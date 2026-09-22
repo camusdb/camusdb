@@ -93,6 +93,13 @@ internal sealed class SchemaChangePublisher
                 ? viewBeingDropped.Id
                 : null;
 
+        // Same reason as droppedTableId: apply removes the sequence from the in-memory map, and the
+        // checkpoint still has to delete its meta key by id afterwards.
+        string? droppedSequenceId = entry.Op == SchemaOp.DropSequence
+            && database.Schema.Sequences.TryGetValue(SchemaDeltaApplier.DecodePayload<SchemaDropSequencePayload>(entry).SequenceName, out SequenceSchema? sequenceBeingDropped)
+                ? sequenceBeingDropped.Id
+                : null;
+
         byte[] bytes = SchemaChangeLogEntryCodec.Encode(entry);
         SchemaReplicationResult result = await database.Kahuna.ReplicateSchemaChangeAsync(database.Id, bytes, CancellationToken.None).ConfigureAwait(false);
 
@@ -122,7 +129,7 @@ internal sealed class SchemaChangePublisher
         // deadlock when its KV writes re-enter the same partition. The committed schema log is
         // already the source of truth; the checkpoint is a load-time optimization, so on a
         // persist failure we retry and then surface a typed error.
-        await checkpoints.PersistSchemaCheckpointWithRetryAsync(database, entry, droppedTableId, droppedViewId).ConfigureAwait(false);
+        await checkpoints.PersistSchemaCheckpointWithRetryAsync(database, entry, droppedTableId, droppedViewId, droppedSequenceId).ConfigureAwait(false);
 
         bool acked = await database.Kahuna.WaitForSchemaAcksAsync(
             database.Id,

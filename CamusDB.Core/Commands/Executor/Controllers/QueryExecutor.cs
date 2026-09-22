@@ -1641,14 +1641,18 @@ internal sealed class QueryExecutor
         foreach ((string tableId, int expectedVersion, long expectedContents) in deps.SchemaDeps)
         {
             TableSchema? schema = null;
+            
             foreach (TableSchema s in database.Schema.Tables.Values)
             {
                 if (s.Id == tableId) { schema = s; break; }
             }
+            
             if (schema is null)
                 return false;  // table was dropped
+            
             if (schema.Version != expectedVersion)
                 return false;  // schema changed (column add/drop/rename, index add/drop)
+            
             if (schema.ContentsGeneration != expectedContents)
                 return false;  // a materialized-view refresh replaced the rows these were read from
         }

@@ -63,6 +63,9 @@ integers exactly — never renumber or reuse them:
 2. **`Id` vs `String` are different fields.** An ObjectId goes in `id_value`, never `string_value`.
    A client that stuffs an id into `string_value` will produce a `String`-typed value and break
    primary-key matching. The id string is 24 lowercase hex characters.
+   The server refuses an `Id` parameter whose text is not 24 hex characters with `CADB0400`
+   (invalid input), and the message names the parameter. It converts upper-case hex to lower case.
+   A GUID is never an ObjectId: send a GUID as `uuid_value`, not as its text in `id_value`.
 
 3. **Date / DateTime are raw ticks, not formatted strings.** The `int64` is a .NET-style tick count
    (100-nanosecond intervals since 0001-01-01) in **UTC**. `DATE` is the same tick scale but

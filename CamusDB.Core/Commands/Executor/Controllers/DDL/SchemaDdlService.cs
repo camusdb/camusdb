@@ -60,6 +60,9 @@ internal sealed class SchemaDdlService
 
     private readonly TableCreator tableCreator;
 
+    /// <summary>Creates and drops the sequences an identity column owns.</summary>
+    private readonly SequenceDdlService sequenceDdl;
+
     private readonly TableColumnAlterer tableColumnAlterer;
 
     private readonly TableIndexAlterer tableIndexAlterer;
@@ -102,6 +105,7 @@ internal sealed class SchemaDdlService
         CatalogsManager catalogs,
         DdlForwardingCoordinator ddlForwarding,
         TableCreator tableCreator,
+        SequenceDdlService sequenceDdl,
         TableColumnAlterer tableColumnAlterer,
         TableIndexAlterer tableIndexAlterer,
         TableConstraintAlterer tableConstraintAlterer,
@@ -117,6 +121,7 @@ internal sealed class SchemaDdlService
         this.catalogs = catalogs;
         this.ddlForwarding = ddlForwarding;
         this.tableCreator = tableCreator;
+        this.sequenceDdl = sequenceDdl;
         this.tableColumnAlterer = tableColumnAlterer;
         this.tableIndexAlterer = tableIndexAlterer;
         this.tableConstraintAlterer = tableConstraintAlterer;
@@ -233,11 +238,226 @@ internal sealed class SchemaDdlService
         DatabaseRegistry registry = await context.Registry.ConfigureAwait(false);
         string tableId = await registry.AllocateTableIdAsync().ConfigureAwait(false);
 
-        return await ExecuteDdlInTransaction(database, async tx =>
+        bool created = await CreateTableWithSequencesAsync(database, ticket, tableId).ConfigureAwait(false);
+        return new CreateTableResult(database, created);
+    }
+
+    /// <summary>
+    /// Creates one table, including the sequences its identity columns own. Both entry points into
+    /// <c>CREATE TABLE</c> — the ticket API and the SQL dispatcher — go through here, so neither
+    /// can be the one that forgets to desugar an identity column.
+    /// </summary>
+    /// <param name="tableId">
+    /// The id the proposer allocated. It is taken as an argument rather than allocated here because
+    /// the caller has already paid for it, and because an identity column's sequence records it as
+    /// its owner before the table exists.
+    /// </param>
+    internal async Task<bool> CreateTableWithSequencesAsync(
+        DatabaseDescriptor database, CreateTableTicket ticket, string tableId)
+    {
+        // Answered before a single sequence is created. Without it, every re-run of
+        // CREATE TABLE IF NOT EXISTS on a table that already exists minted one more sequence for
+        // each of its identity columns and then returned "did nothing".
+        if (ticket.IfNotExists && catalogs.TableExists(database, ticket.TableName))
+            return false;
+
+        // The compensation list is owned by this method and handed down, so a failure part-way
+        // through resolution still reports what it had already created. Built here rather than
+        // returned by the resolver for exactly that reason: a resolver that throws returns nothing,
+        // and the sequences it had already made would never be cleaned up.
+        List<string> createdSequenceNames = [];
+
+        try
         {
-            bool result = await tableCreator.Create(queryExecutor, context.TableOpener, tableIndexAlterer, database, ticket, tx, tableId).ConfigureAwait(false);
-            return new CreateTableResult(database, result);
-        }).ConfigureAwait(false);
+            // Sequence-backed columns are resolved before the table's own delta: a column stores
+            // the sequence's immutable id, so the sequence has to exist first.
+            await ResolveSequenceColumnsAsync(
+                database, ticket, tableId, createdSequenceNames, CancellationToken.None).ConfigureAwait(false);
+
+            CreateTableResult result = await ExecuteDdlInTransaction(database, async tx =>
+            {
+                bool ok = await tableCreator.Create(
+                    queryExecutor, context.TableOpener, tableIndexAlterer, database, ticket, tx, tableId).ConfigureAwait(false);
+                return new CreateTableResult(database, ok);
+            }).ConfigureAwait(false);
+
+            // A create that did nothing — the IF NOT EXISTS arm losing a race with another node —
+            // leaves the sequences it minted with no owner. Cleaned up on that path too, not only
+            // on the throwing one.
+            if (!result.Success)
+                await DropSequencesAfterFailedCreateAsync(database, createdSequenceNames).ConfigureAwait(false);
+
+            return result.Success;
+        }
+        catch
+        {
+            await DropSequencesAfterFailedCreateAsync(database, createdSequenceNames).ConfigureAwait(false);
+            throw;
+        }
+    }
+
+    /// <summary>
+    /// Turns every sequence-backed column declaration into a resolved sequence id: creates the
+    /// owned sequence behind a <c>SERIAL</c> or <c>GENERATED AS IDENTITY</c> column, and resolves
+    /// the name in an explicit <c>DEFAULT nextval('…')</c>.
+    /// </summary>
+    /// <remarks>
+    /// <para><b>The sequences are created before the table, and that order is forced.</b> A column
+    /// records the sequence's immutable id, so the id has to exist before the <c>CREATE TABLE</c>
+    /// delta is built. The alternative — create the table, then the sequences, then alter the
+    /// columns — is two more schema versions and a window in which the table exists with no
+    /// default at all.</para>
+    ///
+    /// <para>The cost is that a <c>CREATE TABLE</c> which fails after this point has already
+    /// created sequences. The caller drops them; see
+    /// <see cref="DropSequencesAfterFailedCreateAsync"/> for what happens when that cleanup
+    /// itself fails.</para>
+    /// </remarks>
+    /// <param name="created">
+    /// The caller's compensation list, appended to as each sequence is created. Passed in rather
+    /// than returned because this method can throw part-way through, and a return value would
+    /// carry nothing when it does — leaving the sequences it had already made unreachable.
+    /// </param>
+    private async Task ResolveSequenceColumnsAsync(
+        DatabaseDescriptor database,
+        CreateTableTicket ticket,
+        string tableId,
+        List<string> created,
+        CancellationToken cancellationToken)
+    {
+        for (int i = 0; i < ticket.Columns.Length; i++)
+        {
+            ColumnInfo column = ticket.Columns[i];
+
+            if (column.Identity is null && column.DefaultSequenceName is null)
+                continue;
+
+            string sequenceId;
+
+            if (column.Identity is not null)
+            {
+                string sequenceName = BuildOwnedSequenceName(database, ticket.TableName, column.Name);
+
+                SequenceSchema owned = await sequenceDdl.CreateOwnedAsync(
+                    database,
+                    sequenceName,
+                    startValue: 1,
+                    increment: 1,
+                    minValue: 1,
+                    maxValue: null,
+                    // The same cache a plain CREATE SEQUENCE gets, for the same reason: a serial
+                    // column that skipped a thousand values on every restart while a hand-written
+                    // sequence did not would be an exception nobody could predict.
+                    cacheSize: 1,
+                    ownedByTableId: tableId,
+                    cancellationToken).ConfigureAwait(false);
+
+                created.Add(sequenceName);
+                sequenceId = owned.Id!;
+            }
+            else
+            {
+                if (!database.Schema.Sequences.TryGetValue(column.DefaultSequenceName!, out SequenceSchema? existing))
+                    throw new CamusDBException(
+                        CamusDBErrorCodes.SequenceDoesntExist,
+                        $"Column '{column.Name}' defaults from sequence '{column.DefaultSequenceName}', which does not exist");
+
+                // An owned sequence belongs to its identity column and goes when that column goes,
+                // with no dependency check on the way out. A default in a second relation would
+                // therefore be left pointing at a counter that is gone the moment the owner is
+                // dropped — so the reference is refused here rather than allowed to dangle later.
+                if (existing.OwnedByTableId is { Length: > 0 } ownerTableId)
+                    throw new CamusDBException(
+                        CamusDBErrorCodes.SequenceInUse,
+                        $"Column '{column.Name}' cannot default from sequence '{existing.Name}': that sequence is " +
+                        $"owned by an identity column of another relation, and is dropped with it. " +
+                        "Create a free-standing sequence with CREATE SEQUENCE and default from that instead.");
+
+                sequenceId = existing.Id!;
+            }
+
+            ticket.Columns[i] = new ColumnInfo(
+                column.Name,
+                column.Type,
+                column.NotNull,
+                column.Default,
+                column.MaxLength,
+                column.ArrayElementType,
+                column.DefaultFunction,
+                column.NotNullConstraintName,
+                column.Comment,
+                column.Storage,
+                defaultSequenceId: sequenceId,
+                identityAlways: column.IdentityAlways,
+                identity: column.Identity,
+                defaultSequenceName: column.DefaultSequenceName);
+        }
+    }
+
+    /// <summary>
+    /// The name an identity column's own sequence gets: <c>{table}_{column}_seq</c>, with a numeric
+    /// suffix when that name is taken.
+    /// </summary>
+    /// <remarks>
+    /// The availability check and the create that follows are not one atomic step, so two
+    /// concurrent <c>CREATE TABLE</c> statements racing for the same generated name can both pass
+    /// here. The loser does not overwrite the winner: the create is refused under the schema lock
+    /// with "relation already exists", which fails that statement rather than corrupting the other.
+    /// </remarks>
+    private static string BuildOwnedSequenceName(DatabaseDescriptor database, string tableName, string columnName)
+    {
+        string baseName = $"{tableName}_{columnName}_seq";
+
+        if (!IsRelationNameTaken(database, baseName))
+            return baseName;
+
+        for (int suffix = 1; suffix < 1000; suffix++)
+        {
+            string candidate = $"{baseName}{suffix}";
+
+            if (!IsRelationNameTaken(database, candidate))
+                return candidate;
+        }
+
+        throw new CamusDBException(
+            CamusDBErrorCodes.SequenceAlreadyExists,
+            $"Cannot name the sequence for '{tableName}.{columnName}': '{baseName}' and every suffixed " +
+            "variant of it are taken. Create the sequence yourself and use DEFAULT nextval('...').");
+    }
+
+    private static bool IsRelationNameTaken(DatabaseDescriptor database, string name)
+        => database.Schema.Tables.ContainsKey(name)
+           || database.Schema.Views.ContainsKey(name)
+           || database.Schema.Sequences.ContainsKey(name);
+
+    /// <summary>
+    /// Removes the sequences a failed <c>CREATE TABLE</c> had already created, so the statement
+    /// leaves nothing behind.
+    /// </summary>
+    /// <remarks>
+    /// Best effort, and deliberately so: the create has already failed and is about to be
+    /// rethrown, so a cleanup that throws in turn would replace the real error with an incidental
+    /// one. A sequence left behind by a failed cleanup is visible in <c>SHOW SEQUENCES</c> and can
+    /// be dropped by hand, which is a far better outcome than losing the cause.
+    /// </remarks>
+    private async Task DropSequencesAfterFailedCreateAsync(DatabaseDescriptor database, List<string> sequenceNames)
+    {
+        foreach (string sequenceName in sequenceNames)
+        {
+            try
+            {
+                await sequenceDdl.DropByNameAsync(database, sequenceName, CancellationToken.None).ConfigureAwait(false);
+            }
+            catch (Exception cleanupEx)
+            {
+                context.Logger.LogWarning(
+                    cleanupEx,
+                    "CREATE TABLE failed and the sequence '{Sequence}' it had created for database {DatabaseName} " +
+                    "could not be removed; drop it by hand",
+                    sequenceName,
+                    database.Name);
+            }
+        }
     }
 
     public async Task<bool> AlterTable(AlterTableTicket ticket)
@@ -261,10 +481,71 @@ internal sealed class SchemaDdlService
         if (context.IsClusterMode && ticket.Operation == AlterTableOperation.AddColumn)
             return await ExecuteClusterAddColumnAsync(database, table, ticket).ConfigureAwait(false);
 
-        return await ExecuteDdlInTransaction(database,
+        return await AlterColumnWithSequencesAsync(database, table, ticket).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Adds or drops one column and, when a dropped column owned a sequence, removes that sequence
+    /// too. Both entry points into <c>ALTER TABLE … ADD/DROP COLUMN</c> go through here.
+    /// </summary>
+    /// <remarks>
+    /// <para>Only an <b>owned</b> sequence goes — one created for this column by <c>SERIAL</c> or
+    /// <c>GENERATED AS IDENTITY</c>. A column that merely defaults from a free-standing sequence
+    /// leaves it alone: other columns may draw from it, and a shared counter is not this
+    /// statement's to remove.</para>
+    ///
+    /// <para>The column goes first, the counter after, for the same reason a dropped table's does:
+    /// removing the counter while the column can still be written would fail an insert in that
+    /// window, while the other order leaves at worst an unreachable counter.</para>
+    /// </remarks>
+    internal async Task<bool> AlterColumnWithSequencesAsync(
+        DatabaseDescriptor database, TableDescriptor table, AlterTableTicket ticket)
+    {
+        // Resolved before the drop: afterwards the column is gone and nothing links the sequence to
+        // it any more.
+        List<string> orphanedSequences = ticket.Operation == AlterTableOperation.DropColumn
+            ? CollectSequencesOwnedByColumn(database, table, ticket.Column.Name)
+            : [];
+
+        bool altered = await ExecuteDdlInTransaction(database,
             tx => tableColumnAlterer.Alter(queryExecutor, database, table, ticket, tx),
             postCommitInvalidate: () => database.Cache?.InvalidateByTableId(database.Id, table.Id)
         ).ConfigureAwait(false);
+
+        if (altered)
+            await DropOwnedSequencesAsync(database, orphanedSequences).ConfigureAwait(false);
+
+        return altered;
+    }
+
+    /// <summary>
+    /// The sequences owned by <paramref name="table"/> that only the named column draws from.
+    /// </summary>
+    private static List<string> CollectSequencesOwnedByColumn(
+        DatabaseDescriptor database, TableDescriptor table, string columnName)
+    {
+        List<string> owned = [];
+
+        if (table.Schema.Columns is null)
+            return owned;
+
+        foreach (TableColumnSchema column in table.Schema.Columns)
+        {
+            if (!string.Equals(column.Name, columnName, StringComparison.OrdinalIgnoreCase))
+                continue;
+
+            if (column.DefaultSequenceId is not { Length: > 0 } sequenceId)
+                continue;
+
+            SequenceSchema? sequence = database.Schema.FindSequenceById(sequenceId);
+
+            // Owned by this relation, or it is a shared sequence the column merely defaults from.
+            if (sequence?.Name is { Length: > 0 } name
+                && string.Equals(sequence.OwnedByTableId, table.Id, StringComparison.Ordinal))
+                owned.Add(name);
+        }
+
+        return owned;
     }
 
     /// <summary>
@@ -871,10 +1152,88 @@ internal sealed class SchemaDdlService
 
         TableDescriptor table = await context.TableOpener.Open(database, ticket.TableName).ConfigureAwait(false);
 
-        return await ExecuteDdlInTransaction(database,
+        return await DropTableWithSequencesAsync(database, table, ticket).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Drops one table and, when the drop is not deferred, the sequences its identity columns own.
+    /// Both entry points into <c>DROP TABLE</c> — the ticket API and the SQL dispatcher — go
+    /// through here, so neither can be the one that leaks a counter.
+    /// </summary>
+    /// <remarks>
+    /// <para><b>A deferred drop deliberately keeps the sequences.</b> The relation is detached, not
+    /// gone: its rows are retained and <c>RELINK</c> can bring it back, and a table whose identity
+    /// column cannot issue is not the table that was dropped. The counters go when the garbage
+    /// collector reclaims the orphan.</para>
+    ///
+    /// <para><b>The table goes first, the counters after.</b> Dropping a counter while the column
+    /// that draws from it is still live would make an insert in that window fail on a counter that
+    /// is gone; the other order leaves, at worst, a counter nothing names, which the whole-database
+    /// purge sweeps.</para>
+    /// </remarks>
+    internal async Task<bool> DropTableWithSequencesAsync(
+        DatabaseDescriptor database, TableDescriptor table, DropTableTicket ticket)
+    {
+        // Read before the drop: afterwards the relation is out of the schema and there is nothing
+        // left to match an owned sequence against.
+        bool deferred = !ticket.Force && database.Ancestors.Count == 0;
+
+        List<string> ownedSequences = deferred
+            ? []
+            : CollectOwnedSequenceNames(database, table.Id);
+
+        bool dropped = await ExecuteDdlInTransaction(database,
             tx => tableDropper.Drop(queryExecutor, tableIndexAlterer, rowDeleter, database, table, ticket, tx),
             postCommitInvalidate: () => database.Cache?.InvalidateByTableId(database.Id, table.Id)
         ).ConfigureAwait(false);
+
+        if (dropped)
+            await DropOwnedSequencesAsync(database, ownedSequences).ConfigureAwait(false);
+
+        return dropped;
+    }
+
+    /// <summary>The names of every sequence owned by a column of <paramref name="tableId"/>.</summary>
+    internal static List<string> CollectOwnedSequenceNames(DatabaseDescriptor database, string tableId)
+    {
+        List<string> owned = [];
+
+        foreach (SequenceSchema sequence in database.Schema.Sequences.Values)
+        {
+            if (string.Equals(sequence.OwnedByTableId, tableId, StringComparison.Ordinal) && sequence.Name is { Length: > 0 } name)
+                owned.Add(name);
+        }
+
+        return owned;
+    }
+
+    /// <summary>
+    /// Removes the sequences an owner took with it.
+    /// </summary>
+    /// <remarks>
+    /// Best effort by design: the owner is already gone, so failing the statement now would report
+    /// an error for work that succeeded. A counter left behind is unreachable — nothing in the
+    /// catalog names its id any more — and the whole-database purge sweeps it, so the cost of a
+    /// failure here is bounded storage rather than incorrect behavior.
+    /// </remarks>
+    internal async Task DropOwnedSequencesAsync(DatabaseDescriptor database, IReadOnlyList<string> sequenceNames)
+    {
+        foreach (string sequenceName in sequenceNames)
+        {
+            try
+            {
+                await sequenceDdl.DropByNameAsync(database, sequenceName, CancellationToken.None).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                context.Logger.LogWarning(
+                    ex,
+                    "The owner of sequence '{Sequence}' in database {DatabaseName} was dropped, but the sequence " +
+                    "could not be removed; it is unreachable and will be swept with the database",
+                    sequenceName,
+                    database.Name);
+            }
+        }
     }
 
     /// <summary>
@@ -994,7 +1353,69 @@ internal sealed class SchemaDdlService
         }
 
         database.Cache?.InvalidateByTableId(database.Id, table.Id);
+
+        if (ticket.RestartIdentity)
+            await RestartOwnedSequencesAsync(database, table.Id, ticket.TableName).ConfigureAwait(false);
+
         return true;
+    }
+
+    /// <summary>
+    /// Returns every sequence owned by a column of <paramref name="tableId"/> to its recorded start
+    /// value, after the relation's contents have been replaced.
+    /// </summary>
+    /// <remarks>
+    /// <para><b>Owned sequences only.</b> A sequence a column merely defaults from is shared —
+    /// other relations may draw from it — and resetting one would be a data-loss-shaped surprise
+    /// for tables this statement never named. That is also PostgreSQL's rule.</para>
+    ///
+    /// <para><b>Ownership is keyed on the relation id, not the storage id.</b> A truncate is
+    /// exactly where the two come apart: the relation keeps its identity and swaps the key-space
+    /// its rows live in, so a sequence matched by storage id would be missed by every truncate
+    /// after the first.</para>
+    ///
+    /// <para><b>The restart runs after the swap has committed, and a failure is reported to the
+    /// caller.</b> The contents swap cannot be undone, so the statement does not fail as a whole —
+    /// but it does not report plain success either: the caller asked for two things and got one,
+    /// and a silent partial result is how a reset that never happened is discovered from the data
+    /// weeks later. A sequence that kept climbing is safe in itself, because it issues values above
+    /// everything the relation ever held.</para>
+    /// </remarks>
+    private async Task RestartOwnedSequencesAsync(DatabaseDescriptor database, string tableId, string tableName)
+    {
+        List<string> notRestarted = [];
+
+        foreach (SequenceSchema sequence in database.Schema.Sequences.Values)
+        {
+            if (!string.Equals(sequence.OwnedByTableId, tableId, StringComparison.Ordinal))
+                continue;
+
+            try
+            {
+                await sequenceDdl.SetCounterAsync(
+                    database, sequence, sequence.StartValue, CancellationToken.None).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                context.Logger.LogWarning(
+                    ex,
+                    "TRUNCATE ... RESTART IDENTITY emptied a relation in database {Database} but could not restart " +
+                    "sequence '{Sequence}'",
+                    database.Name, sequence.Name);
+
+                notRestarted.Add(sequence.Name ?? sequence.Id!);
+            }
+        }
+
+        if (notRestarted.Count == 0)
+            return;
+
+        throw new CamusDBException(
+            CamusDBErrorCodes.SequenceUnavailable,
+            $"TRUNCATE emptied '{tableName}', and that part is committed and final — but these sequences were " +
+            $"not restarted: {string.Join(", ", notRestarted)}. They keep climbing, which is safe (every value " +
+            "they issue is above anything the relation held); re-run ALTER SEQUENCE ... RESTART on each to " +
+            "finish what the statement asked for.");
     }
 
     /// <summary>

@@ -86,7 +86,10 @@ public static class StatementScope
         NodeType.AlterViewRenameTo or NodeType.AlterViewOwnerTo or
         NodeType.CreateMaterializedView or NodeType.CreateMaterializedViewIfNotExists or
         NodeType.DropMaterializedView or NodeType.DropMaterializedViewIfExists or
-        NodeType.AlterMaterializedViewRenameTo;
+        NodeType.AlterMaterializedViewRenameTo or
+        NodeType.CreateSequence or NodeType.CreateSequenceIfNotExists or
+        NodeType.DropSequence or NodeType.DropSequenceIfExists or
+        NodeType.AlterSequence or NodeType.AlterSequenceRenameTo;
 
     /// <summary>
     /// True for the row-returning statements the query executor answers <b>before</b> opening a

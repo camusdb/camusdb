@@ -43,8 +43,11 @@ namespace CamusDB.Core.CommandsExecutor.Controllers;
 internal sealed class OrphanReclaimer : IAsyncDisposable
 {
     private readonly EmbeddedKahuna sharedNode;
+    
     private readonly DatabaseRegistry registry;
+    
     private readonly DatabaseDropper databaseDropper;
+    
     private readonly ILogger<ICamusDB> logger;
 
     /// <summary>
@@ -55,6 +58,7 @@ internal sealed class OrphanReclaimer : IAsyncDisposable
     private CamusDBOptions options;
 
     private readonly CancellationTokenSource cts = new();
+    
     private Task? loop;
 
     /// <summary>
@@ -303,6 +307,7 @@ internal sealed class OrphanReclaimer : IAsyncDisposable
             {
                 if (ct.IsCancellationRequested)
                     break;
+                
                 if (!IsExpired(orphan.DroppedAt, now))
                     continue;
 

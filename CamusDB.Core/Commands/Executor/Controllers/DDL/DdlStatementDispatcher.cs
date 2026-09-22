@@ -81,6 +81,8 @@ internal sealed class DdlStatementDispatcher
 
     private readonly MaterializedViewRefresher matViewRefresher;
 
+    private readonly SequenceDdlService sequenceDdl;
+
     private readonly AuthService? authService;
 
     /// <summary>
@@ -113,6 +115,7 @@ internal sealed class DdlStatementDispatcher
         ViewCreator viewCreator,
         MaterializedViewCreator matViewCreator,
         MaterializedViewRefresher matViewRefresher,
+        SequenceDdlService sequenceDdl,
         AuthService? authService,
         ClusterSettingsService? clusterSettings
     )
@@ -151,6 +154,7 @@ internal sealed class DdlStatementDispatcher
         this.viewCreator = viewCreator;
         this.matViewCreator = matViewCreator;
         this.matViewRefresher = matViewRefresher;
+        this.sequenceDdl = sequenceDdl;
         this.authService = authService;
         this.clusterSettings = clusterSettings;
     }
@@ -337,11 +341,13 @@ internal sealed class DdlStatementDispatcher
                     DatabaseRegistry sqlRegistry = await context.Registry.ConfigureAwait(false);
                     string sqlTableId = await sqlRegistry.AllocateTableIdAsync().ConfigureAwait(false);
 
-                    return await schemaDdl.ExecuteDdlInTransaction(database, async tx =>
-                    {
-                        bool ok = await tableCreator.Create(queryExecutor, context.TableOpener, tableIndexAlterer, database, createTableTicket, tx, sqlTableId).ConfigureAwait(false);
-                        return new ExecuteDDLSQLResult(database, ok);
-                    }).ConfigureAwait(false);
+                    // Shared with the ticket API's CreateTable so an identity column is desugared
+                    // on both paths: the SQL path used to build its own transaction here, and a
+                    // second copy of the create is how one of the two silently loses a step.
+                    bool createdTable = await schemaDdl
+                        .CreateTableWithSequencesAsync(database, createTableTicket, sqlTableId).ConfigureAwait(false);
+
+                    return new ExecuteDDLSQLResult(database, createdTable);
                 }
 
             case NodeType.CreateTableRelink:
@@ -375,13 +381,12 @@ internal sealed class DdlStatementDispatcher
                         return new ExecuteDDLSQLResult(database, ok);
                     }
 
-                    return await schemaDdl.ExecuteDdlInTransaction(database, async tx =>
-                    {
-                        bool ok = await tableColumnAlterer.Alter(queryExecutor, database, table, alterTableTicket, tx).ConfigureAwait(false);
-                        return new ExecuteDDLSQLResult(database, ok);
-                    },
-                    postCommitInvalidate: () => database.Cache?.InvalidateByTableId(database.Id, table.Id)
-                    ).ConfigureAwait(false);
+                    // Shared with the ticket API's AlterTable so a dropped identity column takes
+                    // its sequence with it on both paths.
+                    bool alteredColumn = await schemaDdl
+                        .AlterColumnWithSequencesAsync(database, table, alterTableTicket).ConfigureAwait(false);
+
+                    return new ExecuteDDLSQLResult(database, alteredColumn);
                 }
 
             case NodeType.AlterTableAddIndex:
@@ -561,6 +566,74 @@ internal sealed class DdlStatementDispatcher
                     ).ConfigureAwait(false);
                 }
 
+            case NodeType.CommentOnSequence:
+                {
+                    string commentedSequence = ast.leftAst!.yytext!;
+
+                    // A null value node is IS NULL — remove the comment — while IS '' stores a
+                    // present-but-empty one. The two must stay distinguishable end to end.
+                    string? sequenceComment = ast.rightAst is null
+                        ? null
+                        : DML.SQLExecutorBaseCreator.UnquoteStringLiteral(ast.rightAst.yytext!);
+
+                    await sequenceDdl.SetCommentAsync(database, commentedSequence, sequenceComment).ConfigureAwait(false);
+                    return new ExecuteDDLSQLResult(database, true);
+                }
+
+            case NodeType.CreateSequence:
+            case NodeType.CreateSequenceIfNotExists:
+                {
+                    CreateSequenceTicket createSequenceTicket = sqlExecutor.CreateCreateSequenceTicket(ticket, ast);
+                    context.Validator.Validate(createSequenceTicket);
+
+                    bool createdSequence = await sequenceDdl.CreateAsync(
+                        database, createSequenceTicket, ticket.CancellationToken).ConfigureAwait(false);
+
+                    return new ExecuteDDLSQLResult(database, createdSequence);
+                }
+
+            case NodeType.DropSequence:
+            case NodeType.DropSequenceIfExists:
+                {
+                    DropSequenceTicket dropSequenceTicket = SqlExecutor.CreateDropSequenceTicket(ticket, ast);
+                    context.Validator.Validate(dropSequenceTicket);
+
+                    bool droppedSequence = await sequenceDdl.DropAsync(
+                        database, dropSequenceTicket, ticket.CancellationToken).ConfigureAwait(false);
+
+                    return new ExecuteDDLSQLResult(database, droppedSequence);
+                }
+
+            case NodeType.AlterSequenceRenameTo:
+                {
+                    RenameSequenceTicket renameSequenceTicket = SqlExecutor.CreateRenameSequenceTicket(ticket, ast);
+                    context.Validator.Validate(renameSequenceTicket);
+
+                    await sequenceDdl.RenameAsync(database, renameSequenceTicket).ConfigureAwait(false);
+                    return new ExecuteDDLSQLResult(database, true);
+                }
+
+            case NodeType.AlterSequence:
+                {
+                    AlterSequenceTicket alterSequenceTicket = sqlExecutor.CreateAlterSequenceTicket(ticket, ast);
+                    context.Validator.Validate(alterSequenceTicket);
+
+                    // Refused here rather than inside the executor because this is where the
+                    // caller's own transaction is visible. Moving a live counter is irrevocable —
+                    // the values it skips are never reissued — so a later ROLLBACK could not undo
+                    // it, and accepting the statement would promise semantics the engine cannot
+                    // honour. The same rule TRUNCATE follows below.
+                    if (alterSequenceTicket.Restart && ticket.TxnState is { IsSessionOwned: true })
+                        throw new CamusDBException(
+                            CamusDBErrorCodes.StatementNotAllowedInTransaction,
+                            "ALTER SEQUENCE ... RESTART cannot run inside an explicit transaction: moving a " +
+                            "counter is irrevocable and a later ROLLBACK cannot undo it. Commit or roll back " +
+                            "first, then run it.");
+
+                    await sequenceDdl.AlterAsync(database, alterSequenceTicket, ticket.CancellationToken).ConfigureAwait(false);
+                    return new ExecuteDDLSQLResult(database, true);
+                }
+
             case NodeType.TruncateTable:
                 {
                     TruncateTableTicket truncateTicket = sqlExecutor.CreateTruncateTableTicket(ticket, ast);
@@ -609,13 +682,12 @@ internal sealed class DdlStatementDispatcher
                     ViewDependencyMaintainer.RequireNoDependentViews(
                         database.Schema, dropTableTicket.TableName, table.Id, cascade: false);
 
-                    return await schemaDdl.ExecuteDdlInTransaction(database, async tx =>
-                    {
-                        bool ok = await tableDropper.Drop(queryExecutor, tableIndexAlterer, rowDeleter, database, table, dropTableTicket, tx).ConfigureAwait(false);
-                        return new ExecuteDDLSQLResult(database, ok);
-                    },
-                    postCommitInvalidate: () => database.Cache?.InvalidateByTableId(database.Id, table.Id)
-                    ).ConfigureAwait(false);
+                    // Shared with the ticket API's DropTable so an identity column's sequence goes
+                    // with its table on both paths.
+                    bool droppedTable = await schemaDdl
+                        .DropTableWithSequencesAsync(database, table, dropTableTicket).ConfigureAwait(false);
+
+                    return new ExecuteDDLSQLResult(database, droppedTable);
                 }
 
             case NodeType.CreateTableAsSelect:

@@ -51,6 +51,29 @@ public sealed class TableColumnSchema
     public string? DefaultFunction { get; }
 
     /// <summary>
+    /// The immutable id of the sequence this column's default draws from, or null when the default
+    /// is a constant, a nullary function, or absent.
+    ///
+    /// <para>Separate from <see cref="DefaultFunction"/> rather than folded into it: a function
+    /// default is a nullary call evaluated per row, while a sequence default needs an argument and
+    /// an asynchronous reservation the row-shaping path cannot make. Keeping the three default
+    /// kinds distinguishable is what stops every existing <c>DefaultFunction</c> reader from having
+    /// to learn about sequences.</para>
+    ///
+    /// <para>The <b>id</b>, never the sequence's name, so <c>ALTER SEQUENCE … RENAME TO</c> does
+    /// not break the default. A user-facing rendering resolves the id back to the current
+    /// name.</para>
+    /// </summary>
+    public string? DefaultSequenceId { get; }
+
+    /// <summary>
+    /// True when the column was declared <c>GENERATED ALWAYS AS IDENTITY</c>: an INSERT that
+    /// supplies a value for it is refused rather than silently overridden. Meaningless unless
+    /// <see cref="DefaultSequenceId"/> is set.
+    /// </summary>
+    public bool IdentityAlways { get; }
+
+    /// <summary>
     /// Online schema-change state of the column.
     /// </summary>
     public SchemaElementState State { get; }
@@ -115,7 +138,9 @@ public sealed class TableColumnSchema
         string? defaultFunction = null,
         string? notNullConstraintName = null,
         string? comment = null,
-        ColumnStorageStrategy? storage = null
+        ColumnStorageStrategy? storage = null,
+        string? defaultSequenceId = null,
+        bool identityAlways = false
     )
     {
         Id = id;
@@ -130,5 +155,7 @@ public sealed class TableColumnSchema
         NotNullConstraintName = notNullConstraintName;
         Comment = comment;
         Storage = storage;
+        DefaultSequenceId = defaultSequenceId;
+        IdentityAlways = identityAlways;
     }
 }

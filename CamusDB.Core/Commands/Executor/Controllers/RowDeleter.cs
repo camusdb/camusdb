@@ -123,7 +123,8 @@ internal sealed class RowDeleter
                 table.Schema, tx.TransactionId, rowId, data.Value,
                 requiredColumns: requiredColumns,
                 visibilitySchemaVersion: table.Schema.Version,
-                decodeState: decodeState).ConfigureAwait(false);
+                decodeState: decodeState
+            ).ConfigureAwait(false);
 
             if (!TtlExpiryPredicate.IsExpired(writableRow, expirationColumn, cutoffEpochMs))
             {
@@ -131,7 +132,7 @@ internal sealed class RowDeleter
                 continue;
             }
 
-            batch.Add(new KvTableStore.RowDelete
+            batch.Add(new()
             {
                 RowId = rowId,
                 IndexEntries = CollectIndexDeletes(writableIndexes, rowId, writableRow),
@@ -145,7 +146,7 @@ internal sealed class RowDeleter
         // The same batched primitive the user-facing delete uses, so the row and every one of its index
         // entries go in one transaction — an expired row that lost its row but kept an index entry would
         // make index-only scans return rows that no longer exist.
-        await table.Store.DeleteRowsBatch(tx, batch).ConfigureAwait(false);
+        await table.Store.DeleteRowsBatch(tx, batch, cancellationToken).ConfigureAwait(false);
 
         foreach (KvTableStore.RowDelete row in batch)
             Log.LogRowDeleted(logger, row.RowId);
@@ -218,7 +219,10 @@ internal sealed class RowDeleter
         // The write phase calls LoadWritableRow which does a full decode per matched row.
         // Returns null when the WHERE contains subquery nodes — fall back to full decode.
         IReadOnlySet<string>? locateColumns = RequiredColumnAnalyzer.ComputeForLocate(
-            ticket.Where, ticket.Filters, exprValues: null);
+            ticket.Where, 
+            ticket.Filters, 
+            exprValues: null
+        );
 
         QueryTicket queryTicket = new(
             txnState: ticket.TxnState,
@@ -247,9 +251,12 @@ internal sealed class RowDeleter
         // The scan still runs to completion and the list still seals before the first mutation,
         // so the full match set is fixed up front (Halloween barrier) exactly as before.
         SpillableRowList rowList = new(QueryExecutionContext.For(state.Database, queryTicket));
+        
         await foreach (QueryResultRow row in cursor.ConfigureAwait(false))
-            await rowList.AddAsync(new QueryResultRow(row.RowId, QueryResultRow.EmptyRow)).ConfigureAwait(false);
+            await rowList.AddAsync(new(row.RowId, QueryResultRow.EmptyRow)).ConfigureAwait(false);
+        
         await rowList.SealAsync().ConfigureAwait(false);
+        
         state.RowsToDelete = rowList;
 
         return FluxAction.Continue;
@@ -323,6 +330,7 @@ internal sealed class RowDeleter
         (ReadOnlyMemory<byte>?[] rawRows, List<int>?[] outOfLine) = await ReadRowsForDeleteAsync(table, tx, chunk, requiredColumns, default).ConfigureAwait(false);
 
         List<KvTableStore.RowDelete> batch = new(chunk.Count);
+        
         for (int i = 0; i < chunk.Count; i++)
         {
             ObjectIdValue rowId = chunk[i];
@@ -334,9 +342,10 @@ internal sealed class RowDeleter
                 table.Schema, tx.TransactionId, rowId, data.Value,
                 requiredColumns: requiredColumns,
                 visibilitySchemaVersion: table.Schema.Version,
-                decodeState: decodeState).ConfigureAwait(false);
+                decodeState: decodeState
+           ).ConfigureAwait(false);
 
-            batch.Add(new KvTableStore.RowDelete
+            batch.Add(new()
             {
                 RowId = rowId,
                 IndexEntries = CollectIndexDeletes(writableIndexes, rowId, writableRow),
@@ -372,7 +381,9 @@ internal sealed class RowDeleter
         ReadOnlyMemory<byte>?[] rows = await table.Store.GetRowsBatchLockedForMutation(tx, rowIds, cancellationToken, LargeValueFetch.Raw).ConfigureAwait(false);
 
         List<int>?[] outOfLine = new List<int>?[rows.Length];
+        
         bool anyMarked = false;
+        
         for (int i = 0; i < rows.Length; i++)
         {
             if (rows[i] is { } row && RowStorageForms.HasTrailer(row.Span))
@@ -413,12 +424,12 @@ internal sealed class RowDeleter
                     continue;
 
                 CompositeColumnValue key = GetColumnValue(row, index.Columns);
-                (entries ??= new()).Add(new KvTableStore.IndexDelete(index.KvId, key, rowId, Unique: true));
+                (entries ??= []).Add(new(index.KvId, key, rowId, Unique: true));
             }
             else if (index.Type == IndexType.Multi)
             {
-                CompositeColumnValue key = GetColumnValue(row, index.Columns, new ColumnValue(ColumnType.Id, rowId.ToString()));
-                (entries ??= new()).Add(new KvTableStore.IndexDelete(index.KvId, key, rowId, Unique: false));
+                CompositeColumnValue key = GetColumnValue(row, index.Columns, new(ColumnType.Id, rowId.ToString()));
+                (entries ??= []).Add(new(index.KvId, key, rowId, Unique: false));
             }
         }
 

@@ -27,8 +27,9 @@ namespace CamusDB.Core.Diagnostics;
 /// </list>
 ///
 /// Counters are global (one process = one node) with a per-database breakdown for fence rejections.
-/// There is no metrics exporter in the codebase yet; these are the in-process surface an operator
-/// or test reads directly (and the natural hook point when an exporter is added). <see cref="Reset"/>
+/// These counters are not published through <see cref="ServerDiagnostics"/>, so the Prometheus
+/// endpoint does not scrape them. They are an in-process surface an operator or a test reads
+/// directly, and the natural hook point if they are ever attached to that meter. <see cref="Reset"/>
 /// exists for test isolation.
 /// </summary>
 public static class SchemaMetrics

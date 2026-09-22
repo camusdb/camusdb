@@ -472,6 +472,59 @@ public static class CamusDBErrorCodes
     /// </summary>
     public const string LargeValueNotResolved = "CADB0541";
 
+    /// <summary>
+    /// A name given to <c>CREATE SEQUENCE</c> is already taken by a sequence, a table or a view.
+    /// Sequences share one namespace with relations, as they do in PostgreSQL. Maps to HTTP 409.
+    /// </summary>
+    public const string SequenceAlreadyExists = "CADB0542";
+
+    /// <summary>The named sequence does not exist. Maps to HTTP 404.</summary>
+    public const string SequenceDoesntExist = "CADB0543";
+
+    /// <summary>
+    /// The sequence has no value left to issue: the next value would pass its <c>MAXVALUE</c>, or
+    /// would overflow a 64-bit integer.
+    ///
+    /// <para>Permanent until the sequence is restarted or its maximum is raised, so it is the
+    /// caller's to act on rather than something to retry. Maps to HTTP 400.</para>
+    /// </summary>
+    public const string SequenceExhausted = "CADB0544";
+
+    /// <summary>
+    /// A sequence definition cannot hold: a non-positive <c>INCREMENT</c>, a <c>CACHE</c> below 1, a
+    /// <c>MAXVALUE</c> below <c>MINVALUE</c>, or a <c>START</c> outside the two. Rejected before any
+    /// schema mutation. Maps to HTTP 400.
+    /// </summary>
+    public const string InvalidSequenceDefinition = "CADB0545";
+
+    /// <summary>
+    /// <c>currval</c> or <c>lastval</c> was called before the current transaction drew a value from
+    /// the sequence it names.
+    ///
+    /// <para>Both read values this transaction obtained, and only this transaction — a value another
+    /// caller drew is not an answer, and returning the sequence's reserved ceiling would be a number
+    /// nobody was issued. Maps to HTTP 400.</para>
+    /// </summary>
+    public const string SequenceValueNotYetDefined = "CADB0546";
+
+    /// <summary>
+    /// <c>nextval</c> or <c>setval</c> was written somewhere the engine cannot bound how many values
+    /// the call would consume — a <c>WHERE</c> clause, an aggregate, a subquery, a stored view body,
+    /// a <c>CHECK</c> condition, or a <c>SELECT</c> over a relation.
+    ///
+    /// <para>The count has to be known before the statement runs, because the values are reserved in
+    /// one round trip rather than one per row. Refused rather than evaluated an unpredictable number
+    /// of times. Maps to HTTP 400.</para>
+    /// </summary>
+    public const string SequenceCallNotAllowedHere = "CADB0547";
+
+    /// <summary>
+    /// A sequence could not be dropped, or renamed out from under something that needs it: it is
+    /// owned by an identity column, or a column default draws from it. Drop the owner or the
+    /// default first. Maps to HTTP 409.
+    /// </summary>
+    public const string SequenceInUse = "CADB0548";
+
     public const string InvalidConfig = "CADB0600";
 
     /// <summary>
@@ -627,6 +680,13 @@ public static class CamusDBErrorCodes
         FeatureNotSupported => 501,
         ConcurrentSchemaChange => 409,
         SequenceUnavailable => 503,
+        SequenceAlreadyExists => 409,
+        SequenceDoesntExist => 404,
+        SequenceExhausted => 400,
+        InvalidSequenceDefinition => 400,
+        SequenceValueNotYetDefined => 400,
+        SequenceCallNotAllowedHere => 400,
+        SequenceInUse => 409,
         InsufficientDiskSpace => 507,
         SnapshotPrecedesContentsGeneration => 400,
         StatementNotAllowedInTransaction => 400,

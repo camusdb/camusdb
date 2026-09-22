@@ -89,6 +89,28 @@ internal partial class sqlParser
     }
 
     /// <summary>
+    /// Validates the word written where a column's type belongs when that word is a plain
+    /// identifier rather than a type token. Only the serial shorthands are accepted there.
+    /// </summary>
+    /// <remarks>
+    /// SERIAL is matched as an identifier so the word stays usable as a table and column name,
+    /// which means every mistyped type name — <c>varchar</c>, <c>text</c>, <c>int</c> — also lands
+    /// here. The message therefore names the shorthand rather than only rejecting the word, because
+    /// the parser cannot tell the two mistakes apart.
+    /// </remarks>
+    private static void RequireSerialTypeWord(string? word)
+    {
+        if (string.Equals(word, "serial", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(word, "bigserial", StringComparison.OrdinalIgnoreCase))
+            return;
+
+        throw new CamusDBException(
+            CamusDBErrorCodes.InvalidInput,
+            $"'{word}' is not a column type. Use one of the declared types, or SERIAL for an " +
+            "auto-numbered int64 column.");
+    }
+
+    /// <summary>
     /// Splits the single <c>table@index</c> token the scanner produced into the relation name and
     /// the index name. The scanner matches the pair as one token so the '@' is never seen as a bind
     /// placeholder; the split belongs here because the token's text is the only place both halves

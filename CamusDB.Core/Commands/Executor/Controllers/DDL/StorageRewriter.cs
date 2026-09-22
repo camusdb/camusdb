@@ -376,7 +376,8 @@ internal sealed class StorageRewriter
             ColumnStorageStrategy? now = known ? target.Strategies[column.Id] : null;
             withCurrentStrategy.Add(known && now != column.Storage
                 ? new TableColumnSchema(column.Id, column.Name, column.Type, column.NotNull, column.DefaultValue, column.State,
-                    column.MaxLength, column.ArrayElementType, column.DefaultFunction, column.NotNullConstraintName, column.Comment, now)
+                    column.MaxLength, column.ArrayElementType, column.DefaultFunction, column.NotNullConstraintName, column.Comment, now,
+                    column.DefaultSequenceId, column.IdentityAlways)
                 : column);
         }
 

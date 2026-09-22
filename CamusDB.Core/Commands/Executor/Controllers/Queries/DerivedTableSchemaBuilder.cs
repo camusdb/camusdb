@@ -47,6 +47,39 @@ internal static class DerivedTableSchemaBuilder
         new("refreshed_at", ColumnType.String),
     ];
 
+    /// <summary>
+    /// Columns of <c>SHOW SEQUENCES</c>.
+    /// </summary>
+    /// <remarks>
+    /// <para><b>There is deliberately no <c>last_value</c> column.</b> What the sequencer reports
+    /// is the reserved high-water mark, not the last value issued: after four <c>nextval</c> calls
+    /// on a fresh sequence with the default cache it reads 1000. Printing that as "last value"
+    /// publishes a number that is wrong by up to a whole block, and readers build on it. The column
+    /// is named <c>reserved_upto</c> and documented as an upper bound on what was issued.</para>
+    ///
+    /// <para>Reading it is a routed call per sequence, so the listing reads them in bounded
+    /// parallel batches and reports NULL for one it cannot reach — a sequence nothing has drawn
+    /// from yet has no counter at all, and a partition between leaders answers nothing.</para>
+    /// </remarks>
+    internal static readonly IReadOnlyList<DerivedColumnSchema> ShowSequencesSchema =
+    [
+        new("sequence", ColumnType.String),
+        new("reserved_upto", ColumnType.Integer64),
+        new("start_value", ColumnType.Integer64),
+        new("increment", ColumnType.Integer64),
+        new("min_value", ColumnType.Integer64),
+        new("max_value", ColumnType.Integer64),
+        new("cache", ColumnType.Integer64),
+        new("owned_by", ColumnType.String),
+        new("comment", ColumnType.String),
+    ];
+
+    internal static readonly IReadOnlyList<DerivedColumnSchema> ShowCreateSequenceSchema =
+    [
+        new("sequence", ColumnType.String),
+        new("create sequence", ColumnType.String),
+    ];
+
     internal static readonly IReadOnlyList<DerivedColumnSchema> ShowCreateViewSchema =
     [
         new("view", ColumnType.String),

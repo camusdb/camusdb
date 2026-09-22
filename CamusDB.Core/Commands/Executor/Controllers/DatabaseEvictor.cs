@@ -202,8 +202,7 @@ internal sealed class DatabaseEvictor : IAsyncDisposable
 
         // Commit point. After this no new resolve can reach this descriptor; anything already holding
         // it either shows up in the re-check below or arrived before the idle window and cannot exist.
-        if (!databaseDescriptors.Descriptors.TryRemove(
-                new KeyValuePair<string, AsyncLazy<DatabaseDescriptor>>(id, lazy)))
+        if (!databaseDescriptors.Descriptors.TryRemove(new(id, lazy)))
             return DatabaseEvictionOutcome.NotOpen; // a drop or a close won the race and owns it now
 
         DatabaseEvictionOutcome recheck = CheckEvictable(descriptor, idleWindowMs);

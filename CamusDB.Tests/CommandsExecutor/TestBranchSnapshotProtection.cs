@@ -32,7 +32,7 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// silently returning incomplete inherited data.
 ///
 /// The hazard under test: a branch reads its ancestors frozen at the fork timestamp, protected by
-/// leased Kahuna snapshot-floor holds. Once a hold lapses, revision reclamation may trim the
+/// leased Kahuna snapshot-floor holds. Once a hold is gone, revision reclamation may trim the
 /// pinned history and an ancestor read then reports reclaimed rows as confirmed absences — a
 /// successful, wrong, possibly empty result. These tests exercise the three layers of the fix:
 /// the read-side guard that self-detects a lost hold, the renewer sweep that durably marks the

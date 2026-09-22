@@ -11,6 +11,8 @@ using CamusDB.Core.CommandsExecutor.Controllers.DML;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.SQLParser;
+using CamusDB.Core.Storage.Kv;
+using CamusDB.Core.CommandsExecutor.Controllers.Functions;
 using CamusDB.Core.Routing;
 using CamusDB.Core.Transactions;
 
@@ -296,7 +298,8 @@ internal static class InsertRestoreProbes
 
             KvTransaction tx = await ctx.Db.Transactions.BeginAsync(deferStart: true);
 
-            InsertTicket ticket = await new SQLExecutorInsertCreator().CreateInsertTicket(
+            InsertTicket ticket = await new SQLExecutorInsertCreator(
+                new SequenceStatementBinder(new SequenceAllocator(CamusDBConfig.Ambient))).CreateInsertTicket(
                 ctx.Executor, ctx.Db, new ExecuteSQLTicket(tx, ctx.DbName, sql, null), ast);
 
             int code = ticket.Values.Count == rows ? 0 : 3;

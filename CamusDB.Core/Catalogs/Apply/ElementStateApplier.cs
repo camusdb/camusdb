@@ -71,7 +71,9 @@ internal static class ElementStateApplier
                 defaultFunction: current.DefaultFunction,
                 notNullConstraintName: current.NotNullConstraintName,
                 comment: current.Comment,
-                storage: current.Storage
+                storage: current.Storage,
+                defaultSequenceId: current.DefaultSequenceId,
+                identityAlways: current.IdentityAlways
             );
         }
 

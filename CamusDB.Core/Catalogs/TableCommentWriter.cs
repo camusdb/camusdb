@@ -170,7 +170,9 @@ internal static class TableCommentWriter
                         defaultFunction: old.DefaultFunction,
                         notNullConstraintName: old.NotNullConstraintName,
                         comment: comment,
-                        storage: old.Storage
+                        storage: old.Storage,
+                        defaultSequenceId: old.DefaultSequenceId,
+                        identityAlways: old.IdentityAlways
                     );
                     break;
                 }

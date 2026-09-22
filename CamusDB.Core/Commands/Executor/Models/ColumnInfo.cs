@@ -28,6 +28,33 @@ public sealed class ColumnInfo
     public string? DefaultFunction { get; }
 
     /// <summary>
+    /// The immutable id of the sequence this column's default draws from, or null. Set by
+    /// <c>SERIAL</c> / <c>GENERATED AS IDENTITY</c> desugaring and by an explicit
+    /// <c>DEFAULT nextval('…')</c>, after the sequence has been resolved to an id.
+    /// </summary>
+    public string? DefaultSequenceId { get; }
+
+    /// <summary>
+    /// True for <c>GENERATED ALWAYS AS IDENTITY</c>: a user-supplied value for this column is
+    /// refused on INSERT rather than overridden.
+    /// </summary>
+    public bool IdentityAlways { get; }
+
+    /// <summary>
+    /// The name written in <c>DEFAULT nextval('…')</c>, before it has been resolved to a sequence
+    /// id. Null when the default is not a sequence. The DDL path resolves it and rewrites the
+    /// column with <see cref="DefaultSequenceId"/> set; nothing downstream reads this.
+    /// </summary>
+    public string? DefaultSequenceName { get; }
+
+    /// <summary>
+    /// The identity kind the parser saw on this column, before any sequence exists to point at.
+    /// Null when the column was not declared as an identity column. The DDL path reads it, creates
+    /// the owned sequence, and rewrites the column with <see cref="DefaultSequenceId"/> set.
+    /// </summary>
+    public ColumnIdentityKind? Identity { get; }
+
+    /// <summary>
     /// Maximum length in characters (String) or bytes (Bytes). Null means unbounded-but-capped
     /// at the default (see <see cref="CamusDB.Core.CamusDBConstants.DefaultStringMaxLength"/> /
     /// <see cref="CamusDB.Core.CamusDBConstants.DefaultBytesMaxLength"/>). Ignored for other types.
@@ -70,7 +97,11 @@ public sealed class ColumnInfo
         string? defaultFunction = null,
         string? notNullConstraintName = null,
         string? comment = null,
-        ColumnStorageStrategy? storage = null
+        ColumnStorageStrategy? storage = null,
+        string? defaultSequenceId = null,
+        bool identityAlways = false,
+        ColumnIdentityKind? identity = null,
+        string? defaultSequenceName = null
     )
     {
         Name = name;
@@ -83,5 +114,9 @@ public sealed class ColumnInfo
         NotNullConstraintName = notNullConstraintName;
         Comment = comment;
         Storage = storage;
+        DefaultSequenceId = defaultSequenceId;
+        IdentityAlways = identityAlways;
+        Identity = identity;
+        DefaultSequenceName = defaultSequenceName;
     }
 }

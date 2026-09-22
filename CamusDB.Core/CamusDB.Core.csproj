@@ -7,7 +7,7 @@
          behind CAMUSDB_BROWSER. A project that references this one builds only the target that
          matches its own framework, so the server and the tests still compile net10.0 alone. -->
     <TargetFrameworks>net10.0;net10.0-browser</TargetFrameworks>
-    <Version>0.13.1</Version>
+    <Version>0.13.2</Version>
     <LangVersion>latest</LangVersion>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>

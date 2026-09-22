@@ -30,8 +30,9 @@ namespace CamusDB.Core.Diagnostics;
 /// </list>
 ///
 /// All counters are monotonic; use <see cref="Reset"/> only for test isolation.
-/// There is no metrics exporter in the codebase yet; these are the in-process surface an operator
-/// or test reads directly (and the natural hook point when an exporter is added).
+/// These counters are not published through <see cref="ServerDiagnostics"/>, so the Prometheus
+/// endpoint does not scrape them. They are an in-process surface an operator or a test reads
+/// directly, and the natural hook point if they are ever attached to that meter.
 /// </summary>
 public static class BranchMetrics
 {

@@ -59,12 +59,14 @@ internal static class SchemaLoader
                 database.Schema.SchemaVersion = snapshot.SchemaVersion;
                 database.Schema.Tables = snapshot.Tables;
                 database.Schema.Views = snapshot.Views;
+                database.Schema.Sequences = snapshot.Sequences;
             }
 
             // Both maps were replaced wholesale above, so the id index has to be built from them
             // here: after this point readers resolve relation references through it and must never
             // walk the maps themselves.
             database.Schema.RebuildRelationNameIndex();
+            database.Schema.RebuildSequenceIdIndex();
 
             // Seed the Raft schema fence from the on-disk version so HeadSchemaVersion ≥
             // SchemaVersion holds immediately after a load or reopen.  Without this, the fence
@@ -163,7 +165,11 @@ internal static class SchemaLoader
                 // Views load after tables so a view's recorded dependency ids can be checked against
                 // relations that are already in the map; a view is only ever a consumer of tables and
                 // of earlier views, never the reverse, so this one ordering is sufficient.
-                snapshot.Views = await LoadViewsAsync(database, tx).ConfigureAwait(false);
+                // Views and sequences come out of one scan. A sequence depends on nothing and
+                // nothing decodes against it, so it needs no ordering of its own — and a third
+                // pass over the bucket would add a scan to every database open for a family most
+                // databases do not have.
+                (snapshot.Views, snapshot.Sequences) = await LoadViewsAndSequencesAsync(database, tx).ConfigureAwait(false);
             }
 
             (KeyValueResponseType systemType, ReadOnlyKeyValueEntry? systemEntry) =
@@ -245,19 +251,27 @@ internal static class SchemaLoader
     }
 
     /// <summary>
-    /// Loads every persisted <see cref="ViewSchema"/> for the database, keyed by name.
+    /// Loads every persisted <see cref="ViewSchema"/> and <see cref="SequenceSchema"/> for the
+    /// database, each keyed by name, from one pass over the metadata bucket.
     /// </summary>
     /// <remarks>
     /// Shares the single <c>{dbId}/meta</c> bucket scan pattern with <see cref="LoadTablesAsync"/>
-    /// and filters on the view key prefix, which is why view keys must use ':' rather than '/' as
-    /// their sub-field separator — a '/' would scatter them into per-view buckets this scan cannot
-    /// reach.
+    /// and filters on each family's key prefix, which is why both families must use ':' rather
+    /// than '/' as their sub-field separator — a '/' would scatter them into per-object buckets
+    /// this scan cannot reach.
+    ///
+    /// <para>Both are read in one pass rather than two because neither depends on the other, and a
+    /// pass costs a full walk of the bucket on every database open.</para>
     /// </remarks>
-    private static async Task<Dictionary<string, ViewSchema>> LoadViewsAsync(DatabaseDescriptor database, KvTransaction tx)
+    private static async Task<(Dictionary<string, ViewSchema> Views, Dictionary<string, SequenceSchema> Sequences)>
+        LoadViewsAndSequencesAsync(DatabaseDescriptor database, KvTransaction tx)
     {
         Dictionary<string, ViewSchema> views = new(StringComparer.OrdinalIgnoreCase);
+        Dictionary<string, SequenceSchema> sequences = new(StringComparer.OrdinalIgnoreCase);
+
         IKahuna kahuna = database.Kahuna.Kahuna;
         string viewKeyPrefix = MetaKeys.ViewKeyPrefix(database.Id);
+        string sequenceKeyPrefix = MetaKeys.SequenceKeyPrefix(database.Id);
 
         string versionKey = MetaKeys.VersionKey(database.Id);
         bool sawVersionKey = false;
@@ -275,22 +289,42 @@ internal static class SchemaLoader
             if (string.Equals(key, versionKey, StringComparison.Ordinal))
                 sawVersionKey = true;
 
-            if (!key.StartsWith(viewKeyPrefix, StringComparison.Ordinal) || entry.Value is null)
+            if (entry.Value is null)
                 continue;
 
-            ViewSchema view = MetaJsonSerializer.Deserialize(entry.Value, MetaJsonContext.Default.ViewSchema);
+            if (key.StartsWith(viewKeyPrefix, StringComparison.Ordinal))
+            {
+                ViewSchema view = MetaJsonSerializer.Deserialize(entry.Value, MetaJsonContext.Default.ViewSchema);
 
-            if (string.IsNullOrWhiteSpace(view.Name) || string.IsNullOrWhiteSpace(view.Id))
+                if (string.IsNullOrWhiteSpace(view.Name) || string.IsNullOrWhiteSpace(view.Id))
+                    throw new CamusDBException(
+                        CamusDBErrorCodes.SystemSpaceCorrupt,
+                        $"View meta key '{key}' decoded without a name or id");
+
+                views[view.Name!] = view;
+                continue;
+            }
+
+            if (!key.StartsWith(sequenceKeyPrefix, StringComparison.Ordinal))
+                continue;
+
+            // The catalog record only. The counter behind it lives in Kahuna's reserved sequencer
+            // namespace and is deliberately not read at open: that is a routed round trip per
+            // sequence, for a number no caller has asked for yet — and the number it would give is
+            // a reserved ceiling rather than a value anyone was issued.
+            SequenceSchema sequence = MetaJsonSerializer.Deserialize(entry.Value, MetaJsonContext.Default.SequenceSchema);
+
+            if (string.IsNullOrWhiteSpace(sequence.Name) || string.IsNullOrWhiteSpace(sequence.Id))
                 throw new CamusDBException(
                     CamusDBErrorCodes.SystemSpaceCorrupt,
-                    $"View meta key '{key}' decoded without a name or id");
+                    $"Sequence meta key '{key}' decoded without a name or id");
 
-            views[view.Name!] = view;
+            sequences[sequence.Name!] = sequence;
         }
 
-        RequireCompleteMetaScan(database, sawVersionKey, "views");
+        RequireCompleteMetaScan(database, sawVersionKey, "views and sequences");
 
-        return views;
+        return (views, sequences);
     }
 
     /// <summary>

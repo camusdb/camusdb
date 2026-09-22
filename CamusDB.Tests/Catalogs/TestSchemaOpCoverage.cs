@@ -170,7 +170,11 @@ public sealed class TestSchemaOpCoverage
             SchemaOp.AddIndex, SchemaOp.DropIndex,
             SchemaOp.RenameTable, SchemaOp.RenameColumn, SchemaOp.RenameIndex,
             SchemaOp.CreateView, SchemaOp.ReplaceView, SchemaOp.DropView, SchemaOp.RenameView,
-            SchemaOp.TruncateTable
+            SchemaOp.TruncateTable,
+            // AlterSequence is deliberately absent: it changes a record's fields rather than its
+            // presence, so there is nothing structural to compare and the version fallback is the
+            // only answer available. The other three are answered from Schema.Sequences.
+            SchemaOp.CreateSequence, SchemaOp.DropSequence, SchemaOp.RenameSequence
         ];
 
         // A structurally checked op answers "not applied" against an empty schema even when the

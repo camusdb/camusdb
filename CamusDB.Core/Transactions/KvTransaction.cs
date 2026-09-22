@@ -194,6 +194,86 @@ public sealed class KvTransaction
     /// </summary>
     public void MarkSessionOwned() => IsSessionOwned = true;
 
+    // The values this transaction drew from user sequences, keyed by the sequence's immutable id,
+    // plus the id of the sequence drawn from most recently. This is what currval() and lastval()
+    // read. It is per-transaction rather than per-connection because CamusDB has no connection: the
+    // REST path is stateless, and defining "session" as the auth token would make two unrelated
+    // concurrent requests from one user share a lastval — wrong in a way that is very hard to
+    // debug. A transaction is a real, bounded scope that no two callers share.
+    private Dictionary<string, long>? sequenceValues;
+
+    private string? lastSequenceId;
+
+    /// <summary>
+    /// The ceiling on how many distinct sequences one transaction remembers a value for. A
+    /// transaction that touches more than this loses the oldest entries, and <c>currval</c> on an
+    /// evicted one reports "not yet defined" rather than a stale number — a wrong answer being far
+    /// worse here than a refusal. The cap exists because the map is otherwise unbounded in the
+    /// number of sequences a long-running transaction names.
+    /// </summary>
+    internal const int MaxRememberedSequenceValues = 64;
+
+    /// <summary>
+    /// Records that this transaction drew <paramref name="value"/> from the sequence with
+    /// <paramref name="sequenceId"/>. Called once per statement with the last value the statement
+    /// actually used, not with the bounds of the run it reserved — a statement may reserve more
+    /// than it uses, and <c>currval</c> must report a value that was issued.
+    /// </summary>
+    public void RecordSequenceValue(string sequenceId, long value)
+    {
+        sequenceValues ??= new Dictionary<string, long>(StringComparer.Ordinal);
+
+        // Evicts an arbitrary entry rather than the least recently used: tracking recency would
+        // cost a second structure on every draw to improve a case — more than 64 sequences in one
+        // transaction — that has no realistic shape. What matters is that the map is bounded and
+        // that a missing entry reports itself.
+        if (sequenceValues.Count >= MaxRememberedSequenceValues && !sequenceValues.ContainsKey(sequenceId))
+        {
+            foreach (string evicted in sequenceValues.Keys)
+            {
+                sequenceValues.Remove(evicted);
+                break;
+            }
+        }
+
+        sequenceValues[sequenceId] = value;
+        lastSequenceId = sequenceId;
+    }
+
+    // Distinguishes one sequence reservation from the next within a transaction, so each carries
+    // its own idempotency key. It has to live here rather than on the statement: a per-statement
+    // counter restarts at one for every statement, and two statements of the same transaction
+    // would then reserve under the same key — which Kahuna correctly answers by replaying the
+    // first allocation, so the second statement receives values it was already given.
+    private long sequenceAllocationOrdinal;
+
+    /// <summary>
+    /// The next ordinal for a sequence reservation made by this transaction. Monotonic and never
+    /// reused, so a reservation's idempotency key is stable across the retries of that one call
+    /// and distinct from every other reservation's.
+    /// </summary>
+    public long NextSequenceAllocationOrdinal() => ++sequenceAllocationOrdinal;
+
+    /// <summary>The value this transaction last drew from one sequence, if it drew one.</summary>
+    public bool TryGetSequenceValue(string sequenceId, out long value)
+    {
+        value = 0;
+        return sequenceValues is not null && sequenceValues.TryGetValue(sequenceId, out value);
+    }
+
+    /// <summary>The value this transaction last drew from any sequence, and which sequence it was.</summary>
+    public bool TryGetLastSequenceValue(out string sequenceId, out long value)
+    {
+        sequenceId = "";
+        value = 0;
+
+        if (lastSequenceId is null || sequenceValues is null)
+            return false;
+
+        sequenceId = lastSequenceId;
+        return sequenceValues.TryGetValue(lastSequenceId, out value);
+    }
+
     /// <summary>
     /// Isolation level for this transaction. Defaults to <see cref="CamusIsolationLevel.ReadCommitted"/>.
     /// May be upgraded via <c>SET TRANSACTION ISOLATION LEVEL</c> before any locks are acquired —

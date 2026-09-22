@@ -7,6 +7,7 @@
  */
 
 using System.Collections.Generic;
+using System.Runtime.CompilerServices;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.Statistics;
@@ -93,17 +94,19 @@ internal sealed class TableAnalyzer
         List<(string indexName, string[] keyColumns)> readableIndexes = GetReadableIndexes(table);
 
         // Per-column accumulators.
-        var distinctSets   = new Dictionary<string, HashSet<string>>(StringComparer.Ordinal);
-        var minMax         = new Dictionary<string, ColumnMinMax>(StringComparer.Ordinal);
-        var valueLists     = new Dictionary<string, List<ScalarBound>>(StringComparer.Ordinal);
+        Dictionary<string, HashSet<string>> distinctSets   = new(StringComparer.Ordinal);
+        Dictionary<string, ColumnMinMax> minMax         = new(StringComparer.Ordinal);
+        Dictionary<string, List<ScalarBound>> valueLists     = new(StringComparer.Ordinal);
+        
         // Per-index entry counts (non-null rows).
-        var indexCounts    = new Dictionary<string, long>(StringComparer.Ordinal);
+        Dictionary<string, long> indexCounts    = new(StringComparer.Ordinal);
+        
         // Per-composite-key-tuple distinct sets.
-        var keyDistinct    = new Dictionary<string, HashSet<string>>(StringComparer.Ordinal);
+        Dictionary<string, HashSet<string>> keyDistinct    = new(StringComparer.Ordinal);
 
         foreach (string col in indexedColumns)
         {
-            distinctSets[col] = new HashSet<string>(StringComparer.Ordinal);
+            distinctSets[col] = new(StringComparer.Ordinal);
             valueLists[col]   = [];
         }
 
@@ -115,7 +118,7 @@ internal sealed class TableAnalyzer
             for (int len = 2; len <= keyCols.Length; len++)
             {
                 string sig = StatisticsManager.KeyTupleSignature(keyCols[..len]);
-                keyDistinct.TryAdd(sig, new HashSet<string>(StringComparer.Ordinal));
+                keyDistinct.TryAdd(sig, new(StringComparer.Ordinal));
             }
 
             indexCounts[indexName] = 0;
@@ -127,7 +130,7 @@ internal sealed class TableAnalyzer
 
         // Request one row past the sample limit so the sentinel can set isSampled=true;
         // the sentinel is detected below and not counted toward rowCount.
-        long? scanLimit = limit.HasValue ? limit.Value + 1 : null;
+        long? scanLimit = limit + 1;
 
         // Scan under our own lock-free read-only snapshot (not the caller's transaction), like
         // the background path: statistics must reflect committed data — a scan inside a user
@@ -191,15 +194,15 @@ internal sealed class TableAnalyzer
 
         // --- Build result dicts ---
 
-        var columnNdv = new Dictionary<string, long>(StringComparer.Ordinal);
+        Dictionary<string, long> columnNdv = new(StringComparer.Ordinal);
         foreach ((string col, HashSet<string> set) in distinctSets)
             columnNdv[col] = set.Count;
 
-        var keyNdv = new Dictionary<string, long>(StringComparer.Ordinal);
+        Dictionary<string, long> keyNdv = new(StringComparer.Ordinal);
         foreach ((string sig, HashSet<string> set) in keyDistinct)
             keyNdv[sig] = set.Count;
 
-        var histograms = new Dictionary<string, ColumnHistogram>(StringComparer.Ordinal);
+        Dictionary<string, ColumnHistogram> histograms = new(StringComparer.Ordinal);
         foreach ((string col, List<ScalarBound> values) in valueLists)
         {
             if (values.Count == 0) continue;
@@ -215,18 +218,19 @@ internal sealed class TableAnalyzer
             database, table,
             rowCount, scanComplete: !isSampled,
             minMax, indexCounts, histograms, columnNdv, keyNdv.Count > 0 ? keyNdv : null,
-            baseline, analyzedAt).ConfigureAwait(false);
+            baseline, analyzedAt
+        ).ConfigureAwait(false);
 
         string status = isSampled
             ? $"sampled {rowCount} rows (table larger than {options.StatsAnalyzeSampleRows})"
             : $"analyzed {rowCount} rows";
 
-        return new QueryResultRow(default, new Dictionary<string, ColumnValue>(StringComparer.OrdinalIgnoreCase)
+        return new(default, new Dictionary<string, ColumnValue>(StringComparer.OrdinalIgnoreCase)
         {
-            { "table",   new ColumnValue(ColumnType.String, table.Name) },
-            { "status",  new ColumnValue(ColumnType.String, status) },
-            { "rows",    new ColumnValue(ColumnType.Integer64, rowCount) },
-            { "columns", new ColumnValue(ColumnType.Integer64, (long)columnNdv.Count) },
+            { "table",   new(ColumnType.String, table.Name) },
+            { "status",  new(ColumnType.String, status) },
+            { "rows",    new(ColumnType.Integer64, rowCount) },
+            { "columns", new(ColumnType.Integer64, (long)columnNdv.Count) },
         });
     }
 
@@ -293,19 +297,19 @@ internal sealed class TableAnalyzer
         List<(string indexName, string[] keyColumns)> readableIndexes = GetReadableIndexes(table);
 
         // Bounded accumulators — memory is fixed regardless of how many rows/distinct values exist.
-        var reservoirSeed = SeedFor(database, table, analyzedAt);
-        var minMax        = new Dictionary<string, ColumnMinMax>(StringComparer.Ordinal);
-        var columnHll     = new Dictionary<string, HyperLogLog>(StringComparer.Ordinal);
-        var valueSamples  = new Dictionary<string, ReservoirSampler<ScalarBound>>(StringComparer.Ordinal);
-        var keyHll        = new Dictionary<string, HyperLogLog>(StringComparer.Ordinal);
-        var indexCounts   = new Dictionary<string, long>(StringComparer.Ordinal);
+        ulong reservoirSeed = SeedFor(database, table, analyzedAt);
+        Dictionary<string, ColumnMinMax> minMax = new(StringComparer.Ordinal);
+        Dictionary<string, HyperLogLog> columnHll = new(StringComparer.Ordinal);
+        Dictionary<string, ReservoirSampler<ScalarBound>> valueSamples = new(StringComparer.Ordinal);
+        Dictionary<string, HyperLogLog> keyHll = new(StringComparer.Ordinal);
+        Dictionary<string, long> indexCounts = new(StringComparer.Ordinal);
 
         int colSeed = 0;
         foreach (string col in indexedColumns)
         {
-            columnHll[col]    = new HyperLogLog(hllPrecision);
+            columnHll[col]    = new(hllPrecision);
             // Vary each column's reservoir seed so columns don't share an identical retention pattern.
-            valueSamples[col] = new ReservoirSampler<ScalarBound>(sampleCapacity, reservoirSeed + (ulong)(++colSeed) * 0x100000001B3UL);
+            valueSamples[col] = new(sampleCapacity, reservoirSeed + (ulong)(++colSeed) * 0x100000001B3UL);
         }
 
         foreach ((string indexName, string[] keyCols) in readableIndexes)
@@ -313,7 +317,7 @@ internal sealed class TableAnalyzer
             for (int len = 2; len <= keyCols.Length; len++)
             {
                 string sig = StatisticsManager.KeyTupleSignature(keyCols[..len]);
-                keyHll.TryAdd(sig, new HyperLogLog(hllPrecision));
+                keyHll.TryAdd(sig, new(hllPrecision));
             }
             indexCounts[indexName] = 0;
         }
@@ -328,12 +332,13 @@ internal sealed class TableAnalyzer
         // single HLC across every scan page (consistent), takes no range locks, and does not fold
         // reads into any transaction's validation set — so it cannot interfere with foreground work.
         KvTransaction tx = await database.Transactions.BeginReadOnlyAsync(promote: false, cancellationToken: cancellationToken).ConfigureAwait(false);
+        
         try
         {
             long throttleStartTicks = Environment.TickCount64;
+            ConfiguredCancelableAsyncEnumerable<(ObjectIdValue rowId, ReadOnlyMemory<byte> data)> cursor = table.Store.ScanRows(tx, maxRows: null, afterRowId: null, cancellationToken).ConfigureAwait(false);
 
-            await foreach ((ObjectIdValue rowId, ReadOnlyMemory<byte> data) in
-                table.Store.ScanRows(tx, maxRows: null, afterRowId: null, cancellationToken).ConfigureAwait(false))
+            await foreach ((ObjectIdValue rowId, ReadOnlyMemory<byte> data) in cursor)
             {
                 cancellationToken.ThrowIfCancellationRequested();
 
@@ -374,8 +379,10 @@ internal sealed class TableAnalyzer
                 {
                     if (shouldPause is not null && shouldPause())
                         throw new OperationCanceledException("Auto-analyze paused: foreground load surge");
+                    
                     if (stillOwner is not null && !await stillOwner(cancellationToken).ConfigureAwait(false))
                         throw new OperationCanceledException("Auto-analyze aborted: leadership lost");
+                    
                     if (!table.Schema.AutoStatsCollectionEnabled)
                         throw new OperationCanceledException("Auto-analyze aborted: table opted out mid-scan");
                 }
@@ -391,15 +398,15 @@ internal sealed class TableAnalyzer
         }
 
         // Reaching here means the scan completed without cancellation — safe to build and persist.
-        var columnNdv = new Dictionary<string, long>(StringComparer.Ordinal);
+        Dictionary<string, long> columnNdv = new(StringComparer.Ordinal);
         foreach ((string col, HyperLogLog hll) in columnHll)
             columnNdv[col] = hll.Estimate();
 
-        var keyNdv = new Dictionary<string, long>(StringComparer.Ordinal);
+        Dictionary<string, long> keyNdv = new(StringComparer.Ordinal);
         foreach ((string sig, HyperLogLog hll) in keyHll)
             keyNdv[sig] = hll.Estimate();
 
-        var histograms = new Dictionary<string, ColumnHistogram>(StringComparer.Ordinal);
+        Dictionary<string, ColumnHistogram> histograms = new(StringComparer.Ordinal);
         foreach ((string col, ReservoirSampler<ScalarBound> sampler) in valueSamples)
         {
             if (sampler.Items.Count == 0) continue;
@@ -446,7 +453,8 @@ internal sealed class TableAnalyzer
                 database, table,
                 rowCount, scanComplete: true,
                 minMax, indexCounts, histograms, columnNdv, keyNdv.Count > 0 ? keyNdv : null,
-                baseline, analyzedAt).ConfigureAwait(false);
+                baseline, analyzedAt
+            ).ConfigureAwait(false);
 
             await database.Transactions.CommitAsync(fenceTx).ConfigureAwait(false); // releases the fence
         }
@@ -489,24 +497,35 @@ internal sealed class TableAnalyzer
 
     private static List<string> GetIndexedColumns(TableDescriptor table)
     {
-        var cols = new HashSet<string>(StringComparer.Ordinal);
-        if (table.Indexes is null) return [];
+        HashSet<string> cols = new(StringComparer.Ordinal);
+        
+        if (table.Indexes is null) 
+            return [];
+        
         foreach (KeyValuePair<string, TableIndexSchema> kv in table.Indexes)
         {
-            if (!SchemaElementStateRules.IsReadable(kv.Value)) continue;
+            if (!SchemaElementStateRules.IsReadable(kv.Value)) 
+                continue;
+            
             if (kv.Value.Columns is { Length: > 0 })
                 cols.Add(kv.Value.Columns[0]);
         }
+        
         return [.. cols];
     }
 
     private static List<(string indexName, string[] keyColumns)> GetReadableIndexes(TableDescriptor table)
     {
-        var result = new List<(string, string[])>();
-        if (table.Indexes is null) return result;
+        List<(string, string[])> result = new();
+        
+        if (table.Indexes is null) 
+            return result;
+        
         foreach (KeyValuePair<string, TableIndexSchema> kv in table.Indexes)
         {
-            if (!SchemaElementStateRules.IsReadable(kv.Value)) continue;
+            if (!SchemaElementStateRules.IsReadable(kv.Value)) 
+                continue;
+            
             if (kv.Value.Columns is { Length: > 0 })
                 result.Add((kv.Key, kv.Value.Columns));
         }
@@ -517,11 +536,15 @@ internal sealed class TableAnalyzer
     {
         if (!minMax.TryGetValue(col, out ColumnMinMax? mm))
         {
-            minMax[col] = new ColumnMinMax { Min = bound, Max = bound };
+            minMax[col] = new() { Min = bound, Max = bound };
             return;
         }
-        if (mm.Min is null || bound.CompareTo(mm.Min) < 0) mm.Min = bound;
-        if (mm.Max is null || bound.CompareTo(mm.Max) > 0) mm.Max = bound;
+        
+        if (mm.Min is null || bound.CompareTo(mm.Min) < 0) 
+            mm.Min = bound;
+        
+        if (mm.Max is null || bound.CompareTo(mm.Max) > 0) 
+            mm.Max = bound;
     }
 
     private static string BoundKey(ScalarBound b) => b.Type switch
@@ -542,13 +565,17 @@ internal sealed class TableAnalyzer
 
     private static string BuildTupleKey(Dictionary<string, ColumnValue> row, string[] keyCols)
     {
-        var sb = new System.Text.StringBuilder();
+        System.Text.StringBuilder sb = new();
+        
         for (int i = 0; i < keyCols.Length; i++)
         {
-            if (i > 0) sb.Append('\x1F'); // unit-separator, not in SQL identifiers
+            if (i > 0) 
+                sb.Append('\x1F'); // unit-separator, not in SQL identifiers
+            
             if (row.TryGetValue(keyCols[i], out ColumnValue? v) && v.Type != ColumnType.Null)
                 sb.Append(BoundKey(ScalarBound.FromColumnValue(v)));
         }
+        
         return sb.ToString();
     }
 
@@ -560,7 +587,7 @@ internal sealed class TableAnalyzer
         int bucketsActual = Math.Min(bucketCount, (int)total);
         int bucketSize = (int)Math.Ceiling((double)total / bucketsActual);
 
-        var buckets = new List<ColumnHistogramBucket>(bucketsActual);
+        List<ColumnHistogramBucket> buckets = new(bucketsActual);
 
         // Iterate by bucket index so the last bucket always ends at total-1, even when total
         // is not a multiple of bucketSize. The previous index-stepping loop stopped short of
@@ -571,11 +598,11 @@ internal sealed class TableAnalyzer
             if (start > (int)total - 1) break;
             int end   = Math.Min((k + 1) * bucketSize - 1, (int)total - 1);
 
-            var distinct = new HashSet<string>(StringComparer.Ordinal);
+            HashSet<string> distinct = new(StringComparer.Ordinal);
             for (int j = start; j <= end; j++)
                 distinct.Add(BoundKey(values[j]));
 
-            buckets.Add(new ColumnHistogramBucket
+            buckets.Add(new()
             {
                 UpperBound       = values[end],
                 CumulativeRows   = end + 1,
@@ -590,7 +617,7 @@ internal sealed class TableAnalyzer
 
         // The observed minimum is the first bucket's lower boundary — without it the first
         // bucket cannot be interpolated (values inside it would estimate ~0 rows).
-        return new ColumnHistogram
+        return new()
         {
             Buckets   = buckets,
             TotalRows = total,

@@ -53,10 +53,34 @@ public static class MixedNumericComparison
 
     /// <summary>
     /// SQL equality for <c>x IN (...)</c> membership: NULL equals nothing, a mixed numeric pair is
-    /// equal when the widened values are equal, a same-type pair uses <see cref="ColumnValue.CompareTo"/>,
-    /// and any other cross-type pair (<c>5 = 'foo'</c>) is a non-match rather than an error.
+    /// equal when the widened values are equal, a String against a Uuid or Id is equal when the
+    /// string parses to that value (<see cref="StringOperandCoercion"/>, the rule <c>=</c> uses), a
+    /// same-type pair uses <see cref="ColumnValue.CompareTo"/>, and any other cross-type pair
+    /// (<c>5 = 'foo'</c>) is a non-match rather than an error.
+    ///
+    /// <para><c>x IN (a, b)</c> is defined as <c>x = a OR x = b</c>, so this must agree with the WHERE
+    /// comparison evaluator for every pair. The index IN-list seek converts its items the same way,
+    /// and a table scan that disagrees with it returns different rows for the same predicate.</para>
     /// </summary>
     public static bool EqualsForMembership(ColumnValue left, ColumnValue right)
+    {
+        if (left.Type == ColumnType.Null || right.Type == ColumnType.Null)
+            return false;
+
+        if (left.Type != right.Type
+            && StringOperandCoercion.TryAlign(ref left, ref right) == StringOperandCoercion.Alignment.Malformed)
+            return false;
+
+        return EqualsWithoutStringCoercion(left, right);
+    }
+
+    /// <summary>
+    /// <see cref="EqualsForMembership"/> without the String-to-Uuid/Id step: a String never equals a
+    /// Uuid or Id here. A hash set of list items needs this narrower equality, because a String and
+    /// the Uuid it spells hash differently; the caller converts the probe or the items before a
+    /// lookup instead (see <c>PreparedInSet</c>).
+    /// </summary>
+    public static bool EqualsWithoutStringCoercion(ColumnValue left, ColumnValue right)
     {
         if (left.Type == ColumnType.Null || right.Type == ColumnType.Null)
             return false;

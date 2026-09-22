@@ -162,11 +162,13 @@ internal sealed class StartupRecoveryService
     ///
     /// <para>Also clears <em>this node's own</em> stale drop-intent markers left by a crash during
     /// <c>DropDatabase</c>. A node's own drop-intent can never legitimately survive its restart
-    /// (drops do not span restarts), so any own-owned marker at startup is a crash remnant; without
-    /// this cleanup the affected database would be permanently undroppable because
-    /// <c>AcquireDropIntentAsync</c> uses <c>SetIfNotExists</c> and would always find the key present.
-    /// The cleanup is owner-scoped so a restarting node never deletes a drop-intent another live node
-    /// currently holds for an in-flight drop (which would reopen the cross-node drop/create race).</para>
+    /// (drops do not span restarts), so any own-owned marker at startup is a crash remnant. Such a
+    /// remnant is no longer permanent: the fence carries a lease (<c>CamusDBOptions.FenceLeaseMs</c>)
+    /// that only a live holder renews, so a dead owner's key frees itself once the lease lapses. This
+    /// sweep removes the wait rather than the deadlock — without it, a drop or relink of that id
+    /// issued in the first seconds after a restart is refused by a fence nobody holds. The cleanup is
+    /// owner-scoped so a restarting node never deletes a drop-intent another live node currently holds
+    /// for an in-flight drop (which would reopen the cross-node drop/create race).</para>
     ///
     /// <para>Reachable from the facade because tests invoke it directly to verify the production
     /// scrub path rather than reimplementing the same logic inline.</para>

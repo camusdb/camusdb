@@ -233,6 +233,7 @@ internal static class CheckEvaluator
         {
             if (row.TryGetValue(expr.yytext!, out ColumnValue? val))
                 return val;
+            
             return ColumnValue.Null;
         }
 

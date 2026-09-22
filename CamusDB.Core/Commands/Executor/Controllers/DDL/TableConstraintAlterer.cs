@@ -365,7 +365,9 @@ internal sealed class TableConstraintAlterer
                         defaultFunction: old.DefaultFunction,
                         notNullConstraintName: constraintName,
                         comment: old.Comment,
-                        storage: old.Storage
+                        storage: old.Storage,
+                        defaultSequenceId: old.DefaultSequenceId,
+                        identityAlways: old.IdentityAlways
                     );
                 }
                 finally
@@ -443,7 +445,9 @@ internal sealed class TableConstraintAlterer
                         defaultFunction: old.DefaultFunction,
                         notNullConstraintName: null,
                         comment: old.Comment,
-                        storage: old.Storage
+                        storage: old.Storage,
+                        defaultSequenceId: old.DefaultSequenceId,
+                        identityAlways: old.IdentityAlways
                     );
                 }
                 finally

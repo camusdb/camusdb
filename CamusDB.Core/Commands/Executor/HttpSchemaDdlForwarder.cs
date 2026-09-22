@@ -121,6 +121,7 @@ public sealed class HttpSchemaDdlForwarder : ISchemaDdlForwarder, ISchemaAckSend
             OperationId = operationId,
             DatabaseName = ticket.DatabaseName,
             TableName = ticket.TableName,
+            RestartIdentity = ticket.RestartIdentity,
         };
 
         return await PostAsync(leader, "truncate-table", request, cancellationToken).ConfigureAwait(false);
@@ -290,6 +291,9 @@ public sealed class HttpSchemaDdlForwarder : ISchemaDdlForwarder, ISchemaAckSend
         MaxLength = col.MaxLength,
         ArrayElementType = col.ArrayElementType,
         DefaultFunction = col.DefaultFunction,
+        DefaultSequenceId = col.DefaultSequenceId,
+        IdentityAlways = col.IdentityAlways,
+        Identity = col.Identity,
         NotNullConstraintName = col.NotNullConstraintName,
         Comment = col.Comment,
         Storage = col.Storage,

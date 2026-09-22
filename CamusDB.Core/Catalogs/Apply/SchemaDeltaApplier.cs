@@ -88,6 +88,10 @@ internal static class SchemaDeltaApplier
             SchemaOp.SetViewDefinition => ViewDeltaApplier.ApplySetViewDefinition(schema, SchemaDeltaApplier.DecodePayload<SchemaSetViewDefinitionPayload>(entry)),
             SchemaOp.SetMaterializedViewState => ViewDeltaApplier.ApplySetMaterializedViewState(schema, SchemaDeltaApplier.DecodePayload<SchemaSetMatViewStatePayload>(entry)),
             SchemaOp.TruncateTable => TableDeltaApplier.ApplyTruncateTable(schema, SchemaDeltaApplier.DecodePayload<SchemaTruncateTablePayload>(entry)),
+            SchemaOp.CreateSequence => SequenceDeltaApplier.ApplyCreateSequence(schema, SchemaDeltaApplier.DecodePayload<SchemaSequencePayload>(entry)),
+            SchemaOp.DropSequence => SequenceDeltaApplier.ApplyDropSequence(schema, SchemaDeltaApplier.DecodePayload<SchemaDropSequencePayload>(entry)),
+            SchemaOp.RenameSequence => SequenceDeltaApplier.ApplyRenameSequence(schema, SchemaDeltaApplier.DecodePayload<SchemaRenamePayload>(entry)),
+            SchemaOp.AlterSequence => SequenceDeltaApplier.ApplyAlterSequence(schema, SchemaDeltaApplier.DecodePayload<SchemaAlterSequencePayload>(entry)),
             _ => throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Unknown schema operation '{entry.Op}'")
         };
 
@@ -96,6 +100,11 @@ internal static class SchemaDeltaApplier
         // resolves the relations it reads through this index. Rebuilt before the version advances so
         // a lock-free reader sees either the pre-delta index or the post-delta one, never a torn one.
         schema.RebuildRelationNameIndex();
+
+        // Rebuilt alongside the relation index, and for the same reason: a column default resolves
+        // its sequence through it, so an index left stale by a create, drop or rename would either
+        // miss a live sequence or hand back one that is gone.
+        schema.RebuildSequenceIdIndex();
 
         schema.SchemaVersion = entry.ToVersion;
 
@@ -173,6 +182,11 @@ internal static class SchemaDeltaApplier
             SchemaOp.CreateView or SchemaOp.ReplaceView => schema.Views.ContainsKey(DecodePayload<SchemaViewPayload>(entry).ViewName),
             SchemaOp.DropView => !schema.Views.ContainsKey(DecodePayload<SchemaDropViewPayload>(entry).ViewName),
             SchemaOp.RenameView => schema.Views.ContainsKey(DecodePayload<SchemaRenamePayload>(entry).NewName),
+            // Sequence ops read the sequence map for the same reason view ops read the view map: a
+            // lookup in Tables would answer "not applied" forever and the proposer would time out.
+            SchemaOp.CreateSequence => schema.Sequences.ContainsKey(DecodePayload<SchemaSequencePayload>(entry).SequenceName),
+            SchemaOp.DropSequence => !schema.Sequences.ContainsKey(DecodePayload<SchemaDropSequencePayload>(entry).SequenceName),
+            SchemaOp.RenameSequence => schema.Sequences.ContainsKey(DecodePayload<SchemaRenamePayload>(entry).NewName),
             // A truncate does not move TableSchema.Version, so the fallback below would answer
             // "applied" for any unrelated DDL that did. The storage id is the only proof.
             SchemaOp.TruncateTable => WasTruncateApplied(schema, DecodePayload<SchemaTruncateTablePayload>(entry)),

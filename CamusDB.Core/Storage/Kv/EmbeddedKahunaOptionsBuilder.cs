@@ -147,11 +147,10 @@ public static class EmbeddedKahunaOptionsBuilder
             // upgrade step still applies: a data directory whose prepared-intent snapshot predates the
             // ledger must start once with kahuna.one_phase_apply_time_validation: false.
             OnePhaseApplyTimeValidation = true,
-            // Key/value shard actor count stays at Kahuna's default (ProcessorCount): with the standalone
-            // default of a single Raft partition, TPC-C measured ProcessorCount actors at 28.8 tx/s vs
-            // 15.3 tx/s with 8x — extra actors only fragment per-actor caches when one partition already
-            // serializes the write path. Multi-partition deployments can raise kahuna.key_value_workers
-            // (with 4 partitions on the pre-WriteIOThreads-fix stack, 8x actors measured ~3x at 64 clients).
+            // Key/value shard actor count stays at Kahuna's default, max(32, 4 x CPU cores); see
+            // EffectiveActorCount. With a single Raft partition, extra actors only fragment the per-actor
+            // caches, because one partition already serializes the write path. Set
+            // kahuna.key_value_workers to pin the count.
             //
             // Range auto-split stays off unless an operator asks for it. Kahuna's own default is 1000
             // sampled keys, so inheriting it would make every key-range-routed table start splitting
@@ -207,11 +206,10 @@ public static class EmbeddedKahunaOptionsBuilder
             // upgrade step still applies: a data directory whose prepared-intent snapshot predates the
             // ledger must start once with kahuna.one_phase_apply_time_validation: false.
             OnePhaseApplyTimeValidation = true,
-            // Key/value shard actor count stays at Kahuna's default (ProcessorCount): with the standalone
-            // default of a single Raft partition, TPC-C measured ProcessorCount actors at 28.8 tx/s vs
-            // 15.3 tx/s with 8x — extra actors only fragment per-actor caches when one partition already
-            // serializes the write path. Multi-partition deployments can raise kahuna.key_value_workers
-            // (with 4 partitions on the pre-WriteIOThreads-fix stack, 8x actors measured ~3x at 64 clients).
+            // Key/value shard actor count stays at Kahuna's default, max(32, 4 x CPU cores); see
+            // EffectiveActorCount. With a single Raft partition, extra actors only fragment the per-actor
+            // caches, because one partition already serializes the write path. Set
+            // kahuna.key_value_workers to pin the count.
             //
             // Range auto-split stays off unless an operator asks for it. Kahuna's own default is 1000
             // sampled keys, so inheriting it would make every key-range-routed table start splitting

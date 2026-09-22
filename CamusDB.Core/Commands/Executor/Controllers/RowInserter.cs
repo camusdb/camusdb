@@ -48,7 +48,9 @@ internal sealed class RowInserter
         {
             if (!SchemaElementStateRules.IsWritable(col))
                 continue;
+            
             writableNames.Add(col.Name);
+            
             if (col.NotNull || col.Type == ColumnType.String || col.Type == ColumnType.Bytes)
                 validationRules.Add(col);
         }
@@ -80,7 +82,7 @@ internal sealed class RowInserter
                 }
 
                 if (present && val!.Type != ColumnType.Null
-                    && (col.Type == ColumnType.String || col.Type == ColumnType.Bytes))
+                    && col.Type is ColumnType.String or ColumnType.Bytes)
                 {
                     EnforceLengthBound(col, val);
                 }
@@ -139,7 +141,7 @@ internal sealed class RowInserter
         if (extraUniqueValue is not null)
             columnValues[^1] = extraUniqueValue;
 
-        return new CompositeColumnValue(columnValues);
+        return new(columnValues);
     }
 
     /// <summary>
@@ -231,12 +233,12 @@ internal sealed class RowInserter
                     CompositeColumnValue uniqueKeyValue = GetColumnValue(values, index.Columns);
                     // Serialize the INCLUDE payload only now that the entry is known to be written —
                     // a NULL-key row above returns without paying the encode + byte-check cost.
-                    (indexEntries ??= new()).Add(new(index.KvId, uniqueKeyValue, Unique: true, IncludeTuple: BuildIncludeTuple(index, values, state.Database.Options)));
+                    (indexEntries ??= []).Add(new(index.KvId, uniqueKeyValue, Unique: true, IncludeTuple: BuildIncludeTuple(index, values, state.Database.Options)));
                 }
                 else if (index.Type == IndexType.Multi)
                 {
                     CompositeColumnValue multiKeyValue = GetColumnValue(values, index.Columns, new ColumnValue(ColumnType.Id, rowId.ToString()));
-                    (indexEntries ??= new()).Add(new(index.KvId, multiKeyValue, Unique: false, IncludeTuple: BuildIncludeTuple(index, values, state.Database.Options)));
+                    (indexEntries ??= []).Add(new(index.KvId, multiKeyValue, Unique: false, IncludeTuple: BuildIncludeTuple(index, values, state.Database.Options)));
                 }
             }
 

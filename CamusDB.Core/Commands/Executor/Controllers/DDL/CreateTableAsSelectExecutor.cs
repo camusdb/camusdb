@@ -60,6 +60,9 @@ internal sealed class CreateTableAsSelectExecutor
 
     internal readonly DML.RowInsertSelector rowInsertSelector;
 
+    /// <summary>Reserves the values a sequence-backed column default supplies while the copy loads.</summary>
+    internal readonly Functions.SequenceStatementBinder sequenceBinder;
+
     internal CreateTableAsSelectExecutor(
         ExecutorContext context,
         CatalogsManager catalogs,
@@ -70,7 +73,8 @@ internal sealed class CreateTableAsSelectExecutor
         TableIndexAlterer tableIndexAlterer,
         QueryExecutor queryExecutor,
         RowInserter rowInserter,
-        DML.RowInsertSelector rowInsertSelector
+        DML.RowInsertSelector rowInsertSelector,
+        Functions.SequenceStatementBinder sequenceBinder
     )
     {
         this.context = context;
@@ -83,6 +87,7 @@ internal sealed class CreateTableAsSelectExecutor
         this.queryExecutor = queryExecutor;
         this.rowInserter = rowInserter;
         this.rowInsertSelector = rowInsertSelector;
+        this.sequenceBinder = sequenceBinder;
     }
 
     /// <summary>
@@ -185,7 +190,9 @@ internal sealed class CreateTableAsSelectExecutor
                     Controllers.Queries.SelectStatementExecutor.PinSchemaVersion(database, createdTable, ticket.TxnState);
 
                     int loaded = await rowInsertSelector
-                        .InsertSelect(rowInserter, context.Statistics, database, createdTable, loadTicket, sourceColumns, source.Cursor)
+                        .InsertSelect(
+                            rowInserter, context.Statistics, sequenceBinder, database, createdTable,
+                            loadTicket, ticket, sourceColumns, source.Cursor)
                         .ConfigureAwait(false);
 
                     return (true, loaded, WarnIfTimeTravelCopyReadNothing(source, loaded, tableName));
@@ -336,8 +343,15 @@ internal sealed class CreateTableAsSelectExecutor
                 sourceSelect: null!,
                 parameters: null);
 
+            // The refresh runs with no statement behind it, so the binder is handed a ticket that
+            // carries only this chunk's transaction. A materialized view's staging relation has no
+            // sequence-backed default of its own — a refresh copies values, it does not generate
+            // them — so the binder finds nothing to reserve and returns the ticket unchanged.
+            ExecuteSQLTicket chunkStatement = new(tx, database.Name, string.Empty, null);
+
             int inserted = await rowInsertSelector.InsertSelect(
-                rowInserter, context.Statistics, database, staging, chunkTicket, sourceColumns,
+                rowInserter, context.Statistics, sequenceBinder, database, staging, chunkTicket,
+                chunkStatement, sourceColumns,
                 Queries.QueryResultStream.FromRows(rows)).ConfigureAwait(false);
 
             await database.Transactions.CommitAsync(tx).ConfigureAwait(false);

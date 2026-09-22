@@ -16,6 +16,15 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.DML;
 
 internal sealed class SQLExecutorInsertCreator : SQLExecutorBaseCreator
 {
+    private readonly SequenceStatementBinder sequenceBinder;
+
+    internal SQLExecutorInsertCreator(SequenceStatementBinder sequenceBinder)
+    {
+        ArgumentNullException.ThrowIfNull(sequenceBinder);
+
+        this.sequenceBinder = sequenceBinder;
+    }
+
     // Shared empty row context for evaluating VALUES expressions: INSERT literals/params/functions
     // never reference row columns, and EvalExpr treats the row as read-only, so one instance is
     // reused across every value cell instead of allocating an empty dictionary per cell.
@@ -73,12 +82,36 @@ internal sealed class SQLExecutorInsertCreator : SQLExecutorBaseCreator
         // Per-field schema metadata and the default-bearing columns the field list omits are resolved
         // once for the whole statement; the shaper is shared with the INSERT … SELECT path so both
         // forms coerce and default identically.
+        // GENERATED ALWAYS means the column's values can only come from its sequence, so a
+        // statement that names it — including the implicit all-columns form — is refused rather
+        // than having its value silently replaced.
+        SequenceDefaults.RequireNoValueForAlwaysIdentity(table.Schema, fields);
+
         InsertRowShaper shaper = InsertRowShaper.Create(table.Schema, fields);
+
+        // Every value this statement will draw from a sequence is reserved here, in one call per
+        // sequence, before the first row is shaped: the row count is known from the VALUES list and
+        // shaping is synchronous, so the alternative is one network round trip per row. Reserving
+        // before the mutation starts also means a sequence failure cannot fail the transaction
+        // late, after rows have been written.
+        ExecuteSQLTicket bound = await sequenceBinder.BindAsync(
+            database,
+            ticket,
+            ast,
+            allowedRegion: ast.extendedOne,
+            rowCount: CountValueRows(ast.extendedOne),
+            defaultSequenceIds: shaper.DefaultSequenceIds,
+            statementKind: "INSERT",
+            ticket.CancellationToken).ConfigureAwait(false);
 
         // Single-pass: build each row dictionary directly from the AST, applying coercion
         // and defaults in the same traversal — no List<List<ColumnValue?>> intermediate.
         List<Dictionary<string, ColumnValue>> batchValues = new();
-        FillBatchDicts(ast.extendedOne, ticket.Parameters, shaper, batchValues);
+        FillBatchDicts(ast.extendedOne, bound.Parameters, shaper, batchValues);
+
+        // Every row is shaped by now, so the values the statement actually drew are known — which
+        // is not the same as the values it reserved when a VALUES expression skipped a branch.
+        SequenceStatementBinder.RecordDrawnValues(bound.Parameters, ticket.TxnState);
 
         return new InsertTicket(
             txnState: ticket.TxnState,
@@ -190,7 +223,41 @@ internal sealed class SQLExecutorInsertCreator : SQLExecutorBaseCreator
                 $"The number of fields is not equal to the number of values. Fields={shaper.FieldCount} != Values={filled} Position={batchValues.Count}"
             );
 
-        batchValues.Add(shaper.ShapeRow(slots));
+        batchValues.Add(shaper.ShapeRow(slots, parameters));
+    }
+
+    /// <summary>
+    /// Counts the rows a VALUES list holds, so the statement can reserve exactly that many sequence
+    /// values before it shapes any of them.
+    /// </summary>
+    /// <remarks>
+    /// Iterative for the reason <see cref="FillBatchDicts"/> is: the batch list is left-deep, so a
+    /// recursive count reaches one frame per row and a large VALUES list overflows the stack of the
+    /// thread serving the request — a process-ending failure no catch can absorb.
+    /// </remarks>
+    private static int CountValueRows(NodeAst batchListAst)
+    {
+        int rows = 0;
+        Stack<NodeAst> pending = new();
+        pending.Push(batchListAst);
+
+        while (pending.Count > 0)
+        {
+            NodeAst node = pending.Pop();
+
+            if (node.nodeType == NodeType.InsertBatchList)
+            {
+                if (node.rightAst is not null)
+                    pending.Push(node.rightAst);
+                if (node.leftAst is not null)
+                    pending.Push(node.leftAst);
+                continue;
+            }
+
+            rows++;
+        }
+
+        return rows;
     }
 
     /// <summary>

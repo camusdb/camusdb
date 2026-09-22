@@ -56,7 +56,10 @@ internal static class PrimaryKeyNotNullRule
                         column.DefaultFunction,
                         column.NotNullConstraintName,
                         column.Comment,
-                        column.Storage);
+                        column.Storage,
+                        column.DefaultSequenceId,
+                        column.IdentityAlways,
+                        column.Identity);
                 }
             }
         }

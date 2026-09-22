@@ -12,6 +12,7 @@ using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.CommandsExecutor.Controllers.DML;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Controllers.DDL;
+using CamusDB.Core.CommandsExecutor.Controllers.Functions;
 using Microsoft.Extensions.Logging;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
@@ -20,11 +21,25 @@ namespace CamusDB.Core.CommandsExecutor.Controllers;
 /// The methods in this class receive AST (Abstract Syntax Tree) from the SQL parser and transform them into tickets,
 /// which are the representations and attributes of the different types of requests accepted by the command executor.
 /// </summary>
-internal sealed class SqlExecutor()
+internal sealed class SqlExecutor
 {
     private readonly SQLExecutorQueryCreator sqlExecutorQueryCreator = new();
 
-    private readonly SQLExecutorInsertCreator sqlExecutorInsertCreator = new();
+    private readonly SQLExecutorInsertCreator sqlExecutorInsertCreator;
+
+    private readonly SQLExecutorSequenceCreator sqlExecutorSequenceCreator = new();
+
+    /// <param name="sequenceBinder">
+    /// Reserves the sequence values a statement will draw before it runs. Held here because the
+    /// INSERT ticket is where the row count and the table's sequence-backed defaults first come
+    /// together, and both are needed to size the reservation.
+    /// </param>
+    internal SqlExecutor(SequenceStatementBinder sequenceBinder)
+    {
+        ArgumentNullException.ThrowIfNull(sequenceBinder);
+
+        sqlExecutorInsertCreator = new SQLExecutorInsertCreator(sequenceBinder);
+    }
 
     private readonly SQLExecutorUpdateCreator sqlExecutorUpdateCreator = new();
 
@@ -100,14 +115,33 @@ internal sealed class SqlExecutor()
 
     /// <summary>
     /// Creates a ticket to empty a table from the AST representation of a <c>TRUNCATE</c> statement.
+    /// The identity clause rides on the statement's <c>yytext</c>; <c>CONTINUE IDENTITY</c> and the
+    /// bare form both mean "leave every sequence alone", which is the default.
     /// </summary>
     internal TruncateTableTicket CreateTruncateTableTicket(ExecuteSQLTicket ticket, NodeAst ast)
     {
         if (ast?.leftAst?.yytext is not { Length: > 0 } tableName)
             throw new CamusDBException(CamusDBErrorCodes.InvalidAstStmt, "Invalid truncate table AST");
 
-        return new(ticket.DatabaseName, tableName);
+        return new(ticket.DatabaseName, tableName,
+            restartIdentity: string.Equals(ast.yytext, "restart identity", StringComparison.Ordinal));
     }
+
+    /// <summary>Builds a ticket for <c>CREATE SEQUENCE</c> (with or without <c>IF NOT EXISTS</c>).</summary>
+    internal CreateSequenceTicket CreateCreateSequenceTicket(ExecuteSQLTicket ticket, NodeAst ast)
+        => sqlExecutorSequenceCreator.CreateCreateSequenceTicket(ticket, ast);
+
+    /// <summary>Builds a ticket for <c>DROP SEQUENCE [IF EXISTS]</c>.</summary>
+    internal static DropSequenceTicket CreateDropSequenceTicket(ExecuteSQLTicket ticket, NodeAst ast)
+        => SQLExecutorSequenceCreator.CreateDropSequenceTicket(ticket, ast);
+
+    /// <summary>Builds a ticket for <c>ALTER SEQUENCE … RENAME TO</c>.</summary>
+    internal static RenameSequenceTicket CreateRenameSequenceTicket(ExecuteSQLTicket ticket, NodeAst ast)
+        => SQLExecutorSequenceCreator.CreateRenameSequenceTicket(ticket, ast);
+
+    /// <summary>Builds a ticket for the option-bearing form of <c>ALTER SEQUENCE</c>.</summary>
+    internal AlterSequenceTicket CreateAlterSequenceTicket(ExecuteSQLTicket ticket, NodeAst ast)
+        => sqlExecutorSequenceCreator.CreateAlterSequenceTicket(ticket, ast);
 
     /// <summary>
     /// Creates a ticket to alter a table from the AST representation of a SQL statement.

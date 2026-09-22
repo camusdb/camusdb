@@ -20,6 +20,7 @@ using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.CommandsValidator;
 using CamusDB.Core.SQLParser;
+using CamusDB.Core.CommandsExecutor.Controllers.Functions;
 using CamusDB.Core.Storage.Kv;
 using CamusDB.Core.Transactions;
 using CamusDB.Core.Util.ObjectIds;
@@ -283,7 +284,7 @@ public class InsertParseBenchmarks
     {
         NodeAst ast = SQLParserProcessor.Parse(_sql);
 
-        return await new SQLExecutorInsertCreator()
+        return await new SQLExecutorInsertCreator(new SequenceStatementBinder(new SequenceAllocator(CamusDBConfig.Ambient)))
             .CreateInsertTicket(_ctx.Executor, _ctx.Db, _ticket, ast);
     }
 }

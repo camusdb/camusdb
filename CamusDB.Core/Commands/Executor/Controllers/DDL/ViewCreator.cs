@@ -52,6 +52,12 @@ internal sealed class ViewCreator
                 CamusDBErrorCodes.TableAlreadyExists,
                 $"'{viewName}' is a table, not a view; CREATE OR REPLACE VIEW cannot replace it");
 
+        // A stored body is evaluated once per reader, an unbounded number of times, so a sequence
+        // call in one cannot be counted before it runs — and the count is what lets the engine
+        // reserve values in bulk instead of one round trip per row. Refused at CREATE, where the
+        // author can fix it, rather than at some later reader's first SELECT.
+        RequireNoSequenceCall(bodyAst, "a view body");
+
         // Expanding views inside the body first means a view over a view stores a body that names the
         // inner view (so the dependency is recorded and a later replace of the inner view is seen),
         // while binding still resolves through to real relations.
@@ -201,6 +207,24 @@ internal sealed class ViewCreator
             // Null when authentication is off, in which case no base-relation check applies anyway.
             owner: ticket.Principal?.UserName,
             ownerId: ticket.Principal?.UserId);
+    }
+
+    /// <summary>
+    /// Refuses a sequence call inside a definition that is stored and replayed.
+    /// </summary>
+    /// <remarks>
+    /// Shared by the view body and the materialized-view body. The same rule applies to a
+    /// <c>CHECK</c> condition, which is refused where check constraints are built.
+    /// </remarks>
+    internal static void RequireNoSequenceCall(NodeAst? ast, string what)
+    {
+        if (!Functions.SequenceStatementBinder.ContainsSequenceCall(ast))
+            return;
+
+        throw new CamusDBException(
+            CamusDBErrorCodes.SequenceCallNotAllowedHere,
+            $"A sequence function cannot be used in {what}: the definition is stored and evaluated " +
+            "once per reader, so the engine cannot bound how many values it would draw.");
     }
 
     private static CheckOptionKind ParseCheckOption(string? text) => text switch

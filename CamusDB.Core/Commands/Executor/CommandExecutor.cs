@@ -113,6 +113,15 @@ public sealed class CommandExecutor : IAsyncDisposable
     // Executes a SQL statement that returns no rows, and accepts schema DDL by forwarding it.
     private readonly Controllers.DML.NonQueryStatementDispatcher nonQueryDispatcher;
 
+    /// <summary>The only binding to Kahuna's sequencer for user sequences.</summary>
+    private readonly Storage.Kv.SequenceAllocator sequenceAllocator;
+
+    /// <summary>Reserves the sequence values a statement will draw, before the statement runs.</summary>
+    private readonly Controllers.Functions.SequenceStatementBinder sequenceBinder;
+
+    /// <summary>Executes the sequence DDL statements.</summary>
+    private readonly Controllers.DDL.SequenceDdlService sequenceDdl;
+
     // Server-level backup / point-in-time-recovery controller over the shared node. Null only when this
     // executor was constructed without a shared node (no backup surface is reachable).
     private readonly BackupManager? backupManager;
@@ -432,8 +441,13 @@ public sealed class CommandExecutor : IAsyncDisposable
         tableDropper = new(catalogs, statisticsManager, logger);
         rowDeleter = new(logger, statisticsManager);
         queryExecutor = new(logger, options, statisticsManager, sharedNode?.Kahuna, fragmentTransport);
-        sqlExecutor = new();
-        schemaQuerier = new(catalogs, logger, options);
+        // The allocator is the single binding to Kahuna's sequencer; the binder reserves a
+        // statement's values through it before the statement runs. Both are built here, ahead of
+        // every component that captures them.
+        sequenceAllocator = new Storage.Kv.SequenceAllocator(options);
+        sequenceBinder = new Controllers.Functions.SequenceStatementBinder(sequenceAllocator);
+        sqlExecutor = new(sequenceBinder);
+        schemaQuerier = new(catalogs, logger, options, sequenceAllocator);
         // The owner resolver is what turns a recorded owner into enforceable definer's rights. Null
         // when the engine has no auth service (no shared node), in which case there is no principal to
         // swap to and every view binds as the caller — the same as authentication being off.
@@ -518,12 +532,14 @@ public sealed class CommandExecutor : IAsyncDisposable
             startupRecovery
         );
         ddlForwarding = new Controllers.DDL.DdlForwardingCoordinator(schemaDdlForwarder, isClusterMode);
+        sequenceDdl = new Controllers.DDL.SequenceDdlService(executorContext, catalogs, sequenceAllocator);
         schemaDdl = new Controllers.DDL.SchemaDdlService(
             executorContext,
             options,
             catalogs,
             ddlForwarding,
             tableCreator,
+            sequenceDdl,
             tableColumnAlterer,
             tableIndexAlterer,
             tableConstraintAlterer,
@@ -557,6 +573,7 @@ public sealed class CommandExecutor : IAsyncDisposable
             backgroundSchedulers,
             clusterSettings,
             engineMetrics,
+            sequenceBinder,
             slowQueries
         );
         ctasExecutor = new Controllers.DDL.CreateTableAsSelectExecutor(
@@ -569,7 +586,8 @@ public sealed class CommandExecutor : IAsyncDisposable
             tableIndexAlterer,
             queryExecutor,
             rowInserter,
-            rowInsertSelector
+            rowInsertSelector,
+            sequenceBinder
         );
         rowCommands = new Controllers.DML.RowCommandService(
             executorContext, rowInserter, rowUpdater, rowDeleter, queryExecutor);
@@ -598,6 +616,7 @@ public sealed class CommandExecutor : IAsyncDisposable
             viewCreator,
             matViewCreator,
             matViewRefresher,
+            sequenceDdl,
             authService,
             clusterSettings
         );
@@ -620,7 +639,8 @@ public sealed class CommandExecutor : IAsyncDisposable
             rowInsertSelector,
             queryExecutor,
             subqueryRewriter,
-            matViewRefresher
+            matViewRefresher,
+            sequenceBinder
         );
 
         // Keep every branch's snapshot-floor hold alive for as long as the branch exists. The
@@ -672,6 +692,7 @@ public sealed class CommandExecutor : IAsyncDisposable
         userAdmin.ApplyOptions(next);
         selectExecutor.ApplyOptions(next);
         slowQueries?.ApplyOptions(next);
+        sequenceAllocator.ApplyOptions(next);
 
         backgroundSchedulers?.ApplyOptions(next);
 

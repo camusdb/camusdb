@@ -178,7 +178,7 @@ public sealed class RowUpdater
         if (extraUniqueValue is not null)
             columnValues[^1] = extraUniqueValue;
 
-        return new CompositeColumnValue(columnValues);
+        return new(columnValues);
     }
 
     /// <summary>
@@ -336,12 +336,15 @@ public sealed class RowUpdater
         bool keepScannedValues = ticket.PlainValues is null;
 
         SpillableRowList rowList = new(QueryExecutionContext.For(state.Database, queryTicket));
+        
         await foreach (QueryResultRow row in cursor.ConfigureAwait(false))
         {
-            QueryResultRow record = keepScannedValues ? row : new QueryResultRow(row.RowId, QueryResultRow.EmptyRow);
+            QueryResultRow record = keepScannedValues ? row : new(row.RowId, QueryResultRow.EmptyRow);
             await rowList.AddAsync(record).ConfigureAwait(false);
         }
+        
         await rowList.SealAsync().ConfigureAwait(false);
+        
         state.RowsToUpdate = rowList;
 
         return FluxAction.Continue;
@@ -510,8 +513,10 @@ public sealed class RowUpdater
         // and miss a concurrent commit, deleting a stale index entry. The bytes are read raw: which
         // large values to fetch is decided per row below.
         List<ObjectIdValue> rowIds = new(chunkRows.Count);
+        
         for (int i = 0; i < chunkRows.Count; i++)
             rowIds.Add(chunkRows[i].RowId);
+        
         ReadOnlyMemory<byte>?[] rawRows = await table.Store.GetRowsBatchLockedForMutation(tx, rowIds, default, LargeValueFetch.Raw).ConfigureAwait(false);
 
         // The rewritten row is stored under the current schema version, so its positional layout is
@@ -525,6 +530,7 @@ public sealed class RowUpdater
         List<TableIndexSchema> writableIndexes = SchemaElementStateRules.CollectWritableIndexes(table.Schema, table.Indexes);
 
         UpdateCarryPlan carry = UpdateCarryPlan.Build(table, ticket, writableIndexes);
+        
         (ReadOnlyMemory<byte>?[] oldRows, ReadOnlyMemory<byte>?[] storedRows, List<int>?[] oldOutOfLine, bool[] carried) =
             await ResolveRowsForUpdateAsync(table, tx, rowIds, rawRows, carry).ConfigureAwait(false);
 
@@ -549,7 +555,8 @@ public sealed class RowUpdater
                 table.Schema, tx.TransactionId, rowId, rawData.Value,
                 requiredColumns: carried[i] ? carry.DecodedColumns : null,
                 visibilitySchemaVersion: table.Schema.Version,
-                decodeState: carried[i] ? carryDecodeState : decodeState).ConfigureAwait(false);
+                decodeState: carried[i] ? carryDecodeState : decodeState
+            ).ConfigureAwait(false);
 
             Dictionary<string, ColumnValue> newRow = GetNewUpdatedRow(oldRow, queryRow, ticket);
 
@@ -568,7 +575,7 @@ public sealed class RowUpdater
              IReadOnlyList<KvTableStore.IndexWrite>? newIndexEntries) =
                 CollectIndexUpdates(writableIndexes, rowId, oldRow, newRow, state.Database.Options);
 
-            batch.Add(new KvTableStore.RowUpdate
+            batch.Add(new()
             {
                 RowId = rowId,
                 NewRowData = encoded.StorageValue,

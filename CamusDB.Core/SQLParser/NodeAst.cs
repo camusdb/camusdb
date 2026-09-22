@@ -173,6 +173,8 @@ public sealed class NodeAst
     public static readonly NodeAst ConstraintNotNull = Leaf(NodeType.ConstraintNotNull);
     public static readonly NodeAst ConstraintPrimaryKey = Leaf(NodeType.ConstraintPrimaryKey);
     public static readonly NodeAst ConstraintUnique = Leaf(NodeType.ConstraintUnique);
+    public static readonly NodeAst ConstraintIdentityAlways = Leaf(NodeType.ConstraintIdentityAlways);
+    public static readonly NodeAst ConstraintIdentityByDefault = Leaf(NodeType.ConstraintIdentityByDefault);
 
     // ── Transaction statement sentinels ──────────────────────────────────────
 

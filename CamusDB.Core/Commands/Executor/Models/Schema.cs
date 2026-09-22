@@ -43,6 +43,84 @@ public sealed class Schema : IDisposable
     public Dictionary<string, ViewSchema> Views { get; set; } = new(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>
+    /// Live sequences keyed by name, with the same case-insensitive comparer and the same
+    /// rename-swaps-the-key rule as <see cref="Tables"/>.
+    ///
+    /// <para>Sequences share the relation namespace with tables and views, as they do in PostgreSQL,
+    /// so <see cref="RequireRelationNameAvailable"/> consults this map too. They are <b>not</b>
+    /// relations for any other purpose: nothing selects from a sequence, and
+    /// <see cref="TryResolveRelation"/> deliberately does not return one.</para>
+    /// </summary>
+    public Dictionary<string, SequenceSchema> Sequences { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+
+    // Published as one finished dictionary that is never mutated after publication, for the same
+    // reason relationNamesById is: the map it indexes is mutated in place by an applying delta,
+    // and enumerating one while it is being written throws.
+    private volatile Dictionary<string, SequenceSchema>? sequencesById;
+
+    /// <summary>
+    /// Finds a sequence by its immutable id. Used where a name would be the wrong key: a column
+    /// default records the id, and a rename must not break it.
+    /// </summary>
+    /// <remarks>
+    /// <para>Answered from a published index rather than by walking <see cref="Sequences"/>. The
+    /// walk is on the insert path — every statement with a sequence-backed default resolves every
+    /// such default by id before it can reserve — so it made each identity table's inserts slower
+    /// in proportion to how many <em>unrelated</em> sequences the database held.</para>
+    ///
+    /// <para>Walking the live map was also a read of a dictionary that a concurrent schema delta
+    /// may be mutating in place. The index removes both problems at once, which is why it is a
+    /// published snapshot and not a lock.</para>
+    /// </remarks>
+    public SequenceSchema? FindSequenceById(string sequenceId)
+    {
+        Dictionary<string, SequenceSchema>? index = sequencesById;
+
+        if (index is null)
+        {
+            index = BuildSequenceIdIndexDefensively();
+            sequencesById = index;
+        }
+
+        return index.TryGetValue(sequenceId, out SequenceSchema? sequence) ? sequence : null;
+    }
+
+    /// <summary>
+    /// Re-indexes sequence ids. Must be called while holding <see cref="Semaphore"/>, with
+    /// <see cref="Sequences"/> in its final post-mutation state — the same contract
+    /// <see cref="RebuildRelationNameIndex"/> has, and it is rebuilt from the same places.
+    /// </summary>
+    public void RebuildSequenceIdIndex()
+    {
+        Dictionary<string, SequenceSchema> index = new(Sequences.Count, StringComparer.Ordinal);
+
+        foreach (SequenceSchema sequence in Sequences.Values)
+        {
+            if (sequence.Id is { Length: > 0 } id)
+                index[id] = sequence;
+        }
+
+        sequencesById = index;
+    }
+
+    private Dictionary<string, SequenceSchema> BuildSequenceIdIndexDefensively()
+    {
+        for (int attempt = 0; ; attempt++)
+        {
+            try
+            {
+                RebuildSequenceIdIndex();
+                return sequencesById!;
+            }
+            catch (InvalidOperationException) when (attempt < 2)
+            {
+                // A delta mutated the map mid-walk. Retrying is enough: the writer holds the lock
+                // for the length of one apply, not for anything unbounded.
+            }
+        }
+    }
+
+    /// <summary>
     /// Serializes schema validation and apply so deltas are applied one at a time.
     /// Acquire via <see cref="AcquireLockAsync"/> and release via <see cref="ReleaseLock"/>
     /// so the hold is recorded for the schema-lock assertions.
@@ -179,6 +257,14 @@ public sealed class Schema : IDisposable
         if (Views.ContainsKey(name))
             throw new CamusDBException(
                 CamusDBErrorCodes.ViewAlreadyExists,
+                $"Relation '{name}' already exists");
+
+        // Sequences share the namespace too, so a table cannot be created over a sequence's name
+        // and a sequence cannot be created over a table's. Letting them collide would make
+        // `nextval('x')` and `SELECT … FROM x` name different objects that answer to one word.
+        if (Sequences.ContainsKey(name))
+            throw new CamusDBException(
+                CamusDBErrorCodes.SequenceAlreadyExists,
                 $"Relation '{name}' already exists");
     }
 

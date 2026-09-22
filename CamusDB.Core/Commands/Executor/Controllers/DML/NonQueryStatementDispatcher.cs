@@ -84,6 +84,12 @@ internal sealed class NonQueryStatementDispatcher
 
     internal readonly MaterializedViewRefresher matViewRefresher;
 
+    /// <summary>
+    /// Reserves the sequence values a statement will draw before it runs. Held here because this
+    /// is where an <c>INSERT … SELECT</c> learns its source row count.
+    /// </summary>
+    internal readonly Functions.SequenceStatementBinder sequenceBinder;
+
     internal NonQueryStatementDispatcher(
         ExecutorContext context,
         CatalogsManager catalogs,
@@ -103,13 +109,15 @@ internal sealed class NonQueryStatementDispatcher
         RowInsertSelector rowInsertSelector,
         QueryExecutor queryExecutor,
         SubqueryRewriter subqueryRewriter,
-        MaterializedViewRefresher matViewRefresher
+        MaterializedViewRefresher matViewRefresher,
+        Functions.SequenceStatementBinder sequenceBinder
     )
     {
         // Guarded because these are captured at construction, not read per call: a collaborator
         // built later in the composing constructor would be captured as null here and only fail
         // much later, deep inside a statement, where the cause is far from the mistake.
         ArgumentNullException.ThrowIfNull(statementAuthorizer);
+        ArgumentNullException.ThrowIfNull(sequenceBinder);
         ArgumentNullException.ThrowIfNull(ddlDispatcher);
         ArgumentNullException.ThrowIfNull(serverLevelDispatcher);
         ArgumentNullException.ThrowIfNull(selectExecutor);
@@ -137,6 +145,7 @@ internal sealed class NonQueryStatementDispatcher
         this.queryExecutor = queryExecutor;
         this.subqueryRewriter = subqueryRewriter;
         this.matViewRefresher = matViewRefresher;
+        this.sequenceBinder = sequenceBinder;
     }
 
     /// <summary>
@@ -229,7 +238,9 @@ internal sealed class NonQueryStatementDispatcher
                                 database, insertSelectTicket.SourceSelect, ticket, "INSERT ... SELECT").ConfigureAwait(false);
 
                             int insertedFromSelect = await rowInsertSelector
-                                .InsertSelect(rowInserter, context.Statistics, database, table, insertSelectTicket, source.Columns, source.Cursor)
+                                .InsertSelect(
+                                    rowInserter, context.Statistics, sequenceBinder, database, table,
+                                    insertSelectTicket, ticket, source.Columns, source.Cursor)
                                 .ConfigureAwait(false);
 
                             string? insertWarning = ctasExecutor.WarnIfTimeTravelCopyReadNothing(

@@ -8,6 +8,8 @@
 
 using Nito.AsyncEx;
 using Kahuna;
+using Kahuna.Shared.Sequences;
+using CamusDB.Core.Util.Diagnostics;
 using Kahuna.Server.KeyValues;
 using Kahuna.Shared.KeyValue;
 using Kommander.Time;
@@ -275,14 +277,22 @@ internal sealed class DatabaseDropper
         string metaBucket = $"{id}/meta";
         string catalogPrefix = $"{id}/meta/keyspace:";
 
-        // Phase A: read the keyspace catalog. Read-only — meta (including the catalog) is deleted last
-        // (Phase E) so the catalog survives for every crash-resume. The scan is repeated up to
+        // First, read the keyspace catalog. Read-only — meta (including the catalog) is deleted last
+        // (the final step below) so the catalog survives for every crash-resume. The scan is repeated up to
         // MaxPurgeScanRounds times, accumulating entries idempotently (TryAdd), and stops once a full
         // round adds nothing new. A catalog key transiently missed on one round would otherwise leak
         // its table's entire row/index overlay: on a crashed drop the resume re-scans, but on a
         // *successful* drop the marker is cleared and there is no resume, so re-scanning here is the
         // only guard for that case.
         Dictionary<string, List<string>> catalogByTableId = [];
+
+        // Collected in the same scan: a sequence's counter is not a KV key at all — it lives in
+        // Kahuna's reserved sequencer namespace — so no prefix purge can reach it, and the only
+        // record of which counters this database owns is the meta family about to be deleted.
+        // Read it here, delete the counters after the stats keys, and delete the family last.
+        HashSet<string> sequenceIds = new(StringComparer.Ordinal);
+        string sequencePrefix = $"{id}/meta/sequence:";
+
         for (int round = 0; round < MaxPurgeScanRounds; round++)
         {
             CatalogScanRoundsForTesting++;
@@ -293,6 +303,9 @@ internal sealed class DatabaseDropper
                     HLCTimestamp.Zero, metaBucket, null, true, null, true, 512,
                     HLCTimestamp.Zero, KeyValueDurability.Persistent, CancellationToken.None).ConfigureAwait(false))
                 {
+                    if (key.StartsWith(sequencePrefix, StringComparison.Ordinal))
+                        sequenceIds.Add(key[sequencePrefix.Length..]);
+
                     if (!key.StartsWith(catalogPrefix, StringComparison.Ordinal) || entry.Value is not { Length: > 0 })
                         continue;
 
@@ -319,7 +332,7 @@ internal sealed class DatabaseDropper
                 break;
         }
 
-        // Phase B: build the row, large-value and index bucket prefixes and exact stats keys.
+        // Build the row, large-value and index bucket prefixes and exact stats keys.
         List<(string bucket, string keyPrefix)> rowIndexPrefixes = [];
         List<string> exactKeys = [];
         HashSet<string> coveredTableIds = [];
@@ -355,18 +368,124 @@ internal sealed class DatabaseDropper
         // marker (and, for a table, the recovery record) when this is true.
         bool complete = true;
 
-        // Phase C: purge rows and index entries.
+        // Purge rows and index entries.
         foreach ((string bucket, string keyPrefix) in rowIndexPrefixes)
             complete &= await PurgeBucketAsync(kahuna, id, bucket, keyPrefix, ct).ConfigureAwait(false);
 
-        // Phase D: delete exact stats keys (no '/' suffix so unreachable by bucket scan).
+        // Delete exact stats keys (no '/' suffix so unreachable by bucket scan).
         foreach (string key in exactKeys)
             complete &= await DeleteExactVerifiedAsync(kahuna, key, ct).ConfigureAwait(false);
 
-        // Phase E: delete the meta namespace LAST (catalog included) so it survived for every resume.
+        // Next, delete the sequencer counters, still before the meta family that named them.
+        // Joined to the verified result rather than run as a best-effort side call: the caller
+        // clears its recovery marker only on true, and a counter deleted "best effort" would be
+        // leaked forever the moment that delete failed, because nothing revisits it.
+        foreach (string sequenceId in sequenceIds)
+            complete &= await DeleteSequenceVerifiedAsync(kahuna, id, sequenceId, ct).ConfigureAwait(false);
+
+        // Finally, delete the meta namespace LAST (catalog included) so it survived for every resume.
         complete &= await PurgeMetaNamespaceAsync(kahuna, id, ct).ConfigureAwait(false);
 
         return complete;
+    }
+
+    /// <summary>
+    /// Deletes the counters and the catalog records of every sequence owned by a reclaimed
+    /// relation, so an orphan that is finally reclaimed takes its identity sequences with it.
+    /// </summary>
+    /// <remarks>
+    /// Driven from the persisted records rather than from the live schema, because the relation is
+    /// an orphan: it is not in the schema, and on a resumed sweep there may be no descriptor at
+    /// all. Each record's owner is read from the record itself, which is the same link the live
+    /// path uses.
+    /// </remarks>
+    private async Task<bool> PurgeOwnedSequencesAsync(IKahuna kahuna, string dbId, string tableId, CancellationToken ct)
+    {
+        string metaBucket = $"{dbId}/meta";
+        string sequencePrefix = $"{dbId}/meta/sequence:";
+
+        List<string> ownedIds = [];
+
+        try
+        {
+            await foreach ((string key, ReadOnlyKeyValueEntry entry) in kahuna.LocateAndScanRange(
+                HLCTimestamp.Zero, metaBucket, null, true, null, true, 512,
+                HLCTimestamp.Zero, KeyValueDurability.Persistent, ct).ConfigureAwait(false))
+            {
+                if (!key.StartsWith(sequencePrefix, StringComparison.Ordinal) || entry.Value is not { Length: > 0 })
+                    continue;
+
+                SequenceSchema sequence = MetaJsonSerializer.Deserialize(entry.Value, MetaJsonContext.Default.SequenceSchema);
+
+                if (string.Equals(sequence.OwnedByTableId, tableId, StringComparison.Ordinal))
+                    ownedIds.Add(key[sequencePrefix.Length..]);
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Failed to scan for sequences owned by orphan table {TableId} in database {Id}", tableId, dbId);
+            return false;
+        }
+
+        bool complete = true;
+
+        foreach (string sequenceId in ownedIds)
+        {
+            // The counter first, and the record that names it **only if the counter really went**.
+            // The record is the only durable handle on that counter: a later sweep enumerates the
+            // records to learn which counters exist, so deleting one whose counter survived leaves
+            // the counter behind with nothing that could ever find it again. `&=` does not
+            // short-circuit, which is precisely how that ordering was lost.
+            if (!await DeleteSequenceVerifiedAsync(kahuna, dbId, sequenceId, ct).ConfigureAwait(false))
+            {
+                complete = false;
+                continue;
+            }
+
+            complete &= await DeleteExactVerifiedAsync(kahuna, MetaKeys.SequenceKey(dbId, sequenceId), ct).ConfigureAwait(false);
+        }
+
+        return complete;
+    }
+
+    /// <summary>
+    /// Deletes one sequence's counter and reports whether it verifiably went.
+    /// </summary>
+    /// <remarks>
+    /// <c>NotFound</c> counts as success: the purge is resumable, so a second pass legitimately
+    /// finds the counter already gone. <c>MustRetry</c> does not — it means the attempt did
+    /// nothing, and reporting it as success would clear the recovery marker over a counter that
+    /// is still there.
+    /// </remarks>
+    private async Task<bool> DeleteSequenceVerifiedAsync(IKahuna kahuna, string dbId, string sequenceId, CancellationToken ct)
+    {
+        string name = MetaKeys.KahunaSequenceName(dbId, sequenceId);
+
+        try
+        {
+            SequenceResponseType type = await SequenceRetryPolicy.RetryWhileMustRetryAsync(
+                () => kahuna.LocateAndDeleteSequence(name, SequenceDurability.Persistent, ct),
+                ValueStopwatch.StartNew(),
+                options.SequenceRetryBudgetMs
+            ).ConfigureAwait(false);
+
+            if (type is SequenceResponseType.Success or SequenceResponseType.NotFound)
+                return true;
+
+            logger.LogWarning(
+                "Failed to delete sequence '{Sequence}' while purging database {Id}: {Response}", name, dbId, type);
+
+            return false;
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Failed to delete sequence '{Sequence}' while purging database {Id}", name, dbId);
+            return false;
+        }
     }
 
     /// <summary>
@@ -382,10 +501,60 @@ internal sealed class DatabaseDropper
     /// sweep; reporting success on an unverified delete would leak the namespace permanently, because
     /// nothing else ever revisits it.</para>
     /// </summary>
-    internal Task<bool> PurgeMetaNamespaceAsync(IKahuna kahuna, string id, CancellationToken ct = default)
+    internal async Task<bool> PurgeMetaNamespaceAsync(IKahuna kahuna, string id, CancellationToken ct = default)
     {
         string metaBucket = $"{id}/meta";
-        return PurgeBucketAsync(kahuna, id, metaBucket, metaBucket, ct);
+
+        // The sequence records name counters that live outside every namespace a prefix purge can
+        // reach, so they are deleted before the records that name them go. Skipped when the caller
+        // is the full keyspace purge — it has already done this in its own phase, and a second pass
+        // simply finds nothing, which counts as success.
+        bool complete = await PurgeSequenceCountersAsync(kahuna, id, ct).ConfigureAwait(false);
+
+        complete &= await PurgeBucketAsync(kahuna, id, metaBucket, metaBucket, ct).ConfigureAwait(false);
+
+        return complete;
+    }
+
+    /// <summary>
+    /// Deletes every sequencer counter the database's catalog names, read from the meta family
+    /// that is about to be purged.
+    /// </summary>
+    /// <remarks>
+    /// Reading the catalog is the only way to enumerate them: Kahuna's <c>__kahuna:</c> namespace
+    /// is closed to the public key-value API, so nothing can list the counters a database owns.
+    /// That is also why this must run before the family is deleted — afterwards there is no record
+    /// left of what to delete.
+    /// </remarks>
+    private async Task<bool> PurgeSequenceCountersAsync(IKahuna kahuna, string id, CancellationToken ct)
+    {
+        string metaBucket = $"{id}/meta";
+        string sequencePrefix = $"{id}/meta/sequence:";
+
+        List<string> sequenceIds = [];
+
+        try
+        {
+            await foreach ((string key, ReadOnlyKeyValueEntry _) in kahuna.LocateAndScanRange(
+                HLCTimestamp.Zero, metaBucket, null, true, null, true, 512,
+                HLCTimestamp.Zero, KeyValueDurability.Persistent, ct).ConfigureAwait(false))
+            {
+                if (key.StartsWith(sequencePrefix, StringComparison.Ordinal))
+                    sequenceIds.Add(key[sequencePrefix.Length..]);
+            }
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Failed to scan the meta bucket for sequences while purging database (id={Id})", id);
+            return false;
+        }
+
+        bool complete = true;
+
+        foreach (string sequenceId in sequenceIds)
+            complete &= await DeleteSequenceVerifiedAsync(kahuna, id, sequenceId, ct).ConfigureAwait(false);
+
+        return complete;
     }
 
     /// <summary>
@@ -466,6 +635,11 @@ internal sealed class DatabaseDropper
         complete &= await PurgeSpaceAsync(kahuna, dbId, KvKeyBuilder.LargeValueSpaceOf(dbId, dataId), ct).ConfigureAwait(false);
         foreach (string indexId in indexIds)
             complete &= await PurgeSpaceAsync(kahuna, dbId, KvKeyBuilder.IndexSpaceOf(dbId, dataId, indexId), ct).ConfigureAwait(false);
+
+        // The sequences this relation's identity columns own go with it, and only here: a deferred
+        // drop deliberately kept them so a RELINK would bring back a table whose identity column
+        // can still issue. Reclaim is the point at which the relation stops being recoverable.
+        complete &= await PurgeOwnedSequencesAsync(kahuna, dbId, tableId, ct).ConfigureAwait(false);
 
         foreach (string key in new[]
         {
@@ -626,8 +800,8 @@ internal sealed class DatabaseDropper
             // here — both simply end. Treating the first empty batch as "drained" let a failed scan
             // clear the recovery markers, and with the markers gone nothing ever revisits the
             // keyspace. Require MaxPurgeScanRounds consecutive empty scans instead, which is what
-            // this method's summary has always claimed and what the catalog scan in Phase A already
-            // does.
+            // this method's summary has always claimed and what the catalog scan in
+            // PurgeKeyspaceByIdAsync already does.
             //
             // No back-off between the confirming rounds, unlike the delete-failure path below. This
             // method runs once per row bucket AND once per index bucket, so a database with a few

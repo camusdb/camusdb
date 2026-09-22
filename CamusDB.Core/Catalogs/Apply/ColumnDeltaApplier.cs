@@ -106,7 +106,9 @@ internal static class ColumnDeltaApplier
             defaultFunction: current.DefaultFunction,
             notNullConstraintName: current.NotNullConstraintName,
             comment: current.Comment,
-            storage: current.Storage
+            storage: current.Storage,
+            defaultSequenceId: current.DefaultSequenceId,
+            identityAlways: current.IdentityAlways
         );
 
         tableSchema.Version++;
@@ -128,7 +130,9 @@ internal static class ColumnDeltaApplier
                 defaultFunction: hCol.DefaultFunction,
                 notNullConstraintName: hCol.NotNullConstraintName,
                 comment: hCol.Comment,
-                storage: hCol.Storage);
+                storage: hCol.Storage,
+                defaultSequenceId: hCol.DefaultSequenceId,
+                identityAlways: hCol.IdentityAlways);
         }
 
         tableSchema.SchemaHistory.Add(new() { Version = tableSchema.Version, Columns = tableSchema.Columns });
@@ -181,7 +185,9 @@ internal static class ColumnDeltaApplier
                 defaultFunction: newColumn.DefaultFunction,
                 notNullConstraintName: newColumn.NotNullConstraintName,
                 comment: newColumn.Comment,
-                storage: newColumn.Storage
+                storage: newColumn.Storage,
+                defaultSequenceId: newColumn.DefaultSequenceId,
+                identityAlways: newColumn.IdentityAlways
             )
         );
 

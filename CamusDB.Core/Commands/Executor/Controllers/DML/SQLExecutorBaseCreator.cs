@@ -96,7 +96,15 @@ internal abstract class SQLExecutorBaseCreator
         if (left.Type == ColumnType.Null || right.Type == ColumnType.Null)
             return ColumnValue.Null;
 
-        int cmp = CompareValues(left, right);
+        // A pair with no comparison rule is never equal, as in IN membership, and it has no order;
+        // see CompareValues.
+        if (!TryCompareValues(left, right, out int cmp))
+        {
+            if (op is NodeType.ExprEquals or NodeType.ExprNotEquals)
+                return ColumnValue.FromBool(op == NodeType.ExprNotEquals);
+
+            throw NoComparisonRule(op, left, right);
+        }
 
         return op switch
         {
@@ -163,38 +171,73 @@ internal abstract class SQLExecutorBaseCreator
     /// the string to that type. This lets <c>WHERE uuid_col = '…'</c> / <c>WHERE id = '…'</c> (and
     /// range comparisons) work without an explicit CAST, and — for Id — normalizes the literal to the
     /// canonical lowercase 24-hex form so it matches the stored value regardless of input casing.
+    ///
+    /// <para>A pair of different types with no conversion rule (a Uuid and an Id, an integer and a
+    /// string) has no order, so an ordering operator (<c>&lt;</c>, <c>BETWEEN</c>) on it is a
+    /// <see cref="CamusDBErrorCodes.InvalidInput"/> error that names both types. Equality does not come
+    /// here for such a pair: <see cref="EvalComparison"/> and the simple CASE answer "not equal"
+    /// through <see cref="TryCompareValues"/>, the rule IN membership applies
+    /// (<see cref="MixedNumericComparison.EqualsForMembership"/>), so <c>x IN (a)</c> and
+    /// <c>x = a</c> always agree. <see cref="ColumnValue.CompareTo"/> throws a raw
+    /// <see cref="ArgumentException"/> for such a pair, and it must never reach a caller.</para>
     /// </summary>
-    private static int CompareValues(ColumnValue left, ColumnValue right)
+    private static int CompareValues(ColumnValue left, ColumnValue right, NodeType op)
+    {
+        if (TryCompareValues(left, right, out int cmp))
+            return cmp;
+
+        throw NoComparisonRule(op, left, right);
+    }
+
+    private static CamusDBException NoComparisonRule(NodeType op, ColumnValue left, ColumnValue right) =>
+        new(CamusDBErrorCodes.InvalidInput,
+            $"No matching signature for operator {ComparisonSymbol(op)} for argument types: {left.Type}, {right.Type}");
+
+    /// <summary>
+    /// Orders two values as <see cref="CompareValues"/> does, and returns false instead of throwing
+    /// when the two types have no comparison rule. A String operand that is not a valid Uuid or Id is
+    /// not such a case: it can equal no value of that type, so it gets a fixed non-zero order.
+    /// </summary>
+    private static bool TryCompareValues(ColumnValue left, ColumnValue right, out int cmp)
     {
         // Mixed integer/float operands (e.g. `price > 0` where price is Float64 and 0 is an integer
         // literal) compare numerically by widening both to double; ColumnValue.CompareTo rejects the
         // cross-type comparison. One shared rule, so IN membership, CHECK constraints and the
         // planner's index bounds all agree with this comparison.
-        if (MixedNumericComparison.TryCompare(left, right, out int numericCmp))
-            return numericCmp;
+        if (MixedNumericComparison.TryCompare(left, right, out cmp))
+            return true;
 
         // Coercion is best-effort. If a String operand is not a valid Uuid/Id it can equal no such
         // value, so return a deterministic non-zero ordering rather than throwing — and never call
-        // ColumnValue.CompareTo with mismatched types (it throws on Uuid/Id vs String).
-        try
+        // ColumnValue.CompareTo with mismatched types (it throws on Uuid/Id vs String). IN
+        // membership applies the same rule, so `x IN (a)` and `x = a` always agree.
+        if (StringOperandCoercion.TryAlign(ref left, ref right) == StringOperandCoercion.Alignment.Malformed)
         {
-            if (left.Type == ColumnType.Uuid && right.Type == ColumnType.String)
-                right = ColumnValue.FromUuidString(right.StrValue!);
-            else if (right.Type == ColumnType.Uuid && left.Type == ColumnType.String)
-                left = ColumnValue.FromUuidString(left.StrValue!);
-            else if (left.Type == ColumnType.Id && right.Type == ColumnType.String)
-                right = CastScalarFunctions.CoerceToColumnType(right, ColumnType.Id);
-            else if (right.Type == ColumnType.Id && left.Type == ColumnType.String)
-                left = CastScalarFunctions.CoerceToColumnType(left, ColumnType.Id);
-        }
-        catch (CamusDBException)
-        {
-            // Malformed Uuid/Id literal: unequal to any real value. Order the String operand first.
-            return left.Type == ColumnType.String ? -1 : 1;
+            cmp = left.Type == ColumnType.String ? -1 : 1;
+            return true;
         }
 
-        return left.CompareTo(right);
+        if (left.Type != right.Type)
+        {
+            cmp = 0;
+            return false;
+        }
+
+        cmp = left.CompareTo(right);
+        return true;
     }
+
+    private static string ComparisonSymbol(NodeType op) => op switch
+    {
+        NodeType.ExprEquals => "=",
+        NodeType.ExprNotEquals => "<>",
+        NodeType.ExprLessThan => "<",
+        NodeType.ExprGreaterThan => ">",
+        NodeType.ExprLessEqualsThan => "<=",
+        NodeType.ExprGreaterEqualsThan => ">=",
+        NodeType.ExprBetween => "BETWEEN",
+        _ => op.ToString(),
+    };
 
     private static bool IsNumeric(ColumnType type) => MixedNumericComparison.IsNumeric(type);
 
@@ -717,7 +760,8 @@ internal abstract class SQLExecutorBaseCreator
             return ColumnValue.Null;
 
         return ColumnValue.FromBool(
-            CompareValues(subject, low) >= 0 && CompareValues(subject, high) <= 0);
+            CompareValues(subject, low, NodeType.ExprBetween) >= 0
+            && CompareValues(subject, high, NodeType.ExprBetween) <= 0);
     }
 
     private static ColumnValue EvalLogicalNode(
@@ -853,10 +897,12 @@ internal abstract class SQLExecutorBaseCreator
             {
                 ColumnValue value = EvalExpr(clause.leftAst!, row, parameters, rowNameResolver, queryRow);
 
-                // operand = value with normal equality; a NULL on either side is UNKNOWN → no match.
+                // operand = value with normal equality; a NULL on either side is UNKNOWN → no match,
+                // and so is a pair of types with no comparison rule, as for `=`.
                 matched = operand.Type != ColumnType.Null
                        && value.Type != ColumnType.Null
-                       && CompareValues(operand, value) == 0;
+                       && TryCompareValues(operand, value, out int cmp)
+                       && cmp == 0;
             }
 
             if (matched)
@@ -1084,6 +1130,17 @@ internal abstract class SQLExecutorBaseCreator
             // name so the insert path can call it per row. Only a bare zero-argument volatile call is
             // supported; any richer volatile expression is rejected rather than silently frozen to a
             // constant. Non-volatile defaults (literals, deterministic calls) stay pre-evaluated.
+            // DEFAULT nextval('s') names a sequence rather than a function to call per row: the
+            // value comes from a run the insert path reserves in bulk, so the column stores the
+            // sequence's immutable id and not a call. Matched before the generic volatile arm,
+            // which would otherwise reject it for taking an argument.
+            if (TryReadNextValDefault(defaultExpr, out string? defaultSequenceName))
+            {
+                constraintTypes.Add((ColumnConstraintType.DefaultSequence,
+                    new ColumnValue(ColumnType.String, defaultSequenceName!)));
+                return;
+            }
+
             if (ScalarFunctionEvaluator.ContainsVolatileFunction(defaultExpr))
             {
                 // A session function (current_user() and friends) is volatile too, but it reports the
@@ -1116,6 +1173,18 @@ internal abstract class SQLExecutorBaseCreator
                 constraintTypes.Add((ColumnConstraintType.Default,
                     EvalExpr(defaultExpr, new Dictionary<string, ColumnValue>(), null)));
             }
+            return;
+        }
+
+        if (constraintsList.nodeType == NodeType.ConstraintIdentityAlways)
+        {
+            constraintTypes.Add((ColumnConstraintType.Identity, new ColumnValue(ColumnType.String, "always")));
+            return;
+        }
+
+        if (constraintsList.nodeType == NodeType.ConstraintIdentityByDefault)
+        {
+            constraintTypes.Add((ColumnConstraintType.Identity, new ColumnValue(ColumnType.String, "bydefault")));
             return;
         }
 
@@ -1178,6 +1247,66 @@ internal abstract class SQLExecutorBaseCreator
         {
             if (type == ColumnConstraintType.DefaultFunction)
                 return value?.StrValue;
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// Recognises <c>DEFAULT nextval('&lt;name&gt;')</c> and reads the sequence's name out of it.
+    /// </summary>
+    /// <remarks>
+    /// The name must be a string literal. A computed name could name a different sequence on every
+    /// row, and the insert path has to know which sequence a statement draws from before the
+    /// statement runs — that is what lets it reserve the whole run in one call.
+    /// </remarks>
+    private static bool TryReadNextValDefault(NodeAst defaultExpr, out string? sequenceName)
+    {
+        sequenceName = null;
+
+        if (defaultExpr.nodeType != NodeType.ExprFuncCall
+            || defaultExpr.leftAst?.yytext is not { Length: > 0 } functionName
+            || !string.Equals(functionName, "nextval", StringComparison.OrdinalIgnoreCase))
+            return false;
+
+        NodeAst? argument = defaultExpr.rightAst;
+
+        if (argument is null || argument.nodeType == NodeType.ExprList || argument.nodeType != NodeType.String
+            || argument.yytext is not { Length: > 0 } literal)
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInput,
+                "DEFAULT nextval(...) takes exactly one argument: the sequence's name as a string literal");
+
+        sequenceName = SqlStringLiteral.Decode(literal);
+        return true;
+    }
+
+    /// <summary>
+    /// Returns the name of the sequence a <c>DEFAULT nextval('…')</c> column default draws from,
+    /// or null when the default is not a sequence.
+    /// </summary>
+    protected static string? GetDefaultSequenceNameFromConstraints(List<(ColumnConstraintType type, ColumnValue? value)> constraintTypes)
+    {
+        foreach ((ColumnConstraintType type, ColumnValue? value) in constraintTypes)
+        {
+            if (type == ColumnConstraintType.DefaultSequence)
+                return value?.StrValue;
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// Returns the identity kind declared on a column, or null when it is not an identity column.
+    /// </summary>
+    protected static ColumnIdentityKind? GetIdentityFromConstraints(List<(ColumnConstraintType type, ColumnValue? value)> constraintTypes)
+    {
+        foreach ((ColumnConstraintType type, ColumnValue? value) in constraintTypes)
+        {
+            if (type == ColumnConstraintType.Identity)
+                return string.Equals(value?.StrValue, "always", StringComparison.Ordinal)
+                    ? ColumnIdentityKind.Always
+                    : ColumnIdentityKind.ByDefault;
         }
 
         return null;

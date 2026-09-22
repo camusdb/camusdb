@@ -191,6 +191,8 @@ TViews          (V|v)(I|i)(E|e)(W|w)(S|s)
 TView           (V|v)(I|i)(E|e)(W|w)
 TMaterialized   (M|m)(A|a)(T|t)(E|e)(R|r)(I|i)(A|a)(L|l)(I|i)(Z|z)(E|e)(D|d)
 TRefresh        (R|r)(E|e)(F|f)(R|r)(E|e)(S|s)(H|h)
+TSequences      (S|s)(E|e)(Q|q)(U|u)(E|e)(N|n)(C|c)(E|e)(S|s)
+TSequence       (S|s)(E|e)(Q|q)(U|u)(E|e)(N|n)(C|c)(E|e)
 
 %{
 
@@ -500,6 +502,10 @@ TRefresh        (R|r)(E|e)(F|f)(R|r)(E|e)(S|s)(H|h)
 {TMaterialized} { return (int)Token.TMATERIALIZED; }
 
 {TRefresh} { return (int)Token.TREFRESH; }
+
+{TSequences} { return (int)Token.TSEQUENCES; }
+
+{TSequence} { return (int)Token.TSEQUENCE; }
 
 /* An unquoted name@name pair, matched as ONE token so the '@' never reaches the parser.
    Without this rule "users@users_pkey" lexes as TIDENTIFIER("users") followed by

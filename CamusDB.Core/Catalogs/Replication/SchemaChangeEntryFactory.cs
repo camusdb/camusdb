@@ -182,6 +182,8 @@ internal static class SchemaChangeEntryFactory
             NotNull = c.NotNull,
             DefaultValue = c.DefaultValue,
             DefaultFunction = c.DefaultFunction,
+            DefaultSequenceId = c.DefaultSequenceId,
+            IdentityAlways = c.IdentityAlways,
             State = c.State,
             MaxLength = c.MaxLength,
             ArrayElementType = c.ArrayElementType,
@@ -746,6 +748,84 @@ internal static class SchemaChangeEntryFactory
                 NewName = newName,
                 DependentViewDefinitions = dependentViews
             })
+        };
+    }
+
+    /// <summary>
+    /// Creates a user sequence. <paramref name="sequenceId"/> is allocated by the proposer and
+    /// carried verbatim so every node records the same id — which is also the name the Kahuna
+    /// counter will be created under.
+    /// </summary>
+    internal static SchemaChangeLogEntry CreateSequenceEntry(DatabaseDescriptor database, SequenceSchema sequence)
+    {
+        return new()
+        {
+            Database = database.Id,
+            FromVersion = database.Schema.SchemaVersion,
+            ToVersion = database.Schema.SchemaVersion + 1,
+            Op = SchemaOp.CreateSequence,
+            Payload = SchemaChangeLogEntryCodec.EncodePayload(new SchemaSequencePayload
+            {
+                SequenceId = sequence.Id,
+                SequenceName = sequence.Name ?? "",
+                StartValue = sequence.StartValue,
+                Increment = sequence.Increment,
+                MinValue = sequence.MinValue,
+                MaxValue = sequence.MaxValue,
+                CacheSize = sequence.CacheSize,
+                OwnedByTableId = sequence.OwnedByTableId,
+                Comment = sequence.Comment
+            })
+        };
+    }
+
+    internal static SchemaChangeLogEntry DropSequenceEntry(DatabaseDescriptor database, string sequenceName, string? sequenceId)
+    {
+        return new()
+        {
+            Database = database.Id,
+            FromVersion = database.Schema.SchemaVersion,
+            ToVersion = database.Schema.SchemaVersion + 1,
+            Op = SchemaOp.DropSequence,
+            Payload = SchemaChangeLogEntryCodec.EncodePayload(new SchemaDropSequencePayload
+            {
+                SequenceName = sequenceName,
+                SequenceId = sequenceId
+            })
+        };
+    }
+
+    internal static SchemaChangeLogEntry RenameSequenceEntry(DatabaseDescriptor database, string sequenceName, string newName)
+    {
+        return new()
+        {
+            Database = database.Id,
+            FromVersion = database.Schema.SchemaVersion,
+            ToVersion = database.Schema.SchemaVersion + 1,
+            Op = SchemaOp.RenameSequence,
+            Payload = SchemaChangeLogEntryCodec.EncodePayload(new SchemaRenamePayload
+            {
+                TableName = sequenceName,
+                Kind = SchemaRenameKind.Sequence,
+                NewName = newName
+            })
+        };
+    }
+
+    /// <summary>
+    /// Records a change to a sequence's parameters or ownership. The payload carries only the
+    /// fields the statement named, keyed by the sequence's immutable id so a concurrent rename
+    /// cannot send the change to a different sequence.
+    /// </summary>
+    internal static SchemaChangeLogEntry AlterSequenceEntry(DatabaseDescriptor database, SchemaAlterSequencePayload payload)
+    {
+        return new()
+        {
+            Database = database.Id,
+            FromVersion = database.Schema.SchemaVersion,
+            ToVersion = database.Schema.SchemaVersion + 1,
+            Op = SchemaOp.AlterSequence,
+            Payload = SchemaChangeLogEntryCodec.EncodePayload(payload)
         };
     }
 

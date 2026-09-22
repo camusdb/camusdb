@@ -26,6 +26,7 @@ namespace CamusDB.Core.CommandsExecutor.Controllers;
 internal sealed class BackupManager
 {
     private readonly EmbeddedKahuna node;
+    
     private readonly ILogger<ICamusDB> logger;
 
     public BackupManager(EmbeddedKahuna node, ILogger<ICamusDB> logger)
@@ -50,6 +51,7 @@ internal sealed class BackupManager
         {
             if (principal is null)
                 throw new CamusDBException(CamusDBErrorCodes.AuthenticationFailed, "Authentication required");
+            
             if (!principal.IsSuperuser)
                 throw new CamusDBException(CamusDBErrorCodes.InsufficientPrivilege, "Backup administration requires a superuser");
         }

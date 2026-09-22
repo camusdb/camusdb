@@ -120,10 +120,12 @@ public sealed class DatabaseRegistry : IAsyncDisposable
     // the lease in the background (below) for as long as it holds it, so an operation that legitimately
     // outlives one lease period (e.g. a large keyspace purge) never has the fence stolen mid-flight.
 
-    // The lease mechanism itself lives in KeyLeaseFence, shared with the row-level TTL span claims —
-    // acquire with SetIfNotExists + a native expiry, renew with a compare-and-set on this node's owner
-    // value. Two lease implementations with subtly different renewal semantics is how these diverge, so
-    // there is deliberately only one. Assigned in the constructor; see the note there on why not lazily.
+    // The lease mechanism itself lives in KeyLeaseFence: acquire with SetIfNotExists + a native expiry,
+    // renew with a compare-and-set on this acquisition's token. This fence is its only remaining user —
+    // row-level TTL span claims moved to Kahuna's distributed locks (TtlSpanLease), which enforce owner
+    // equality server-side and hand out a monotonic fencing token. Prefer those locks for anything new;
+    // what keeps this one here is that startup recovery enumerates fence markers by range scan, which
+    // the lock API cannot do. Assigned in the constructor; see the note there on why not lazily.
     private readonly KeyLeaseFence dropIntentFence;
 
     private KeyLeaseFence DropIntentFence => dropIntentFence;
@@ -286,26 +288,13 @@ public sealed class DatabaseRegistry : IAsyncDisposable
         ).ConfigureAwait(false);
     }
 
-    // Capped exponential back-off for the sequence retry loop: 25, 50, 100, 200, 400, 500, 500…
-    private const int SequenceRetryBaseDelayMs = 25;
-    private const int SequenceRetryMaxDelayMs = 500;
-
-    private static int SequenceRetryDelayMs(int attempt) =>
-        (int)Math.Min((long)SequenceRetryBaseDelayMs << Math.Min(attempt, 16), SequenceRetryMaxDelayMs);
-
     /// <summary>
     /// Runs a sequence call until it stops answering <see cref="SequenceResponseType.MustRetry"/>,
     /// bounded by the wall-clock <see cref="CamusDBOptions.SequenceRetryBudgetMs"/>.
     ///
-    /// <para><c>MustRetry</c> is the storage layer's "this sequence's partition has no confirmed leader
-    /// right now" answer — a node still joining, an election in flight, or leadership moving while the
-    /// request was forwarded. It carries no state change, so every sequence call must ride it out rather
-    /// than surface it: giving up would fail a user's CREATE TABLE over a routine leadership blip.</para>
-    ///
-    /// <para>The budget is time, not attempts, because what is being waited on is an election — which
-    /// takes seconds, and takes no fewer of them when a saturated node makes each attempt slower. The
-    /// loop stops before a sleep that would overshoot, so it never exceeds the budget by a whole back-off
-    /// interval and a non-positive budget yields exactly one attempt.</para>
+    /// <para>The loop itself lives in <see cref="SequenceRetryPolicy"/>, shared with the user-sequence
+    /// allocator. Both wait on the same thing — a partition election — so they must wait the same
+    /// way; two copies is how the two budgets drift apart unnoticed until a failover.</para>
     ///
     /// <para><paramref name="elapsed"/> is started by the caller and shared across the calls making up one
     /// allocation, so the budget bounds the operation the user is waiting on rather than each round trip.</para>
@@ -313,35 +302,17 @@ public sealed class DatabaseRegistry : IAsyncDisposable
     private Task<(SequenceResponseType, T)> RetryWhileMustRetryAsync<T>(
         Func<Task<(SequenceResponseType, T)>> sequenceCall,
         ValueStopwatch elapsed)
-        => RetryWhileAsync(sequenceCall, r => r.Item1 == SequenceResponseType.MustRetry, elapsed);
+        => SequenceRetryPolicy.RetryWhileMustRetryAsync(sequenceCall, elapsed, options.SequenceRetryBudgetMs);
 
     /// <summary>
-    /// The retry loop itself, over any call whose result can say "not right now". Shared by the
-    /// sequence-backed id counters and the generation stamp's write, which fail the same way — the
-    /// partition has no confirmed leader at that instant — and so must wait the same way.
+    /// The retry loop over any call whose result can say "not right now". Used by the generation
+    /// stamp's write, which fails the same way the sequence calls do.
     /// </summary>
-    private async Task<T> RetryWhileAsync<T>(
+    private Task<T> RetryWhileAsync<T>(
         Func<Task<T>> call,
         Func<T, bool> shouldRetry,
         ValueStopwatch elapsed)
-    {
-        int attempt = 0;
-
-        while (true)
-        {
-            T result = await call().ConfigureAwait(false);
-
-            if (!shouldRetry(result))
-                return result;
-
-            int delayMs = SequenceRetryDelayMs(attempt++);
-
-            if (elapsed.GetElapsedMilliseconds() + delayMs > options.SequenceRetryBudgetMs)
-                return result;
-
-            await Task.Delay(delayMs).ConfigureAwait(false);
-        }
-    }
+        => SequenceRetryPolicy.RetryWhileAsync(call, shouldRetry, elapsed, options.SequenceRetryBudgetMs);
 
     /// <summary>
     /// Builds the failure for a sequence call that never reached <see cref="SequenceResponseType.Success"/>.
@@ -1542,7 +1513,8 @@ public sealed class DatabaseRegistry : IAsyncDisposable
         // fence appends one per acquisition). Parse the first two fields positionally rather than
         // splitting on the LAST colon: with a token present, a last-colon split puts "{nodeId}:{epoch}"
         // in the node field, no marker ever matches this node, and startup recovery silently stops
-        // reclaiming its own crash remnants — leaving a database permanently undroppable.
+        // reclaiming its own crash remnants — so an interrupted drop's purge is never resumed and its
+        // row/index/meta keys leak with no other reclaim.
         string s = System.Text.Encoding.UTF8.GetString(value);
         string[] parts = s.Split(':');
         string nodePart = parts[0];
@@ -1871,8 +1843,12 @@ public sealed class DatabaseRegistry : IAsyncDisposable
     /// Scans the registry bucket for drop-intent keys owned by <em>this</em> node and deletes them.
     /// Called once at startup: a drop never spans a process restart, so any drop-intent stamped with
     /// this node's id that survived a restart is a crash remnant — left when a crash hit between
-    /// <see cref="AcquireDropIntentAsync"/> and the release, permanently blocking future drops of that
-    /// database id until cleared.
+    /// <see cref="AcquireDropIntentAsync"/> and the release.
+    ///
+    /// <para><b>This is the prompt path, not the only one.</b> A remnant blocks a later drop or relink
+    /// of that database id only until its lease (<c>CamusDBOptions.FenceLeaseMs</c>) lapses, because
+    /// the dead owner no longer renews it. Clearing it here frees the id immediately instead of making
+    /// the first drop after a restart fail for up to one lease.</para>
     ///
     /// <para><b>Owner-scoped on purpose.</b> In a cluster the drop-intent key is Raft-replicated and
     /// visible on every node. Deleting <em>all</em> drop-intents at startup would let a restarting

@@ -65,6 +65,26 @@ internal static class MetaKeys
     /// <summary>Holds one view definition, keyed by the immutable view id.</summary>
     internal static string ViewKey(string dbId, string viewId) => $"{ViewKeyPrefix(dbId)}{viewId}";
 
+    internal static string SequenceKeyPrefix(string dbId) => $"{dbId}/meta/sequence:";
+
+    /// <summary>
+    /// Holds one <c>SequenceSchema</c>, keyed by the immutable sequence id rather than the mutable
+    /// name, so a rename is a metadata-only change and a column default keeps resolving across it.
+    ///
+    /// <para>The counter itself is <b>not</b> here: it lives in Kahuna's reserved sequencer
+    /// namespace, which no prefix scan of this bucket can reach. Every sweep over
+    /// <c>{dbId}/meta</c> must therefore read this family to learn which counters the database owns
+    /// before it deletes the family.</para>
+    /// </summary>
+    internal static string SequenceKey(string dbId, string sequenceId) => $"{SequenceKeyPrefix(dbId)}{sequenceId}";
+
+    /// <summary>
+    /// The name Kahuna's sequencer knows a CamusDB sequence by. It embeds the database id and the
+    /// immutable sequence id and never the user's name, so a rename does not strand the counter and
+    /// a branch's counters cannot collide with its source's.
+    /// </summary>
+    internal static string KahunaSequenceName(string dbId, string sequenceId) => $"{dbId}/seq:{sequenceId}";
+
     internal static string CoordinatorKeyPrefix(string dbId) => $"{dbId}/meta/coordinator:";
 
     /// <summary>

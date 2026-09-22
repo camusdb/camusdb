@@ -101,6 +101,12 @@ internal sealed class SelectStatementExecutor
     internal readonly SlowQueryRecorder? slowQueries;
 
     /// <summary>
+    /// Reserves the sequence values a FROM-less SELECT will draw, and applies its <c>setval</c>
+    /// calls, before the projections are evaluated.
+    /// </summary>
+    internal readonly Functions.SequenceStatementBinder sequenceBinder;
+
+    /// <summary>
     /// How many times a statement re-attempts a table open that failed the schema catch-up fence.
     /// The fence fires before any write or schema pin, so the in-flight transaction is unmodified
     /// and safe to reuse on each attempt.
@@ -128,6 +134,7 @@ internal sealed class SelectStatementExecutor
         Maintenance.BackgroundSchedulerHost? backgroundSchedulers,
         ClusterSettingsService? clusterSettings,
         EngineMetricsCollector? engineMetrics,
+        Functions.SequenceStatementBinder sequenceBinder,
         SlowQueryRecorder? slowQueries = null
     )
     {
@@ -151,6 +158,7 @@ internal sealed class SelectStatementExecutor
         this.backgroundSchedulers = backgroundSchedulers;
         this.clusterSettings = clusterSettings;
         this.engineMetrics = engineMetrics;
+        this.sequenceBinder = sequenceBinder;
         this.slowQueries = slowQueries;
     }
 
@@ -479,6 +487,35 @@ internal sealed class SelectStatementExecutor
                         schemaOut.Schema = DerivedTableSchemaBuilder.ShowMaterializedViewsSchema;
                     return (database, schemaQuerier.ShowMaterializedViews(
                         database, UnquoteLikePattern(ast.leftAst?.yytext), statementAuthorizer.VisibilityPrincipal(ticket)));
+                }
+
+            case NodeType.ShowSequences:
+                {
+                    if (schemaOut is not null)
+                        schemaOut.Schema = DerivedTableSchemaBuilder.ShowSequencesSchema;
+
+                    return (database, schemaQuerier.ShowSequences(
+                        database, UnquoteLikePattern(ast.leftAst?.yytext)));
+                }
+
+            case NodeType.ShowCreateSequence:
+                {
+                    string shownSequenceName = ast.leftAst!.yytext!;
+
+                    if (!database.Schema.Sequences.TryGetValue(shownSequenceName, out SequenceSchema? shownSequence))
+                        throw new CamusDBException(
+                            CamusDBErrorCodes.SequenceDoesntExist, $"Sequence '{shownSequenceName}' does not exist");
+
+                    if (schemaOut is not null)
+                        schemaOut.Schema = DerivedTableSchemaBuilder.ShowCreateSequenceSchema;
+
+                    return (database, QueryResultStream.FromRow(new QueryResultRow(
+                        default,
+                        new Dictionary<string, ColumnValue>(StringComparer.OrdinalIgnoreCase)
+                        {
+                            { "sequence", new ColumnValue(ColumnType.String, shownSequenceName) },
+                            { "create sequence", new ColumnValue(ColumnType.String, SchemaQuerier.RenderCreateSequence(shownSequence)) },
+                        })));
                 }
 
             case NodeType.ShowCreateView:
@@ -1193,6 +1230,21 @@ internal sealed class SelectStatementExecutor
     internal async Task<IAsyncEnumerable<QueryResultRow>> ExecuteFromlessSelectAsync(
         DatabaseDescriptor database, NodeAst ast, ExecuteSQLTicket ticket, QuerySchemaHolder? schemaOut = null)
     {
+        // A FROM-less SELECT produces exactly one row, so each nextval call site draws exactly one
+        // value and the reservation is sized by counting the call sites. This is also where setval
+        // is applied: it moves a counter, which is an asynchronous call that takes about one block
+        // lease to answer and so cannot run from the synchronous evaluator below.
+        ticket = await sequenceBinder.BindAsync(
+            database,
+            ticket,
+            ast,
+            allowedRegion: ast.leftAst,
+            rowCount: 1,
+            defaultSequenceIds: null,
+            statementKind: "a FROM-less SELECT",
+            ticket.CancellationToken,
+            regionIsProjectionList: true).ConfigureAwait(false);
+
         List<NodeAst> projections = new();
         FlattenProjectionList(ast.leftAst!, projections);
 
@@ -1222,6 +1274,11 @@ internal sealed class SelectStatementExecutor
 
             projected[rowKeys[i]] = SQLExecutorBaseCreator.EvalExpr(resolved, emptyRow, ticket.Parameters);
         }
+
+        // The projections above are the whole statement's evaluation, so this is the point at
+        // which what was drawn is known. Recorded here rather than at reservation time: a value
+        // inside a branch the evaluator skipped was never issued, and currval must not report one.
+        Functions.SequenceStatementBinder.RecordDrawnValues(ticket.Parameters, ticket.TxnState);
 
         if (schemaOut is not null)
             schemaOut.Schema = DerivedTableSchemaBuilder.BuildFromless(projections, projected);

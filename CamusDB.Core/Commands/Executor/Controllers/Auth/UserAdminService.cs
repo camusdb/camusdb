@@ -159,7 +159,8 @@ internal sealed class UserAdminService
 
         bool created = await catalog.TryBootstrapSuperuserAsync(
             bootstrapUser,
-            PasswordHasher.Hash(bootstrapPassword, currentOptions.PasswordHashIterations)).ConfigureAwait(false);
+            PasswordHasher.Hash(bootstrapPassword, currentOptions.PasswordHashIterations)
+        ).ConfigureAwait(false);
 
         if (created && context.Logger.IsEnabled(LogLevel.Information))
             context.Logger.LogInformation("Bootstrap superuser '{User}' created", bootstrapUser);
@@ -178,9 +179,11 @@ internal sealed class UserAdminService
             return 0;
 
         AuthCatalog catalog = await GetAuthCatalogAsync().ConfigureAwait(false);
+        
         return await catalog.ReapExpiredSessionsAsync(
             DateTime.UtcNow,
-            TimeSpan.FromMilliseconds(Math.Max(0, currentOptions.ExpiredSessionRetentionMs))).ConfigureAwait(false);
+            TimeSpan.FromMilliseconds(Math.Max(0, currentOptions.ExpiredSessionRetentionMs))
+        ).ConfigureAwait(false);
     }
 
     /// <summary>

@@ -116,6 +116,95 @@ public sealed class SchemaSetViewDefinitionPayload
 }
 
 /// <summary>
+/// Payload for <see cref="SchemaOp.CreateSequence"/>: the whole catalog record, including the id
+/// the proposer allocated. The id travels in the payload rather than being minted during apply so
+/// every node records the same one — the same rule table and view ids follow, and here it also
+/// decides the name of the Kahuna counter.
+/// </summary>
+public sealed class SchemaSequencePayload
+{
+    public string? SequenceId { get; set; }
+
+    public string SequenceName { get; set; } = "";
+
+    public long StartValue { get; set; } = 1;
+
+    public long Increment { get; set; } = 1;
+
+    public long MinValue { get; set; } = 1;
+
+    public long? MaxValue { get; set; }
+
+    public int? CacheSize { get; set; }
+
+    /// <summary>The relation id that owns this sequence, or null for a free-standing sequence.</summary>
+    public string? OwnedByTableId { get; set; }
+
+    public string? Comment { get; set; }
+}
+
+/// <summary>
+/// Payload for <see cref="SchemaOp.DropSequence"/>. Carries the id as well as the name: apply
+/// removes the record by name, and the checkpoint still has to delete the meta key by id once it is
+/// gone from memory.
+/// </summary>
+public sealed class SchemaDropSequencePayload
+{
+    public string SequenceName { get; set; } = "";
+
+    public string? SequenceId { get; set; }
+}
+
+/// <summary>
+/// Payload for <see cref="SchemaOp.AlterSequence"/>: the fields the statement named, and nothing
+/// else. A null field is "leave this as the record has it", which is why every value is nullable
+/// even where the record's own field is not.
+/// </summary>
+/// <remarks>
+/// Keyed by <see cref="SequenceId"/> rather than by name so an alter cannot be sent to a different
+/// sequence by a rename that committed between the proposal and the apply.
+/// </remarks>
+public sealed class SchemaAlterSequencePayload
+{
+    public string SequenceId { get; set; } = "";
+
+    /// <summary>The recorded start value, moved by <c>ALTER SEQUENCE … START WITH</c>.</summary>
+    public long? StartValue { get; set; }
+
+    public long? Increment { get; set; }
+
+    public long? MinValue { get; set; }
+
+    public long? MaxValue { get; set; }
+
+    /// <summary>Removes the maximum. Distinguishes <c>NO MAXVALUE</c> from "not named".</summary>
+    public bool RemoveMaxValue { get; set; }
+
+    public int? CacheSize { get; set; }
+
+    /// <summary>Removes the per-sequence cache size, returning the sequence to the node-wide setting.</summary>
+    public bool RemoveCacheSize { get; set; }
+
+    /// <summary>Sets the owning relation. Ignored unless <see cref="SetOwner"/> is true.</summary>
+    public string? OwnedByTableId { get; set; }
+
+    /// <summary>
+    /// Whether the owner field is part of this change. Without it, clearing an owner and leaving it
+    /// alone would both be "a null".
+    /// </summary>
+    public bool SetOwner { get; set; }
+
+    /// <summary>The new comment. Ignored unless <see cref="SetComment"/> is true; null removes it.</summary>
+    public string? Comment { get; set; }
+
+    /// <summary>
+    /// Whether the comment is part of this change. A null comment removes one, so it cannot double
+    /// as "not mentioned".
+    /// </summary>
+    public bool SetComment { get; set; }
+}
+
+/// <summary>
 /// Payload for <see cref="SchemaOp.SetMaterializedViewState"/>.
 /// </summary>
 /// <remarks>
@@ -178,6 +267,16 @@ public sealed class SchemaColumnPayload
     /// </summary>
     public string? DefaultFunction { get; set; }
 
+    /// <summary>
+    /// The immutable id of the sequence this column's default draws from, or null. Absent in
+    /// entries written before this field existed, which decode to null — the correct answer for
+    /// every column that predates sequences.
+    /// </summary>
+    public string? DefaultSequenceId { get; set; }
+
+    /// <summary>True for a column declared <c>GENERATED ALWAYS AS IDENTITY</c>.</summary>
+    public bool IdentityAlways { get; set; }
+
     public SchemaElementState State { get; set; } = SchemaElementState.Public;
 
     /// <summary>
@@ -215,6 +314,8 @@ public sealed class SchemaColumnPayload
             NotNull = column.NotNull,
             DefaultValue = column.Default,
             DefaultFunction = column.DefaultFunction,
+            DefaultSequenceId = column.DefaultSequenceId,
+            IdentityAlways = column.IdentityAlways,
             MaxLength = column.MaxLength,
             ArrayElementType = column.ArrayElementType,
             NotNullConstraintName = column.NotNullConstraintName,
@@ -315,6 +416,9 @@ public enum SchemaRenameKind
     /// materialized-view rename is a <see cref="Table"/> rename, because a materialized view is a
     /// relation.</summary>
     View,
+
+    /// <summary>A user sequence. <c>TableName</c> carries the sequence's current name.</summary>
+    Sequence,
 }
 
 /// <summary>

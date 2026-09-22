@@ -53,6 +53,7 @@ internal sealed class ScalarFunctionRegistry
         NullScalarFunctions.Register(registry);
         RegexScalarFunctions.Register(registry);
         SessionScalarFunctions.Register(registry);
+        SequenceScalarFunctions.Register(registry);
         ArrayScalarFunctions.Register(registry);
         QuantifierScalarFunctions.Register(registry);
         return registry;

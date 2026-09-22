@@ -11,6 +11,7 @@ using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.Serializer;
 using CamusDB.Core.Transactions;
 using Kahuna;
+using CamusDB.Core.Storage.Kv;
 using Kahuna.Server.KeyValues;
 using Kahuna.Shared.KeyValue;
 using Kommander.Time;
@@ -75,6 +76,10 @@ internal static class BranchMetaCopier
     /// </summary>
     internal static async Task CopyMetaForBranchAsync(DatabaseDescriptor source, string branchDbId, HLCTimestamp forkT)
     {
+        // Read once, here, rather than per call: the fork is one logical operation and the budget
+        // bounds what the user waits for, not each round trip inside it.
+        int retryBudgetMs = source.Options.SequenceRetryBudgetMs;
+
         IKahuna kahuna = source.Kahuna.Kahuna;
         string sourceBucket = MetaKeys.MetaBucketPrefix(source.Id);
         string sourcePrefix = source.Id + "/meta/";
@@ -83,6 +88,12 @@ internal static class BranchMetaCopier
         string sourceKeyspacePrefix = MetaKeys.KeyspaceCatalogKeyPrefix(source.Id);
         string sourceRefreshJobPrefix = MetaKeys.RefreshJobKeyPrefix(source.Id);
         string sourceTablePrefix = MetaKeys.TableKeyPrefix(source.Id);
+        string sourceSequencePrefix = MetaKeys.SequenceKeyPrefix(source.Id);
+
+        // The sequence records the branch inherits, so their counters can be created afterwards.
+        // Collected here rather than re-scanned later because the copy already walks every key and
+        // the branch's own namespace is not readable until this transaction commits.
+        List<SequenceSchema> inheritedSequences = [];
 
         List<(string destKey, byte[] value)> toCopy = [];
 
@@ -118,6 +129,9 @@ internal static class BranchMetaCopier
             if (IsSourceWorkInProgress(key, entry.Value, sourceRefreshJobPrefix, sourceTablePrefix, ref stagingTableIds))
                 continue;
 
+            if (key.StartsWith(sourceSequencePrefix, StringComparison.Ordinal))
+                inheritedSequences.Add(MetaJsonSerializer.Deserialize(entry.Value, MetaJsonContext.Default.SequenceSchema));
+
             string destKey = branchPrefix + key[sourcePrefix.Length..];
             toCopy.Add((destKey, entry.Value));
         }
@@ -141,6 +155,48 @@ internal static class BranchMetaCopier
         finally
         {
             await source.Transactions.RollbackIfNotCompletedAsync(writeTx).ConfigureAwait(false);
+        }
+
+        await SeedBranchSequencesAsync(source, branchDbId, inheritedSequences, retryBudgetMs).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Creates the branch's own counter for every sequence record the copy inherited, seeded above
+    /// every value the source ever issued.
+    /// </summary>
+    /// <remarks>
+    /// <para><b>A copied catalog row is not a copied counter.</b> The record is a meta key and rides
+    /// the copy; the counter lives in Kahuna's reserved sequencer namespace, which the copy cannot
+    /// see. Left alone, the branch's first <c>nextval</c> would find nothing, create a counter at
+    /// the sequence's start value, and begin reissuing numbers the branch's <em>inherited rows
+    /// already hold</em> — a duplicate-key failure on any unique index, and silent duplicates
+    /// without one.</para>
+    ///
+    /// <para><b>The seed is the source's reserved ceiling, and that is correct precisely because it
+    /// is a ceiling.</b> It sits above every value the source ever issued, so the branch cannot
+    /// collide with what it inherited. The cost is a gap of up to one block, and a gap is
+    /// allowed.</para>
+    ///
+    /// <para>The counters are created <b>after</b> the metadata commit, inside the fork's existing
+    /// crash-recovery frame: the branch namespace is marked pending before the copy, so a fork that
+    /// dies here leaves a namespace the purge finds — and that purge reads the same sequence records
+    /// to delete these counters.</para>
+    /// </remarks>
+    private static async Task SeedBranchSequencesAsync(
+        DatabaseDescriptor source, string branchDbId, List<SequenceSchema> sequences, int retryBudgetMs)
+    {
+        if (sequences.Count == 0)
+            return;
+
+        IKahuna kahuna = source.Kahuna.Kahuna;
+
+        foreach (SequenceSchema sequence in sequences)
+        {
+            if (sequence.Id is not { Length: > 0 })
+                continue;
+
+            await SequenceAllocator.SeedBranchCounterAsync(
+                kahuna, source.Id, branchDbId, sequence, retryBudgetMs, CancellationToken.None).ConfigureAwait(false);
         }
     }
 

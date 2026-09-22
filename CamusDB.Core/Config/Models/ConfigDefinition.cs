@@ -75,6 +75,12 @@ public class ConfigDefinition
 
     public int RaftPort { get; set; } = 7070;
 
+    /// <summary>
+    /// Raft partition count. The initializer value is not the effective default:
+    /// <see cref="ConfigResolver.ApplyEffectiveDefaults"/> replaces an unset value with 1 in standalone
+    /// mode and 3 in cluster mode, because one partition keeps every standalone transaction on the
+    /// one-phase commit path. Must be &gt;= 1. Maps to <c>EmbeddedKahunaOptions.InitialPartitions</c>.
+    /// </summary>
     public int InitialPartitions { get; set; } = 3;
 
     public List<string> Peers { get; set; } = [];
@@ -396,8 +402,8 @@ public class ConfigDefinition
 
     /// <summary>
     /// Enables the query plan cache.
-    /// When <c>false</c> (default), the cache is built but never consulted —
-    /// consistent with the opt-in convention for all cost-based optimizer features.
+    /// When <c>false</c> (default), the cache is built but never consulted, unlike the two
+    /// cost-based planner switches, which default on.
     /// Maps to <c>CamusDBOptions.PlanCacheEnabled</c>.
     /// </summary>
     public bool PlanCacheEnabled { get; set; } = false;
@@ -737,8 +743,9 @@ public class ConfigDefinition
     /// Lease window, in milliseconds, for a branch's snapshot-floor hold on its parent's MVCC history;
     /// the leader-owned renewer must renew well inside it for as long as the branch exists. Must be
     /// &gt;= 5000: the renewer never ticks faster than once per second (renewing every lease/3), and a
-    /// lease at or below its tick would be guaranteed to lapse between sweeps — a lapsed hold is
-    /// permanent and fails the branch closed. Default 300 000 (5 min). Maps to
+    /// lease at or below its tick would be guaranteed to lapse between sweeps — and a lapse exposes
+    /// the hold to the reaper, whose purge is what fails the branch closed (a lapse the renewer
+    /// catches first is revived, not lost). Default 300 000 (5 min). Maps to
     /// <c>CamusDBOptions.BranchSnapshotHoldLeaseMs</c>.
     /// </summary>
     public int BranchSnapshotHoldLeaseMs { get; set; } = 300_000;
@@ -957,7 +964,7 @@ public class ConfigDefinition
     /// <summary>Allow-listed Kahuna engine tunables for cluster and standalone nodes.</summary>
     public KahunaOptionsConfig Kahuna { get; set; } = new();
 
-    /// <summary>Opt-in observability settings; effective only for a standalone node when enabled.</summary>
+    /// <summary>Opt-in observability settings; effective in both standalone and cluster mode when enabled.</summary>
     public DiagnosticsConfig Diagnostics { get; set; } = new();
 
     // ──────────────────────────────────────────────────────────────────────────

@@ -39,11 +39,28 @@ internal sealed class SchemaQuerier
     /// </summary>
     internal void ApplyOptions(CamusDBOptions next) => options = next;
 
-    public SchemaQuerier(CatalogsManager catalogsManager, Microsoft.Extensions.Logging.ILogger<ICamusDB> logger, CamusDBOptions options)
+    /// <param name="sequenceAllocator">
+    /// The one binding to Kahuna's sequencer, used by <see cref="ShowSequences"/> to read each
+    /// sequence's position. Held here rather than reached through the catalog because a sequence's
+    /// counter is not a key the catalog can read.
+    /// </param>
+    public SchemaQuerier(
+        CatalogsManager catalogsManager,
+        Microsoft.Extensions.Logging.ILogger<ICamusDB> logger,
+        CamusDBOptions options,
+        Storage.Kv.SequenceAllocator sequenceAllocator)
     {
+        ArgumentNullException.ThrowIfNull(sequenceAllocator);
+
         this.catalogs = catalogsManager;
         this.options = options;
+        this.logger = logger;
+        this.sequenceAllocator = sequenceAllocator;
     }
+
+    private readonly Microsoft.Extensions.Logging.ILogger<ICamusDB> logger;
+
+    private readonly Storage.Kv.SequenceAllocator sequenceAllocator;
 
     /// <summary>
     /// Lists the tables of <paramref name="database"/>, optionally narrowed by a LIKE
@@ -104,6 +121,201 @@ internal sealed class SchemaQuerier
                 { "views", new ColumnValue(ColumnType.String, view.Key) }
             });
         }
+    }
+
+    /// <summary>
+    /// Lists the database's sequences with their recorded parameters and, when one is owned, the
+    /// column that owns it.
+    /// </summary>
+    /// <remarks>
+    /// <para><b>No current value is reported.</b> The only number the sequencer can give is the
+    /// reserved ceiling, which is an upper bound on what was issued rather than a value anyone
+    /// received — after four draws on a fresh sequence it reads 1000. Reporting it as a listing
+    /// column would also make one statement cost one routed call per sequence. Use
+    /// <c>currval</c> for a value this transaction drew.</para>
+    ///
+    /// <para>The owning column is resolved by scanning the owner relation for the column whose
+    /// default draws from this sequence, because that link — and not a stored column id — is what
+    /// the schema records: a column id is minted while the <c>CREATE TABLE</c> delta applies, long
+    /// after the sequence was created.</para>
+    /// </remarks>
+    internal async IAsyncEnumerable<QueryResultRow> ShowSequences(
+        DatabaseDescriptor database, string? pattern = null,
+        [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken = default)
+    {
+        List<SequenceSchema> listed = [];
+
+        foreach (KeyValuePair<string, SequenceSchema> entry in database.Schema.Sequences)
+        {
+            if (pattern is null || LikeMatch(entry.Key, pattern))
+                listed.Add(entry.Value);
+        }
+
+        Dictionary<string, long?> positions =
+            await ReadSequencePositionsAsync(database, listed, cancellationToken).ConfigureAwait(false);
+
+        foreach (SequenceSchema sequence in listed)
+        {
+            positions.TryGetValue(sequence.Id!, out long? position);
+
+            yield return new QueryResultRow(default, new Dictionary<string, ColumnValue>(StringComparer.OrdinalIgnoreCase)
+            {
+                { "sequence", new ColumnValue(ColumnType.String, sequence.Name!) },
+                { "reserved_upto", position is { } upto ? new ColumnValue(ColumnType.Integer64, upto) : ColumnValue.Null },
+                { "start_value", new ColumnValue(ColumnType.Integer64, sequence.StartValue) },
+                { "increment", new ColumnValue(ColumnType.Integer64, sequence.Increment) },
+                { "min_value", new ColumnValue(ColumnType.Integer64, sequence.MinValue) },
+                { "max_value", sequence.MaxValue is { } max ? new ColumnValue(ColumnType.Integer64, max) : ColumnValue.Null },
+                { "cache", new ColumnValue(ColumnType.Integer64, EffectiveCacheSize(database, sequence)) },
+                { "owned_by", DescribeSequenceOwner(database, sequence) },
+                { "comment", sequence.Comment is null ? ColumnValue.Null : new ColumnValue(ColumnType.String, sequence.Comment) },
+            });
+        }
+    }
+
+    /// <summary>
+    /// The block size actually in force for a sequence: its own, or the node-wide setting it
+    /// follows when it has none of its own.
+    /// </summary>
+    /// <remarks>
+    /// Reported as the effective number rather than as the recorded one, because the recorded one
+    /// is null for most sequences and null tells an operator nothing about the behaviour they are
+    /// getting. This is the number that decides how many values a restart abandons, so seeing
+    /// "null" where the answer is "1000" hides the whole reason a sequence jumped.
+    ///
+    /// <para><c>SHOW CREATE SEQUENCE</c> still renders <c>CACHE</c> only when the sequence carries
+    /// its own, so the distinction between pinned and inherited is not lost — it is just not what
+    /// this column is for.</para>
+    /// </remarks>
+    private static long EffectiveCacheSize(DatabaseDescriptor database, SequenceSchema sequence)
+        => sequence.CacheSize ?? database.Kahuna.Options.SequencerBlockSize;
+
+    /// <summary>
+    /// How many counters <see cref="ShowSequences"/> reads at once.
+    /// </summary>
+    /// <remarks>
+    /// Each read is a routed call to the node that owns that sequence's partition, so a database
+    /// with many sequences would otherwise turn one statement into one round trip after another.
+    /// Bounded rather than unbounded because the listing must not become a burst of traffic
+    /// proportional to how many sequences happen to exist.
+    /// </remarks>
+    private const int SequencePositionReadConcurrency = 8;
+
+    /// <summary>
+    /// Reads each listed sequence's reserved position, in bounded parallel batches.
+    /// </summary>
+    /// <remarks>
+    /// <para>A sequence whose counter cannot be read is reported as NULL rather than failing the
+    /// listing. Two cases reach it and both are ordinary: a sequence nothing has ever drawn from
+    /// has no counter yet, and a partition between leaders answers nothing for the retry budget.
+    /// Refusing to list a database's sequences because one of them is momentarily unreachable
+    /// would be the wrong trade for an introspection statement.</para>
+    /// </remarks>
+    private async Task<Dictionary<string, long?>> ReadSequencePositionsAsync(
+        DatabaseDescriptor database, List<SequenceSchema> sequences, CancellationToken cancellationToken)
+    {
+        Dictionary<string, long?> positions = new(sequences.Count, StringComparer.Ordinal);
+
+        for (int offset = 0; offset < sequences.Count; offset += SequencePositionReadConcurrency)
+        {
+            int size = Math.Min(SequencePositionReadConcurrency, sequences.Count - offset);
+            Task<long?>[] reads = new Task<long?>[size];
+
+            for (int i = 0; i < size; i++)
+            {
+                string sequenceId = sequences[offset + i].Id!;
+                reads[i] = ReadOnePositionAsync(database, sequenceId, cancellationToken);
+            }
+
+            long?[] read = await Task.WhenAll(reads).ConfigureAwait(false);
+
+            for (int i = 0; i < size; i++)
+                positions[sequences[offset + i].Id!] = read[i];
+        }
+
+        return positions;
+    }
+
+    private async Task<long?> ReadOnePositionAsync(
+        DatabaseDescriptor database, string sequenceId, CancellationToken cancellationToken)
+    {
+        try
+        {
+            Storage.Kv.SequencePosition? position = await sequenceAllocator
+                .ReadPositionAsync(database.Kahuna.Kahuna, database.Id, sequenceId, cancellationToken)
+                .ConfigureAwait(false);
+
+            // Nothing drawn yet reports nothing, not the counter's seed: the seed sits one
+            // increment below the first value the sequence will issue, and showing it invites the
+            // reader to take it for a value that was handed out.
+            return position is { HasIssuedAValue: true } issued ? issued.ReservedCeiling : null;
+        }
+        catch (Exception ex)
+        {
+            Microsoft.Extensions.Logging.LoggerExtensions.LogWarning(
+                logger,
+                ex, "Could not read the position of sequence '{Sequence}' in database {Database} for SHOW SEQUENCES",
+                sequenceId, database.Name);
+
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Renders <c>SHOW CREATE SEQUENCE</c>: the statement that would recreate the sequence with the
+    /// parameters it currently records.
+    /// </summary>
+    /// <remarks>
+    /// The rendered statement carries <c>START WITH</c>, not the sequence's current position. A
+    /// sequence's position is not reproducible — the only reading available is a reserved ceiling
+    /// — and a rendered statement that claimed to restore it would be quietly wrong.
+    /// </remarks>
+    internal static string RenderCreateSequence(SequenceSchema sequence)
+    {
+        System.Text.StringBuilder builder = new();
+
+        builder.Append("CREATE SEQUENCE ").Append(sequence.Name);
+        builder.Append(" START WITH ").Append(sequence.StartValue);
+        builder.Append(" INCREMENT BY ").Append(sequence.Increment);
+        builder.Append(" MINVALUE ").Append(sequence.MinValue);
+
+        if (sequence.MaxValue is { } max)
+            builder.Append(" MAXVALUE ").Append(max);
+        else
+            builder.Append(" NO MAXVALUE");
+
+        if (sequence.CacheSize is { } cache)
+            builder.Append(" CACHE ").Append(cache);
+
+        return builder.ToString();
+    }
+
+    /// <summary>
+    /// The <c>table.column</c> an owned sequence belongs to, or NULL for a free-standing one.
+    /// </summary>
+    private static ColumnValue DescribeSequenceOwner(DatabaseDescriptor database, SequenceSchema sequence)
+    {
+        if (sequence.OwnedByTableId is not { Length: > 0 } ownerTableId)
+            return ColumnValue.Null;
+
+        foreach (TableSchema table in database.Schema.Tables.Values)
+        {
+            if (!string.Equals(table.Id, ownerTableId, StringComparison.Ordinal) || table.Columns is null)
+                continue;
+
+            foreach (TableColumnSchema column in table.Columns)
+            {
+                if (string.Equals(column.DefaultSequenceId, sequence.Id, StringComparison.Ordinal))
+                    return new ColumnValue(ColumnType.String, $"{table.Name}.{column.Name}");
+            }
+
+            // The relation is there but no column draws from the sequence any more — a dropped
+            // column, or a deferred-dropped relation that is out of the live schema. Naming the
+            // relation alone is still the honest answer.
+            return new ColumnValue(ColumnType.String, table.Name!);
+        }
+
+        return new ColumnValue(ColumnType.String, ownerTableId);
     }
 
     /// <summary>

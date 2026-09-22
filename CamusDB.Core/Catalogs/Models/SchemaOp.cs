@@ -174,5 +174,41 @@ public enum SchemaOp
     /// <c>TableSchema.Version</c> — a strategy decides only how future rows are written, and a reader
     /// follows the marks each stored cell carries — and it rewrites no stored row.</para>
     /// </summary>
-    SetColumnStorage = 23
+    SetColumnStorage = 23,
+
+    /// <summary>
+    /// Create a user sequence (payload: <c>SchemaSequencePayload</c>). The delta adds the catalog
+    /// record only; the proposer creates the Kahuna counter around the replication, because apply
+    /// runs inside the commit pipeline and must never do storage work.
+    ///
+    /// <para>Idempotent on apply: a re-delivered create whose payload carries the id already in the
+    /// schema is a no-op rather than a name conflict.</para>
+    /// </summary>
+    CreateSequence = 24,
+
+    /// <summary>
+    /// Remove a user sequence (payload: <c>SchemaDropSequencePayload</c>). Idempotent on apply — a
+    /// sequence that is already gone is a no-op, so a re-delivered entry cannot wedge the pipeline.
+    /// The counter is deleted by the proposer afterwards; a counter left behind by a crash is
+    /// unreachable rather than harmful, since nothing in the catalog names its id any more.
+    /// </summary>
+    DropSequence = 25,
+
+    /// <summary>
+    /// Rename a user sequence (payload: <c>SchemaRenamePayload</c> with
+    /// <c>Kind = SchemaRenameKind.Sequence</c>). Metadata-only: the counter is named after the
+    /// sequence's immutable id, so it does not move, and a column default bound to that id keeps
+    /// resolving.
+    /// </summary>
+    RenameSequence = 26,
+
+    /// <summary>
+    /// Change a sequence's parameters or ownership (payload: <c>SchemaAlterSequencePayload</c>).
+    /// Carries only the fields the statement named; every other field keeps its recorded value.
+    ///
+    /// <para>The counter itself is moved by the proposer through Kahuna's sequence update, which is
+    /// what makes <c>RESTART</c> and <c>setval</c> safe. This delta records the catalog side so
+    /// every node agrees on the parameters.</para>
+    /// </summary>
+    AlterSequence = 27
 }

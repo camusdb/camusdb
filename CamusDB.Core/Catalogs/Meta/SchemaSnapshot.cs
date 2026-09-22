@@ -35,6 +35,9 @@ internal sealed class SchemaSnapshot
     /// <summary>Views keyed by name, case-insensitive, matching <see cref="Schema.Views"/>.</summary>
     public Dictionary<string, ViewSchema> Views = new(StringComparer.OrdinalIgnoreCase);
 
+    /// <summary>Sequences keyed by name, case-insensitive, matching <see cref="Schema.Sequences"/>.</summary>
+    public Dictionary<string, SequenceSchema> Sequences = new(StringComparer.OrdinalIgnoreCase);
+
     /// <summary>The legacy system blob, or null when the key is absent.</summary>
     public SystemSchema? System;
 }

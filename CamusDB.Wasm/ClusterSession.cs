@@ -200,7 +200,7 @@ internal sealed class ClusterSession : IAsyncDisposable
         StatementRunner runner = MemberAt(nodeIndex).Runner;
 
         ArrayBufferWriter<byte> buffer = new();
-        using (Utf8JsonWriter writer = new(buffer))
+        await using (Utf8JsonWriter writer = new(buffer))
         {
             writer.WriteStartArray();
 
@@ -225,7 +225,7 @@ internal sealed class ClusterSession : IAsyncDisposable
     public async Task<string> StatusJsonAsync(CancellationToken cancellationToken = default)
     {
         ArrayBufferWriter<byte> buffer = new();
-        using (Utf8JsonWriter writer = new(buffer))
+        await using (Utf8JsonWriter writer = new(buffer))
         {
             writer.WriteStartObject();
             writer.WriteNumber("partitionCount", PartitionCount);

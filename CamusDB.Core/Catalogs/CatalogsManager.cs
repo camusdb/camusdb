@@ -78,6 +78,8 @@ public sealed class CatalogsManager
 
     private readonly ViewCatalog views;
 
+    private readonly SequenceCatalog sequences;
+
     /// <summary>
     /// Test hook, written through to <see cref="SchemaCheckpointWriter"/>: when non-null, every
     /// checkpoint persist throws it instead of writing, so a test can drive the exhausted-retry path
@@ -97,6 +99,7 @@ public sealed class CatalogsManager
         elements = new(publisher);
         relations = new(publisher);
         views = new(publisher);
+        sequences = new(publisher);
     }
 
     // -----------------------------------------------------------------------
@@ -113,6 +116,12 @@ public sealed class CatalogsManager
 
     public async Task PersistSystemMetaAsync(DatabaseDescriptor database, KvTransaction tx)
         => await SchemaMetaStore.PersistSystemMetaAsync(database, tx).ConfigureAwait(false);
+
+    public async Task PersistSchemaSequenceAsync(DatabaseDescriptor database, SequenceSchema sequenceSchema, KvTransaction tx)
+        => await SchemaMetaStore.PersistSchemaSequenceAsync(database, sequenceSchema, tx).ConfigureAwait(false);
+
+    public async Task DeleteSchemaSequenceAsync(DatabaseDescriptor database, string sequenceId, KvTransaction tx)
+        => await SchemaMetaStore.DeleteSchemaSequenceAsync(database, sequenceId, tx).ConfigureAwait(false);
 
     public async Task PersistSchemaViewAsync(DatabaseDescriptor database, ViewSchema viewSchema, KvTransaction tx)
         => await SchemaMetaStore.PersistSchemaViewAsync(database, viewSchema, tx).ConfigureAwait(false);
@@ -272,6 +281,28 @@ public sealed class CatalogsManager
         => await views.SetMaterializedViewStateAsync(
             database, tableId, isPopulated, refreshedAt, swapToTableId, publishHlc,
             expectedMetadataGeneration).ConfigureAwait(false);
+
+    // -----------------------------------------------------------------------
+    // Sequences
+    // -----------------------------------------------------------------------
+    //
+    // These move the replicated catalog record only. The Kahuna counter behind a sequence is not a
+    // KV key and is created, updated and deleted by SequenceDdlService around these calls.
+
+    public static bool SequenceExists(DatabaseDescriptor database, string sequenceName)
+        => SequenceCatalog.SequenceExists(database, sequenceName);
+
+    public async Task CreateSequenceAsync(DatabaseDescriptor database, SequenceSchema sequence)
+        => await sequences.CreateSequenceAsync(database, sequence).ConfigureAwait(false);
+
+    public async Task<string> DropSequenceAsync(DatabaseDescriptor database, string sequenceName)
+        => await sequences.DropSequenceAsync(database, sequenceName).ConfigureAwait(false);
+
+    public async Task RenameSequenceAsync(DatabaseDescriptor database, string sequenceName, string newName)
+        => await sequences.RenameSequenceAsync(database, sequenceName, newName).ConfigureAwait(false);
+
+    public async Task AlterSequenceAsync(DatabaseDescriptor database, SchemaAlterSequencePayload payload)
+        => await sequences.AlterSequenceAsync(database, payload).ConfigureAwait(false);
 
     /// <summary>
     /// Applies a COMMENT ON and persists it on the single-node path. See

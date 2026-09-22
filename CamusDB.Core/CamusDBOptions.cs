@@ -448,9 +448,13 @@ public sealed record CamusDBOptions
     /// acquires on its immediate parent at fork time. The hold pins the parent's MVCC history at
     /// <c>forkT</c> so branch as-of reads stay correct under aggressive revision retention. The
     /// hold must be renewed well inside this window for as long as the branch exists (see the
-    /// leader-owned renewer); if renewal stops, the hold lapses after one lease and the branch's
-    /// frozen view can be reclaimed — a permanent state the engine then fails closed on (see
-    /// <see cref="Storage.Kv.BranchSnapshotHoldGuard"/>). Configuration enforces a floor of 5000:
+    /// leader-owned renewer). A bare lapse is not the loss: a hold that is still registered keeps
+    /// constraining reclamation while its lease is expired, and the next renew revives it. Protection
+    /// ends only when the hold is removed from Kahuna's replicated registry — an explicit release, or
+    /// the reaper's purge of a lapsed hold — and that removal is permanent, so the engine fails the
+    /// branch's ancestor reads closed from then on (see
+    /// <see cref="Storage.Kv.BranchSnapshotHoldGuard"/>). A longer lease therefore widens the window
+    /// in which a stalled renewer can still revive the hold. Configuration enforces a floor of 5000:
     /// the renewer never ticks faster than once a second, so a smaller lease would lapse between
     /// sweeps by design. Chosen coarse so lease renewals are not a hot Raft path.
     /// </summary>

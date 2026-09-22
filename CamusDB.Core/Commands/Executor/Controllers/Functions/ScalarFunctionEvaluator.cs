@@ -49,6 +49,11 @@ internal static class ScalarFunctionEvaluator
         if (descriptor.SessionEvaluator is not null)
             return descriptor.SessionEvaluator(functionName, parameters);
 
+        // Checked after the session evaluator and before the plain one: a statement-scoped function
+        // needs both its arguments and a dictionary it may write, which neither of the others gives.
+        if (descriptor.StatementEvaluator is not null)
+            return descriptor.StatementEvaluator(functionName, arguments, parameters);
+
         return descriptor.Evaluator(functionName, arguments);
     }
 

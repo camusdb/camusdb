@@ -92,10 +92,12 @@ internal static class SchemaFreshnessReconciler
                 database.Schema.SchemaVersion = snapshot.SchemaVersion;
                 database.Schema.Tables = snapshot.Tables;
                 database.Schema.Views = snapshot.Views;
+                database.Schema.Sequences = snapshot.Sequences;
                 if (snapshot.System is not null)
                     database.SystemSchema = snapshot.System;
 
                 database.Schema.RebuildRelationNameIndex();
+                database.Schema.RebuildSequenceIdIndex();
                 SchemaLoader.MigrateIndexesFromSystemSchema(database);
 
                 // The swap replaced every TableSchema instance; any open descriptor captured the

@@ -11,9 +11,9 @@ namespace CamusDB.Core.Config.Models;
 /// <summary>
 /// Opt-in observability settings surfaced through the <c>diagnostics:</c> YAML section. Everything is
 /// off by default: with <see cref="Enabled"/> false the server registers no exporter, endpoint, or
-/// background collector and emits nothing, so an unconfigured node pays no diagnostics cost. Exporting
-/// is wired only for a standalone node (<c>!IsClusterMode</c>) with <see cref="Enabled"/> true — this
-/// phase deliberately leaves cluster behavior unchanged. The Prometheus scrape endpoint exposes
+/// background collector and emits nothing, so an unconfigured node pays no diagnostics cost. With
+/// <see cref="Enabled"/> true, exporting is wired in both standalone and cluster mode (a cluster node
+/// also exports the <c>kahuna.placement.*</c> counters). The Prometheus scrape endpoint exposes
 /// operational metadata and must be protected or bound to a trusted interface when enabled.
 /// </summary>
 public sealed class DiagnosticsConfig

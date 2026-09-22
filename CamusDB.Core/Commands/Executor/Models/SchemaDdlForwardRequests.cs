@@ -27,6 +27,21 @@ public sealed class ColumnInfoRequest
     /// <summary>Name of a nullary volatile function default (e.g. <c>gen_uuid_v7</c>); null when absent.</summary>
     public string? DefaultFunction { get; set; }
 
+    /// <summary>
+    /// Immutable id of the sequence this column's default draws from; null when absent. Without it
+    /// a forwarded CREATE TABLE would rebuild the column on the leader with no sequence default.
+    /// </summary>
+    public string? DefaultSequenceId { get; set; }
+
+    /// <summary>True for <c>GENERATED ALWAYS AS IDENTITY</c>: the leader must refuse a supplied value too.</summary>
+    public bool IdentityAlways { get; set; }
+
+    /// <summary>
+    /// The identity kind the parser saw, for a forwarded statement whose owned sequence the leader
+    /// has still to create. Null when the column is not an identity column.
+    /// </summary>
+    public ColumnIdentityKind? Identity { get; set; }
+
     /// <summary>Name of a <c>CONSTRAINT name NOT NULL</c> declared on the column; null for bare NOT NULL.</summary>
     public string? NotNullConstraintName { get; set; }
 
@@ -116,6 +131,13 @@ public sealed class ForwardTruncateTableRequest
     public string OperationId { get; set; } = "";
     public string DatabaseName { get; set; } = "";
     public string TableName { get; set; } = "";
+
+    /// <summary>
+    /// Whether <c>RESTART IDENTITY</c> was written. Carried because the leader is the node that
+    /// moves the counters; without it a forwarded truncate would empty the table and silently
+    /// leave every identity sequence climbing.
+    /// </summary>
+    public bool RestartIdentity { get; set; }
 }
 
 public sealed class ForwardRelinkTableRequest

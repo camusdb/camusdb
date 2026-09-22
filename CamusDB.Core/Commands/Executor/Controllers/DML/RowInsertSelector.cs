@@ -41,12 +41,24 @@ internal sealed class RowInsertSelector
     /// The unexecuted source row cursor. It is lazy, so nothing has been read yet and the arity
     /// check below still runs before the query does any work.
     /// </param>
+    /// <param name="sequenceBinder">
+    /// Reserves the values a sequence-backed column default will supply. The reservation is made
+    /// after the drain and before the first row is shaped, so its size is the exact source row
+    /// count rather than a guess — which is possible only because this path already reads every
+    /// source row before it writes any.
+    /// </param>
+    /// <param name="statementTicket">
+    /// The statement the insert came from, carrying the parameter dictionary the reservation is
+    /// installed in. Distinct from <paramref name="ticket"/>, which describes the insert itself.
+    /// </param>
     public async Task<int> InsertSelect(
         RowInserter rowInserter,
         StatisticsManager statisticsManager,
+        Functions.SequenceStatementBinder sequenceBinder,
         DatabaseDescriptor database,
         TableDescriptor table,
         InsertSelectTicket ticket,
+        ExecuteSQLTicket statementTicket,
         IReadOnlyList<DerivedColumnSchema> sourceColumns,
         IAsyncEnumerable<QueryResultRow> cursor)
     {
@@ -73,23 +85,31 @@ internal sealed class RowInsertSelector
                 $"Columns={targetColumns.Count} != Source={sourceColumns.Count}"
             );
 
+        // GENERATED ALWAYS means the column's values can only come from its sequence, so a
+        // statement that names it — including the implicit all-columns form — is refused.
+        Functions.SequenceDefaults.RequireNoValueForAlwaysIdentity(table.Schema, targetColumns);
+
         InsertRowShaper shaper = InsertRowShaper.Create(table.Schema, targetColumns);
 
         int mutationLimit = database.Options.MaxMutationsPerTransaction;
 
         // Read everything first (see the class summary), failing fast at the mutation ceiling.
-        List<Dictionary<string, ColumnValue>> rows = new();
-        ColumnValue?[] slots = new ColumnValue?[targetColumns.Count];
+        // The source values are buffered as raw slot arrays rather than shaped rows: shaping is
+        // what applies a sequence-backed default, and the run those defaults draw from can only be
+        // reserved once the row count is known — which is after this drain.
+        List<ColumnValue?[]> sourceRows = new();
 
         await foreach (QueryResultRow sourceRow in cursor.ConfigureAwait(false))
         {
-            if (rows.Count >= mutationLimit)
+            if (sourceRows.Count >= mutationLimit)
                 throw new CamusDBException(
                     CamusDBErrorCodes.TransactionMutationLimitExceeded,
                     $"INSERT ... SELECT would insert more than {mutationLimit} rows, which exceeds the " +
                     $"per-transaction mutation limit. Narrow the source query (for example with WHERE or " +
                     $"LIMIT) and run it in several transactions."
                 );
+
+            ColumnValue?[] slots = new ColumnValue?[targetColumns.Count];
 
             for (int i = 0; i < sourceColumns.Count; i++)
             {
@@ -102,11 +122,35 @@ internal sealed class RowInsertSelector
                     : null;
             }
 
-            rows.Add(shaper.ShapeRow(slots));
+            sourceRows.Add(slots);
         }
 
-        if (rows.Count == 0)
+        if (sourceRows.Count == 0)
             return 0;
+
+        // One reservation per sequence for the whole statement, sized to the exact row count, and
+        // made before the first row is shaped so a sequence failure cannot fail the transaction
+        // after rows have been written.
+        ExecuteSQLTicket bound = await sequenceBinder.BindAsync(
+            database,
+            statementTicket,
+            // Nothing of the source query is scanned here. It was bound and position-checked where
+            // it was executed — a projection over a relation refuses a sequence call there, and a
+            // FROM-less source is allowed one and has already drawn it. Re-scanning it from this
+            // side would refuse the legal form and reserve a second run for the illegal one.
+            statementAst: null,
+            allowedRegion: null,
+            rowCount: sourceRows.Count,
+            defaultSequenceIds: shaper.DefaultSequenceIds,
+            statementKind: "INSERT ... SELECT",
+            statementTicket.CancellationToken).ConfigureAwait(false);
+
+        List<Dictionary<string, ColumnValue>> rows = new(sourceRows.Count);
+
+        foreach (ColumnValue?[] slots in sourceRows)
+            rows.Add(shaper.ShapeRow(slots, bound.Parameters));
+
+        Functions.SequenceStatementBinder.RecordDrawnValues(bound.Parameters, statementTicket.TxnState);
 
         // Write in pages so a large copy does not hold every serialized row at once. All pages share
         // the caller's transaction, so a failure in a later page rolls back the earlier ones.

@@ -123,6 +123,42 @@ public sealed class TestSchemaChangeLogEntryCodec
             ExpectedStorageId = "A0",
             ExpectedContentsGeneration = 1
         });
+        yield return (SchemaOp.CreateSequence, new SchemaSequencePayload
+        {
+            SequenceId = "A2",
+            SequenceName = "order_no",
+            StartValue = 10,
+            Increment = 5,
+            MinValue = 10,
+            MaxValue = 1000,
+            CacheSize = 1,
+            OwnedByTableId = "A0",
+            Comment = "order numbers"
+        });
+        yield return (SchemaOp.DropSequence, new SchemaDropSequencePayload
+        {
+            SequenceName = "order_no",
+            SequenceId = "A2"
+        });
+        yield return (SchemaOp.RenameSequence, new SchemaRenamePayload
+        {
+            Kind = SchemaRenameKind.Sequence,
+            TableName = "order_no",
+            NewName = "order_number"
+        });
+        yield return (SchemaOp.AlterSequence, new SchemaAlterSequencePayload
+        {
+            SequenceId = "A2",
+            StartValue = 20,
+            Increment = 2,
+            MinValue = 20,
+            MaxValue = 2000,
+            CacheSize = 4,
+            SetOwner = true,
+            OwnedByTableId = "A0",
+            Comment = "retuned",
+            SetComment = true
+        });
     }
 
     [Test]

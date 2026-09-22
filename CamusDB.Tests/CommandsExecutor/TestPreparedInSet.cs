@@ -132,6 +132,99 @@ public class TestPreparedInSet : SharedNodeBaseTest
         Assert.AreEqual(AstTruth(Str("alpha"), values), Truth(set.Evaluate(Str("alpha"))));
     }
 
+    // ── String against Uuid / Id: the rule `=` uses ───────────────────────────
+    // A uuid column filtered by string parameters builds a set of strings and probes it with Uuid
+    // values. Both the linear and the hash path must parse the strings, or a table scan finds none
+    // of the rows that the index seek finds.
+
+    [TestCase(3)]
+    [TestCase(50)]
+    public void UuidProbe_StringItems_MatchesByParsedValue(int size)
+    {
+        Guid[] guids = Enumerable.Range(0, size).Select(_ => Guid.NewGuid()).ToArray();
+        ColumnValue[] values = guids.Select(g => Str(g.ToString())).ToArray();
+        PreparedInSet set = new(values);
+
+        foreach (ColumnValue probe in new[] { ColumnValue.FromUuid(guids[size - 1]), ColumnValue.FromUuid(Guid.NewGuid()) })
+        {
+            Assert.AreEqual(AstTruth(probe, values), Truth(set.Evaluate(probe)));
+        }
+
+        Assert.IsTrue(set.Contains(ColumnValue.FromUuid(guids[0])));
+        Assert.IsFalse(set.Contains(ColumnValue.FromUuid(Guid.NewGuid())));
+    }
+
+    [TestCase(3)]
+    [TestCase(50)]
+    public void UuidProbe_OtherSpellingsAndMalformedItems(int size)
+    {
+        Guid[] guids = Enumerable.Range(0, size).Select(_ => Guid.NewGuid()).ToArray();
+        ColumnValue[] values =
+        [
+            .. guids.Select((g, i) => Str(i % 2 == 0 ? g.ToString().ToUpperInvariant() : g.ToString("N"))),
+            Str("not-a-uuid"),
+        ];
+        PreparedInSet set = new(values);
+
+        foreach (Guid g in guids)
+            Assert.IsTrue(set.Contains(ColumnValue.FromUuid(g)));
+
+        ColumnValue absent = ColumnValue.FromUuid(Guid.NewGuid());
+        Assert.IsFalse(set.Contains(absent));
+        Assert.AreEqual(AstTruth(absent, values), Truth(set.Evaluate(absent)));
+    }
+
+    [TestCase(3)]
+    [TestCase(50)]
+    public void StringProbe_UuidItems_MatchesByParsedValue(int size)
+    {
+        Guid[] guids = Enumerable.Range(0, size).Select(_ => Guid.NewGuid()).ToArray();
+        ColumnValue[] values = guids.Select(ColumnValue.FromUuid).ToArray();
+        PreparedInSet set = new(values);
+
+        foreach (ColumnValue probe in new[] { Str(guids[1].ToString().ToUpperInvariant()), Str("not-a-uuid"), Str(Guid.NewGuid().ToString()) })
+        {
+            Assert.AreEqual(AstTruth(probe, values), Truth(set.Evaluate(probe)));
+        }
+
+        Assert.IsTrue(set.Contains(Str(guids[1].ToString())));
+        Assert.IsFalse(set.Contains(Str("not-a-uuid")));
+    }
+
+    [TestCase(3)]
+    [TestCase(50)]
+    public void IdProbe_StringItems_MatchesByParsedValue(int size)
+    {
+        string[] ids = Enumerable.Range(0, size).Select(i => (0x2000 + i).ToString("x24")).ToArray();
+        ColumnValue[] values = ids.Select(Str).ToArray();
+        PreparedInSet set = new(values);
+
+        ColumnValue present = new(ColumnType.Id, ids[size - 1]);
+        ColumnValue absent = new(ColumnType.Id, "ffffffffffffffffffffffff");
+
+        Assert.IsTrue(set.Contains(present));
+        Assert.IsFalse(set.Contains(absent));
+        Assert.AreEqual(AstTruth(present, values), Truth(set.Evaluate(present)));
+        Assert.AreEqual(AstTruth(absent, values), Truth(set.Evaluate(absent)));
+    }
+
+    [Test]
+    public void UuidProbe_StringItems_ConcurrentProbesAgree()
+    {
+        // A parallel scan shares one set across workers; the converted items are built on first use.
+        Guid[] guids = Enumerable.Range(0, 200).Select(_ => Guid.NewGuid()).ToArray();
+        PreparedInSet set = new(guids.Select(g => Str(g.ToString())).ToArray());
+
+        int matches = 0;
+        Parallel.For(0, 2_000, new ParallelOptions { MaxDegreeOfParallelism = 8 }, i =>
+        {
+            if (set.Contains(ColumnValue.FromUuid(guids[i % guids.Length])))
+                System.Threading.Interlocked.Increment(ref matches);
+        });
+
+        Assert.AreEqual(2_000, matches);
+    }
+
     // ── NULL semantics ────────────────────────────────────────────────────────
 
     [Test]

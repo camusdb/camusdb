@@ -54,6 +54,7 @@ internal static class StoredRowRewriter
         LargeValuePolicy policy = LargeValuePolicy.For(columns, database.Options);
 
         List<KvTableStore.RowUpdate> batch = new(rows.Count);
+        
         for (int i = 0; i < rows.Count; i++)
         {
             EncodedRow encoded = codec.EncodeStorageValue(RowSlotAdapter.FromRow(columns, rows[i].Values), policy);
@@ -81,9 +82,11 @@ internal static class StoredRowRewriter
             return null;
 
         List<int>? deletes = null;
+        
         foreach (int ordinal in oldOrdinals)
         {
             bool rewritten = false;
+            
             for (int w = 0; encoded.OutOfLine is { } writes && w < writes.Count; w++)
             {
                 if (writes[w].VariableOrdinal == ordinal)

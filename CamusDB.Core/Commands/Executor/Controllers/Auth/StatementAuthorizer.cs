@@ -79,6 +79,18 @@ internal sealed class StatementAuthorizer
         if (principal is null)
             throw new CamusDBException(CamusDBErrorCodes.AuthenticationFailed, "Authentication required");
 
+        // Drawing from a sequence changes it, and the change is not undone by a rollback. A
+        // statement that only reads what this transaction already drew needs no more than a read.
+        //
+        // **This runs before every other arm, including their early returns, and that placement is
+        // the check.** A sequence call can ride inside a statement whose own arm returns early —
+        // CREATE TABLE AS SELECT is the one that matters, because its source is bound and executed
+        // whatever the outer statement is authorized for, and a FROM-less source opens no table for
+        // the per-table chokepoint to see. Checking the statement's calls rather than its shape is
+        // what makes one gate cover every carrier.
+        if (SequenceCallPrivilege(ast) is { } callPrivilege)
+            await RequireDatabasePrivilegeAsync(ticket, principal, callPrivilege, "sequence").ConfigureAwait(false);
+
         // ALTER USER splits three ways. (Principal.UserName is normalized; normalize the AST target.)
         //
         //  - Changing your own password requires proving you know the current one, through the REPLACE
@@ -248,10 +260,83 @@ internal sealed class StatementAuthorizer
             return;
         }
 
+        // Sequence statements are enforced here, at database scope, and cannot be left to the
+        // per-table chokepoint: a sequence is not a relation anything opens, so TableOpener.Open
+        // never sees one and an unchecked statement would be an unchecked statement.
+        if (MapSequenceStatementPrivilege(ast.nodeType) is { } sequencePrivilege)
+        {
+            await RequireDatabasePrivilegeAsync(ticket, principal, sequencePrivilege, "sequence").ConfigureAwait(false);
+            return;
+        }
+
         // Every other in-database statement is enforced PER TABLE at the resolution chokepoint
         // (TableOpener.Open), which sees every referenced table — including join and subquery sources
         // that never reach this statement-level gate. The ambient AuthorizationContext set by the
         // entry point carries the principal and the statement's required privilege down to it.
+    }
+
+    /// <summary>
+    /// The privilege a sequence <b>statement</b> needs, at database scope, or null when the
+    /// statement is not one.
+    /// </summary>
+    /// <remarks>
+    /// Existing privilege bits are reused rather than a new <c>Privilege</c> member being added.
+    /// <c>Privilege.All</c> is frozen at compile time and expanded to a stored mask at grant time,
+    /// so a new bit would not be picked up by any existing <c>ALL PRIVILEGES</c> grant — every
+    /// account an operator believes has everything would be quietly denied until every grant was
+    /// re-issued. Creating a sequence creates a relation, so it takes the same bit creating a table
+    /// does.
+    /// </remarks>
+    private static Privilege? MapSequenceStatementPrivilege(NodeType nodeType) => nodeType switch
+    {
+        NodeType.CreateSequence or NodeType.CreateSequenceIfNotExists => Privilege.CreateTable,
+        NodeType.DropSequence or NodeType.DropSequenceIfExists => Privilege.Drop,
+        NodeType.AlterSequence or NodeType.AlterSequenceRenameTo or NodeType.CommentOnSequence => Privilege.Alter,
+        NodeType.ShowSequences or NodeType.ShowCreateSequence => Privilege.Select,
+        _ => null,
+    };
+
+    /// <summary>
+    /// The privilege the sequence functions a statement calls need, or null when it calls none.
+    /// <c>nextval</c> and <c>setval</c> move a counter, so they are writes; <c>currval</c> and
+    /// <c>lastval</c> report what this transaction already drew, so they are reads.
+    /// </summary>
+    private static Privilege? SequenceCallPrivilege(NodeAst ast)
+    {
+        bool writes = NodeAstWalk.Any(ast, static node =>
+            node.nodeType == NodeType.ExprFuncCall
+            && node.leftAst?.yytext is { Length: > 0 } writeName
+            && (string.Equals(writeName, "nextval", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(writeName, "setval", StringComparison.OrdinalIgnoreCase)));
+
+        if (writes)
+            return Privilege.Update;
+
+        bool reads = NodeAstWalk.Any(ast, static node =>
+            node.nodeType == NodeType.ExprFuncCall
+            && node.leftAst?.yytext is { Length: > 0 } readName
+            && (string.Equals(readName, "currval", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(readName, "lastval", StringComparison.OrdinalIgnoreCase)));
+
+        return reads ? Privilege.Select : null;
+    }
+
+    /// <summary>
+    /// Requires <paramref name="privilege"/> on the statement's database, for an object that is not
+    /// a table and so can never be a per-table grant target.
+    /// </summary>
+    private async Task RequireDatabasePrivilegeAsync(
+        ExecuteSQLTicket ticket, Principal principal, Privilege privilege, string objectKind)
+    {
+        DatabaseRegistry registry = await context.Registry.ConfigureAwait(false);
+
+        if (registry.TryResolveId(ticket.DatabaseName, out string databaseId)
+            && !principal.HasPrivilege(privilege, databaseId, tableId: null))
+        {
+            throw new CamusDBException(
+                CamusDBErrorCodes.InsufficientPrivilege,
+                $"Missing {privilege} privilege on database '{ticket.DatabaseName}' for a {objectKind} statement");
+        }
     }
 
     /// <summary>

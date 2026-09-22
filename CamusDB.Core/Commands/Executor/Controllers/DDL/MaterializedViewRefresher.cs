@@ -724,7 +724,9 @@ internal sealed class MaterializedViewRefresher
             defaultFunction: column.DefaultFunction,
             notNullConstraintName: column.NotNullConstraintName,
             comment: column.Comment,
-            storage: column.Storage))];
+            storage: column.Storage,
+            defaultSequenceId: column.DefaultSequenceId,
+            identityAlways: column.IdentityAlways))];
 
         Dictionary<string, string> nameByColumnId = new(StringComparer.Ordinal);
         foreach (TableColumnSchema column in view.Columns ?? [])

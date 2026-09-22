@@ -18,10 +18,12 @@ namespace CamusDB.Core.CommandsExecutor.Controllers;
 /// <summary>
 /// Owns a single Kahuna snapshot-floor hold for the lifetime of one long read, and keeps it alive.
 ///
-/// <para>A hold is <b>leased</b>, not permanent: Kahuna stops honoring it once the lease lapses, and
-/// revision GC is then free to reclaim past the held timestamp. Acquiring one and never renewing it
-/// therefore protects a read only for as long as the lease — after that the pin is gone while the
-/// reader carries on believing it is reading a fixed snapshot. That failure is silent and produces a
+/// <para>A hold is <b>leased</b>, not permanent. A lapsed lease does not by itself end the pin: a
+/// hold that is still registered keeps constraining reclamation, and a renew revives it. What the
+/// lapse does is expose the hold to Kahuna's reaper, whose purge removes it and frees revision GC to
+/// reclaim past the held timestamp. Acquiring one and never renewing it therefore protects a read
+/// only until that purge — after it the pin is gone while the reader carries on believing it is
+/// reading a fixed snapshot. That failure is silent and produces a
 /// <em>partial</em> result rather than an error, which is the worst shape a bug can take here: a
 /// materialized view that quietly holds some of the rows it should.</para>
 ///

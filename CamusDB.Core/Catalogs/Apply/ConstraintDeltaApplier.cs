@@ -117,7 +117,9 @@ internal static class ConstraintDeltaApplier
             defaultFunction: column.DefaultFunction,
             notNullConstraintName: column.NotNullConstraintName,
             comment: column.Comment,
-            storage: storage);
+            storage: storage,
+            defaultSequenceId: column.DefaultSequenceId,
+            identityAlways: column.IdentityAlways);
     }
 
     /// <summary>
@@ -151,7 +153,9 @@ internal static class ConstraintDeltaApplier
             defaultFunction: old.DefaultFunction,
             notNullConstraintName: payload.ConstraintName,
             comment: old.Comment,
-            storage: old.Storage
+            storage: old.Storage,
+            defaultSequenceId: old.DefaultSequenceId,
+            identityAlways: old.IdentityAlways
         );
         return tableSchema;
     }

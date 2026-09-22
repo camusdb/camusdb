@@ -30,12 +30,25 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 ///
 /// Cross-type semantics: <c>x IN (a, b, c)</c> is defined as <c>x = a OR x = b OR x = c</c>, so each
 /// element uses the equality <c>=</c> uses (<see cref="MixedNumericComparison.EqualsForMembership"/>):
-/// a mixed numeric pair widens to double, so <c>1 IN (1.0)</c> is true, and any other cross-type
-/// element (e.g. <c>5 IN (1, 'foo')</c>) is a non-match rather than a hard error. This matches the
-/// AST reference path (<see cref="SubqueryValueListAst.EvaluateMembership"/>), so prepared and reference
-/// paths stay identical — and it matches the index IN-list seek, which rewrites list items into the
-/// column's type. IN lists are not type-checked at bind time, so mixed-type lists are reachable and
-/// must not throw.
+/// a mixed numeric pair widens to double, so <c>1 IN (1.0)</c> is true; a String and a Uuid or Id
+/// are equal when the string parses to that value (<see cref="StringOperandCoercion"/>); and any
+/// other cross-type element (e.g. <c>5 IN (1, 'foo')</c>) is a non-match rather than a hard error.
+/// This matches the AST reference path (<see cref="SubqueryValueListAst.EvaluateMembership"/>), so
+/// prepared and reference paths stay identical — and it matches the index IN-list seek, which
+/// rewrites list items into the column's type. IN lists are not type-checked at bind time, so
+/// mixed-type lists are reachable and must not throw.
+///
+/// <para>The String-to-Uuid/Id rule is the trap. The set is built before the planner knows the
+/// column's type, so a uuid column filtered by string parameters gives a set of strings and a probe
+/// of Uuid values. The index seek converts its items and finds the rows; a table scan that compared
+/// the probe with the raw strings would find none. The planner prefers the table scan once the list
+/// names about half the table, so the query would silently return no rows past that point. The hash
+/// set therefore uses an equality that never crosses String and Uuid/Id (the two hash differently),
+/// and <see cref="Contains"/> converts before it looks up: the string items into the probe's type
+/// for a Uuid/Id probe, or a String probe into the type of any Uuid/Id items.</para>
+///
+/// <para>Thread safety: a set is shared by every worker of a parallel scan. The converted item sets
+/// are built on first use and published once; a race builds the same set twice and keeps one.</para>
 /// </summary>
 public sealed class PreparedInSet
 {
@@ -44,6 +57,15 @@ public sealed class PreparedInSet
     private readonly ColumnValue[] _values;
     private readonly HashSet<ColumnValue>? _set;
     private readonly bool _containsNull;
+
+    // Item types that take part in the String-to-Uuid/Id rule; see the class summary.
+    private readonly bool _hasStringItems;
+    private readonly bool _hasUuidItems;
+    private readonly bool _hasIdItems;
+
+    // The string items converted into Uuid or Id, built on the first probe of that type.
+    private HashSet<ColumnValue>? _stringItemsAsUuid;
+    private HashSet<ColumnValue>? _stringItemsAsId;
 
     /// <param name="values">The list items. NULL items are allowed and are dropped.</param>
     /// <param name="containsNull">True when the caller already dropped a NULL item from
@@ -66,14 +88,26 @@ public sealed class PreparedInSet
                 _values[idx++] = values[i];
         }
 
+        foreach (ColumnValue value in _values)
+        {
+            switch (value.Type)
+            {
+                case ColumnType.String: _hasStringItems = true; break;
+                case ColumnType.Uuid: _hasUuidItems = true; break;
+                case ColumnType.Id: _hasIdItems = true; break;
+            }
+        }
+
         if (_values.Length > HashThreshold)
             _set = new HashSet<ColumnValue>(_values, MembershipComparer.Instance);
     }
 
     /// <summary>
-    /// Hash comparer with the membership equality above. Numeric values hash by their widened
-    /// double regardless of type, so an Integer64 probe lands in the bucket of an equal Float64
-    /// member; every other type hashes as <see cref="SqlColumnValueComparer"/> does.
+    /// Hash comparer with the membership equality above, minus the String-to-Uuid/Id step (see
+    /// <see cref="MixedNumericComparison.EqualsWithoutStringCoercion"/>), so that equal values always
+    /// hash alike. Numeric values hash by their widened double regardless of type, so an Integer64
+    /// probe lands in the bucket of an equal Float64 member; every other type hashes as
+    /// <see cref="SqlColumnValueComparer"/> does.
     /// </summary>
     private sealed class MembershipComparer : IEqualityComparer<ColumnValue>
     {
@@ -84,7 +118,7 @@ public sealed class PreparedInSet
             if (x is null || y is null)
                 return x is null && y is null;
 
-            return MixedNumericComparison.EqualsForMembership(x, y);
+            return MixedNumericComparison.EqualsWithoutStringCoercion(x, y);
         }
 
         public int GetHashCode(ColumnValue obj) =>
@@ -125,14 +159,54 @@ public sealed class PreparedInSet
         if (lhs.Type == ColumnType.Null)
             return false;
 
-        if (_set is not null)
-            return _set.Contains(lhs);
-
-        foreach (ColumnValue v in _values)
+        if (_set is null)
         {
-            if (MixedNumericComparison.EqualsForMembership(lhs, v))
-                return true;
+            foreach (ColumnValue v in _values)
+            {
+                if (MixedNumericComparison.EqualsForMembership(lhs, v))
+                    return true;
+            }
+            return false;
         }
-        return false;
+
+        if (_set.Contains(lhs))
+            return true;
+
+        switch (lhs.Type)
+        {
+            case ColumnType.Uuid when _hasStringItems:
+                return (_stringItemsAsUuid ?? BuildStringItemsAs(ColumnType.Uuid, ref _stringItemsAsUuid)).Contains(lhs);
+
+            case ColumnType.Id when _hasStringItems:
+                return (_stringItemsAsId ?? BuildStringItemsAs(ColumnType.Id, ref _stringItemsAsId)).Contains(lhs);
+
+            case ColumnType.String:
+                return (_hasUuidItems && ContainsCoerced(lhs, ColumnType.Uuid))
+                    || (_hasIdItems && ContainsCoerced(lhs, ColumnType.Id));
+
+            default:
+                return false;
+        }
+    }
+
+    private bool ContainsCoerced(ColumnValue lhs, ColumnType target) =>
+        StringOperandCoercion.TryCoerce(lhs, target, out ColumnValue coerced) && _set!.Contains(coerced);
+
+    /// <summary>
+    /// Builds the set of string items that parse as <paramref name="target"/>, converted into it, and
+    /// publishes it in <paramref name="field"/>. A string that does not parse can equal no value of
+    /// that type and is left out.
+    /// </summary>
+    private HashSet<ColumnValue> BuildStringItemsAs(ColumnType target, ref HashSet<ColumnValue>? field)
+    {
+        HashSet<ColumnValue> converted = new(MembershipComparer.Instance);
+
+        foreach (ColumnValue value in _values)
+        {
+            if (StringOperandCoercion.TryCoerce(value, target, out ColumnValue coerced))
+                converted.Add(coerced);
+        }
+
+        return Interlocked.CompareExchange(ref field, converted, null) ?? converted;
     }
 }

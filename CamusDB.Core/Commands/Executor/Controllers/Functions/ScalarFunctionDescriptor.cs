@@ -22,6 +22,19 @@ internal delegate ColumnType ScalarReturnTypeInferenceDelegate(IReadOnlyList<Col
 /// </summary>
 internal delegate ColumnValue ScalarSessionEvaluatorDelegate(string calledName, IReadOnlyDictionary<string, ColumnValue>? parameters);
 
+/// <summary>
+/// Evaluator for a function whose result depends on state the <b>statement</b> carries, and that
+/// may change that state as it answers. It receives the arguments and the statement's parameter
+/// dictionary, mutable, so a function that hands out one value of a reserved run can advance the
+/// cursor in the same call.
+///
+/// <para>Distinct from <see cref="ScalarSessionEvaluatorDelegate"/>, which gets the parameters
+/// read-only and no arguments. Splitting them keeps a session function unable to write the
+/// dictionary by accident.</para>
+/// </summary>
+internal delegate ColumnValue ScalarStatementEvaluatorDelegate(
+    string calledName, IReadOnlyList<ColumnValue> arguments, Dictionary<string, ColumnValue>? parameters);
+
 internal sealed class ScalarFunctionDescriptor
 {
     public required string Name { get; init; }
@@ -44,6 +57,14 @@ internal sealed class ScalarFunctionDescriptor
     /// no session and exists to raise a clear error there.
     /// </summary>
     public ScalarSessionEvaluatorDelegate? SessionEvaluator { get; init; }
+
+    /// <summary>
+    /// Set instead of using <see cref="Evaluator"/> alone when the result comes from per-statement
+    /// state the parameters carry — today the sequence functions and their reserved runs. When
+    /// present the evaluator dispatches here; <see cref="Evaluator"/> is then only reached from
+    /// paths that carry no statement and exists to raise a clear error there.
+    /// </summary>
+    public ScalarStatementEvaluatorDelegate? StatementEvaluator { get; init; }
 
     public required ScalarReturnTypeInferenceDelegate InferReturnType { get; init; }
 

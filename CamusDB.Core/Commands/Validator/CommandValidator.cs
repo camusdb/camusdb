@@ -50,6 +50,8 @@ public sealed class CommandValidator
 
     private readonly RestoreBackupValidator restoreBackupValidator;
 
+    private readonly SequenceValidator sequenceValidator;
+
     /// <summary>
     /// Builds the validator set for one engine. Limits such as identifier length and the per-table
     /// column ceiling are operator-settable, so each validator is given this engine's configuration
@@ -88,6 +90,7 @@ public sealed class CommandValidator
         relinkTableValidator = new(options);
         takeBackupValidator = new(options);
         restoreBackupValidator = new(options);
+        sequenceValidator = new(options);
     }
 
     public void Validate(TakeBackupTicket ticket)
@@ -192,6 +195,26 @@ public sealed class CommandValidator
     {
         DropTableValidator validator = new(options);
         validator.Validate(ticket);
+    }
+
+    public void Validate(CreateSequenceTicket ticket)
+    {
+        sequenceValidator.Validate(ticket);
+    }
+
+    public void Validate(DropSequenceTicket ticket)
+    {
+        sequenceValidator.Validate(ticket);
+    }
+
+    public void Validate(RenameSequenceTicket ticket)
+    {
+        sequenceValidator.Validate(ticket);
+    }
+
+    public void Validate(AlterSequenceTicket ticket)
+    {
+        sequenceValidator.Validate(ticket);
     }
 
     public void Validate(TruncateTableTicket ticket)

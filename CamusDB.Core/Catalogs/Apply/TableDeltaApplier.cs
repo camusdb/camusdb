@@ -37,6 +37,14 @@ internal static class TableDeltaApplier
         if (schema.Tables.ContainsKey(payload.TableName))
             throw new CamusDBException(CamusDBErrorCodes.TableAlreadyExists, $"Table '{payload.TableName}' already exists");
 
+        // Sequences share one namespace with relations, as they do in PostgreSQL, so a name a
+        // sequence holds is not this table's to take. Checked in apply rather than only at the
+        // proposer because apply is the one place every node runs — a check the proposer made
+        // alone would let a follower build a schema where one word names two objects.
+        if (schema.Sequences.ContainsKey(payload.TableName))
+            throw new CamusDBException(
+                CamusDBErrorCodes.SequenceAlreadyExists, $"Relation '{payload.TableName}' already exists");
+
         // One table id maps to at most one live name. A relink reuses the orphan's id; reject if that id
         // is already live under another name so a stale-orphan relink cannot mint a second alias for one
         // physical keyspace. (A fresh CREATE always allocates an unregistered id, so this never fires.)
@@ -83,7 +91,9 @@ internal static class TableDeltaApplier
                     defaultFunction: column.DefaultFunction,
                     notNullConstraintName: column.NotNullConstraintName,
                     comment: column.Comment,
-                    storage: column.Storage
+                    storage: column.Storage,
+                    defaultSequenceId: column.DefaultSequenceId,
+                    identityAlways: column.IdentityAlways
                 )
             );
         }
@@ -332,7 +342,9 @@ internal static class TableDeltaApplier
                         defaultFunction: old.DefaultFunction,
                         notNullConstraintName: old.NotNullConstraintName,
                         comment: payload.Comment,
-                        storage: old.Storage
+                        storage: old.Storage,
+                        defaultSequenceId: old.DefaultSequenceId,
+                        identityAlways: old.IdentityAlways
                     );
                     break;
                 }

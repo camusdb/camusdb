@@ -65,6 +65,8 @@ public static class PreparedStatementBinder
         NodeType.ShowMaterializedViews or
         NodeType.ShowCreateView or
         NodeType.ShowCreateMaterializedView or
+        NodeType.ShowSequences or
+        NodeType.ShowCreateSequence or
         NodeType.ShowEngineStats or
         NodeType.ShowSlowQueries or
         NodeType.ShowVariables or

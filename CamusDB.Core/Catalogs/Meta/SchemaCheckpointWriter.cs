@@ -65,7 +65,8 @@ internal sealed class SchemaCheckpointWriter
         DatabaseDescriptor database,
         SchemaChangeLogEntry entry,
         string? droppedTableId,
-        string? droppedViewId
+        string? droppedViewId,
+        string? droppedSequenceId
     )
     {
         const int maxAttempts = 3;
@@ -74,7 +75,7 @@ internal sealed class SchemaCheckpointWriter
         {
             try
             {
-                await PersistSchemaCheckpointAsync(database, entry, droppedTableId, droppedViewId).ConfigureAwait(false);
+                await PersistSchemaCheckpointAsync(database, entry, droppedTableId, droppedViewId, droppedSequenceId).ConfigureAwait(false);
                 return;
             }
             catch (Exception ex) when (attempt < maxAttempts)
@@ -112,7 +113,8 @@ internal sealed class SchemaCheckpointWriter
         DatabaseDescriptor database,
         SchemaChangeLogEntry entry,
         string? droppedTableId,
-        string? droppedViewId
+        string? droppedViewId,
+        string? droppedSequenceId
     )
     {
         if (TestPersistCheckpointException is { } fault)
@@ -135,7 +137,25 @@ internal sealed class SchemaCheckpointWriter
             // View ops write the view meta key family, not a table blob. They are checked first
             // because GetEntryTableName below has no answer for them — a view is not a table, and
             // asking it for one would throw on every view DDL.
-            if (entry.Op is SchemaOp.CreateView or SchemaOp.ReplaceView or SchemaOp.RenameView or SchemaOp.SetViewDefinition)
+            // Sequence ops write the sequence meta key family, not a table blob, and are checked
+            // first for the same reason the view arm is: GetEntryTableName has no answer for them.
+            if (entry.Op is SchemaOp.CreateSequence or SchemaOp.RenameSequence or SchemaOp.AlterSequence)
+            {
+                SequenceSchema? sequenceSchema = ResolveEntrySequence(database, entry);
+
+                // Null means the sequence was already gone when this entry applied — an idempotent
+                // re-delivery, or an alter that lost to a drop. Only the version advances.
+                if (sequenceSchema is not null)
+                    await SchemaMetaStore.PersistSchemaSequenceAsync(database, sequenceSchema, tx).ConfigureAwait(false);
+            }
+            else if (entry.Op == SchemaOp.DropSequence)
+            {
+                // Null means the sequence was already gone when this entry was applied. There is no
+                // key left to delete, so only the version advances.
+                if (droppedSequenceId is not null)
+                    await SchemaMetaStore.DeleteSchemaSequenceAsync(database, droppedSequenceId, tx).ConfigureAwait(false);
+            }
+            else if (entry.Op is SchemaOp.CreateView or SchemaOp.ReplaceView or SchemaOp.RenameView or SchemaOp.SetViewDefinition)
             {
                 string viewName = GetEntryViewName(entry);
                 if (database.Schema.Views.TryGetValue(viewName, out ViewSchema? viewSchema))
@@ -244,6 +264,34 @@ internal sealed class SchemaCheckpointWriter
     }
 
     /// <summary>
+    /// The sequence record this entry left in the schema, resolved the same way apply resolved it:
+    /// by name for a create, by the post-rename name for a rename, and by immutable id for an
+    /// alter — which is keyed by id precisely so a concurrent rename cannot redirect it.
+    /// </summary>
+    private static SequenceSchema? ResolveEntrySequence(DatabaseDescriptor database, SchemaChangeLogEntry entry)
+    {
+        switch (entry.Op)
+        {
+            case SchemaOp.CreateSequence:
+                database.Schema.Sequences.TryGetValue(
+                    SchemaDeltaApplier.DecodePayload<SchemaSequencePayload>(entry).SequenceName, out SequenceSchema? created);
+                return created;
+
+            case SchemaOp.RenameSequence:
+                database.Schema.Sequences.TryGetValue(
+                    SchemaDeltaApplier.DecodePayload<SchemaRenamePayload>(entry).NewName, out SequenceSchema? renamed);
+                return renamed;
+
+            case SchemaOp.AlterSequence:
+                return database.Schema.FindSequenceById(
+                    SchemaDeltaApplier.DecodePayload<SchemaAlterSequencePayload>(entry).SequenceId);
+
+            default:
+                return null;
+        }
+    }
+
+    /// <summary>
     /// The name the view lives under <b>after</b> the entry has been applied — which for a rename is
     /// the new name, since the checkpoint has to find the view in the map to persist it.
     /// </summary>
@@ -336,6 +384,18 @@ internal sealed class SchemaCheckpointWriter
                         await MetaKeyWriter.WriteMetaKey(kahuna, tx, MetaKeys.HistoryKey(database.Id, table.Id, current.Version), historyBytes).ConfigureAwait(false);
                     }
                 }
+            }
+
+            // Sequence records are rewritten alongside the tables. A full checkpoint replaces what a
+            // reopen reads, so a family left out here is silently dropped from disk by the very
+            // write that was meant to bring disk up to the committed head.
+            foreach (SequenceSchema sequence in database.Schema.Sequences.Values.ToArray())
+            {
+                if (string.IsNullOrWhiteSpace(sequence.Id))
+                    continue;
+
+                byte[] sequenceBytes = MetaJsonSerializer.Serialize(sequence, MetaJsonContext.Default.SequenceSchema);
+                await MetaKeyWriter.WriteMetaKey(kahuna, tx, MetaKeys.SequenceKey(database.Id, sequence.Id), sequenceBytes).ConfigureAwait(false);
             }
 
             // Reconciled here, in the transaction that also rewrites the table blobs, and before any

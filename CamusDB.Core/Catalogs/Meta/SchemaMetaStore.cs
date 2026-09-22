@@ -102,6 +102,56 @@ internal static class SchemaMetaStore
         await MetaKeyWriter.DeleteMetaKey(kahuna, tx, MetaKeys.ViewKey(database.Id, viewId)).ConfigureAwait(false);
     }
 
+    /// <summary>
+    /// Persists one sequence's catalog record plus the database schema-version counter, in the
+    /// caller's transaction so the two commit together.
+    /// </summary>
+    /// <remarks>
+    /// This writes the record only. The Kahuna counter is not a KV key and cannot join this
+    /// transaction; the proposer creates or updates it around the replication, and a first
+    /// <c>nextval</c> that finds no counter creates one from this record's start value.
+    /// </remarks>
+    internal static async Task PersistSchemaSequenceAsync(DatabaseDescriptor database, SequenceSchema sequenceSchema, KvTransaction tx)
+    {
+        // Same invariant as PersistSchemaTableAsync: a replicated KV write must never be issued while
+        // the schema lock is held, or the schema-log partition can deadlock behind it.
+        System.Diagnostics.Debug.Assert(
+            !database.Schema.IsHeldByCurrentFlow,
+            $"PersistSchemaSequenceAsync called while Schema lock is held on database '{database.Name}' — no replicated write may run under a schema lock"
+        );
+
+        if (string.IsNullOrWhiteSpace(sequenceSchema.Id))
+            throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, $"Sequence '{sequenceSchema.Name}' has no sequence id");
+
+        IKahuna kahuna = database.Kahuna.Kahuna;
+
+        byte[] versionBytes = MetaJsonSerializer.Serialize(database.Schema.SchemaVersion, MetaJsonContext.Default.Int64);
+        byte[] sequenceBytes = MetaJsonSerializer.Serialize(sequenceSchema, MetaJsonContext.Default.SequenceSchema);
+
+        await MetaKeyWriter.WriteMetaKey(kahuna, tx, MetaKeys.VersionKey(database.Id), versionBytes).ConfigureAwait(false);
+        await MetaKeyWriter.WriteMetaKey(kahuna, tx, MetaKeys.SequenceKey(database.Id, sequenceSchema.Id), sequenceBytes).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Removes a dropped sequence's catalog record and advances the persisted schema version, in the
+    /// caller's transaction. The Kahuna counter is deleted separately by the proposer: it is not a KV
+    /// key, so it cannot be removed inside this transaction.
+    /// </summary>
+    internal static async Task DeleteSchemaSequenceAsync(DatabaseDescriptor database, string sequenceId, KvTransaction tx)
+    {
+        System.Diagnostics.Debug.Assert(
+            !database.Schema.IsHeldByCurrentFlow,
+            $"DeleteSchemaSequenceAsync called while Schema lock is held on database '{database.Name}' — no replicated write may run under a schema lock"
+        );
+
+        IKahuna kahuna = database.Kahuna.Kahuna;
+
+        byte[] versionBytes = MetaJsonSerializer.Serialize(database.Schema.SchemaVersion, MetaJsonContext.Default.Int64);
+
+        await MetaKeyWriter.WriteMetaKey(kahuna, tx, MetaKeys.VersionKey(database.Id), versionBytes).ConfigureAwait(false);
+        await MetaKeyWriter.DeleteMetaKey(kahuna, tx, MetaKeys.SequenceKey(database.Id, sequenceId)).ConfigureAwait(false);
+    }
+
     internal static async Task PersistSchemaTableAsync(DatabaseDescriptor database, TableSchema tableSchema, KvTransaction tx)
         => await PersistSchemaTableAsync(database, tableSchema, database.Schema.SchemaVersion, tx).ConfigureAwait(false);
 

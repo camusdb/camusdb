@@ -244,6 +244,22 @@ The HTTP API exchanges values as JSON:
 > **Bytes format differs by path:** SQL literals use `0x`-hex, JSON uses base64. A round-trip through
 > each path is lossless, but the encodings are not interchangeable.
 
+### Parameters of type `id`
+
+A parameter of type `id` must hold an object id: 24 hex characters. The server converts upper-case hex
+to lower case. Any other text fails with `CADB0400` (invalid input), and the message names the
+parameter. The usual cause is a client that sends a GUID as an `id` parameter. A GUID has 16 bytes and
+an object id has 12, so a GUID can never be an object id: send it as a `uuid` parameter.
+
+### Comparing values of different types
+
+Some pairs of types have a conversion rule: two numbers of different types, and a `string` against a
+`uuid` or an `id` (the string is parsed). Other pairs have no rule, for example a `uuid` against an
+`id`, or an `int64` against a `uuid`. For such a pair:
+
+- `=`, `IN` and a simple `CASE` find no match. `<>` and `NOT IN` find a match.
+- `<`, `<=`, `>`, `>=` and `BETWEEN` fail with `CADB0400`, because the two types have no order.
+
 To declare `string(N)` / `array(T)` over HTTP, the create-table column carries `maxLength` and
 `arrayElementType` fields alongside `type`.
 

@@ -499,7 +499,7 @@ internal static class CastScalarFunctions
         return new ColumnValue(ColumnType.Float64, value);
     }
 
-    private static bool IsValidLowerHexObjectId(string value)
+    internal static bool IsValidLowerHexObjectId(string value)
     {
         if (value.Length != 24)
             return false;

@@ -588,7 +588,8 @@ public sealed class SchemaReplicator
         {
             SchemaVersion = schema.SchemaVersion,
             Tables = new Dictionary<string, TableSchema>(schema.Tables.Count, schema.Tables.Comparer),
-            Views = new Dictionary<string, ViewSchema>(schema.Views.Count, schema.Views.Comparer)
+            Views = new Dictionary<string, ViewSchema>(schema.Views.Count, schema.Views.Comparer),
+            Sequences = new Dictionary<string, SequenceSchema>(schema.Sequences.Count, schema.Sequences.Comparer)
         };
 
         foreach ((string tableName, TableSchema table) in schema.Tables)
@@ -601,6 +602,12 @@ public sealed class SchemaReplicator
         // reason the table clone is: apply mutates it.
         foreach ((string viewName, ViewSchema view) in schema.Views)
             clone.Views[viewName] = CloneView(view);
+
+        // Cloned for the same reason views are: the dry-run validator applies the delta to this
+        // copy, so a missing sequence map would let a CREATE SEQUENCE over a taken name validate
+        // and a DROP of a live sequence fail.
+        foreach ((string sequenceName, SequenceSchema sequence) in schema.Sequences)
+            clone.Sequences[sequenceName] = sequence.Clone();
 
         return clone;
     }

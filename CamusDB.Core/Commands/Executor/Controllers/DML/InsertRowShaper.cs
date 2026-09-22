@@ -33,18 +33,32 @@ internal sealed class InsertRowShaper
 
     /// <summary>
     /// Columns carrying a default that the statement's target list does not mention. A function
-    /// default has a null <see cref="TableColumnSchema.DefaultValue"/>, so both kinds are collected.
+    /// default and a sequence default both have a null <see cref="TableColumnSchema.DefaultValue"/>,
+    /// so all three kinds are collected.
     /// </summary>
     private readonly List<TableColumnSchema> extraDefaults;
+
+    /// <summary>
+    /// The sequence each omitted default draws from, <b>one entry per column</b> — with duplicates
+    /// when two columns default from the same sequence, because shaping then consumes two values a
+    /// row and a deduplicated list would buy one.
+    ///
+    /// <para>The insert path reserves against this before any row is shaped: a sequence default
+    /// cannot be evaluated per row, because drawing a value is an asynchronous call and this class
+    /// is synchronous by design.</para>
+    /// </summary>
+    public IReadOnlyList<string> DefaultSequenceIds { get; }
 
     private InsertRowShaper(
         IReadOnlyList<string> fields,
         (TableColumnSchema?, ColumnValue)[] fieldMeta,
-        List<TableColumnSchema> extraDefaults)
+        List<TableColumnSchema> extraDefaults,
+        IReadOnlyList<string> defaultSequenceIds)
     {
         this.fields = fields;
         this.fieldMeta = fieldMeta;
         this.extraDefaults = extraDefaults;
+        DefaultSequenceIds = defaultSequenceIds;
     }
 
     /// <summary>Number of values one row must supply — the arity every value row is checked against.</summary>
@@ -69,13 +83,24 @@ internal sealed class InsertRowShaper
         }
 
         List<TableColumnSchema> extraDefaults = new();
+        List<string> defaultSequenceIds = [];
+
         foreach (TableColumnSchema col in schemaColumns)
         {
-            if ((col.DefaultValue is not null || col.DefaultFunction is not null) && !fields.Contains(col.Name))
-                extraDefaults.Add(col);
+            bool hasDefault = col.DefaultValue is not null
+                || col.DefaultFunction is not null
+                || col.DefaultSequenceId is not null;
+
+            if (!hasDefault || fields.Contains(col.Name))
+                continue;
+
+            extraDefaults.Add(col);
+
+            if (col.DefaultSequenceId is { Length: > 0 } sequenceId)
+                defaultSequenceIds.Add(sequenceId);
         }
 
-        return new InsertRowShaper(fields, fieldMeta, extraDefaults);
+        return new InsertRowShaper(fields, fieldMeta, extraDefaults, defaultSequenceIds);
     }
 
     /// <summary>
@@ -87,7 +112,12 @@ internal sealed class InsertRowShaper
     /// <c>username</c>), and the row is read back by the schema's own name during encoding — an
     /// ordinal dictionary would miss and silently write null.</para>
     /// </summary>
-    public Dictionary<string, ColumnValue> ShapeRow(ColumnValue?[] slots)
+    /// <param name="parameters">
+    /// The statement's parameter dictionary, which carries the reserved sequence runs a sequence
+    /// default draws from. May be null only for a statement whose table has no sequence default;
+    /// one that has is refused rather than silently written as NULL.
+    /// </param>
+    public Dictionary<string, ColumnValue> ShapeRow(ColumnValue?[] slots, Dictionary<string, ColumnValue>? parameters = null)
     {
         Dictionary<string, ColumnValue> row = new(fields.Count + extraDefaults.Count, StringComparer.OrdinalIgnoreCase);
 
@@ -106,6 +136,12 @@ internal sealed class InsertRowShaper
         {
             if (row.ContainsKey(col.Name))
                 continue;
+
+            if (col.DefaultSequenceId is { Length: > 0 } sequenceId)
+            {
+                row[col.Name] = SequenceDefaults.TakeNextValue(sequenceId, col.Name, parameters);
+                continue;
+            }
 
             row[col.Name] = col.DefaultFunction is not null
                 ? ScalarFunctionEvaluator.EvaluateNullary(col.DefaultFunction)

@@ -57,6 +57,12 @@
    is matched as a plain identifier and validated in the parse action, so each stays usable as a
    table or column name. "owner" in particular is already a column name in the test corpus. */
 %token TVIEW TVIEWS TMATERIALIZED TREFRESH
+/* SEQUENCE/SEQUENCES are the only new reserved words the sequence statements need, the same trade
+   VIEW/VIEWS already made. Every option word — START, INCREMENT, MINVALUE, MAXVALUE, NO, CYCLE,
+   CACHE, RESTART, OWNED, IDENTITY, GENERATED, ALWAYS, SERIAL, CONTINUE — is matched as a plain
+   identifier and validated in the parse action, so each stays usable as a table name, a column
+   name and an alias. */
+%token TSEQUENCE TSEQUENCES
 /* One unquoted "table@index" pair, produced by a single scanner rule so the '@' never reaches the
    parser as a placeholder. Accepted only in the SHOW ... FROM INDEX productions and split there. */
 %token TQUALIFIED_INDEX
@@ -102,6 +108,9 @@ stat    : select_stmt { $$.n = $1.n; }
         | refresh_matview_stmt { $$.n = $1.n; }
         | drop_matview_stmt { $$.n = $1.n; }
         | alter_matview_stmt { $$.n = $1.n; }
+        | create_sequence_stmt { $$.n = $1.n; }
+        | drop_sequence_stmt { $$.n = $1.n; }
+        | alter_sequence_stmt { $$.n = $1.n; }
         ;
 
 opt_distinct : TDISTINCT { $$.s = "1"; }
@@ -421,8 +430,30 @@ opt_with_data : TWITH TIDENTIFIER
    The TABLE keyword is optional, matching PostgreSQL and MySQL. Exactly one target: several
    tables in one statement are out of scope, and widening any_identifier to a list later is not a
    breaking grammar change. */
-truncate_table_stmt : TTRUNCATE TTABLE any_identifier { $$.n = new(NodeType.TruncateTable, $3.n, null, null, null, null, null, null, null); }
-                    | TTRUNCATE any_identifier { $$.n = new(NodeType.TruncateTable, $2.n, null, null, null, null, null, null, null); }
+truncate_table_stmt : TTRUNCATE TTABLE any_identifier opt_identity_action { $$.n = new(NodeType.TruncateTable, $3.n, null, null, null, null, null, null, $4.s); }
+                    | TTRUNCATE any_identifier opt_identity_action { $$.n = new(NodeType.TruncateTable, $2.n, null, null, null, null, null, null, $3.s); }
+                    ;
+
+/* [ RESTART IDENTITY | CONTINUE IDENTITY ]. CONTINUE is the default and leaves every sequence
+   alone; RESTART returns each sequence OWNED BY a column of this relation to its recorded start
+   value. Both words are plain identifiers validated here, so "restart", "continue" and "identity"
+   all stay usable as column names. */
+opt_identity_action : TIDENTIFIER TIDENTIFIER
+                      {
+                        if (!string.Equals($2.s, "identity", System.StringComparison.OrdinalIgnoreCase))
+                            throw new CamusDB.Core.CamusDBException(
+                                CamusDB.Core.CamusDBErrorCodes.InvalidInput,
+                                "Expected: TRUNCATE <table> [RESTART IDENTITY | CONTINUE IDENTITY], got '" + $1.s + " " + $2.s + "'");
+                        if (string.Equals($1.s, "restart", System.StringComparison.OrdinalIgnoreCase))
+                            $$.s = "restart identity";
+                        else if (string.Equals($1.s, "continue", System.StringComparison.OrdinalIgnoreCase))
+                            $$.s = "continue identity";
+                        else
+                            throw new CamusDB.Core.CamusDBException(
+                                CamusDB.Core.CamusDBErrorCodes.InvalidInput,
+                                "Expected RESTART IDENTITY or CONTINUE IDENTITY, got '" + $1.s + " " + $2.s + "'");
+                      }
+                    | { $$.s = null; }
                     ;
 
 drop_table_stmt : TDROP TTABLE any_identifier { $$.n = new(NodeType.DropTable, $3.n, null, null, null, null, null, null, null); }
@@ -552,6 +583,56 @@ drop_matview_stmt : TDROP TMATERIALIZED TVIEW view_name_list opt_drop_behavior {
 alter_matview_stmt : TALTER TMATERIALIZED TVIEW any_identifier TRENAME TTO any_identifier { $$.n = new(NodeType.AlterMaterializedViewRenameTo, $4.n, $7.n, null, null, null, null, null, null); }
                    ;
 
+/* ---------------------------------------------------------------------------------------------
+   Sequences.
+
+   The option list is gathered as a flat chain of words and numbers and validated in C# rather than
+   given one production per option. That is deliberate: PostgreSQL accepts the options in any order
+   and mixes one-word (CYCLE), two-word (NO CYCLE) and valued (CACHE 1) forms, and a grammar that
+   tried to separate those shapes cannot tell a bare option followed by another option from a
+   two-word option — an ambiguity LALR(1) resolves by guessing. Gathering the words keeps the
+   grammar conflict-free and lets the error name the option that was wrong.
+
+   leftAst = sequence name, rightAst = the option word chain (null when no options were given).
+   --------------------------------------------------------------------------------------------- */
+
+create_sequence_stmt : TCREATE TSEQUENCE any_identifier opt_sequence_option_list
+                       { $$.n = new(NodeType.CreateSequence, $3.n, $4.n, null, null, null, null, null, null); }
+                     | TCREATE TSEQUENCE TIF TNOT TEXISTS any_identifier opt_sequence_option_list
+                       { $$.n = new(NodeType.CreateSequenceIfNotExists, $6.n, $7.n, null, null, null, null, null, null); }
+                     ;
+
+drop_sequence_stmt : TDROP TSEQUENCE any_identifier
+                     { $$.n = new(NodeType.DropSequence, $3.n, null, null, null, null, null, null, null); }
+                   | TDROP TSEQUENCE TIF TEXISTS any_identifier
+                     { $$.n = new(NodeType.DropSequenceIfExists, $5.n, null, null, null, null, null, null, null); }
+                   ;
+
+alter_sequence_stmt : TALTER TSEQUENCE any_identifier TRENAME TTO any_identifier
+                      { $$.n = new(NodeType.AlterSequenceRenameTo, $3.n, $6.n, null, null, null, null, null, null); }
+                    | TALTER TSEQUENCE any_identifier sequence_option_list
+                      { $$.n = new(NodeType.AlterSequence, $3.n, $4.n, null, null, null, null, null, null); }
+                    ;
+
+opt_sequence_option_list : sequence_option_list { $$.n = $1.n; }
+                         | { $$.n = null; }
+                         ;
+
+sequence_option_list : sequence_option_list sequence_option_word
+                       { $$.n = new(NodeType.SequenceOptionList, $1.n, $2.n, null, null, null, null, null, null); }
+                     | sequence_option_word { $$.n = $1.n; $$.s = $1.s; }
+                     ;
+
+/* One word or one number of the option list. START, WITH and BY are already tokens for other
+   statements, so they are folded back to their text here and the validator sees a uniform chain. */
+sequence_option_word : TIDENTIFIER { $$.n = new(NodeType.SequenceOptionWord, null, null, null, null, null, null, null, $1.s); }
+                     | TSTART { $$.n = new(NodeType.SequenceOptionWord, null, null, null, null, null, null, null, "start"); }
+                     | TWITH { $$.n = new(NodeType.SequenceOptionWord, null, null, null, null, null, null, null, "with"); }
+                     | TBY { $$.n = new(NodeType.SequenceOptionWord, null, null, null, null, null, null, null, "by"); }
+                     | int { $$.n = $1.n; $$.s = $1.s; }
+                     | TMINUS int { $$.n = new(NodeType.Integer, null, null, null, null, null, null, null, "-" + $2.n.yytext); }
+                     ;
+
 create_database_stmt : TCREATE TDATABASE any_identifier TRELINK TTO string { $$.n = new(NodeType.CreateDatabaseRelink, $3.n, $6.n, null, null, null, null, null, null); }
                      | TCREATE TDATABASE any_identifier { $$.n = new(NodeType.CreateDatabase, $3.n, null, null, null, null, null, null, null); }
                      | TCREATE TDATABASE TIF TNOT TEXISTS any_identifier { $$.n = new(NodeType.CreateDatabaseIfNotExists, $6.n, null, null, null, null, null, null, null); }
@@ -575,6 +656,7 @@ comment_stmt : TCOMMENT TON TTABLE any_identifier TIS comment_value { $$.n = new
              | TCOMMENT TON TCOLUMN any_identifier TIS comment_value { $$.n = new(NodeType.CommentOnColumn, $4.n, $6.n, null, null, null, null, null, null); }
              | TCOMMENT TON TINDEX any_identifier TIS comment_value { $$.n = new(NodeType.CommentOnIndex, $4.n, $6.n, null, null, null, null, null, null); }
              | TCOMMENT TON TDATABASE any_identifier TIS comment_value { $$.n = new(NodeType.CommentOnDatabase, $4.n, $6.n, null, null, null, null, null, null); }
+             | TCOMMENT TON TSEQUENCE any_identifier TIS comment_value { $$.n = new(NodeType.CommentOnSequence, $4.n, $6.n, null, null, null, null, null, null); }
              ;
 
 /* A null node distinguishes "IS NULL" (remove the comment) from "IS ''" (store an empty string). */
@@ -772,6 +854,9 @@ show_stmt : TSHOW TCOLUMNS TFROM any_identifier { $$.n = new(NodeType.ShowColumn
           | TSHOW TMATERIALIZED TVIEWS TLIKE string { $$.n = new(NodeType.ShowMaterializedViews, $5.n, null, null, null, null, null, null, null); }
           | TSHOW TCREATE TVIEW any_identifier { $$.n = new(NodeType.ShowCreateView, $4.n, null, null, null, null, null, null, null); }
           | TSHOW TCREATE TMATERIALIZED TVIEW any_identifier { $$.n = new(NodeType.ShowCreateMaterializedView, $5.n, null, null, null, null, null, null, null); }
+          | TSHOW TSEQUENCES { $$.n = new(NodeType.ShowSequences, null, null, null, null, null, null, null, null); }
+          | TSHOW TSEQUENCES TLIKE string { $$.n = new(NodeType.ShowSequences, $4.n, null, null, null, null, null, null, null); }
+          | TSHOW TCREATE TSEQUENCE any_identifier { $$.n = new(NodeType.ShowCreateSequence, $4.n, null, null, null, null, null, null, null); }
           | TSHOW TDATABASE { $$.n = NodeAst.ShowDatabase; }
           | TSHOW TDATABASES { $$.n = NodeAst.ShowDatabases; }
           | TSHOW TDATABASES TLIKE string { $$.n = new(NodeType.ShowDatabases, $4.n, null, null, null, null, null, null, null); }
@@ -1153,6 +1238,22 @@ create_table_inline_constraint : TCONSTRAINT any_identifier TPRIMARY TKEY LPAREN
 
 create_table_item : any_identifier field_type { $$.n = new(NodeType.CreateTableItem, $1.n, $2.n, null, null, null, null, null, null); }
                   | any_identifier field_type create_table_field_constraint_list { $$.n = new(NodeType.CreateTableItem, $1.n, $2.n, $3.n, null, null, null, null, null); }
+                  /* SERIAL / BIGSERIAL: a declaration shorthand, not a storage type. It resolves to
+                     int64 plus an identity constraint, so no ColumnType member is spent on spelling
+                     a default. The word is a plain identifier — no field_type alternative begins
+                     with one — so "serial" stays usable as a table and column name. */
+                  | any_identifier TIDENTIFIER
+                    {
+                      RequireSerialTypeWord($2.s);
+                      $$.n = new(NodeType.CreateTableItem, $1.n, NodeAst.TypeInteger64, NodeAst.ConstraintIdentityByDefault, null, null, null, null, null);
+                    }
+                  | any_identifier TIDENTIFIER create_table_field_constraint_list
+                    {
+                      RequireSerialTypeWord($2.s);
+                      $$.n = new(NodeType.CreateTableItem, $1.n, NodeAst.TypeInteger64,
+                                 new(NodeType.CreateTableFieldConstraintList, $3.n, NodeAst.ConstraintIdentityByDefault, null, null, null, null, null, null),
+                                 null, null, null, null, null);
+                    }
                   ;
 
 create_table_constraint_list : TPRIMARY TKEY LPAREN identifier_index_list RPAREN { $$.n = new(NodeType.CreateTableConstraintPrimaryKey, $4.n, null, null, null, null, null, null, null); }
@@ -1170,15 +1271,53 @@ create_table_field_constraint : TNULL { $$.n = NodeAst.ConstraintNull; }
                         | TDEFAULT LPAREN default_expr RPAREN { $$.n = new(NodeType.ConstraintDefault, $3.n, null, null, null, null, null, null, null); }
                         | TCHECK LPAREN condition RPAREN { $$.n = new(NodeType.ConstraintCheck, $3.n, null, null, null, null, null, null, null); }
                         | TCOMMENT string { $$.n = new(NodeType.ConstraintComment, $2.n, null, null, null, null, null, null, null); }
-                        | TIDENTIFIER TIDENTIFIER
+                        /* Two shapes share this production because they share their first two
+                           tokens: STORAGE <mode>, and GENERATED ALWAYS AS IDENTITY. Splitting them
+                           into separate productions would make the choice depend on a token the
+                           parser has not read yet, which LALR(1) can only resolve by guessing. */
+                        | TIDENTIFIER TIDENTIFIER opt_as_identity
                           {
-                            if (!string.Equals($1.s, "storage", System.StringComparison.OrdinalIgnoreCase))
+                            if ($3.s is not null)
+                            {
+                                if (!string.Equals($1.s, "generated", System.StringComparison.OrdinalIgnoreCase) ||
+                                    !string.Equals($2.s, "always", System.StringComparison.OrdinalIgnoreCase))
+                                    throw new CamusDB.Core.CamusDBException(
+                                        CamusDB.Core.CamusDBErrorCodes.InvalidInput,
+                                        "Expected: GENERATED { ALWAYS | BY DEFAULT } AS IDENTITY, got '" + $1.s + " " + $2.s + " AS " + $3.s + "'");
+                                $$.n = NodeAst.ConstraintIdentityAlways;
+                            }
+                            else
+                            {
+                                if (!string.Equals($1.s, "storage", System.StringComparison.OrdinalIgnoreCase))
+                                    throw new CamusDB.Core.CamusDBException(
+                                        CamusDB.Core.CamusDBErrorCodes.InvalidInput,
+                                        "Expected a column constraint, got '" + $1.s + " " + $2.s + "'");
+                                $$.n = new(NodeType.ConstraintStorage, null, null, null, null, null, null, null, $2.s);
+                            }
+                          }
+                        | TIDENTIFIER TBY TDEFAULT TAS TIDENTIFIER
+                          {
+                            if (!string.Equals($1.s, "generated", System.StringComparison.OrdinalIgnoreCase) ||
+                                !string.Equals($5.s, "identity", System.StringComparison.OrdinalIgnoreCase))
                                 throw new CamusDB.Core.CamusDBException(
                                     CamusDB.Core.CamusDBErrorCodes.InvalidInput,
-                                    "Expected a column constraint, got '" + $1.s + " " + $2.s + "'");
-                            $$.n = new(NodeType.ConstraintStorage, null, null, null, null, null, null, null, $2.s);
+                                    "Expected: GENERATED BY DEFAULT AS IDENTITY, got '" + $1.s + " BY DEFAULT AS " + $5.s + "'");
+                            $$.n = NodeAst.ConstraintIdentityByDefault;
                           }
                         ;
+
+/* The tail of GENERATED ALWAYS AS IDENTITY. Empty means the two words before it were something
+   else — today that is only STORAGE <mode>. */
+opt_as_identity : TAS TIDENTIFIER
+                  {
+                    if (!string.Equals($2.s, "identity", System.StringComparison.OrdinalIgnoreCase))
+                        throw new CamusDB.Core.CamusDBException(
+                            CamusDB.Core.CamusDBErrorCodes.InvalidInput,
+                            "Expected: GENERATED ALWAYS AS IDENTITY, got 'AS " + $2.s + "'");
+                    $$.s = $2.s;
+                  }
+                | { $$.s = null; }
+                ;
 
 default_expr : int { $$.n = $1.n; $$.s = $1.s; }
              | float { $$.n = $1.n; $$.s = $1.s; }
