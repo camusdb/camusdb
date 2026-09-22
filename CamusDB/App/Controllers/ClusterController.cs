@@ -37,9 +37,10 @@ namespace CamusDB.App.Controllers;
 /// authentication is on. With authentication off they stay open, exactly as that statement does, since
 /// any client that reaches the port can already run every statement.</para>
 ///
-/// <para>The two mutations (leave, replication-factor) are held higher: superuser when authentication
-/// is enabled, loopback-only otherwise, and never a credential over plaintext. Unlike a read, one
-/// unauthenticated call can take a node out of the cluster.</para>
+/// <para>The three mutations (leave, replication-factor, transfer-leadership) are held higher:
+/// superuser when authentication is enabled, loopback-only otherwise, and never a credential over
+/// plaintext. Unlike a read, one unauthenticated call can take a node out of the cluster, or move a
+/// partition's leadership under a running workload.</para>
 /// </summary>
 [ApiController]
 public sealed class ClusterController : CommandsController
@@ -391,6 +392,101 @@ public sealed class ClusterController : CommandsController
         {
             AuditCluster("replication-factor", principal, e.Code, failure: true);
             return Failure(e);
+        }
+    }
+
+    /// <summary>
+    /// Hands leadership of one data partition from this node to another replica of it: a graceful
+    /// handover, not a failover. The local node must lead the partition; the consensus layer asks
+    /// the target to campaign once it is caught up and waits up to ten seconds for the new leader
+    /// to be observed. This is the lever a reliability harness needs for "leader transfer at chosen
+    /// commit points" — exercising the handover path with commits in flight, which no crash fault
+    /// reaches — and what an operator uses to drain leadership off a node before maintenance.
+    ///
+    /// <para>Refusals are reported as an outcome rather than a 500: <c>NodeIsNotLeader</c> when this
+    /// node does not lead the partition (the caller retries against the leader from the placement
+    /// table), <c>LeaderAlreadyElected</c> when leadership moved elsewhere during the handover, and
+    /// <c>Refused</c> when consensus would not take the request at all (not initialized, unknown
+    /// partition). A 409 carries every non-success outcome so a script can branch on the body.</para>
+    /// </summary>
+    [HttpPost]
+    [Route("/v1/cluster/transfer-leadership")]
+    public async Task<JsonResult> TransferLeadership()
+    {
+        Principal? principal = null;
+        ClusterTransferLeadershipRequest? request = null;
+        try
+        {
+            principal = await EnsureClusterAdminAllowedAsync().ConfigureAwait(false);
+
+            using StreamReader reader = new(Request.Body);
+            string body = await reader.ReadToEndAsync().ConfigureAwait(false);
+
+            request = string.IsNullOrWhiteSpace(body)
+                ? null
+                : JsonSerializer.Deserialize<ClusterTransferLeadershipRequest>(body, jsonOptions);
+
+            if (request is null || request.PartitionId <= 0 || string.IsNullOrWhiteSpace(request.TargetEndpoint))
+                throw new CamusDBException(
+                    CamusDBErrorCodes.InvalidInput,
+                    "'partitionId' must be a data partition (> 0) and 'targetEndpoint' the consensus endpoint of a replica that hosts it");
+
+            ClusterTransferLeadershipResponse response = new()
+            {
+                PartitionId = request.PartitionId,
+                TargetEndpoint = request.TargetEndpoint,
+            };
+
+            try
+            {
+                RaftOperationStatus status = await kahuna.Raft.TransferLeadershipAsync(
+                    request.PartitionId, request.TargetEndpoint, HttpContext.RequestAborted).ConfigureAwait(false);
+
+                response.Success = status == RaftOperationStatus.Success;
+                response.Status = status.ToString();
+                response.Reason = status switch
+                {
+                    RaftOperationStatus.Success => null,
+                    RaftOperationStatus.NodeIsNotLeader => "This node does not lead the partition; send the request to its leader.",
+                    RaftOperationStatus.LeaderAlreadyElected => "Leadership moved to another replica during the handover.",
+                    RaftOperationStatus.Errored => "Consensus refused the request: the node is not initialized or the partition is unknown here.",
+                    _ => "The handover did not complete; see status.",
+                };
+            }
+            catch (RaftException ex)
+            {
+                // Kommander refuses by throwing for a system partition or an unknown target; surface
+                // the reason so the caller can correct the request instead of reading a 500.
+                response.Success = false;
+                response.Status = "Refused";
+                response.Reason = ex.Message;
+            }
+
+            AuditCluster($"transfer-leadership:{request.PartitionId}->{request.TargetEndpoint}",
+                principal, response.Success ? "ok" : response.Status, failure: !response.Success);
+
+            return new JsonResult(response)
+            {
+                StatusCode = response.Success ? StatusCodes.Status200OK : StatusCodes.Status409Conflict,
+            };
+        }
+        catch (CamusDBException e)
+        {
+            AuditCluster("transfer-leadership", principal, e.Code, failure: true);
+            return new JsonResult(new ClusterTransferLeadershipResponse
+            {
+                Success = false,
+                Status = "Refused",
+                PartitionId = request?.PartitionId ?? 0,
+                TargetEndpoint = request?.TargetEndpoint ?? "",
+                Reason = e.Message,
+            })
+            {
+                // A malformed request is the caller's error (400); everything else follows the code's mapping.
+                StatusCode = e.Code == CamusDBErrorCodes.InvalidInput
+                    ? StatusCodes.Status400BadRequest
+                    : CamusDBErrorCodes.GetHttpStatus(e.Code),
+            };
         }
     }
 

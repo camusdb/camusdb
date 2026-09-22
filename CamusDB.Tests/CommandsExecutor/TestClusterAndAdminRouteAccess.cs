@@ -6,6 +6,7 @@
  */
 
 using System;
+using System.IO;
 using System.Net;
 using System.Threading.Tasks;
 
@@ -252,6 +253,79 @@ internal sealed class TestClusterAndAdminRouteAccess : BaseTest
     }
 
     // ─── Closing a database ───────────────────────────────────────────────────
+
+    // ─── transfer-leadership: the third mutation, held to the same bar as leave ─────────────
+
+    private static ClusterController WithBody(ClusterController controller, string json)
+    {
+        controller.ControllerContext.HttpContext.Request.Body = new MemoryStream(System.Text.Encoding.UTF8.GetBytes(json));
+        return controller;
+    }
+
+    [Test]
+    public async Task TransferLeadership_IsRefusedToANonSuperuser()
+    {
+        (CommandExecutor ex, _, string plain) = await SetupAsync();
+
+        JsonResult result = await WithBody(Cluster(ex, plain), "{\"partitionId\":1,\"targetEndpoint\":\"10.0.0.3:7072\"}").TransferLeadership();
+
+        Assert.AreEqual(403, result.StatusCode);
+        ClusterTransferLeadershipResponse body = (ClusterTransferLeadershipResponse)result.Value!;
+        Assert.IsFalse(body.Success);
+        Assert.AreEqual("Refused", body.Status);
+        StringAssert.Contains("superuser", body.Reason);
+    }
+
+    [Test]
+    public async Task TransferLeadership_OverTheNetworkWithAuthenticationOff_IsRefused()
+    {
+        CamusDBOptions authOff = Options with { AuthenticationEnabled = false };
+        (CommandExecutor ex, _, _) = await SetupAsync(authOff);
+
+        JsonResult result = await WithBody(Cluster(ex, bearer: null, authOff, IPAddress.Parse("10.1.2.3")),
+            "{\"partitionId\":1,\"targetEndpoint\":\"10.0.0.3:7072\"}").TransferLeadership();
+
+        Assert.AreEqual(403, result.StatusCode);
+        StringAssert.Contains("requires authentication", ((ClusterTransferLeadershipResponse)result.Value!).Reason);
+    }
+
+    [Test]
+    public async Task TransferLeadership_RejectsAMalformedRequestBeforeConsensus()
+    {
+        CamusDBOptions authOff = Options with { AuthenticationEnabled = false };
+        (CommandExecutor ex, _, _) = await SetupAsync(authOff);
+
+        foreach (string json in new[] { "", "{}", "{\"partitionId\":0,\"targetEndpoint\":\"10.0.0.3:7072\"}", "{\"partitionId\":1,\"targetEndpoint\":\" \"}" })
+        {
+            JsonResult result = await WithBody(Cluster(ex, bearer: null, authOff, IPAddress.Loopback), json).TransferLeadership();
+
+            Assert.AreEqual(400, result.StatusCode, json);
+            ClusterTransferLeadershipResponse body = (ClusterTransferLeadershipResponse)result.Value!;
+            Assert.IsFalse(body.Success, json);
+            StringAssert.Contains("partitionId", body.Reason, json);
+        }
+    }
+
+    /// <summary>
+    /// A well-formed request reaches consensus and comes back as an outcome, never a 500: the test
+    /// node hosts no data partition led by anyone, so the answer is a refusal with the request echoed.
+    /// </summary>
+    [Test]
+    public async Task TransferLeadership_ReportsARefusalAsAnOutcome()
+    {
+        (CommandExecutor ex, string root, _) = await SetupAsync();
+
+        JsonResult result = await WithBody(Cluster(ex, root), "{\"partitionId\":1,\"targetEndpoint\":\"10.0.0.3:7072\"}").TransferLeadership();
+
+        Assert.AreEqual(409, result.StatusCode);
+        ClusterTransferLeadershipResponse body = (ClusterTransferLeadershipResponse)result.Value!;
+        Assert.IsFalse(body.Success);
+        Assert.IsNotEmpty(body.Status);
+        Assert.AreNotEqual("Success", body.Status);
+        Assert.AreEqual(1, body.PartitionId);
+        Assert.AreEqual("10.0.0.3:7072", body.TargetEndpoint);
+        Assert.IsNotNull(body.Reason);
+    }
 
     [Test]
     public async Task CloseDatabase_IsRefusedToANonSuperuser()

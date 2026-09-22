@@ -17,6 +17,7 @@ using Kommander.WAL;
 
 using Kahuna;
 using Kahuna.Server.KeyValues;
+using Kahuna.Server.KeyValues.Data;
 using Kahuna.Server.KeyValues.Transactions.Data;
 using Kahuna.Server.KeyValues.Writes;
 using Kahuna.Server.Locks;
@@ -144,6 +145,7 @@ internal abstract class DelegatingKahuna : IKahuna
         public virtual Task<bool> OnReplicationReceived(int partitionId, RaftLog log) => inner.OnReplicationReceived(partitionId, log);
         public virtual void OnReplicationError(int partitionId, RaftLog log) => inner.OnReplicationError(partitionId, log);
         public virtual Task<bool> OnLeaderChanged(int partitionId, string node) => inner.OnLeaderChanged(partitionId, node);
+        public virtual Task OnLeadershipLost(int partitionId, long term) => inner.OnLeadershipLost(partitionId, term);
         public virtual Task FlushPersistenceAsync() => inner.FlushPersistenceAsync();
         public virtual Task BootstrapFromPitrBackupAsync(string backupDir, Guid leafBackupId, HLCTimestamp targetTime, IWAL walAdapter, TimeSpan pitrWindow, TimeSpan baseSnapshotInterval) => inner.BootstrapFromPitrBackupAsync(backupDir, leafBackupId, targetTime, walAdapter, pitrWindow, baseSnapshotInterval);
         public virtual void RegisterKeyRange(string keySpace) => inner.RegisterKeyRange(keySpace);
@@ -173,4 +175,5 @@ internal abstract class DelegatingKahuna : IKahuna
         public virtual Task<(KeyValueResponseType Type, HLCTimestamp LeaseExpiry)> LocateAndRenewSnapshotHold(string holdId, int leaseMs, CancellationToken ct) => inner.LocateAndRenewSnapshotHold(holdId, leaseMs, ct);
         public virtual Task<KeyValueResponseType> LocateAndReleaseSnapshotHold(string holdId, CancellationToken ct) => inner.LocateAndReleaseSnapshotHold(holdId, ct);
         public virtual Task<(KeyValueResponseType Type, HLCTimestamp EffectiveFloor, int LiveHolds)> GetSnapshotFloor(CancellationToken ct) => inner.GetSnapshotFloor(ct);
+        public virtual Task<(KeyValueResponseType Type, KeyValueApplyFingerprint Fingerprint)> GetPartitionApplyFingerprint(int partitionId, CancellationToken ct) => inner.GetPartitionApplyFingerprint(partitionId, ct);
 }
