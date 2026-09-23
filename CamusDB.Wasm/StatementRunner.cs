@@ -102,7 +102,10 @@ internal sealed class StatementRunner
                 rows.Clear();
 
                 DatabaseDescriptor database = await executor.OpenDatabase(databaseName).ConfigureAwait(false);
-                KvTransaction tx = await database.Transactions.BeginReadOnlyAsync(promote: true, cancellationToken: ct).ConfigureAwait(false);
+                // A row-returning statement can still have a bounded side effect: SELECT nextval(...)
+                // reserves sequence values before evaluating the projection. Use a normal
+                // transaction so each reservation gets a unique idempotency key.
+                KvTransaction tx = await database.Transactions.BeginAsync(cancellationToken: ct).ConfigureAwait(false);
                 try
                 {
                     (DatabaseDescriptor? db, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(

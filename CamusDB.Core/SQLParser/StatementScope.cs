@@ -143,6 +143,7 @@ public static class StatementScope
         NodeType.ShowRanges or NodeType.ShowCreateTable or NodeType.ShowDatabase or
         NodeType.ShowViews or NodeType.ShowMaterializedViews or
         NodeType.ShowCreateView or NodeType.ShowCreateMaterializedView or
+        NodeType.ShowSequences or NodeType.ShowCreateSequence or
         NodeType.ShowOrphanTables ||
         IsServerLevelQuery(nodeType);
 

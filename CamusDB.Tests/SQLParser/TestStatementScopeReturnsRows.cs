@@ -24,6 +24,8 @@ public sealed class TestStatementScopeReturnsRows
     [TestCase("SHOW INDEXES FROM t")]
     [TestCase("SHOW CREATE TABLE t")]
     [TestCase("SHOW DATABASES")]
+    [TestCase("SHOW SEQUENCES")]
+    [TestCase("SHOW CREATE SEQUENCE s")]
     [TestCase("SHOW VARIABLES")]
     [TestCase("EXPLAIN SELECT a FROM t")]
     [TestCase("EXPLAIN (ANALYZE) SELECT a FROM t")]
