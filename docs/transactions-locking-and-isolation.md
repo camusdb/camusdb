@@ -480,7 +480,12 @@ statement, because retroactively upgrading the level would skip locks the earlie
 Conflicts are detected and resolved **promptly** — a blocked writer or a deadlock fails fast (sub-second)
 rather than stalling on a lock timeout. Deadlocks have a **deterministic winner**: when two transactions
 contend, the older one waits and commits while the younger aborts and retries (a *wait-die* ordering), so
-two transactions can never both abort each other. And all of this works the same on one node or a whole cluster
+two transactions can never both abort each other. One requester is exempt from the age rule: a transaction
+that holds no lock and has staged no write yet is nobody's holder, so its wait can never close a cycle, and
+it waits out the lock-wait deadline whatever its age. That is what lets a fresh `SELECT`, or a DDL fence such
+as `TRUNCATE`, ride out a short in-flight writer instead of failing on its first lock. A staged write counts
+as a lock holder here: a shared or exclusive range lock is never granted over another transaction's live
+write intent, and the requester is ordered against that writer by the same rule. And all of this works the same on one node or a whole cluster
 (§8). Reserve serializable read-write transactions for logic that truly needs an invariant; everything
 else is cheaper and fully concurrent under Read Committed.
 

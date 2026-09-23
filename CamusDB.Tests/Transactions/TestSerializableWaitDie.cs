@@ -31,6 +31,11 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// alongside the denial): an OLDER requester waits for the younger holder to release; a YOUNGER
 /// requester aborts immediately. Waits therefore only ever point older→younger, so two transactions
 /// contending in reverse order can never both abort — the older one wins deterministically.
+///
+/// One requester is exempt from the age rule: a transaction that holds no range lock and has staged
+/// no write is nobody's holder, so a wait from it can never close a cycle, and it waits out the
+/// lock-wait deadline whatever its age. The younger-dies cases therefore give the younger
+/// transaction something to hold first.
 /// </summary>
 [TestFixture]
 [NonParallelizable]
@@ -132,14 +137,15 @@ public sealed class TestSerializableWaitDie : SharedNodeBaseTest
     }
 
     // -----------------------------------------------------------------------
-    // 2. Younger requester dies immediately (does not wait out the deadline).
+    // 2. A younger requester that already holds something dies immediately.
     //
-    // txOld holds the lock; txYoung arrives second and, being younger, aborts at
-    // once with a conflict instead of waiting up to the lock-wait deadline.
+    // txOld holds the lock; txYoung has staged a write of its own, so a wait from it
+    // could close a cycle: being younger, it aborts at once with a conflict instead
+    // of waiting up to the lock-wait deadline.
     // -----------------------------------------------------------------------
 
     [Test]
-    public async Task YoungerRequester_DiesImmediately()
+    public async Task YoungerRequesterThatAlreadyHoldsAWrite_DiesImmediately()
     {
         (string dbname, DatabaseDescriptor db, CommandExecutor executor) = await SetupDbAsync();
 
@@ -153,6 +159,16 @@ public sealed class TestSerializableWaitDie : SharedNodeBaseTest
 
         // The older transaction holds the exclusive lock.
         await UpdatePriorityAsync(dbname, db, executor, txOld, 1, "old");
+
+        // The younger transaction stages a row outside the older one's range, so it now holds
+        // something another transaction could wait on and the holds-nothing exemption is gone.
+        await executor.Insert(new InsertTicket(
+            txnState: txYoung, databaseName: dbname, tableName: "tasks",
+            values: new() { new() {
+                { "id",       new(ColumnType.Id,        ObjectIdGenerator.Generate().ToString()) },
+                { "priority", new(ColumnType.Integer64, 2L)      },
+                { "name",     new(ColumnType.String,    "young") },
+            }}));
 
         // The younger transaction is denied and must die quickly, not wait out the deadline.
         Stopwatch sw = Stopwatch.StartNew();
@@ -169,6 +185,46 @@ public sealed class TestSerializableWaitDie : SharedNodeBaseTest
 
         await db.Transactions.RollbackAsync(txYoung);
         await db.Transactions.CommitAsync(txOld);
+    }
+
+    // -----------------------------------------------------------------------
+    // 2b. A younger requester that holds nothing waits for the older holder.
+    //
+    // txOld holds the lock; txYoung's very first operation is denied. It holds no
+    // lock and no write, so nobody can be waiting on it: it waits, and once txOld
+    // commits within the lock-wait budget it acquires the lock and proceeds.
+    // -----------------------------------------------------------------------
+
+    [Test]
+    public async Task YoungerRequesterThatHoldsNothing_WaitsForTheOlderHolder_AndProceeds()
+    {
+        (string dbname, DatabaseDescriptor db, CommandExecutor executor) = await SetupDbAsync();
+
+        string id1 = ObjectIdGenerator.Generate().ToString();
+        await InsertAsync(dbname, db, executor, id1, priority: 1, name: "original");
+
+        KvTransaction txOld = await db.Transactions.BeginAsync(
+            CamusIsolationLevel.Serializable, CamusTransactionMode.ReadWrite);
+        KvTransaction txYoung = await db.Transactions.BeginAsync(
+            CamusIsolationLevel.Serializable, CamusTransactionMode.ReadWrite);
+
+        await UpdatePriorityAsync(dbname, db, executor, txOld, 1, "old");
+
+        // Release the older holder shortly, well within the younger requester's lock-wait budget.
+        Task release = Task.Run(async () =>
+        {
+            await Task.Delay(100);
+            await db.Transactions.CommitAsync(txOld);
+        });
+
+        Assert.DoesNotThrowAsync(async () =>
+        {
+            await UpdatePriorityAsync(dbname, db, executor, txYoung, 1, "young");
+            await db.Transactions.CommitAsync(txYoung);
+        }, "A younger requester that holds nothing must wait for the holder and then proceed, " +
+           "not die at once as a younger requester that holds something does");
+
+        await release;
     }
 
     // -----------------------------------------------------------------------

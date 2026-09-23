@@ -32,7 +32,16 @@ namespace CamusDB.Core.Storage.Kv;
 /// <c>AlreadyLocked</c> denial names its holder, the requester compares transaction start
 /// timestamps: an older requester waits for a younger holder, a younger requester aborts at once and
 /// is replayed from BeginAsync. Waits therefore only ever point older-to-younger, so no wait cycle
-/// can form and two transactions contending in reverse order can never both abort.</para>
+/// can form and two transactions contending in reverse order can never both abort. One requester is
+/// exempt from the age rule: a transaction that holds no range lock and has staged no write
+/// (<see cref="KvTransaction.HoldsNoLocksOrWrites"/>) is nobody's holder, so its wait can never close
+/// a cycle, and it waits out the lock-wait deadline whatever its age.</para>
+///
+/// <para><b>A live write intent is a lock holder too.</b> Kahuna refuses a Shared or Exclusive
+/// range acquire while a covered key carries another transaction's live write intent, and names
+/// that writer as the holder. The rules above therefore also order a reader against an in-flight
+/// writer, which is the reader-side half of strict two-phase locking; the write path's refusal of
+/// a mutation under a foreign range lock is the other half.</para>
 ///
 /// <para><b>Optimistic transactions still lock on the read side.</b> The write path skips the
 /// explicit exclusive lock under optimistic locking, but a Serializable read takes its shared
@@ -402,8 +411,9 @@ internal sealed class KvRangeLockManager
                     "is closed or out of operation budget) — retry the operation from BeginAsync");
 
             // AlreadyLocked is a serialization conflict with a foreign holder: for Shared, another txn
-            // holds an overlapping Exclusive lock; for Exclusive, another txn holds an overlapping
-            // Shared or Exclusive lock (including the S→X upgrade case).
+            // holds an overlapping Exclusive lock or a live write intent on a covered key; for Exclusive,
+            // another txn holds an overlapping Shared or Exclusive lock (including the S→X upgrade case)
+            // or such an intent.
             //
             // Resolve it by deadlock-avoidance ordering on the holder's start timestamp (its
             // transaction id, returned alongside the denial). An OLDER requester (smaller HLC) WAITS
@@ -412,12 +422,19 @@ internal sealed class KvRangeLockManager
             // and two transactions contending in reverse order can never both abort — the older wins
             // deterministically. With no holder reported (Zero), no ordering is possible, so fall back
             // to immediate abort.
+            //
+            // A requester that holds nothing yet is the exception: a wait cycle needs every waiter to
+            // also be a holder someone else waits on, and a transaction with no range lock and no
+            // staged write is nobody's holder. It may wait out its deadline whatever its age. This is
+            // what lets a fresh scan, or a DDL fence transaction such as TRUNCATE, ride out a short
+            // in-flight writer instead of failing on its first lock.
             if (type == KeyValueResponseType.AlreadyLocked)
             {
                 bool requesterIsOlder = holder != HLCTimestamp.Zero && tx.TransactionId.CompareTo(holder) < 0;
-                if (requesterIsOlder && Stopwatch.GetTimestamp() < deadline)
+                bool mayWait = requesterIsOlder || tx.HoldsNoLocksOrWrites;
+                if (mayWait && Stopwatch.GetTimestamp() < deadline)
                 {
-                    ServerDiagnostics.AddKvRetryWait("rangelock_holder_wait");
+                    ServerDiagnostics.AddKvRetryWait(requesterIsOlder ? "rangelock_holder_wait" : "rangelock_empty_requester_wait");
                     await Task.Delay(KahunaRetryPolicy.RetryDelayMs(retries++), cancellationToken).ConfigureAwait(false);
                     // A confirmed denial ends this observation; the wait-then-retry is a fresh acquire
                     // attempt, so mint a new id rather than replay the denied one.

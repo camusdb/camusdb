@@ -843,6 +843,25 @@ public sealed class KvTransaction
     }
 
     /// <summary>
+    /// True while this transaction holds no range lock and has staged no write, so nothing of it can
+    /// be waited on by another transaction. Wait-die aborts a younger lock requester because a wait
+    /// from it could close a cycle through what it already holds; a requester that holds nothing
+    /// cannot be on any cycle, so it may wait for its deadline instead of aborting at once. The
+    /// exclusive key lock a write takes is not tracked separately, but a write path takes it and
+    /// records the key before it returns, so no range-lock acquire of this transaction ever runs
+    /// between the two.
+    /// </summary>
+    public bool HoldsNoLocksOrWrites
+    {
+        get
+        {
+            lock (trackSync)
+                return (acquiredRangeLocks is null || acquiredRangeLocks.Count == 0)
+                    && (modifiedKeys is null || modifiedKeys.Count == 0);
+        }
+    }
+
+    /// <summary>
     /// Records that <paramref name="key"/> was written or deleted within this transaction.
     /// </summary>
     public void TrackModified(string key, KeyValueDurability durability)

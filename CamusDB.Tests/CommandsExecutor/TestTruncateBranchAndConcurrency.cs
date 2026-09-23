@@ -9,6 +9,7 @@ using NUnit.Framework;
 
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
@@ -206,27 +207,74 @@ internal sealed class TestTruncateBranchAndConcurrency : SharedNodeBaseTest
     // Concurrency
     // -----------------------------------------------------------------------
 
+    /// <summary>
+    /// The fence transaction holds nothing when it asks for the fence, so a staged foreign write does
+    /// not refuse it; it waits for that writer. The writer finishes into the generation the fence then
+    /// retires, so the truncate still leaves the relation empty.
+    /// </summary>
     [Test]
-    public async Task Truncate_AbortsAWriterThatStagedARowBeforeTheFence()
+    public async Task Truncate_WaitsForAWriterThatStagedARowBeforeTheFence_AndRetiresItsRow()
     {
-        (string dbName, DatabaseDescriptor db, CommandExecutor executor, _) = await SetupRoot(2);
+        (string dbName, DatabaseDescriptor db, CommandExecutor executor, _) =
+            await SetupRoot(2, Options with { LockWaitDeadlineMs = 5_000 });
 
-        // Stage a row but do not commit: the write intent exists before the fence is taken.
+        // Stage a row but do not commit: the write intent exists before the fence is requested.
         KvTransaction writer = await db.Transactions.BeginAsync();
         await executor.ExecuteNonSQLQuery(new ExecuteSQLTicket(
             writer, dbName, "INSERT INTO robots (id, name, year) VALUES (gen_id(), \"staged\", 2050)", null));
 
-        await executor.TruncateTable(new TruncateTableTicket(dbName, "robots"));
+        Task<bool> truncate = executor.TruncateTable(new TruncateTableTicket(dbName, "robots"));
 
-        // The write was staged into a key-space the relation no longer reads, so it must not be
-        // reported as committed. Either the durable range fence aborts it or the contents pin does.
-        Assert.ThrowsAsync<CamusDBException>(async () => await db.Transactions.CommitAsync(writer),
-            "a writer staged into the retired generation must not commit successfully");
+        await Task.Delay(150);
+        Assert.False(truncate.IsCompleted,
+            "the fence must not be granted over a live foreign write intent; a grant here would let " +
+            "the writer commit a row into storage the relation no longer reads");
 
-        await db.Transactions.RollbackIfNotCompletedAsync(writer);
+        Assert.DoesNotThrowAsync(async () => await db.Transactions.CommitAsync(writer),
+            "the waiting fence holds nothing, so the writer it waits for must be free to commit");
+
+        Assert.True(await truncate, "once the writer settled, the truncate must go through");
 
         Assert.IsEmpty(await RunSelect(dbName, executor, "SELECT name FROM robots"),
-            "no row committed only to retired storage may appear in the live relation");
+            "the row committed into the retired generation and must not appear in the live relation");
+    }
+
+    /// <summary>
+    /// A writer that stays open past the lock-wait deadline makes the truncate give up with the
+    /// replay-from-BEGIN conflict code. A refused truncate applies nothing: the writer commits
+    /// unhindered afterwards and a later truncate empties the relation.
+    /// </summary>
+    [Test]
+    public async Task Truncate_GivesUpAtTheDeadlineWhileAStagedWriterStaysOpen_AndAppliesNothing()
+    {
+        (string dbName, DatabaseDescriptor db, CommandExecutor executor, _) =
+            await SetupRoot(2, Options with { LockWaitDeadlineMs = 300 });
+
+        KvTransaction writer = await db.Transactions.BeginAsync();
+        await executor.ExecuteNonSQLQuery(new ExecuteSQLTicket(
+            writer, dbName, "INSERT INTO robots (id, name, year) VALUES (gen_id(), \"staged\", 2050)", null));
+
+        long started = Stopwatch.GetTimestamp();
+        CamusDBException? ex = Assert.ThrowsAsync<CamusDBException>(
+            () => executor.TruncateTable(new TruncateTableTicket(dbName, "robots")),
+            "the writer never finishes, so the fence wait must end at the deadline");
+
+        Assert.AreEqual(CamusDBErrorCodes.TransactionConflict, ex?.Code,
+            "a wait that ran out against a named holder is a definite conflict the caller replays from BEGIN");
+
+        Assert.GreaterOrEqual(Stopwatch.GetElapsedTime(started).TotalMilliseconds, 300,
+            "the refusal must come after the deadline, not at once: the fence transaction holds nothing " +
+            "and so waits for the writer instead of dying as a younger requester");
+
+        Assert.DoesNotThrowAsync(async () => await db.Transactions.CommitAsync(writer),
+            "the refused truncate never held the fence, so the writer commits as if it had never asked");
+
+        Assert.AreEqual(3, (await RunSelect(dbName, executor, "SELECT name FROM robots")).Count,
+            "the refused truncate retired nothing: the two seeded rows and the writer's row are all live");
+
+        Assert.True(await executor.TruncateTable(new TruncateTableTicket(dbName, "robots")));
+
+        Assert.IsEmpty(await RunSelect(dbName, executor, "SELECT name FROM robots"));
     }
 
     [Test]

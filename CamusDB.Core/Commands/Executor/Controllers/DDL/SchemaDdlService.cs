@@ -1246,11 +1246,13 @@ internal sealed class SchemaDdlService
     /// recoverable — so it is constant in cardinality, not constant in wall-clock time.</para>
     ///
     /// <para><b>Order is the whole design.</b> The fence is taken <em>before</em> the cut timestamp is
-    /// minted and before anything is proposed. Kahuna's durable range-lock write fence aborts any
-    /// transaction — optimistic or pessimistic — that staged a write into the old key-space before the
-    /// fence was acquired, and makes later writers wait. That is what stops a writer from having a row
-    /// acknowledged into storage nothing reads afterwards, and it is what makes the cut a real
-    /// linearization point rather than a hopeful one.</para>
+    /// minted and before anything is proposed. Kahuna never grants the fence over a write another
+    /// transaction — optimistic or pessimistic — staged into the old key-space: the fence transaction
+    /// holds nothing at that point, so it waits for such a writer to finish (up to the lock-wait
+    /// deadline) rather than being refused, and once it holds the fence every later writer into the
+    /// old key-space is refused. That is what stops a writer from having a row acknowledged into
+    /// storage nothing reads afterwards, and it is what makes the cut a real linearization point
+    /// rather than a hopeful one.</para>
     ///
     /// <para><b>Once the schema entry commits, the truncate has happened.</b> It is cluster-wide and
     /// irrevocable at that point, so a later failure to finalize the fence-owning transaction is
