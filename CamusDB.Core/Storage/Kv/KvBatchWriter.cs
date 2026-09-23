@@ -13,6 +13,7 @@ using Kommander.Time;
 using Microsoft.Extensions.Logging;
 using CamusDB.Core.Diagnostics;
 using CamusDB.Core.Transactions;
+using CamusDB.Core.Util.ObjectIds;
 
 namespace CamusDB.Core.Storage.Kv;
 
@@ -47,6 +48,7 @@ internal sealed class KvBatchWriter
     private readonly IKahuna kahuna;
     private readonly ILogger logger;
     private readonly KvKeyBuilder keys;
+    private readonly KvRangeLockManager locks;
     private readonly KvBranchReader branch;
     private readonly KahunaRetryPolicy retry;
     private readonly KvConflictMessageBuilder messages;
@@ -58,6 +60,7 @@ internal sealed class KvBatchWriter
         IKahuna kahuna,
         ILogger logger,
         KvKeyBuilder keys,
+        KvRangeLockManager locks,
         KvBranchReader branch,
         KahunaRetryPolicy retry,
         KvConflictMessageBuilder messages,
@@ -66,6 +69,7 @@ internal sealed class KvBatchWriter
         this.kahuna = kahuna;
         this.logger = logger;
         this.keys = keys;
+        this.locks = locks;
         this.branch = branch;
         this.retry = retry;
         this.messages = messages;
@@ -111,11 +115,19 @@ internal sealed class KvBatchWriter
         Dictionary<string, bool> uniqueByKey = new();       // root only
         HashSet<string> seenUnique = [];                    // within-batch duplicate guard (both paths)
 
+        // Keys this transaction read under a Shared point lock: upgraded before the write (see
+        // UpgradeSharedPointLocksAsync). A unique-index miss lookup point-locks the slot an insert fills.
+        bool upgradeReads = KvRangeLockManager.IsSerializableReadWrite(tx);
+        List<(string BucketPrefix, string Key)>? upgrades = null;
+
         foreach (KvTableStore.RowWrite row in rows)
         {
             string rowKey = keys.BuildRowKey(row.RowId);
             byte[] rowValue = row.RowData;   // already the enveloped storage value (EncodeStorageValue)
             lockKeys.Add((rowKey, 0, KeyValueDurability.Persistent));
+
+            if (upgradeReads)
+                CollectSharedPointLock(tx, keys.RowBucketPrefix, rowKey, ref upgrades);
 
             if (!isBranch)
             {
@@ -153,6 +165,9 @@ internal sealed class KvBatchWriter
                 if (ix.Unique && !seenUnique.Add(kvKey))
                     throw new CamusDBException(CamusDBErrorCodes.DuplicateUniqueKeyValue, $"Duplicate entry for key '{keys.DuplicateKeyLabel(ix.IndexId)}'");
 
+                if (upgradeReads)
+                    CollectSharedPointLock(tx, keys.BuildIndexBucketPrefix(ix.IndexId), kvKey, ref upgrades);
+
                 if (!isBranch)
                 {
                     // An include-only rewrite (Overwrite) targets an existing unique key owned by this
@@ -164,6 +179,8 @@ internal sealed class KvBatchWriter
         }
 
         tx.ReserveMutations(lockKeys.Count);
+
+        await UpgradeSharedPointLocksAsync(tx, upgrades, cancellationToken).ConfigureAwait(false);
 
         // Phase 1 — acquire every lock for the batch in one round-trip (retrying only transients).
         await AcquireManyWithRetry(tx, lockKeys, cancellationToken).ConfigureAwait(false);
@@ -312,17 +329,28 @@ internal sealed class KvBatchWriter
         Dictionary<string, bool> uniqueByKey = new();             // root only
         HashSet<string> seenUniqueNew = [];                        // within-batch new unique guard
 
-        void AddLockKey(string key)
+        // Keys this transaction read under a Shared point lock — the rows the write phase re-read,
+        // and any index slot it looked up — are upgraded before the write (see UpgradeSharedPointLocksAsync).
+        bool upgradeReads = KvRangeLockManager.IsSerializableReadWrite(tx);
+        List<(string BucketPrefix, string Key)>? upgrades = null;
+
+        // A null bucketPrefix marks a key no read path point-locks (large values), so it is never upgraded.
+        void AddLockKey(string key, string? bucketPrefix)
         {
-            if (seenLockKeys.Add(key))
-                lockKeys.Add((key, 0, KeyValueDurability.Persistent));
+            if (!seenLockKeys.Add(key))
+                return;
+
+            lockKeys.Add((key, 0, KeyValueDurability.Persistent));
+
+            if (upgradeReads && bucketPrefix is not null)
+                CollectSharedPointLock(tx, bucketPrefix, key, ref upgrades);
         }
 
         foreach (KvTableStore.RowUpdate row in rows)
         {
             string rowKey = keys.BuildRowKey(row.RowId);
             byte[] rowValue = row.NewRowData;   // already the enveloped storage value (EncodeStorageValue)
-            AddLockKey(rowKey);
+            AddLockKey(rowKey, keys.RowBucketPrefix);
 
             if (!isBranch)
             {
@@ -336,7 +364,7 @@ internal sealed class KvBatchWriter
             for (int v = 0; largeValues is not null && v < largeValues.Count; v++)
             {
                 string valueKey = keys.BuildLargeValueKey(row.RowId, largeValues[v].VariableOrdinal);
-                AddLockKey(valueKey);
+                AddLockKey(valueKey, null);
 
                 if (!isBranch)
                 {
@@ -349,7 +377,7 @@ internal sealed class KvBatchWriter
             for (int v = 0; largeValueDeletes is not null && v < largeValueDeletes.Count; v++)
             {
                 string valueKey = keys.BuildLargeValueKey(row.RowId, largeValueDeletes[v]);
-                AddLockKey(valueKey);
+                AddLockKey(valueKey, null);
 
                 if (!isBranch)
                     deleteItems.Add(new KahunaDeleteKeyValueRequestItem { TransactionId = tx.TransactionId, Key = valueKey, Durability = KeyValueDurability.Persistent });
@@ -364,7 +392,7 @@ internal sealed class KvBatchWriter
                 string kvKey = old.Unique
                     ? keys.BuildUniqueIndexKey(old.IndexId, old.Key)
                     : keys.BuildNonUniqueIndexKey(old.IndexId, old.Key, old.RowId);
-                AddLockKey(kvKey);
+                AddLockKey(kvKey, upgradeReads ? keys.BuildIndexBucketPrefix(old.IndexId) : null);
 
                 if (!isBranch)
                     deleteItems.Add(new KahunaDeleteKeyValueRequestItem { TransactionId = tx.TransactionId, Key = kvKey, Durability = KeyValueDurability.Persistent });
@@ -381,7 +409,7 @@ internal sealed class KvBatchWriter
                 if (newIx.Unique && !seenUniqueNew.Add(kvKey))
                     throw new CamusDBException(CamusDBErrorCodes.DuplicateUniqueKeyValue, $"Duplicate entry for key '{keys.DuplicateKeyLabel(newIx.IndexId)}'");
 
-                AddLockKey(kvKey);
+                AddLockKey(kvKey, upgradeReads ? keys.BuildIndexBucketPrefix(newIx.IndexId) : null);
 
                 if (!isBranch)
                 {
@@ -394,6 +422,8 @@ internal sealed class KvBatchWriter
         }
 
         tx.ReserveMutations(lockKeys.Count);
+
+        await UpgradeSharedPointLocksAsync(tx, upgrades, cancellationToken).ConfigureAwait(false);
 
         // Phase 1 — acquire every exclusive lock in one round-trip.
         await AcquireManyWithRetry(tx, lockKeys, cancellationToken).ConfigureAwait(false);
@@ -513,6 +543,38 @@ internal sealed class KvBatchWriter
         tx.TrackModifiedRange(lockKeys, KeyValueDurability.Persistent);
     }
 
+    /// <summary>
+    /// Takes the exclusive lock on every row key of a mutation chunk, in one round trip, before the
+    /// write phase reads those rows. See <see cref="KvTableStore.LockAndReadRowsForMutationAsync"/>.
+    ///
+    /// <para>Only a pessimistic transaction below Serializable locks here. An optimistic transaction
+    /// takes no explicit locks (its folded reads are validated at commit), and a Serializable read-write
+    /// transaction already holds a shared point lock from its read until commit, and the write upgrades
+    /// it to exclusive (<see cref="UpgradeSharedPointLocksAsync"/>), so its path is unchanged. The locks join the coordinator working set like every other
+    /// exclusive point lock, and the later <see cref="UpdateRowsBatch"/> or <see cref="DeleteRowsBatch"/>
+    /// asks for the same keys again under the same transaction.</para>
+    /// </summary>
+    internal async Task AcquireRowLocksForMutationAsync(KvTransaction tx, IReadOnlyList<ObjectIdValue> rowIds, CancellationToken cancellationToken = default)
+    {
+        if (rowIds.Count == 0)
+            return;
+
+        if (tx.Locking == KeyValueTransactionLocking.Optimistic || KvRangeLockManager.IsSerializableReadWrite(tx))
+            return;
+
+        HashSet<string> seen = new(rowIds.Count, StringComparer.Ordinal);
+        List<(string key, int expiresMs, KeyValueDurability durability)> lockKeys = new(rowIds.Count);
+
+        for (int i = 0; i < rowIds.Count; i++)
+        {
+            string rowKey = keys.BuildRowKey(rowIds[i]);
+            if (seen.Add(rowKey))
+                lockKeys.Add((rowKey, 0, KeyValueDurability.Persistent));
+        }
+
+        await AcquireManyWithRetry(tx, lockKeys, cancellationToken).ConfigureAwait(false);
+    }
+
     // -----------------------------------------------------------------------
     // Batched delete path (mass delete / drop index / drop table)
     // -----------------------------------------------------------------------
@@ -537,9 +599,18 @@ internal sealed class KvBatchWriter
 
         List<string> deleteKeys = [];
 
+        // Rows the write phase re-read, and index slots a lookup read, carry this transaction's Shared
+        // point locks; they are upgraded before the delete (see UpgradeSharedPointLocksAsync).
+        bool upgradeReads = KvRangeLockManager.IsSerializableReadWrite(tx);
+        List<(string BucketPrefix, string Key)>? upgrades = null;
+
         foreach (KvTableStore.RowDelete row in rows)
         {
-            deleteKeys.Add(keys.BuildRowKey(row.RowId));
+            string rowKey = keys.BuildRowKey(row.RowId);
+            deleteKeys.Add(rowKey);
+
+            if (upgradeReads)
+                CollectSharedPointLock(tx, keys.RowBucketPrefix, rowKey, ref upgrades);
 
             IReadOnlyList<int>? largeValueOrdinals = row.LargeValueOrdinals;
             for (int v = 0; largeValueOrdinals is not null && v < largeValueOrdinals.Count; v++)
@@ -549,13 +620,19 @@ internal sealed class KvBatchWriter
             for (int e = 0; indexEntries is not null && e < indexEntries.Count; e++)
             {
                 KvTableStore.IndexDelete ix = indexEntries[e];
-                deleteKeys.Add(ix.Unique
+                string kvKey = ix.Unique
                     ? keys.BuildUniqueIndexKey(ix.IndexId, ix.Key)
-                    : keys.BuildNonUniqueIndexKey(ix.IndexId, ix.Key, ix.RowId));
+                    : keys.BuildNonUniqueIndexKey(ix.IndexId, ix.Key, ix.RowId);
+                deleteKeys.Add(kvKey);
+
+                if (upgradeReads)
+                    CollectSharedPointLock(tx, keys.BuildIndexBucketPrefix(ix.IndexId), kvKey, ref upgrades);
             }
         }
 
         tx.ReserveMutations(deleteKeys.Count);
+
+        await UpgradeSharedPointLocksAsync(tx, upgrades, cancellationToken).ConfigureAwait(false);
 
         if (branch.IsBranch)
         {
@@ -658,6 +735,57 @@ internal sealed class KvBatchWriter
     // -----------------------------------------------------------------------
     // Shared batch primitives
     // -----------------------------------------------------------------------
+
+    /// <summary>
+    /// Records <paramref name="key"/> for an S→X upgrade when the transaction holds a Shared point
+    /// lock on it. Call it only for a Serializable read-write transaction, and only for a key in a
+    /// bucket that a read path point-locks (rows and index entries, never large values).
+    /// </summary>
+    private static void CollectSharedPointLock(
+        KvTransaction tx,
+        string bucketPrefix,
+        string key,
+        ref List<(string BucketPrefix, string Key)>? upgrades)
+    {
+        if (KvRangeLockManager.HasSharedPointLock(tx, bucketPrefix, key))
+            (upgrades ??= []).Add((bucketPrefix, key));
+    }
+
+    /// <summary>
+    /// Upgrades to Exclusive every Shared point lock that a batch is about to write, before the batch
+    /// takes its key locks or sends its sets. This is the batched form of the upgrade that
+    /// <see cref="KvRowAccessor.WriteRow"/> and the <see cref="KvIndexAccessor"/> write paths make per key.
+    ///
+    /// <para><b>Why a batch must upgrade.</b> A Serializable read-write transaction holds a Shared point
+    /// lock on each key it read, until commit. Shared locks are compatible, so two transactions can both
+    /// read the same row. Kahuna refuses a set into a key under a foreign range lock of any mode, and the
+    /// refusal is <c>MustRetry</c> with no holder. If both transactions sent their sets without an
+    /// upgrade, each set would wait for the other's Shared lock, and that lock stays until its owner
+    /// ends. Neither can go first, so both wait out the whole lock-wait deadline. An optimistic
+    /// transaction takes no exclusive key lock that could break the tie, so for it every such conflict
+    /// cost the full deadline.</para>
+    ///
+    /// <para><b>How the upgrade breaks the tie.</b> The upgrade is an Exclusive range-lock acquire. Kahuna
+    /// refuses it with <c>AlreadyLocked</c> and names the holder, so
+    /// <see cref="KvRangeLockManager"/> applies wait-die: a younger requester aborts at once with
+    /// <see cref="CamusDBErrorCodes.TransactionConflict"/> and releases its Shared lock, and an older one
+    /// waits for the younger to end. A successful upgrade replaces the Shared entry in the transaction's
+    /// lock tracking, so a later write to the same key does not upgrade again.</para>
+    ///
+    /// <para>A key covered only by an escalated whole-bucket Shared lock has no point entry and is not
+    /// upgraded, the same as on the per-row paths.</para>
+    /// </summary>
+    private async Task UpgradeSharedPointLocksAsync(
+        KvTransaction tx,
+        List<(string BucketPrefix, string Key)>? upgrades,
+        CancellationToken cancellationToken)
+    {
+        if (upgrades is null)
+            return;
+
+        for (int i = 0; i < upgrades.Count; i++)
+            await locks.UpgradeToExclusivePointLockAsync(tx, upgrades[i].BucketPrefix, upgrades[i].Key, cancellationToken).ConfigureAwait(false);
+    }
 
     /// <summary>
     /// Locks and physically deletes an arbitrary key list in two round-trips. Callers must have

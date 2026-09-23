@@ -389,8 +389,9 @@ public sealed class KvTransaction
     /// <para><b>What this does not change.</b> Point reads keep the transaction id: they are the
     /// read-modify-write shape, and the pin they record is what makes a later write to the same key
     /// under pessimistic locking abort instead of overwriting a value another transaction committed in
-    /// between. Update and delete statements re-read the rows they modify under lock
-    /// (<c>GetRowsBatchLockedForMutation</c>) before writing, so the rows their locating scan yielded
+    /// between (a guard that is not reliable across nodes, so no correctness path depends on it). Update
+    /// and delete statements lock the rows they modify and then read them again
+    /// (<c>KvTableStore.LockAndReadRowsForMutationAsync</c>) before writing, so the rows their locating scan yielded
     /// are validated by that locked read, never by the scan. Under Read Committed a row a scan
     /// returned is therefore not pinned for the rest of the transaction, which is precisely the
     /// non-repeatable read that level permits (see §9.2 of the isolation guide).</para>

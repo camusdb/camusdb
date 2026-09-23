@@ -53,13 +53,10 @@ internal sealed class QueryScanner
     /// memory than the projected-only slot path; those shapes keep the existing decode. The global
     /// <see cref="CamusDBOptions.BorrowedDecode"/> override still forces it on everywhere for A/B runs.
     /// <para>
-    /// The DML locate buffers (DELETE, and UPDATE with plain values) are deliberately absent from the
-    /// retaining-step list: they buffer row-id-only records — the mutation phase re-reads every row
-    /// under its lock — so a borrowed row never outlives the locate scan there, and the reject-side
-    /// win of borrowed decode is kept for DML scans. The exception is an expression-SET UPDATE: its
-    /// buffer must keep the scanned rows because their values feed the SET evaluation, so a matched
-    /// borrowed row does live until the statement's mutation phase there — an accepted retention,
-    /// bounded by the match set.
+    /// The DML locate buffers (DELETE and UPDATE) are deliberately absent from the retaining-step
+    /// list: they buffer row-id-only records — the mutation phase locks every row, reads it again and
+    /// evaluates the SET expressions against that read — so a borrowed row never outlives the locate
+    /// scan there, and the reject-side win of borrowed decode is kept for DML scans.
     /// </para>
     /// </summary>
     internal static bool ShouldUseBorrowedDecode(QueryPlan plan)

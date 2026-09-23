@@ -128,7 +128,7 @@ internal static class RequiredColumnAnalyzer
     }
 
     /// <summary>Returns true if <paramref name="expr"/> or any descendant is a subquery node.</summary>
-    private static bool ContainsSubqueryNode(NodeAst expr)
+    internal static bool ContainsSubqueryNode(NodeAst expr)
     {
         return expr.nodeType is NodeType.ExprExistsSubquery
             or NodeType.ExprExistsCorrelated

@@ -297,13 +297,12 @@ public sealed class RowUpdater
     {
         UpdateTicket ticket = state.Ticket;
 
-        // Restrict scan-time decode to columns needed by the WHERE filter and any
-        // expression-based SET values (e.g. SET col = old_col + 1). Rejected candidates
-        // are only partially decoded. The write phase batch-loads full rows from raw bytes
-        // and decodes them. Returns null when the WHERE contains subquery nodes — fall back
-        // to full decode.
+        // Restrict scan-time decode to the columns the WHERE filter needs. The SET expressions are
+        // evaluated in the write phase, on the row it reads after it locks the row, so their columns
+        // are not needed here. Returns null when the WHERE contains subquery nodes — fall back to
+        // full decode.
         IReadOnlySet<string>? locateColumns = RequiredColumnAnalyzer.ComputeForLocate(
-            ticket.Where, ticket.Filters, ticket.ExprValues);
+            ticket.Where, ticket.Filters, exprValues: null);
 
         QueryTicket queryTicket = new(
             txnState: ticket.TxnState,
@@ -324,28 +323,22 @@ public sealed class RowUpdater
 
         IAsyncEnumerable<QueryResultRow> cursor = state.QueryExecutor.Query(state.Database, state.Table, queryTicket);
 
-        // A plain-values update never reads the located row's values: the write phase re-reads and
-        // decodes every row from raw bytes under its lock, and the new cells come from the ticket.
-        // So its buffer keeps row-id-only records — retaining the scanned row would pin, per match,
-        // the decoded values (and for a borrowed-backed row its full KV bytes) for the life of the
-        // buffer, and would spill those values when the buffer overflows to disk. An expression-SET
-        // update must keep the scanned row: its values feed SqlExecutor.EvalExpr, and the locate
-        // columns already include the SET expression columns. The scan still runs to completion and
-        // the list still seals before the first mutation, so the full match set is fixed up front
-        // (Halloween barrier) exactly as before.
-        bool keepScannedValues = ticket.PlainValues is null;
-
+        // The buffer keeps row-id-only records. The write phase never reads the located row's values:
+        // it locks each row, reads it again, re-checks the predicate and evaluates every SET expression
+        // against that locked read (see FlushUpdateChunk). Retaining the scanned row would pin, per
+        // match, the decoded values (and for a borrowed-backed row its full KV bytes) for the life of
+        // the buffer, and would spill those values when the buffer overflows to disk. The scan still
+        // runs to completion and the list still seals before the first mutation, so the full match set
+        // is fixed up front (Halloween barrier).
         SpillableRowList rowList = new(QueryExecutionContext.For(state.Database, queryTicket));
-        
+
         await foreach (QueryResultRow row in cursor.ConfigureAwait(false))
-        {
-            QueryResultRow record = keepScannedValues ? row : new(row.RowId, QueryResultRow.EmptyRow);
-            await rowList.AddAsync(record).ConfigureAwait(false);
-        }
-        
+            await rowList.AddAsync(new(row.RowId, QueryResultRow.EmptyRow)).ConfigureAwait(false);
+
         await rowList.SealAsync().ConfigureAwait(false);
-        
+
         state.RowsToUpdate = rowList;
+        state.LocateTicket = queryTicket;
 
         return FluxAction.Continue;
     }
@@ -427,9 +420,16 @@ public sealed class RowUpdater
         }
     }
 
+    /// <summary>
+    /// Builds the new image of a row. Every SET expression is evaluated against
+    /// <paramref name="currentRow"/>, the row the write phase read after it locked the row, and never
+    /// against the row the locate scan returned. The locate read holds no lock at Read Committed, so a
+    /// transaction that committed between the two reads would otherwise be overwritten by a value
+    /// computed from the older row: <c>SET v = concat(v, 'x')</c> would drop the other append.
+    /// Expressions read the old image only, so <c>SET a = b, b = a</c> swaps the two values.
+    /// </summary>
     private static Dictionary<string, ColumnValue> GetNewUpdatedRow(
         Dictionary<string, ColumnValue> currentRow,
-        QueryResultRow queryRow,
         UpdateTicket ticket
     )
     {
@@ -451,7 +451,7 @@ public sealed class RowUpdater
         if (ticket.ExprValues is not null)
         {
             foreach (KeyValuePair<string, NodeAst> keyValuePair in ticket.ExprValues)
-                rowValues[keyValuePair.Key] = SqlExecutor.EvalExpr(keyValuePair.Value, queryRow.Row, ticket.Parameters);
+                rowValues[keyValuePair.Key] = SqlExecutor.EvalExpr(keyValuePair.Value, currentRow, ticket.Parameters);
 
             return rowValues;
         }
@@ -459,9 +459,16 @@ public sealed class RowUpdater
         throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Invalid values in update ticket");
     }
 
+    /// <summary>
+    /// Test-only interleaving hook, awaited after the locate scan has chosen a chunk's rows and before the write phase
+    /// locks and reads them again. Lets a test commit a competing update inside that window, which no external caller can
+    /// time deterministically. Null (zero-cost) in production.
+    /// </summary>
+    internal Func<Task>? TestBeforeWriteHook;
+
     private async Task<FluxAction> UpdateRowsAndIndexes(UpdateFluxState state)
     {
-        if (state.RowsToUpdate is null)
+        if (state.RowsToUpdate is null || state.LocateTicket is null)
         {
             logger.LogWarning("Invalid rows to update");
             return FluxAction.Abort;
@@ -471,6 +478,11 @@ public sealed class RowUpdater
         UpdateTicket ticket = state.Ticket;
         KvTransaction tx = ticket.TxnState;
 
+        // The predicate and every SET expression are evaluated against the locked read, so the columns
+        // they reference must be decoded even on a row that carries its untouched large values.
+        MutationRowRecheck recheck = MutationRowRecheck.Build(table.Schema, ticket.Where, ticket.Filters);
+        IReadOnlySet<string>? evaluatedColumns = CollectEvaluatedColumns(table.Schema, ticket, recheck);
+
         // Drain the matched-row buffer in bounded chunks so the heap retains at most chunkSize
         // writable rows and their index mutation sets simultaneously. Mirrors the delete path.
         int chunkSize = state.Database.Options.SpillEffectiveThreshold;
@@ -478,10 +490,9 @@ public sealed class RowUpdater
 
         await foreach (QueryResultRow queryRow in state.RowsToUpdate.EnumerateAsync().ConfigureAwait(false))
         {
-            // Drain-time retention check: a plain-values update buffers row-id-only records, so a
-            // drained record with columns on that path means the locate phase retained scanned
-            // values it must not. An expression-SET update legitimately drains its locate columns.
-            // Reading Count on a lazy row is a layout lookup — it materializes nothing.
+            // Drain-time retention check: the buffer holds row-id-only records, so a drained record
+            // with columns means the locate phase retained scanned values it must not. Reading Count
+            // on a lazy row is a layout lookup — it materializes nothing.
             if (_stats is not null && queryRow.Row.Count > _stats.DmlLocateBufferMaxColumnsSeen)
                 _stats.DmlLocateBufferMaxColumnsSeen = queryRow.Row.Count;
 
@@ -489,35 +500,79 @@ public sealed class RowUpdater
 
             if (chunkRows.Count >= chunkSize)
             {
-                await FlushUpdateChunk(table, tx, ticket, chunkRows, state).ConfigureAwait(false);
+                await FlushUpdateChunk(table, tx, ticket, chunkRows, state, recheck, evaluatedColumns).ConfigureAwait(false);
                 chunkRows.Clear();
             }
         }
 
         if (chunkRows.Count > 0)
-            await FlushUpdateChunk(table, tx, ticket, chunkRows, state).ConfigureAwait(false);
+            await FlushUpdateChunk(table, tx, ticket, chunkRows, state, recheck, evaluatedColumns).ConfigureAwait(false);
 
         return FluxAction.Continue;
     }
 
+    /// <summary>
+    /// The schema-cased columns that the write phase evaluates on the locked read: the re-checked
+    /// predicate's columns and the columns every SET expression reads. Null means every column, which
+    /// is the answer whenever one of them cannot be named exactly (a subquery left in a SET expression,
+    /// a name that is not a column of the current schema).
+    /// </summary>
+    private static IReadOnlySet<string>? CollectEvaluatedColumns(TableSchema schema, UpdateTicket ticket, MutationRowRecheck recheck)
+    {
+        if (recheck.Columns is null)
+            return null;
+
+        HashSet<string> referenced = new(recheck.Columns, StringComparer.OrdinalIgnoreCase);
+
+        if (ticket.ExprValues is not null)
+        {
+            foreach (KeyValuePair<string, NodeAst> entry in ticket.ExprValues)
+            {
+                if (RequiredColumnAnalyzer.ContainsSubqueryNode(entry.Value))
+                    return null;
+
+                QueryExpressionWalker.CollectColumnReferences(entry.Value, referenced);
+            }
+        }
+
+        return MutationRowRecheck.ToSchemaColumns(schema, referenced);
+    }
+
+    /// <summary>
+    /// Updates one chunk of located rows. The order is the fix for a lost update at Read Committed, and
+    /// it must be kept: <b>lock, then read, then re-check, then compute, then write</b>.
+    ///
+    /// <para>The locate scan reads without a lock. If the write phase computed <c>SET v = f(v)</c> from
+    /// a row it read before it held the row's exclusive lock, a transaction that committed in between
+    /// would be overwritten by a value computed from the older row, and both transactions would
+    /// commit. <see cref="KvTableStore.LockAndReadRowsForMutationAsync"/> takes the exclusive row locks
+    /// before the read, so the read returns the latest committed row and no other writer can change it
+    /// until this transaction ends. The predicate is then evaluated again on that row
+    /// (<see cref="MutationRowRecheck"/>): a row that a concurrent commit moved out of the WHERE, or
+    /// deleted, is skipped and not counted. The old index entries also come from that read, so a
+    /// concurrent change of an indexed column cannot leave a stale entry behind.</para>
+    /// </summary>
     private async Task FlushUpdateChunk(
         TableDescriptor table,
         KvTransaction tx,
         UpdateTicket ticket,
         List<QueryResultRow> chunkRows,
-        UpdateFluxState state)
+        UpdateFluxState state,
+        MutationRowRecheck recheck,
+        IReadOnlySet<string>? evaluatedColumns)
     {
-        // Batch-load row bytes for the whole chunk in one Kahuna round-trip. Uses the lock-acquiring
-        // batch read so a Serializable+RW update holds the same shared point locks on the read rows that
-        // a per-row GetRow would — without them, an index-scan-located update could read a row lock-free
-        // and miss a concurrent commit, deleting a stale index entry. The bytes are read raw: which
-        // large values to fetch is decided per row below.
         List<ObjectIdValue> rowIds = new(chunkRows.Count);
-        
+
         for (int i = 0; i < chunkRows.Count; i++)
             rowIds.Add(chunkRows[i].RowId);
-        
-        ReadOnlyMemory<byte>?[] rawRows = await table.Store.GetRowsBatchLockedForMutation(tx, rowIds, default, LargeValueFetch.Raw).ConfigureAwait(false);
+
+        // Test-only interleaving point; see TestBeforeWriteHook. Read once so a concurrent clear cannot fault it.
+        if (TestBeforeWriteHook is { } beforeWriteHook)
+            await beforeWriteHook().ConfigureAwait(false);
+
+        // Lock the chunk's row keys, then batch-load their bytes in one Kahuna round trip. The bytes are
+        // read raw: which large values to fetch is decided per row below.
+        ReadOnlyMemory<byte>?[] rawRows = await table.Store.LockAndReadRowsForMutationAsync(tx, rowIds, default, LargeValueFetch.Raw).ConfigureAwait(false);
 
         // The rewritten row is stored under the current schema version, so its positional layout is
         // fixed for the whole chunk. Compiled once here rather than per row.
@@ -529,7 +584,7 @@ public sealed class RowUpdater
         // so filter once per chunk instead of re-evaluating per index per row.
         List<TableIndexSchema> writableIndexes = SchemaElementStateRules.CollectWritableIndexes(table.Schema, table.Indexes);
 
-        UpdateCarryPlan carry = UpdateCarryPlan.Build(table, ticket, writableIndexes);
+        UpdateCarryPlan carry = UpdateCarryPlan.Build(table, ticket, writableIndexes, evaluatedColumns);
         
         (ReadOnlyMemory<byte>?[] oldRows, ReadOnlyMemory<byte>?[] storedRows, List<int>?[] oldOutOfLine, bool[] carried) =
             await ResolveRowsForUpdateAsync(table, tx, rowIds, rawRows, carry).ConfigureAwait(false);
@@ -544,12 +599,14 @@ public sealed class RowUpdater
 
         for (int i = 0; i < chunkRows.Count; i++)
         {
-            QueryResultRow queryRow = chunkRows[i];
-            ObjectIdValue rowId = queryRow.RowId;
+            ObjectIdValue rowId = chunkRows[i].RowId;
             ReadOnlyMemory<byte>? rawData = oldRows[i];
 
+            // A concurrent transaction deleted the row and committed after the locate scan chose it.
+            // There is nothing left to update, which is what the statement would have seen had it
+            // started later.
             if (rawData is null || rawData.Value.Length == 0)
-                throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, $"Row '{rowId}' disappeared before update");
+                continue;
 
             Dictionary<string, ColumnValue> oldRow = await RowEncoder.DecodeWritableAsync(
                 table.Schema, tx.TransactionId, rowId, rawData.Value,
@@ -558,7 +615,12 @@ public sealed class RowUpdater
                 decodeState: carried[i] ? carryDecodeState : decodeState
             ).ConfigureAwait(false);
 
-            Dictionary<string, ColumnValue> newRow = GetNewUpdatedRow(oldRow, queryRow, ticket);
+            // A concurrent commit changed the row after the locate scan chose it, and it no longer
+            // matches the statement's predicate.
+            if (!recheck.IsEmpty && !await recheck.MatchesAsync(state.QueryExecutor, state.Database, state.LocateTicket!, oldRow).ConfigureAwait(false))
+                continue;
+
+            Dictionary<string, ColumnValue> newRow = GetNewUpdatedRow(oldRow, ticket);
 
             CoerceRowValues(table, newRow);
             CheckForNotNulls(table, newRow);
@@ -602,8 +664,9 @@ public sealed class RowUpdater
     ///   <c>string</c>, <c>bytes</c> or array column the statement does not assign. Its value cannot
     ///   change, so its stored form stays valid.</item>
     ///   <item><b>Decode</b>: every column that is not carried, plus a carried column that a writable
-    ///   index uses as a key or INCLUDE column or that a CHECK constraint reads. The update compares or
-    ///   re-validates those values, so they are resolved, but the stored cell is still carried.</item>
+    ///   index uses as a key or INCLUDE column, that a CHECK constraint reads, or that the re-checked
+    ///   predicate or a SET expression reads. The update compares, re-validates or evaluates those
+    ///   values, so they are resolved, but the stored cell is still carried.</item>
     /// </list>
     /// A column that must be decoded is not a reason to write its large value again: a CHECK on a large
     /// column would otherwise make every small update rewrite the large value.
@@ -624,7 +687,11 @@ public sealed class RowUpdater
 
         public bool IsEmpty => CarriedVariableOrdinals.Count == 0;
 
-        public static UpdateCarryPlan Build(TableDescriptor table, UpdateTicket ticket, List<TableIndexSchema> writableIndexes)
+        /// <param name="evaluatedColumns">
+        /// The columns the write phase evaluates on the locked read (predicate re-check and SET
+        /// expressions), in schema case; null means every column.
+        /// </param>
+        public static UpdateCarryPlan Build(TableDescriptor table, UpdateTicket ticket, List<TableIndexSchema> writableIndexes, IReadOnlySet<string>? evaluatedColumns)
         {
             HashSet<string> assigned = new(StringComparer.OrdinalIgnoreCase);
 
@@ -648,6 +715,17 @@ public sealed class RowUpdater
             }
 
             List<TableColumnSchema> columns = table.Schema.Columns!;
+
+            if (evaluatedColumns is null)
+            {
+                foreach (TableColumnSchema column in columns)
+                    validated.Add(column.Name);
+            }
+            else
+            {
+                validated.UnionWith(evaluatedColumns);
+            }
+
             bool[] mask = new bool[columns.Count];
             HashSet<int> carriedOrdinals = [];
             HashSet<string> decoded = new(StringComparer.Ordinal);

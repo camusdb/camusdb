@@ -938,7 +938,7 @@ public static class PredicateAnalyzer
         }
     }
 
-    private static NodeAst BuildFilterConjunct(QueryFilter filter)
+    internal static NodeAst BuildFilterConjunct(QueryFilter filter)
     {
         NodeAst column = new(
             NodeType.Identifier,

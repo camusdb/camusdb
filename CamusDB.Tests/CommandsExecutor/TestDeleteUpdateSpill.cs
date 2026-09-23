@@ -43,8 +43,8 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// </para>
 ///
 /// <para>
-/// The row-id-only tests additionally lock the buffered representation: DELETE and plain-values
-/// UPDATE buffer row-id-only records (the mutation phase re-reads each row under its lock), so a
+/// The row-id-only tests additionally lock the buffered representation: DELETE and UPDATE buffer
+/// row-id-only records (the mutation phase locks each row and reads it again), so a
 /// match on a wide column must not retain the scanned values — in memory or in a spill file. The
 /// observable is <c>StatisticsManager.DmlLocateBufferMaxColumnsSeen</c>, measured when the
 /// mutation phase drains the buffer.
@@ -512,22 +512,21 @@ public sealed class TestDeleteUpdateSpill : SharedNodeBaseTest
     }
 
     /// <summary>
-    /// Negative control for the drain-time retention counter: an expression-SET UPDATE must keep
-    /// its scanned locate columns (they feed the SET evaluation), so the counter observes a
-    /// positive column count. This proves the counter actually measures the drained records —
-    /// the zero asserted by the row-id-only tests is a real zero, not a dead counter.
+    /// An expression-SET UPDATE also buffers row-id-only records: the write phase evaluates every SET
+    /// expression against the row it reads after it locks the row, never against the scanned row,
+    /// so the scanned values are dead weight. The expression must still see the columns it reads,
+    /// which the value check below proves.
     /// </summary>
     [Test]
-    public async Task UpdateExprValues_LocateBufferRetainsScannedColumns()
+    public async Task UpdateExprValues_LocateBufferIsRowIdOnly()
     {
         Fixture f = await SetupWideTable(SpillOff, 10);
         f.Executor.Statistics.DmlLocateBufferMaxColumnsSeen = 0;
 
         await RunNonQueryParams(f, "UPDATE wide SET value = value + 100 WHERE payload = @p", PayloadParam('A'));
 
-        Assert.That(f.Executor.Statistics.DmlLocateBufferMaxColumnsSeen, Is.GreaterThan(0),
-            "An expression-SET UPDATE buffers its locate columns; a zero here means the " +
-            "retention counter is not observing the drained records.");
+        Assert.That(f.Executor.Statistics.DmlLocateBufferMaxColumnsSeen, Is.EqualTo(0),
+            "An expression-SET UPDATE must not retain the scanned values in its locate buffer.");
 
         List<QueryResultRow> bumped = await RunQuery(f, "SELECT value FROM wide WHERE value >= 100");
         Assert.That(bumped.Count, Is.EqualTo(5), "The expression SET must still update the matched rows.");

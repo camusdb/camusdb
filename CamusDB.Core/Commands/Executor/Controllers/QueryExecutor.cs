@@ -113,6 +113,18 @@ internal sealed class QueryExecutor
     /// </summary>
     internal QueryJoinExecutor JoinExecutor => queryJoinExecutor;
 
+    /// <summary>
+    /// Evaluates an UPDATE or DELETE predicate against a row that the write phase read after it
+    /// locked the row. Uses the same filter as the locate scan, so both reads of one row are judged
+    /// by one rule. See <see cref="MutationRowRecheck"/>.
+    /// </summary>
+    internal ValueTask<bool> MeetMutationPredicateAsync(
+        NodeAst predicate,
+        IReadOnlyDictionary<string, ColumnValue> row,
+        QueryTicket locateTicket,
+        DatabaseDescriptor database)
+        => queryFilterer.MeetWhereAsync(predicate, row, locateTicket, database);
+
     /// <param name="metaOut">
     /// Optional holder populated with cache resolution metadata after the returned cursor is
     /// fully drained. Pass a <see cref="CacheMetadataHolder"/> instance when the caller needs

@@ -402,9 +402,8 @@ public sealed class TestSerializableAnomalies : SharedNodeBaseTest
     //
     // Mechanism: TxA reads alice (S lock on alice's row). TxB reads alice (S lock, S∩S fine).
     // TxA's UPDATE alice needs to upgrade S→X on alice's row — TxB holds S, so the upgrade is
-    // refused and surfaces as a serialization conflict (the batched write path reports it as
-    // TransactionMustRetry after exhausting its bounded lock-wait; the single-key path reports it
-    // as TransactionConflict — both are the same retryable conflict class). TxA aborts. TxB can
+    // refused. TxA is the older transaction, so wait-die lets it wait for TxB; TxB never ends in
+    // this test, so the wait runs out and surfaces as TransactionConflict. TxA aborts. TxB can
     // then update bob (its S lock on bob has no competitor once TxA is gone) and commit.
     // Final: alice=100, bob=-50, total=50 >= 0.
     // -----------------------------------------------------------------------
@@ -432,10 +431,9 @@ public sealed class TestSerializableAnomalies : SharedNodeBaseTest
         // TxA tries to update alice: S→X upgrade on alice's row — but TxB holds S on alice.
         CamusDBException? ex = Assert.ThrowsAsync<CamusDBException>(
             () => UpdateBalanceAsync(dbname, executor, txA, aliceId, -50L));
-        // S→X upgrade against a foreign shared lock surfaces as a retryable serialization conflict.
-        // The batched write path reports TransactionMustRetry (bounded lock-wait exhausted); the
-        // single-key path reports TransactionConflict. Both belong to the retryable conflict class.
-        Assert.That(ex?.Code, Is.AnyOf(CamusDBErrorCodes.TransactionConflict, CamusDBErrorCodes.TransactionMustRetry),
+        // The batched write path upgrades the shared lock before it writes, so a refused upgrade is
+        // the same TransactionConflict the single-key path reports.
+        Assert.AreEqual(CamusDBErrorCodes.TransactionConflict, ex?.Code,
             "TxA's write to alice must fail with a serialization conflict because TxB holds a shared lock on alice");
 
         await db.Transactions.RollbackAsync(txA);
@@ -460,9 +458,8 @@ public sealed class TestSerializableAnomalies : SharedNodeBaseTest
     // 7. Serializable+RW prevents lost updates
     //
     // Both TxA and TxB read K=100 (S point locks acquired).
-    // TxA tries to write K=999 → S→X upgrade conflict with TxB's S lock → a retryable
-    // serialization conflict (TransactionMustRetry via the batched write path, or
-    // TransactionConflict via the single-key path). TxA aborts. TxB writes K=999 successfully.
+    // TxA tries to write K=999 → S→X upgrade conflict with TxB's S lock → TransactionConflict
+    // once TxA's wait for the younger TxB runs out. TxA aborts. TxB writes K=999 successfully.
     // Under Read Committed both might see 100 and write 999, but the "lost update"
     // scenario with increments (both read 100, both increment by 1 → result should be 102
     // but RC gives 101) is prevented: one writer aborts, the other's effect is preserved.
@@ -488,10 +485,8 @@ public sealed class TestSerializableAnomalies : SharedNodeBaseTest
         // TxA tries to write: S→X upgrade blocked by TxB's S on alice's row.
         CamusDBException? ex = Assert.ThrowsAsync<CamusDBException>(
             () => UpdateBalanceAsync(dbname, executor, txA, aliceId, 999L));
-        // The upgrade conflict surfaces as a retryable serialization conflict: TransactionMustRetry
-        // from the batched write path (bounded lock-wait exhausted) or TransactionConflict from the
-        // single-key path. Both are in the retryable conflict class the autocommit helper retries on.
-        Assert.That(ex?.Code, Is.AnyOf(CamusDBErrorCodes.TransactionConflict, CamusDBErrorCodes.TransactionMustRetry),
+        // The upgrade conflict surfaces as TransactionConflict, which the autocommit helper retries.
+        Assert.AreEqual(CamusDBErrorCodes.TransactionConflict, ex?.Code,
             "Lost-update write must fail: TxA cannot upgrade its S lock while TxB holds S on the same row");
 
         await db.Transactions.RollbackAsync(txA);
@@ -567,5 +562,59 @@ public sealed class TestSerializableAnomalies : SharedNodeBaseTest
 
         await db.Transactions.RollbackAsync(txB);
         await db.Transactions.CommitAsync(txA);
+    }
+
+    // -----------------------------------------------------------------------
+    // 9. Two writers of one row resolve at once — no lock-wait deadline
+    //
+    // TxA and TxB both read alice, so both hold S on her row (S∩S compatible). Both then UPDATE
+    // her. Each write must first upgrade S→X, and each upgrade is refused by the other's S lock.
+    // Without the upgrade each set would wait for the other's S lock, which neither releases before
+    // it ends, and both would spend the whole lock-wait deadline before failing. With it, wait-die
+    // decides: TxB, the younger, fails at once with TransactionConflict and releases its lock, and
+    // TxA, the older, waits for that and then writes. This is the shape of two concurrent
+    // read-modify-write appends to one hot key, and it must hold for optimistic transactions too,
+    // which take no exclusive key lock that could break the tie.
+    // -----------------------------------------------------------------------
+
+    [Test]
+    public async Task SerializableRW_TwoWritersOfOneRow_YoungerAbortsAtOnceOlderCommits()
+    {
+        (string dbname, DatabaseDescriptor db, CommandExecutor executor, string aliceId, _) =
+            await SetupAccountsAsync();
+
+        KvTransaction txA = await db.Transactions.BeginAsync(
+            CamusIsolationLevel.Serializable, CamusTransactionMode.ReadWrite);
+        KvTransaction txB = await db.Transactions.BeginAsync(
+            CamusIsolationLevel.Serializable, CamusTransactionMode.ReadWrite);
+
+        // TxA reads first, so its session — and its wait-die age — starts first: TxA is older.
+        Assert.AreEqual(100L, await ReadBalanceAsync(dbname, executor, txA, aliceId));
+        Assert.AreEqual(100L, await ReadBalanceAsync(dbname, executor, txB, aliceId));
+        Assert.Less(txA.TransactionId.CompareTo(txB.TransactionId), 0, "TxA must be the older transaction");
+
+        // TxA's write waits for TxB's shared lock (older waits for younger).
+        Task<UpdateResult> writeA = UpdateBalanceAsync(dbname, executor, txA, aliceId, 111L);
+
+        // TxB's write is refused at once by TxA's shared lock (younger dies).
+        CamusDBException? ex = Assert.ThrowsAsync<CamusDBException>(
+            () => UpdateBalanceAsync(dbname, executor, txB, aliceId, 222L));
+
+        // TransactionMustRetry here would mean the write waited out the lock-wait deadline.
+        Assert.AreEqual(CamusDBErrorCodes.TransactionConflict, ex?.Code,
+            "the younger writer must fail at once by wait-die, not after the lock-wait deadline");
+
+        await db.Transactions.RollbackAsync(txB);
+
+        UpdateResult resultA = await writeA;
+        Assert.AreEqual(1, resultA.UpdatedRows, "the older writer must update the row once the younger one released it");
+        await db.Transactions.CommitAsync(txA);
+
+        KvTransaction verify = await db.Transactions.BeginAsync(
+            CamusIsolationLevel.Serializable, CamusTransactionMode.ReadOnly);
+        long final = await ReadBalanceAsync(dbname, executor, verify, aliceId);
+        await db.Transactions.CommitAsync(verify);
+
+        Assert.AreEqual(111L, final, "the older writer's value must persist and the aborted one's must not");
     }
 }

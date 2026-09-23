@@ -29,6 +29,13 @@ internal sealed class UpdateFluxState
     /// </summary>
     public SpillableRowList? RowsToUpdate { get; set; }
 
+    /// <summary>
+    /// The ticket the locate scan ran with. The write phase re-evaluates the statement's predicate on
+    /// each row it read under lock, and evaluates it with this ticket so the parameters and the filter
+    /// rules are the ones the scan used. Set by the locate step.
+    /// </summary>
+    public QueryTicket? LocateTicket { get; set; }
+
     public int ModifiedRows { get; set; }
 
     public UpdateFluxState(

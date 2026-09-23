@@ -2019,11 +2019,10 @@ public sealed class StatisticsManager
     /// Tracks the largest column count of any record the DELETE or UPDATE mutation phase drained
     /// from its locate match-set buffer. Measured at drain time, so it reports what the buffer
     /// actually retained in memory (or round-tripped through a spill file), not what a producer
-    /// claimed to append. DELETE and plain-values UPDATE buffer row-id-only records — the
-    /// mutation phase re-reads each row under its lock — so on those paths this stays 0; a
-    /// positive value there proves a scanned row (potentially borrowed-backed, pinning its full
-    /// KV bytes) was retained past the locate scan. An expression-SET UPDATE legitimately buffers
-    /// its locate columns and records a positive value. Test-only; not thread-safe.
+    /// claimed to append. DELETE and UPDATE buffer row-id-only records — the mutation phase locks
+    /// each row, reads it again and evaluates the SET expressions against that read — so this stays
+    /// 0; a positive value proves a scanned row (potentially borrowed-backed, pinning its full KV
+    /// bytes) was retained past the locate scan. Test-only; not thread-safe.
     /// </summary>
     internal int DmlLocateBufferMaxColumnsSeen { get; set; }
 

@@ -162,7 +162,7 @@ public sealed partial class KvTableStore
         branch = new KvBranchReader(kahuna, keys, levels, ancestorReadGuard);
         rows = new KvRowAccessor(kahuna, keys, locks, branch, retry);
         indexes = new KvIndexAccessor(kahuna, keys, locks, branch, retry);
-        batch = new KvBatchWriter(kahuna, this.logger, keys, branch, retry, messages, options);
+        batch = new KvBatchWriter(kahuna, this.logger, keys, locks, branch, retry, messages, options);
         largeValues = new KvLargeValueReader(keys, branch, options);
 
         if (this.ancestorStores.Length >= BranchMetrics.LineageWarningThreshold)
@@ -363,6 +363,40 @@ public sealed partial class KvTableStore
         ReadOnlyMemory<byte>?[] result = await rows.GetRowsBatchLockedForMutation(tx, rowIds, cancellationToken).ConfigureAwait(false);
         await this.largeValues.ResolveAsync(tx, rowIds, result, largeValues, cancellationToken).ConfigureAwait(false);
         return result;
+    }
+
+    /// <summary>
+    /// The read an UPDATE or DELETE write phase must use: it locks the rows first and reads them second.
+    ///
+    /// <para><b>Why the order matters.</b> At Read Committed the locate scan and
+    /// <see cref="GetRowsBatchLockedForMutation"/> take no lock, and a pessimistic write takes its
+    /// exclusive lock only in <see cref="UpdateRowsBatch"/> or <see cref="DeleteRowsBatch"/>. A value
+    /// computed between the read and that lock is computed from a row another transaction may have
+    /// changed and committed in the gap. <c>UPDATE t SET v = concat(v, 'x')</c> then overwrites the
+    /// other commit, and both transactions succeed: a lost update. Kahuna aborts that stale write only
+    /// when the other commit came through the same node, so the engine must not depend on it. Taking
+    /// the exclusive row locks before the read closes the gap: the read returns the latest committed
+    /// row, and no other writer can change it until this transaction ends.</para>
+    ///
+    /// <para><b>Per transaction shape.</b> A pessimistic transaction below Serializable takes the
+    /// exclusive row locks here (<see cref="KvBatchWriter.AcquireRowLocksForMutationAsync"/>). A
+    /// Serializable read-write transaction, pessimistic or optimistic, keeps its shared point lock, taken
+    /// before the read and held to commit, which already blocks a competing commit; the write upgrades it
+    /// to exclusive, with wait-die, before it writes. An optimistic transaction below Serializable takes
+    /// no lock: its batch read is folded into the commit-time read set, so a competing commit aborts it
+    /// at commit.
+    /// </para>
+    ///
+    /// <para>A row that a concurrent commit deleted comes back null, as it does from every batch read.
+    /// The caller must skip it and re-check its predicate on the rows that remain.</para>
+    /// </summary>
+    public async Task<ReadOnlyMemory<byte>?[]> LockAndReadRowsForMutationAsync(KvTransaction tx, IReadOnlyList<ObjectIdValue> rowIds, CancellationToken cancellationToken = default, LargeValueFetch? largeValues = null)
+    {
+        if (rowIds.Count == 0)
+            return [];
+
+        await batch.AcquireRowLocksForMutationAsync(tx, rowIds, cancellationToken).ConfigureAwait(false);
+        return await GetRowsBatchLockedForMutation(tx, rowIds, cancellationToken, largeValues).ConfigureAwait(false);
     }
 
     /// <summary>

@@ -419,14 +419,25 @@ This is the lock-free behavior described in §4/§5. What it does **not** promis
 - ⚠️ **Write skew is possible.** Two transactions can each read a set, then write disjoint keys based on
   what they read, in a way no serial order would allow.
 - ⚠️ **A scanned row is not pinned.** A point read under a pessimistic Read Committed transaction records
-  the revision it saw, and a later write to that same key in the same transaction is refused if another
-  transaction committed in between (the read-modify-write guard). A *range scan* records nothing: while
+  the revision it saw, and Kahuna usually refuses a later write to that same key in the same
+  transaction if another transaction committed in between. Do not rely on that guard: whether it fires
+  depends on the order in which the other commit's messages reach the partition leader, and it can miss
+  a commit that came through another node. A *range scan* records nothing: while
   the transaction folds no reads (pessimistic locking, no `TrackAndValidate`) and has written nothing
   yet, its scans carry no transaction identity at all and simply return each row's latest committed
   version. That is what keeps a read-only aggregate on a hot table from being answered with a
   write-conflict error when a scan page has to be retried under replication lag, and it is the
-  non-repeatable read this level already permits. `UPDATE` and `DELETE` are unaffected: they re-read the
-  rows they modify under lock before writing.
+  non-repeatable read this level already permits.
+- ✅ **One `UPDATE` or `DELETE` statement never loses a concurrent commit.** The statement finds its rows
+  with an unlocked scan, then, for each batch of rows: it takes the exclusive row locks, reads the rows
+  again, evaluates the `WHERE` clause again on that read, and computes every `SET` expression from that
+  read. So `UPDATE t SET v = v + 1` always adds to the latest committed value, a row that a concurrent
+  commit moved out of the `WHERE` clause is left alone, and a row that a concurrent commit deleted is
+  skipped. These rows are not counted in the result. This is the behavior of PostgreSQL at Read
+  Committed. `WHERE` conditions that contain an `EXISTS` subquery keep the answer the first scan gave.
+  Under optimistic locking no lock is taken; the commit fails instead if one of the rows changed.
+  A read in one statement and a write in a *later* statement are not protected: that read-then-write
+  pattern needs Serializable, or a single `UPDATE … SET v = f(v)`.
 
 For invariants that must hold under concurrency at this level (e.g. "no two robots with the same
 serial"), lean on **unique constraints** (enforced at the key level) rather than read-then-decide logic.

@@ -76,8 +76,9 @@ internal sealed class RowDeleter
     /// expired and this delete, another transaction may have extended its expiry — and on a session or
     /// heartbeat table, which is exactly what TTL is for, that is the single most common write there is.
     /// Deleting by primary key alone would silently destroy live data. The re-check costs nothing extra
-    /// because <see cref="KvTableStore.GetRowsBatchLockedForMutation"/> has already re-read and decoded
-    /// the row under the lock that makes the answer trustworthy.</para>
+    /// because <see cref="KvTableStore.LockAndReadRowsForMutationAsync"/> locks the row before it reads
+    /// it, and that lock is what makes the answer trustworthy: no transaction can extend the expiry
+    /// between the re-check and the delete.</para>
     ///
     /// <para>A row that fails the re-check is dropped from the batch and counted, never retried in a
     /// tight loop: the sweep will see it again next run, by which time it may legitimately have
@@ -258,13 +259,14 @@ internal sealed class RowDeleter
         await rowList.SealAsync().ConfigureAwait(false);
         
         state.RowsToDelete = rowList;
+        state.LocateTicket = queryTicket;
 
         return FluxAction.Continue;
     }
 
     private async Task<FluxAction> DeleteRowsAndIndexesFromDisk(DeleteFluxState state)
     {
-        if (state.RowsToDelete.Count == 0)
+        if (state.RowsToDelete.Count == 0 || state.LocateTicket is null)
         {
             logger.LogError("Invalid rows to delete");
             return FluxAction.Abort;
@@ -272,6 +274,9 @@ internal sealed class RowDeleter
 
         TableDescriptor table = state.Table;
         KvTransaction tx = state.Ticket.TxnState;
+
+        // Re-evaluated on each row read under the write lock; see FlushDeleteChunk.
+        MutationRowRecheck recheck = MutationRowRecheck.Build(table.Schema, state.Ticket.Where, state.Ticket.Filters);
 
         // Drain RowsToDelete in bounded chunks so a DELETE over a huge matched set does not
         // hold an O(matched) list on the heap between scan and the Kahuna round-trip. The chunk
@@ -294,38 +299,59 @@ internal sealed class RowDeleter
 
             if (chunk.Count >= chunkSize)
             {
-                await FlushDeleteChunk(table, tx, chunk, state).ConfigureAwait(false);
+                await FlushDeleteChunk(table, tx, chunk, state, recheck).ConfigureAwait(false);
                 chunk.Clear();
             }
         }
 
         if (chunk.Count > 0)
-            await FlushDeleteChunk(table, tx, chunk, state).ConfigureAwait(false);
+            await FlushDeleteChunk(table, tx, chunk, state, recheck).ConfigureAwait(false);
 
         return FluxAction.Continue;
     }
 
     /// <summary>
-    /// Reads the raw bytes for one chunk of matched row ids in a single batch round-trip, decodes each
-    /// to determine its index entries, and deletes the rows and their index entries in one batch.
-    /// The read uses <see cref="KvTableStore.GetRowsBatchLockedForMutation"/> so a Serializable+RW
-    /// delete holds the same shared point locks a per-row <c>GetRow</c> would — without them an
-    /// index-scan-located delete could read a row lock-free and miss a concurrent modify-commit,
-    /// deleting a stale index entry and orphaning the concurrently-written one.
+    /// Test-only interleaving hook, awaited after the locate scan has chosen a chunk's rows and before the write phase
+    /// locks and reads them again. Lets a test commit a competing change inside that window, which no external caller
+    /// can time deterministically. Null (zero-cost) in production.
+    /// </summary>
+    internal Func<Task>? TestBeforeWriteHook;
+
+    /// <summary>
+    /// Deletes one chunk of located rows: <b>lock, then read, then re-check, then delete</b>.
+    ///
+    /// <para><see cref="KvTableStore.LockAndReadRowsForMutationAsync"/> takes the exclusive row locks
+    /// before it reads the rows, so the read returns the latest committed row and nothing can change it
+    /// before this transaction ends. The index entries to delete come from that read: a row read without
+    /// its lock could miss a concurrent commit that changed an indexed column, and the delete would then
+    /// remove the stale entry and orphan the new one. The predicate is re-evaluated on the same read
+    /// (<see cref="MutationRowRecheck"/>), so a row that a concurrent commit moved out of the WHERE is
+    /// kept, and a row that a concurrent commit already deleted is skipped. Neither is counted.</para>
     /// </summary>
     private async Task FlushDeleteChunk(
         TableDescriptor table,
         KvTransaction tx,
         List<ObjectIdValue> chunk,
-        DeleteFluxState state)
+        DeleteFluxState state,
+        MutationRowRecheck recheck)
     {
         // Index writability is fixed for the statement, so filter once per chunk instead of per row;
-        // the decode below is narrowed to the index key columns — the only values this path consumes
-        // (the row bytes are deleted wholesale, never re-encoded). Values for those columns are
-        // identical to a full decode; other columns are simply never materialized.
+        // the decode below is narrowed to the index key columns and the re-checked predicate's
+        // columns — the only values this path consumes (the row bytes are deleted wholesale, never
+        // re-encoded). Values for those columns are identical to a full decode; other columns are
+        // simply never materialized. A predicate column that cannot be named exactly decodes all.
         List<TableIndexSchema> writableIndexes = SchemaElementStateRules.CollectWritableIndexes(table.Schema, table.Indexes);
-        HashSet<string> requiredColumns = CollectIndexKeyColumns(writableIndexes);
+        HashSet<string>? requiredColumns = null;
+        if (recheck.Columns is not null)
+        {
+            requiredColumns = CollectIndexKeyColumns(writableIndexes);
+            requiredColumns.UnionWith(recheck.Columns);
+        }
         RowEncoder.DictionaryDecodeState decodeState = new();
+
+        // Test-only interleaving point; see TestBeforeWriteHook. Read once so a concurrent clear cannot fault it.
+        if (TestBeforeWriteHook is { } beforeWriteHook)
+            await beforeWriteHook().ConfigureAwait(false);
 
         (ReadOnlyMemory<byte>?[] rawRows, List<int>?[] outOfLine) = await ReadRowsForDeleteAsync(table, tx, chunk, requiredColumns, default).ConfigureAwait(false);
 
@@ -335,8 +361,10 @@ internal sealed class RowDeleter
         {
             ObjectIdValue rowId = chunk[i];
             ReadOnlyMemory<byte>? data = rawRows[i];
+
+            // A concurrent transaction deleted the row and committed after the locate scan chose it.
             if (data is null || data.Value.Length == 0)
-                throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, $"Row '{rowId}' disappeared before delete");
+                continue;
 
             Dictionary<string, ColumnValue> writableRow = await RowEncoder.DecodeWritableAsync(
                 table.Schema, tx.TransactionId, rowId, data.Value,
@@ -344,6 +372,11 @@ internal sealed class RowDeleter
                 visibilitySchemaVersion: table.Schema.Version,
                 decodeState: decodeState
            ).ConfigureAwait(false);
+
+            // A concurrent commit changed the row after the locate scan chose it, and it no longer
+            // matches the statement's predicate.
+            if (!recheck.IsEmpty && !await recheck.MatchesAsync(state.QueryExecutor, state.Database, state.LocateTicket!, writableRow).ConfigureAwait(false))
+                continue;
 
             batch.Add(new()
             {
@@ -364,8 +397,9 @@ internal sealed class RowDeleter
     }
 
     /// <summary>
-    /// Reads rows for deletion under the mutation lock, and returns, per row, the variable ordinals of
-    /// its out-of-line values beside bytes in which only <paramref name="requiredColumns"/> are resolved.
+    /// Locks rows for deletion and then reads them (<see cref="KvTableStore.LockAndReadRowsForMutationAsync"/>),
+    /// and returns, per row, the variable ordinals of its out-of-line values beside bytes in which only
+    /// <paramref name="requiredColumns"/> are resolved (every column when it is null).
     ///
     /// <para>The ordinals come from the stored pointers, read before any value is resolved, so the
     /// delete names every key the row points at without fetching a single large value. Only a large
@@ -375,10 +409,10 @@ internal sealed class RowDeleter
         TableDescriptor table,
         KvTransaction tx,
         IReadOnlyList<ObjectIdValue> rowIds,
-        IReadOnlySet<string> requiredColumns,
+        IReadOnlySet<string>? requiredColumns,
         CancellationToken cancellationToken)
     {
-        ReadOnlyMemory<byte>?[] rows = await table.Store.GetRowsBatchLockedForMutation(tx, rowIds, cancellationToken, LargeValueFetch.Raw).ConfigureAwait(false);
+        ReadOnlyMemory<byte>?[] rows = await table.Store.LockAndReadRowsForMutationAsync(tx, rowIds, cancellationToken, LargeValueFetch.Raw).ConfigureAwait(false);
 
         List<int>?[] outOfLine = new List<int>?[rows.Length];
         

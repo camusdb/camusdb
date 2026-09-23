@@ -727,6 +727,12 @@ public sealed class CommandExecutor : IAsyncDisposable
     /// </summary>
     internal int EvictIdleDatabasesForTests(long idleWindowMs) => databaseEvictor.EvictIdle(idleWindowMs);
 
+    /// <summary>The UPDATE controller, so a test can install its interleaving hook.</summary>
+    internal RowUpdater RowUpdaterForTests => rowUpdater;
+
+    /// <summary>The DELETE controller, so a test can install its interleaving hook.</summary>
+    internal RowDeleter RowDeleterForTests => rowDeleter;
+
     /// <summary>
     /// Test-only seam: runs one schema freshness sweep over every open database and returns how
     /// many stale schemas were repaired. Drives the sweep deterministically instead of waiting out

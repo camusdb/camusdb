@@ -31,6 +31,13 @@ internal sealed class DeleteFluxState
     /// </summary>
     public SpillableRowList RowsToDelete { get; set; }
 
+    /// <summary>
+    /// The ticket the locate scan ran with. The write phase re-evaluates the statement's predicate on
+    /// each row it read under lock, and evaluates it with this ticket so the parameters and the filter
+    /// rules are the ones the scan used. Set by the locate step.
+    /// </summary>
+    public QueryTicket? LocateTicket { get; set; }
+
     public int DeletedRows { get; set; }
 
     public DeleteFluxState(DatabaseDescriptor database, TableDescriptor table, DeleteTicket ticket, QueryExecutor queryExecutor)
