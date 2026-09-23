@@ -158,8 +158,17 @@ public sealed class RunOptions : CommonOptions
         return clone;
     }
 
-    [Option("workload", Default = "accounts", HelpText = "Write shape: accounts (shard-disjoint read-modify-write, conflict-free), bank (contended transfers within the dataset with a conserved SUM(balance) invariant), or fanout (bank transfers whose two legs always land in different tables; needs --tables >= 2).")]
+    [Option("workload", Default = "accounts", HelpText = "Write shape: accounts (shard-disjoint read-modify-write, conflict-free), bank (contended transfers within the dataset with a conserved SUM(balance) invariant), fanout (bank transfers whose two legs always land in different tables; needs --tables >= 2), or append (Elle list-append transactions on a separate table, recorded to history.edn for an Elle check; reads become read-only list-append transactions).")]
     public string Workload { get; set; } = "accounts";
+
+    [Option("append-keys", Default = 10, HelpText = "Append workload: lists active at one time. Fewer keys means more contention, and more dependency edges for Elle.")]
+    public int AppendKeys { get; set; }
+
+    [Option("append-max-writes-per-key", Default = 64, HelpText = "Append workload: appends a list takes before its slot moves to a new key. Keeps lists short; Elle's cost grows with list length.")]
+    public int AppendMaxWritesPerKey { get; set; }
+
+    [Option("append-max-txn-length", Default = 4, HelpText = "Append workload: most read/append steps in one transaction (each transaction has 1 to this many).")]
+    public int AppendMaxTxnLength { get; set; }
 }
 
 /// <summary>

@@ -6,6 +6,9 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <IsPackable>false</IsPackable>
+    <!-- Same as CamusDB.Workload: the tool formats its artifacts under the invariant culture, so the
+         tests must too, or a machine with a decimal-comma locale fails on "11,0s" vs "11.0s". -->
+    <InvariantGlobalization>true</InvariantGlobalization>
   </PropertyGroup>
 
   <ItemGroup>

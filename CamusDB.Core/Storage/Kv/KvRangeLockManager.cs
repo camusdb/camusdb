@@ -390,6 +390,17 @@ internal sealed class KvRangeLockManager
                 continue;
             }
 
+            // Aborted: the coordinator refused to register the acquire because this transaction's session is
+            // already closed (reaped or finalized) or has spent its operation budget. No retry under this
+            // transaction can succeed, so this is not waited out like MustRetry; it is retryable from
+            // BeginAsync, which is how the exclusive key-lock path treats the same answer. Reporting it as an
+            // internal error made the client give up on an ordinary replayable transaction.
+            if (type == KeyValueResponseType.Aborted)
+                throw new CamusDBException(
+                    CamusDBErrorCodes.TransactionMustRetry,
+                    $"{mode} range-lock acquisition on '{bucketPrefix}' was aborted by Kahuna (the transaction's session " +
+                    "is closed or out of operation budget) — retry the operation from BeginAsync");
+
             // AlreadyLocked is a serialization conflict with a foreign holder: for Shared, another txn
             // holds an overlapping Exclusive lock; for Exclusive, another txn holds an overlapping
             // Shared or Exclusive lock (including the S→X upgrade case).

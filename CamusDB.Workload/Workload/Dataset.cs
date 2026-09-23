@@ -250,7 +250,7 @@ public sealed class Dataset
     /// the wire — <see cref="CamusException.Code"/> can arrive empty — so the message is the reliable
     /// signal, with the code checked first when it is present.
     /// </summary>
-    private static bool IsMissingTable(Exception ex)
+    internal static bool IsMissingTable(Exception ex)
     {
         if (ex is not CamusException camus)
             return false;
@@ -440,7 +440,7 @@ public sealed class Dataset
     /// propagation budget for the same reason — setup can afford to wait a minute, and a run that
     /// starts on a half-created schema is worse than one that waits.</para>
     /// </summary>
-    private static async Task EnsureDdlAsync(CamusConnection conn, string sql, string what, CancellationToken ct)
+    internal static async Task EnsureDdlAsync(CamusConnection conn, string sql, string what, CancellationToken ct)
     {
         int attempt = 0;
         while (true)

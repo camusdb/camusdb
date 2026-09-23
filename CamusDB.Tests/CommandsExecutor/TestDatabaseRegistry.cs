@@ -843,4 +843,161 @@ internal sealed class TestDatabaseRegistry
         Assert.AreEqual(idAlpha, newNameResolved,
             "newName must resolve to alpha's id — r1's rename must not have been disturbed");
     }
+
+    // -----------------------------------------------------------------------
+    // Lock-free cache backfills must not resurrect a name a concurrent local mutation removed
+    // -----------------------------------------------------------------------
+
+    /// <summary>
+    /// Fault fake: parks one registry read of a single name key — the bucket scan right before it hands
+    /// that entry to the registry, or the point read of that key — until the test resumes it. Models a
+    /// scan page (or a point read) that was fetched before a delete and is consumed after it. The gate is
+    /// one-shot and disarmed until <see cref="Arm"/>, so the registry's startup load is not affected.
+    /// </summary>
+    private sealed class PauseReadOfNameKahuna : DelegatingKahuna
+    {
+        private readonly string gatedKey;
+        private readonly bool gateScan;
+        private readonly TaskCompletionSource paused = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource resume = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private int gateArmed;
+
+        public PauseReadOfNameKahuna(IKahuna inner, string name, bool gateScan) : base(inner)
+        {
+            gatedKey = $"_system/dbregistry/db:{name.ToLowerInvariant()}";
+            this.gateScan = gateScan;
+        }
+
+        public Task Paused => paused.Task;
+        public void Arm() => Interlocked.Exchange(ref gateArmed, 1);
+        public void Resume() => resume.TrySetResult();
+
+        private async Task PauseIfGatedAsync(string key)
+        {
+            if (key == gatedKey && Interlocked.Exchange(ref gateArmed, 0) == 1)
+            {
+                paused.TrySetResult();
+                await resume.Task;
+            }
+        }
+
+        public override async IAsyncEnumerable<(string Key, ReadOnlyKeyValueEntry Entry)> LocateAndScanRange(
+            HLCTimestamp txId, string prefix, string? startKey, bool startInclusive, string? endKey, bool endInclusive,
+            int pageSize, HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken ct,
+            string coordinatorKey = "", TransactionOperationId operationId = default)
+        {
+            await foreach ((string key, ReadOnlyKeyValueEntry entry) in base.LocateAndScanRange(
+                txId, prefix, startKey, startInclusive, endKey, endInclusive, pageSize, readTimestamp,
+                durability, ct, coordinatorKey, operationId))
+            {
+                // The inner scan already read this entry; the pause sits between that read and the
+                // registry consuming it.
+                if (gateScan)
+                    await PauseIfGatedAsync(key);
+
+                yield return (key, entry);
+            }
+        }
+
+        public override async Task<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> LocateAndTryGetValue(
+            HLCTimestamp transactionId, string key, long revision, HLCTimestamp readTimestamp,
+            KeyValueDurability durability, CancellationToken cancellationToken,
+            string coordinatorKey = "", TransactionOperationId operationId = default)
+        {
+            (KeyValueResponseType, ReadOnlyKeyValueEntry?) result = await base.LocateAndTryGetValue(
+                transactionId, key, revision, readTimestamp, durability, cancellationToken, coordinatorKey, operationId);
+
+            // Pause AFTER the read so the caller holds a copy that a concurrent delete then outdates.
+            if (!gateScan)
+                await PauseIfGatedAsync(key);
+
+            return result;
+        }
+    }
+
+    private static async Task WaitForPauseAsync(PauseReadOfNameKahuna gate, string what)
+    {
+        Task first = await Task.WhenAny(gate.Paused, Task.Delay(TimeSpan.FromSeconds(30)));
+        Assert.That(first, Is.SameAs(gate.Paused), what);
+    }
+
+    /// <summary>
+    /// The registry scan copies every entry it reads into the in-memory cache. A background sweep's scan
+    /// that read a name just before <see cref="DatabaseRegistry.UnregisterAsync"/> deleted it, and
+    /// consumed that page just after, used to add the entry straight back — a phantom name that resolved
+    /// a dead id. In standalone mode a cache hit is never revalidated, so the phantom lived until restart:
+    /// re-creating the name failed with DatabaseAlreadyExists and an open reached a purged keyspace. In
+    /// cluster mode the unregister had already adopted the bumped generation, so the hit was trusted too.
+    /// The backfill must yield to the local mutation in both modes.
+    /// </summary>
+    [Test]
+    public async Task ScanBackfill_RacingLocalUnregister_DoesNotResurrectTheName([Values(false, true)] bool clusterMode)
+    {
+        string name = NewName();
+        PauseReadOfNameKahuna gate = new(sharedNode!.Kahuna, name, gateScan: true);
+        await using DatabaseRegistry registry = await DatabaseRegistry.OpenForTestingAsync(
+            sharedNode!, gate, CamusDBOptions.Default, clusterMode);
+
+        string id = await registry.AllocateIdAsync();
+        await registry.RegisterAsync(name, id);
+        gate.Arm();
+
+        // A sweep's scan reads the entry, then stalls before the registry consumes it.
+        Task<IReadOnlyList<DatabaseRegistryEntry>> scan = registry.ScanAllEntriesAsync();
+        await WaitForPauseAsync(gate, "the scan must reach the registered name");
+
+        // The name is dropped while the scan still holds its copy of the entry.
+        await registry.UnregisterAsync(name);
+        Assert.IsNull(registry.Get(name), "precondition: the unregister evicted the name from the cache");
+
+        gate.Resume();
+        IReadOnlyList<DatabaseRegistryEntry> scanned = await scan;
+        Assert.IsTrue(scanned.Any(e => e.Id == id), "sanity: the scan itself read the entry before the delete");
+
+        Assert.IsNull(registry.Get(name), "the scan's backfill must not resurrect a name the unregister removed");
+        Assert.IsNull(registry.GetById(id), "the scan's backfill must not resurrect the dead id");
+        Assert.IsNull(await registry.TryResolveEntryAsync(name), "the name must not resolve after the unregister");
+
+        // The name is genuinely free again — a phantom would refuse this with DatabaseAlreadyExists.
+        string newId = await registry.AllocateIdAsync();
+        await registry.RegisterAsync(name, newId);
+        Assert.AreEqual(newId, (await registry.TryResolveEntryAsync(name))!.Id);
+    }
+
+    /// <summary>
+    /// Same interleaving on the miss path of <see cref="DatabaseRegistry.TryResolveEntryAsync"/>: its
+    /// point read fetched the entry, a local <see cref="DatabaseRegistry.RetractRegistrationAsync"/>
+    /// then deleted the name, and the backfill of the stale read must not put it back. The resolve still
+    /// returns what it read — true at read time — but the cache must reflect the retraction.
+    /// </summary>
+    [Test]
+    public async Task MissPathBackfill_RacingLocalRetraction_DoesNotResurrectTheName([Values(false, true)] bool clusterMode)
+    {
+        string name = NewName();
+        PauseReadOfNameKahuna gate = new(sharedNode!.Kahuna, name, gateScan: false);
+
+        // The name is registered through another registry so the observer's cache misses it.
+        await using DatabaseRegistry writer = await DatabaseRegistry.OpenAsync(sharedNode!, CamusDBOptions.Default);
+        await using DatabaseRegistry observer = await DatabaseRegistry.OpenForTestingAsync(
+            sharedNode!, gate, CamusDBOptions.Default, clusterMode);
+
+        string id = await writer.AllocateIdAsync();
+        await writer.RegisterAsync(name, id);
+        Assert.IsNull(observer.Get(name), "precondition: the observer's cache must miss the name");
+        gate.Arm();
+
+        Task<DatabaseRegistryEntry?> resolve = observer.TryResolveEntryAsync(name);
+        await WaitForPauseAsync(gate, "the resolve must reach the point read of the name");
+
+        // A local retraction removes the name while the resolve holds its stale read.
+        Assert.AreEqual(RegistryRetraction.Retracted, await observer.RetractRegistrationAsync(name, id));
+
+        gate.Resume();
+        DatabaseRegistryEntry? resolved = await resolve;
+        Assert.IsNotNull(resolved, "sanity: the point read happened before the retraction");
+
+        Assert.IsNull(observer.Get(name), "the miss-path backfill must not resurrect a name the retraction removed");
+        Assert.IsNull(observer.GetById(id), "the miss-path backfill must not resurrect the dead id");
+        Assert.IsNull(await observer.TryResolveEntryAsync(name), "the name must not resolve after the retraction");
+    }
 }

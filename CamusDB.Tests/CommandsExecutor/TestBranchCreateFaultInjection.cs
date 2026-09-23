@@ -608,12 +608,22 @@ public sealed class TestBranchCreateFaultInjection : BaseTest
     /// <summary>
     /// Asserts the full clean-abort outcome of a paused-then-resumed branch-create whose parent
     /// disappeared: no registry entry, no pending-create marker, no copied metadata, no live hold.
+    ///
+    /// <para>Every check reads durable state. The registration check in particular scans the persistent
+    /// registry rather than resolving the name through <paramref name="authoritativeRegistry"/>'s cache:
+    /// that registry is a second standalone instance over the same store, and a standalone registry
+    /// trusts a cache hit without revalidation. Its background sweeps (snapshot-hold renewer, startup
+    /// orphan reclaim) scan the registry bucket at unpredictable moments, so one of them can observe the
+    /// branch during the instant it is published and cache it — the creator's retraction then never
+    /// reaches that cache, and a cache-first resolve would report the retracted branch as registered.</para>
     /// </summary>
     private static async Task AssertBranchFullyCleanedUpAsync(
         DatabaseRegistry authoritativeRegistry, PauseBeforeBranchNameLockKahuna gate,
         IKahuna kahuna, string branchName, int expectedLiveHolds)
     {
-        Assert.That(await authoritativeRegistry.TryResolveEntryAsync(branchName), Is.Null,
+        IReadOnlyList<DatabaseRegistryEntry> durable = await authoritativeRegistry.ScanAllEntriesAsync();
+        Assert.That(
+            durable.Any(e => string.Equals(e.Name, branchName, StringComparison.OrdinalIgnoreCase)), Is.False,
             "the aborted branch must not remain registered");
 
         Assert.That(gate.ObservedBranchId, Is.Not.Null,

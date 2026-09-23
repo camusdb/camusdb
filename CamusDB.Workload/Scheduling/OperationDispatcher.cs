@@ -19,10 +19,10 @@ namespace CamusDB.Workload.Scheduling;
 /// </summary>
 public sealed class OperationDispatcher : IOperationExecutor
 {
-    private readonly ReadOperation _read;
+    private readonly IReadOperation _read;
     private readonly IWriteOperation _write;
 
-    public OperationDispatcher(ReadOperation read, IWriteOperation write)
+    public OperationDispatcher(IReadOperation read, IWriteOperation write)
     {
         _read = read;
         _write = write;

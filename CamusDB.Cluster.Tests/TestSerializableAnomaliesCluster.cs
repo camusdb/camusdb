@@ -476,6 +476,215 @@ public sealed class TestSerializableAnomaliesCluster
             "Cluster: constraint total >= 0 must hold after write-skew prevention");
     }
 
+
+    // -----------------------------------------------------------------------
+    // 6b. Cluster N=3: write skew where each transaction WRITES before the other READS
+    // -----------------------------------------------------------------------
+
+    /// <summary>
+    /// The write-first ordering of write skew, which the read-first test above does not reach.
+    /// There, both shared locks exist before either write, so the writer's shared→exclusive upgrade
+    /// is refused. Here TxA writes alice before anyone has read it, so there is no shared lock to
+    /// upgrade and TxA holds only its per-key write lock. TxB's read of alice must then wait or be
+    /// refused: a strict-2PL reader cannot see the committed value under an uncommitted writer.
+    ///
+    /// <para>This is the two-transaction cycle Elle reported (Caraxes <c>append-rw-8keys</c>, G2-item):
+    /// T_A appended to 1570 and read 1574 without T_B's append, T_B read 1570 without T_A's append and
+    /// appended to 1574, and both committed.</para>
+    /// </summary>
+    [Test]
+    public async Task Cluster_SerializableRW_WriteSkew_WriteFirst_Prevented()
+    {
+        (InProcessSchemaCluster cluster, string db, InProcessSchemaCluster.Node leader,
+            string aliceId, string bobId) = await SetupClusterAccountsAsync();
+        await using InProcessSchemaCluster clusterScope = cluster;
+
+        DatabaseDescriptor database = leader.Database!;
+        CommandExecutor    executor  = leader.Executor;
+
+        KvTransaction txA = await database.Transactions.BeginAsync(
+            CamusIsolationLevel.Serializable, CamusTransactionMode.ReadWrite);
+        KvTransaction txB = await database.Transactions.BeginAsync(
+            CamusIsolationLevel.Serializable, CamusTransactionMode.ReadWrite);
+
+        // TxA writes alice with no prior read, so it holds no shared lock that could be upgraded.
+        await UpdateBalanceAsync(db, executor, txA, aliceId, 50L);
+
+        // Every later step may be refused; a refusal is a correct outcome, so each one is recorded
+        // rather than asserted.
+        bool aAlive = true, bAlive = true;
+        long? bSawAlice = null, aSawBob = null;
+
+        try { bSawAlice = await ReadBalanceAsync(db, executor, txB, aliceId); }
+        catch (CamusDBException) { bAlive = false; }
+
+        if (bAlive)
+        {
+            try { await UpdateBalanceAsync(db, executor, txB, bobId, 50L); }
+            catch (CamusDBException) { bAlive = false; }
+        }
+
+        try { aSawBob = await ReadBalanceAsync(db, executor, txA, bobId); }
+        catch (CamusDBException) { aAlive = false; }
+
+        bool aCommitted = await TryCommitOrRollbackAsync(database, txA, aAlive);
+        bool bCommitted = await TryCommitOrRollbackAsync(database, txB, bAlive);
+
+        // Write skew: both committed, and each read the other's row as it was before the other's write.
+        bool writeSkew = aCommitted && bCommitted && bSawAlice == 100L && aSawBob == 100L;
+        Assert.That(writeSkew, Is.False,
+            $"write skew committed: TxB read alice={bSawAlice} under TxA's uncommitted write, " +
+            $"TxA read bob={aSawBob} under TxB's, and both committed");
+    }
+
+
+    // -----------------------------------------------------------------------
+    // 6c. Cluster N=3: write skew on a STRING primary key, through SQL
+    // -----------------------------------------------------------------------
+
+    /// <summary>
+    /// The same write-skew shapes as 6 and 6b, on the table and SQL the Caraxes Elle workload uses:
+    /// <c>k STRING PRIMARY KEY</c>, read by <c>SELECT v … WHERE k = …</c> and appended by
+    /// <c>UPDATE … SET v = concat(v, …) WHERE k = …</c>. An <c>oid</c> key is the row key itself; a
+    /// string key reaches the row through a primary-key index entry, so the read and the write can
+    /// take their locks on different keys. The <c>accounts</c> tests cannot see that.
+    ///
+    /// <para><paramref name="writeFirst"/> true: TxA appends to a before TxB reads a (6b's order).
+    /// False: both read before either writes (6's order).</para>
+    /// </summary>
+    [TestCase(true)]
+    [TestCase(false)]
+    public async Task Cluster_SerializableRW_WriteSkew_StringKeySql_Prevented(bool writeFirst)
+    {
+        InProcessSchemaCluster cluster =
+            await InProcessSchemaCluster.StartAsync(nodeCount: 3, partitions: 1,
+                loggerFactory: sharedLoggerFactory, logger: logger);
+        await using InProcessSchemaCluster clusterScope = cluster;
+
+        string db = cluster.NextSchemaLogDatabaseName();
+        await cluster.OpenDatabaseOnAllNodesAsync(db);
+
+        await cluster.RunOnSchemaLeaderAsync(db, leader => leader.Executor.CreateTable(new CreateTableTicket(
+            databaseName: db,
+            tableName: "lists",
+            columns:
+            [
+                new ColumnInfo("k", ColumnType.String, notNull: true),
+                new ColumnInfo("v", ColumnType.String, notNull: true),
+            ],
+            constraints:
+            [
+                new ConstraintInfo(ConstraintType.PrimaryKey, "~pk",
+                    [new ColumnIndexInfo("k", OrderType.Ascending)])
+            ],
+            ifNotExists: false
+        )).WaitAsync(TimeSpan.FromSeconds(20)));
+
+        await cluster.WaitForSchemaConvergenceAsync(db, version: 1);
+
+        await cluster.RunOnSchemaLeaderAsync(db, async leader =>
+        {
+            KvTransaction setup = await leader.Database!.Transactions.BeginAsync();
+            await leader.Executor.ExecuteNonSQLQuery(new ExecuteSQLTicket(
+                txnState: setup, database: db,
+                sql: "INSERT INTO lists (k, v) VALUES ('a', '1'), ('b', '1')", parameters: null));
+            await leader.Database.Transactions.CommitAsync(setup);
+        });
+
+        InProcessSchemaCluster.Node leader = await cluster.WaitForSchemaLeaderNodeAsync(db);
+        DatabaseDescriptor database = leader.Database!;
+        CommandExecutor    executor  = leader.Executor;
+
+        KvTransaction txA = await database.Transactions.BeginAsync(
+            CamusIsolationLevel.Serializable, CamusTransactionMode.ReadWrite);
+        KvTransaction txB = await database.Transactions.BeginAsync(
+            CamusIsolationLevel.Serializable, CamusTransactionMode.ReadWrite);
+
+        bool aAlive = true, bAlive = true;
+        string? bSawA = null, aSawB = null;
+
+        async Task Step(KvTransaction tx, bool isA, Func<Task> action)
+        {
+            if (!(isA ? aAlive : bAlive))
+                return;
+            try { await action(); }
+            catch (CamusDBException e)
+            {
+                if (isA) aAlive = false; else bAlive = false;
+                TestContext.Out.WriteLine($"{(isA ? "TxA" : "TxB")} refused: {e.Code}: {e.Message}");
+
+                // A refusal is correct only as a conflict. Anything else (a bad statement, say) would
+                // abort both transactions and let the test pass without testing isolation at all.
+                Assert.That(e.Code, Is.EqualTo(CamusDBErrorCodes.TransactionConflict)
+                                      .Or.EqualTo(CamusDBErrorCodes.TransactionMustRetry),
+                    $"refusal must be a conflict, got {e.Code}: {e.Message}");
+            }
+        }
+
+        if (writeFirst)
+        {
+            await Step(txA, true,  () => AppendSqlAsync(executor, db, txA, "a", "2"));
+            await Step(txB, false, async () => bSawA = await ReadListSqlAsync(executor, db, txB, "a"));
+            await Step(txB, false, () => AppendSqlAsync(executor, db, txB, "b", "3"));
+            await Step(txA, true,  async () => aSawB = await ReadListSqlAsync(executor, db, txA, "b"));
+        }
+        else
+        {
+            await Step(txA, true,  async () => aSawB = await ReadListSqlAsync(executor, db, txA, "b"));
+            await Step(txB, false, async () => bSawA = await ReadListSqlAsync(executor, db, txB, "a"));
+            await Step(txA, true,  () => AppendSqlAsync(executor, db, txA, "a", "2"));
+            await Step(txB, false, () => AppendSqlAsync(executor, db, txB, "b", "3"));
+        }
+
+        bool aCommitted = await TryCommitOrRollbackAsync(database, txA, aAlive);
+        bool bCommitted = await TryCommitOrRollbackAsync(database, txB, bAlive);
+
+        TestContext.Out.WriteLine(
+            $"TxA committed={aCommitted} read b='{aSawB}'; TxB committed={bCommitted} read a='{bSawA}'");
+
+        bool writeSkew = aCommitted && bCommitted && bSawA == "1" && aSawB == "1";
+        Assert.That(writeSkew, Is.False,
+            $"write skew committed ({(writeFirst ? "write-first" : "read-first")}): TxB read a='{bSawA}' " +
+            $"without TxA's append, TxA read b='{aSawB}' without TxB's append, and both committed");
+    }
+
+    private static async Task AppendSqlAsync(CommandExecutor executor, string db, KvTransaction tx, string key, string value)
+    {
+        ExecuteNonSQLResult result = await executor.ExecuteNonSQLQuery(new ExecuteSQLTicket(
+            txnState: tx, database: db,
+            sql: $"UPDATE lists SET v = concat(v, ',{value}') WHERE k = '{key}'", parameters: null));
+        Assert.That(result.ModifiedRows, Is.EqualTo(1), $"append to '{key}' must modify exactly its row");
+    }
+
+    private static async Task<string?> ReadListSqlAsync(CommandExecutor executor, string db, KvTransaction tx, string key)
+    {
+        (_, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(new ExecuteSQLTicket(
+            txnState: tx, database: db, sql: $"SELECT v FROM lists WHERE k = '{key}'", parameters: null));
+        List<QueryResultRow> rows = await cursor.ToListAsync();
+        return rows.Count == 0 ? null : rows[0].Row["v"].StrValue;
+    }
+
+    private static async Task<bool> TryCommitOrRollbackAsync(DatabaseDescriptor database, KvTransaction tx, bool alive)
+    {
+        if (alive)
+        {
+            try
+            {
+                await database.Transactions.CommitAsync(tx);
+                return true;
+            }
+            catch (CamusDBException e)
+            {
+                // Refused at commit; fall through to the rollback.
+                TestContext.Out.WriteLine($"commit refused: {e.Code}: {e.Message}");
+            }
+        }
+
+        try { await database.Transactions.RollbackAsync(tx); }
+        catch (CamusDBException) { /* already aborted */ }
+        return false;
+    }
+
     // -----------------------------------------------------------------------
     // 7. Cluster N=3: Serializable+RW prevents lost updates
     // -----------------------------------------------------------------------

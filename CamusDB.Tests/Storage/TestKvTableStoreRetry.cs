@@ -79,6 +79,9 @@ public sealed class TestKvTableStoreRetry
         public int InjectDeleteManyFaults;
         public int InjectRangeLockFaults;
 
+        // The answer an injected range-lock fault returns. MustRetry by default, like every other injected fault.
+        public KeyValueResponseType RangeLockFaultType = KeyValueResponseType.MustRetry;
+
         // Operation ids seen per batch/range call, in order — lets a test assert the id is reused across
         // an unchanged transient resend and freshly minted only when the pending set shrinks.
         public List<TransactionOperationId> SetManyOpIds { get; } = [];
@@ -229,7 +232,7 @@ public sealed class TestKvTableStoreRetry
         {
             RangeLockOpIds.Add(operationId);
             if (InjectRangeLockFaults-- > 0)
-                return Task.FromResult((KeyValueResponseType.MustRetry, HLCTimestamp.Zero));
+                return Task.FromResult((RangeLockFaultType, HLCTimestamp.Zero));
             return inner.LocateAndTryAcquireRangeLock(transactionId, prefix, startKey, startInclusive, endKey, endInclusive,
                 expiresMs, durability, mode, cancellationToken, coordinatorKey, operationId);
         }
@@ -885,6 +888,41 @@ public sealed class TestKvTableStoreRetry
         Assert.That(stub.RangeLockOpIds.Count, Is.EqualTo(3), "two MustRetry retries plus the successful acquire");
         Assert.That(stub.RangeLockOpIds.Distinct().Count(), Is.EqualTo(1),
             "a range-lock retried through transient MustRetry must retain the same operation id");
+
+        await stub.LocateAndRollbackTransaction(tx.Handle, CancellationToken.None);
+    }
+
+
+    /// <summary>
+    /// Kahuna answers <c>Aborted</c> to a registered range-lock acquire when the transaction's session is closed
+    /// or out of operation budget. That must surface as the retryable <c>TransactionMustRetry</c>, not as an
+    /// internal error the client gives up on, and it must not be waited out in the acquire loop: no retry under
+    /// the same transaction can succeed.
+    /// </summary>
+    [TestCase(false)]
+    [TestCase(true)]
+    public async Task AcquireRowRangeLock_Aborted_IsRetryableFromBegin_AndNotRetriedInPlace(bool exclusive)
+    {
+        (EmbeddedKahuna node, FaultInjectingKahuna stub, KvTableStore store) = await CreateStoreAsync("tbl_rangeabort");
+        await using EmbeddedKahuna __ = node;
+
+        (KeyValueResponseType type, TransactionHandle handle) = await stub.LocateAndStartTransaction(
+            new KeyValueTransactionOptions { CoordinatorKey = "rangeabort_w", Locking = KeyValueTransactionLocking.Pessimistic },
+            CancellationToken.None
+        );
+        Assert.AreEqual(KeyValueResponseType.Set, type);
+
+        KvTransaction tx = new(handle.TransactionId, "rangeabort_w", isReadOnly: false,
+            CamusIsolationLevel.Serializable, CamusTransactionMode.ReadWrite);
+
+        stub.RangeLockFaultType = KeyValueResponseType.Aborted;
+        stub.InjectRangeLockFaults = 1;
+
+        CamusDBException? ex = Assert.ThrowsAsync<CamusDBException>(
+            () => store.AcquireRowRangeLockAsync(tx, exclusive: exclusive));
+
+        Assert.That(ex!.Code, Is.EqualTo(CamusDBErrorCodes.TransactionMustRetry), ex.Message);
+        Assert.That(stub.RangeLockOpIds.Count, Is.EqualTo(1), "an Aborted acquire must not be retried in place");
 
         await stub.LocateAndRollbackTransaction(tx.Handle, CancellationToken.None);
     }

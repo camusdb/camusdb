@@ -86,6 +86,22 @@ public sealed class DatabaseRegistry : IAsyncDisposable
     // (a stale read only forces a redundant, harmless revalidation).
     private long loadedGeneration;
 
+    // Local cache-mutation epoch, paired with `cacheSync`. Besides the mutation paths (all under
+    // `writeSem`), the caches are written by two lock-free backfills — the bucket scan in
+    // ScanAllEntriesAsync and the point read on the miss path of TryResolveEntryAsync — which copy into
+    // the cache what KV held when they READ it. A local mutation can land between that read and the cache
+    // write: UnregisterAsync or RetractRegistrationAsync deletes the name and evicts it, then the backfill
+    // adds the entry it read a moment earlier straight back. That phantom resolves a dead id, and in
+    // standalone mode a cache hit is never revalidated, so it lives until restart — `CREATE DATABASE` of
+    // the name fails with DatabaseAlreadyExists and an open reaches a purged keyspace. A background sweep
+    // (snapshot-hold renewer, orphan reclaimer, TTL discovery) scanning while a DROP or an aborted
+    // branch-create retracts is exactly that interleaving. Every mutation path therefore advances this
+    // epoch together with its cache write, under `cacheSync`, and a backfill writes only while the epoch
+    // still equals the value it captured before its read (see TryBackfill). The lock is held for
+    // synchronous dictionary work only, never across an await; reads of the caches stay lock-free.
+    private readonly object cacheSync = new();
+    private long cacheMutationEpoch;
+
     /// <summary>
     /// The stamp's key. Its <em>revision</em> — not its value — is the generation: the store assigns each
     /// write of a key a strictly increasing revision, ordered by that key's partition leader, which is
@@ -492,32 +508,83 @@ public sealed class DatabaseRegistry : IAsyncDisposable
     {
         HashSet<string> present = new(StringComparer.Ordinal);
 
-        foreach (DatabaseRegistryEntry loaded in entries)
+        lock (cacheSync)
         {
-            present.Add(Normalize(loaded.Name));
-            byName[Normalize(loaded.Name)] = loaded;
-            byId[loaded.Id] = loaded;
-        }
-
-        // Evict names that no longer exist in KV. Remove the id mapping only if it still points at the
-        // evicted entry — a rename re-points byId[id] at the NEW name, which the upsert above already
-        // wrote, so the id must not be dropped along with the old name. `name` here is the normalized
-        // cache key, so compare it against the entry's normalized name.
-        foreach (string name in byName.Keys.ToList())
-        {
-            if (present.Contains(name))
-                continue;
-
-            if (byName.TryRemove(name, out DatabaseRegistryEntry? removed)
-                && byId.TryGetValue(removed.Id, out DatabaseRegistryEntry? currentById)
-                && Normalize(currentById.Name) == name)
+            foreach (DatabaseRegistryEntry loaded in entries)
             {
-                byId.TryRemove(removed.Id, out _);
+                present.Add(Normalize(loaded.Name));
+                byName[Normalize(loaded.Name)] = loaded;
+                byId[loaded.Id] = loaded;
             }
+
+            // Evict names that no longer exist in KV. Remove the id mapping only if it still points at the
+            // evicted entry — a rename re-points byId[id] at the NEW name, which the upsert above already
+            // wrote, so the id must not be dropped along with the old name. `name` here is the normalized
+            // cache key, so compare it against the entry's normalized name.
+            foreach (string name in byName.Keys.ToList())
+            {
+                if (present.Contains(name))
+                    continue;
+
+                if (byName.TryRemove(name, out DatabaseRegistryEntry? removed)
+                    && byId.TryGetValue(removed.Id, out DatabaseRegistryEntry? currentById)
+                    && Normalize(currentById.Name) == name)
+                {
+                    byId.TryRemove(removed.Id, out _);
+                }
+            }
+
+            // The rewrite evicted names; a backfill that read KV before it must not add them back.
+            cacheMutationEpoch++;
         }
 
         Volatile.Write(ref loadedGeneration, authoritativeGeneration);
     }
+
+    /// <summary>
+    /// Copies an entry a lock-free read took from KV into the caches — unless a local mutation ran since
+    /// <paramref name="epochAtRead"/> was captured (with <see cref="CaptureCacheEpoch"/>, <b>before</b>
+    /// the read). The check and the write are one unit under <see cref="cacheSync"/>, so a mutation can
+    /// never slip between them. Returns whether the entry was written.
+    ///
+    /// <para>Skipping is always safe: a backfill only adds what KV already held, and after a local
+    /// mutation the caches already hold the truth for every name that mutation touched, while any other
+    /// name simply misses and re-reads KV. Writing after a mutation is not safe — it is how a name a
+    /// concurrent <see cref="UnregisterAsync"/> or <see cref="RetractRegistrationAsync"/> removed came
+    /// back as a phantom. A backfill never advances the epoch itself.</para>
+    ///
+    /// <para><paramref name="overwrite"/> selects the miss-path semantics (replace whatever is cached for
+    /// the name and id, e.g. re-point <c>byId</c> after a rename seen on another node) over the scan's
+    /// add-if-absent semantics.</para>
+    /// </summary>
+    private bool TryBackfill(DatabaseRegistryEntry entry, long epochAtRead, bool overwrite)
+    {
+        string normalized = Normalize(entry.Name);
+
+        lock (cacheSync)
+        {
+            if (cacheMutationEpoch != epochAtRead)
+                return false;
+
+            if (overwrite)
+            {
+                byName[normalized] = entry;
+                byId[entry.Id] = entry;
+            }
+            else
+            {
+                byName.TryAdd(normalized, entry);
+                byId.TryAdd(entry.Id, entry);
+            }
+
+            return true;
+        }
+    }
+
+    /// <summary>
+    /// The epoch a backfill must capture before its KV read; see <see cref="TryBackfill"/>.
+    /// </summary>
+    private long CaptureCacheEpoch() => Volatile.Read(ref cacheMutationEpoch);
 
     /// <summary>
     /// Refreshes <b>one</b> name against KV and returns what it resolves to now, or null if it no longer
@@ -567,8 +634,13 @@ public sealed class DatabaseRegistry : IAsyncDisposable
             DatabaseRegistryEntry loaded = MetaJsonSerializer.Deserialize(
                 kvEntry.Value, MetaJsonContext.Default.DatabaseRegistryEntry);
 
-            byName[Normalize(loaded.Name)] = loaded;
-            byId[loaded.Id] = loaded;
+            lock (cacheSync)
+            {
+                byName[Normalize(loaded.Name)] = loaded;
+                byId[loaded.Id] = loaded;
+                cacheMutationEpoch++;
+            }
+
             return loaded;
         }
 
@@ -580,11 +652,16 @@ public sealed class DatabaseRegistry : IAsyncDisposable
         // Gone from KV: dropped, or renamed away on another node. Evict it, and drop the id mapping only
         // if it still points at this name — a rename re-points byId at the new name, and that mapping
         // must survive the old name's eviction.
-        if (byName.TryRemove(normalizedName, out DatabaseRegistryEntry? removed)
-            && byId.TryGetValue(removed.Id, out DatabaseRegistryEntry? currentById)
-            && Normalize(currentById.Name) == normalizedName)
+        lock (cacheSync)
         {
-            byId.TryRemove(removed.Id, out _);
+            if (byName.TryRemove(normalizedName, out DatabaseRegistryEntry? removed)
+                && byId.TryGetValue(removed.Id, out DatabaseRegistryEntry? currentById)
+                && Normalize(currentById.Name) == normalizedName)
+            {
+                byId.TryRemove(removed.Id, out _);
+            }
+
+            cacheMutationEpoch++;
         }
 
         return null;
@@ -817,6 +894,11 @@ public sealed class DatabaseRegistry : IAsyncDisposable
         // that is already in flight (opening a database it named). Queueing it behind ordinary traffic
         // would stall an already-admitted user statement on a transaction that has not been admitted
         // yet — the caller waits, but its wait is invisible to the gate.
+        //
+        // Captured before the read: the backfill below may only land if no local mutation ran in between
+        // (see TryBackfill), otherwise it would re-add a name that mutation just removed.
+        long epochAtRead = CaptureCacheEpoch();
+
         KvTransaction tx = await transactions.BeginAsync(
             CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite,
             priority: TransactionPriority.High
@@ -840,9 +922,9 @@ public sealed class DatabaseRegistry : IAsyncDisposable
             DatabaseRegistryEntry entry = MetaJsonSerializer.Deserialize(
                 kvEntry.Value, MetaJsonContext.Default.DatabaseRegistryEntry);
 
-            // Backfill the local cache so subsequent reads are fast.
-            byName[Normalize(entry.Name)] = entry;
-            byId[entry.Id] = entry;
+            // Backfill the local cache so subsequent reads are fast. The answer itself is returned either
+            // way — it was true when read; only the cache write is conditional.
+            TryBackfill(entry, epochAtRead, overwrite: true);
             return entry;
         }
         finally
@@ -1055,8 +1137,12 @@ public sealed class DatabaseRegistry : IAsyncDisposable
                 throw;
             }
 
-            byName[normalized] = entry;
-            byId[id] = entry;
+            lock (cacheSync)
+            {
+                byName[normalized] = entry;
+                byId[id] = entry;
+                cacheMutationEpoch++;
+            }
 
             // Advance the shared generation so other nodes revalidate their caches and observe this new
             // name; adopt it locally so this node does not revalidate against its own just-applied change.
@@ -1097,8 +1183,12 @@ public sealed class DatabaseRegistry : IAsyncDisposable
                 throw;
             }
 
-            byName.TryRemove(name, out _);
-            byId.TryRemove(entry.Id, out _);
+            lock (cacheSync)
+            {
+                byName.TryRemove(name, out _);
+                byId.TryRemove(entry.Id, out _);
+                cacheMutationEpoch++;
+            }
 
             // Advance the shared generation so other nodes drop their now-stale cache hit for this name.
             AdoptGeneration(await BumpGenerationAsync().ConfigureAwait(false));
@@ -1176,11 +1266,15 @@ public sealed class DatabaseRegistry : IAsyncDisposable
 
             // The durable state is established. Drop any local cache claim that still maps this
             // name to this id — including an entry a failed create's RegisterAsync left behind.
-            if (byName.TryGetValue(normalized, out DatabaseRegistryEntry? cached)
-                && string.Equals(cached.Id, expectedId, StringComparison.Ordinal))
-                byName.TryRemove(normalized, out _);
+            lock (cacheSync)
+            {
+                if (byName.TryGetValue(normalized, out DatabaseRegistryEntry? cached)
+                    && string.Equals(cached.Id, expectedId, StringComparison.Ordinal))
+                    byName.TryRemove(normalized, out _);
 
-            byId.TryRemove(expectedId, out _);
+                byId.TryRemove(expectedId, out _);
+                cacheMutationEpoch++;
+            }
 
             if (outcome == RegistryRetraction.Retracted)
                 AdoptGeneration(await BumpGenerationAsync().ConfigureAwait(false));
@@ -1345,10 +1439,14 @@ public sealed class DatabaseRegistry : IAsyncDisposable
                 throw;
             }
 
-            if (!caseOnlyRename)
-                byName.TryRemove(normalizedOld, out _);
-            byName[normalizedNew] = updated;
-            byId[existing.Id] = updated;
+            lock (cacheSync)
+            {
+                if (!caseOnlyRename)
+                    byName.TryRemove(normalizedOld, out _);
+                byName[normalizedNew] = updated;
+                byId[existing.Id] = updated;
+                cacheMutationEpoch++;
+            }
 
             // Advance the shared generation so other nodes stop resolving the old name and pick up the new.
             AdoptGeneration(await BumpGenerationAsync().ConfigureAwait(false));
@@ -1437,15 +1535,23 @@ public sealed class DatabaseRegistry : IAsyncDisposable
             {
                 // The name vanished or was repointed underneath us. Drop the stale cache entry so the
                 // next resolve re-reads KV rather than serving what we just failed to write.
-                byName.TryRemove(normalized, out _);
+                lock (cacheSync)
+                {
+                    byName.TryRemove(normalized, out _);
+                    cacheMutationEpoch++;
+                }
 
                 throw new CamusDBException(
                     CamusDBErrorCodes.DatabaseDoesntExist,
                     $"Database '{dbName}' is not registered");
             }
 
-            byName[normalized] = updated;
-            byId[existing.Id] = updated;
+            lock (cacheSync)
+            {
+                byName[normalized] = updated;
+                byId[existing.Id] = updated;
+                cacheMutationEpoch++;
+            }
 
             AdoptGeneration(await BumpGenerationAsync().ConfigureAwait(false));
         }
@@ -2330,7 +2436,10 @@ public sealed class DatabaseRegistry : IAsyncDisposable
     ///
     /// <para>As a side effect, any entry loaded from the scan that is absent from the local caches
     /// is backfilled into <c>byName</c> and <c>byId</c>, consistent with the lazy-load pattern
-    /// used by <see cref="TryResolveEntryAsync"/>.</para>
+    /// used by <see cref="TryResolveEntryAsync"/>. The backfill is fenced by the local cache-mutation
+    /// epoch (<see cref="TryBackfill"/>): once a mutation on this registry lands mid-scan, the rest of
+    /// the scan adds nothing, because its pages predate that mutation and could resurrect a name it
+    /// removed. The returned list is unaffected — it is what KV held when the scan read it.</para>
     ///
     /// <para>Transient scan failures are absorbed by <see cref="RetryTransientScanAsync"/>; a
     /// restarted attempt re-runs the backfill, which is harmless because the cache adds are
@@ -2346,6 +2455,10 @@ public sealed class DatabaseRegistry : IAsyncDisposable
         // writer to the coordinator. The synthetic read-only identity performs read-committed per-key
         // reads with no START/ROLLBACK round-trips, matching how the catalog's own meta scans read.
         KvTransaction tx = transactions.CreateReadOnlyTransaction();
+
+        // Captured before the scan starts: every page it yields predates any mutation that lands after
+        // this point, so none of them may be written into the cache once the epoch has moved.
+        long epochAtRead = CaptureCacheEpoch();
         try
         {
             await foreach ((string key, ReadOnlyKeyValueEntry kve) in kahuna.LocateAndScanRange(
@@ -2367,9 +2480,9 @@ public sealed class DatabaseRegistry : IAsyncDisposable
                 // Backfill cache for entries registered on other nodes. Keyed by the normalized name,
                 // like every other write to this dictionary: the raw name was silently dead for any
                 // database created with an upper-case letter, because every lookup normalizes first —
-                // the entry went in under a key nothing would ever ask for.
-                byName.TryAdd(Normalize(loaded.Name), loaded);
-                byId.TryAdd(loaded.Id, loaded);
+                // the entry went in under a key nothing would ever ask for. Add-if-absent, and only while
+                // no local mutation has run since the scan began.
+                TryBackfill(loaded, epochAtRead, overwrite: false);
 
                 entries.Add(loaded);
             }
@@ -2429,6 +2542,7 @@ public sealed class DatabaseRegistry : IAsyncDisposable
             // again — whereas a generation read afterwards would claim currency for a change the scan
             // may not have seen.
             long generationBeforeScan = isClusterMode ? await ReadGenerationAsync().ConfigureAwait(false) : 0;
+            long epochBeforeScan = CaptureCacheEpoch();
 
             IReadOnlyList<DatabaseRegistryEntry> scanned = await ScanAllEntriesAsync().ConfigureAwait(false);
 
@@ -2436,12 +2550,18 @@ public sealed class DatabaseRegistry : IAsyncDisposable
             // the right to call itself current. Without this the foreground resolve path — which now
             // refreshes a single name and deliberately does not adopt the generation — would keep paying
             // a point read per open forever on a node that reads but never writes.
+            //
+            // A local mutation that landed mid-scan makes the scanned list older than the cache, so the
+            // rewrite is skipped for this sweep: the generation check alone does not catch that case when
+            // the mutation's best-effort generation bump failed. Under writeSem the epoch cannot move, so
+            // the single check inside the lock is decisive.
             if (isClusterMode && Volatile.Read(ref loadedGeneration) < generationBeforeScan)
             {
                 await writeSem.WaitAsync().ConfigureAwait(false);
                 try
                 {
-                    if (Volatile.Read(ref loadedGeneration) < generationBeforeScan)
+                    if (Volatile.Read(ref loadedGeneration) < generationBeforeScan
+                        && Volatile.Read(ref cacheMutationEpoch) == epochBeforeScan)
                         ReconcileCachesLocked(scanned, generationBeforeScan);
                 }
                 finally

@@ -19,7 +19,7 @@ namespace CamusDB.Workload.Operations;
 /// not a fast success. There is one constant SQL text per table and the id is bound as a parameter, so
 /// the server's parse/plan caches see one statement per table, not one per row.
 /// </summary>
-public sealed class ReadOperation
+public sealed class ReadOperation : IReadOperation
 {
     private readonly ConnectionSet _connections;
     private readonly Dataset _dataset;

@@ -9,6 +9,7 @@ using System.Reflection;
 using CamusDB.Client;
 using CamusDB.Workload.Cli;
 using CamusDB.Workload.Client;
+using CamusDB.Workload.Elle;
 using CamusDB.Workload.Metrics;
 using CamusDB.Workload.Operations;
 using CamusDB.Workload.Results;
@@ -226,9 +227,16 @@ public static class Program
             Console.Error.WriteLine($"--isolation must be read_committed or serializable (got '{o.Isolation}').");
             return RunOutcome.Rejected;
         }
-        if (o.Workload is not ("accounts" or "bank" or "fanout"))
+        if (o.Workload is not ("accounts" or "bank" or "fanout" or "append"))
         {
-            Console.Error.WriteLine($"--workload must be accounts, bank or fanout (got '{o.Workload}').");
+            Console.Error.WriteLine($"--workload must be accounts, bank, fanout or append (got '{o.Workload}').");
+            return RunOutcome.Rejected;
+        }
+        if (o.Workload == "append" && (o.AppendKeys < 1 || o.AppendMaxWritesPerKey < 1 || o.AppendMaxTxnLength < 1))
+        {
+            Console.Error.WriteLine(
+                $"--append-keys, --append-max-writes-per-key and --append-max-txn-length must each be >= 1 " +
+                $"(got {o.AppendKeys}, {o.AppendMaxWritesPerKey}, {o.AppendMaxTxnLength}).");
             return RunOutcome.Rejected;
         }
         if (DatasetShapeError(o) is string shapeError)
@@ -392,13 +400,44 @@ public static class Program
         }
         await using ScanProbe? scanProbeLifetime = scanProbe;
 
-        IWriteOperation writeOperation = transfers
-            ? new TransferOperation(
-                connections, dataset, o.Rows, locking, isolation, ledger: transferLedger, crossTable: crossTable)
-            : new WriteOperation(connections, dataset, o.WritesPerTransaction, locking, isolation);
-        OperationDispatcher dispatcher = new(
-            new ReadOperation(connections, dataset),
-            writeOperation);
+        // The append shape records every attempt, reads included, to history.edn for Elle. Its table is
+        // created here rather than by init, because it is part of this run's setup and a dataset seeded
+        // by an older init must still be usable. The run tag keeps an earlier run's lists out of this
+        // run's history when the database is reused.
+        bool append = o.Workload == "append";
+        ElleHistory? elleHistory = null;
+        AppendKeySpace? appendKeys = null;
+        string appendRunTag = "";
+        if (append)
+        {
+            await using (CamusConnection appendSetup = await OpenSingleAsync(o, ct, o.ReconcileRequestTimeout).ConfigureAwait(false))
+            {
+                await AppendOperation.EnsureTableAsync(appendSetup, connections, TimeSpan.FromSeconds(120), ct).ConfigureAwait(false);
+            }
+
+            Directory.CreateDirectory(o.Output);
+            elleHistory = new ElleHistory(Path.Combine(o.Output, "history.edn"));
+            appendKeys = new AppendKeySpace(o.Seed, o.AppendKeys, o.AppendMaxWritesPerKey, o.AppendMaxTxnLength);
+            appendRunTag = $"{DateTime.UtcNow:yyyyMMddHHmmss}-{Guid.NewGuid().ToString("N")[..12]}";
+        }
+        using ElleHistory? elleHistoryLifetime = elleHistory;
+
+        AppendOperation? appendOperation = append
+            ? new AppendOperation(connections, appendKeys!, elleHistory!, appendRunTag, locking, isolation)
+            : null;
+        IWriteOperation writeOperation;
+        if (appendOperation is not null)
+            writeOperation = appendOperation;
+        else if (transfers)
+            writeOperation = new TransferOperation(
+                connections, dataset, o.Rows, locking, isolation, ledger: transferLedger, crossTable: crossTable);
+        else
+            writeOperation = new WriteOperation(connections, dataset, o.WritesPerTransaction, locking, isolation);
+
+        IReadOperation readOperation = appendOperation is not null
+            ? appendOperation
+            : new ReadOperation(connections, dataset);
+        OperationDispatcher dispatcher = new(readOperation, writeOperation);
 
         TimeSpan warmup = DurationParser.Parse(o.Warmup);
         TimeSpan measure = DurationParser.Parse(o.Duration);
@@ -456,6 +495,42 @@ public static class Program
                 samplerResult = await sampler.StopAsync().ConfigureAwait(false);
             if (scanProbe is not null)
                 probeSamples = await scanProbe.StopAsync().ConfigureAwait(false);
+        }
+
+        // Closed after the scheduler has drained, so the only attempts still open are the ones the drain
+        // gave up on. They end as :info, which admits both outcomes. elle.json describes the history for
+        // the checker; it does not judge it — the Elle check runs outside this process.
+        if (elleHistory is not null)
+        {
+            ElleHistoryStats stats = elleHistory.Close();
+            await File.WriteAllTextAsync(
+                Path.Combine(o.Output, "elle.json"),
+                System.Text.Json.JsonSerializer.Serialize(
+                    new
+                    {
+                        model = "list-append",
+                        history = "history.edn",
+                        isolation = isolation.ToString(),
+                        locking = locking.ToString(),
+                        activeKeys = appendKeys!.ActiveKeys,
+                        maxWritesPerKey = appendKeys.MaxWritesPerKey,
+                        maxTxnLength = appendKeys.MaxTxnLength,
+                        keysUsed = appendKeys.KeysUsed,
+                        runTag = appendRunTag,
+                        invocations = stats.Invocations,
+                        ok = stats.Ok,
+                        fail = stats.Fail,
+                        info = stats.Info,
+                        openAtClose = stats.OpenAtClose,
+                        processes = stats.Processes,
+                    },
+                    new System.Text.Json.JsonSerializerOptions { WriteIndented = true }),
+                ct).ConfigureAwait(false);
+
+            Console.WriteLine(
+                $"Elle history: {stats.Invocations:N0} attempts ({stats.Ok:N0} ok, {stats.Fail:N0} fail, " +
+                $"{stats.Info:N0} info, {stats.OpenAtClose:N0} open at close) over {appendKeys.KeysUsed:N0} keys, " +
+                $"{stats.Processes:N0} processes -> history.edn");
         }
 
         // The probe's verdict is computed once the window is known; it joins reconciliation below.
@@ -573,6 +648,10 @@ public static class Program
         // Reconciliation (outside the measured window). Never crashes the run: neither a query that
         // cannot complete nor a connection that cannot even open discards the artifacts above — both
         // downgrade the verdict to "could not verify".
+        // The append shape's unknown commits wrote only to its own table, so they cannot widen the band
+        // for the seeded rows. The seeded rows must be exactly as they were.
+        long datasetIndeterminate = append ? 0 : writeOperation.IndeterminateTxns;
+
         ReconciliationResult reconciliation;
         try
         {
@@ -583,7 +662,7 @@ public static class Program
             reconciliation = await Reconciliation
                 .VerifyOrInconclusiveAsync(
                     verify, dataset, metrics, baselineVersionSum, writeOperation.CommittedRows,
-                    writeOperation.IndeterminateTxns, o.WritesPerTransaction, o.ExpectFaults, o.Rows, ct,
+                    datasetIndeterminate, o.WritesPerTransaction, o.ExpectFaults, o.Rows, ct,
                     bankMode: transfers, baselineBalanceSum: baselineBalanceSum,
                     retryBudget: TimeSpan.FromSeconds(Math.Max(1, o.ReconcileTimeout)),
                     rowAttribution: attribution, rowAttributionSkip: attributionSkip,
@@ -594,7 +673,7 @@ public static class Program
         {
             reconciliation = Reconciliation.Inconclusive(
                 $"the reconciliation connection could not be opened — {ex.GetType().Name}: {ex.Message}",
-                writeOperation.IndeterminateTxns, metrics.Conflicts,
+                datasetIndeterminate, metrics.Conflicts,
                 baselineBalanceSum, rowAttributionExpected: attribution is not null, scanProbe: scanProbeResult);
         }
 
