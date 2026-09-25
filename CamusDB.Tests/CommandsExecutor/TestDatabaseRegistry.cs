@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -883,7 +884,8 @@ internal sealed class TestDatabaseRegistry
 
         public override async IAsyncEnumerable<(string Key, ReadOnlyKeyValueEntry Entry)> LocateAndScanRange(
             HLCTimestamp txId, string prefix, string? startKey, bool startInclusive, string? endKey, bool endInclusive,
-            int pageSize, HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken ct,
+            int pageSize, HLCTimestamp readTimestamp, KeyValueDurability durability,
+            [EnumeratorCancellation] CancellationToken ct,
             string coordinatorKey = "", TransactionOperationId operationId = default)
         {
             await foreach ((string key, ReadOnlyKeyValueEntry entry) in base.LocateAndScanRange(

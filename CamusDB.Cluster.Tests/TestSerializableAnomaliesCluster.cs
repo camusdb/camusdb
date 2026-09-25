@@ -368,8 +368,8 @@ public sealed class TestSerializableAnomaliesCluster
         KvTransaction writer = await database.Transactions.BeginAsync();
         CamusDBException? ex = Assert.ThrowsAsync<CamusDBException>(
             () => UpdateBalanceAsync(db, executor, writer, aliceId, 999L));
-        Assert.AreEqual(CamusDBErrorCodes.TransactionMustRetry, ex?.Code,
-            "Cluster: write to a key locked by a Serializable+RW reader must fail with TransactionMustRetry");
+        Assert.AreEqual(CamusDBErrorCodes.TransactionConflict, ex?.Code,
+            "Cluster: write to a key locked by a Serializable+RW reader must fail with TransactionConflict");
 
         await database.Transactions.RollbackAsync(writer);
 
