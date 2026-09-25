@@ -176,4 +176,5 @@ internal abstract class DelegatingKahuna : IKahuna
         public virtual Task<KeyValueResponseType> LocateAndReleaseSnapshotHold(string holdId, CancellationToken ct) => inner.LocateAndReleaseSnapshotHold(holdId, ct);
         public virtual Task<(KeyValueResponseType Type, HLCTimestamp EffectiveFloor, int LiveHolds)> GetSnapshotFloor(CancellationToken ct) => inner.GetSnapshotFloor(ct);
         public virtual Task<(KeyValueResponseType Type, KeyValueApplyFingerprint Fingerprint)> GetPartitionApplyFingerprint(int partitionId, CancellationToken ct) => inner.GetPartitionApplyFingerprint(partitionId, ct);
+        public virtual Task<(KeyValueResponseType Type, bool Held, long AppliedLogId)> GetPreparedIntentPresence(int partitionId, HLCTimestamp transactionId, long epoch, string key, CancellationToken ct) => inner.GetPreparedIntentPresence(partitionId, transactionId, epoch, key, ct);
 }
