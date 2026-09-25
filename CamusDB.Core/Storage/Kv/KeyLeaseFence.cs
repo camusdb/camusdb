@@ -64,6 +64,17 @@ internal sealed class KeyLeaseFence : IAsyncDisposable
     private const int MaxRetries = 10;
 
     /// <summary>
+    /// How many times <see cref="TryAcquireAsync"/> probes again after a refused <c>SetIfNotExists</c>
+    /// followed by a refused free-marker compare-and-set. One extra probe is not enough: the probe's own two
+    /// writes can straddle the marker's <see cref="ReleaseExpiryMs"/> expiry exactly as the first pair did, so
+    /// a budget of one reports a free fence as held whenever the first pair was refused for another reason
+    /// (a transient refusal answered by a wrapper, or a marker that lapsed during the first pair as well). A
+    /// genuine live claim holds the key for a whole lease and refuses every probe alike, so the extra probes
+    /// cost a few round trips under real contention and nothing otherwise.
+    /// </summary>
+    private const int MaxExpiredMarkerProbes = 3;
+
+    /// <summary>
     /// Expiry stamped on the released marker, so a key nobody re-acquires does not linger. Not zero:
     /// zero means "no expiry" to the KV layer, which would make a release pin the key forever — the
     /// exact opposite of releasing it.
@@ -190,11 +201,15 @@ internal sealed class KeyLeaseFence : IAsyncDisposable
                     // still existed and the second refuses because the stored value is no longer the
                     // marker, although nobody holds the key. Giving up here reports a free fence as
                     // held, which is exactly the failure an orderly release is meant to prevent.
-                    // Probe once more from the top: a lapsed marker is absent by then and the plain
+                    // Probe again from the top: a lapsed marker is absent by then and the plain
                     // SetIfNotExists claims it; a genuine live claim refuses both writes again and is
-                    // then reported as held.
-                    if (++expiredMarkerProbes <= 1)
+                    // reported as held once the probe budget is spent. The next probe first waits past
+                    // the marker's expiry, so its own two writes cannot straddle the same boundary.
+                    if (++expiredMarkerProbes <= MaxExpiredMarkerProbes)
+                    {
+                        await Task.Delay(ReleaseExpiryMs + expiredMarkerProbes, cancellationToken).ConfigureAwait(false);
                         continue;
+                    }
 
                     return null; // a live claim genuinely holds the key
                 }
