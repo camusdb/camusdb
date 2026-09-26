@@ -52,6 +52,14 @@ internal sealed class SQLExecutorCreateTableCreator : SQLExecutorBaseCreator
                     $"Duplicate constraint name '{check.Name}'");
         }
 
+        // Foreign keys are named after the CHECK and named NOT NULL constraints are known, because
+        // DROP CONSTRAINT resolves one name across all three kinds.
+        IEnumerable<string> takenNames = checkConstraintInfos.Select(c => c.Name)
+            .Concat(columnInfos.Where(c => c.NotNullConstraintName is not null).Select(c => c.NotNullConstraintName!));
+
+        ForeignKeyInfo[] foreignKeys = ForeignKeyAstReader.ReadCreateTable(
+            ast.rightAst, tableName, ticket.DatabaseName, columnInfos.Select(c => c.Name).ToList(), takenNames);
+
         // Reject array columns in any PK or index — arrays are not indexable.
         Dictionary<string, ColumnType> colTypeByName = columnInfos.ToDictionary(c => c.Name, c => c.Type, StringComparer.Ordinal);
         foreach (ConstraintInfo constraint in constraintInfos)
@@ -72,7 +80,8 @@ internal sealed class SQLExecutorCreateTableCreator : SQLExecutorBaseCreator
             ifNotExists: ast.nodeType == NodeType.CreateTableIfNotExists,
             checkConstraints: [.. checkConstraintInfos],
             comment: GetInlineComment(ast.extendedTwo),
-            settings: GetInlineSettings(ast.extendedThree)
+            settings: GetInlineSettings(ast.extendedThree),
+            foreignKeys: foreignKeys
         );
     }
 
@@ -170,8 +179,9 @@ internal sealed class SQLExecutorCreateTableCreator : SQLExecutorBaseCreator
             return;
         }
 
-        // CHECK constraints are collected separately in CollectCheckConstraints.
-        if (constraintList.nodeType == NodeType.CreateTableConstraintCheck)
+        // CHECK constraints are collected separately in CollectCheckConstraints, and foreign keys
+        // by ForeignKeyAstReader.
+        if (constraintList.nodeType is NodeType.CreateTableConstraintCheck or NodeType.CreateTableConstraintForeignKey)
             return;
 
         throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Invalid create table field list");
@@ -354,7 +364,8 @@ internal sealed class SQLExecutorCreateTableCreator : SQLExecutorBaseCreator
         if (fieldList.nodeType == NodeType.CreateTableConstraintPrimaryKey
             || fieldList.nodeType == NodeType.CreateTableConstraintMultiIndex
             || fieldList.nodeType == NodeType.CreateTableConstraintUniqueIndex
-            || fieldList.nodeType == NodeType.CreateTableConstraintCheck)
+            || fieldList.nodeType == NodeType.CreateTableConstraintCheck
+            || fieldList.nodeType == NodeType.CreateTableConstraintForeignKey)
             return;
 
         throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Invalid create table field list");
@@ -504,8 +515,9 @@ internal sealed class SQLExecutorCreateTableCreator : SQLExecutorBaseCreator
             return;
         }
 
-        // CHECK constraints are collected separately in CollectCheckConstraints.
-        if (fieldList.nodeType == NodeType.CreateTableConstraintCheck)
+        // CHECK constraints are collected separately in CollectCheckConstraints, and foreign keys
+        // by ForeignKeyAstReader.
+        if (fieldList.nodeType is NodeType.CreateTableConstraintCheck or NodeType.CreateTableConstraintForeignKey)
             return;
 
         throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Invalid create table field list");

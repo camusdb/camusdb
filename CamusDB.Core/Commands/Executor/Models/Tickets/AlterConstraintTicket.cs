@@ -46,6 +46,13 @@ public enum AlterConstraintOperation
     /// <see cref="AlterConstraintTicket.Storage"/> identify the column and the strategy.
     /// </summary>
     SetStorage,
+
+    /// <summary>
+    /// Adds a foreign key (<c>ALTER TABLE t ADD [CONSTRAINT name] FOREIGN KEY …</c>). The constraint
+    /// is in <see cref="AlterConstraintTicket.ForeignKey"/>. Appended last: the operation travels to the
+    /// leader as an integer when DDL is forwarded.
+    /// </summary>
+    AddForeignKey,
 }
 
 /// <summary>
@@ -88,6 +95,9 @@ public readonly struct AlterConstraintTicket
     /// <summary>The new strategy for <see cref="AlterConstraintOperation.SetStorage"/>; null for every other operation.</summary>
     public ColumnStorageStrategy? Storage { get; }
 
+    /// <summary>The constraint to add, for <see cref="AlterConstraintOperation.AddForeignKey"/>; null otherwise.</summary>
+    public ForeignKeyInfo? ForeignKey { get; }
+
     public AlterConstraintTicket(
         string databaseName,
         string tableName,
@@ -96,7 +106,8 @@ public readonly struct AlterConstraintTicket
         string[]? referencedColumns,
         AlterConstraintOperation operation,
         string? columnName = null,
-        ColumnStorageStrategy? storage = null)
+        ColumnStorageStrategy? storage = null,
+        ForeignKeyInfo? foreignKey = null)
     {
         DatabaseName = databaseName;
         TableName = tableName;
@@ -106,5 +117,6 @@ public readonly struct AlterConstraintTicket
         Operation = operation;
         ColumnName = columnName;
         Storage = storage;
+        ForeignKey = foreignKey;
     }
 }

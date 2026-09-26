@@ -200,6 +200,9 @@ internal static class ViewDeltaApplier
         live.Columns = built.Columns;
         live.Indexes = built.Indexes;
         live.CheckConstraints = built.CheckConstraints;
+        // A materialized view can never take part in a foreign key, so this is null on both sides.
+        // Copied anyway so that the swap stays a complete transfer of the definition.
+        live.ForeignKeys = built.ForeignKeys;
         live.Version = built.Version;
         live.SchemaHistory = built.SchemaHistory;
         live.SchemaHistoryLoader = built.SchemaHistoryLoader;

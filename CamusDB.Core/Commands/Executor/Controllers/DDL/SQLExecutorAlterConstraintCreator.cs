@@ -6,6 +6,7 @@
  * file that was distributed with this source code.
  */
 
+using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.CommandsExecutor.Controllers.DML;
 using CamusDB.Core.CommandsExecutor.Controllers.Queries;
@@ -15,7 +16,7 @@ using CamusDB.Core.Catalogs.Models;
 namespace CamusDB.Core.CommandsExecutor.Controllers.DDL;
 
 /// <summary>
-/// Translates <c>AlterTableAddConstraintCheck</c>, <c>AlterTableDropConstraint</c>,
+/// Translates <c>AlterTableAddConstraintCheck</c>, <c>AlterTableAddConstraintForeignKey</c>, <c>AlterTableDropConstraint</c>,
 /// <c>AlterTableSetNotNull</c>, and <c>AlterTableDropNotNull</c> AST nodes into
 /// <see cref="AlterConstraintTicket"/> instances. Validates CHECK expressions at parse time
 /// (no subqueries, aggregates, or volatile functions; all referenced columns must exist).
@@ -72,6 +73,32 @@ internal sealed class SQLExecutorAlterConstraintCreator : SQLExecutorBaseCreator
                 referencedColumns: null,
                 operation: AlterConstraintOperation.DropNotNull,
                 columnName: columnName
+            );
+        }
+
+        if (ast.nodeType == NodeType.AlterTableAddConstraintForeignKey)
+        {
+            // DROP CONSTRAINT resolves one name across CHECK, named NOT NULL and foreign keys, so a
+            // new name must avoid all three.
+            IEnumerable<string> takenNames = (tableSchema.CheckConstraints ?? []).Select(c => c.Name)
+                .Concat((tableSchema.Columns ?? []).Where(c => c.NotNullConstraintName is not null).Select(c => c.NotNullConstraintName!))
+                .Concat((tableSchema.ForeignKeys ?? []).Select(f => f.Name));
+
+            ForeignKeyInfo foreignKey = ForeignKeyAstReader.ReadAlterTable(
+                ast.rightAst!,
+                tableName,
+                sqlTicket.DatabaseName,
+                (tableSchema.Columns ?? []).Select(c => c.Name).ToList(),
+                takenNames);
+
+            return new AlterConstraintTicket(
+                databaseName: sqlTicket.DatabaseName,
+                tableName: tableName,
+                constraintName: foreignKey.Name,
+                expression: null,
+                referencedColumns: null,
+                operation: AlterConstraintOperation.AddForeignKey,
+                foreignKey: foreignKey
             );
         }
 

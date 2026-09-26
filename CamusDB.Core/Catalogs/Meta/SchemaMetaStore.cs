@@ -339,10 +339,14 @@ internal static class SchemaMetaStore
             Columns = tableSchema.Columns,
             Indexes = tableSchema.Indexes,
             CheckConstraints = tableSchema.CheckConstraints,
+            ForeignKeys = tableSchema.ForeignKeys,
             Settings = tableSchema.Settings,
             Comment = tableSchema.Comment,
             StorageId = tableSchema.StorageId,
             ContentsGeneration = tableSchema.ContentsGeneration,
+            // The truncate cut. Without it a restarted node forgets where the current contents begin, and
+            // a time-travel read from before a TRUNCATE answers "no rows" instead of being refused.
+            ContentsValidFrom = tableSchema.ContentsValidFrom,
             MetadataGeneration = tableSchema.MetadataGeneration,
             Kind = tableSchema.Kind,
             ViewDefinition = tableSchema.ViewDefinition,

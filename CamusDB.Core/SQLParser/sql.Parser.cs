@@ -111,6 +111,65 @@ internal partial class sqlParser
     }
 
     /// <summary>
+    /// One clause of a foreign key: <c>ON DELETE</c>, <c>ON UPDATE</c>, <c>MATCH</c>,
+    /// <c>[NOT] DEFERRABLE</c> or <c>INITIALLY</c>. The node's text is <c>kind:value</c>, for example
+    /// <c>on_delete:cascade</c>, so the executor reads every clause the same way whether it came from
+    /// the column-level or the table-level form.
+    /// </summary>
+    /// <remarks>
+    /// The parser only checks that the words form a clause. Whether CamusDB supports the clause is
+    /// the executor's decision, so an unsupported but well-formed clause gets a clear "not supported"
+    /// error rather than a syntax error.
+    /// </remarks>
+    private static NodeAst ForeignKeyOption(string kind, string value) =>
+        new(NodeType.ForeignKeyOption, null, null, null, null, null, null, null, kind + ":" + value);
+
+    /// <summary>The single-word referential actions. NO ACTION, SET NULL and SET DEFAULT have their own tokens.</summary>
+    private static string ForeignKeyActionWord(string? word)
+    {
+        if (string.Equals(word, "restrict", StringComparison.OrdinalIgnoreCase))
+            return "restrict";
+
+        if (string.Equals(word, "cascade", StringComparison.OrdinalIgnoreCase))
+            return "cascade";
+
+        throw new CamusDBException(
+            CamusDBErrorCodes.InvalidInput,
+            $"Expected NO ACTION, RESTRICT, CASCADE, SET NULL or SET DEFAULT, got '{word}'");
+    }
+
+    /// <summary><c>MATCH SIMPLE | FULL | PARTIAL</c>, matched as two plain identifiers.</summary>
+    private static NodeAst ForeignKeyMatchOption(string? first, string? second)
+    {
+        if (!string.Equals(first, "match", StringComparison.OrdinalIgnoreCase))
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInput,
+                $"Expected a foreign key clause, got '{first} {second}'");
+
+        string? kind = second?.ToLowerInvariant();
+
+        if (kind is not ("simple" or "full" or "partial"))
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInput,
+                $"Expected MATCH SIMPLE, MATCH FULL or MATCH PARTIAL, got 'MATCH {second}'");
+
+        return ForeignKeyOption("match", kind);
+    }
+
+    /// <summary><c>INITIALLY DEFERRED | IMMEDIATE</c>.</summary>
+    private static NodeAst ForeignKeyInitiallyOption(string? word)
+    {
+        string? kind = word?.ToLowerInvariant();
+
+        if (kind is not ("deferred" or "immediate"))
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInput,
+                $"Expected INITIALLY DEFERRED or INITIALLY IMMEDIATE, got 'INITIALLY {word}'");
+
+        return ForeignKeyOption("initially", kind);
+    }
+
+    /// <summary>
     /// Splits the single <c>table@index</c> token the scanner produced into the relation name and
     /// the index name. The scanner matches the pair as one token so the '@' is never seen as a bind
     /// placeholder; the split belongs here because the token's text is the only place both halves

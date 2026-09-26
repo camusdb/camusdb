@@ -103,6 +103,21 @@ public static class CamusDBErrorCodes
     /// </summary>
     public const string ColumnStorageNotApplicable = "CADB0414";
 
+    /// <summary>
+    /// A foreign-key definition cannot be accepted: the column counts or types of the two sides do not
+    /// match, the referenced columns are not exactly the key of a unique index or the primary key, a
+    /// side is a view or a materialized view, or the referenced table is in another database. A
+    /// permanent caller mistake — maps to HTTP 400.
+    /// </summary>
+    public const string InvalidForeignKeyDefinition = "CADB0415";
+
+    /// <summary>
+    /// Adding the foreign key would close a cycle of references through two or more tables. CamusDB
+    /// refuses such cycles, which PostgreSQL permits; a table that references itself is allowed. A
+    /// permanent caller mistake — maps to HTTP 400.
+    /// </summary>
+    public const string ForeignKeyCycle = "CADB0416";
+
     public const string DuplicateUniqueKeyValue = "CADB0300";
     public const string NotNullViolation = "CADB0301";
     public const string ValueTooLong = "CADB0302";
@@ -112,6 +127,29 @@ public static class CamusDBErrorCodes
     /// The exception message includes the constraint name. Maps to HTTP 400.
     /// </summary>
     public const string CheckConstraintViolation = "CADB0303";
+
+    /// <summary>
+    /// A child row references a parent key that does not exist: an INSERT, or an UPDATE of a
+    /// referencing column, left a row whose non-NULL foreign-key columns match no row of the
+    /// referenced table. Also raised when <c>ALTER TABLE … ADD CONSTRAINT … FOREIGN KEY</c> finds such
+    /// a row already in the table. The message names the constraint, both tables and the key. The
+    /// outcome depends on the current data, not on the statement text, so it maps to HTTP 409.
+    /// </summary>
+    public const string ForeignKeyViolation = "CADB0304";
+
+    /// <summary>
+    /// A DELETE removed a parent row that child rows still reference, under a foreign key whose
+    /// <c>ON DELETE</c> action is <c>NO ACTION</c> or <c>RESTRICT</c>. The message names the constraint,
+    /// the child table and the key. Maps to HTTP 409.
+    /// </summary>
+    public const string ForeignKeyRestrictDelete = "CADB0305";
+
+    /// <summary>
+    /// An UPDATE changed a referenced parent key that child rows still reference, under a foreign key
+    /// whose <c>ON UPDATE</c> action is <c>NO ACTION</c> or <c>RESTRICT</c>. The message names the
+    /// constraint, the child table and the old key. Maps to HTTP 409.
+    /// </summary>
+    public const string ForeignKeyRestrictUpdate = "CADB0306";
     
     public const string TransactionAlreadyCompleted = "CADB0501";
     public const string TransactionConflict = "CADB0502";
@@ -652,6 +690,11 @@ public static class CamusDBErrorCodes
         TransactionMutationLimitExceeded => 400,
         AnalyzeRequiresNoPendingWrites => 400,
         CheckConstraintViolation => 400,
+        ForeignKeyViolation => 409,
+        ForeignKeyRestrictDelete => 409,
+        ForeignKeyRestrictUpdate => 409,
+        InvalidForeignKeyDefinition => 400,
+        ForeignKeyCycle => 400,
         MalformedVector => 400,
         VectorDimensionMismatch => 400,
         InvalidVectorValue => 400,

@@ -67,6 +67,8 @@ public static class GrpcErrorMapper
         CamusDBErrorCodes.ColumnStorageNotApplicable => StatusCode.InvalidArgument,
         CamusDBErrorCodes.NotNullViolation => StatusCode.InvalidArgument,
         CamusDBErrorCodes.CheckConstraintViolation => StatusCode.InvalidArgument,
+        CamusDBErrorCodes.InvalidForeignKeyDefinition => StatusCode.InvalidArgument,
+        CamusDBErrorCodes.ForeignKeyCycle => StatusCode.InvalidArgument,
 
         // Not found
         CamusDBErrorCodes.DatabaseDoesntExist => StatusCode.NotFound,
@@ -87,6 +89,13 @@ public static class GrpcErrorMapper
         CamusDBErrorCodes.AnalyzeRequiresNoPendingWrites => StatusCode.FailedPrecondition,
         CamusDBErrorCodes.StatementNotAllowedInTransaction => StatusCode.FailedPrecondition,
         CamusDBErrorCodes.SnapshotPrecedesContentsGeneration => StatusCode.FailedPrecondition,
+
+        // Refused because of what the data or the schema holds right now, not because of the
+        // statement text: the same statement succeeds once the dependent rows or objects are gone.
+        CamusDBErrorCodes.ForeignKeyViolation      => StatusCode.FailedPrecondition,
+        CamusDBErrorCodes.ForeignKeyRestrictDelete => StatusCode.FailedPrecondition,
+        CamusDBErrorCodes.ForeignKeyRestrictUpdate => StatusCode.FailedPrecondition,
+        CamusDBErrorCodes.DependentObjectsExist    => StatusCode.FailedPrecondition,
 
         // Retryable transaction conflicts → ABORTED (trailer code disambiguates)
         CamusDBErrorCodes.TransactionConflict        => StatusCode.Aborted,

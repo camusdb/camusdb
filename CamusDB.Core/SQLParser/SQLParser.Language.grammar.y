@@ -63,6 +63,13 @@
    identifier and validated in the parse action, so each stays usable as a table name, a column
    name and an alias. */
 %token TSEQUENCE TSEQUENCES
+/* Foreign keys. REFERENCES, FOREIGN, DEFERRABLE and INITIALLY are reserved, as they are in
+   PostgreSQL. NO ACTION is one token spanning two words, like AS OF SYSTEM TIME: a column-level
+   "ON DELETE NO ACTION" may be followed by another column constraint that starts with a plain
+   identifier (STORAGE, GENERATED, MATCH), and two separate identifier tokens there would make the
+   grammar ambiguous. Every other word the clauses use (MATCH, SIMPLE, FULL, PARTIAL, RESTRICT,
+   CASCADE, DEFERRED, IMMEDIATE) is a plain identifier validated in the parse action. */
+%token TREFERENCES TFOREIGN TDEFERRABLE TINITIALLY TNOACTION
 /* One unquoted "table@index" pair, produced by a single scanner rule so the '@' never reaches the
    parser as a placeholder. Accepted only in the SHOW ... FROM INDEX productions and split there. */
 %token TQUALIFIED_INDEX
@@ -755,6 +762,8 @@ alter_table_stmt : TALTER TTABLE any_identifier TWADD any_identifier field_type 
                  | TALTER TTABLE any_identifier TRENAME TCOLUMN any_identifier TTO any_identifier { $$.n = new(NodeType.AlterTableRenameColumn, $3.n, $6.n, $8.n, null, null, null, null, null); }
                  | TALTER TTABLE any_identifier TRENAME TINDEX any_identifier TTO any_identifier { $$.n = new(NodeType.AlterTableRenameIndex, $3.n, $6.n, $8.n, null, null, null, null, null); }
                  | TALTER TTABLE any_identifier TWADD TCONSTRAINT any_identifier TCHECK LPAREN condition RPAREN { $$.n = new(NodeType.AlterTableAddConstraintCheck, $3.n, $9.n, null, null, null, null, null, $6.s); }
+                 | TALTER TTABLE any_identifier TWADD fk_table_constraint { $$.n = new(NodeType.AlterTableAddConstraintForeignKey, $3.n, $5.n, null, null, null, null, null, null); }
+                 | TALTER TTABLE any_identifier TWADD TCONSTRAINT any_identifier fk_table_constraint { $7.n.yytext = $6.s; $$.n = new(NodeType.AlterTableAddConstraintForeignKey, $3.n, $7.n, null, null, null, null, null, null); }
                  | TALTER TTABLE any_identifier TDROP TCONSTRAINT any_identifier { $$.n = new(NodeType.AlterTableDropConstraint, $3.n, null, null, null, null, null, null, $6.s); }
                  | TALTER TTABLE any_identifier TALTER any_identifier TSET TNOT TNULL { $$.n = new(NodeType.AlterTableSetNotNull, $3.n, $5.n, null, null, null, null, null, null); }
                  | TALTER TTABLE any_identifier TALTER TCOLUMN any_identifier TSET TNOT TNULL { $$.n = new(NodeType.AlterTableSetNotNull, $3.n, $6.n, null, null, null, null, null, null); }
@@ -1234,7 +1243,54 @@ create_table_inline_constraint : TCONSTRAINT any_identifier TPRIMARY TKEY LPAREN
                                | TUNIQUE TKEY any_identifier LPAREN identifier_index_list RPAREN index_include_clause opt_inline_comment { $$.n = new(NodeType.CreateTableConstraintUniqueIndex, $3.n, $5.n, $7.n, $8.n, null, null, null, null); }
                                | TCONSTRAINT any_identifier TCHECK LPAREN condition RPAREN { $$.n = new(NodeType.CreateTableConstraintCheck, $5.n, null, null, null, null, null, null, $2.s); }
                                | TCHECK LPAREN condition RPAREN { $$.n = new(NodeType.CreateTableConstraintCheck, $3.n, null, null, null, null, null, null, null); }
+                               | fk_table_constraint { $$.n = $1.n; }
+                               | TCONSTRAINT any_identifier fk_table_constraint { $3.n.yytext = $2.s; $$.n = $3.n; }
                                ;
+
+/* FOREIGN KEY (cols) REFERENCES table [(cols)] [clauses]. The table-level form is always followed by
+   a comma, a closing parenthesis or the end of the statement, so its clauses can form one list here
+   without any ambiguity. The column-level form cannot do that; see create_table_field_constraint. */
+fk_table_constraint : TFOREIGN TKEY LPAREN fk_column_list RPAREN TREFERENCES any_identifier opt_fk_ref_columns opt_fk_clauses
+                      { $$.n = new(NodeType.CreateTableConstraintForeignKey, $4.n, $7.n, $8.n, $9.n, null, null, null, null); }
+                    ;
+
+/* A plain list of column names. Unlike identifier_index_list it takes no ASC/DESC: a foreign key
+   has no direction. Built from IndexIdentifierList nodes so the executor's list walkers apply. */
+fk_column_list : fk_column_list TCOMMA any_identifier { $$.n = new(NodeType.IndexIdentifierList, $1.n, $3.n, null, null, null, null, null, null); }
+               | any_identifier { $$.n = $1.n; $$.s = $1.s; }
+               ;
+
+/* No list means the parent's primary key, as in PostgreSQL. */
+opt_fk_ref_columns : LPAREN fk_column_list RPAREN { $$.n = $2.n; }
+                   | { $$.n = null; }
+                   ;
+
+opt_fk_clauses : fk_clause_list { $$.n = $1.n; }
+               | { $$.n = null; }
+               ;
+
+fk_clause_list : fk_clause_list fk_clause { $$.n = new(NodeType.ForeignKeyOptionList, $1.n, $2.n, null, null, null, null, null, null); }
+               | fk_clause { $$.n = $1.n; }
+               ;
+
+fk_clause : fk_option { $$.n = $1.n; }
+          | TIDENTIFIER TIDENTIFIER { $$.n = ForeignKeyMatchOption($1.s, $2.s); }
+          ;
+
+/* The clauses a foreign key accepts in both positions. MATCH is not here: at column level it
+   shares its first token with STORAGE and GENERATED, so it rides their two-word production. */
+fk_option : TON TDELETE fk_action { $$.n = ForeignKeyOption("on_delete", $3.s); }
+          | TON TUPDATE fk_action { $$.n = ForeignKeyOption("on_update", $3.s); }
+          | TDEFERRABLE { $$.n = ForeignKeyOption("deferrable", "true"); }
+          | TNOT TDEFERRABLE { $$.n = ForeignKeyOption("deferrable", "false"); }
+          | TINITIALLY TIDENTIFIER { $$.n = ForeignKeyInitiallyOption($2.s); }
+          ;
+
+fk_action : TIDENTIFIER { $$.s = ForeignKeyActionWord($1.s); }
+          | TNOACTION { $$.s = "no_action"; }
+          | TSET TNULL { $$.s = "set_null"; }
+          | TSET TDEFAULT { $$.s = "set_default"; }
+          ;
 
 create_table_item : any_identifier field_type { $$.n = new(NodeType.CreateTableItem, $1.n, $2.n, null, null, null, null, null, null); }
                   | any_identifier field_type create_table_field_constraint_list { $$.n = new(NodeType.CreateTableItem, $1.n, $2.n, $3.n, null, null, null, null, null); }
@@ -1271,6 +1327,13 @@ create_table_field_constraint : TNULL { $$.n = NodeAst.ConstraintNull; }
                         | TDEFAULT LPAREN default_expr RPAREN { $$.n = new(NodeType.ConstraintDefault, $3.n, null, null, null, null, null, null, null); }
                         | TCHECK LPAREN condition RPAREN { $$.n = new(NodeType.ConstraintCheck, $3.n, null, null, null, null, null, null, null); }
                         | TCOMMENT string { $$.n = new(NodeType.ConstraintComment, $2.n, null, null, null, null, null, null, null); }
+                        /* REFERENCES and each of its clauses are separate column constraints. A clause
+                           tail after REFERENCES would be ambiguous: in "REFERENCES t NOT NULL" the NOT
+                           could start NOT DEFERRABLE or NOT NULL. The executor attaches each clause to
+                           the REFERENCES before it on the same column. */
+                        | TREFERENCES any_identifier opt_fk_ref_columns { $$.n = new(NodeType.ConstraintForeignKey, $2.n, $3.n, null, null, null, null, null, null); }
+                        | TCONSTRAINT any_identifier TREFERENCES any_identifier opt_fk_ref_columns { $$.n = new(NodeType.ConstraintForeignKey, $4.n, $5.n, null, null, null, null, null, $2.s); }
+                        | fk_option { $$.n = $1.n; }
                         /* Two shapes share this production because they share their first two
                            tokens: STORAGE <mode>, and GENERATED ALWAYS AS IDENTITY. Splitting them
                            into separate productions would make the choice depend on a token the
@@ -1285,6 +1348,10 @@ create_table_field_constraint : TNULL { $$.n = NodeAst.ConstraintNull; }
                                         CamusDB.Core.CamusDBErrorCodes.InvalidInput,
                                         "Expected: GENERATED { ALWAYS | BY DEFAULT } AS IDENTITY, got '" + $1.s + " " + $2.s + " AS " + $3.s + "'");
                                 $$.n = NodeAst.ConstraintIdentityAlways;
+                            }
+                            else if (string.Equals($1.s, "match", System.StringComparison.OrdinalIgnoreCase))
+                            {
+                                $$.n = ForeignKeyMatchOption($1.s, $2.s);
                             }
                             else
                             {

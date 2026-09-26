@@ -44,6 +44,40 @@ internal abstract class ValidatorBase
     }
 
     /// <summary>
+    /// Checks one declared foreign key: its shape, then whether CamusDB supports each clause. Shared by
+    /// every ticket that can carry one — CREATE TABLE and ALTER TABLE ADD FOREIGN KEY, from SQL or from
+    /// the HTTP API — so a clause is refused the same way wherever it was written.
+    /// </summary>
+    /// <remarks>
+    /// Nothing persists or enforces a foreign key yet, so a well-formed, supported declaration is
+    /// refused too. Accepting it would create a table whose constraint silently does nothing, which is
+    /// worse than an error. The last statement of this method goes away when the DDL path stores the
+    /// constraint.
+    /// </remarks>
+    protected static void ValidateForeignKey(ForeignKeyInfo foreignKey)
+    {
+        if (string.IsNullOrWhiteSpace(foreignKey.Name) || !HasValidCharacters(foreignKey.Name))
+            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Foreign key name '{foreignKey.Name}' is not valid");
+
+        if (foreignKey.Columns.Length == 0)
+            throw new CamusDBException(CamusDBErrorCodes.InvalidForeignKeyDefinition, $"Foreign key '{foreignKey.Name}' names no referencing column");
+
+        if (string.IsNullOrWhiteSpace(foreignKey.ReferencedTable))
+            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Foreign key '{foreignKey.Name}' names no referenced table");
+
+        if (foreignKey.ReferencedColumns.Length > 0 && foreignKey.ReferencedColumns.Length != foreignKey.Columns.Length)
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidForeignKeyDefinition,
+                $"Foreign key '{foreignKey.Name}' names {foreignKey.Columns.Length} referencing column(s) but {foreignKey.ReferencedColumns.Length} referenced column(s)");
+
+        foreignKey.RequireSupported();
+
+        throw new CamusDBException(
+            CamusDBErrorCodes.FeatureNotSupported,
+            $"Foreign key '{foreignKey.Name}': FOREIGN KEY constraints are parsed but cannot be created yet");
+    }
+
+    /// <summary>
     /// Enforces <see cref="CamusDB.Core.CamusDBConstants.MaxCommentLength"/> on one comment.
     ///
     /// <para>Shared rather than inlined because comments arrive through several unrelated tickets —

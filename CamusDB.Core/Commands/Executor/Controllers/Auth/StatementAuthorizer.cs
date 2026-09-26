@@ -439,7 +439,7 @@ internal sealed class StatementAuthorizer
             or NodeType.AlterTableDropIndex => Privilege.Index,
         NodeType.AlterTableAddColumn or NodeType.AlterTableDropColumn or NodeType.AlterTableRenameTo
             or NodeType.AlterTableRenameColumn or NodeType.AlterTableRenameIndex
-            or NodeType.AlterTableAddConstraintCheck or NodeType.AlterTableDropConstraint
+            or NodeType.AlterTableAddConstraintCheck or NodeType.AlterTableAddConstraintForeignKey or NodeType.AlterTableDropConstraint
             or NodeType.AlterTableSetNotNull or NodeType.AlterTableDropNotNull
             or NodeType.AlterTableSetColumnStorage or NodeType.AlterTableRewriteStorage
             or NodeType.AlterTableAddPrimaryKey or NodeType.AlterTableDropPrimaryKey

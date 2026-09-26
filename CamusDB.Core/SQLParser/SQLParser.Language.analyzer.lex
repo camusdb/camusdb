@@ -104,6 +104,11 @@ TInclude        (I|i)(N|n)(C|c)(L|l)(U|u)(D|d)(E|e)
 TDouble         (D|d)(O|o)(U|u)(B|b)(L|l)(E|e)
 TConstraint     (C|c)(O|o)(N|n)(S|s)(T|t)(R|r)(A|a)(I|i)(N|n)(T|t)
 TCheck          (C|c)(H|h)(E|e)(C|c)(K|k)
+TReferences     (R|r)(E|e)(F|f)(E|e)(R|r)(E|e)(N|n)(C|c)(E|e)(S|s)
+TForeign        (F|f)(O|o)(R|r)(E|e)(I|i)(G|g)(N|n)
+TDeferrable     (D|d)(E|e)(F|f)(E|e)(R|r)(R|r)(A|a)(B|b)(L|l)(E|e)
+TInitially      (I|i)(N|n)(I|i)(T|t)(I|i)(A|a)(L|l)(L|l)(Y|y)
+TNoAction       (N|n)(O|o)[ \t\r\n]+(A|a)(C|c)(T|t)(I|i)(O|o)(N|n)
 TExplain        (E|e)(X|x)(P|p)(L|l)(A|a)(I|i)(N|n)
 TBegin          (B|b)(E|e)(G|g)(I|i)(N|n)
 TStart          (S|s)(T|t)(A|a)(R|r)(T|t)
@@ -428,6 +433,16 @@ TSequence       (S|s)(E|e)(Q|q)(U|u)(E|e)(N|n)(C|c)(E|e)
 {TConstraint} { return (int)Token.TCONSTRAINT; }
 
 {TCheck} { return (int)Token.TCHECK; }
+
+{TReferences} { return (int)Token.TREFERENCES; }
+
+{TForeign} { return (int)Token.TFOREIGN; }
+
+{TDeferrable} { return (int)Token.TDEFERRABLE; }
+
+{TInitially} { return (int)Token.TINITIALLY; }
+
+{TNoAction} { return (int)Token.TNOACTION; }
 
 {TAt} { return (int)Token.TAT; }
 

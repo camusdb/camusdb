@@ -70,6 +70,7 @@ public sealed class TestStatementScopeCompleteness
         [NodeType.CreateTableConstraintMultiIndex] = "AST fragment, not a statement",
         [NodeType.CreateTableConstraintUniqueIndex] = "AST fragment, not a statement",
         [NodeType.CreateTableConstraintCheck] = "AST fragment, not a statement",
+        [NodeType.CreateTableConstraintForeignKey] = "AST fragment, not a statement",
     };
 
     /// <summary>

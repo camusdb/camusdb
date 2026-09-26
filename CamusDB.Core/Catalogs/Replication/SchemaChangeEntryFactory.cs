@@ -209,6 +209,9 @@ internal static class SchemaChangeEntryFactory
                 Columns = columns,
                 Indexes = src.Indexes is { Count: > 0 } ? [.. src.Indexes] : null,
                 CheckConstraints = src.CheckConstraints is { Count: > 0 } ? [.. src.CheckConstraints] : null,
+                // Foreign keys are deliberately not relinked. While the table was dropped, no
+                // parent-side check could see its rows, so the parents they reference may be gone.
+                // The user adds the constraints again, and that path validates the rows.
                 // Preserve table settings (e.g. the auto-analyze opt-out) across deferred drop + relink.
                 Settings = src.Settings is { Count: > 0 } ? new Dictionary<string, string>(src.Settings, StringComparer.Ordinal) : null,
                 // Preserve the table comment too, so a relinked table comes back documented.

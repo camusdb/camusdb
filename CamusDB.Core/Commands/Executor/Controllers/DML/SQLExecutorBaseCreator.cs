@@ -1198,6 +1198,22 @@ internal abstract class SQLExecutorBaseCreator
             return;
         }
 
+        // A column-level REFERENCES and its clauses are read straight from the AST by
+        // ForeignKeyAstReader, which pairs each clause with the REFERENCES before it. They are listed
+        // here so a caller can see that the column declares a foreign key; the reference carries no
+        // value, and a clause carries its kind:value text.
+        if (constraintsList.nodeType == NodeType.ConstraintForeignKey)
+        {
+            constraintTypes.Add((ColumnConstraintType.ForeignKey, null));
+            return;
+        }
+
+        if (constraintsList.nodeType == NodeType.ForeignKeyOption)
+        {
+            constraintTypes.Add((ColumnConstraintType.ForeignKey, new ColumnValue(ColumnType.String, constraintsList.yytext ?? "")));
+            return;
+        }
+
         if (constraintsList.nodeType == NodeType.ConstraintStorage)
         {
             constraintTypes.Add((ColumnConstraintType.Storage, new ColumnValue(ColumnType.String, constraintsList.yytext ?? "")));

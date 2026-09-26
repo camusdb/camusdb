@@ -834,4 +834,37 @@ public enum NodeType
     /// user-supplied value is accepted and used.
     /// </summary>
     ConstraintIdentityByDefault,
+
+    /// <summary>
+    /// A column-level <c>[CONSTRAINT name] REFERENCES table [(column)]</c>. <c>leftAst</c> is the
+    /// referenced table, <c>rightAst</c> the referenced column list or null for the primary key, and
+    /// <c>yytext</c> the constraint name or null. Its clauses follow as separate
+    /// <see cref="ForeignKeyOption"/> constraints on the same column.
+    /// </summary>
+    ConstraintForeignKey,
+
+    /// <summary>
+    /// A table-level <c>[CONSTRAINT name] FOREIGN KEY (columns) REFERENCES table [(columns)]</c>.
+    /// <c>leftAst</c> is the referencing column list, <c>rightAst</c> the referenced table,
+    /// <c>extendedOne</c> the referenced column list or null for the primary key, <c>extendedTwo</c>
+    /// the clauses or null, and <c>yytext</c> the constraint name or null.
+    /// </summary>
+    CreateTableConstraintForeignKey,
+
+    /// <summary>
+    /// <c>ALTER TABLE t ADD [CONSTRAINT name] FOREIGN KEY …</c>. <c>leftAst</c> is the table and
+    /// <c>rightAst</c> a <see cref="CreateTableConstraintForeignKey"/> node that carries the name.
+    /// </summary>
+    AlterTableAddConstraintForeignKey,
+
+    /// <summary>
+    /// One foreign-key clause. <c>yytext</c> is <c>kind:value</c>: <c>on_delete</c> or <c>on_update</c>
+    /// with <c>no_action</c>, <c>restrict</c>, <c>cascade</c>, <c>set_null</c> or <c>set_default</c>;
+    /// <c>match</c> with <c>simple</c>, <c>full</c> or <c>partial</c>; <c>deferrable</c> with
+    /// <c>true</c> or <c>false</c>; <c>initially</c> with <c>deferred</c> or <c>immediate</c>.
+    /// </summary>
+    ForeignKeyOption,
+
+    /// <summary>A list of <see cref="ForeignKeyOption"/> nodes in <c>leftAst</c> and <c>rightAst</c>, in source order.</summary>
+    ForeignKeyOptionList,
 }

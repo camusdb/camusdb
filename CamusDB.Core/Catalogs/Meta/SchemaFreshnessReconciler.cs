@@ -100,6 +100,11 @@ internal static class SchemaFreshnessReconciler
                 database.Schema.RebuildSequenceIdIndex();
                 SchemaLoader.MigrateIndexesFromSystemSchema(database);
 
+                // After the index migration, for the same reason as in SchemaLoader.LoadMetaAsync.
+                ForeignKeyGraph foreignKeys = database.Schema.RebuildForeignKeyGraph();
+                foreach (string unresolved in foreignKeys.Unresolved)
+                    Log.LogForeignKeyUnresolved(logger, database.Name, unresolved);
+
                 // The swap replaced every TableSchema instance; any open descriptor captured the
                 // old references and must be rebuilt on next access.
                 database.TableDescriptors.Clear();

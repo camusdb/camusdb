@@ -131,7 +131,8 @@ internal static class ElementStateApplier
                 current.StartOffset,
                 columnDirections: current.ColumnDirections,
                 includeColumnIds: current.IncludeColumnIds,
-                comment: current.Comment
+                comment: current.Comment,
+                ownerConstraintId: current.OwnerConstraintId
             );
         }
 

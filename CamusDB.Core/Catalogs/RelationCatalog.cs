@@ -255,6 +255,9 @@ internal sealed class RelationCatalog
                 Columns = captured.Columns,
                 Indexes = captured.Indexes,
                 CheckConstraints = captured.CheckConstraints,
+                // Foreign keys are deliberately left behind. While these contents were detached, no
+                // parent-side check could see them, so the parents they reference may be gone. The
+                // user adds the constraints again, and that path validates the rows.
                 Settings = captured.Settings,
                 Comment = captured.Comment,
                 Kind = captured.Kind,

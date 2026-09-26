@@ -114,6 +114,16 @@ public sealed class TableIndexSchema
     public string? Comment { get; }
 
     /// <summary>
+    /// Id of the foreign key that the engine created this index for, or null for every index a user
+    /// created. A foreign key needs an index that leads with its referencing columns; when the table
+    /// has none, the engine adds one and marks it here. The mark is what lets <c>DROP CONSTRAINT</c>
+    /// drop the index with its constraint while it keeps an index the user made, and lets
+    /// <c>SHOW CREATE TABLE</c> leave the index out, because running the constraint again recreates it.
+    /// Carried on both forms of this type, so every site that rebuilds an instance must pass it on.
+    /// </summary>
+    public string? OwnerConstraintId { get; }
+
+    /// <summary>
     /// Stable identifier used as the Kahuna key segment for this index's data. Returns
     /// <see cref="Id"/> when set (all indexes created after the stable-ID migration carry it);
     /// falls back to <see cref="Name"/> for legacy entries that pre-date the migration.
@@ -144,7 +154,7 @@ public sealed class TableIndexSchema
     /// <paramref name="columnDirections"/> is positionally aligned with <paramref name="columns"/>;
     /// null means all-ascending.
     /// </summary>
-    public TableIndexSchema(string name, string[] columns, IndexType type, SchemaElementState state = SchemaElementState.Public, string? id = null, OrderType[]? columnDirections = null, string[]? includeColumns = null, string? comment = null)
+    public TableIndexSchema(string name, string[] columns, IndexType type, SchemaElementState state = SchemaElementState.Public, string? id = null, OrderType[]? columnDirections = null, string[]? includeColumns = null, string? comment = null, string? ownerConstraintId = null)
     {
         Id = id;
         Name = name;
@@ -154,6 +164,7 @@ public sealed class TableIndexSchema
         ColumnDirections = columnDirections;
         IncludeColumns = includeColumns ?? [];
         Comment = comment;
+        OwnerConstraintId = ownerConstraintId;
     }
 
     /// <summary>
@@ -166,7 +177,7 @@ public sealed class TableIndexSchema
     /// existed) means every column is ascending.
     /// </summary>
     [JsonConstructor]
-    public TableIndexSchema(string? id, string name, string[]? columnIds, IndexType type, SchemaElementState state, string? startOffset = null, OrderType[]? columnDirections = null, string[]? includeColumnIds = null, string? comment = null)
+    public TableIndexSchema(string? id, string name, string[]? columnIds, IndexType type, SchemaElementState state, string? startOffset = null, OrderType[]? columnDirections = null, string[]? includeColumnIds = null, string? comment = null, string? ownerConstraintId = null)
     {
         Id = id;
         Name = name;
@@ -179,5 +190,6 @@ public sealed class TableIndexSchema
         IncludeColumnIds = includeColumnIds;
         IncludeColumns = [];
         Comment = comment;
+        OwnerConstraintId = ownerConstraintId;
     }
 }

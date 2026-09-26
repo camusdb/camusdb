@@ -106,6 +106,11 @@ internal static class SchemaDeltaApplier
         // miss a live sequence or hand back one that is gone.
         schema.RebuildSequenceIdIndex();
 
+        // Rebuilt with the other published indexes and for the same reason: a parent's DML finds the
+        // constraints that reference it through this graph, so a graph left stale by a create, drop,
+        // rename or constraint change would check the wrong tables, or none.
+        schema.RebuildForeignKeyGraph();
+
         schema.SchemaVersion = entry.ToVersion;
 
         // One place, deliberately. Every op that touches a relation lands here, so a generation bump

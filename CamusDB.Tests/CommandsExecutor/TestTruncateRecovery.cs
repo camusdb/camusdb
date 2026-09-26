@@ -299,6 +299,33 @@ internal sealed class TestTruncateRecovery : SharedNodeBaseTest
         }
     }
 
+    /// <summary>
+    /// The cut must survive a restart. It is part of the table's persisted record; a node that reloads
+    /// the schema without it answers a read from before the TRUNCATE with the new, empty contents.
+    /// </summary>
+    [Test]
+    public async Task TimeTravel_BeforeTheCut_IsStillRefusedAfterReopen()
+    {
+        (string dbName, DatabaseDescriptor db, CommandExecutor executor, _) = await SetupRobots(3);
+
+        await Task.Delay(60);
+        long beforeCut = SharedNode.Raft.HybridLogicalClock.SendOrLocalEvent(SharedNode.Raft.GetLocalNodeId()).L;
+        await Task.Delay(60);
+
+        await executor.TruncateTable(new TruncateTableTicket(dbName, "robots"));
+        HLCTimestamp cut = db.Schema.Tables["robots"].ContentsValidFrom!.Value;
+
+        await executor.CloseDatabase(new CloseDatabaseTicket(dbName));
+        DatabaseDescriptor reopened = await executor.OpenDatabase(dbName);
+
+        Assert.AreEqual(cut, reopened.Schema.Tables["robots"].ContentsValidFrom, "the cut must be reloaded from disk");
+
+        CamusDBException? exception = Assert.ThrowsAsync<CamusDBException>(async () =>
+            await RunSelect(dbName, executor, $"SELECT name FROM robots AS OF SYSTEM TIME {beforeCut}"));
+
+        Assert.AreEqual(CamusDBErrorCodes.SnapshotPrecedesContentsGeneration, exception!.Code);
+    }
+
     [Test]
     public async Task TimeTravel_AtOrAfterTheCut_ReadsTheNewEmptyGeneration()
     {

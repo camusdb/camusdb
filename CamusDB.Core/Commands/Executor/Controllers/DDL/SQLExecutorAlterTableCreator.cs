@@ -37,6 +37,15 @@ internal sealed class SQLExecutorAlterTableCreator : SQLExecutorBaseCreator
                 List<(ColumnConstraintType type, ColumnValue? value)> constraintTypes = new();
                 declaredConstraints = constraintTypes;
                 GetColumnConstraintList(ast.extendedTwo, constraintTypes);
+
+                // Adding a column and a constraint over it are two schema changes with different
+                // rollouts, so they are two statements here.
+                if (constraintTypes.Any(x => x.type == ColumnConstraintType.ForeignKey))
+                    throw new CamusDBException(
+                        CamusDBErrorCodes.FeatureNotSupported,
+                        $"ALTER TABLE ... ADD COLUMN cannot declare a foreign key on '{ast.rightAst!.yytext}'. " +
+                        "Add the column first, then use ALTER TABLE ... ADD FOREIGN KEY.");
+
                 defaultValue = GetDefaultFromConstraints(constraintTypes);
                 defaultFunction = GetDefaultFunctionFromConstraints(constraintTypes);
                 comment = GetCommentFromConstraints(constraintTypes);

@@ -84,6 +84,13 @@ internal static class SchemaLoader
             // PersistSchemaTableAsync (which includes Indexes via WithoutHistory).
             MigrateIndexesFromSystemSchema(database);
 
+            // Built after the index migration, because a foreign key resolves its parent and backing
+            // indexes. A constraint that no longer resolves is logged and left unenforced; it must
+            // never stop the database from opening.
+            ForeignKeyGraph foreignKeys = database.Schema.RebuildForeignKeyGraph();
+            foreach (string unresolved in foreignKeys.Unresolved)
+                Log.LogForeignKeyUnresolved(logger, database.Name, unresolved);
+
             Log.LogSchemaLoaded(logger, database.Schema.Tables.Count, database.SystemSchema.Indexes.Count);
         }
         finally

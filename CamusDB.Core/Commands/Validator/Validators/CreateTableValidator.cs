@@ -78,5 +78,8 @@ internal sealed class CreateTableValidator : ValidatorBase
                 CamusDBErrorCodes.InvalidInput,
                 "A primary key column is mandatory in the table"
             );
+
+        foreach (ForeignKeyInfo foreignKey in ticket.ForeignKeys)
+            ValidateForeignKey(foreignKey);
     }
 }

@@ -126,6 +126,15 @@ public sealed class TableSchema
     public List<CheckConstraintSchema>? CheckConstraints { get; set; }
 
     /// <summary>
+    /// Foreign keys that this table owns — the constraints in which it is the referencing (child)
+    /// table. Null for a table with none. The referenced (parent) table records nothing, so a
+    /// constraint change touches only this table; the reverse direction is answered in memory by
+    /// <see cref="ForeignKeyGraph"/>. Like <c>Indexes</c> and <c>CheckConstraints</c> it rides the table
+    /// blob and does <b>not</b> bump <c>Version</c>: a constraint does not affect row encoding.
+    /// </summary>
+    public List<ForeignKeySchema>? ForeignKeys { get; set; }
+
+    /// <summary>
     /// Table storage parameters (<c>ALTER TABLE t SET (key = value)</c>). A free-form string→string bag
     /// so new settings need no schema-model change. Like <c>Indexes</c> / <c>CheckConstraints</c> it
     /// rides the table blob and does <b>not</b> bump <c>Version</c> — settings do not affect row

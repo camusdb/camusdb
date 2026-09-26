@@ -473,6 +473,7 @@ internal sealed class DdlStatementDispatcher
                 }
 
             case NodeType.AlterTableAddConstraintCheck:
+            case NodeType.AlterTableAddConstraintForeignKey:
             case NodeType.AlterTableDropConstraint:
             case NodeType.AlterTableSetNotNull:
             case NodeType.AlterTableDropNotNull:

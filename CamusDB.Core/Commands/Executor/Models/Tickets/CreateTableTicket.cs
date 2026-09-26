@@ -25,6 +25,12 @@ public readonly struct CreateTableTicket
     /// </summary>
     public CheckConstraintInfo[] CheckConstraints { get; }
 
+    /// <summary>
+    /// Foreign keys from both the column-level <c>REFERENCES</c> form and the table-level
+    /// <c>FOREIGN KEY</c> form, in source order, each already named. Empty when none were declared.
+    /// </summary>
+    public ForeignKeyInfo[] ForeignKeys { get; }
+
     public bool IfNotExists { get; }
 
     /// <summary>
@@ -58,7 +64,8 @@ public readonly struct CreateTableTicket
         string? comment = null,
         IReadOnlyDictionary<string, string>? settings = null,
         Catalogs.Models.RelationKind kind = Catalogs.Models.RelationKind.Table,
-        Catalogs.Models.ViewDefinition? viewDefinition = null
+        Catalogs.Models.ViewDefinition? viewDefinition = null,
+        ForeignKeyInfo[]? foreignKeys = null
     )
     {
         Comment = comment;
@@ -68,6 +75,7 @@ public readonly struct CreateTableTicket
         Columns = columns;
         Constraints = constraints;
         CheckConstraints = checkConstraints ?? [];
+        ForeignKeys = foreignKeys ?? [];
         IfNotExists = ifNotExists;
         Kind = kind;
         ViewDefinition = viewDefinition;

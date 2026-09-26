@@ -99,7 +99,8 @@ internal static class IndexDeltaApplier
             startOffset: current.StartOffset,
             columnDirections: current.ColumnDirections,
             includeColumnIds: current.IncludeColumnIds,
-            comment: current.Comment
+            comment: current.Comment,
+            ownerConstraintId: current.OwnerConstraintId
         );
 
         // TableSchema.Version is intentionally NOT bumped: indexes are not part of row encoding.

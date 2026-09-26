@@ -37,6 +37,14 @@ internal sealed class AlterConstraintValidator : ValidatorBase
             string.IsNullOrWhiteSpace(ticket.ColumnName))
             throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Column name is required for SET/DROP NOT NULL");
 
+        if (ticket.Operation == AlterConstraintOperation.AddForeignKey)
+        {
+            if (ticket.ForeignKey is null)
+                throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "A foreign key definition is required for ADD FOREIGN KEY");
+
+            ValidateForeignKey(ticket.ForeignKey);
+        }
+
         if (ticket.Operation == AlterConstraintOperation.SetStorage)
         {
             if (string.IsNullOrWhiteSpace(ticket.ColumnName))

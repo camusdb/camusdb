@@ -30,6 +30,9 @@ internal static partial class Log
     [LoggerMessage(Level = LogLevel.Information, Message = "Schema loaded: {Tables} table(s), {Indexes} index object(s)")]
     public static partial void LogSchemaLoaded(ILogger logger, int tables, int indexes);
 
+    [LoggerMessage(Level = LogLevel.Warning, Message = "Foreign key {Detail} in database {DbName} does not resolve against the schema; it is not enforced")]
+    public static partial void LogForeignKeyUnresolved(ILogger logger, string dbName, string detail);
+
     [LoggerMessage(Level = LogLevel.Information, Message = "Resuming coordinator job for {TableName}.{ElementName} → {TargetState} on database {DbName} (attempt {Attempt})")]
     public static partial void LogResumingCoordinatorJob(ILogger logger, string? tableName, string? elementName, SchemaElementState targetState, string dbName, int attempt);
 

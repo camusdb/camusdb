@@ -370,7 +370,8 @@ internal static class TableDeltaApplier
                         startOffset: old.StartOffset,
                         columnDirections: old.ColumnDirections,
                         includeColumnIds: old.IncludeColumnIds,
-                        comment: payload.Comment
+                        comment: payload.Comment,
+                        ownerConstraintId: old.OwnerConstraintId
                     );
                     break;
                 }

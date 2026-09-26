@@ -482,7 +482,8 @@ internal sealed class TableIndexAdder
                         finalOffset,
                         columnDirections: old.ColumnDirections,
                         includeColumnIds: old.IncludeColumnIds,
-                        comment: old.Comment
+                        comment: old.Comment,
+                        ownerConstraintId: old.OwnerConstraintId
                     );
                     break;
                 }
@@ -497,7 +498,7 @@ internal sealed class TableIndexAdder
         table.MutateIndexes(indexes =>
         {
             TableIndexSchema current = indexes[ticket.IndexName];
-            indexes[ticket.IndexName] = new TableIndexSchema(current.Name, current.Columns ?? [], current.Type, SchemaElementState.Public, id: current.Id, columnDirections: current.ColumnDirections, includeColumns: current.IncludeColumns.Length > 0 ? current.IncludeColumns : null, comment: current.Comment);
+            indexes[ticket.IndexName] = new TableIndexSchema(current.Name, current.Columns ?? [], current.Type, SchemaElementState.Public, id: current.Id, columnDirections: current.ColumnDirections, includeColumns: current.IncludeColumns.Length > 0 ? current.IncludeColumns : null, comment: current.Comment, ownerConstraintId: current.OwnerConstraintId);
         });
 
         return FluxAction.Continue;

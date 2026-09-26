@@ -348,6 +348,61 @@ public sealed class Schema : IDisposable
         }
     }
 
+    // Published as one finished, immutable graph, for the same reason as relationNamesById: an applying
+    // delta mutates Tables in place, so only the writer may walk it.
+    private volatile ForeignKeyGraph? foreignKeys;
+
+    /// <summary>
+    /// Every foreign key of the database, indexed by the table that owns it and by the table it
+    /// references. DML reads this on every statement, so it is a published snapshot rather than a walk
+    /// of <see cref="Tables"/>: the walk would race an applying delta, and it would cost the parent side
+    /// of every DELETE a pass over every table. See <see cref="ForeignKeyGraph"/>.
+    /// </summary>
+    public ForeignKeyGraph ForeignKeys
+    {
+        get
+        {
+            ForeignKeyGraph? graph = foreignKeys;
+
+            if (graph is null)
+            {
+                // Only reachable before the first build; a loaded database is indexed with its schema.
+                graph = BuildForeignKeyGraphDefensively();
+                foreignKeys = graph;
+            }
+
+            return graph;
+        }
+    }
+
+    /// <summary>
+    /// Rebuilds <see cref="ForeignKeys"/>. Same contract as <see cref="RebuildRelationNameIndex"/>: hold
+    /// <see cref="Semaphore"/>, call it with <see cref="Tables"/> in its final post-mutation state, and
+    /// call it before <see cref="SchemaVersion"/> advances. Cheap when no table has a foreign key: the
+    /// walk only counts, and the shared empty graph is published.
+    /// </summary>
+    public ForeignKeyGraph RebuildForeignKeyGraph()
+    {
+        ForeignKeyGraph graph = ForeignKeyGraph.Build(Tables.Values);
+        foreignKeys = graph;
+        return graph;
+    }
+
+    private ForeignKeyGraph BuildForeignKeyGraphDefensively()
+    {
+        for (int attempt = 0; ; attempt++)
+        {
+            try
+            {
+                return RebuildForeignKeyGraph();
+            }
+            catch (InvalidOperationException) when (attempt < 2)
+            {
+                // A delta mutated the map mid-walk; see BuildRelationNameIndexDefensively.
+            }
+        }
+    }
+
     public void Dispose()
     {
         Semaphore?.Dispose();

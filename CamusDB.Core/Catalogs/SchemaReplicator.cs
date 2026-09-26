@@ -645,6 +645,9 @@ public sealed class SchemaReplicator
             // are shared, matching the Indexes treatment. Omitting this dropped all checks from the
             // clone, silently losing them for any consumer that promotes the clone to a live schema.
             CheckConstraints = table.CheckConstraints is null ? null : [.. table.CheckConstraints],
+            // ForeignKeySchema is immutable too, so a shallow list copy is sufficient. A clone that
+            // dropped the list would dry-run a delta against a schema in which nothing is referenced.
+            ForeignKeys = table.ForeignKeys is null ? null : [.. table.ForeignKeys],
             // Preserve table settings so a clone promoted to a live schema (or used for validation)
             // does not silently lose the opt-out; matches the Indexes/CheckConstraints treatment.
             Settings = table.Settings is null ? null : new Dictionary<string, string>(table.Settings, StringComparer.Ordinal),

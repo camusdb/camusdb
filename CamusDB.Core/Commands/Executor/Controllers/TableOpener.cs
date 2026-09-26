@@ -272,7 +272,7 @@ internal sealed class TableOpener
                     tableDescriptor.MutateIndexes(indexes => indexes[entry.Name] =
                         // The comment rides the projection because SHOW CREATE TABLE renders from
                         // TableDescriptor.Indexes, not from the persisted TableSchema.Indexes.
-                        new TableIndexSchema(entry.Name, columnNames, entry.Type, entry.State, id: entry.Id, columnDirections: entry.ColumnDirections, includeColumns: includeColumnNames, comment: entry.Comment));
+                        new TableIndexSchema(entry.Name, columnNames, entry.Type, entry.State, id: entry.Id, columnDirections: entry.ColumnDirections, includeColumns: includeColumnNames, comment: entry.Comment, ownerConstraintId: entry.OwnerConstraintId));
 
                     // Register display name so duplicate-key errors show the human-readable
                     // name instead of the opaque immutable KvId stored in KV keys.

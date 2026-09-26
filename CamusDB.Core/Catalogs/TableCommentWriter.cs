@@ -195,7 +195,8 @@ internal static class TableCommentWriter
                         startOffset: old.StartOffset,
                         columnDirections: old.ColumnDirections,
                         includeColumnIds: old.IncludeColumnIds,
-                        comment: comment
+                        comment: comment,
+                        ownerConstraintId: old.OwnerConstraintId
                     );
                     break;
                 }
