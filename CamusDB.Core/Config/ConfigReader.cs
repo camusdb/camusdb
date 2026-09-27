@@ -152,6 +152,7 @@ public class ConfigReader
         "lock_tracing_enabled",
         "fence_lease_ms",
         "fence_lease_renew_interval_ms",
+        "registry_generation_lease_ms",
         "keyspace_purge_batch_size",
         "index_scan_fetch_batch_size",
         "max_query_parallelism",

@@ -63,6 +63,7 @@ public class TestConfigurationDefaults
         Assert.AreEqual(5 * 60 * 1000, CamusDBOptions.Default.OrphanReclaimIntervalMs, nameof(CamusDBOptions.Default.OrphanReclaimIntervalMs));
         Assert.AreEqual(30_000, CamusDBOptions.Default.FenceLeaseMs, nameof(CamusDBOptions.Default.FenceLeaseMs));
         Assert.AreEqual(10_000, CamusDBOptions.Default.FenceLeaseRenewIntervalMs, nameof(CamusDBOptions.Default.FenceLeaseRenewIntervalMs));
+        Assert.AreEqual(250, CamusDBOptions.Default.RegistryGenerationLeaseMs, nameof(CamusDBOptions.Default.RegistryGenerationLeaseMs));
         Assert.AreEqual(300_000, CamusDBOptions.Default.BranchSnapshotHoldLeaseMs, nameof(CamusDBOptions.Default.BranchSnapshotHoldLeaseMs));
         Assert.AreEqual(10_000, CamusDBOptions.Default.SnapshotHoldRetryBudgetMs, nameof(CamusDBOptions.Default.SnapshotHoldRetryBudgetMs));
         Assert.AreEqual(3600, CamusDBOptions.Default.PitrWindowSeconds, nameof(CamusDBOptions.Default.PitrWindowSeconds));

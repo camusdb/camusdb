@@ -86,6 +86,28 @@ public sealed class DatabaseRegistry : IAsyncDisposable
     // (a stale read only forces a redundant, harmless revalidation).
     private long loadedGeneration;
 
+    // How long a generation read may be trusted, in milliseconds; 0 reads the stamp on every resolve (the
+    // behaviour before the lease). See ReadLeasedGenerationAsync for the argument, and
+    // WaitOutGenerationLeasesAsync for the half of it the mutating side carries.
+    private readonly int generationLeaseMs;
+
+    // The last generation read on the resolve path and the Stopwatch timestamp until which it may be
+    // trusted. Replaced whole (never mutated) under `generationLeaseSync`; read lock-free.
+    private sealed record GenerationLease(long Generation, long ExpiresAtTimestamp);
+
+    private GenerationLease? generationLease;
+    private readonly object generationLeaseSync = new();
+
+    // Single-flight for a lease refresh: callers that find the lease expired queue here and take the one
+    // read's result, so a lapsed lease costs one Kahuna read per node, not one per statement in flight.
+    private readonly SemaphoreSlim generationLeaseSem = new(1, 1);
+
+    // Names the foreground resolve path has already re-read at a generation the cache as a whole has not
+    // reached, with the exact entry object the re-read confirmed. While the authoritative generation stays
+    // at or below the recorded one and the cache still holds that same object, the name is known current
+    // and a hit needs no second read. Keyed by normalized name; cleared by a full reconcile.
+    private readonly ConcurrentDictionary<string, (long Generation, DatabaseRegistryEntry Entry)> nameValidatedAt = new(StringComparer.Ordinal);
+
     // Local cache-mutation epoch, paired with `cacheSync`. Besides the mutation paths (all under
     // `writeSem`), the caches are written by two lock-free backfills — the bucket scan in
     // ScanAllEntriesAsync and the point read on the miss path of TryResolveEntryAsync — which copy into
@@ -189,6 +211,7 @@ public sealed class DatabaseRegistry : IAsyncDisposable
         this.keyPrefix = keyPrefix;
         this.localNodeId = localNodeId;
         this.isClusterMode = isClusterMode;
+        this.generationLeaseMs = isClusterMode ? Math.Max(0, options.RegistryGenerationLeaseMs) : 0;
 
         // Constructed eagerly, not lazily: a `??=` here would be check-then-act, and two concurrent
         // acquires could each build a fence while only one landed in the field — so a later release
@@ -379,6 +402,96 @@ public sealed class DatabaseRegistry : IAsyncDisposable
     }
 
     /// <summary>
+    /// The generation as the foreground resolve path sees it: a read of the stamp that is reused for
+    /// <see cref="CamusDBOptions.RegistryGenerationLeaseMs"/>, measured from the moment the read was
+    /// <em>issued</em>, instead of a linearizable Kahuna read under every statement. Before the lease that
+    /// read was the largest single cost of a point query in cluster mode (about 0.46 ms of a 1.1 ms query
+    /// mean under load: one read per statement, two per autocommit read).
+    ///
+    /// <para><b>Why the lease keeps the guarantee.</b> A cache hit may be served from a generation read
+    /// that is up to one lease old, so it may miss a mutation made in that window. Every mutation that can
+    /// make a cached name <em>wrong</em> — a drop, a rename, a retracted registration — waits out one lease
+    /// after moving the stamp before it returns (<see cref="WaitOutGenerationLeasesAsync"/>). A read issued
+    /// before that stamp moved expires before the mutation completes, so a statement that trusts it started
+    /// while the mutation was still in progress. Such a statement was always concurrent with the mutation,
+    /// and the engine already handles one that opened its database before a drop finished. A statement that
+    /// starts after the mutation returned can only hold a read issued after the stamp moved, and that read
+    /// sees the move. A registration needs no wait: a name another node has never cached misses the cache
+    /// and is read from KV. It is the same bounded-staleness argument as a schema lease, and it relies only
+    /// on the nodes' monotonic clocks agreeing on the length of an interval, not on when it started.</para>
+    ///
+    /// <para>The lease length must be identical on every node (a node trusting a longer lease than the
+    /// mutating node waits out would break the argument), so the setting is cluster-scoped and restart-only.
+    /// A read that does not answer (0) is never leased, and a lease of 0 reads the stamp every time.</para>
+    /// </summary>
+    private async ValueTask<long> ReadLeasedGenerationAsync()
+    {
+        if (generationLeaseMs <= 0)
+            return await ReadGenerationAsync().ConfigureAwait(false);
+
+        if (TryReadLease(out long leased))
+            return leased;
+
+        await generationLeaseSem.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            // Another caller may have refreshed while this one queued; its read was issued no earlier than
+            // this caller's own lease lapsed, and it is trusted only within its own lease.
+            if (TryReadLease(out leased))
+                return leased;
+
+            long issuedAt = Stopwatch.GetTimestamp();
+            long generation = await ReadGenerationAsync().ConfigureAwait(false);
+            if (generation > 0)
+            {
+                long expiresAt = issuedAt + generationLeaseMs * Stopwatch.Frequency / 1000;
+                lock (generationLeaseSync)
+                {
+                    // A local mutation may have adopted a newer generation while the read was in flight;
+                    // the lease never goes backwards.
+                    long floor = Volatile.Read(ref generationLease)?.Generation ?? 0;
+                    Volatile.Write(ref generationLease, new GenerationLease(Math.Max(generation, floor), expiresAt));
+                }
+            }
+
+            return generation;
+        }
+        finally
+        {
+            generationLeaseSem.Release();
+        }
+    }
+
+    private bool TryReadLease(out long generation)
+    {
+        GenerationLease? lease = Volatile.Read(ref generationLease);
+        if (lease is not null && Stopwatch.GetTimestamp() < lease.ExpiresAtTimestamp)
+        {
+            generation = lease.Generation;
+            return true;
+        }
+
+        generation = 0;
+        return false;
+    }
+
+    /// <summary>
+    /// The mutating half of <see cref="ReadLeasedGenerationAsync"/>: after a mutation that can make another
+    /// node's cached name wrong has moved the stamp, wait until every generation lease issued before the
+    /// move has lapsed, so the mutation does not complete while another node can still serve the old
+    /// mapping from a fresh-looking cache. Called after <see cref="writeSem"/> is released, so it delays only
+    /// the statement that made the change. The margin covers timer granularity and clock-rate skew between
+    /// nodes. A no-op in standalone mode and when the lease is off.
+    /// </summary>
+    private Task WaitOutGenerationLeasesAsync()
+    {
+        if (generationLeaseMs <= 0)
+            return Task.CompletedTask;
+
+        return Task.Delay(generationLeaseMs + Math.Max(10, generationLeaseMs / 10));
+    }
+
+    /// <summary>
     /// Moves the shared registry generation so every other node's next cache hit revalidates against KV.
     /// Called after a mutation (Register/Unregister/Rename) has durably committed, so the generation only
     /// moves once the change is visible. Best-effort: if the write fails the mutation is already committed
@@ -437,6 +550,15 @@ public sealed class DatabaseRegistry : IAsyncDisposable
         long current = Volatile.Read(ref loadedGeneration);
         if (generation > current)
             Volatile.Write(ref loadedGeneration, generation);
+
+        // This node's own change is known without a read, so a lease that predates it must not make the
+        // cache look stale against itself. The expiry is kept: nothing else was learned about other nodes.
+        lock (generationLeaseSync)
+        {
+            GenerationLease? lease = Volatile.Read(ref generationLease);
+            if (lease is not null && generation > lease.Generation)
+                Volatile.Write(ref generationLease, lease with { Generation = generation });
+        }
 
         // Every local registration/unregistration/rename passes through here, which makes this the one
         // place that knows the shared background snapshot has just gone stale.
@@ -538,6 +660,9 @@ public sealed class DatabaseRegistry : IAsyncDisposable
             cacheMutationEpoch++;
         }
 
+        // Every name is now current as of this generation, so the per-name records say nothing more.
+        nameValidatedAt.Clear();
+
         Volatile.Write(ref loadedGeneration, authoritativeGeneration);
     }
 
@@ -631,6 +756,19 @@ public sealed class DatabaseRegistry : IAsyncDisposable
 
         if (getType == KeyValueResponseType.Get && kvEntry?.Value is not null)
         {
+            // The common case: the name is exactly what the cache already holds, and only the coarse
+            // stamp moved (a registration of some other database). Nothing is written and the epoch
+            // stays put. Moving it here was the reason a node could stay stale for minutes: a background
+            // sweep adopts the generation only if the epoch did not move during its scan, and under load
+            // every statement's re-read moved it. The same cached object is returned,
+            // which is what lets the caller record the name as confirmed.
+            if (byName.TryGetValue(normalizedName, out DatabaseRegistryEntry? current)
+                && byId.TryGetValue(current.Id, out DatabaseRegistryEntry? currentById)
+                && ReferenceEquals(current, currentById)
+                && kvEntry.Value.AsSpan().SequenceEqual(
+                    MetaJsonSerializer.Serialize(current, MetaJsonContext.Default.DatabaseRegistryEntry)))
+                return current;
+
             DatabaseRegistryEntry loaded = MetaJsonSerializer.Deserialize(
                 kvEntry.Value, MetaJsonContext.Default.DatabaseRegistryEntry);
 
@@ -842,6 +980,31 @@ public sealed class DatabaseRegistry : IAsyncDisposable
         return false;
     }
 
+    /// <summary>The local cache-mutation epoch, for tests that pin when it may move.</summary>
+    internal long CacheMutationEpochForTesting => Volatile.Read(ref cacheMutationEpoch);
+
+    /// <summary>
+    /// Whether <paramref name="normalizedName"/> was re-read at <paramref name="generation"/> or later and
+    /// the cache still holds the very entry that read returned. The reference check is what makes a local
+    /// change safe without clearing the record: a rename, drop or re-registration replaces or removes the
+    /// cached object, and the record stops matching.
+    /// </summary>
+    private bool IsValidatedAt(string normalizedName, long generation, out DatabaseRegistryEntry? entry)
+    {
+        if (generation > 0
+            && nameValidatedAt.TryGetValue(normalizedName, out (long Generation, DatabaseRegistryEntry Entry) record)
+            && record.Generation >= generation
+            && byName.TryGetValue(normalizedName, out DatabaseRegistryEntry? current)
+            && ReferenceEquals(current, record.Entry))
+        {
+            entry = current;
+            return true;
+        }
+
+        entry = null;
+        return false;
+    }
+
     /// <summary>
     /// Async variant: checks the in-memory cache first, then falls back to a live Kahuna
     /// read when the name is absent.  Returns the full <see cref="DatabaseRegistryEntry"/>
@@ -864,10 +1027,16 @@ public sealed class DatabaseRegistry : IAsyncDisposable
             // A cache hit is authoritative only while this node's cache is at the current generation.
             // If a mutation (possibly on another node) has advanced the generation since we last loaded,
             // the hit may be stale — so the answer for this one name is re-read from KV before it is
-            // trusted (the name may now be gone, or repointed to a new id).
-            long authGen = await ReadGenerationAsync().ConfigureAwait(false);
+            // trusted (the name may now be gone, or repointed to a new id). The generation itself comes
+            // from a lease rather than a read per statement; see ReadLeasedGenerationAsync.
+            long authGen = await ReadLeasedGenerationAsync().ConfigureAwait(false);
             if (authGen == Volatile.Read(ref loadedGeneration))
                 return cached;
+
+            // This name was already re-read at this generation or a later one, and the cache still holds
+            // the entry that read confirmed: current, whatever the rest of the cache is.
+            if (IsValidatedAt(name, authGen, out DatabaseRegistryEntry? validated))
+                return validated;
 
             // One key, not the whole bucket. A full rebuild here would put a scan whose cost grows with
             // the number of registered databases directly under a user statement, every time any DDL
@@ -880,7 +1049,20 @@ public sealed class DatabaseRegistry : IAsyncDisposable
                 if (Volatile.Read(ref loadedGeneration) >= authGen)
                     return byName.TryGetValue(name, out DatabaseRegistryEntry? reconciled) ? reconciled : null;
 
-                return await RevalidateSingleNameLockedAsync(name).ConfigureAwait(false);
+                // The statements that queued behind the first re-read of this name take its answer: one
+                // read per name per generation change, not one per statement serialized on this lock.
+                if (IsValidatedAt(name, authGen, out validated))
+                    return validated;
+
+                DatabaseRegistryEntry? revalidated = await RevalidateSingleNameLockedAsync(name).ConfigureAwait(false);
+
+                // Only a real stamp may vouch for a name: 0 is "unanswered", which matches nothing.
+                if (revalidated is not null && authGen > 0)
+                    nameValidatedAt[name] = (authGen, revalidated);
+                else
+                    nameValidatedAt.TryRemove(name, out _);
+
+                return revalidated;
             }
             finally
             {
@@ -1163,6 +1345,8 @@ public sealed class DatabaseRegistry : IAsyncDisposable
     {
         name = Normalize(name);
 
+        bool waitOutLeases = false;
+
         await writeSem.WaitAsync().ConfigureAwait(false);
         try
         {
@@ -1192,10 +1376,15 @@ public sealed class DatabaseRegistry : IAsyncDisposable
 
             // Advance the shared generation so other nodes drop their now-stale cache hit for this name.
             AdoptGeneration(await BumpGenerationAsync().ConfigureAwait(false));
+            waitOutLeases = true;
         }
         finally
         {
             writeSem.Release();
+
+            // Outside the lock, and on the success path only (the flag is set after the bump).
+            if (waitOutLeases)
+                await WaitOutGenerationLeasesAsync().ConfigureAwait(false);
         }
     }
 
@@ -1218,6 +1407,8 @@ public sealed class DatabaseRegistry : IAsyncDisposable
     public async Task<RegistryRetraction> RetractRegistrationAsync(string name, string expectedId)
     {
         string normalized = Normalize(name);
+
+        bool waitOutLeases = false;
 
         await writeSem.WaitAsync().ConfigureAwait(false);
         try
@@ -1277,13 +1468,20 @@ public sealed class DatabaseRegistry : IAsyncDisposable
             }
 
             if (outcome == RegistryRetraction.Retracted)
+            {
                 AdoptGeneration(await BumpGenerationAsync().ConfigureAwait(false));
+                waitOutLeases = true;
+            }
 
             return outcome;
         }
         finally
         {
             writeSem.Release();
+
+            // Outside the lock, and on the success path only (the flag is set after the bump).
+            if (waitOutLeases)
+                await WaitOutGenerationLeasesAsync().ConfigureAwait(false);
         }
     }
 
@@ -1387,6 +1585,8 @@ public sealed class DatabaseRegistry : IAsyncDisposable
                 CamusDBErrorCodes.DatabaseNameReserved,
                 $"'{newName}' is a reserved database name");
 
+        bool waitOutLeases = false;
+
         await writeSem.WaitAsync().ConfigureAwait(false);
         try
         {
@@ -1450,10 +1650,15 @@ public sealed class DatabaseRegistry : IAsyncDisposable
 
             // Advance the shared generation so other nodes stop resolving the old name and pick up the new.
             AdoptGeneration(await BumpGenerationAsync().ConfigureAwait(false));
+            waitOutLeases = true;
         }
         finally
         {
             writeSem.Release();
+
+            // Outside the lock, and on the success path only (the flag is set after the bump).
+            if (waitOutLeases)
+                await WaitOutGenerationLeasesAsync().ConfigureAwait(false);
         }
     }
 
