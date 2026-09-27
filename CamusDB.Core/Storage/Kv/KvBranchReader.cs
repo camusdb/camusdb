@@ -117,13 +117,18 @@ internal sealed class KvBranchReader
     /// key (the default, and every ancestor snapshot probe) issues an unregistered read, identical to
     /// the pessimistic behavior. The operation id is minted once, outside the retry, so a transient
     /// MustRetry replays under the same id rather than registering a second read.</para>
+    ///
+    /// <para>With <paramref name="aborts"/>, a read Kahuna aborted or never confirmed is recorded there
+    /// and answered as <see cref="BranchKvValue.Miss"/>, which the caller must not use: it tests
+    /// <see cref="RetryableAbortSink.HasAbort"/> first. See <see cref="RetryableAbortSink"/>.</para>
     /// </summary>
     internal async Task<BranchKvValue> ProbeRaw(
         HLCTimestamp txId,
         HLCTimestamp readTimestamp,
         string key,
         CancellationToken cancellationToken,
-        string coordinatorKey = "")
+        string coordinatorKey = "",
+        RetryableAbortSink? aborts = null)
     {
         TransactionOperationId operationId = coordinatorKey.Length == 0 ? default : TransactionOperationId.NewRandom();
 
@@ -132,17 +137,29 @@ internal sealed class KvBranchReader
             cancellationToken
         ).ConfigureAwait(false);
 
+        // Kahuna's early conflict check answers Aborted when another transaction committed the key after
+        // this one first read it: the transaction has lost, and only the client can restart it.
         if (type == KeyValueResponseType.Aborted)
-            throw new CamusDBException(CamusDBErrorCodes.TransactionMustRetry,
-                $"Read of key {key} was aborted by Kahuna — retry the operation from BeginAsync");
+        {
+            RetryableAbortSink.Raise(aborts,
+                new CamusDBException(CamusDBErrorCodes.TransactionMustRetry,
+                    $"Read of key {key} was aborted by Kahuna — retry the operation from BeginAsync"),
+                ServerDiagnostics.Tags.AbortSite.Read);
+            return BranchKvValue.Miss;
+        }
 
         // Only a confirmed answer may shape the result. Anything else — an exhausted MustRetry /
         // WaitingForReplication (a foreign 2PC intent that stalled past the whole retry budget),
         // Errored, or any future non-confirmed type — means the key's state is UNKNOWN, not absent.
         // See the class summary for the atomicity violation that decoding it as a miss produced.
         if (type is not (KeyValueResponseType.Get or KeyValueResponseType.DoesNotExist))
-            throw new CamusDBException(CamusDBErrorCodes.TransactionMustRetry,
-                $"Read of key {key} did not return a confirmed result ({type}) — retry the operation from BeginAsync");
+        {
+            RetryableAbortSink.Raise(aborts,
+                new CamusDBException(CamusDBErrorCodes.TransactionMustRetry,
+                    $"Read of key {key} did not return a confirmed result ({type}) — retry the operation from BeginAsync"),
+                ServerDiagnostics.Tags.AbortSite.Read);
+            return BranchKvValue.Miss;
+        }
 
         // On an ancestor level a "confirmed" answer is only as good as the snapshot pin behind it:
         // a reclaimed revision reads as a confirmed miss. Verify the pin before the answer is used.
@@ -180,6 +197,12 @@ internal sealed class KvBranchReader
     /// under the same id) and a fresh id is minted only when the set shrinks. Unregistered reads — every
     /// ancestor snapshot probe — carry the default id, so the identity is immaterial there.
     /// </para>
+    ///
+    /// <para>
+    /// With <paramref name="aborts"/>, an aborted or never-confirmed batch is recorded there and answered
+    /// as all misses, which the caller must not use: it tests <see cref="RetryableAbortSink.HasAbort"/>
+    /// first. See <see cref="RetryableAbortSink"/>.
+    /// </para>
     /// </summary>
     internal async Task<BranchKvValue[]> ProbeManyRaw(
         HLCTimestamp txId,
@@ -187,7 +210,8 @@ internal sealed class KvBranchReader
         IReadOnlyList<string> probeKeys,
         string coordinatorKey,
         string retryDiagnosticLabel,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        RetryableAbortSink? aborts = null)
     {
         if (probeKeys.Count == 0)
             return [];
@@ -224,8 +248,13 @@ internal sealed class KvBranchReader
             foreach ((KeyValueResponseType responseType, string key, _, ReadOnlyKeyValueEntry? entry) in results ?? [])
             {
                 if (responseType == KeyValueResponseType.Aborted)
-                    throw new CamusDBException(CamusDBErrorCodes.TransactionMustRetry,
-                        $"Batch read of key {key} was aborted by Kahuna — retry the operation from BeginAsync");
+                {
+                    RetryableAbortSink.Raise(aborts,
+                        new CamusDBException(CamusDBErrorCodes.TransactionMustRetry,
+                            $"Batch read of key {key} was aborted by Kahuna — retry the operation from BeginAsync"),
+                        ServerDiagnostics.Tags.AbortSite.ReadMany);
+                    return AllMisses(probeKeys.Count);
+                }
 
                 if (responseType is KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication)
                 {
@@ -239,8 +268,13 @@ internal sealed class KvBranchReader
                 // actor response) that lands in byKey decodes as Miss — an unknown converted into a
                 // definitive absence, with no folded observation for commit validation to catch.
                 if (responseType is not (KeyValueResponseType.Get or KeyValueResponseType.DoesNotExist))
-                    throw new CamusDBException(CamusDBErrorCodes.TransactionMustRetry,
-                        $"Batch read of key {key} returned {responseType} — retry the operation from BeginAsync");
+                {
+                    RetryableAbortSink.Raise(aborts,
+                        new CamusDBException(CamusDBErrorCodes.TransactionMustRetry,
+                            $"Batch read of key {key} returned {responseType} — retry the operation from BeginAsync"),
+                        ServerDiagnostics.Tags.AbortSite.ReadMany);
+                    return AllMisses(probeKeys.Count);
+                }
 
                 byKey[key] = (responseType, entry);
             }
@@ -249,8 +283,13 @@ internal sealed class KvBranchReader
                 break;
 
             if (++retries >= KahunaRetryPolicy.MaxKahunaRetries)
-                throw new CamusDBException(CamusDBErrorCodes.TransactionMustRetry,
-                    $"Batch read was not ready after {KahunaRetryPolicy.MaxKahunaRetries} retries — retry the operation from BeginAsync");
+            {
+                RetryableAbortSink.Raise(aborts,
+                    new CamusDBException(CamusDBErrorCodes.TransactionMustRetry,
+                        $"Batch read was not ready after {KahunaRetryPolicy.MaxKahunaRetries} retries — retry the operation from BeginAsync"),
+                    ServerDiagnostics.Tags.AbortSite.ReadMany);
+                return AllMisses(probeKeys.Count);
+            }
 
             ServerDiagnostics.AddKvRetryWait(retryDiagnosticLabel);
             await Task.Delay(KahunaRetryPolicy.RetryDelayMs(retries), cancellationToken).ConfigureAwait(false);
@@ -279,6 +318,14 @@ internal sealed class KvBranchReader
         }
 
         return decoded;
+    }
+
+    /// <summary>The neutral answer a batch read leaves behind when it records an abort: one miss per position.</summary>
+    private static BranchKvValue[] AllMisses(int count)
+    {
+        BranchKvValue[] misses = new BranchKvValue[count];
+        Array.Fill(misses, BranchKvValue.Miss);
+        return misses;
     }
 
     /// <summary>

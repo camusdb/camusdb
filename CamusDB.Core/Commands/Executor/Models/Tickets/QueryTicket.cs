@@ -155,6 +155,15 @@ public sealed class QueryTicket
     /// </summary>
     internal Diagnostics.StatementProbe? Probe { get; }
 
+    /// <summary>
+    /// Where a scan records a retryable Kahuna abort instead of throwing it, or null to throw. Set only
+    /// by a consumer that tests it after the scan, today the locate scan of an UPDATE, and never copied
+    /// into a ticket built from this one: a scan that records an abort ends early, and only a consumer
+    /// that knows to look can tell that from a scan that found nothing. See
+    /// <see cref="Transactions.RetryableAbortSink"/>.
+    /// </summary>
+    internal Transactions.RetryableAbortSink? RetryableAborts { get; }
+
     public QueryTicket(
         KvTransaction txnState,
         string databaseName,
@@ -181,7 +190,8 @@ public sealed class QueryTicket
         CacheHintOptions? cacheHint = null,
         Queries.SingleTableRequiredColumnsMemo? requiredColumnsMemo = null,
         CancellationToken cancellationToken = default,
-        Diagnostics.StatementProbe? probe = null)
+        Diagnostics.StatementProbe? probe = null,
+        Transactions.RetryableAbortSink? retryableAborts = null)
     {
         TxnState = txnState;
         DatabaseName = databaseName;
@@ -209,5 +219,6 @@ public sealed class QueryTicket
         RequiredColumnsMemo = requiredColumnsMemo;
         CancellationToken = cancellationToken;
         Probe = probe;
+        RetryableAborts = retryableAborts;
     }
 }

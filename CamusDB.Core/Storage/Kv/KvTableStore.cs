@@ -330,11 +330,13 @@ public sealed partial class KvTableStore
     /// <summary>
     /// Point-reads one row. See <see cref="KvRowAccessor.GetRow"/> for the snapshot, locking and
     /// ancestry rules. <paramref name="largeValues"/> selects the compressed and out-of-line cells to
-    /// resolve before the bytes are returned; null resolves them all.
+    /// resolve before the bytes are returned; null resolves them all. With <paramref name="aborts"/>, a
+    /// retryable abort is recorded there instead of thrown and the answer is a null the caller must not
+    /// use (see <see cref="RetryableAbortSink"/>).
     /// </summary>
-    public async Task<ReadOnlyMemory<byte>?> GetRow(KvTransaction tx, ObjectIdValue rowId, CancellationToken cancellationToken = default, LargeValueFetch? largeValues = null)
+    public async Task<ReadOnlyMemory<byte>?> GetRow(KvTransaction tx, ObjectIdValue rowId, CancellationToken cancellationToken = default, LargeValueFetch? largeValues = null, RetryableAbortSink? aborts = null)
     {
-        ReadOnlyMemory<byte>? row = await rows.GetRow(tx, rowId, cancellationToken).ConfigureAwait(false);
+        ReadOnlyMemory<byte>? row = await rows.GetRow(tx, rowId, cancellationToken, aborts).ConfigureAwait(false);
         if (row is not { } data || !RowStorageForms.HasTrailer(data.Span) || largeValues is { IsRaw: true })
             return row;
 
@@ -356,11 +358,15 @@ public sealed partial class KvTableStore
 
     /// <summary>
     /// Lock-acquiring batch point-read for a mutation write phase. See
-    /// <see cref="KvRowAccessor.GetRowsBatchLockedForMutation"/>.
+    /// <see cref="KvRowAccessor.GetRowsBatchLockedForMutation"/>. With <paramref name="aborts"/>, a
+    /// retryable abort is recorded there instead of thrown and the rows answered are all null.
     /// </summary>
-    public async Task<ReadOnlyMemory<byte>?[]> GetRowsBatchLockedForMutation(KvTransaction tx, IReadOnlyList<ObjectIdValue> rowIds, CancellationToken cancellationToken = default, LargeValueFetch? largeValues = null)
+    public async Task<ReadOnlyMemory<byte>?[]> GetRowsBatchLockedForMutation(KvTransaction tx, IReadOnlyList<ObjectIdValue> rowIds, CancellationToken cancellationToken = default, LargeValueFetch? largeValues = null, RetryableAbortSink? aborts = null)
     {
-        ReadOnlyMemory<byte>?[] result = await rows.GetRowsBatchLockedForMutation(tx, rowIds, cancellationToken).ConfigureAwait(false);
+        ReadOnlyMemory<byte>?[] result = await rows.GetRowsBatchLockedForMutation(tx, rowIds, cancellationToken, aborts).ConfigureAwait(false);
+        if (aborts is { HasAbort: true })
+            return result;
+
         await this.largeValues.ResolveAsync(tx, rowIds, result, largeValues, cancellationToken).ConfigureAwait(false);
         return result;
     }
@@ -389,14 +395,21 @@ public sealed partial class KvTableStore
     ///
     /// <para>A row that a concurrent commit deleted comes back null, as it does from every batch read.
     /// The caller must skip it and re-check its predicate on the rows that remain.</para>
+    ///
+    /// <para>With <paramref name="aborts"/>, a retryable abort from the lock or the read is recorded
+    /// there instead of thrown, and the caller must test <see cref="RetryableAbortSink.HasAbort"/>
+    /// before it reads any row (see <see cref="RetryableAbortSink"/>).</para>
     /// </summary>
-    public async Task<ReadOnlyMemory<byte>?[]> LockAndReadRowsForMutationAsync(KvTransaction tx, IReadOnlyList<ObjectIdValue> rowIds, CancellationToken cancellationToken = default, LargeValueFetch? largeValues = null)
+    public async Task<ReadOnlyMemory<byte>?[]> LockAndReadRowsForMutationAsync(KvTransaction tx, IReadOnlyList<ObjectIdValue> rowIds, CancellationToken cancellationToken = default, LargeValueFetch? largeValues = null, RetryableAbortSink? aborts = null)
     {
         if (rowIds.Count == 0)
             return [];
 
-        await batch.AcquireRowLocksForMutationAsync(tx, rowIds, cancellationToken).ConfigureAwait(false);
-        return await GetRowsBatchLockedForMutation(tx, rowIds, cancellationToken, largeValues).ConfigureAwait(false);
+        await batch.AcquireRowLocksForMutationAsync(tx, rowIds, cancellationToken, aborts).ConfigureAwait(false);
+        if (aborts is { HasAbort: true })
+            return new ReadOnlyMemory<byte>?[rowIds.Count];
+
+        return await GetRowsBatchLockedForMutation(tx, rowIds, cancellationToken, largeValues, aborts).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -617,8 +630,8 @@ public sealed partial class KvTableStore
         => batch.WriteRowsBatch(tx, rows, cancellationToken);
 
     /// <inheritdoc cref="KvBatchWriter.UpdateRowsBatch"/>
-    public Task UpdateRowsBatch(KvTransaction tx, IReadOnlyList<RowUpdate> rows, CancellationToken cancellationToken = default)
-        => batch.UpdateRowsBatch(tx, rows, cancellationToken);
+    public Task UpdateRowsBatch(KvTransaction tx, IReadOnlyList<RowUpdate> rows, CancellationToken cancellationToken = default, RetryableAbortSink? aborts = null)
+        => batch.UpdateRowsBatch(tx, rows, cancellationToken, aborts);
 
     /// <inheritdoc cref="KvBatchWriter.DeleteRowsBatch"/>
     public Task DeleteRowsBatch(KvTransaction tx, IReadOnlyList<RowDelete> rows, CancellationToken cancellationToken = default)

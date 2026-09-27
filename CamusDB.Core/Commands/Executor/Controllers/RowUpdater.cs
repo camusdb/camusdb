@@ -141,7 +141,15 @@ public sealed class RowUpdater
             ValidateExprValues(columns, indexes, ticket.ExprValues);
     }
 
-    internal async Task<int> Update(QueryExecutor queryExecutor, DatabaseDescriptor database, TableDescriptor table, UpdateTicket ticket)
+    /// <summary>
+    /// Updates the rows the ticket selects and returns how many it changed.
+    ///
+    /// <para>With <paramref name="aborts"/>, a retryable Kahuna abort of the locate scan's row read or
+    /// of the write phase's lock, read or write is recorded there instead of thrown, the statement stops
+    /// where it was, and the count returned is meaningless: the caller tests
+    /// <see cref="RetryableAbortSink.HasAbort"/> first. See <see cref="RetryableAbortSink"/>.</para>
+    /// </summary>
+    internal async Task<int> Update(QueryExecutor queryExecutor, DatabaseDescriptor database, TableDescriptor table, UpdateTicket ticket, RetryableAbortSink? aborts = null)
     {
         MaterializedViewAccessGuard.RequireWritable(table);
         Validate(table, ticket);
@@ -150,7 +158,8 @@ public sealed class RowUpdater
             database: database,
             table: table,
             ticket: ticket,
-            queryExecutor: queryExecutor
+            queryExecutor: queryExecutor,
+            retryableAborts: aborts
         );
 
         FluxMachine<UpdateFluxSteps, UpdateFluxState> machine = new(state);
@@ -318,7 +327,8 @@ public sealed class RowUpdater
             parameters: ticket.Parameters,
             locateColumns: locateColumns,
             exclusivePredicateLocks: true,
-            probe: ticket.Probe
+            probe: ticket.Probe,
+            retryableAborts: state.RetryableAborts
         );
 
         IAsyncEnumerable<QueryResultRow> cursor = state.QueryExecutor.Query(state.Database, state.Table, queryTicket);
@@ -335,9 +345,15 @@ public sealed class RowUpdater
         await foreach (QueryResultRow row in cursor.ConfigureAwait(false))
             await rowList.AddAsync(new(row.RowId, QueryResultRow.EmptyRow)).ConfigureAwait(false);
 
+        // Handed to the state before the abort test, so UpdateInternal disposes it either way.
+        state.RowsToUpdate = rowList;
+
+        // A scan that recorded an abort ended early: what it located is not the match set.
+        if (state.RetryableAborts is { HasAbort: true })
+            return FluxAction.Abort;
+
         await rowList.SealAsync().ConfigureAwait(false);
 
-        state.RowsToUpdate = rowList;
         state.LocateTicket = queryTicket;
 
         return FluxAction.Continue;
@@ -501,12 +517,19 @@ public sealed class RowUpdater
             if (chunkRows.Count >= chunkSize)
             {
                 await FlushUpdateChunk(table, tx, ticket, chunkRows, state, recheck, evaluatedColumns).ConfigureAwait(false);
+                if (state.RetryableAborts is { HasAbort: true })
+                    return FluxAction.Abort;
+
                 chunkRows.Clear();
             }
         }
 
         if (chunkRows.Count > 0)
+        {
             await FlushUpdateChunk(table, tx, ticket, chunkRows, state, recheck, evaluatedColumns).ConfigureAwait(false);
+            if (state.RetryableAborts is { HasAbort: true })
+                return FluxAction.Abort;
+        }
 
         return FluxAction.Continue;
     }
@@ -572,7 +595,9 @@ public sealed class RowUpdater
 
         // Lock the chunk's row keys, then batch-load their bytes in one Kahuna round trip. The bytes are
         // read raw: which large values to fetch is decided per row below.
-        ReadOnlyMemory<byte>?[] rawRows = await table.Store.LockAndReadRowsForMutationAsync(tx, rowIds, default, LargeValueFetch.Raw).ConfigureAwait(false);
+        ReadOnlyMemory<byte>?[] rawRows = await table.Store.LockAndReadRowsForMutationAsync(tx, rowIds, default, LargeValueFetch.Raw, state.RetryableAborts).ConfigureAwait(false);
+        if (state.RetryableAborts is { HasAbort: true })
+            return;
 
         // The rewritten row is stored under the current schema version, so its positional layout is
         // fixed for the whole chunk. Compiled once here rather than per row.
@@ -648,7 +673,9 @@ public sealed class RowUpdater
             });
         }
 
-        await table.Store.UpdateRowsBatch(tx, batch).ConfigureAwait(false);
+        await table.Store.UpdateRowsBatch(tx, batch, default, state.RetryableAborts).ConfigureAwait(false);
+        if (state.RetryableAborts is { HasAbort: true })
+            return;
 
         state.ModifiedRows += batch.Count;
 
@@ -1002,6 +1029,9 @@ public sealed class RowUpdater
             if (state.RowsToUpdate is not null)
                 await state.RowsToUpdate.DisposeAsync().ConfigureAwait(false);
         }
+
+        if (state.RetryableAborts is { HasAbort: true })
+            return 0;
 
         TimeSpan timeTaken = timer.GetElapsedTime();
 

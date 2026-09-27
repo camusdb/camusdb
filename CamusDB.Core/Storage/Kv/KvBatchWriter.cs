@@ -308,8 +308,12 @@ internal sealed class KvBatchWriter
     /// <para>Lock keys are deduplicated before acquisition so that a key appearing as both an
     /// old entry for one row and a new entry for another row within the same batch is only locked
     /// once, avoiding a false <c>AlreadyLocked</c> from Kahuna on repeated lock requests.</para>
+    ///
+    /// <para>With <paramref name="aborts"/>, a retryable abort from the batched acquire, delete or set is
+    /// recorded there and the method returns without tracking the batch; the caller must test
+    /// <see cref="RetryableAbortSink.HasAbort"/>. See <see cref="RetryableAbortSink"/>.</para>
     /// </summary>
-    internal async Task UpdateRowsBatch(KvTransaction tx, IReadOnlyList<KvTableStore.RowUpdate> rows, CancellationToken cancellationToken = default)
+    internal async Task UpdateRowsBatch(KvTransaction tx, IReadOnlyList<KvTableStore.RowUpdate> rows, CancellationToken cancellationToken = default, RetryableAbortSink? aborts = null)
     {
         if (rows.Count == 0)
             return;
@@ -426,15 +430,18 @@ internal sealed class KvBatchWriter
         await UpgradeSharedPointLocksAsync(tx, upgrades, cancellationToken).ConfigureAwait(false);
 
         // Phase 1 — acquire every exclusive lock in one round-trip.
-        await AcquireManyWithRetry(tx, lockKeys, cancellationToken).ConfigureAwait(false);
+        if (!await AcquireManyWithRetry(tx, lockKeys, cancellationToken, aborts).ConfigureAwait(false))
+            return;
 
         if (!isBranch)
         {
             // Phase 2a (root) — physically delete old index entries.
-            await DeleteManyWithRetry(tx, deleteItems, cancellationToken).ConfigureAwait(false);
+            if (!await DeleteManyWithRetry(tx, deleteItems, cancellationToken, aborts).ConfigureAwait(false))
+                return;
 
             // Phase 2b (root) — write row blobs and new index entries.
-            await SetManyWithRetry(tx, setItems, uniqueByKey, cancellationToken).ConfigureAwait(false);
+            if (!await SetManyWithRetry(tx, setItems, uniqueByKey, cancellationToken, aborts).ConfigureAwait(false))
+                return;
         }
         else
         {
@@ -536,7 +543,8 @@ internal sealed class KvBatchWriter
                 }
             }
 
-            await SetManyWithRetry(tx, batchItems, batchByKey, cancellationToken).ConfigureAwait(false);
+            if (!await SetManyWithRetry(tx, batchItems, batchByKey, cancellationToken, aborts).ConfigureAwait(false))
+                return;
         }
 
         // Track all modified keys for 2PC commit. Locks were already tracked inside AcquireManyWithRetry.
@@ -554,7 +562,7 @@ internal sealed class KvBatchWriter
     /// exclusive point lock, and the later <see cref="UpdateRowsBatch"/> or <see cref="DeleteRowsBatch"/>
     /// asks for the same keys again under the same transaction.</para>
     /// </summary>
-    internal async Task AcquireRowLocksForMutationAsync(KvTransaction tx, IReadOnlyList<ObjectIdValue> rowIds, CancellationToken cancellationToken = default)
+    internal async Task AcquireRowLocksForMutationAsync(KvTransaction tx, IReadOnlyList<ObjectIdValue> rowIds, CancellationToken cancellationToken = default, RetryableAbortSink? aborts = null)
     {
         if (rowIds.Count == 0)
             return;
@@ -572,7 +580,7 @@ internal sealed class KvBatchWriter
                 lockKeys.Add((rowKey, 0, KeyValueDurability.Persistent));
         }
 
-        await AcquireManyWithRetry(tx, lockKeys, cancellationToken).ConfigureAwait(false);
+        await AcquireManyWithRetry(tx, lockKeys, cancellationToken, aborts).ConfigureAwait(false);
     }
 
     // -----------------------------------------------------------------------
@@ -831,18 +839,22 @@ internal sealed class KvBatchWriter
     /// still take SHARED range/point locks and a following write upgrades them to Exclusive, both gated
     /// on the isolation level rather than on <see cref="KvTransaction.Locking"/>. Serializable +
     /// Optimistic is therefore a hybrid, deliberately not weakened to lock-free.</para>
+    ///
+    /// <para>Returns false only when <paramref name="aborts"/> is given and a retryable abort was recorded
+    /// in it instead of thrown (see <see cref="RetryableAbortSink"/>); the caller must stop.</para>
     /// </summary>
-    private async Task AcquireManyWithRetry(
+    private async Task<bool> AcquireManyWithRetry(
         KvTransaction tx,
         List<(string key, int expiresMs, KeyValueDurability durability)> lockKeys,
-        CancellationToken ct)
+        CancellationToken ct,
+        RetryableAbortSink? aborts = null)
     {
         // Start the deferred session before the optimistic check so that the write calls that
         // follow (SetManyWithRetry / DeleteManyWithRetry) have a valid TransactionId.
         await tx.EnsureSessionStartedAsync(ct, keys.TableKeyPrefix).ConfigureAwait(false);
 
         if (tx.Locking == KeyValueTransactionLocking.Optimistic)
-            return;
+            return true;
 
         List<(string, int, KeyValueDurability)> pending = new(lockKeys);
         long deadline = retry.LockWaitDeadlineTicks();
@@ -891,28 +903,48 @@ internal sealed class KvBatchWriter
                 }
 
                 if (type == KeyValueResponseType.AlreadyLocked)
-                    throw new CamusDBException(CamusDBErrorCodes.TransactionConflict, $"Key {key} is locked by another transaction");
+                {
+                    RetryableAbortSink.Raise(aborts,
+                        new CamusDBException(CamusDBErrorCodes.TransactionConflict, $"Key {key} is locked by another transaction"),
+                        ServerDiagnostics.Tags.AbortSite.AcquireMany);
+                    return false;
+                }
 
                 // A range that lost quorum or changed leadership (e.g. under a partition) aborts the
                 // lock acquisition; that is transient and retryable from BeginAsync, not corruption.
                 if (type == KeyValueResponseType.Aborted)
-                    throw new CamusDBException(CamusDBErrorCodes.TransactionMustRetry, $"Lock acquisition on {key} was aborted by Kahuna — retry the operation from BeginAsync");
+                {
+                    RetryableAbortSink.Raise(aborts,
+                        new CamusDBException(CamusDBErrorCodes.TransactionMustRetry, $"Lock acquisition on {key} was aborted by Kahuna — retry the operation from BeginAsync"),
+                        ServerDiagnostics.Tags.AbortSite.AcquireMany);
+                    return false;
+                }
 
                 throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, $"Failed to acquire lock on {key}: {type}");
             }
 
             if (retryBatch.Count == 0)
-                return;
+                return true;
 
             if (Stopwatch.GetTimestamp() >= deadline)
-                throw new CamusDBException(
-                    CamusDBErrorCodes.TransactionMustRetry,
-                    messages.LockWaitDeadlineMessage(tx, "batched exclusive lock acquisition", retryBatch.Select(r => r.Item1).ToList(), retryBatch.Count));
+            {
+                RetryableAbortSink.Raise(aborts,
+                    new CamusDBException(
+                        CamusDBErrorCodes.TransactionMustRetry,
+                        messages.LockWaitDeadlineMessage(tx, "batched exclusive lock acquisition", retryBatch.Select(r => r.Item1).ToList(), retryBatch.Count)),
+                    ServerDiagnostics.Tags.AbortSite.AcquireMany);
+                return false;
+            }
 
             if (++retries >= KahunaRetryPolicy.MaxKahunaRetries)
-                throw new CamusDBException(
-                    CamusDBErrorCodes.TransactionMustRetry,
-                    messages.WriteConflictMessage(tx, "batched exclusive lock acquisition", retryBatch.Select(r => r.Item1).ToList(), retryBatch.Count));
+            {
+                RetryableAbortSink.Raise(aborts,
+                    new CamusDBException(
+                        CamusDBErrorCodes.TransactionMustRetry,
+                        messages.WriteConflictMessage(tx, "batched exclusive lock acquisition", retryBatch.Select(r => r.Item1).ToList(), retryBatch.Count)),
+                    ServerDiagnostics.Tags.AbortSite.AcquireMany);
+                return false;
+            }
 
             ServerDiagnostics.AddKvRetryWait("acquire_many");
             await Task.Delay(KahunaRetryPolicy.RetryDelayMs(retries), ct).ConfigureAwait(false);
@@ -924,18 +956,23 @@ internal sealed class KvBatchWriter
                 lockBatchOperationId = TransactionOperationId.NewRandom();
             pending = retryBatch;
         }
+
+        return true;
     }
 
     /// <summary>
     /// Writes every item of a batch in one round-trip, resending only the keys that came back
     /// transient. <paramref name="uniqueByKey"/> marks the keys whose <c>NotSet</c> means a genuine
     /// duplicate; for every other key a <c>NotSet</c> mirrors the per-row path and is acceptable.
+    /// Returns false only when <paramref name="aborts"/> is given and a retryable abort was recorded in
+    /// it instead of thrown; the caller must stop.
     /// </summary>
-    private async Task SetManyWithRetry(
+    private async Task<bool> SetManyWithRetry(
         KvTransaction tx,
         List<KahunaSetKeyValueRequestItem> items,
         Dictionary<string, bool> uniqueByKey,
-        CancellationToken ct)
+        CancellationToken ct,
+        RetryableAbortSink? aborts = null)
     {
         List<KahunaSetKeyValueRequestItem> pending = new(items);
         long deadline = retry.LockWaitDeadlineTicks();
@@ -989,10 +1026,15 @@ internal sealed class KvBatchWriter
                         // operation cannot be replayed in place under the same coordinator. Surface a
                         // retryable TransactionMustRetry so the client restarts from BeginAsync; falling
                         // through to SystemSpaceCorrupt would report a transient partition as durable
-                        // corruption and turn a recoverable blip into a fatal error.
-                        throw new CamusDBException(
-                            CamusDBErrorCodes.TransactionMustRetry,
-                            $"Batched set of key {key} was aborted by Kahuna — retry the operation from BeginAsync");
+                        // corruption and turn a recoverable blip into a fatal error. Kahuna's early
+                        // write-conflict check answers the same way when another transaction committed
+                        // the key after this one read it, which is the common case under contention.
+                        RetryableAbortSink.Raise(aborts,
+                            new CamusDBException(
+                                CamusDBErrorCodes.TransactionMustRetry,
+                                $"Batched set of key {key} was aborted by Kahuna — retry the operation from BeginAsync"),
+                            ServerDiagnostics.Tags.AbortSite.SetMany);
+                        return false;
 
                     default:
                         throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, $"Batch set failed for key {key}: {resp.Type}");
@@ -1000,17 +1042,27 @@ internal sealed class KvBatchWriter
             }
 
             if (retryBatch.Count == 0)
-                return;
+                return true;
 
             if (Stopwatch.GetTimestamp() >= deadline)
-                throw new CamusDBException(
-                    CamusDBErrorCodes.TransactionMustRetry,
-                    messages.LockWaitDeadlineMessage(tx, "batched write", retryBatch.Select(i => i.Key ?? "").ToList(), retryBatch.Count));
+            {
+                RetryableAbortSink.Raise(aborts,
+                    new CamusDBException(
+                        CamusDBErrorCodes.TransactionMustRetry,
+                        messages.LockWaitDeadlineMessage(tx, "batched write", retryBatch.Select(i => i.Key ?? "").ToList(), retryBatch.Count)),
+                    ServerDiagnostics.Tags.AbortSite.SetMany);
+                return false;
+            }
 
             if (++retries >= KahunaRetryPolicy.MaxKahunaRetries)
-                throw new CamusDBException(
-                    CamusDBErrorCodes.TransactionMustRetry,
-                    messages.WriteConflictMessage(tx, "batched write", retryBatch.Select(i => i.Key ?? "").ToList(), retryBatch.Count));
+            {
+                RetryableAbortSink.Raise(aborts,
+                    new CamusDBException(
+                        CamusDBErrorCodes.TransactionMustRetry,
+                        messages.WriteConflictMessage(tx, "batched write", retryBatch.Select(i => i.Key ?? "").ToList(), retryBatch.Count)),
+                    ServerDiagnostics.Tags.AbortSite.SetMany);
+                return false;
+            }
 
             ServerDiagnostics.AddKvRetryWait("set_many");
             await Task.Delay(KahunaRetryPolicy.RetryDelayMs(retries), ct).ConfigureAwait(false);
@@ -1021,13 +1073,16 @@ internal sealed class KvBatchWriter
                 batchOperationId = TransactionOperationId.NewRandom();
             pending = retryBatch;
         }
+
+        return true;
     }
 
     /// <summary>
     /// Physically deletes every item of a batch in one round-trip, resending only the keys that came
-    /// back transient. A key that does not exist is a success, not an error.
+    /// back transient. A key that does not exist is a success, not an error. Returns false only when
+    /// <paramref name="aborts"/> is given and a retryable abort was recorded in it instead of thrown.
     /// </summary>
-    private async Task DeleteManyWithRetry(KvTransaction tx, List<KahunaDeleteKeyValueRequestItem> items, CancellationToken ct)
+    private async Task<bool> DeleteManyWithRetry(KvTransaction tx, List<KahunaDeleteKeyValueRequestItem> items, CancellationToken ct, RetryableAbortSink? aborts = null)
     {
         List<KahunaDeleteKeyValueRequestItem> pending = new(items);
         long deadline = retry.LockWaitDeadlineTicks();
@@ -1073,9 +1128,12 @@ internal sealed class KvBatchWriter
                         // continue and must restart from BeginAsync. Surface a retryable
                         // TransactionMustRetry rather than falling through to SystemSpaceCorrupt, which
                         // would report a transient partition as durable corruption.
-                        throw new CamusDBException(
-                            CamusDBErrorCodes.TransactionMustRetry,
-                            $"Batched delete of key {key} was aborted by Kahuna — retry the operation from BeginAsync");
+                        RetryableAbortSink.Raise(aborts,
+                            new CamusDBException(
+                                CamusDBErrorCodes.TransactionMustRetry,
+                                $"Batched delete of key {key} was aborted by Kahuna — retry the operation from BeginAsync"),
+                            ServerDiagnostics.Tags.AbortSite.DeleteMany);
+                        return false;
 
                     default:
                         throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, $"Batch delete failed for key {key}: {resp.Type}");
@@ -1083,17 +1141,27 @@ internal sealed class KvBatchWriter
             }
 
             if (retryBatch.Count == 0)
-                return;
+                return true;
 
             if (Stopwatch.GetTimestamp() >= deadline)
-                throw new CamusDBException(
-                    CamusDBErrorCodes.TransactionMustRetry,
-                    messages.LockWaitDeadlineMessage(tx, "batched delete", retryBatch.Select(i => i.Key ?? "").ToList(), retryBatch.Count));
+            {
+                RetryableAbortSink.Raise(aborts,
+                    new CamusDBException(
+                        CamusDBErrorCodes.TransactionMustRetry,
+                        messages.LockWaitDeadlineMessage(tx, "batched delete", retryBatch.Select(i => i.Key ?? "").ToList(), retryBatch.Count)),
+                    ServerDiagnostics.Tags.AbortSite.DeleteMany);
+                return false;
+            }
 
             if (++retries >= KahunaRetryPolicy.MaxKahunaRetries)
-                throw new CamusDBException(
-                    CamusDBErrorCodes.TransactionMustRetry,
-                    messages.WriteConflictMessage(tx, "batched delete", retryBatch.Select(i => i.Key ?? "").ToList(), retryBatch.Count));
+            {
+                RetryableAbortSink.Raise(aborts,
+                    new CamusDBException(
+                        CamusDBErrorCodes.TransactionMustRetry,
+                        messages.WriteConflictMessage(tx, "batched delete", retryBatch.Select(i => i.Key ?? "").ToList(), retryBatch.Count)),
+                    ServerDiagnostics.Tags.AbortSite.DeleteMany);
+                return false;
+            }
 
             ServerDiagnostics.AddKvRetryWait("delete_many");
             await Task.Delay(KahunaRetryPolicy.RetryDelayMs(retries), ct).ConfigureAwait(false);
@@ -1104,5 +1172,7 @@ internal sealed class KvBatchWriter
                 deleteBatchOperationId = TransactionOperationId.NewRandom();
             pending = retryBatch;
         }
+
+        return true;
     }
 }

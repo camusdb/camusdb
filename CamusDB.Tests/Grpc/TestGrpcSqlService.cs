@@ -25,6 +25,8 @@ using CamusDB.Grpc;
 using CamusDB.App.Grpc;
 using CamusDB.App.Services;
 using CamusDB.Tests.CommandsExecutor;
+using CamusDB.Tests.Utils;
+using CamusDB.Core.CommandsExecutor.Controllers;
 
 using Kahuna.Shared.KeyValue;
 
@@ -835,6 +837,138 @@ public class TestGrpcSqlService : BaseTest
         BatchExecuteResponse.PayloadOneofCase.StartReply or
         BatchExecuteResponse.PayloadOneofCase.CommitReply or
         BatchExecuteResponse.PayloadOneofCase.RollbackReply;
+
+    // A retryable Kahuna abort travels from the KV site to the batch writer as a value: the op is
+    // answered with the same BatchError the thrown abort produced, and no engine exception is thrown.
+
+    private async Task<string> CreateAccountsDatabaseAsync()
+    {
+        string dbName = await CreateTestDatabaseWithTableAsync(
+            "CREATE TABLE accounts (id string(10) PRIMARY KEY, balance int64)");
+        await service.ExecuteNonQuery(NonQueryRequest(dbName, "INSERT INTO accounts (id, balance) VALUES ('a', 100)"), Ctx());
+        return dbName;
+    }
+
+    private async Task<long> BalanceOfAAsync(string dbName)
+    {
+        (List<QueryStreamMessage> msgs, _) = await QueryAsync(dbName, "SELECT balance FROM accounts WHERE id = 'a'");
+        return GrpcAssert.RowValues(msgs, msgs[0].Schema)["balance"].Int64Value;
+    }
+
+    // Kahuna does not always abort a loser at the statement (one that began in a busy HLC millisecond
+    // loses at commit instead), so these repeat the race until it does; see TestRetryableAbortsAsValues.
+    private const int LostUpdateAttempts = 20;
+
+    private static SqlRequest ReadCommittedOptimistic(string dbName, string sql, TxnHandle? handle = null)
+    {
+        SqlRequest r = new()
+        {
+            Database = dbName, Sql = sql,
+            Locking = LockingMode.Optimistic, IsolationLevel = IsolationLevel.ReadCommitted,
+        };
+        if (handle is not null) r.TxnHandle = handle;
+        return r;
+    }
+
+    [Test]
+    public async Task BatchExecute_ExplicitTxnLostUpdate_AnswersTheAbortWithoutAThrow()
+    {
+        string dbName = await CreateAccountsDatabaseAsync();
+
+        for (int attempt = 1; attempt <= LostUpdateAttempts; attempt++)
+        {
+            long winnerBalance = 1000 + attempt;
+
+            await Task.Delay(5); // a fresh HLC millisecond for the loser
+            TxnHandle loser = await service.StartTransaction(
+                new StartTxnRequest { Database = dbName, Locking = LockingMode.Optimistic, IsolationLevel = IsolationLevel.ReadCommitted }, Ctx());
+
+            CapturingStreamWriter<QueryStreamMessage> readWriter = new();
+            await service.ExecuteQuery(ReadCommittedOptimistic(dbName, "SELECT balance FROM accounts WHERE id = 'a'", loser), readWriter, Ctx());
+
+            await service.ExecuteNonQuery(ReadCommittedOptimistic(dbName, $"UPDATE accounts SET balance = {winnerBalance} WHERE id = 'a'"), Ctx());
+
+            List<BatchExecuteResponse> responses = [];
+            int throws = await EngineThrowCounter.CountAsync(async () =>
+                responses = await BatchAsync(BNonQuery(1, dbName, "UPDATE accounts SET balance = balance + 1 WHERE id = 'a'", loser)));
+
+            Assert.That(throws, Is.Zero, "the op must reach the batch writer without an engine exception, lost or not");
+
+            await service.RollbackTransaction(loser, Ctx());
+            Assert.That(await BalanceOfAAsync(dbName), Is.EqualTo(winnerBalance));
+
+            BatchExecuteResponse reply = ForId(responses, 1).Single();
+            if (reply.PayloadCase == BatchExecuteResponse.PayloadOneofCase.NonQuery)
+                continue; // not aborted at the statement: the loss would have surfaced at commit
+
+            Assert.That(reply.PayloadCase, Is.EqualTo(BatchExecuteResponse.PayloadOneofCase.Error));
+            Assert.That(reply.Error.Code, Is.EqualTo(CamusDBErrorCodes.TransactionMustRetry));
+            Assert.That(reply.Error.Message, Does.Contain("aborted by Kahuna"));
+            return;
+        }
+
+        Assert.Fail($"Kahuna never aborted the lost update at the statement in {LostUpdateAttempts} attempts");
+    }
+
+    [Test]
+    public async Task BatchExecute_AutocommitLostUpdate_RollsBackAndAnswersTheAbort()
+    {
+        string dbName = await CreateAccountsDatabaseAsync();
+        RowUpdater updater = serviceExecutor.RowUpdaterForTests;
+
+        for (int attempt = 1; attempt <= LostUpdateAttempts; attempt++)
+        {
+            long winnerBalance = 1000 + attempt;
+
+            // The competing commit lands between the autocommit statement's locate scan and its write
+            // phase, so the statement loses in the write phase, after it has already read the row.
+            bool hookRan = false;
+            updater.TestBeforeWriteHook = async () =>
+            {
+                updater.TestBeforeWriteHook = null;
+                hookRan = true;
+                await service.ExecuteNonQuery(ReadCommittedOptimistic(dbName, $"UPDATE accounts SET balance = {winnerBalance} WHERE id = 'a'"), Ctx());
+            };
+
+            List<BatchExecuteResponse> responses = [];
+            int throws;
+            try
+            {
+                await Task.Delay(5); // a fresh HLC millisecond for the autocommit transaction
+                SqlRequest request = ReadCommittedOptimistic(dbName, "UPDATE accounts SET balance = balance + 1 WHERE id = 'a'");
+                throws = await EngineThrowCounter.CountAsync(async () =>
+                    responses = await BatchAsync(new BatchExecuteRequest { RequestId = 1, Kind = BatchStatementKind.NonQuery, Request = request }));
+            }
+            finally
+            {
+                updater.TestBeforeWriteHook = null;
+            }
+
+            Assert.That(hookRan, Is.True, "the competing commit never ran inside the write window");
+
+            BatchExecuteResponse reply = ForId(responses, 1).Single();
+            if (reply.PayloadCase != BatchExecuteResponse.PayloadOneofCase.Error)
+            {
+                Assert.Fail("an autocommit statement that lost to a concurrent commit must not be committed");
+                return;
+            }
+
+            // A loss Kahuna missed at the statement is caught at commit, which answers with its own
+            // error; only a statement-time abort is the value path under test.
+            if (!reply.Error.Message.Contains("aborted by Kahuna"))
+            {
+                Assert.That(await BalanceOfAAsync(dbName), Is.EqualTo(winnerBalance));
+                continue;
+            }
+
+            Assert.That(reply.Error.Code, Is.EqualTo(CamusDBErrorCodes.TransactionMustRetry));
+            Assert.That(throws, Is.Zero);
+            Assert.That(await BalanceOfAAsync(dbName), Is.EqualTo(winnerBalance), "only the competing commit may persist");
+            return;
+        }
+
+        Assert.Fail($"Kahuna never aborted the lost update at the statement in {LostUpdateAttempts} attempts");
+    }
 
     [Test]
     public async Task BatchExecute_StartStatementsCommit_OverOneStream()

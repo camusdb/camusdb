@@ -1141,7 +1141,13 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
                 case BatchStatementKind.NonQuery:
                 case BatchStatementKind.Unspecified:
                 default:
-                    await RunBatchNonQueryAsync(req.RequestId, request, writer, prepared, principal, ct).ConfigureAwait(false);
+                    // A retryable abort comes back as a value and is answered exactly as the thrown one is.
+                    CamusDBException? abort = await RunBatchNonQueryAsync(req.RequestId, request, writer, prepared, principal, ct).ConfigureAwait(false);
+                    if (abort is not null)
+                    {
+                        outcome = ClassifyOutcome(abort.Code);
+                        await WriteBatchFailureAsync(req.RequestId, abort, writer, ct).ConfigureAwait(false);
+                    }
                     break;
             }
         }
@@ -1153,12 +1159,7 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
         catch (CamusDBException ex)
         {
             outcome = ClassifyOutcome(ex.Code);
-            CommandFailureLog.LogFailure(logger, ex);
-            await writer.TryWriteAsync(new BatchExecuteResponse
-            {
-                RequestId = req.RequestId,
-                Error = new BatchError { Code = ex.Code, Message = ex.Message },
-            }, ct).ConfigureAwait(false);
+            await WriteBatchFailureAsync(req.RequestId, ex, writer, ct).ConfigureAwait(false);
         }
         catch (RpcException ex) when (KahunaRetryPolicy.IsTransientTransportFailure(ex, ct))
         {
@@ -1324,7 +1325,25 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
         }, ct).ConfigureAwait(false);
     }
 
-    private async Task RunBatchNonQueryAsync(
+    /// <summary>Logs an engine error and answers the op with it as a <c>BatchError</c>.</summary>
+    private async Task WriteBatchFailureAsync(int requestId, CamusDBException ex, BatchResponseWriter writer, CancellationToken ct)
+    {
+        CommandFailureLog.LogFailure(logger, ex);
+        await writer.TryWriteAsync(new BatchExecuteResponse
+        {
+            RequestId = requestId,
+            Error = new BatchError { Code = ex.Code, Message = ex.Message },
+        }, ct).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Runs one non-query op and writes its reply. Returns the retryable abort the statement recorded
+    /// instead of throwing (see <see cref="RetryableAbortSink"/>), which the caller answers as the op's
+    /// error, or null when a reply was written. An autocommit statement that recorded one is rolled back
+    /// here and never committed; an explicit transaction is left to its client, as a thrown abort leaves
+    /// it. Every other failure is still thrown.
+    /// </summary>
+    private async Task<CamusDBException?> RunBatchNonQueryAsync(
         int requestId,
         SqlRequest request,
         BatchResponseWriter writer,
@@ -1364,11 +1383,15 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
             // (see the query path above): it informs where the client starts its next transaction.
             KvTransaction txnState = transactions.GetState(handle.TxnIdPt, (uint)handle.TxnIdCounter);
             Core.Routing.StatementRoutingCollector? routingCollector = BeginRoutingCollection(request);
+            RetryableAbortSink aborts = new();
             ExecuteSQLTicket ticket = new(
                 txnState: txnState, database: resolved.Database, sql: resolved.Sql,
                 parameters: resolved.Parameters, principal: principal,
-                routing: routingCollector);
+                routing: routingCollector, retryableAborts: aborts);
             ExecuteNonSQLResult result = await executor.ExecuteNonSQLQuery(ticket).ConfigureAwait(false);
+            if (aborts.Abort is { } txnAbort)
+                return txnAbort;
+
             reply = new NonQueryReply { AffectedRows = result.ModifiedRows, Warning = result.Warning ?? "" };
             RoutingAdvice? advice = BuildRoutingAdvice(result.Database, routingCollector);
             if (advice is not null)
@@ -1383,13 +1406,22 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
             HLCTimestamp token;
             Core.Routing.StatementRoutingCollector? routingCollector = BeginRoutingCollection(request);
             DatabaseDescriptor? routingDb;
+            RetryableAbortSink aborts = new();
             try
             {
                 ExecuteSQLTicket ticket = new(
                     txnState: tx, database: resolved.Database, sql: resolved.Sql,
                     parameters: resolved.Parameters, principal: principal,
-                    routing: routingCollector);
+                    routing: routingCollector, retryableAborts: aborts);
                 ExecuteNonSQLResult r = await executor.ExecuteNonSQLQuery(ticket).ConfigureAwait(false);
+
+                // The statement lost to a concurrent commit: roll back, never commit what it wrote.
+                if (aborts.Abort is { } autocommitAbort)
+                {
+                    await transactions.RollbackIfNotCompletedAsync(tx, ct).ConfigureAwait(false);
+                    return autocommitAbort;
+                }
+
                 token = await transactions.CommitOrReleaseAsync(r.Database, tx, ct).ConfigureAwait(false);
                 rows = r.ModifiedRows;
                 batchWarning = r.Warning;
@@ -1417,6 +1449,8 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
             RequestId = requestId,
             NonQuery = reply,
         }, ct).ConfigureAwait(false);
+
+        return null;
     }
 
     /// <summary>

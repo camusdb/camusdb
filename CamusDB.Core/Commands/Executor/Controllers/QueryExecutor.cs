@@ -1205,10 +1205,12 @@ internal sealed class QueryExecutor
         if (rowId is null)
             yield break;
 
+        // A row read Kahuna aborts under contention is recorded on the ticket's sink when the consumer
+        // opted in; the scan then ends, and the consumer reports the abort instead of an empty result.
         ReadOnlyMemory<byte>? data;
         using (CamusDB.Core.Diagnostics.QueryStageProfile.Measure(CamusDB.Core.Diagnostics.QueryStage.RowGet))
-            data = await table.Store.GetRow(ticket.TxnState, rowId.Value, cancellationToken, LargeValueFetch.Columns(table.Schema, plan.ScanRequiredColumns)).ConfigureAwait(false);
-        if (data is null || data.Value.Length == 0)
+            data = await table.Store.GetRow(ticket.TxnState, rowId.Value, cancellationToken, LargeValueFetch.Columns(table.Schema, plan.ScanRequiredColumns), ticket.RetryableAborts).ConfigureAwait(false);
+        if (ticket.RetryableAborts is { HasAbort: true } || data is null || data.Value.Length == 0)
             yield break;
 
         probe?.AddRowRead();

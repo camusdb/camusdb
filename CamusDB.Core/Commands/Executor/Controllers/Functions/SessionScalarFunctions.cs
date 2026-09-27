@@ -121,7 +121,8 @@ internal static class SessionScalarFunctions
             parameters, ticket.Principal,
             ticket.CancellationToken, 
             ticket.Probe, 
-            ticket.Routing
+            ticket.Routing,
+            ticket.RetryableAborts
         );
     }
 

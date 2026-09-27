@@ -38,16 +38,25 @@ internal sealed class UpdateFluxState
 
     public int ModifiedRows { get; set; }
 
+    /// <summary>
+    /// Where the statement's retryable Kahuna abort is recorded instead of thrown, or null to throw.
+    /// Each step tests it after every call it passes it to and aborts the machine when it is set.
+    /// See <see cref="Transactions.RetryableAbortSink"/>.
+    /// </summary>
+    public Transactions.RetryableAbortSink? RetryableAborts { get; }
+
     public UpdateFluxState(
         DatabaseDescriptor database,
         TableDescriptor table,
         UpdateTicket ticket,
-        QueryExecutor queryExecutor
+        QueryExecutor queryExecutor,
+        Transactions.RetryableAbortSink? retryableAborts = null
     )
     {
         Database = database;
         Table = table;
         Ticket = ticket;
         QueryExecutor = queryExecutor;
+        RetryableAborts = retryableAborts;
     }
 }

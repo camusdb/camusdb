@@ -85,8 +85,10 @@ internal sealed class KvRowAccessor
     /// <summary>
     /// Point-read a single row. Returns the raw serialized bytes, or <c>null</c> if not found.
     /// See the class summary for the snapshot, locking and ancestry rules that apply.
+    /// With <paramref name="aborts"/>, a read Kahuna aborted is recorded there and answered as
+    /// <c>null</c>, which the caller must not take for a miss (see <see cref="RetryableAbortSink"/>).
     /// </summary>
-    internal async Task<ReadOnlyMemory<byte>?> GetRow(KvTransaction tx, ObjectIdValue rowId, CancellationToken cancellationToken = default)
+    internal async Task<ReadOnlyMemory<byte>?> GetRow(KvTransaction tx, ObjectIdValue rowId, CancellationToken cancellationToken = default, RetryableAbortSink? aborts = null)
     {
         Interlocked.Increment(ref pointReadCalls);
 
@@ -102,7 +104,10 @@ internal sealed class KvRowAccessor
         if (tx.IsolationLevel == CamusIsolationLevel.Serializable && tx.TransactionMode == CamusTransactionMode.ReadWrite)
             await locks.AcquireSharedPointLockAsync(tx, keys.RowBucketPrefix, key, cancellationToken).ConfigureAwait(false);
 
-        BranchKvValue probe = await branch.ProbeRaw(tx.TransactionId, tx.ReadTimestamp, key, cancellationToken, tx.FoldReads ? tx.CoordinatorKey : "").ConfigureAwait(false);
+        BranchKvValue probe = await branch.ProbeRaw(tx.TransactionId, tx.ReadTimestamp, key, cancellationToken, tx.FoldReads ? tx.CoordinatorKey : "", aborts).ConfigureAwait(false);
+        if (aborts is { HasAbort: true })
+            return null;
+
         if (probe.Kind == BranchKvKind.Tombstone)
             return null;   // explicitly deleted at this level
 
@@ -149,7 +154,8 @@ internal sealed class KvRowAccessor
     internal async Task<ReadOnlyMemory<byte>?[]> GetRowsBatch(
         KvTransaction tx,
         IReadOnlyList<ObjectIdValue> rowIds,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        RetryableAbortSink? aborts = null)
     {
         if (rowIds.Count == 0)
             return [];
@@ -169,9 +175,14 @@ internal sealed class KvRowAccessor
             rowKeys,
             tx.FoldReads ? tx.CoordinatorKey : "",
             "get_rows_batch",
-            cancellationToken).ConfigureAwait(false);
+            cancellationToken,
+            aborts).ConfigureAwait(false);
 
         ReadOnlyMemory<byte>?[] output = new ReadOnlyMemory<byte>?[rowIds.Count];
+
+        // An aborted batch answers every position null; the caller tests the sink before it reads any.
+        if (aborts is { HasAbort: true })
+            return output;
 
         // Input positions still unanswered after level 0. Kept as positions, not ids, so a repeated id
         // resolves once per position and the output stays aligned with the input.
@@ -249,7 +260,8 @@ internal sealed class KvRowAccessor
     internal async Task<ReadOnlyMemory<byte>?[]> GetRowsBatchLockedForMutation(
         KvTransaction tx,
         IReadOnlyList<ObjectIdValue> rowIds,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        RetryableAbortSink? aborts = null)
     {
         if (rowIds.Count == 0)
             return [];
@@ -264,7 +276,7 @@ internal sealed class KvRowAccessor
                 await locks.AcquireSharedPointLockAsync(tx, keys.RowBucketPrefix, keys.BuildRowKey(rowIds[i]), cancellationToken).ConfigureAwait(false);
         }
 
-        return await GetRowsBatch(tx, rowIds, cancellationToken).ConfigureAwait(false);
+        return await GetRowsBatch(tx, rowIds, cancellationToken, aborts).ConfigureAwait(false);
     }
 
     /// <summary>

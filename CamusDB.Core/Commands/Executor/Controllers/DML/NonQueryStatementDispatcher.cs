@@ -266,7 +266,13 @@ internal sealed class NonQueryStatementDispatcher
                         {
                             TableDescriptor table = await context.TableOpener.Open(database, updateTicket.TableName).ConfigureAwait(false);
                             SelectStatementExecutor.PinSchemaVersion(database, table, ticket.TxnState);
-                            int updated = await rowUpdater.Update(queryExecutor, database, table, updateTicket).ConfigureAwait(false);
+                            int updated = await rowUpdater.Update(queryExecutor, database, table, updateTicket, ticket.RetryableAborts).ConfigureAwait(false);
+
+                            // A retryable abort recorded instead of thrown: the statement did not
+                            // complete, and the transport that owns the sink reports it.
+                            if (ticket.RetryableAborts is { HasAbort: true })
+                                return new(database, table, 0);
+
                             context.Statistics.TrackUpdate(database, table, updated, updateTicket.PlainValues);
                             return new(database, table, updated);
                         }

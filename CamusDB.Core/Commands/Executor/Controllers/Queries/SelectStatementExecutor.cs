@@ -836,7 +836,7 @@ internal sealed class SelectStatementExecutor
         // fails open. Carrying it costs nothing and removes that trap.
         return new ExecuteSQLTicket(
             snapshotTx, ticket.DatabaseName, ticket.Sql, ticket.Parameters, ticket.Principal,
-            ticket.CancellationToken, ticket.Probe, ticket.Routing);
+            ticket.CancellationToken, ticket.Probe, ticket.Routing, ticket.RetryableAborts);
     }
 
     /// <summary>
