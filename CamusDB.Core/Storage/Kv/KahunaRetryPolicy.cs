@@ -123,6 +123,7 @@ internal sealed class KahunaRetryPolicy
     {
         try
         {
+            using QueryStageProfile.KahunaScope kahunaCall = QueryStageProfile.MeasureKahuna(KahunaCallKind.KeyValue);
             return await fn().ConfigureAwait(false);
         }
         catch (RpcException ex) when (IsTransientTransportFailure(ex, ct))
@@ -142,6 +143,7 @@ internal sealed class KahunaRetryPolicy
     {
         try
         {
+            using QueryStageProfile.KahunaScope kahunaCall = QueryStageProfile.MeasureKahuna(KahunaCallKind.KeyValue);
             return await fn().ConfigureAwait(false);
         }
         catch (RpcException ex) when (IsTransientTransportFailure(ex, ct))

@@ -276,12 +276,36 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
         try
         {
             QuerySchemaHolder schemaHolder = new();
-            (DatabaseDescriptor? db, IAsyncEnumerable<QueryResultRow> cursor) =
-                await executor.ExecuteSQLQuery(ticket, cacheMeta, schemaHolder).ConfigureAwait(false);
+            DatabaseDescriptor? db;
+            IAsyncEnumerable<QueryResultRow> cursor;
+            using (QueryStageProfile.Measure(QueryStage.Prepare))
+                (db, cursor) = await executor.ExecuteSQLQuery(ticket, cacheMeta, schemaHolder).ConfigureAwait(false);
 
-            await sink.WriteSchemaAsync(schemaHolder.Schema, ct).ConfigureAwait(false);
-            await foreach (QueryResultRow row in cursor.WithCancellation(ct).ConfigureAwait(false))
-                await sink.WriteRowAsync(row.Row, schemaHolder.Schema, ct).ConfigureAwait(false);
+            if (QueryStageProfile.Current is null)
+            {
+                await sink.WriteSchemaAsync(schemaHolder.Schema, ct).ConfigureAwait(false);
+                await foreach (QueryResultRow row in cursor.WithCancellation(ct).ConfigureAwait(false))
+                    await sink.WriteRowAsync(row.Row, schemaHolder.Schema, ct).ConfigureAwait(false);
+
+                return db;
+            }
+
+            // The profiled shape of the same loop: the cursor's moves and the response writes are
+            // timed apart, because the rows are read lazily inside MoveNextAsync.
+            using (QueryStageProfile.Measure(QueryStage.Write))
+                await sink.WriteSchemaAsync(schemaHolder.Schema, ct).ConfigureAwait(false);
+            await using IAsyncEnumerator<QueryResultRow> rows = cursor.GetAsyncEnumerator(ct);
+            while (true)
+            {
+                bool more;
+                using (QueryStageProfile.Measure(QueryStage.Fetch))
+                    more = await rows.MoveNextAsync().ConfigureAwait(false);
+                if (!more)
+                    break;
+
+                using (QueryStageProfile.Measure(QueryStage.Write))
+                    await sink.WriteRowAsync(rows.Current.Row, schemaHolder.Schema, ct).ConfigureAwait(false);
+            }
 
             return db;
         }
@@ -893,6 +917,11 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
     {
         CancellationToken ct = state.Ct;
 
+        // A query's stage clock opens here, so the op's admission is part of its profile. It flows to
+        // the op through the async context and is published when the op ends (RunBatchOpAsync).
+        QueryStageClock? stageClock = req.Kind == BatchStatementKind.Query ? QueryStageProfile.Begin() : null;
+        long admitStart = stageClock is null ? 0 : Stopwatch.GetTimestamp();
+
         // Re-resolve before the op is admitted, so an authorization change reaches this stream
         // instead of waiting for the client to open a new one. Resolved here, ahead of the two
         // reservations below, because a token that has become invalid must fail without first
@@ -920,6 +949,7 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
 
         BatchStreamTracker tracker = state.Tracker;
         (long Pt, uint Counter)? handleKey = HandleKey(req.Request?.TxnHandle);
+        stageClock?.AddElapsed(QueryStage.Admit, admitStart);
 
         // Reserve the outstanding-op reference before the op exists: an op can finish before
         // this line returns, and its completion callback must not decrement a count that was
@@ -1016,7 +1046,10 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
         // defensively so a same-handle op only starts once its predecessor has fully completed.
         // The execution slot is acquired only AFTER the predecessor: while queued in the chain this op
         // consumes no execution capacity, so a pipelining transaction cannot starve the stream.
-        try { await prev.ConfigureAwait(false); } catch { /* predecessor reported its own outcome */ }
+        using (QueryStageProfile.Measure(QueryStage.ChainWait))
+        {
+            try { await prev.ConfigureAwait(false); } catch { /* predecessor reported its own outcome */ }
+        }
         await RunBatchOpGatedAsync(inFlight, req, writer, startedHandles, prepared, principal, ct).ConfigureAwait(false);
     }
 
@@ -1033,6 +1066,7 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
     {
         try
         {
+            using QueryStageProfile.StageScope slotWait = QueryStageProfile.Measure(QueryStage.SlotWait);
             await inFlight.WaitAsync(ct).ConfigureAwait(false);
         }
         catch (OperationCanceledException)
@@ -1158,6 +1192,11 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
             ServerDiagnostics.RecordRequest(
                 operation, ServerDiagnostics.Tags.Transport.GrpcBatch, outcome,
                 Stopwatch.GetElapsedTime(requestStart).TotalMilliseconds);
+            if (QueryStageProfile.Current is { } stageClock)
+            {
+                stageClock.AddElapsed(QueryStage.Request, requestStart);
+                stageClock.Publish();
+            }
             requestSpan?.SetTag("outcome", outcome);
             if (outcome != ServerDiagnostics.Tags.Outcome.Ok)
                 requestSpan?.SetStatus(System.Diagnostics.ActivityStatusCode.Error);
@@ -1191,7 +1230,10 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
         Principal? principal,
         CancellationToken ct)
     {
-        ResolvedStatement resolved = ResolveStatement(request, prepared);
+        QueryStageClock? stageClock = QueryStageProfile.Current;
+        ResolvedStatement resolved;
+        using (QueryStageProfile.Measure(QueryStage.Resolve))
+            resolved = ResolveStatement(request, prepared);
         string sql = resolved.Sql;
         BatchQuerySink sink = new(writer, requestId);
         HLCTimestamp commitToken = default;
@@ -1213,6 +1255,8 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
             // Explicit transaction — the client owns the lifecycle, so no commit and no auto-rollback.
             // Advice is still collected: it describes the statement's table, and a client uses it to
             // place the next transaction's START on that table's leader; it never moves this one.
+            if (stageClock is not null)
+                stageClock.Path = QueryStageProfile.Paths.Txn;
             KvTransaction txnState = transactions.GetState(handle.TxnIdPt, (uint)handle.TxnIdCounter);
             routingCollector = BeginRoutingCollection(request);
             ExecuteSQLTicket ticket = new(
@@ -1226,11 +1270,15 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
             // Autocommit: begin a promoted read-only txn, stream, commit. Not server-retried — a
             // retryable conflict propagates and is reported as BatchError for the client to replay.
             HLCTimestamp? causalToken = ToCausalToken(request.CausalTokenN, request.CausalTokenL, request.CausalTokenC);
+            if (stageClock is not null)
+                stageClock.Path = QueryStageProfile.Paths.Autocommit;
             // Begin, commit and rollback deliberately ignore the stream's token, for the reason
             // given on the unary autocommit path: a cancelled lifecycle call abandons locks that
             // only a lease expiry reclaims. The read alone observes a cancel.
-            KvTransaction tx = await transactions.BeginReadOnlyAsync(
-                resolved.Database, promote: true, causalToken, priority: ToPriority(request.Priority), cancellationToken: CancellationToken.None).ConfigureAwait(false);
+            KvTransaction tx;
+            using (QueryStageProfile.Measure(QueryStage.Begin))
+                tx = await transactions.BeginReadOnlyAsync(
+                    resolved.Database, promote: true, causalToken, priority: ToPriority(request.Priority), cancellationToken: CancellationToken.None).ConfigureAwait(false);
             try
             {
                 routingCollector = BeginRoutingCollection(request);
@@ -1239,7 +1287,8 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
                     parameters: resolved.Parameters, principal: principal,
                     cancellationToken: ct, routing: routingCollector);
                 DatabaseDescriptor? db = await StreamQueryAsync(ticket, sink, ct, cacheMeta).ConfigureAwait(false);
-                commitToken = await transactions.CommitOrReleaseAsync(db, tx, CancellationToken.None).ConfigureAwait(false);
+                using (QueryStageProfile.Measure(QueryStage.Commit))
+                    commitToken = await transactions.CommitOrReleaseAsync(db, tx, CancellationToken.None).ConfigureAwait(false);
                 routingDb = db;
             }
             catch
@@ -1251,6 +1300,7 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
 
         // Success terminator (schema was already written first by the sink). Best-effort: a failed
         // terminal write must NOT become a BatchError — the read completed successfully.
+        using QueryStageProfile.StageScope completeStage = QueryStageProfile.Measure(QueryStage.Complete);
         QueryComplete complete = new();
         if (!commitToken.IsNull())
         {

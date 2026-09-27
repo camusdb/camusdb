@@ -195,6 +195,12 @@ CamusDB.Core.Config.CamusDBOptionsHolder optionsHolder = new(camusOptions with {
 bool diagnosticsActive = config.Diagnostics.Enabled;
 CamusDB.Core.Diagnostics.ServerDiagnostics.Enabled = diagnosticsActive;
 
+// The per-stage query profile is a measurement aid, not an operating signal: it
+// adds a few timestamps and counter updates to every query, so it stays off unless a measurement
+// run asks for it, and it rides on the diagnostics exporter.
+CamusDB.Core.Diagnostics.QueryStageProfile.Enabled =
+    diagnosticsActive && Environment.GetEnvironmentVariable("CAMUS_QUERY_STAGE_PROFILE") == "1";
+
 // Build the singleton query-result cache once, after config statics are set.
 // When the feature is off we pass null (not NullQueryResultCache.Instance): every hot-path
 // guard is `_cache is not null` / `database.Cache is { }`, so null short-circuits the whole
@@ -425,6 +431,8 @@ if (diagnosticsActive)
         .WithMetrics(metrics =>
         {
             metrics.AddMeter(CamusDB.Core.Diagnostics.ServerDiagnostics.MeterName);
+            if (CamusDB.Core.Diagnostics.QueryStageProfile.Enabled)
+                metrics.AddMeter(CamusDB.Core.Diagnostics.QueryStageProfile.MeterName);
             metrics.AddMeter("Kahuna");
             metrics.AddMeter("Kommander");
             metrics.AddAspNetCoreInstrumentation();
