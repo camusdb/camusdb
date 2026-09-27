@@ -58,6 +58,58 @@ public static class ServerDiagnostics
         KvRetryWaits.Add(1, new TagList { { "site", site } });
     }
 
+    // ── Foreign keys ────────────────────────────────────────────────────────────
+    // One instrument, tagged by kind, so the checks' cost is visible per statement shape: how many
+    // rendezvous locks were sent to a parent's partition and how many were already held, how many
+    // batched parent reads and keys the child side issued, how many prefix probes the parent side ran.
+    // Tests read it to prove the performance budgets rather than infer them.
+    private static readonly Counter<long> ForeignKeyOperations =
+        Meter.CreateCounter<long>("camus.foreign_key.operations", unit: "{operation}", description: "Foreign-key check work, by kind.");
+
+    /// <summary>The kinds recorded on <c>camus.foreign_key.operations</c>. The tag value is the member name in snake case.</summary>
+    public enum ForeignKeyOperation
+    {
+        /// <summary>A rendezvous lock sent to the parent's partition.</summary>
+        LockAcquired,
+
+        /// <summary>A rendezvous lock skipped because the transaction already held the key or its whole bucket.</summary>
+        LockCovered,
+
+        /// <summary>One batched read of parent keys issued by the child side.</summary>
+        ChildProbeBatch,
+
+        /// <summary>One parent key read by the child side, inside a batch.</summary>
+        ChildProbeKey,
+
+        /// <summary>One prefix probe of a child index issued by the parent side.</summary>
+        ParentProbe,
+
+        /// <summary>One distinct key checked by the validation of existing rows.</summary>
+        ValidationKey,
+
+        /// <summary>A statement refused because it would break a foreign key.</summary>
+        Violation,
+    }
+
+    public static void AddForeignKeyOperation(ForeignKeyOperation kind, long count = 1)
+    {
+        if (!Enabled || count <= 0)
+            return;
+
+        string tag = kind switch
+        {
+            ForeignKeyOperation.LockAcquired => "lock_acquired",
+            ForeignKeyOperation.LockCovered => "lock_covered",
+            ForeignKeyOperation.ChildProbeBatch => "child_probe_batch",
+            ForeignKeyOperation.ChildProbeKey => "child_probe_key",
+            ForeignKeyOperation.ParentProbe => "parent_probe",
+            ForeignKeyOperation.ValidationKey => "validation_key",
+            _ => "violation",
+        };
+
+        ForeignKeyOperations.Add(count, new TagList { { "kind", tag } });
+    }
+
     // ── SQL execution ───────────────────────────────────────────────────────────
     private static readonly Histogram<double> ExecuteDuration =
         Meter.CreateHistogram<double>("camus.execute.duration", unit: "ms", description: "Command executor duration by statement family.");

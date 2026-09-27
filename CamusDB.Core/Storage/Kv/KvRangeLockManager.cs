@@ -514,6 +514,105 @@ internal sealed class KvRangeLockManager
     }
 
     /// <summary>
+    /// Takes the foreign-key rendezvous lock — a shared point lock — on each key of a parent's
+    /// referenced unique index. A child writer holds it until commit, so a parent writer that deletes
+    /// or re-keys the entry is fenced until the child finishes, and a child that arrives while a parent
+    /// write is pending is refused (wait-die) until that write finishes. This is the whole of the
+    /// concurrency protection a foreign key needs; see the foreign-key design notes in
+    /// <c>docs/foreign-keys.md</c>.
+    ///
+    /// <para><b>Every isolation level, both locking modes.</b> Unlike
+    /// <see cref="AcquireSharedPointLockAsync"/>, this lock is not gated on Serializable read-write. A
+    /// Read Committed child that skipped it could commit a row whose parent a concurrent DELETE removes
+    /// in the same instant, and an optimistic one could too: its read set validates the parent key it
+    /// read, but not the parent-side probe, which found nothing to validate.</para>
+    ///
+    /// <para><b>Optimistic children can lose.</b> A parent writer that meets the lock holds the key's
+    /// exclusive lock while it waits, so an optimistic child's read of the key no longer validates at
+    /// commit and the child aborts with <see cref="CamusDBErrorCodes.TransactionConflict"/>. That is the
+    /// safe outcome — the parent's write proceeds only after the child is gone — and it is the ordinary
+    /// optimistic trade: conflicts surface at commit.</para>
+    ///
+    /// <para><b>Never escalated.</b> A whole-bucket shared lock on the parent's index would block every
+    /// new parent INSERT until this transaction commits. Escalation exists to bound the number of locks
+    /// a transaction holds, and this one is bounded already: at most one per child row written, and
+    /// <c>MaxMutationsPerTransaction</c> bounds those.</para>
+    ///
+    /// <para><b>Batched on purpose.</b> A key the transaction already holds (Shared, or Exclusive
+    /// because it wrote the parent itself) costs nothing, and repeats are dropped. The whole-bucket check
+    /// walks every lock the transaction holds, so it runs once per call, not once per key. The rest are
+    /// acquired with at most <see cref="KvStoreConstants.ForeignKeyLockConcurrency"/> in flight: each is
+    /// one round trip to the parent partition's leader, and Kahuna has no batched shared-lock call. The
+    /// concurrent acquires are safe because the transaction's lock tracking and session start are
+    /// synchronized; the first failure cancels the rest and propagates, and locks already granted are
+    /// released with the transaction.</para>
+    ///
+    /// <para>The transaction must have an identity. A lock without one cannot be released, and
+    /// <see cref="AcquireRangeLockAsync"/> would skip it without a trace, so its absence is an error
+    /// here rather than a silent gap in the protection.</para>
+    /// </summary>
+    internal async Task AcquireForeignKeyLocksAsync(
+        KvTransaction tx,
+        string bucketPrefix,
+        IReadOnlyList<string> lockKeys,
+        CancellationToken cancellationToken)
+    {
+        if (lockKeys.Count == 0)
+            return;
+
+        await tx.EnsureSessionStartedAsync(cancellationToken, keys.TableKeyPrefix).ConfigureAwait(false);
+
+        if (tx.TransactionId == HLCTimestamp.Zero)
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInternalOperation,
+                "A foreign-key check needs a read-write transaction with an identity to hold its locks");
+
+        if (tx.HasWholeBucketLock(bucketPrefix))
+        {
+            ServerDiagnostics.AddForeignKeyOperation(ServerDiagnostics.ForeignKeyOperation.LockCovered, lockKeys.Count);
+            return;
+        }
+
+        List<string>? pending = null;
+        HashSet<string> seen = new(lockKeys.Count, StringComparer.Ordinal);
+        int covered = 0;
+
+        foreach (string key in lockKeys)
+        {
+            if (!seen.Add(key))
+                continue;
+
+            if (tx.HasPointLock(bucketPrefix, key))
+            {
+                covered++;
+                continue;
+            }
+
+            (pending ??= new(lockKeys.Count)).Add(key);
+        }
+
+        if (covered > 0)
+            ServerDiagnostics.AddForeignKeyOperation(ServerDiagnostics.ForeignKeyOperation.LockCovered, covered);
+
+        if (pending is null)
+            return;
+
+        ServerDiagnostics.AddForeignKeyOperation(ServerDiagnostics.ForeignKeyOperation.LockAcquired, pending.Count);
+
+        if (pending.Count == 1)
+        {
+            await AcquireRangeLockAsync(tx, bucketPrefix, pending[0], true, pending[0], true, cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        await Parallel.ForEachAsync(
+            pending,
+            new ParallelOptions { MaxDegreeOfParallelism = KvStoreConstants.ForeignKeyLockConcurrency, CancellationToken = cancellationToken },
+            (key, ct) => new ValueTask(AcquireRangeLockAsync(tx, bucketPrefix, key, true, key, true, ct))
+        ).ConfigureAwait(false);
+    }
+
+    /// <summary>
     /// Upgrades a shared singleton range lock on <paramref name="key"/> to exclusive in-place.
     /// Called by write paths in Serializable read-write transactions when the same transaction
     /// already holds a shared point lock on the key it is about to write.

@@ -548,6 +548,18 @@ public sealed partial class KvTableStore
     public Task<ObjectIdValue?> LookupUnique(KvTransaction tx, string indexId, CompositeColumnValue key, CancellationToken cancellationToken = default)
         => indexes.LookupUnique(tx, indexId, key, cancellationToken);
 
+    /// <inheritdoc cref="KvIndexAccessor.LookupUniqueManyAsync"/>
+    internal Task<bool[]> LookupUniqueManyAsync(KvTransaction tx, string indexId, IReadOnlyList<CompositeColumnValue> keys, CancellationToken cancellationToken = default)
+        => indexes.LookupUniqueManyAsync(tx, indexId, keys, cancellationToken);
+
+    /// <inheritdoc cref="KvIndexAccessor.LockAndLookupUniqueManyAsync"/>
+    internal Task<bool[]> LockAndLookupUniqueManyAsync(KvTransaction tx, string indexId, IReadOnlyList<CompositeColumnValue> keys, CancellationToken cancellationToken = default)
+        => indexes.LockAndLookupUniqueManyAsync(tx, indexId, keys, cancellationToken);
+
+    /// <inheritdoc cref="KvIndexAccessor.IndexPrefixExistsAsync"/>
+    internal Task<bool> IndexPrefixExistsAsync(KvTransaction tx, string indexId, ColumnType[] keyTypes, CompositeColumnValue prefix, bool unique, CancellationToken cancellationToken = default)
+        => indexes.IndexPrefixExistsAsync(tx, indexId, keyTypes, prefix, unique, cancellationToken);
+
     /// <inheritdoc cref="KvIndexAccessor.LookupUniqueUntracked"/>
     internal Task<ObjectIdValue?> LookupUniqueUntracked(string indexId, CompositeColumnValue key, CancellationToken cancellationToken = default)
         => indexes.LookupUniqueUntracked(indexId, key, cancellationToken);

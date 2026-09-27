@@ -54,7 +54,9 @@ internal readonly record struct BranchLevel(KvKeyBuilder Keys, KvBranchReader Re
 internal sealed class KvBranchReader
 {
     private readonly IKahuna kahuna;
+    
     private readonly KvKeyBuilder keys;
+    
     private readonly BranchLevel[] levels;
 
     /// <summary>
@@ -83,7 +85,7 @@ internal sealed class KvBranchReader
     /// validates every read that finished before T.
     /// </summary>
     private ValueTask GuardSnapshotAsync(CancellationToken cancellationToken) =>
-        snapshotGuard is null ? ValueTask.CompletedTask : snapshotGuard.EnsureProtectedAsync(cancellationToken);
+        snapshotGuard?.EnsureProtectedAsync(cancellationToken) ?? ValueTask.CompletedTask;
 
     /// <summary>
     /// The ancestry levels, nearest parent first. Treat as read-only: the array is shared, and the
@@ -421,7 +423,8 @@ internal sealed class KvBranchReader
         [EnumeratorCancellation] CancellationToken cancellationToken = default,
         string coordinatorKey = "",
         bool toIsPrefixBound = false,
-        bool fromIsPrefixBound = false)
+        bool fromIsPrefixBound = false,
+        int pageSize = KvStoreConstants.DefaultPageSize)
     {
         string bucketPrefix = keys.BuildIndexBucketPrefix(indexId);
         string keyPrefix = bucketPrefix + "/";
@@ -439,10 +442,23 @@ internal sealed class KvBranchReader
         // See ScanRowsRawAsync: non-empty coordinatorKey registers the index scan for read-set folding.
         TransactionOperationId operationId = coordinatorKey.Length == 0 ? default : TransactionOperationId.NewRandom();
 
-        await foreach ((string kvKey, ReadOnlyKeyValueEntry entry) in KvScanFailure.Translate(kahuna.LocateAndScanRange(
-            txId, bucketPrefix, startKey, fromInclusive, endKey, toInclusive,
-            KvStoreConstants.DefaultPageSize, readTimestamp, KeyValueDurability.Persistent, cancellationToken, coordinatorKey, operationId),
-            $"index scan of {keys.DisplayTableName}.{indexId}", cancellationToken).ConfigureAwait(false))
+        ConfiguredCancelableAsyncEnumerable<(string Key, ReadOnlyKeyValueEntry Entry)> cursor = KvScanFailure.Translate(kahuna.LocateAndScanRange(
+            txId, 
+            bucketPrefix, 
+            startKey, 
+            fromInclusive, 
+            endKey, 
+            toInclusive,
+            pageSize, 
+            readTimestamp, 
+            KeyValueDurability.Persistent, 
+            cancellationToken, 
+            coordinatorKey, 
+            operationId
+        ),
+        $"index scan of {keys.DisplayTableName}.{indexId}", cancellationToken).ConfigureAwait(false);
+
+        await foreach ((string kvKey, ReadOnlyKeyValueEntry entry) in cursor)
         {
             // See ScanRowsRawAsync: cheap per-entry check keeping every streamed page covered by a
             // snapshot-pin confirmation that postdates it.
@@ -496,7 +512,8 @@ internal sealed class KvBranchReader
     internal async Task<Dictionary<string, KeyValueFlags>> ResolveBranchUniqueFlagsBatchAsync(
         KvTransaction tx,
         List<BranchUniqueFlagRequest> requests,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken
+    )
     {
         Dictionary<string, KeyValueFlags> resolved = new(requests.Count, StringComparer.Ordinal);
 
@@ -513,7 +530,8 @@ internal sealed class KvBranchReader
             level0Keys,
             coordinatorKey: "",
             "branch_unique_flags",
-            cancellationToken).ConfigureAwait(false);
+            cancellationToken
+        ).ConfigureAwait(false);
 
         // Index id of the conflicting entry, per request position; null when the position resolved.
         string?[] conflicts = new string?[requests.Count];
@@ -571,7 +589,8 @@ internal sealed class KvBranchReader
                 ancestorProbeKeys,
                 coordinatorKey: "",
                 "branch_unique_flags_ancestor",
-                cancellationToken).ConfigureAwait(false);
+                cancellationToken
+            ).ConfigureAwait(false);
 
             List<int> next = [];
 
@@ -656,7 +675,11 @@ internal sealed class KvBranchReader
         // MVCC snapshot from the current committed state — after any competing writer released
         // the lock by committing or rolling back.
         BranchKvValue existing = await ProbeRaw(
-            tx.TransactionId, HLCTimestamp.Zero, kvKey, cancellationToken).ConfigureAwait(false);
+            tx.TransactionId,
+            HLCTimestamp.Zero, 
+            kvKey,
+            cancellationToken
+        ).ConfigureAwait(false);
 
         if (existing.Kind == BranchKvKind.Tombstone)
             // Slot was explicitly cleared in this branch; replace the tombstone with the new value.
@@ -670,6 +693,7 @@ internal sealed class KvBranchReader
                 throw new CamusDBException(
                     CamusDBErrorCodes.DuplicateUniqueKeyValue,
                     $"Duplicate entry for key '{keys.DuplicateKeyLabel(indexId)}'");
+            
             return KeyValueFlags.Set;
         }
 
@@ -678,8 +702,13 @@ internal sealed class KvBranchReader
         foreach ((KvKeyBuilder ancestorKeys, KvBranchReader ancestorReader, HLCTimestamp forkTimestamp) in levels)
         {
             string ancestorKvKey = ancestorKeys.BuildUniqueIndexKey(indexId, key);
+            
             BranchKvValue ancestor = await ancestorReader.ProbeRaw(
-                HLCTimestamp.Zero, forkTimestamp, ancestorKvKey, cancellationToken).ConfigureAwait(false);
+                HLCTimestamp.Zero, 
+                forkTimestamp, 
+                ancestorKvKey, 
+                cancellationToken
+            ).ConfigureAwait(false);
 
             if (ancestor.Kind == BranchKvKind.Tombstone)
                 break;   // an ancestor branch cleared this slot; treat as available

@@ -26,6 +26,22 @@ internal static class KvStoreConstants
     internal const int DefaultPageSize = 512;
 
     /// <summary>
+    /// Page size of a foreign-key existence probe. The probe stops at the first live entry, so a full
+    /// page would transfer up to <see cref="DefaultPageSize"/> keys to answer one yes-or-no question
+    /// for every parent that has many children. A small page keeps that cost flat; entries the page
+    /// skips (the transaction's own deletes, tombstones on a branch) only cost another round trip.
+    /// </summary>
+    internal const int ForeignKeyProbePageSize = 16;
+
+    /// <summary>
+    /// How many foreign-key rendezvous locks one statement acquires at the same time. Each lock is one
+    /// round trip to the parent's partition leader, and Kahuna has no batched shared-lock call, so a
+    /// statement that references many parents would otherwise wait for them one after another. The
+    /// bound keeps one large statement from flooding the parent partition.
+    /// </summary>
+    internal const int ForeignKeyLockConcurrency = 16;
+
+    /// <summary>
     /// Upper-bound sentinel appended to the encoded last value for non-unique index keys.
     /// Non-unique stored key = "{encodedValue}{rowId24}" where rowId24 is exactly 24 lowercase
     /// hex chars (code points 0x0030-0x0066). The sentinel U+FFFF is the highest BMP code point

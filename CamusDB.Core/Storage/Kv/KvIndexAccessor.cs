@@ -114,6 +114,223 @@ internal sealed class KvIndexAccessor
     }
 
     /// <summary>
+    /// Answers, for each key, whether the unique index holds an entry for it. The batch counterpart of
+    /// <see cref="LookupUnique"/> for the foreign-key checks: the child side asks whether each
+    /// referenced parent key exists, and the validation pass asks it for a page of distinct keys.
+    ///
+    /// <para><b>What the read sees.</b> It runs under the transaction's identity, so it sees the
+    /// transaction's own uncommitted writes — a parent inserted, or deleted, earlier in the same
+    /// transaction. A read-write transaction has no fixed read timestamp, so each key answers with its
+    /// newest committed state; Kahuna pins the key at this first read, and a later read after the key
+    /// moved returns <c>Aborted</c>, which surfaces as <see cref="CamusDBErrorCodes.TransactionMustRetry"/>
+    /// rather than as a stale answer. Reads fold into the read set when <see cref="KvTransaction.FoldReads"/>
+    /// is set, so an optimistic transaction validates them at commit.</para>
+    ///
+    /// <para><b>No lock.</b> This call only reads. The child side of a foreign key must first take the
+    /// rendezvous lock; <see cref="LockAndLookupUniqueManyAsync"/> does both.</para>
+    ///
+    /// <para><b>Cost.</b> One batched read of the transaction's own keys, then, on a branch, one batched
+    /// read per ancestry level for the keys still unanswered. A tombstone at a level answers "absent" and
+    /// stops the walk for that key. A key that cannot be encoded answers "absent".</para>
+    /// </summary>
+    internal async Task<bool[]> LookupUniqueManyAsync(
+        KvTransaction tx,
+        string indexId,
+        IReadOnlyList<CompositeColumnValue> lookupKeys,
+        CancellationToken cancellationToken = default)
+    {
+        await tx.EnsureSessionStartedAsync(cancellationToken, keys.TableKeyPrefix).ConfigureAwait(false);
+
+        string?[] kvKeys = EncodeUniqueKeys(indexId, lookupKeys);
+        return await ProbeUniqueKeysAsync(tx, indexId, lookupKeys, kvKeys, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// The child side of a foreign key: takes the rendezvous lock on each referenced parent key, then
+    /// reads each key. Encodes each key once for both steps.
+    ///
+    /// <para><b>Order is the point.</b> The lock comes first, so no parent writer can delete or re-key an
+    /// entry between the read and the commit: its write of the entry is fenced by the lock. The read
+    /// that follows therefore answers for the whole life of the transaction. See
+    /// <see cref="KvRangeLockManager.AcquireForeignKeyLocksAsync"/>.</para>
+    ///
+    /// <para>Call it after the statement's own writes. An explicit transaction opens its session on
+    /// the first table it touches, and a session anchored on the parent's partition would cost the
+    /// child's write its one-phase commit. (An autocommit statement starts its session eagerly, before
+    /// any table, so the order does not move its anchor.)</para>
+    /// </summary>
+    internal async Task<bool[]> LockAndLookupUniqueManyAsync(
+        KvTransaction tx,
+        string indexId,
+        IReadOnlyList<CompositeColumnValue> lookupKeys,
+        CancellationToken cancellationToken = default)
+    {
+        await tx.EnsureSessionStartedAsync(cancellationToken, keys.TableKeyPrefix).ConfigureAwait(false);
+
+        string?[] kvKeys = EncodeUniqueKeys(indexId, lookupKeys);
+
+        List<string> lockKeys = new(kvKeys.Length);
+        foreach (string? kvKey in kvKeys)
+        {
+            if (kvKey is not null)
+                lockKeys.Add(kvKey);
+        }
+
+        await locks.AcquireForeignKeyLocksAsync(tx, keys.BuildIndexBucketPrefix(indexId), lockKeys, cancellationToken).ConfigureAwait(false);
+
+        return await ProbeUniqueKeysAsync(tx, indexId, lookupKeys, kvKeys, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// The parent side of a foreign key: answers whether the index holds any live entry whose leading
+    /// key columns equal <paramref name="prefix"/> — whether a child row still references a parent key.
+    ///
+    /// <para><b>No lock, on purpose.</b> The caller runs this after its own write of the parent's key.
+    /// That write was fenced until every child transaction holding the rendezvous lock on the key had
+    /// finished, and no new child can take the lock while the write is pending. The children this read
+    /// sees are therefore all the children there will be. A range lock here would add a round trip and
+    /// a deadlock edge, and protect nothing.</para>
+    ///
+    /// <para><b>What the read sees.</b> The transaction's own writes, so a child that the same statement
+    /// deleted does not count; and each entry's newest committed state. On a branch the ancestry is
+    /// merged, and a tombstone hides an inherited entry. It reads a small page
+    /// (<see cref="KvStoreConstants.ForeignKeyProbePageSize"/>) and stops at the first live entry.</para>
+    /// </summary>
+    internal async Task<bool> IndexPrefixExistsAsync(
+        KvTransaction tx,
+        string indexId,
+        ColumnType[] keyTypes,
+        CompositeColumnValue prefix,
+        bool unique,
+        CancellationToken cancellationToken = default)
+    {
+        ServerDiagnostics.AddForeignKeyOperation(ServerDiagnostics.ForeignKeyOperation.ParentProbe);
+
+        await foreach ((CompositeColumnValue _, ObjectIdValue _, ReadOnlyMemory<byte> _) in ScanIndex(
+            tx, indexId, keyTypes, prefix, prefix, unique, fromInclusive: true, toInclusive: true, maxRows: 1,
+            cancellationToken, KvStoreConstants.ForeignKeyProbePageSize).ConfigureAwait(false))
+        {
+            return true;
+        }
+
+        return false;
+    }
+
+    private string?[] EncodeUniqueKeys(string indexId, IReadOnlyList<CompositeColumnValue> lookupKeys)
+    {
+        string?[] kvKeys = new string?[lookupKeys.Count];
+
+        for (int i = 0; i < lookupKeys.Count; i++)
+            kvKeys[i] = keys.TryBuildUniqueIndexKey(indexId, lookupKeys[i], out string kvKey) ? kvKey : null;
+
+        return kvKeys;
+    }
+
+    /// <summary>Level-0 batch read of <paramref name="kvKeys"/>, then one batch per ancestry level for the misses.</summary>
+    private async Task<bool[]> ProbeUniqueKeysAsync(
+        KvTransaction tx,
+        string indexId,
+        IReadOnlyList<CompositeColumnValue> lookupKeys,
+        string?[] kvKeys,
+        CancellationToken cancellationToken)
+    {
+        bool[] found = new bool[kvKeys.Length];
+
+        List<int> positions = new(kvKeys.Length);
+        List<string> probeKeys = new(kvKeys.Length);
+        for (int i = 0; i < kvKeys.Length; i++)
+        {
+            if (kvKeys[i] is { } kvKey)
+            {
+                positions.Add(i);
+                probeKeys.Add(kvKey);
+            }
+        }
+
+        if (probeKeys.Count == 0)
+            return found;
+
+        ServerDiagnostics.AddForeignKeyOperation(ServerDiagnostics.ForeignKeyOperation.ChildProbeBatch);
+        ServerDiagnostics.AddForeignKeyOperation(ServerDiagnostics.ForeignKeyOperation.ChildProbeKey, probeKeys.Count);
+
+        BranchKvValue[] level0 = await branch.ProbeManyRaw(
+            tx.TransactionId,
+            tx.ReadTimestamp,
+            probeKeys,
+            tx.FoldReads ? tx.CoordinatorKey : "",
+            "fk_unique_lookup_batch",
+            cancellationToken).ConfigureAwait(false);
+
+        List<int>? pending = null;
+
+        for (int i = 0; i < positions.Count; i++)
+        {
+            BranchKvValue value = level0[i];
+
+            if (value.Kind == BranchKvKind.Tombstone)
+                continue;
+
+            if (value.HasPayload)
+            {
+                found[positions[i]] = true;
+                continue;
+            }
+
+            if (branch.IsBranch)
+                (pending ??= []).Add(positions[i]);
+        }
+
+        if (pending is null)
+            return found;
+
+        // Nearest ancestor first. A level that answers a key — with a value or with a tombstone —
+        // removes it before the next level runs, so a nearer tombstone hides an older value.
+        foreach ((KvKeyBuilder ancestorKeys, KvBranchReader ancestorReader, HLCTimestamp forkTimestamp) in branch.Levels)
+        {
+            string[] ancestorProbeKeys = new string[pending.Count];
+
+            for (int i = 0; i < pending.Count; i++)
+            {
+                ancestorProbeKeys[i] = ancestorKeys.BuildUniqueIndexKey(indexId, lookupKeys[pending[i]]);
+                BranchMetrics.RecordAncestorProbe();
+            }
+
+            BranchKvValue[] probed = await ancestorReader.ProbeManyRaw(
+                HLCTimestamp.Zero,
+                forkTimestamp,
+                ancestorProbeKeys,
+                coordinatorKey: "",
+                "fk_ancestor_unique_lookup_batch",
+                cancellationToken).ConfigureAwait(false);
+
+            List<int>? next = null;
+
+            for (int i = 0; i < pending.Count; i++)
+            {
+                BranchKvValue value = probed[i];
+
+                if (value.Kind == BranchKvKind.Tombstone)
+                    continue;
+
+                if (value.HasPayload)
+                {
+                    found[pending[i]] = true;
+                    continue;
+                }
+
+                (next ??= []).Add(pending[i]);
+            }
+
+            if (next is null)
+                break;
+
+            pending = next;
+        }
+
+        return found;
+    }
+
+    /// <summary>
     /// Point-reads a unique index entry <b>outside any transaction</b>: it acquires no lock, folds
     /// nothing into a read set, and starts no session. Returns the row id, or null when the key is
     /// absent.
@@ -220,7 +437,8 @@ internal sealed class KvIndexAccessor
         bool fromInclusive = true,
         bool toInclusive = true,
         long? maxRows = null,
-        [EnumeratorCancellation] CancellationToken cancellationToken = default)
+        [EnumeratorCancellation] CancellationToken cancellationToken = default,
+        int pageSize = KvStoreConstants.DefaultPageSize)
     {
         if (maxRows is <= 0)
             yield break;
@@ -287,7 +505,7 @@ internal sealed class KvIndexAccessor
                 bucketPrefix,
                 startKey, fromInclusive,
                 endKey, toInclusive,
-                KvStoreConstants.DefaultPageSize,
+                pageSize,
                 tx.ReadTimestamp,
                 KeyValueDurability.Persistent,
                 cancellationToken,
@@ -376,11 +594,11 @@ internal sealed class KvIndexAccessor
             int levelCount = 1 + levels.Length;
             var iters = new IAsyncEnumerator<(string suffix, BranchKvKind kind, ReadOnlyMemory<byte>? payload)>[levelCount];
 
-            iters[0] = branch.ScanIndexRawAsync(tx.RangeScanIdentity, tx.ReadTimestamp, indexId, fromEncoded, fromInclusive, toEncoded, toInclusive, unique, cancellationToken, tx.FoldReads ? tx.CoordinatorKey : "", toIsPrefixBound, fromIsPrefixBound).GetAsyncEnumerator(cancellationToken);
+            iters[0] = branch.ScanIndexRawAsync(tx.RangeScanIdentity, tx.ReadTimestamp, indexId, fromEncoded, fromInclusive, toEncoded, toInclusive, unique, cancellationToken, tx.FoldReads ? tx.CoordinatorKey : "", toIsPrefixBound, fromIsPrefixBound, pageSize).GetAsyncEnumerator(cancellationToken);
             for (int ai = 0; ai < levels.Length; ai++)
             {
                 (KvKeyBuilder _, KvBranchReader ancestorReader, HLCTimestamp forkTimestamp) = levels[ai];
-                iters[ai + 1] = ancestorReader.ScanIndexRawAsync(HLCTimestamp.Zero, forkTimestamp, indexId, fromEncoded, fromInclusive, toEncoded, toInclusive, unique, cancellationToken, "", toIsPrefixBound, fromIsPrefixBound).GetAsyncEnumerator(cancellationToken);
+                iters[ai + 1] = ancestorReader.ScanIndexRawAsync(HLCTimestamp.Zero, forkTimestamp, indexId, fromEncoded, fromInclusive, toEncoded, toInclusive, unique, cancellationToken, "", toIsPrefixBound, fromIsPrefixBound, pageSize).GetAsyncEnumerator(cancellationToken);
             }
 
             BranchMetrics.RecordScanIterators(levels.Length);
