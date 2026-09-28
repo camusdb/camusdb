@@ -307,6 +307,47 @@ public sealed class TestEmbeddedKahunaOptionsBuilder
         Assert.That(standalone.StagedBaseFenceRetentionMs, Is.EqualTo(900_000));
     }
 
+    // ── Materialize on resolve ───────────────────────────────────────────────
+
+    [Test]
+    public void DurableMaterializeOnResolve_UnsetKeepsKahunaDefaultOffOnBothBaselines()
+    {
+        // The record shape is a per-group property that stays off until it has passed two clean fault
+        // soaks, and an older node resolving a materializing settle loses the write: CamusDB states no
+        // baseline of its own, so an unset key must leave Kahuna's default (off) untouched.
+        ConfigDefinition config = new() { DataDir = "/data/camus", Mode = "cluster", InitialPartitions = 3 };
+
+        EmbeddedKahunaOptions cluster = EmbeddedKahunaOptionsBuilder.BuildCluster(config, CamusDBOptions.Default);
+        EmbeddedKahunaOptions standalone =
+            EmbeddedKahunaOptionsBuilder.BuildStandaloneRocksDb("/tmp/materialize-db", new KahunaOptionsConfig(), CamusDBOptions.Default);
+
+        Assert.That(new EmbeddedKahunaOptions().DurableMaterializeOnResolve, Is.False, "the Kahuna default this key passes through");
+        Assert.That(cluster.DurableMaterializeOnResolve, Is.False);
+        Assert.That(standalone.DurableMaterializeOnResolve, Is.False);
+    }
+
+    [Test]
+    public void DurableMaterializeOnResolve_OverridesBothBaselines()
+    {
+        // The flag-on measurement and the eventual default flip both depend on the stated value reaching
+        // Kahuna on every baseline; an explicit false must be a value too, so a rolling upgrade can pin it off.
+        ConfigDefinition on = new()
+        {
+            DataDir = "/data/camus",
+            Kahuna = new KahunaOptionsConfig { DurableMaterializeOnResolve = true },
+        };
+        ConfigDefinition off = new()
+        {
+            DataDir = "/data/camus",
+            Kahuna = new KahunaOptionsConfig { DurableMaterializeOnResolve = false },
+        };
+
+        Assert.That(EmbeddedKahunaOptionsBuilder.BuildCluster(on, CamusDBOptions.Default).DurableMaterializeOnResolve, Is.True);
+        Assert.That(EmbeddedKahunaOptionsBuilder.BuildStandaloneRocksDb("/tmp/materialize-db", on.Kahuna, CamusDBOptions.Default).DurableMaterializeOnResolve, Is.True);
+        Assert.That(EmbeddedKahunaOptionsBuilder.BuildCluster(off, CamusDBOptions.Default).DurableMaterializeOnResolve, Is.False);
+        Assert.That(EmbeddedKahunaOptionsBuilder.BuildStandaloneRocksDb("/tmp/materialize-db", off.Kahuna, CamusDBOptions.Default).DurableMaterializeOnResolve, Is.False);
+    }
+
     [Test]
     public void RevisionRetention_DefaultsToPitrWindowOnPersistentBaselines()
     {
@@ -597,17 +638,20 @@ public sealed class TestEmbeddedKahunaOptionsBuilder
     // ── Post-completion hold ─────────────────────────────────────────────────
 
     [Test]
-    public void Baselines_HoldTwoMsAfterABatchCompletes_ByDefault()
+    public void Baselines_HoldOneMsAfterABatchCompletes_ByDefault()
     {
         // Kahuna's own default is 0 (dispatch the next batch the instant one completes); CamusDB ships
-        // 2 ms so a fully occupied aggregator packs more items per Raft round (+6% at 128 workers with a
-        // lower write p50, free at low load — Kahuna fac7be26, 51311414 item 5). Every baseline carries it.
+        // 1 ms so a fully occupied aggregator packs more items per Raft round. The hold's timer fires
+        // about 1 ms late, so 1 ms configured is ~2 ms of accumulation; 2 ms was the default while the
+        // round was ~2.4 ms, and 1 ms measured +2.5% throughput with a shorter commit once the round
+        // reached ~1.6 ms, while 0 ms slowed the reads that share the partition executor. Every
+        // baseline carries it.
         string dataPath = "/tmp/hold-test";
         ConfigDefinition config = new() { DataDir = dataPath };
 
-        Assert.That(EmbeddedKahunaOptionsBuilder.DefaultKeyValueWritePostCompletionHoldMs, Is.EqualTo(2));
-        Assert.That(EmbeddedKahunaOptionsBuilder.StandaloneRocksDbBaseline(dataPath).KeyValueWritePostCompletionHoldMs, Is.EqualTo(2));
-        Assert.That(EmbeddedKahunaOptionsBuilder.ClusterBaseline(config, CamusDBOptions.Default).KeyValueWritePostCompletionHoldMs, Is.EqualTo(2));
+        Assert.That(EmbeddedKahunaOptionsBuilder.DefaultKeyValueWritePostCompletionHoldMs, Is.EqualTo(1));
+        Assert.That(EmbeddedKahunaOptionsBuilder.StandaloneRocksDbBaseline(dataPath).KeyValueWritePostCompletionHoldMs, Is.EqualTo(1));
+        Assert.That(EmbeddedKahunaOptionsBuilder.ClusterBaseline(config, CamusDBOptions.Default).KeyValueWritePostCompletionHoldMs, Is.EqualTo(1));
         Assert.That(new EmbeddedKahunaOptions().KeyValueWritePostCompletionHoldMs, Is.EqualTo(0), "the Kahuna default this baseline deliberately departs from");
     }
 

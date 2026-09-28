@@ -178,6 +178,25 @@ gate on will fail to start. Upgrading such a deployment:
 A cluster created on a build that defaults it on needs none of this — its first snapshot already carries
 a ledger.
 
+### Materialize on resolve
+
+`kahuna.durable_materialize_on_resolve` (default **off**, Kahuna's own default) changes the record shape of
+a committed durable transaction: the commit's settle installs each committed value from the prepared
+intent on every replica, so Kahuna writes no materialization record per key. On the anchor partition a
+two-row transaction then costs about four Raft entries instead of six (the one-phase bundle's three plus
+one settle) and about two scheduler submissions instead of four; followers apply fewer entries and a
+device writes fewer bytes per commit. CamusDB does not set it in its baselines: the shape is a per-group
+property, and it stays off until it has passed two clean two-hour fault soaks. Setting it here passes the
+value through unchanged; unset keeps Kahuna's default.
+
+Two operating rules, both enforced by the record shape rather than by CamusDB:
+
+- **Every node first, then the flag.** Every node must run a Kahuna build that installs on a
+  materializing settle (Kahuna.Core 1.10.1 or later) before any node turns this on. An older node resolves
+  the intent without installing the value and loses that write locally. Turning it off is safe at any
+  time, so a rolling upgrade runs with it off and turns it on afterwards.
+- **Same value on every node of the group**, for the same reason as the one-phase gate above.
+
 ### Persistent MVCC revision retention
 
 Every version of every row is a physical row in the KV store. Without pruning, a hot table's history —
@@ -334,14 +353,20 @@ a batch is dispatched while nothing is in flight, the cap bounds a batch's items
 Measured 2026-09-09: the linger itself is inert at full occupancy (1, 3 and 5 ms all gave the same
 batches), because a completing batch re-dispatches whatever is queued.
 
-`kahuna.key_value_write_post_completion_hold_ms` (default **2** in CamusDB; Kahuna's own default is 0)
+`kahuna.key_value_write_post_completion_hold_ms` (default **1** in CamusDB; Kahuna's own default is 0)
 is the knob that does add density at full occupancy: after a batch completes the aggregator holds this
 long before dispatching the next, so more items accumulate per batch; the cost is that much added write
 latency. The aggregator keeps one Raft round in flight per partition, so at full load a round carries
-only what arrived during the previous ~2.4 ms round; the 2 ms hold roughly doubled the items per round
-(110 vs 51 at 128 workers on the bank shape) for +6% throughput and a *lower* write p50, and an idle
-aggregator still dispatches on arrival, so low-load latency is unchanged. Set `0` to restore Kahuna's
-dispatch-at-once behaviour; an explicit value always wins over the shipped default.
+only what arrived during the previous round. The timer that ends the hold fires about 1 ms late (0.95 to
+1.1 ms on the aggregator's cycle stamps), so the effective hold is the configured value plus ~1 ms. The
+default was 2 ms while the round was ~2.4 ms: it roughly doubled the items per round (110 vs 51 at 128
+workers on the bank shape) for +6% throughput and a *lower* write p50. With the round at ~1.6 ms, a
+one-variable sweep on the same shape measured 2 / 1 / 0 ms at 9,193 / 9,421 / 8,755 ops/s: 1 ms keeps
+~128 items per batch and takes 0.5 ms off the commit; 0 ms makes the commit fastest but runs 2.8× the
+Raft rounds, which slows point reads (1.97 → 2.40 ms) and updates on the shared partition executor, so
+the closed loop loses. An idle aggregator still dispatches on arrival, so low-load latency is unchanged.
+Set `0` to restore Kahuna's dispatch-at-once behaviour; an explicit value always wins over the shipped
+default.
 
 `kahuna.rocksdb_direct_reads` (default **off** in CamusDB; Kahuna's own default is on) selects how the
 RocksDB key/value backend reads SST files. With direct I/O the block cache is the only in-RAM read
