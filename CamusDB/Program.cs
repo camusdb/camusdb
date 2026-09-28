@@ -68,12 +68,7 @@ if (optsResult is NotParsed<CamusCommandLineOptions> notParsed)
 
 CamusCommandLineOptions opts = optsResult.Value;
 
-Console.WriteLine("   ____                          ____  ____  ");
-Console.WriteLine("  / ___|__ _ _ __ ___  _   _ ___|  _ \\| __ ) ");
-Console.WriteLine(" | |   / _` | '_ ` _ \\| | | / __| | | |  _ \\ ");
-Console.WriteLine(" | |__| (_| | | | | | | |_| \\__ \\ |_| | |_) |");
-Console.WriteLine("  \\____\\__,_|_| |_| |_|\\__,_|___/____/|____/ ");
-Console.WriteLine();
+StartupBanner.Print();
 
 // Read and merge config before building the host so cluster-mode detection can gate DI service
 // registration. The lookup is ordered and first-hit-wins (--config, CAMUS_CONFIG_PATH, the working
