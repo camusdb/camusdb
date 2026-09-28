@@ -105,6 +105,11 @@ public sealed class TestRetryableAbortsAsValues : SharedNodeBaseTest
         await ExecIn(executor, dbname, winner, $"UPDATE accounts SET balance = {winnerBalance} WHERE id = \"a\"");
         await database.Transactions.CommitAsync(winner);
 
+        // The early abort compares the key's applied revision with the loser's read; a commit is
+        // acknowledged when it is durable, and its apply can land a moment later. A linearizable
+        // read waits for local application, so the loser's next statement meets the new revision.
+        await CommittedBalance(executor, database, dbname, "a");
+
         return loser;
     }
 
@@ -196,6 +201,7 @@ public sealed class TestRetryableAbortsAsValues : SharedNodeBaseTest
                 KvTransaction winner = await BeginOptimisticAsync(database);
                 await ExecIn(executor, dbname, winner, $"UPDATE accounts SET balance = {winnerBalance} WHERE id = \"a\"");
                 await database.Transactions.CommitAsync(winner);
+                await CommittedBalance(executor, database, dbname, "a"); // wait for the apply; see ReadThenLoseRowAAsync
             };
 
             await Task.Delay(5); // a fresh HLC millisecond; see MaxAttempts
