@@ -975,6 +975,10 @@ public sealed class CommandExecutor : IAsyncDisposable
     /// Executes a SQL statement that returns no rows. Schema DDL is accepted here too and forwarded,
     /// so a client that routes every non-SELECT statement to this endpoint is never told a supported
     /// statement is unknown.
+    ///
+    /// <para>When <see cref="ExecuteSQLTicket.RetryableAborts"/> is set, a retryable Kahuna abort may
+    /// come back recorded there instead of thrown. The result is then meaningless, and the caller that
+    /// created the sink must test it before it reads the result or commits.</para>
     /// </summary>
     public async Task<ExecuteNonSQLResult> ExecuteNonSQLQuery(ExecuteSQLTicket ticket)
     {
@@ -983,7 +987,8 @@ public sealed class CommandExecutor : IAsyncDisposable
         if (recording is null)
         {
             ExecuteNonSQLResult plain = await nonQueryDispatcher.ExecuteNonSQLQuery(this, ticket).ConfigureAwait(false);
-            RecordRoutingForNonQuery(ticket, plain);
+            if (ticket.RetryableAborts is not { HasAbort: true })
+                RecordRoutingForNonQuery(ticket, plain);
             return plain;
         }
 
@@ -993,6 +998,13 @@ public sealed class CommandExecutor : IAsyncDisposable
         {
             ExecuteNonSQLResult result = await nonQueryDispatcher
                 .ExecuteNonSQLQuery(this, ticket.WithProbe(recording.Probe)).ConfigureAwait(false);
+
+            // An abort carried as a value fails the statement exactly as the thrown one did.
+            if (ticket.RetryableAborts is { Abort: { } abort })
+            {
+                recording.FinishFailed(abort);
+                return result;
+            }
 
             // Rows affected stands in for rows returned: the column means "rows this statement was
             // about", and for a mutation that is what it changed.

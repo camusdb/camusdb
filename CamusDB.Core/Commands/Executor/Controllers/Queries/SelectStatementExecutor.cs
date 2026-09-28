@@ -238,7 +238,9 @@ internal sealed class SelectStatementExecutor
     {
         context.Validator.Validate(ticket);
 
-        NodeAst ast = SQLParserProcessor.Parse(ticket.Sql, sqlParserCache);
+        NodeAst ast;
+        using (Diagnostics.QueryStageProfile.Measure(Diagnostics.QueryStage.Parse))
+            ast = SQLParserProcessor.Parse(ticket.Sql, sqlParserCache);
 
         recording?.Describe(ast.nodeType);
 
@@ -248,9 +250,12 @@ internal sealed class SelectStatementExecutor
         if (ast.nodeType == NodeType.ShowSlowQueries)
             recording?.Discard();
 
-        statementAuthorizer.SetAuthorizationScope(ticket, ast);
-        ticket = SessionScalarFunctions.AttachSessionValues(ticket, ast);
-        await statementAuthorizer.EnforceAsync(ticket, ast).ConfigureAwait(false);
+        using (Diagnostics.QueryStageProfile.Measure(Diagnostics.QueryStage.Authorize))
+        {
+            statementAuthorizer.SetAuthorizationScope(ticket, ast);
+            ticket = SessionScalarFunctions.AttachSessionValues(ticket, ast);
+            await statementAuthorizer.EnforceAsync(ticket, ast).ConfigureAwait(false);
+        }
 
         // SHOW DATABASES does not require a database context — resolve the registry and return.
         if (ast.nodeType == NodeType.ShowDatabases)
@@ -393,7 +398,9 @@ internal sealed class SelectStatementExecutor
             return (null!, schemaQuerier.ShowAllGrants(snapshot));
         }
 
-        DatabaseDescriptor database = await context.DatabaseOpener.Open(ticket.DatabaseName);
+        DatabaseDescriptor database;
+        using (Diagnostics.QueryStageProfile.Measure(Diagnostics.QueryStage.DbOpen))
+            database = await context.DatabaseOpener.Open(ticket.DatabaseName);
 
         ast = ExpandViews(database, ast);
 
@@ -829,7 +836,7 @@ internal sealed class SelectStatementExecutor
         // fails open. Carrying it costs nothing and removes that trap.
         return new ExecuteSQLTicket(
             snapshotTx, ticket.DatabaseName, ticket.Sql, ticket.Parameters, ticket.Principal,
-            ticket.CancellationToken, ticket.Probe, ticket.Routing);
+            ticket.CancellationToken, ticket.Probe, ticket.Routing, ticket.RetryableAborts);
     }
 
     /// <summary>

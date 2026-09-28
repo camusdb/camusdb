@@ -444,6 +444,21 @@ public sealed record CamusDBOptions
     public int FenceLeaseRenewIntervalMs { get; init; } = 10_000;
 
     /// <summary>
+    /// How long, in milliseconds, a cluster node trusts a read of the database registry's generation
+    /// stamp before reading it again. Resolving a database name then costs a Kahuna read once per lease
+    /// per node instead of once per statement. The price is paid by the mutations that can make another
+    /// node's cached name wrong: <c>DROP DATABASE</c>, <c>RENAME DATABASE</c> and a retracted create wait
+    /// out one lease (plus a small margin) before they return. 0 reads the stamp on every resolve.
+    /// Ignored in standalone mode, where the registry cache is authoritative.
+    ///
+    /// <para>Must be the same on every node: a node trusting a longer lease than the mutating node
+    /// waits out could serve a dropped name after the drop returned. It is therefore restart-only.
+    /// Default 250.</para>
+    /// </summary>
+    [ConfigSetting(ConfigMutability.Restart, ConfigScope.Cluster)]
+    public int RegistryGenerationLeaseMs { get; init; } = 250;
+
+    /// <summary>
     /// Lease duration, in milliseconds, of the Kahuna snapshot-floor hold a branch database
     /// acquires on its immediate parent at fork time. The hold pins the parent's MVCC history at
     /// <c>forkT</c> so branch as-of reads stay correct under aggressive revision retention. The

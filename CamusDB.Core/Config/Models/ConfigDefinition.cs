@@ -808,6 +808,14 @@ public class ConfigDefinition
     public int FenceLeaseRenewIntervalMs { get; set; } = 10_000;
 
     /// <summary>
+    /// How long a cluster node trusts a read of the database registry's generation stamp, in
+    /// milliseconds. DROP/RENAME DATABASE wait out one lease. Must be &gt;= 0 and identical on every node;
+    /// 0 reads the stamp on every resolve. Default 250. Maps to
+    /// <c>CamusDBOptions.RegistryGenerationLeaseMs</c>.
+    /// </summary>
+    public int RegistryGenerationLeaseMs { get; set; } = 250;
+
+    /// <summary>
     /// Max keys the non-transactional DROP DATABASE keyspace purge scans/deletes per batch. Must be
     /// &gt;= 1. Default 512. Maps to <c>CamusDBOptions.KeyspacePurgeBatchSize</c>.
     /// </summary>
@@ -1340,6 +1348,9 @@ public class ConfigDefinition
             throw Invalid(
                 $"'fence_lease_renew_interval_ms' ({FenceLeaseRenewIntervalMs}) must be < " +
                 $"'fence_lease_ms' ({FenceLeaseMs})");
+
+        if (RegistryGenerationLeaseMs < 0)
+            throw Invalid($"'registry_generation_lease_ms' must be >= 0, got {RegistryGenerationLeaseMs}");
 
         if (KeyspacePurgeBatchSize < 1)
             throw Invalid($"'keyspace_purge_batch_size' must be >= 1, got {KeyspacePurgeBatchSize}");

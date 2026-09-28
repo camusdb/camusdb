@@ -64,6 +64,16 @@ public readonly struct ExecuteSQLTicket
     /// </summary>
     public Routing.StatementRoutingCollector? Routing { get; }
 
+    /// <summary>
+    /// Where the statement records a retryable Kahuna abort instead of throwing it, or null to throw.
+    /// Created by a transport that reports the abort itself: after the statement returns it tests
+    /// <see cref="RetryableAbortSink.HasAbort"/> before it looks at the result, and it never commits
+    /// a transaction whose statement recorded one. Carried forward like <see cref="Probe"/> by every
+    /// rebuild of this ticket for the same statement, and never into a ticket for a subquery, whose
+    /// consumer would not know to test it. See <see cref="RetryableAbortSink"/>.
+    /// </summary>
+    public RetryableAbortSink? RetryableAborts { get; }
+
     public ExecuteSQLTicket(
         KvTransaction txnState,
         string database,
@@ -72,7 +82,8 @@ public readonly struct ExecuteSQLTicket
         Principal? principal = null,
         CancellationToken cancellationToken = default,
         Diagnostics.StatementProbe? probe = null,
-        Routing.StatementRoutingCollector? routing = null)
+        Routing.StatementRoutingCollector? routing = null,
+        RetryableAbortSink? retryableAborts = null)
     {
         TxnState = txnState;
         DatabaseName = database;
@@ -82,6 +93,7 @@ public readonly struct ExecuteSQLTicket
         CancellationToken = cancellationToken;
         Probe = probe;
         Routing = routing;
+        RetryableAborts = retryableAborts;
     }
 
     /// <summary>
@@ -89,5 +101,5 @@ public readonly struct ExecuteSQLTicket
     /// slow query log creates the probe after the ticket has already been built by the transport.
     /// </summary>
     public ExecuteSQLTicket WithProbe(Diagnostics.StatementProbe? probe)
-        => new(TxnState, DatabaseName, Sql, Parameters, Principal, CancellationToken, probe, Routing);
+        => new(TxnState, DatabaseName, Sql, Parameters, Principal, CancellationToken, probe, Routing, RetryableAborts);
 }

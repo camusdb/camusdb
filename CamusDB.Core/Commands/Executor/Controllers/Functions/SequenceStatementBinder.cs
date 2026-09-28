@@ -239,7 +239,8 @@ internal sealed class SequenceStatementBinder
             ticket.Principal,
             ticket.CancellationToken,
             ticket.Probe,
-            ticket.Routing);
+            ticket.Routing,
+            ticket.RetryableAborts);
     }
 
     /// <summary>

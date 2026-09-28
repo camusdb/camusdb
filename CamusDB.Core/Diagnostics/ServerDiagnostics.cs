@@ -58,6 +58,21 @@ public static class ServerDiagnostics
         KvRetryWaits.Add(1, new TagList { { "site", site } });
     }
 
+    // ── KV retryable aborts ────────────────────────────────────────────────────
+    // One count per retryable abort a KV read or write site hands to its statement, tagged by site and
+    // by delivery: carried up as a value (Transactions.RetryableAbortSink) or thrown. A thrown abort is
+    // rethrown at every async frame on its way to the transport, and an exception trace counts each
+    // rethrow, so this is the count to divide by write transactions — not a trace's exception count.
+    private static readonly Counter<long> KvRetryableAborts =
+        Meter.CreateCounter<long>("camus.kv.retryable_aborts", unit: "{abort}", description: "Retryable aborts raised by KV read and write sites, by site and delivery.");
+
+    public static void AddKvRetryableAbort(string site, string delivery)
+    {
+        if (!Enabled)
+            return;
+        KvRetryableAborts.Add(1, new TagList { { "site", site }, { "delivery", delivery } });
+    }
+
     // ── Foreign keys ────────────────────────────────────────────────────────────
     // One instrument, tagged by kind, so the checks' cost is visible per statement shape: how many
     // rendezvous locks were sent to a parent's partition and how many were already held, how many
@@ -403,6 +418,25 @@ public static class ServerDiagnostics
             public const string Scanned = "scanned";
             public const string Returned = "returned";
             public static readonly IReadOnlyList<string> All = new[] { Scanned, Returned };
+        }
+
+        /// <summary>The KV site that raised a retryable abort (<c>camus.kv.retryable_aborts</c>).</summary>
+        public static class AbortSite
+        {
+            public const string Read = "read";
+            public const string ReadMany = "read_many";
+            public const string AcquireMany = "acquire_many";
+            public const string SetMany = "set_many";
+            public const string DeleteMany = "delete_many";
+            public static readonly IReadOnlyList<string> All = new[] { Read, ReadMany, AcquireMany, SetMany, DeleteMany };
+        }
+
+        /// <summary>How a retryable abort left its site: carried up as a value, or thrown.</summary>
+        public static class AbortDelivery
+        {
+            public const string Value = "value";
+            public const string Thrown = "thrown";
+            public static readonly IReadOnlyList<string> All = new[] { Value, Thrown };
         }
     }
 }

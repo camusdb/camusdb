@@ -124,6 +124,9 @@ public sealed class TestKvTableStoreRetry
         public int InjectGetManyMustRetryFaults;
         public int GetManyCalls;
 
+        // ---- intercepted: batch get, whole batch Aborted (a lost optimistic read) ----
+        public int InjectGetManyAbortedFaults;
+
         public override Task<List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)>> LocateAndTryGetManyValues(
             HLCTimestamp txId, HLCTimestamp readTimestamp, List<(string key, long revision, KeyValueDurability durability)> keys,
             CancellationToken ct, string coordinatorKey = "", TransactionOperationId operationId = default)
@@ -138,6 +141,11 @@ public sealed class TestKvTableStoreRetry
             if (InjectGetManyErroredFaults-- > 0)
                 return Task.FromResult(keys
                     .Select(k => (KeyValueResponseType.Errored, k.key, k.durability, (ReadOnlyKeyValueEntry?)null))
+                    .ToList());
+
+            if (InjectGetManyAbortedFaults-- > 0)
+                return Task.FromResult(keys
+                    .Select(k => (KeyValueResponseType.Aborted, k.key, k.durability, (ReadOnlyKeyValueEntry?)null))
                     .ToList());
             return inner.LocateAndTryGetManyValues(txId, readTimestamp, keys, ct, coordinatorKey, operationId);
         }
@@ -189,6 +197,11 @@ public sealed class TestKvTableStoreRetry
         // would come back NotSet → false DuplicateUniqueKeyValue.
         public Func<string, bool>? SetManyPartialFaultPredicate;
 
+        // Whole batch answered with a terminal type the retry loop does not absorb: Aborted (a lost
+        // optimistic write) by default, or Errored.
+        public int InjectSetManyTerminalFaults;
+        public KeyValueResponseType SetManyTerminalType = KeyValueResponseType.Aborted;
+
         public override async Task<List<KahunaSetKeyValueResponseItem>> LocateAndTrySetManyKeyValue(
             List<KahunaSetKeyValueRequestItem> items, CancellationToken ct,
             string coordinatorKey = "", TransactionOperationId operationId = default)
@@ -197,6 +210,9 @@ public sealed class TestKvTableStoreRetry
 
             if (InjectSetManyFaults-- > 0)
                 return items.Select(i => new KahunaSetKeyValueResponseItem { Key = i.Key, Type = KeyValueResponseType.MustRetry }).ToList();
+
+            if (InjectSetManyTerminalFaults-- > 0)
+                return items.Select(i => new KahunaSetKeyValueResponseItem { Key = i.Key, Type = SetManyTerminalType }).ToList();
 
             if (SetManyPartialFaultPredicate is { } pred)
             {
@@ -1001,6 +1017,161 @@ public sealed class TestKvTableStoreRetry
         Assert.That(ex.Message, Does.Contain("table 'robots'"));
         Assert.That(ex.Message, Does.Contain("database 'inventory'"));
         Assert.That(ex.Message, Does.Contain("diag_batch_w"));
+
+        await stub.LocateAndRollbackTransaction(tx.Handle, CancellationToken.None);
+    }
+
+    // -----------------------------------------------------------------------
+    // Retryable aborts carried as a value (RetryableAbortSink). With a sink, an
+    // Aborted answer is recorded and the call returns a neutral result; without
+    // one it throws as it always did; a non-retryable answer throws either way.
+    // -----------------------------------------------------------------------
+
+    [Test]
+    public async Task GetRow_Aborted_WithSink_RecordsTheAbortInsteadOfThrowing()
+    {
+        (EmbeddedKahuna node, FaultInjectingKahuna stub, KvTableStore store) = await CreateStoreAsync("tbl_sink_get");
+        await using EmbeddedKahuna __ = node;
+
+        ObjectIdValue rowId = Generate();
+        KvTransaction writeTx = await BeginTransaction(stub, "sink_get_w");
+        await store.InsertRow(writeTx, rowId, [1, 2, 3]);
+        await CommitTransaction(stub, writeTx);
+
+        stub.GetValueTerminalType = KeyValueResponseType.Aborted;
+        stub.InjectGetValueTerminalFaults = 1;
+
+        KvTransaction readTx = await BeginTransaction(stub, "sink_get_r");
+        RetryableAbortSink aborts = new();
+        ReadOnlyMemory<byte>? result = await store.GetRow(readTx, rowId, CancellationToken.None, null, aborts);
+
+        Assert.IsNull(result, "an aborted read answers null, which the caller must not take for a miss");
+        Assert.That(aborts.HasAbort, Is.True);
+        Assert.That(aborts.Abort!.Code, Is.EqualTo(CamusDBErrorCodes.TransactionMustRetry));
+        Assert.That(aborts.Abort.Message, Does.Contain("aborted by Kahuna"));
+
+        await stub.LocateAndRollbackTransaction(readTx.Handle, CancellationToken.None);
+    }
+
+    [Test]
+    public async Task GetRow_Aborted_WithoutSink_StillThrows()
+    {
+        (EmbeddedKahuna node, FaultInjectingKahuna stub, KvTableStore store) = await CreateStoreAsync("tbl_nosink_get");
+        await using EmbeddedKahuna __ = node;
+
+        ObjectIdValue rowId = Generate();
+        KvTransaction writeTx = await BeginTransaction(stub, "nosink_get_w");
+        await store.InsertRow(writeTx, rowId, [1, 2, 3]);
+        await CommitTransaction(stub, writeTx);
+
+        stub.GetValueTerminalType = KeyValueResponseType.Aborted;
+        stub.InjectGetValueTerminalFaults = 1;
+
+        KvTransaction readTx = await BeginTransaction(stub, "nosink_get_r");
+        CamusDBException ex = Assert.ThrowsAsync<CamusDBException>(async () => await store.GetRow(readTx, rowId))!;
+
+        Assert.That(ex.Code, Is.EqualTo(CamusDBErrorCodes.TransactionMustRetry));
+        Assert.That(ex.Message, Does.Contain("aborted by Kahuna"));
+
+        await stub.LocateAndRollbackTransaction(readTx.Handle, CancellationToken.None);
+    }
+
+    [Test]
+    public async Task LockAndReadRowsForMutation_AbortedBatchRead_WithSink_AnswersNoRows()
+    {
+        (EmbeddedKahuna node, FaultInjectingKahuna stub, KvTableStore store) = await CreateStoreAsync("tbl_sink_getmany");
+        await using EmbeddedKahuna __ = node;
+
+        List<ObjectIdValue> rowIds = [Generate(), Generate(), Generate()];
+        KvTransaction writeTx = await BeginTransaction(stub, "sink_getmany_w");
+        foreach (ObjectIdValue rowId in rowIds)
+            await store.InsertRow(writeTx, rowId, [7]);
+        await CommitTransaction(stub, writeTx);
+
+        stub.InjectGetManyAbortedFaults = 1;
+
+        KvTransaction tx = await BeginTransaction(stub, "sink_getmany_r");
+        RetryableAbortSink aborts = new();
+        ReadOnlyMemory<byte>?[] rows = await store.LockAndReadRowsForMutationAsync(tx, rowIds, CancellationToken.None, LargeValueFetch.Raw, aborts);
+
+        Assert.That(aborts.HasAbort, Is.True);
+        Assert.That(aborts.Abort!.Code, Is.EqualTo(CamusDBErrorCodes.TransactionMustRetry));
+        Assert.That(rows, Has.Length.EqualTo(rowIds.Count), "the neutral answer keeps one position per row id");
+        Assert.That(rows.All(r => r is null), Is.True, "no row of an aborted batch read may reach the caller");
+
+        await stub.LocateAndRollbackTransaction(tx.Handle, CancellationToken.None);
+    }
+
+    [Test]
+    public async Task UpdateRowsBatch_AbortedSet_WithSink_RecordsTheAbortAndTracksNothing()
+    {
+        (EmbeddedKahuna node, FaultInjectingKahuna stub, KvTableStore store) = await CreateStoreAsync("tbl_sink_setmany");
+        await using EmbeddedKahuna __ = node;
+
+        ObjectIdValue rowId = Generate();
+        KvTransaction writeTx = await BeginTransaction(stub, "sink_setmany_w");
+        await store.InsertRow(writeTx, rowId, [1]);
+        await CommitTransaction(stub, writeTx);
+
+        stub.SetManyTerminalType = KeyValueResponseType.Aborted;
+        stub.InjectSetManyTerminalFaults = 1;
+
+        KvTransaction tx = await BeginTransaction(stub, "sink_setmany_u");
+        RetryableAbortSink aborts = new();
+        await store.UpdateRowsBatch(tx, [new KvTableStore.RowUpdate { RowId = rowId, NewRowData = BranchKvCodec.EncodeValue([2]) }], CancellationToken.None, aborts);
+
+        Assert.That(aborts.HasAbort, Is.True);
+        Assert.That(aborts.Abort!.Code, Is.EqualTo(CamusDBErrorCodes.TransactionMustRetry));
+        Assert.That(aborts.Abort.Message, Does.Contain("Batched set of key"));
+        Assert.That(tx.GetModifiedKeyPairs(), Is.Empty, "an aborted batch must not be tracked for the commit");
+
+        await stub.LocateAndRollbackTransaction(tx.Handle, CancellationToken.None);
+    }
+
+    [Test]
+    public async Task UpdateRowsBatch_AbortedSet_WithoutSink_StillThrows()
+    {
+        (EmbeddedKahuna node, FaultInjectingKahuna stub, KvTableStore store) = await CreateStoreAsync("tbl_nosink_setmany");
+        await using EmbeddedKahuna __ = node;
+
+        ObjectIdValue rowId = Generate();
+        KvTransaction writeTx = await BeginTransaction(stub, "nosink_setmany_w");
+        await store.InsertRow(writeTx, rowId, [1]);
+        await CommitTransaction(stub, writeTx);
+
+        stub.SetManyTerminalType = KeyValueResponseType.Aborted;
+        stub.InjectSetManyTerminalFaults = 1;
+
+        KvTransaction tx = await BeginTransaction(stub, "nosink_setmany_u");
+        CamusDBException ex = Assert.ThrowsAsync<CamusDBException>(async () =>
+            await store.UpdateRowsBatch(tx, [new KvTableStore.RowUpdate { RowId = rowId, NewRowData = BranchKvCodec.EncodeValue([2]) }]))!;
+
+        Assert.That(ex.Code, Is.EqualTo(CamusDBErrorCodes.TransactionMustRetry));
+
+        await stub.LocateAndRollbackTransaction(tx.Handle, CancellationToken.None);
+    }
+
+    [Test]
+    public async Task UpdateRowsBatch_ErroredSet_WithSink_StillThrowsTheNonRetryableError()
+    {
+        (EmbeddedKahuna node, FaultInjectingKahuna stub, KvTableStore store) = await CreateStoreAsync("tbl_sink_seterr");
+        await using EmbeddedKahuna __ = node;
+
+        ObjectIdValue rowId = Generate();
+        KvTransaction writeTx = await BeginTransaction(stub, "sink_seterr_w");
+        await store.InsertRow(writeTx, rowId, [1]);
+        await CommitTransaction(stub, writeTx);
+
+        stub.SetManyTerminalType = KeyValueResponseType.Errored;
+        stub.InjectSetManyTerminalFaults = 1;
+
+        KvTransaction tx = await BeginTransaction(stub, "sink_seterr_u");
+        RetryableAbortSink aborts = new();
+        CamusDBException ex = Assert.ThrowsAsync<CamusDBException>(async () =>
+            await store.UpdateRowsBatch(tx, [new KvTableStore.RowUpdate { RowId = rowId, NewRowData = BranchKvCodec.EncodeValue([2]) }], CancellationToken.None, aborts))!;
+
+        Assert.That(ex.Code, Is.EqualTo(CamusDBErrorCodes.SystemSpaceCorrupt), "only a retryable abort may travel as a value");
+        Assert.That(aborts.HasAbort, Is.False);
 
         await stub.LocateAndRollbackTransaction(tx.Handle, CancellationToken.None);
     }

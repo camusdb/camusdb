@@ -7,6 +7,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -18,6 +19,7 @@ using Kahuna.Server.KeyValues.Transactions.Data;
 using Kahuna.Shared.KeyValue;
 using Kommander.Time;
 
+using CamusDB.Core;
 using CamusDB.Core.CommandsExecutor.Controllers;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Tests.Storage;
@@ -55,11 +57,13 @@ internal sealed class TestRegistryRevalidationCost : BaseTest
 
         public int RegistryScans;
         public int RegistryPointReads;
+        public int GenerationReads;
 
         public void Reset()
         {
             Volatile.Write(ref RegistryScans, 0);
             Volatile.Write(ref RegistryPointReads, 0);
+            Volatile.Write(ref GenerationReads, 0);
         }
 
         public override IAsyncEnumerable<(string Key, ReadOnlyKeyValueEntry Entry)> LocateAndScanRange(
@@ -82,6 +86,8 @@ internal sealed class TestRegistryRevalidationCost : BaseTest
         {
             if (key.StartsWith(registryBucket + "/db:", StringComparison.Ordinal))
                 Interlocked.Increment(ref RegistryPointReads);
+            else if (string.Equals(key, registryBucket + "/generation", StringComparison.Ordinal))
+                Interlocked.Increment(ref GenerationReads);
 
             return base.LocateAndTryGetValue(
                 transactionId, key, revision, readTimestamp, durability, cancellationToken,
@@ -95,13 +101,16 @@ internal sealed class TestRegistryRevalidationCost : BaseTest
     /// Two registries over one shared node stand in for two cluster nodes: independent in-memory caches,
     /// one replicated store. The observed one is wrapped so its KV traffic can be counted.
     /// </summary>
-    private async Task<(DatabaseRegistry mutator, DatabaseRegistry observer, CountingKahuna counter)> TwoNodesAsync()
+    private Task<(DatabaseRegistry mutator, DatabaseRegistry observer, CountingKahuna counter)> TwoNodesAsync()
+        => TwoNodesAsync(Options);
+
+    private async Task<(DatabaseRegistry mutator, DatabaseRegistry observer, CountingKahuna counter)> TwoNodesAsync(CamusDBOptions options)
     {
-        DatabaseRegistry mutator = await DatabaseRegistry.OpenAsync(TestNode!, Options, isClusterMode: true);
+        DatabaseRegistry mutator = await DatabaseRegistry.OpenAsync(TestNode!, options, isClusterMode: true);
 
         CountingKahuna counter = new(TestNode!.Kahuna, RegistryBucket);
         DatabaseRegistry observer = await DatabaseRegistry.OpenForTestingAsync(
-            TestNode!, counter, Options, isClusterMode: true);
+            TestNode!, counter, options, isClusterMode: true);
 
         return (mutator, observer, counter);
     }
@@ -307,6 +316,165 @@ internal sealed class TestRegistryRevalidationCost : BaseTest
             Assert.AreEqual(
                 0, Volatile.Read(ref counter.RegistryPointReads),
                 "a mixed-case name must be served from the backfilled cache, not re-read from KV");
+        }
+        finally
+        {
+            await mutator.DisposeAsync();
+            await observer.DisposeAsync();
+        }
+    }
+
+    /// <summary>
+    /// While the cache as a whole is behind, a name costs one re-read per generation change, not one per
+    /// statement. Before, every resolve of a stale hit re-read the name under the registry's write lock, so a
+    /// node that missed one registration serialized every statement on that lock until a sweep caught up.
+    /// The lease is off here so every resolve compares against a fresh stamp, which is the worst case.
+    /// </summary>
+    [Test]
+    public async Task AStaleNameIsReReadOncePerGenerationNotOncePerResolve()
+    {
+        (DatabaseRegistry mutator, DatabaseRegistry observer, CountingKahuna counter) =
+            await TwoNodesAsync(Options with { RegistryGenerationLeaseMs = 0 });
+        try
+        {
+            string name = NewName();
+            string id = await mutator.AllocateIdAsync();
+            await mutator.RegisterAsync(name, id);
+            Assert.AreEqual(id, (await observer.TryResolveEntryAsync(name))!.Id, "warm the observer's cache");
+
+            await mutator.RegisterAsync(NewName(), await mutator.AllocateIdAsync());
+
+            counter.Reset();
+            for (int i = 0; i < 10; i++)
+                Assert.AreEqual(id, (await observer.TryResolveEntryAsync(name))!.Id);
+
+            Task<DatabaseRegistryEntry?>[] concurrent = new Task<DatabaseRegistryEntry?>[32];
+            for (int i = 0; i < concurrent.Length; i++)
+                concurrent[i] = Task.Run(() => observer.TryResolveEntryAsync(name));
+            foreach (DatabaseRegistryEntry? entry in await Task.WhenAll(concurrent))
+                Assert.AreEqual(id, entry!.Id);
+
+            Assert.AreEqual(
+                1, Volatile.Read(ref counter.RegistryPointReads),
+                "the first stale resolve re-reads the name; the rest take its answer");
+            Assert.AreEqual(0, Volatile.Read(ref counter.RegistryScans));
+
+            // A further mutation elsewhere moves the stamp again, so the name is re-read again, once.
+            await mutator.RegisterAsync(NewName(), await mutator.AllocateIdAsync());
+            counter.Reset();
+            for (int i = 0; i < 5; i++)
+                Assert.AreEqual(id, (await observer.TryResolveEntryAsync(name))!.Id);
+            Assert.AreEqual(1, Volatile.Read(ref counter.RegistryPointReads));
+        }
+        finally
+        {
+            await mutator.DisposeAsync();
+            await observer.DisposeAsync();
+        }
+    }
+
+    /// <summary>
+    /// A re-read that finds the name unchanged must not move the cache-mutation epoch. The background sweep
+    /// adopts the generation only when the epoch did not move during its scan, and under load a stale node
+    /// re-reads names constantly: when every re-read moved the epoch, the sweep kept discarding its scan and
+    /// the node stayed stale for minutes.
+    /// </summary>
+    [Test]
+    public async Task AnUnchangedReReadLeavesTheEpochSoTheSweepCanAdopt()
+    {
+        (DatabaseRegistry mutator, DatabaseRegistry observer, CountingKahuna counter) =
+            await TwoNodesAsync(Options with { RegistryGenerationLeaseMs = 0 });
+        try
+        {
+            string name = NewName();
+            string id = await mutator.AllocateIdAsync();
+            await mutator.RegisterAsync(name, id);
+            Assert.AreEqual(id, (await observer.TryResolveEntryAsync(name))!.Id, "warm the observer's cache");
+
+            await mutator.RegisterAsync(NewName(), await mutator.AllocateIdAsync());
+
+            long epoch = observer.CacheMutationEpochForTesting;
+            counter.Reset();
+            Assert.AreEqual(id, (await observer.TryResolveEntryAsync(name))!.Id);
+            Assert.AreEqual(1, Volatile.Read(ref counter.RegistryPointReads), "precondition: the stale hit re-read the name");
+            Assert.AreEqual(epoch, observer.CacheMutationEpochForTesting, "an unchanged name is not a cache mutation");
+
+            await observer.GetBackgroundSnapshotAsync();
+
+            counter.Reset();
+            Assert.AreEqual(id, (await observer.TryResolveEntryAsync(name))!.Id);
+            Assert.AreEqual(0, Volatile.Read(ref counter.RegistryPointReads), "the sweep adopted the generation");
+        }
+        finally
+        {
+            await mutator.DisposeAsync();
+            await observer.DisposeAsync();
+        }
+    }
+
+    /// <summary>
+    /// Within one generation lease, a cache hit reads neither the name nor the generation stamp: the stamp
+    /// is read once per lease per node, not once per statement.
+    /// </summary>
+    [Test]
+    public async Task WithinTheLeaseAHitReadsNothing()
+    {
+        (DatabaseRegistry mutator, DatabaseRegistry observer, CountingKahuna counter) =
+            await TwoNodesAsync(Options with { RegistryGenerationLeaseMs = 60_000 });
+        try
+        {
+            string name = NewName();
+            string id = await mutator.AllocateIdAsync();
+            await mutator.RegisterAsync(name, id);
+            await observer.GetBackgroundSnapshotAsync();
+            Assert.AreEqual(id, (await observer.TryResolveEntryAsync(name))!.Id, "take the lease");
+
+            counter.Reset();
+            for (int i = 0; i < 50; i++)
+                Assert.AreEqual(id, (await observer.TryResolveEntryAsync(name))!.Id);
+
+            Assert.AreEqual(0, Volatile.Read(ref counter.GenerationReads), "the lease answers the generation");
+            Assert.AreEqual(0, Volatile.Read(ref counter.RegistryPointReads));
+        }
+        finally
+        {
+            await mutator.DisposeAsync();
+            await observer.DisposeAsync();
+        }
+    }
+
+    /// <summary>
+    /// A drop waits out the generation lease before it returns, so a node that took its lease before the
+    /// drop can no longer serve the dropped name from a fresh-looking cache once the drop has returned.
+    /// A registration needs no wait: a name the other node never cached misses and is read from KV.
+    /// </summary>
+    [Test]
+    public async Task ADropWaitsOutTheLeaseAndIsThenSeenByANodeHoldingOne()
+    {
+        const int leaseMs = 400;
+        (DatabaseRegistry mutator, DatabaseRegistry observer, CountingKahuna _) =
+            await TwoNodesAsync(Options with { RegistryGenerationLeaseMs = leaseMs });
+        try
+        {
+            string name = NewName();
+            string id = await mutator.AllocateIdAsync();
+            await mutator.RegisterAsync(name, id);
+            await observer.GetBackgroundSnapshotAsync();
+            Assert.AreEqual(id, (await observer.TryResolveEntryAsync(name))!.Id, "the observer holds a lease and a current hit");
+
+            string created = NewName();
+            string createdId = await mutator.AllocateIdAsync();
+            await mutator.RegisterAsync(created, createdId);
+            Assert.AreEqual(createdId, (await observer.TryResolveEntryAsync(created))!.Id,
+                "a new name is visible at once, lease or not");
+
+            Stopwatch drop = Stopwatch.StartNew();
+            await mutator.UnregisterAsync(name);
+            drop.Stop();
+
+            Assert.GreaterOrEqual(drop.ElapsedMilliseconds, leaseMs, "the drop returns only after the lease has lapsed");
+            Assert.IsNull(await observer.TryResolveEntryAsync(name),
+                "once the drop has returned, no node may resolve the dropped name");
         }
         finally
         {

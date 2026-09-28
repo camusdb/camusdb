@@ -543,6 +543,7 @@ public sealed class KvTransactionsManager : IDisposable
 
         for (int attempt = 0; attempt <= MaxStartRetries; attempt++)
         {
+            Diagnostics.QueryStageProfile.KahunaScope startCall = Diagnostics.QueryStageProfile.MeasureKahuna(Diagnostics.KahunaCallKind.Start);
             (type, handle) = await kahuna.LocateAndStartTransaction(
                 new KeyValueTransactionOptions
                 {
@@ -572,6 +573,7 @@ public sealed class KvTransactionsManager : IDisposable
                 },
                 cancellationToken
             ).ConfigureAwait(false);
+            startCall.Dispose();
 
             if (type is not (KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication))
                 break;
@@ -740,7 +742,8 @@ public sealed class KvTransactionsManager : IDisposable
             Untrack(tx);
             try
             {
-                await kahuna.LocateAndRollbackTransaction(tx.Handle, cancellationToken).ConfigureAwait(false);
+                using (Diagnostics.QueryStageProfile.MeasureKahuna(Diagnostics.KahunaCallKind.Rollback))
+                    await kahuna.LocateAndRollbackTransaction(tx.Handle, cancellationToken).ConfigureAwait(false);
             }
             catch
             {
@@ -868,10 +871,12 @@ public sealed class KvTransactionsManager : IDisposable
                     commitRequestIssued = true;
                     commitAttempts++;
 
+                    Diagnostics.QueryStageProfile.KahunaScope commitCall = Diagnostics.QueryStageProfile.MeasureKahuna(Diagnostics.KahunaCallKind.Commit);
                     (result, string? anchor) = await kahuna.LocateAndCommitTransaction(
                             tx.Handle,
                             cancellationToken
                         ).ConfigureAwait(false);
+                    commitCall.Dispose();
 
                     // Fold the coordinator's canonical record anchor onto the handle the moment it is known —
                     // including alongside a non-terminal MustRetry — so a finalize retried after the live
@@ -1201,7 +1206,8 @@ public sealed class KvTransactionsManager : IDisposable
         for (int attempt = 0; ; attempt++)
         {
             attempts++;
-            result = await kahuna.LocateAndRollbackTransaction(tx.Handle, cancellationToken).ConfigureAwait(false);
+            using (Diagnostics.QueryStageProfile.MeasureKahuna(Diagnostics.KahunaCallKind.Rollback))
+                result = await kahuna.LocateAndRollbackTransaction(tx.Handle, cancellationToken).ConfigureAwait(false);
 
             if (result != KeyValueResponseType.MustRetry)
                 break;

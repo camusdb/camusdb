@@ -309,6 +309,12 @@ initial_partitions: 1      # Raft partition count (>= 1). Unset, it is 1 in stan
 # fence_lease_ms: 30000
 # fence_lease_renew_interval_ms: 10000
 # keyspace_purge_batch_size: 512        # keys the DROP DATABASE purge scans and deletes per batch (>= 1)
+#
+# Registry generation lease (cluster mode): how long a node trusts its last read of the database
+# registry's change stamp before reading it again, instead of reading it under every statement.
+# DROP DATABASE and RENAME DATABASE wait out one lease before returning. Must be the same on every
+# node; 0 reads the stamp on every statement. Restart-only.
+# registry_generation_lease_ms: 250
 
 # ── Table statistics ──────────────────────────────────────────────────────────
 # Row-count estimates are updated in memory on every DML and flushed to storage at most once per

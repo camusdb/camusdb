@@ -195,6 +195,10 @@ public sealed class ServerDiagnosticsTests
             Is.EquivalentTo(new[] { "scanned", "returned" }));
         Assert.That(ServerDiagnostics.Tags.CoordinatorUnknown.All,
             Is.EquivalentTo(new[] { "released", "deferred", "dropped", "disabled", "no_keys" }));
+        Assert.That(ServerDiagnostics.Tags.AbortSite.All,
+            Is.EquivalentTo(new[] { "read", "read_many", "acquire_many", "set_many", "delete_many" }));
+        Assert.That(ServerDiagnostics.Tags.AbortDelivery.All,
+            Is.EquivalentTo(new[] { "value", "thrown" }));
     }
 
     [Test]

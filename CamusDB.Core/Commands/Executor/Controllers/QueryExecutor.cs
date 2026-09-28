@@ -1195,7 +1195,9 @@ internal sealed class QueryExecutor
 
         CancellationToken cancellationToken = ticket.CancellationToken;
 
-        ObjectIdValue? rowId = await table.Store.LookupUnique(ticket.TxnState, index.KvId, lookupKey, cancellationToken).ConfigureAwait(false);
+        ObjectIdValue? rowId;
+        using (CamusDB.Core.Diagnostics.QueryStageProfile.Measure(CamusDB.Core.Diagnostics.QueryStage.IndexLookup))
+            rowId = await table.Store.LookupUnique(ticket.TxnState, index.KvId, lookupKey, cancellationToken).ConfigureAwait(false);
 
         if (scanStats is not null)
             scanStats.KvPointLookups++;
@@ -1203,8 +1205,12 @@ internal sealed class QueryExecutor
         if (rowId is null)
             yield break;
 
-        ReadOnlyMemory<byte>? data = await table.Store.GetRow(ticket.TxnState, rowId.Value, cancellationToken, LargeValueFetch.Columns(table.Schema, plan.ScanRequiredColumns)).ConfigureAwait(false);
-        if (data is null || data.Value.Length == 0)
+        // A row read Kahuna aborts under contention is recorded on the ticket's sink when the consumer
+        // opted in; the scan then ends, and the consumer reports the abort instead of an empty result.
+        ReadOnlyMemory<byte>? data;
+        using (CamusDB.Core.Diagnostics.QueryStageProfile.Measure(CamusDB.Core.Diagnostics.QueryStage.RowGet))
+            data = await table.Store.GetRow(ticket.TxnState, rowId.Value, cancellationToken, LargeValueFetch.Columns(table.Schema, plan.ScanRequiredColumns), ticket.RetryableAborts).ConfigureAwait(false);
+        if (ticket.RetryableAborts is { HasAbort: true } || data is null || data.Value.Length == 0)
             yield break;
 
         probe?.AddRowRead();
@@ -1223,17 +1229,24 @@ internal sealed class QueryExecutor
             BorrowedDecode = QueryScanner.ShouldUseBorrowedDecode(plan),
         };
 
-        QueryRow row = await RowEncoder.DecodeToQueryRowAsync(
-            table.Schema,
-            txId,
-            resolvedRowId,
-            data.Value,
-            options,
-            plan.ScanRequiredColumns,
-            plan.TableSchemaVersion,
-            decodeState).ConfigureAwait(false);
+        QueryRow row;
+        bool meets;
+        using (CamusDB.Core.Diagnostics.QueryStageProfile.Measure(CamusDB.Core.Diagnostics.QueryStage.Decode))
+        {
+            row = await RowEncoder.DecodeToQueryRowAsync(
+                table.Schema,
+                txId,
+                resolvedRowId,
+                data.Value,
+                options,
+                plan.ScanRequiredColumns,
+                plan.TableSchemaVersion,
+                decodeState).ConfigureAwait(false);
 
-        if (await queryFilterer.MeetPlanFilterAsync(plan, row).ConfigureAwait(false))
+            meets = await queryFilterer.MeetPlanFilterAsync(plan, row).ConfigureAwait(false);
+        }
+
+        if (meets)
             yield return new(resolvedRowId, row);
     }
 
