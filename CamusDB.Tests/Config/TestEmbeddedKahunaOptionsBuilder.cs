@@ -597,17 +597,20 @@ public sealed class TestEmbeddedKahunaOptionsBuilder
     // ── Post-completion hold ─────────────────────────────────────────────────
 
     [Test]
-    public void Baselines_HoldTwoMsAfterABatchCompletes_ByDefault()
+    public void Baselines_HoldOneMsAfterABatchCompletes_ByDefault()
     {
         // Kahuna's own default is 0 (dispatch the next batch the instant one completes); CamusDB ships
-        // 2 ms so a fully occupied aggregator packs more items per Raft round (+6% at 128 workers with a
-        // lower write p50, free at low load — Kahuna fac7be26, 51311414 item 5). Every baseline carries it.
+        // 1 ms so a fully occupied aggregator packs more items per Raft round. The hold's timer fires
+        // about 1 ms late, so 1 ms configured is ~2 ms of accumulation; 2 ms was the default while the
+        // round was ~2.4 ms, and 1 ms measured +2.5% throughput with a shorter commit once the round
+        // reached ~1.6 ms, while 0 ms slowed the reads that share the partition executor. Every
+        // baseline carries it.
         string dataPath = "/tmp/hold-test";
         ConfigDefinition config = new() { DataDir = dataPath };
 
-        Assert.That(EmbeddedKahunaOptionsBuilder.DefaultKeyValueWritePostCompletionHoldMs, Is.EqualTo(2));
-        Assert.That(EmbeddedKahunaOptionsBuilder.StandaloneRocksDbBaseline(dataPath).KeyValueWritePostCompletionHoldMs, Is.EqualTo(2));
-        Assert.That(EmbeddedKahunaOptionsBuilder.ClusterBaseline(config, CamusDBOptions.Default).KeyValueWritePostCompletionHoldMs, Is.EqualTo(2));
+        Assert.That(EmbeddedKahunaOptionsBuilder.DefaultKeyValueWritePostCompletionHoldMs, Is.EqualTo(1));
+        Assert.That(EmbeddedKahunaOptionsBuilder.StandaloneRocksDbBaseline(dataPath).KeyValueWritePostCompletionHoldMs, Is.EqualTo(1));
+        Assert.That(EmbeddedKahunaOptionsBuilder.ClusterBaseline(config, CamusDBOptions.Default).KeyValueWritePostCompletionHoldMs, Is.EqualTo(1));
         Assert.That(new EmbeddedKahunaOptions().KeyValueWritePostCompletionHoldMs, Is.EqualTo(0), "the Kahuna default this baseline deliberately departs from");
     }
 
