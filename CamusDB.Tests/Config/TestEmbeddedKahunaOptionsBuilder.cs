@@ -307,6 +307,47 @@ public sealed class TestEmbeddedKahunaOptionsBuilder
         Assert.That(standalone.StagedBaseFenceRetentionMs, Is.EqualTo(900_000));
     }
 
+    // ── Materialize on resolve ───────────────────────────────────────────────
+
+    [Test]
+    public void DurableMaterializeOnResolve_UnsetKeepsKahunaDefaultOffOnBothBaselines()
+    {
+        // The record shape is a per-group property that stays off until it has passed two clean fault
+        // soaks, and an older node resolving a materializing settle loses the write: CamusDB states no
+        // baseline of its own, so an unset key must leave Kahuna's default (off) untouched.
+        ConfigDefinition config = new() { DataDir = "/data/camus", Mode = "cluster", InitialPartitions = 3 };
+
+        EmbeddedKahunaOptions cluster = EmbeddedKahunaOptionsBuilder.BuildCluster(config, CamusDBOptions.Default);
+        EmbeddedKahunaOptions standalone =
+            EmbeddedKahunaOptionsBuilder.BuildStandaloneRocksDb("/tmp/materialize-db", new KahunaOptionsConfig(), CamusDBOptions.Default);
+
+        Assert.That(new EmbeddedKahunaOptions().DurableMaterializeOnResolve, Is.False, "the Kahuna default this key passes through");
+        Assert.That(cluster.DurableMaterializeOnResolve, Is.False);
+        Assert.That(standalone.DurableMaterializeOnResolve, Is.False);
+    }
+
+    [Test]
+    public void DurableMaterializeOnResolve_OverridesBothBaselines()
+    {
+        // The flag-on measurement and the eventual default flip both depend on the stated value reaching
+        // Kahuna on every baseline; an explicit false must be a value too, so a rolling upgrade can pin it off.
+        ConfigDefinition on = new()
+        {
+            DataDir = "/data/camus",
+            Kahuna = new KahunaOptionsConfig { DurableMaterializeOnResolve = true },
+        };
+        ConfigDefinition off = new()
+        {
+            DataDir = "/data/camus",
+            Kahuna = new KahunaOptionsConfig { DurableMaterializeOnResolve = false },
+        };
+
+        Assert.That(EmbeddedKahunaOptionsBuilder.BuildCluster(on, CamusDBOptions.Default).DurableMaterializeOnResolve, Is.True);
+        Assert.That(EmbeddedKahunaOptionsBuilder.BuildStandaloneRocksDb("/tmp/materialize-db", on.Kahuna, CamusDBOptions.Default).DurableMaterializeOnResolve, Is.True);
+        Assert.That(EmbeddedKahunaOptionsBuilder.BuildCluster(off, CamusDBOptions.Default).DurableMaterializeOnResolve, Is.False);
+        Assert.That(EmbeddedKahunaOptionsBuilder.BuildStandaloneRocksDb("/tmp/materialize-db", off.Kahuna, CamusDBOptions.Default).DurableMaterializeOnResolve, Is.False);
+    }
+
     [Test]
     public void RevisionRetention_DefaultsToPitrWindowOnPersistentBaselines()
     {

@@ -178,6 +178,25 @@ gate on will fail to start. Upgrading such a deployment:
 A cluster created on a build that defaults it on needs none of this — its first snapshot already carries
 a ledger.
 
+### Materialize on resolve
+
+`kahuna.durable_materialize_on_resolve` (default **off**, Kahuna's own default) changes the record shape of
+a committed durable transaction: the commit's settle installs each committed value from the prepared
+intent on every replica, so Kahuna writes no materialization record per key. On the anchor partition a
+two-row transaction then costs about four Raft entries instead of six (the one-phase bundle's three plus
+one settle) and about two scheduler submissions instead of four; followers apply fewer entries and a
+device writes fewer bytes per commit. CamusDB does not set it in its baselines: the shape is a per-group
+property, and it stays off until it has passed two clean two-hour fault soaks. Setting it here passes the
+value through unchanged; unset keeps Kahuna's default.
+
+Two operating rules, both enforced by the record shape rather than by CamusDB:
+
+- **Every node first, then the flag.** Every node must run a Kahuna build that installs on a
+  materializing settle (Kahuna.Core 1.10.1 or later) before any node turns this on. An older node resolves
+  the intent without installing the value and loses that write locally. Turning it off is safe at any
+  time, so a rolling upgrade runs with it off and turns it on afterwards.
+- **Same value on every node of the group**, for the same reason as the one-phase gate above.
+
 ### Persistent MVCC revision retention
 
 Every version of every row is a physical row in the KV store. Without pruning, a hot table's history —

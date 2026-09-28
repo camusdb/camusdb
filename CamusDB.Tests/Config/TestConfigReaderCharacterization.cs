@@ -234,6 +234,15 @@ public sealed class TestConfigReaderCharacterization
     }
 
     [Test]
+    public void ReadsDurableMaterializeOnResolve_AndLeavesItUnsetByDefault()
+    {
+        Assert.That(new ConfigReader().Read("kahuna:\n  durable_materialize_on_resolve: true").Kahuna.DurableMaterializeOnResolve, Is.True);
+        Assert.That(new ConfigReader().Read("kahuna:\n  durable_materialize_on_resolve: false").Kahuna.DurableMaterializeOnResolve, Is.False);
+        Assert.That(new ConfigReader().Read("kahuna:\n  key_value_write_linger_ms: 1").Kahuna.DurableMaterializeOnResolve, Is.Null,
+            "unset must stay unset so Kahuna's own default applies");
+    }
+
+    [Test]
     public void ReadsEveryWalShardTuningKey()
     {
         // All eight in one document, each at a non-default value, so a key that parses into the wrong

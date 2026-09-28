@@ -98,6 +98,7 @@ public sealed class KahunaOptionsConfig
         "transaction_outcome_retention_ttl_ms",
         "transaction_outcome_retention_max",
         "one_phase_apply_time_validation",
+        "durable_materialize_on_resolve",
         "staged_base_fence_retention_ms",
         "scan_page_retry_budget_ms",
         "persistent_revision_retention_count",
@@ -729,6 +730,30 @@ public sealed class KahunaOptionsConfig
     /// Maps to <see cref="Kahuna.EmbeddedKahunaOptions.OnePhaseApplyTimeValidation"/>.
     /// </summary>
     public bool? OnePhaseApplyTimeValidation { get; set; }
+
+    /// <summary>
+    /// Materialize on resolve: when on, a committed durable transaction's settle installs each committed
+    /// value from the prepared intent on every replica, so Kahuna writes no materialization record per key.
+    /// On the anchor partition a two-row transaction then costs about four Raft entries instead of six
+    /// (the one-phase bundle's three plus one settle), and about two scheduler submissions instead of
+    /// four; followers apply fewer entries and a device writes fewer bytes per commit.
+    ///
+    /// <para><b>Stated by the operator or not at all.</b> CamusDB keeps Kahuna's default (off) rather than a
+    /// baseline of its own: the record shape is a per-group property, and it stays off until the change has
+    /// passed two clean two-hour fault soaks. Two rules once it is turned on:</para>
+    /// <list type="bullet">
+    /// <item><description><b>Every node first, then the flag.</b> Every node must run a Kahuna build that
+    /// installs on a materializing settle (1.10.1 or later) before any node turns this on; an older node
+    /// resolves the intent without installing the value and loses that write locally. Turning it off is
+    /// safe at any time.</description></item>
+    /// <item><description><b>Same value on every node of the group</b>, as for
+    /// <see cref="OnePhaseApplyTimeValidation"/>.</description></item>
+    /// </list>
+    ///
+    /// Maps to <see cref="Kahuna.EmbeddedKahunaOptions.DurableMaterializeOnResolve"/>; unset keeps Kahuna's
+    /// default of off.
+    /// </summary>
+    public bool? DurableMaterializeOnResolve { get; set; }
 
     /// <summary>
     /// Milliseconds the prepare-apply staged-base fence remembers a key's last transactionally committed

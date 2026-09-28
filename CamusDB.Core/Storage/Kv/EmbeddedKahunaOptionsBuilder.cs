@@ -499,6 +499,15 @@ public static class EmbeddedKahunaOptionsBuilder
         if (kahuna.StagedBaseFenceRetentionMs is int stagedBaseFenceRetention)
             baseline.StagedBaseFenceRetentionMs = stagedBaseFenceRetention;
 
+        // Materialize on resolve: the commit's settle installs the committed values on every replica and no
+        // materialization record is written, about two Raft entries fewer per two-row transaction. Stated
+        // by the operator or not at all: Kahuna's default (off) stays, because every node must run a build
+        // that installs on a materializing settle before any node turns it on (an older node resolves
+        // without installing and loses that write locally), and the shape stays off until it has passed
+        // two clean fault soaks. Turning it off is safe at any time.
+        if (kahuna.DurableMaterializeOnResolve is bool materializeOnResolve)
+            baseline.DurableMaterializeOnResolve = materializeOnResolve;
+
         // Per-page scan retry budget. Kahuna's default already sits below the shipped client command
         // deadline (5 s vs 10 s) so the named failure is observable; a deployment that raises its client
         // deadline may raise this with it, keeping the budget strictly below the deadline.
