@@ -104,7 +104,7 @@ internal sealed class KvRowAccessor
         if (tx.IsolationLevel == CamusIsolationLevel.Serializable && tx.TransactionMode == CamusTransactionMode.ReadWrite)
             await locks.AcquireSharedPointLockAsync(tx, keys.RowBucketPrefix, key, cancellationToken).ConfigureAwait(false);
 
-        BranchKvValue probe = await branch.ProbeRaw(tx.TransactionId, tx.ReadTimestamp, key, cancellationToken, tx.FoldReads ? tx.CoordinatorKey : "", aborts).ConfigureAwait(false);
+        BranchKvValue probe = await branch.ProbeRaw(tx.TransactionId, tx.ReadTimestamp, key, cancellationToken, tx.ReadRegistrationKey(key), aborts).ConfigureAwait(false);
         if (aborts is { HasAbort: true })
             return null;
 
@@ -167,13 +167,14 @@ internal sealed class KvRowAccessor
         for (int i = 0; i < rowIds.Count; i++)
             rowKeys[i] = keys.BuildRowKey(rowIds[i]);
 
-        // Register the batch read for read-set folding on the optimistic / TrackAndValidate path; empty
-        // coordinatorKey leaves it unregistered (pessimistic / snapshot).
+        // Register the batch read for read-set folding on the optimistic / TrackAndValidate path, and
+        // when the batch holds a row this transaction wrote (see KvTransaction.ReadRegistrationKey); an
+        // empty coordinatorKey leaves it unregistered (pessimistic / snapshot).
         BranchKvValue[] level0 = await branch.ProbeManyRaw(
             tx.TransactionId,
             tx.ReadTimestamp,
             rowKeys,
-            tx.FoldReads ? tx.CoordinatorKey : "",
+            tx.ReadRegistrationKey(rowKeys),
             "get_rows_batch",
             cancellationToken,
             aborts).ConfigureAwait(false);
