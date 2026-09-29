@@ -119,12 +119,49 @@ openssl req -new -nodes \
   -key "$OUT_DIR/development-private.key" \
   -out "$OUT_DIR/development-certificate.csr"
 
-echo "==> self-signing the certificate (10-year validity, SAN + EKU from $CNF)"
-openssl x509 -req \
+# notBefore is backdated one day. A node whose wall clock runs behind the moment the certificate
+# was made (a clock-skew fault in a chaos run, or a host that regenerated the certificate just
+# before starting the cluster) otherwise rejects every peer's certificate as not yet valid, and
+# the cluster cannot form. `openssl x509 -req` cannot set a start date before OpenSSL 3.4, so the
+# certificate is self-signed with `openssl ca -selfsign`, which accepts one on every version in use.
+# The date commands try GNU syntax first and then BSD (macOS) syntax.
+START_DATE=$(date -u -d '1 day ago' +%Y%m%d%H%M%SZ 2>/dev/null || date -u -v-1d +%Y%m%d%H%M%SZ)
+END_DATE=$(date -u -d '3650 days' +%Y%m%d%H%M%SZ 2>/dev/null || date -u -v+3650d +%Y%m%d%H%M%SZ)
+
+CA_DIR=$(mktemp -d)
+trap 'rm -rf "$CA_DIR"' EXIT
+: > "$CA_DIR/index.txt"
+openssl rand -hex 16 > "$CA_DIR/serial"
+cat > "$CA_DIR/ca.cnf" <<EOF
+[ca]
+default_ca = dev
+
+[dev]
+database        = $CA_DIR/index.txt
+new_certs_dir   = $CA_DIR
+serial          = $CA_DIR/serial
+default_md      = sha256
+policy          = keep_subject
+preserve        = yes
+unique_subject  = no
+copy_extensions = none
+
+[keep_subject]
+countryName            = optional
+stateOrProvinceName    = optional
+localityName           = optional
+organizationName       = optional
+commonName             = supplied
+EOF
+
+echo "==> self-signing the certificate (valid from 1 day ago for 10 years, SAN + EKU from $CNF)"
+openssl ca -batch -notext -selfsign \
+  -config "$CA_DIR/ca.cnf" \
+  -keyfile "$OUT_DIR/development-private.key" \
   -in "$OUT_DIR/development-certificate.csr" \
-  -signkey "$OUT_DIR/development-private.key" \
   -out "$OUT_DIR/development-certificate.crt" \
-  -days 3650 \
+  -startdate "$START_DATE" \
+  -enddate "$END_DATE" \
   -extensions req_ext \
   -extfile "$CNF"
 
