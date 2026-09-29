@@ -271,12 +271,12 @@ internal sealed class DatabaseOpener
             branchName,
             options.BranchSnapshotHoldLeaseMs,
             ResolveChainHoldIds,
-            persistLostAsync: reason => registry.MarkSnapshotProtectionLostAsync(branchId, reason));
+            persistLostAsync: reason => registry.DropMarkers.MarkSnapshotProtectionLostAsync(branchId, reason));
 
         // Fast-fail path only: a marker written by the renewer (or by another node's guard) makes
         // the very first read fail with the definitive recorded reason. A transient miss here is
         // harmless — a genuinely lost chain still fails closed through the guard's refused renew.
-        string? lostReason = await registry.TryGetSnapshotProtectionLostAsync(branchId).ConfigureAwait(false);
+        string? lostReason = await registry.DropMarkers.TryGetSnapshotProtectionLostAsync(branchId).ConfigureAwait(false);
         if (lostReason is not null)
             guard.LatchLostFromDurableMarker(lostReason);
 

@@ -176,7 +176,7 @@ public sealed class TestBranchSnapshotProtection : BaseTest
         Assert.That(rows[0].Row["v"].StrValue, Is.EqualTo("original"),
             "the fork-point value must survive churn during the lapse");
 
-        Assert.That(await sharedRegistry!.TryGetSnapshotProtectionLostAsync(branch.Id), Is.Null,
+        Assert.That(await sharedRegistry!.DropMarkers.TryGetSnapshotProtectionLostAsync(branch.Id), Is.Null,
             "a recoverable lapse must not be recorded as lost protection");
 
         (_, _, int liveHolds) = await root.Kahuna.Kahuna.GetSnapshotFloor(CancellationToken.None);
@@ -220,7 +220,7 @@ public sealed class TestBranchSnapshotProtection : BaseTest
             "a write whose uniqueness check depends on the frozen parent view must also fail closed");
 
         // The guard durably recorded the loss so later opens fail fast everywhere.
-        Assert.That(await sharedRegistry.TryGetSnapshotProtectionLostAsync(branch.Id), Is.Not.Null,
+        Assert.That(await sharedRegistry.DropMarkers.TryGetSnapshotProtectionLostAsync(branch.Id), Is.Not.Null,
             "the guard must persist the lost-protection marker");
     }
 
@@ -243,7 +243,7 @@ public sealed class TestBranchSnapshotProtection : BaseTest
         Assert.That(await renewer.RenewDueHoldsAsync(CancellationToken.None), Is.EqualTo(0),
             "the sweep must renew zero holds once the hold is gone");
 
-        Assert.That(await sharedRegistry.TryGetSnapshotProtectionLostAsync(branch.Id), Is.Not.Null,
+        Assert.That(await sharedRegistry.DropMarkers.TryGetSnapshotProtectionLostAsync(branch.Id), Is.Not.Null,
             "a definitive renewal refusal must durably mark the branch's protection as lost");
 
         // A separate engine (fresh descriptor cache — the restart/failover shape) opens the branch

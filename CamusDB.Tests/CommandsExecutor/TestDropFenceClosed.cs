@@ -76,7 +76,7 @@ public sealed class TestDropFenceClosed : SharedNodeBaseTest
 
         // The parent survives: still registered, no drop-intent marker, and still openable.
         Assert.That(sharedRegistry.Get(rootName), Is.Not.Null, "the parent must remain registered");
-        Assert.That(await faultRegistry.HasDropIntentAsync(rootId), Is.False,
+        Assert.That(await faultRegistry.DropMarkers.HasDropIntentAsync(rootId), Is.False,
             "no drop-intent marker may be left behind after a failed-closed drop");
 
         CommandExecutor cleanExecutor = CreateCommandExecutor();

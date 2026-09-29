@@ -79,7 +79,7 @@ public sealed class TestBranchCreateFaultInjection : BaseTest
 
     /// <summary>
     /// Fault fake: returns a scripted sequence of statuses for the drop-intent GET, so the retry /
-    /// present / indeterminate semantics of <see cref="DatabaseRegistry.HasDropIntentAsync"/> can be
+    /// present / indeterminate semantics of <see cref="RegistryDropMarkers.HasDropIntentAsync"/> can be
     /// asserted deterministically.
     /// </summary>
     private sealed class ScriptedDropIntentKahuna : DelegatingKahuna
@@ -203,7 +203,7 @@ public sealed class TestBranchCreateFaultInjection : BaseTest
             "the branch's snapshot hold must NOT be released while it remains registered");
 
         // The pending-create recovery marker is still present.
-        Assert.That(await faultRegistry.PendingMarkerExistsForTestingAsync(branchEntry!.Id), Is.True,
+        Assert.That(await faultRegistry.PendingBranches.PendingMarkerExistsForTestingAsync(branchEntry!.Id), Is.True,
             "the pending-create marker must be retained as the recovery handle");
 
         // The branch metadata namespace was NOT purged.
@@ -226,7 +226,7 @@ public sealed class TestBranchCreateFaultInjection : BaseTest
             [KeyValueResponseType.MustRetry, KeyValueResponseType.WaitingForReplication, KeyValueResponseType.Get]);
         await using DatabaseRegistry registry = await DatabaseRegistry.OpenForTestingAsync(TestNode!, fault, Options);
 
-        bool present = await registry.HasDropIntentAsync("some-source-id");
+        bool present = await registry.DropMarkers.HasDropIntentAsync("some-source-id");
 
         Assert.That(present, Is.True, "a present marker after transient retries must report a drop in progress");
         Assert.That(fault.GetCalls, Is.EqualTo(3), "transient statuses must be retried, not treated as absent");
@@ -240,7 +240,7 @@ public sealed class TestBranchCreateFaultInjection : BaseTest
         ScriptedDropIntentKahuna fault = new(TestNode!.Kahuna, [KeyValueResponseType.DoesNotExist]);
         await using DatabaseRegistry registry = await DatabaseRegistry.OpenForTestingAsync(TestNode!, fault, Options);
 
-        Assert.That(await registry.HasDropIntentAsync("some-source-id"), Is.False,
+        Assert.That(await registry.DropMarkers.HasDropIntentAsync("some-source-id"), Is.False,
             "only an authoritative DoesNotExist may report no drop");
     }
 
@@ -256,7 +256,7 @@ public sealed class TestBranchCreateFaultInjection : BaseTest
         await using DatabaseRegistry registry = await DatabaseRegistry.OpenForTestingAsync(TestNode!, fault, Options);
 
         CamusDBException? ex = Assert.ThrowsAsync<CamusDBException>(async () =>
-            await registry.HasDropIntentAsync("some-source-id"));
+            await registry.DropMarkers.HasDropIntentAsync("some-source-id"));
         Assert.That(ex!.Code, Is.EqualTo(CamusDBErrorCodes.TransactionMustRetry),
             "an indeterminate fence read must throw a retryable error, not return false");
     }
@@ -294,7 +294,7 @@ public sealed class TestBranchCreateFaultInjection : BaseTest
         await using DatabaseRegistry registry = await DatabaseRegistry.OpenForTestingAsync(TestNode!, fault, Options);
 
         CamusDBException? ex = Assert.ThrowsAsync<CamusDBException>(async () =>
-            await registry.HasDropIntentAsync("some-source-id"));
+            await registry.DropMarkers.HasDropIntentAsync("some-source-id"));
         Assert.That(ex!.Code, Is.EqualTo(CamusDBErrorCodes.TransactionMustRetry));
     }
 
@@ -410,7 +410,7 @@ public sealed class TestBranchCreateFaultInjection : BaseTest
         Assert.That(liveHolds, Is.GreaterThanOrEqualTo(1),
             "the published branch's snapshot hold must not be released");
 
-        Assert.That(await registry.PendingMarkerExistsForTestingAsync(entry.Id), Is.False,
+        Assert.That(await registry.PendingBranches.PendingMarkerExistsForTestingAsync(entry.Id), Is.False,
             "a successful create must clear its pending-create marker");
     }
 
@@ -515,7 +515,7 @@ public sealed class TestBranchCreateFaultInjection : BaseTest
         string? branchId = fault.LastArmedDatabaseId;
         Assert.That(branchId, Is.Not.Null, "sanity: the create must have allocated a branch id");
 
-        Assert.That(await registry.PendingMarkerExistsForTestingAsync(branchId!), Is.True,
+        Assert.That(await registry.PendingBranches.PendingMarkerExistsForTestingAsync(branchId!), Is.True,
             "the pending-create marker must be retained as the recovery handle");
 
         (_, _, int liveHolds) = await rootDb.Kahuna.Kahuna.GetSnapshotFloor(CancellationToken.None);
@@ -629,7 +629,7 @@ public sealed class TestBranchCreateFaultInjection : BaseTest
         Assert.That(gate.ObservedBranchId, Is.Not.Null,
             "sanity: the create must have written its pending-create marker before pausing");
 
-        Assert.That(await authoritativeRegistry.PendingMarkerExistsForTestingAsync(gate.ObservedBranchId!), Is.False,
+        Assert.That(await authoritativeRegistry.PendingBranches.PendingMarkerExistsForTestingAsync(gate.ObservedBranchId!), Is.False,
             "the pending-create marker must be cleared after a clean abort");
 
         int branchMeta = await CountMetaKeysHeadlessAsync(kahuna, gate.ObservedBranchId!);
@@ -936,7 +936,7 @@ public sealed class TestBranchCreateFaultInjection : BaseTest
             await kahuna.LocateAndTrySetKeyValue(
                 HLCTimestamp.Zero, metaKey, [0x01], null, -1,
                 KeyValueFlags.Set, 0, KeyValueDurability.Persistent, CancellationToken.None);
-        await writerRegistry.TrackPendingBranchAsync(orphanId);
+        await writerRegistry.PendingBranches.TrackPendingBranchAsync(orphanId);
 
         Assert.That(await CountMetaKeysHeadlessAsync(kahuna, orphanId), Is.EqualTo(metaKeys.Length),
             "sanity: the orphan namespace must be present before the scrub");
@@ -949,7 +949,7 @@ public sealed class TestBranchCreateFaultInjection : BaseTest
 
         Assert.That(fault.MetaDeleteAttempts, Is.GreaterThan(0),
             "sanity: the scrub must have attempted (and been refused) the branch meta deletes");
-        Assert.That(await writerRegistry.PendingMarkerExistsForTestingAsync(orphanId), Is.True,
+        Assert.That(await writerRegistry.PendingBranches.PendingMarkerExistsForTestingAsync(orphanId), Is.True,
             "an incomplete purge must keep the pending-create marker: it is the only recovery handle on the namespace");
         Assert.That(await CountMetaKeysHeadlessAsync(kahuna, orphanId), Is.EqualTo(metaKeys.Length),
             "the namespace must be intact after the failed purge");
@@ -961,7 +961,7 @@ public sealed class TestBranchCreateFaultInjection : BaseTest
 
         Assert.That(await CountMetaKeysHeadlessAsync(kahuna, orphanId), Is.EqualTo(0),
             "a later sweep must finish the purge once deletes succeed");
-        Assert.That(await writerRegistry.PendingMarkerExistsForTestingAsync(orphanId), Is.False,
+        Assert.That(await writerRegistry.PendingBranches.PendingMarkerExistsForTestingAsync(orphanId), Is.False,
             "the marker is cleared only after the purge verifiably drained the namespace");
     }
 
@@ -1005,7 +1005,7 @@ public sealed class TestBranchCreateFaultInjection : BaseTest
             "the aborted branch must not remain registered");
         (_, _, int liveHolds) = await kahuna.GetSnapshotFloor(CancellationToken.None);
         Assert.That(liveHolds, Is.EqualTo(0), "a clean abort must release the branch's snapshot hold");
-        Assert.That(await faultRegistry.PendingMarkerExistsForTestingAsync(branchId!), Is.True,
+        Assert.That(await faultRegistry.PendingBranches.PendingMarkerExistsForTestingAsync(branchId!), Is.True,
             "an incomplete inline purge must keep the pending-create marker as the scrubber's recovery handle");
         Assert.That(await CountMetaKeysHeadlessAsync(kahuna, branchId!), Is.GreaterThan(0),
             "the copied metadata must still be present after the failed inline purge");
@@ -1017,7 +1017,7 @@ public sealed class TestBranchCreateFaultInjection : BaseTest
 
         Assert.That(await CountMetaKeysHeadlessAsync(kahuna, branchId!), Is.EqualTo(0),
             "the startup scrub must finish the purge the abort could not");
-        Assert.That(await afterRestart.PendingMarkerExistsForTestingAsync(branchId!), Is.False,
+        Assert.That(await afterRestart.PendingBranches.PendingMarkerExistsForTestingAsync(branchId!), Is.False,
             "the marker is cleared only after the scrub verifiably drained the namespace");
         Assert.That(await afterRestart.TryResolveEntryAsync(rootName), Is.Not.Null,
             "the parent must be unaffected");

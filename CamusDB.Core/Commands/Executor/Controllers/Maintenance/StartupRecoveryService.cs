@@ -92,9 +92,9 @@ internal sealed class StartupRecoveryService
             if (ct.IsCancellationRequested)
                 break;
 
-            string fenceId = DatabaseRegistry.TableFenceId(database.Id, job.ViewTableId);
+            string fenceId = RegistryDropMarkers.TableFenceId(database.Id, job.ViewTableId);
 
-            if (!await registry.AcquireDropIntentAsync(fenceId).ConfigureAwait(false))
+            if (!await registry.DropMarkers.AcquireDropIntentAsync(fenceId).ConfigureAwait(false))
                 continue; // a refresh is running right now — this storage is not abandoned
 
             try
@@ -105,7 +105,7 @@ internal sealed class StartupRecoveryService
             }
             finally
             {
-                await registry.ReleaseDropIntentAsync(fenceId).ConfigureAwait(false);
+                await registry.DropMarkers.ReleaseDropIntentAsync(fenceId).ConfigureAwait(false);
             }
         }
 
@@ -180,7 +180,7 @@ internal sealed class StartupRecoveryService
             // Clear this node's own stale drop-intent markers first so that a marker left by a crash
             // does not permanently block future drops. Owner-scoped: a restarting node must not delete
             // a drop-intent another live node currently holds for an in-flight drop.
-            int intentsCleared = await registry.ClearOwnStaleDropIntentsAsync().ConfigureAwait(false);
+            int intentsCleared = await registry.DropMarkers.ClearOwnStaleDropIntentsAsync().ConfigureAwait(false);
             if (intentsCleared > 0 && context.Logger.IsEnabled(LogLevel.Information))
                 context.Logger.LogInformation("Cleared {Count} stale drop-intent marker(s) on startup", intentsCleared);
 
@@ -190,7 +190,7 @@ internal sealed class StartupRecoveryService
             // row/index/stats data with no other reclaim. Each resume takes the id's fence and rechecks
             // AUTHORITATIVE registry state under it (not the local cache) so a concurrent relink/GC of the
             // same id can never interleave with the resumed purge.
-            foreach (string droppingId in await registry.LoadOwnDroppingIdsAsync().ConfigureAwait(false))
+            foreach (string droppingId in await registry.DropMarkers.LoadOwnDroppingIdsAsync().ConfigureAwait(false))
             {
                 try
                 {
@@ -198,13 +198,13 @@ internal sealed class StartupRecoveryService
                     // UnregisterAsync — nothing was purged — so just clear the stale marker.
                     if (await registry.TryResolveNameByIdAsync(droppingId).ConfigureAwait(false) is not null)
                     {
-                        await registry.ClearDroppingAsync(droppingId).ConfigureAwait(false);
+                        await registry.DropMarkers.ClearDroppingAsync(droppingId).ConfigureAwait(false);
                         continue;
                     }
 
                     // Fence the id for the resumed purge. If we cannot take it, another operation holds
                     // it (a relink/GC on this or another node); leave the marker for a later resume.
-                    if (!await registry.AcquireDropIntentAsync(droppingId).ConfigureAwait(false))
+                    if (!await registry.DropMarkers.AcquireDropIntentAsync(droppingId).ConfigureAwait(false))
                         continue;
 
                     try
@@ -212,7 +212,7 @@ internal sealed class StartupRecoveryService
                         // Re-check liveness under the fence before destroying anything.
                         if (await registry.TryResolveNameByIdAsync(droppingId).ConfigureAwait(false) is not null)
                         {
-                            await registry.ClearDroppingAsync(droppingId).ConfigureAwait(false);
+                            await registry.DropMarkers.ClearDroppingAsync(droppingId).ConfigureAwait(false);
                             continue;
                         }
 
@@ -222,13 +222,13 @@ internal sealed class StartupRecoveryService
                         // Clear the marker only if the resumed purge verifiably completed; otherwise
                         // leave it so the NEXT startup resumes again (never abandon leaked keys).
                         if (await databaseDropper.PurgeKeyspaceByIdAsync(node.Kahuna, droppingId, null).ConfigureAwait(false))
-                            await registry.ClearDroppingAsync(droppingId).ConfigureAwait(false);
+                            await registry.DropMarkers.ClearDroppingAsync(droppingId).ConfigureAwait(false);
                         else
                             context.Logger.LogWarning("Resumed purge for id {DbId} is still incomplete; leaving marker for the next startup", droppingId);
                     }
                     finally
                     {
-                        await registry.ReleaseDropIntentAsync(droppingId).ConfigureAwait(false);
+                        await registry.DropMarkers.ReleaseDropIntentAsync(droppingId).ConfigureAwait(false);
                     }
                 }
                 catch (Exception ex)
@@ -237,7 +237,7 @@ internal sealed class StartupRecoveryService
                 }
             }
 
-            List<string> orphanIds = await registry.LoadReclaimablePendingBranchIdsAsync().ConfigureAwait(false);
+            List<string> orphanIds = await registry.PendingBranches.LoadReclaimablePendingBranchIdsAsync().ConfigureAwait(false);
             if (orphanIds.Count == 0)
                 return;
 
@@ -259,7 +259,7 @@ internal sealed class StartupRecoveryService
                     // marker cleared — never a purge.
                     if (await registry.TryResolveEntryByIdAsync(orphanId).ConfigureAwait(false) is not null)
                     {
-                        await registry.ClearPendingBranchAsync(orphanId).ConfigureAwait(false);
+                        await registry.PendingBranches.ClearPendingBranchAsync(orphanId).ConfigureAwait(false);
                         continue;
                     }
 
@@ -267,7 +267,7 @@ internal sealed class StartupRecoveryService
                     // above: relink and GC serialize on the same per-id fence, so nothing revives
                     // or reclaims this id while the fence is held. If the fence is unavailable,
                     // another operation is live on the id — leave the marker for a later pass.
-                    if (!await registry.AcquireDropIntentAsync(orphanId).ConfigureAwait(false))
+                    if (!await registry.DropMarkers.AcquireDropIntentAsync(orphanId).ConfigureAwait(false))
                         continue;
 
                     try
@@ -275,7 +275,7 @@ internal sealed class StartupRecoveryService
                         // Re-check registration under the fence before the destructive purge.
                         if (await registry.TryResolveEntryByIdAsync(orphanId).ConfigureAwait(false) is not null)
                         {
-                            await registry.ClearPendingBranchAsync(orphanId).ConfigureAwait(false);
+                            await registry.PendingBranches.ClearPendingBranchAsync(orphanId).ConfigureAwait(false);
                             continue;
                         }
 
@@ -283,9 +283,9 @@ internal sealed class StartupRecoveryService
                         // CREATE DATABASE ... RELINK until the GC retention window elapses.
                         // A purge here would break the retained-data invariant that record
                         // documents, so only the marker is cleared.
-                        if (await registry.TryGetDatabaseOrphanAsync(orphanId).ConfigureAwait(false) is not null)
+                        if (await registry.Orphans.TryGetDatabaseOrphanAsync(orphanId).ConfigureAwait(false) is not null)
                         {
-                            await registry.ClearPendingBranchAsync(orphanId).ConfigureAwait(false);
+                            await registry.PendingBranches.ClearPendingBranchAsync(orphanId).ConfigureAwait(false);
                             continue;
                         }
 
@@ -294,7 +294,7 @@ internal sealed class StartupRecoveryService
                         // marker is the only discovery handle on these keys.
                         if (await PurgeBranchMetaNamespaceAsync(orphanId, kahuna).ConfigureAwait(false))
                         {
-                            await registry.ClearPendingBranchAsync(orphanId).ConfigureAwait(false);
+                            await registry.PendingBranches.ClearPendingBranchAsync(orphanId).ConfigureAwait(false);
 
                             if (context.Logger.IsEnabled(LogLevel.Information))
                                 context.Logger.LogInformation("Purged orphaned meta namespace for branch id {BranchId}", orphanId);
@@ -308,7 +308,7 @@ internal sealed class StartupRecoveryService
                     }
                     finally
                     {
-                        await registry.ReleaseDropIntentAsync(orphanId).ConfigureAwait(false);
+                        await registry.DropMarkers.ReleaseDropIntentAsync(orphanId).ConfigureAwait(false);
                     }
                 }
                 catch (Exception ex)

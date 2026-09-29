@@ -199,7 +199,7 @@ internal sealed class TestDeferredDrop : SharedNodeBaseTest
         Assert.Greater(await CountKeysAsync(metaBucket, metaPrefix), 0, "deferred drop must retain meta keys");
 
         // Orphan record present, keyed by the preserved id and carrying the former name.
-        OrphanDatabaseRecord? orphan = await sharedRegistry!.TryGetDatabaseOrphanAsync(dbId);
+        OrphanDatabaseRecord? orphan = await sharedRegistry!.Orphans.TryGetDatabaseOrphanAsync(dbId);
         Assert.NotNull(orphan);
         Assert.AreEqual(dbId, orphan!.Id);
         Assert.AreEqual(dbname, orphan.FormerName);
@@ -225,7 +225,7 @@ internal sealed class TestDeferredDrop : SharedNodeBaseTest
 
         Assert.AreEqual(0, await CountKeysAsync(rowBucket, rowPrefix), "FORCE drop must physically delete row data");
         Assert.AreEqual(0, await CountKeysAsync(metaBucket, metaPrefix), "FORCE drop must physically delete meta keys");
-        Assert.IsNull(await sharedRegistry!.TryGetDatabaseOrphanAsync(dbId), "FORCE drop must NOT write an orphan record");
+        Assert.IsNull(await sharedRegistry!.Orphans.TryGetDatabaseOrphanAsync(dbId), "FORCE drop must NOT write an orphan record");
     }
 
     [Test]
@@ -242,7 +242,7 @@ internal sealed class TestDeferredDrop : SharedNodeBaseTest
         DatabaseDescriptor recreated = await executor.CreateDatabase(new CreateDatabaseTicket(dbname, ifNotExists: false));
         Assert.AreNotEqual(firstId, recreated.Id, "recreated database must get a fresh id");
 
-        OrphanDatabaseRecord? orphan = await sharedRegistry!.TryGetDatabaseOrphanAsync(firstId);
+        OrphanDatabaseRecord? orphan = await sharedRegistry!.Orphans.TryGetDatabaseOrphanAsync(firstId);
         Assert.NotNull(orphan, "orphan for the old id must survive a same-name fresh create");
         Assert.AreEqual(firstId, orphan!.Id);
     }

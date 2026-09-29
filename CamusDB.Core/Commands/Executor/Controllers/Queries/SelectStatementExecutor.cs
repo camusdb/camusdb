@@ -322,7 +322,7 @@ internal sealed class SelectStatementExecutor
         if (ast.nodeType == NodeType.ShowOrphanDatabases)
         {
             DatabaseRegistry reg = await context.Registry.ConfigureAwait(false);
-            List<OrphanDatabaseRecord> orphans = await reg.LoadDatabaseOrphansAsync().ConfigureAwait(false);
+            List<OrphanDatabaseRecord> orphans = await reg.Orphans.LoadDatabaseOrphansAsync().ConfigureAwait(false);
             if (schemaOut is not null)
                 schemaOut.Schema = DerivedTableSchemaBuilder.ShowOrphanDatabasesSchema;
             return (null!, schemaQuerier.ShowOrphanDatabases(orphans));

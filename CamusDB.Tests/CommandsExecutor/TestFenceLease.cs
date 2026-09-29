@@ -58,24 +58,24 @@ internal sealed class TestFenceLease : BaseTest
         string id = "f" + Guid.NewGuid().ToString("n");
 
         DatabaseRegistry dead = await DatabaseRegistry.OpenAsync(TestNode!, fence);
-        Assert.IsTrue(await dead.AcquireDropIntentAsync(id), "sanity: fence acquired by the first owner");
+        Assert.IsTrue(await dead.DropMarkers.AcquireDropIntentAsync(id), "sanity: fence acquired by the first owner");
 
         DatabaseRegistry other = await DatabaseRegistry.OpenAsync(TestNode!, fence);
         try
         {
             // While the first owner's lease is live, the fence is genuinely held.
-            Assert.IsFalse(await other.AcquireDropIntentAsync(id),
+            Assert.IsFalse(await other.DropMarkers.AcquireDropIntentAsync(id),
                 "a live lease must block another acquirer");
 
             // Simulate a crash: dispose the owner (stops the renewer) WITHOUT releasing the fence.
             await dead.DisposeAsync();
 
             // The stale marker's lease lapses; the fence must become acquirable again.
-            await WaitUntilAsync(async () => await other.AcquireDropIntentAsync(id), timeoutMs: 5_000);
+            await WaitUntilAsync(async () => await other.DropMarkers.AcquireDropIntentAsync(id), timeoutMs: 5_000);
         }
         finally
         {
-            await other.ReleaseDropIntentAsync(id);
+            await other.DropMarkers.ReleaseDropIntentAsync(id);
             await other.DisposeAsync();
         }
     }
@@ -97,18 +97,18 @@ internal sealed class TestFenceLease : BaseTest
         DatabaseRegistry other = await DatabaseRegistry.OpenAsync(TestNode!, fence);
         try
         {
-            Assert.IsTrue(await holder.AcquireDropIntentAsync(id), "sanity: fence acquired");
+            Assert.IsTrue(await holder.DropMarkers.AcquireDropIntentAsync(id), "sanity: fence acquired");
 
             // Wait well past two lease periods; the renewer must have kept the lease alive throughout.
             await Task.Delay(fence.FenceLeaseMs * 3);
 
-            Assert.IsFalse(await other.AcquireDropIntentAsync(id),
+            Assert.IsFalse(await other.DropMarkers.AcquireDropIntentAsync(id),
                 "a renewed lease must still block another acquirer after multiple lease periods");
-            Assert.IsTrue(await holder.HasDropIntentAsync(id), "the holder must still see its own live fence");
+            Assert.IsTrue(await holder.DropMarkers.HasDropIntentAsync(id), "the holder must still see its own live fence");
         }
         finally
         {
-            await holder.ReleaseDropIntentAsync(id);
+            await holder.DropMarkers.ReleaseDropIntentAsync(id);
             await holder.DisposeAsync();
             await other.DisposeAsync();
         }
@@ -131,22 +131,22 @@ internal sealed class TestFenceLease : BaseTest
         DatabaseRegistry b = await DatabaseRegistry.OpenAsync(TestNode!, fence);
         try
         {
-            Assert.IsTrue(await a.AcquireDropIntentAsync(id));
-            Assert.IsFalse(await b.AcquireDropIntentAsync(id), "held before release");
+            Assert.IsTrue(await a.DropMarkers.AcquireDropIntentAsync(id));
+            Assert.IsFalse(await b.DropMarkers.AcquireDropIntentAsync(id), "held before release");
 
-            await a.ReleaseDropIntentAsync(id);
+            await a.DropMarkers.ReleaseDropIntentAsync(id);
 
-            Assert.IsTrue(await b.AcquireDropIntentAsync(id),
+            Assert.IsTrue(await b.DropMarkers.AcquireDropIntentAsync(id),
                 "an explicitly released fence must be immediately acquirable");
 
             // The prior holder's renewer must be gone: give it more than a renew interval and confirm the
             // new holder still owns the fence (the old renewer did not resurrect the old owner's marker).
             await Task.Delay(1_500);
-            Assert.IsTrue(await b.HasDropIntentAsync(id), "the new holder's fence must survive");
+            Assert.IsTrue(await b.DropMarkers.HasDropIntentAsync(id), "the new holder's fence must survive");
         }
         finally
         {
-            await b.ReleaseDropIntentAsync(id);
+            await b.DropMarkers.ReleaseDropIntentAsync(id);
             await a.DisposeAsync();
             await b.DisposeAsync();
         }
@@ -173,22 +173,22 @@ internal sealed class TestFenceLease : BaseTest
         DatabaseRegistry b = await DatabaseRegistry.OpenAsync(TestNode!, fence);
         try
         {
-            Assert.IsTrue(await a.AcquireDropIntentAsync(id), "sanity: fence acquired");
-            Assert.IsFalse(await b.AcquireDropIntentAsync(id), "held before release");
+            Assert.IsTrue(await a.DropMarkers.AcquireDropIntentAsync(id), "sanity: fence acquired");
+            Assert.IsFalse(await b.DropMarkers.AcquireDropIntentAsync(id), "held before release");
 
             // Fault the next 3 drop-intent writes — well inside the release's bounded retry budget, so
             // the count does not race the budget itself.
             faulty.InjectSetFaults = 3;
 
-            await a.ReleaseDropIntentAsync(id);
+            await a.DropMarkers.ReleaseDropIntentAsync(id);
 
             Assert.Zero(faulty.InjectSetFaults, "sanity: the release consumed the injected transient statuses");
-            Assert.IsTrue(await b.AcquireDropIntentAsync(id),
+            Assert.IsTrue(await b.DropMarkers.AcquireDropIntentAsync(id),
                 "a release that saw transient statuses must still free the fence immediately");
         }
         finally
         {
-            await b.ReleaseDropIntentAsync(id);
+            await b.DropMarkers.ReleaseDropIntentAsync(id);
             await a.DisposeAsync();
             await b.DisposeAsync();
         }
@@ -215,23 +215,23 @@ internal sealed class TestFenceLease : BaseTest
         DatabaseRegistry b = await DatabaseRegistry.OpenAsync(TestNode!, fence);
         try
         {
-            Assert.IsTrue(await a.AcquireDropIntentAsync(id), "sanity: fence acquired");
-            await a.ReleaseDropIntentAsync(id);
+            Assert.IsTrue(await a.DropMarkers.AcquireDropIntentAsync(id), "sanity: fence acquired");
+            await a.DropMarkers.ReleaseDropIntentAsync(id);
 
             // Refuse the SetIfNotExists probe and the free-marker compare-and-set that follows it, as
             // the real node does when the marker lapses between them.
             refusing.RefuseSets = 2;
 
-            Assert.IsTrue(await a.AcquireDropIntentAsync(id),
+            Assert.IsTrue(await a.DropMarkers.AcquireDropIntentAsync(id),
                 "two refusals caused by a lapsed free marker must not be reported as a live claim");
             Assert.Zero(refusing.RefuseSets, "sanity: both injected refusals were consumed");
 
-            Assert.IsFalse(await b.AcquireDropIntentAsync(id),
+            Assert.IsFalse(await b.DropMarkers.AcquireDropIntentAsync(id),
                 "the re-probed acquisition must really hold the fence");
         }
         finally
         {
-            await a.ReleaseDropIntentAsync(id);
+            await a.DropMarkers.ReleaseDropIntentAsync(id);
             await a.DisposeAsync();
             await b.DisposeAsync();
         }
@@ -252,8 +252,8 @@ internal sealed class TestFenceLease : BaseTest
             string id = "f" + Guid.NewGuid().ToString("n");
             for (int i = 0; i < 300; i++)
             {
-                Assert.IsTrue(await registry.AcquireDropIntentAsync(id), $"iteration {i}: free fence reported as held");
-                await registry.ReleaseDropIntentAsync(id);
+                Assert.IsTrue(await registry.DropMarkers.AcquireDropIntentAsync(id), $"iteration {i}: free fence reported as held");
+                await registry.DropMarkers.ReleaseDropIntentAsync(id);
             }
         }
         finally

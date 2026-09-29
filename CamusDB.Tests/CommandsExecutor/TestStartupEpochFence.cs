@@ -37,20 +37,20 @@ internal sealed class TestStartupEpochFence : BaseTest
         {
             string id = "e" + Guid.NewGuid().ToString("n");
 
-            Assert.IsTrue(await current.AcquireDropIntentAsync(id), "sanity: fence acquired");
-            Assert.IsTrue(await current.HasDropIntentAsync(id));
+            Assert.IsTrue(await current.DropMarkers.AcquireDropIntentAsync(id), "sanity: fence acquired");
+            Assert.IsTrue(await current.DropMarkers.HasDropIntentAsync(id));
 
             // Same run: the fence is current-epoch (live), so startup cleanup must leave it alone.
-            Assert.AreEqual(0, await current.ClearOwnStaleDropIntentsAsync(),
+            Assert.AreEqual(0, await current.DropMarkers.ClearOwnStaleDropIntentsAsync(),
                 "current-epoch (live) fence must not be counted as stale");
-            Assert.IsTrue(await current.HasDropIntentAsync(id),
+            Assert.IsTrue(await current.DropMarkers.HasDropIntentAsync(id),
                 "a live in-flight fence must survive this run's startup cleanup");
 
             // After a "restart" (new epoch, same node) the same marker is a prior-run remnant and must
             // be cleared so a permanently-abandoned fence never blocks the id forever.
-            Assert.GreaterOrEqual(await afterRestart.ClearOwnStaleDropIntentsAsync(), 1,
+            Assert.GreaterOrEqual(await afterRestart.DropMarkers.ClearOwnStaleDropIntentsAsync(), 1,
                 "a prior-run stale fence must be reclaimed on restart");
-            Assert.IsFalse(await afterRestart.HasDropIntentAsync(id),
+            Assert.IsFalse(await afterRestart.DropMarkers.HasDropIntentAsync(id),
                 "the prior-run fence must be gone after restart cleanup");
         }
         finally

@@ -113,7 +113,7 @@ internal sealed class MaterializedViewRefresher
         // and orphan reclamation use. The gate this replaces was a dictionary in one executor, so it
         // fenced nothing across nodes: two could refresh the same view at once, and each would sweep
         // the other's staging relation out from under it.
-        string fenceId = DatabaseRegistry.TableFenceId(database.Id, viewTableId);
+        string fenceId = RegistryDropMarkers.TableFenceId(database.Id, viewTableId);
 
         if (!await AcquireRefreshFenceAsync(registry, fenceId).ConfigureAwait(false))
             throw new CamusDBException(
@@ -136,7 +136,7 @@ internal sealed class MaterializedViewRefresher
         {
             // Released on every path so the next refresh does not wait out the lease. A process that
             // dies here leaves the fence to expire on its own, which is the point of it being leased.
-            await registry.ReleaseDropIntentAsync(fenceId).ConfigureAwait(false);
+            await registry.DropMarkers.ReleaseDropIntentAsync(fenceId).ConfigureAwait(false);
         }
     }
 
@@ -410,7 +410,7 @@ internal sealed class MaterializedViewRefresher
     {
         for (int attempt = 0; ; attempt++)
         {
-            if (await registry.AcquireDropIntentAsync(fenceId).ConfigureAwait(false))
+            if (await registry.DropMarkers.AcquireDropIntentAsync(fenceId).ConfigureAwait(false))
                 return true;
 
             if (attempt >= FenceAcquireAttempts - 1)
