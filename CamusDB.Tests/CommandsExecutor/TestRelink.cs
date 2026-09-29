@@ -93,7 +93,7 @@ internal sealed class TestRelink : BaseTest
         Assert.AreEqual(5, rows.Count, "all rows must be recovered after relink");
 
         // Orphan record is gone.
-        Assert.IsNull(await sharedRegistry!.TryGetDatabaseOrphanAsync(dbId), "orphan record must be removed after relink");
+        Assert.IsNull(await sharedRegistry!.Orphans.TryGetDatabaseOrphanAsync(dbId), "orphan record must be removed after relink");
     }
 
     [Test]
@@ -125,7 +125,7 @@ internal sealed class TestRelink : BaseTest
         Assert.AreEqual(CamusDBErrorCodes.DatabaseAlreadyExists, ex!.Code);
 
         // The orphan is untouched and still relinkable to a free name.
-        Assert.IsNotNull(await sharedRegistry!.TryGetDatabaseOrphanAsync(dbId));
+        Assert.IsNotNull(await sharedRegistry!.Orphans.TryGetDatabaseOrphanAsync(dbId));
     }
 
     [Test]

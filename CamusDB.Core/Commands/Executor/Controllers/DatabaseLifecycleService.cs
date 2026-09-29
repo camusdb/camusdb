@@ -279,7 +279,7 @@ internal sealed class DatabaseLifecycleService
                 // id unregistered and purges the orphaned namespace. If the marker write itself
                 // fails, we propagate the error and CopyMetaForBranchAsync is never called —
                 // so no orphan can exist without a recovery handle.
-                await registry.TrackPendingBranchAsync(branchId).ConfigureAwait(false);
+                await registry.PendingBranches.TrackPendingBranchAsync(branchId).ConfigureAwait(false);
 
                 // Ancestry chain: immediate parent first, then its ancestors (nearest-parent ordering).
                 DatabaseRegistryEntry? sourceEntry = await registry.TryResolveEntryAsync(ticket.BranchFrom!).ConfigureAwait(false);
@@ -315,7 +315,7 @@ internal sealed class DatabaseLifecycleService
                 // drop's subsequent HasLiveDescendantsAsync scan sees our child and drop aborts
                 // instead. Neither of those two orderings leaves an orphaned child. A third
                 // ordering escapes this check alone; the liveness re-read below covers it.
-                if (await registry.HasDropIntentAsync(sourceDescriptor.Id).ConfigureAwait(false))
+                if (await registry.DropMarkers.HasDropIntentAsync(sourceDescriptor.Id).ConfigureAwait(false))
                     throw new CamusDBException(
                         CamusDBErrorCodes.DatabaseDoesntExist,
                         $"Source database '{ticket.BranchFrom}' is being dropped concurrently; branch creation aborted");
@@ -461,7 +461,7 @@ internal sealed class DatabaseLifecycleService
                 // still be present and the marker is the scrubber's only handle — keep it so
                 // startup can reclaim it.
                 if (!leaveMarkerForScrubber)
-                    await registry.ClearPendingBranchAsync(branchId).ConfigureAwait(false);
+                    await registry.PendingBranches.ClearPendingBranchAsync(branchId).ConfigureAwait(false);
             }
         }
         finally
@@ -545,7 +545,7 @@ internal sealed class DatabaseLifecycleService
         bool dropIntentAcquired = false;
         try
         {
-            dropIntentAcquired = await registry.AcquireDropIntentAsync(entry.Id).ConfigureAwait(false);
+            dropIntentAcquired = await registry.DropMarkers.AcquireDropIntentAsync(entry.Id).ConfigureAwait(false);
             if (!dropIntentAcquired)
                 throw new CamusDBException(
                     CamusDBErrorCodes.InvalidInput,
@@ -603,7 +603,7 @@ internal sealed class DatabaseLifecycleService
                     // consistent across nodes.
                     HLCTimestamp droppedAt = context.SharedNode!.Raft.HybridLogicalClock
                         .SendOrLocalEvent(context.SharedNode.Raft.GetLocalNodeId());
-                    await registry.WriteDatabaseOrphanAsync(new OrphanDatabaseRecord
+                    await registry.Orphans.WriteDatabaseOrphanAsync(new OrphanDatabaseRecord
                     {
                         Id = entry.Id,
                         FormerName = entry.Name,
@@ -615,7 +615,7 @@ internal sealed class DatabaseLifecycleService
                     // Mark the drop in progress before unregistering so a crash during the (non-atomic,
                     // per-key) keyspace purge below can be resumed at startup. The marker is owner-scoped
                     // and cleared only after the purge fully completes.
-                    await registry.MarkDroppingAsync(entry.Id).ConfigureAwait(false);
+                    await registry.DropMarkers.MarkDroppingAsync(entry.Id).ConfigureAwait(false);
                 }
 
                 // Unregister first: once the registry KV entry is deleted and the in-memory cache
@@ -660,7 +660,7 @@ internal sealed class DatabaseLifecycleService
                 // not (a delete/scan failure), leave the marker so the startup resume finishes the purge
                 // — clearing it now would abandon leaked row/index/meta keys with no reclaim.
                 if (purged)
-                    await registry.ClearDroppingAsync(entry.Id).ConfigureAwait(false);
+                    await registry.DropMarkers.ClearDroppingAsync(entry.Id).ConfigureAwait(false);
                 else
                     context.Logger.LogWarning(
                         "DROP DATABASE FORCE for '{Database}' (id={Id}) did not fully purge; leaving drop-in-progress marker for startup resume",
@@ -669,11 +669,11 @@ internal sealed class DatabaseLifecycleService
                 // A FORCE drop destroys the keyspace for good, so any stale orphan record for this id
                 // (left by a crashed relink) must go too — otherwise the id stays "relinkable" to an
                 // empty/partial keyspace.
-                await registry.DeleteDatabaseOrphanAsync(entry.Id).ConfigureAwait(false);
+                await registry.Orphans.DeleteDatabaseOrphanAsync(entry.Id).ConfigureAwait(false);
 
                 // Dropping the branch is the one action that resolves a lost-snapshot-protection
                 // state, so retire its marker with it. Ids are never reused; best-effort.
-                await registry.ClearSnapshotProtectionLostAsync(entry.Id).ConfigureAwait(false);
+                await registry.DropMarkers.ClearSnapshotProtectionLostAsync(entry.Id).ConfigureAwait(false);
             }
 
             // Evict every cache entry for this database. The descriptor may no longer be available
@@ -688,7 +688,7 @@ internal sealed class DatabaseLifecycleService
             // caught by branch-create's authoritative post-publication liveness re-read of the
             // now-unregistered source id.
             if (dropIntentAcquired)
-                await registry.ReleaseDropIntentAsync(entry.Id).ConfigureAwait(false);
+                await registry.DropMarkers.ReleaseDropIntentAsync(entry.Id).ConfigureAwait(false);
         }
     }
 
@@ -710,7 +710,7 @@ internal sealed class DatabaseLifecycleService
 
         // Fence the id so a concurrent GC purge or a second relink cannot race this recovery. All the
         // authoritative state decisions below happen under this fence.
-        bool fenced = await registry.AcquireDropIntentAsync(ticket.OrphanId).ConfigureAwait(false);
+        bool fenced = await registry.DropMarkers.AcquireDropIntentAsync(ticket.OrphanId).ConfigureAwait(false);
         if (!fenced)
             throw new CamusDBException(
                 CamusDBErrorCodes.InvalidInput,
@@ -733,7 +733,7 @@ internal sealed class DatabaseLifecycleService
                         CamusDBErrorCodes.DatabaseAlreadyExists,
                         $"Database id '{ticket.OrphanId}' is already live under name '{existingName}'");
 
-                await registry.DeleteDatabaseOrphanAsync(ticket.OrphanId).ConfigureAwait(false);
+                await registry.Orphans.DeleteDatabaseOrphanAsync(ticket.OrphanId).ConfigureAwait(false);
                 return await context.DatabaseOpener.Open(existingName).ConfigureAwait(false);
             }
 
@@ -743,7 +743,7 @@ internal sealed class DatabaseLifecycleService
                     CamusDBErrorCodes.DatabaseAlreadyExists,
                     $"Database '{ticket.NewName}' already exists");
 
-            OrphanDatabaseRecord? orphan = await registry.TryGetDatabaseOrphanAsync(ticket.OrphanId).ConfigureAwait(false);
+            OrphanDatabaseRecord? orphan = await registry.Orphans.TryGetDatabaseOrphanAsync(ticket.OrphanId).ConfigureAwait(false);
             if (orphan is null)
                 throw new CamusDBException(
                     CamusDBErrorCodes.OrphanNotFound,
@@ -753,13 +753,13 @@ internal sealed class DatabaseLifecycleService
             await registry.RegisterAsync(ticket.NewName, orphan.Id).ConfigureAwait(false);
 
             // The database is live again — remove the orphan record so the GC leaves it alone.
-            await registry.DeleteDatabaseOrphanAsync(orphan.Id).ConfigureAwait(false);
+            await registry.Orphans.DeleteDatabaseOrphanAsync(orphan.Id).ConfigureAwait(false);
 
             return await context.DatabaseOpener.Open(ticket.NewName).ConfigureAwait(false);
         }
         finally
         {
-            await registry.ReleaseDropIntentAsync(ticket.OrphanId).ConfigureAwait(false);
+            await registry.DropMarkers.ReleaseDropIntentAsync(ticket.OrphanId).ConfigureAwait(false);
         }
     }
 

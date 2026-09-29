@@ -115,7 +115,7 @@ internal sealed class TestRelinkHardening : BaseTest
         Assert.AreEqual(dbId, first.Id);
 
         // Simulate the crash window: re-plant a stale orphan record for the now-live id.
-        await sharedRegistry!.WriteDatabaseOrphanAsync(new OrphanDatabaseRecord
+        await sharedRegistry!.Orphans.WriteDatabaseOrphanAsync(new OrphanDatabaseRecord
         {
             Id = dbId,
             FormerName = dbName,
@@ -125,10 +125,10 @@ internal sealed class TestRelinkHardening : BaseTest
         // Retry to the SAME name → idempotent success (same id), and it cleans the stale record.
         DatabaseDescriptor retry = await executor.RelinkDatabase(new RelinkDatabaseTicket(recovered, dbId));
         Assert.AreEqual(dbId, retry.Id);
-        Assert.IsNull(await sharedRegistry.TryGetDatabaseOrphanAsync(dbId), "stale orphan must be cleaned by the idempotent retry");
+        Assert.IsNull(await sharedRegistry.Orphans.TryGetDatabaseOrphanAsync(dbId), "stale orphan must be cleaned by the idempotent retry");
 
         // Re-plant again and retry to a DIFFERENT name → rejected (no second alias for one id).
-        await sharedRegistry.WriteDatabaseOrphanAsync(new OrphanDatabaseRecord { Id = dbId, FormerName = dbName, DroppedAt = default });
+        await sharedRegistry.Orphans.WriteDatabaseOrphanAsync(new OrphanDatabaseRecord { Id = dbId, FormerName = dbName, DroppedAt = default });
         string secondName = "db_" + Guid.NewGuid().ToString("n");
         CamusDBException? ex = Assert.ThrowsAsync<CamusDBException>(async () =>
             await executor.RelinkDatabase(new RelinkDatabaseTicket(secondName, dbId)));

@@ -1042,9 +1042,9 @@ public sealed class TestMaterializedViews : SharedNodeBaseTest
 
         string viewTableId = database.Schema.Tables["open_orders"].Id!;
         DatabaseRegistry registry = await executor.GetDatabaseRegistryAsync();
-        string fenceId = DatabaseRegistry.TableFenceId(database.Id, viewTableId);
+        string fenceId = RegistryDropMarkers.TableFenceId(database.Id, viewTableId);
 
-        Assert.IsTrue(await registry.AcquireDropIntentAsync(fenceId), "the fence must be free to begin with");
+        Assert.IsTrue(await registry.DropMarkers.AcquireDropIntentAsync(fenceId), "the fence must be free to begin with");
         try
         {
             CamusDBException? error = Assert.ThrowsAsync<CamusDBException>(async () =>
@@ -1054,7 +1054,7 @@ public sealed class TestMaterializedViews : SharedNodeBaseTest
         }
         finally
         {
-            await registry.ReleaseDropIntentAsync(fenceId);
+            await registry.DropMarkers.ReleaseDropIntentAsync(fenceId);
         }
 
         // Once released, the refresh proceeds — the fence gates it, it does not permanently block it.
@@ -1186,7 +1186,7 @@ public sealed class TestMaterializedViews : SharedNodeBaseTest
         string viewTableId = database.Schema.Tables["open_orders"].Id!;
         CatalogsManager catalogs = executor.GetCatalogsManagerForTesting();
         DatabaseRegistry registry = await executor.GetDatabaseRegistryAsync();
-        string fenceId = DatabaseRegistry.TableFenceId(database.Id, viewTableId);
+        string fenceId = RegistryDropMarkers.TableFenceId(database.Id, viewTableId);
 
         async Task RecordAbandonedJob(string stagingId)
         {
@@ -1202,7 +1202,7 @@ public sealed class TestMaterializedViews : SharedNodeBaseTest
 
         // A refresh is running: the fence is held, and the sweep must not touch its storage.
         await RecordAbandonedJob("live1");
-        Assert.IsTrue(await registry.AcquireDropIntentAsync(fenceId));
+        Assert.IsTrue(await registry.DropMarkers.AcquireDropIntentAsync(fenceId));
         try
         {
             Assert.AreEqual(0, await executor.ReclaimAbandonedRefreshesForTesting(dbname),
@@ -1212,7 +1212,7 @@ public sealed class TestMaterializedViews : SharedNodeBaseTest
         }
         finally
         {
-            await registry.ReleaseDropIntentAsync(fenceId);
+            await registry.DropMarkers.ReleaseDropIntentAsync(fenceId);
         }
 
         // Fence free — the run is gone, so the record and its storage are reclaimed.

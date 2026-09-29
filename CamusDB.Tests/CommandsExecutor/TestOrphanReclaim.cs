@@ -90,14 +90,14 @@ internal sealed class TestOrphanReclaim : SharedNodeBaseTest
         (string dbName, _, CommandExecutor executor, string dbId, string tableId) = await SetupDbWithRows(5, options);
         await executor.DropDatabase(new DropDatabaseTicket(dbName));
 
-        Assert.IsNotNull(await sharedRegistry!.TryGetDatabaseOrphanAsync(dbId), "sanity: orphan record present after deferred drop");
+        Assert.IsNotNull(await sharedRegistry!.Orphans.TryGetDatabaseOrphanAsync(dbId), "sanity: orphan record present after deferred drop");
 
         await Task.Delay(50);
 
         int reclaimed = await executor.RunOrphanReclaimForTestsAsync();
 
         Assert.GreaterOrEqual(reclaimed, 1, "GC must reclaim the expired database orphan");
-        Assert.IsNull(await sharedRegistry.TryGetDatabaseOrphanAsync(dbId), "orphan record must be gone after reclaim");
+        Assert.IsNull(await sharedRegistry.Orphans.TryGetDatabaseOrphanAsync(dbId), "orphan record must be gone after reclaim");
         Assert.AreEqual(0, await CountKeysAsync($"{dbId}:{tableId}|r", $"{dbId}:{tableId}|r/"), "row data must be physically purged");
         Assert.AreEqual(0, await CountKeysAsync($"{dbId}/meta", $"{dbId}/"), "meta namespace must be physically purged");
     }
@@ -115,7 +115,7 @@ internal sealed class TestOrphanReclaim : SharedNodeBaseTest
         (string dbName, _, CommandExecutor executor, string dbId, _) = await SetupDbWithRows(2, options);
         await executor.DropDatabase(new DropDatabaseTicket(dbName));
 
-        Assert.IsNotNull(await sharedRegistry!.TryGetDatabaseOrphanAsync(dbId), "sanity: orphan record present");
+        Assert.IsNotNull(await sharedRegistry!.Orphans.TryGetDatabaseOrphanAsync(dbId), "sanity: orphan record present");
 
         await Task.Delay(50);
 
@@ -124,7 +124,7 @@ internal sealed class TestOrphanReclaim : SharedNodeBaseTest
         int reclaimed = await executor.RunOrphanReclaimForTestsAsync();
 
         Assert.GreaterOrEqual(reclaimed, 1, "a re-election must not be reported as nothing to reclaim");
-        Assert.IsNull(await sharedRegistry.TryGetDatabaseOrphanAsync(dbId), "orphan record must be gone after reclaim");
+        Assert.IsNull(await sharedRegistry.Orphans.TryGetDatabaseOrphanAsync(dbId), "orphan record must be gone after reclaim");
     }
 
     [Test]
@@ -138,7 +138,7 @@ internal sealed class TestOrphanReclaim : SharedNodeBaseTest
         int reclaimed = await executor.RunOrphanReclaimForTestsAsync();
 
         Assert.AreEqual(0, reclaimed, "unexpired orphan must not be reclaimed");
-        Assert.IsNotNull(await sharedRegistry!.TryGetDatabaseOrphanAsync(dbId));
+        Assert.IsNotNull(await sharedRegistry!.Orphans.TryGetDatabaseOrphanAsync(dbId));
         Assert.AreEqual(3, await CountKeysAsync($"{dbId}:{tableId}|r", $"{dbId}:{tableId}|r/"), "row data must remain");
     }
 
@@ -155,7 +155,7 @@ internal sealed class TestOrphanReclaim : SharedNodeBaseTest
         int reclaimed = await executor.RunOrphanReclaimForTestsAsync();
 
         Assert.AreEqual(0, reclaimed, "retention <= 0 must disable reclamation");
-        Assert.IsNotNull(await sharedRegistry!.TryGetDatabaseOrphanAsync(dbId), "orphan must be kept when reclamation is disabled");
+        Assert.IsNotNull(await sharedRegistry!.Orphans.TryGetDatabaseOrphanAsync(dbId), "orphan must be kept when reclamation is disabled");
     }
 
     [Test]
@@ -168,7 +168,7 @@ internal sealed class TestOrphanReclaim : SharedNodeBaseTest
         CamusDBOptions options = Options with { OrphanRetentionMs = 1 };
         (string dbName, _, CommandExecutor executor, string dbId, string tableId) = await SetupDbWithRows(4, options);
 
-        await sharedRegistry!.WriteDatabaseOrphanAsync(new OrphanDatabaseRecord
+        await sharedRegistry!.Orphans.WriteDatabaseOrphanAsync(new OrphanDatabaseRecord
         {
             Id = dbId,
             FormerName = dbName,
@@ -179,7 +179,7 @@ internal sealed class TestOrphanReclaim : SharedNodeBaseTest
 
         await executor.RunOrphanReclaimForTestsAsync();
 
-        Assert.IsNull(await sharedRegistry.TryGetDatabaseOrphanAsync(dbId), "stale orphan record for a live database must be cleaned");
+        Assert.IsNull(await sharedRegistry.Orphans.TryGetDatabaseOrphanAsync(dbId), "stale orphan record for a live database must be cleaned");
         Assert.AreEqual(4, await CountKeysAsync($"{dbId}:{tableId}|r", $"{dbId}:{tableId}|r/"), "live database data must NOT be purged");
     }
 
@@ -267,7 +267,7 @@ internal sealed class TestOrphanReclaim : SharedNodeBaseTest
         await Task.WhenAll(relinkTask, gcTask);
 
         int rowCount = await CountKeysAsync($"{dbId}:{tableId}|r", $"{dbId}:{tableId}|r/");
-        Assert.IsNull(await sharedRegistry!.TryGetDatabaseOrphanAsync(dbId), "the orphan record is resolved either way");
+        Assert.IsNull(await sharedRegistry!.Orphans.TryGetDatabaseOrphanAsync(dbId), "the orphan record is resolved either way");
 
         if (relinkTask.Result is not null)
         {
@@ -308,13 +308,13 @@ internal sealed class TestOrphanReclaim : SharedNodeBaseTest
             for (int i = 0; i < 400; i++)
             {
                 string id = (i % 2 == 0) ? idA : idB;
-                await sharedRegistry!.WriteDatabaseOrphanAsync(new OrphanDatabaseRecord
+                await sharedRegistry!.Orphans.WriteDatabaseOrphanAsync(new OrphanDatabaseRecord
                 {
                     Id = id,
                     FormerName = "contended",
                     DroppedAt = HLCTimestamp.Zero,
                 });
-                await sharedRegistry.DeleteDatabaseOrphanAsync(id);
+                await sharedRegistry.Orphans.DeleteDatabaseOrphanAsync(id);
             }
         });
 
@@ -323,16 +323,16 @@ internal sealed class TestOrphanReclaim : SharedNodeBaseTest
             // Every scan must complete without an exception while the writer bursts, and one more
             // must succeed after it finishes.
             while (!writer.IsCompleted)
-                await sharedRegistry!.LoadDatabaseOrphansAsync();
+                await sharedRegistry!.Orphans.LoadDatabaseOrphansAsync();
 
             await writer;
-            await sharedRegistry!.LoadDatabaseOrphansAsync();
+            await sharedRegistry!.Orphans.LoadDatabaseOrphansAsync();
         }
         finally
         {
             // The writer can leave a record behind; remove both so no later sweep sees them.
-            await sharedRegistry!.DeleteDatabaseOrphanAsync(idA);
-            await sharedRegistry.DeleteDatabaseOrphanAsync(idB);
+            await sharedRegistry!.Orphans.DeleteDatabaseOrphanAsync(idA);
+            await sharedRegistry.Orphans.DeleteDatabaseOrphanAsync(idB);
         }
     }
 }

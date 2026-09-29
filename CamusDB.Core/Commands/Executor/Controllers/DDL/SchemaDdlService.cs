@@ -1503,8 +1503,8 @@ internal sealed class SchemaDdlService
         // takes the same per-table drop-intent key before purging, so the two never interleave. All the
         // state decisions below happen under this fence.
         DatabaseRegistry registry = await context.Registry.ConfigureAwait(false);
-        string fenceId = DatabaseRegistry.TableFenceId(database.Id, ticket.OrphanTableId);
-        bool fenced = await registry.AcquireDropIntentAsync(fenceId).ConfigureAwait(false);
+        string fenceId = RegistryDropMarkers.TableFenceId(database.Id, ticket.OrphanTableId);
+        bool fenced = await registry.DropMarkers.AcquireDropIntentAsync(fenceId).ConfigureAwait(false);
         if (!fenced)
             throw new CamusDBException(
                 CamusDBErrorCodes.InvalidInput,
@@ -1563,7 +1563,7 @@ internal sealed class SchemaDdlService
         }
         finally
         {
-            await registry.ReleaseDropIntentAsync(fenceId).ConfigureAwait(false);
+            await registry.DropMarkers.ReleaseDropIntentAsync(fenceId).ConfigureAwait(false);
         }
 
         return true;

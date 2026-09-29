@@ -38,7 +38,7 @@ namespace CamusDB.Core.CommandsExecutor.Controllers;
 /// open), and success still proves the protection never lapsed. A <b>definitive</b> refusal
 /// (<c>DoesNotExist</c> — the hold was released or purged) remains permanent, so the sweep durably
 /// marks the branch's protection as lost
-/// (<see cref="DatabaseRegistry.MarkSnapshotProtectionLostAsync"/>) and the branch fails closed
+/// (<see cref="RegistryDropMarkers.MarkSnapshotProtectionLostAsync"/>) and the branch fails closed
 /// from then on; see <see cref="Storage.Kv.BranchSnapshotHoldGuard"/> for the read-side fence that
 /// enforces this even when the sweep itself is starved or down.
 ///
@@ -223,7 +223,7 @@ internal sealed class SnapshotHoldRenewer : IAsyncDisposable
                 "its lease lapsed); the branch's frozen ancestor view is permanently unprotected and will fail closed",
                 entry.ImmediateParentHoldId, entry.Name);
 
-            await registry.MarkSnapshotProtectionLostAsync(
+            await registry.DropMarkers.MarkSnapshotProtectionLostAsync(
                 entry.Id,
                 $"Snapshot hold {entry.ImmediateParentHoldId} protecting the frozen ancestor view of branch " +
                 $"'{entry.Name}' no longer exists (it was released, or the reaper purged it after its lease " +

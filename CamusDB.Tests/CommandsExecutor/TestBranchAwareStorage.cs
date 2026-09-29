@@ -1300,14 +1300,14 @@ internal sealed class TestBranchAwareStorage : BaseTest
             KeyValueFlags.Set, 0, KeyValueDurability.Persistent, CancellationToken.None);
 
         // Write a pending marker, as the production code does before CopyMetaForBranchAsync.
-        await sharedRegistry.TrackPendingBranchAsync(orphanId);
+        await sharedRegistry.PendingBranches.TrackPendingBranchAsync(orphanId);
 
         // Sanity: the sentinel and the pending marker are present before scrubbing.
         string metaBucket = $"{orphanId}/meta";
         int beforeCount = await CountKeysUnder(kahuna, metaBucket, $"{orphanId}/");
         Assert.AreEqual(1, beforeCount, "sentinel meta key must be present before scrub");
 
-        List<string> orphansBefore = await sharedRegistry.LoadOrphanBranchIdsAsync();
+        List<string> orphansBefore = await sharedRegistry.PendingBranches.LoadOrphanBranchIdsAsync();
         Assert.Contains(orphanId, orphansBefore, "pending id not in registry must appear as an orphan");
 
         // Invoke the PRODUCTION scrubber — not a reimplementation. This exercises the real
@@ -1324,7 +1324,7 @@ internal sealed class TestBranchAwareStorage : BaseTest
         Assert.AreEqual(0, afterCount, "production scrubber must have removed the orphan meta key");
 
         // Pending marker must also be cleared.
-        List<string> orphansAfter = await sharedRegistry.LoadOrphanBranchIdsAsync();
+        List<string> orphansAfter = await sharedRegistry.PendingBranches.LoadOrphanBranchIdsAsync();
         Assert.IsFalse(orphansAfter.Contains(orphanId),
             "production scrubber must clear the pending marker so the id is no longer an orphan");
 
@@ -1410,7 +1410,7 @@ internal sealed class TestBranchAwareStorage : BaseTest
 
         // Simulate a create in progress in this process: marker written by THIS registry instance
         // (current epoch), metadata copy under way, id not yet registered.
-        await sharedRegistry.TrackPendingBranchAsync(branchId);
+        await sharedRegistry.PendingBranches.TrackPendingBranchAsync(branchId);
         string metaKey = $"{branchId}/meta/version";
         await kahuna.LocateAndTrySetKeyValue(
             HLCTimestamp.Zero, metaKey, [0x01], null, -1,
@@ -1431,7 +1431,7 @@ internal sealed class TestBranchAwareStorage : BaseTest
             "an in-flight create's marker must survive the scrub");
 
         // Clean up the simulated create.
-        await sharedRegistry.ClearPendingBranchAsync(branchId);
+        await sharedRegistry.PendingBranches.ClearPendingBranchAsync(branchId);
         await kahuna.LocateAndTryDeleteKeyValue(
             HLCTimestamp.Zero, metaKey, KeyValueDurability.Persistent, CancellationToken.None);
     }
@@ -1544,7 +1544,7 @@ internal sealed class TestBranchAwareStorage : BaseTest
         await kahuna.LocateAndTrySetKeyValue(
             HLCTimestamp.Zero, metaKey, [0x01], null, -1,
             KeyValueFlags.Set, 0, KeyValueDurability.Persistent, CancellationToken.None);
-        await sharedRegistry.WriteDatabaseOrphanAsync(new OrphanDatabaseRecord
+        await sharedRegistry.Orphans.WriteDatabaseOrphanAsync(new OrphanDatabaseRecord
         {
             Id = retainedId,
             FormerName = "retained_db",
@@ -1574,7 +1574,7 @@ internal sealed class TestBranchAwareStorage : BaseTest
             "the stale marker on a retained id must be cleared");
 
         // Clean up the simulated retained orphan.
-        await sharedRegistry.DeleteDatabaseOrphanAsync(retainedId);
+        await sharedRegistry.Orphans.DeleteDatabaseOrphanAsync(retainedId);
         await kahuna.LocateAndTryDeleteKeyValue(
             HLCTimestamp.Zero, metaKey, KeyValueDurability.Persistent, CancellationToken.None);
     }
@@ -1700,7 +1700,7 @@ internal sealed class TestBranchAwareStorage : BaseTest
         // children) and now holds the drop-intent marker — the keyspace purge is about to run.
         // Use a second registry instance (independent cache) to represent the remote node's registry.
         await using DatabaseRegistry remoteRegistry = await DatabaseRegistry.OpenAsync(TestNode!, Options);
-        bool acquired = await remoteRegistry.AcquireDropIntentAsync(rootEntry.Id);
+        bool acquired = await remoteRegistry.DropMarkers.AcquireDropIntentAsync(rootEntry.Id);
         Assert.IsTrue(acquired, "drop-intent must be acquirable when no other drop is in progress");
 
         string branchName = NewName();
@@ -1720,14 +1720,14 @@ internal sealed class TestBranchAwareStorage : BaseTest
                 "aborted branch-create must not leave a registry entry for the child");
 
             // No orphaned pending marker should remain.
-            List<string> orphans = await sharedRegistry.LoadOrphanBranchIdsAsync();
+            List<string> orphans = await sharedRegistry.PendingBranches.LoadOrphanBranchIdsAsync();
             Assert.AreEqual(0, orphans.Count,
                 "aborted branch-create must clean up its pending marker");
         }
         finally
         {
             // Simulate the remote node releasing the intent after its purge completes.
-            await remoteRegistry.ReleaseDropIntentAsync(rootEntry.Id);
+            await remoteRegistry.DropMarkers.ReleaseDropIntentAsync(rootEntry.Id);
         }
 
         // The root database must still be usable (drop never completed — it was only simulated
@@ -1760,7 +1760,7 @@ internal sealed class TestBranchAwareStorage : BaseTest
 
         // Plant a stale drop-intent key — simulates a crash during DropDatabase after
         // AcquireDropIntentAsync wrote the key but before the finally released it.
-        bool acquired = await sharedRegistry.AcquireDropIntentAsync(rootEntry.Id);
+        bool acquired = await sharedRegistry.DropMarkers.AcquireDropIntentAsync(rootEntry.Id);
         Assert.IsTrue(acquired, "sanity: no other drop in progress");
 
         // With the stale intent present, a fresh DropDatabase must block.
@@ -1816,7 +1816,7 @@ internal sealed class TestBranchAwareStorage : BaseTest
         await executor.ScrubOrphanBranchNamespacesAsync(TestNode!, sharedRegistry);
 
         // The foreign fence must still be in place → this node cannot acquire the drop-intent.
-        bool acquired = await sharedRegistry.AcquireDropIntentAsync(rootEntry.Id);
+        bool acquired = await sharedRegistry.DropMarkers.AcquireDropIntentAsync(rootEntry.Id);
         Assert.IsFalse(acquired,
             "a drop-intent owned by another live node must survive this node's startup scrub");
 
@@ -1857,7 +1857,7 @@ internal sealed class TestBranchAwareStorage : BaseTest
 
         // Simulate a crash right after UnregisterAsync but before the keyspace purge: the
         // drop-in-progress marker is set and the entry is gone, but all data is still on disk.
-        await sharedRegistry.MarkDroppingAsync(dbId);
+        await sharedRegistry.DropMarkers.MarkDroppingAsync(dbId);
         await sharedRegistry.UnregisterAsync(dbName);
 
         Assert.AreEqual(2, await CountKeysUnder(kahuna, rowBucket, rowPrefix), "crash simulated before purge — rows still present");
@@ -1875,7 +1875,7 @@ internal sealed class TestBranchAwareStorage : BaseTest
         Assert.AreEqual(0, await CountKeysUnder(kahuna, metaBucket, metaPrefix),
             "resumed purge must delete the meta namespace last");
 
-        List<string> stillDropping = await sharedRegistry.LoadOwnDroppingIdsAsync();
+        List<string> stillDropping = await sharedRegistry.DropMarkers.LoadOwnDroppingIdsAsync();
         Assert.IsFalse(stillDropping.Contains(dbId), "the drop-in-progress marker must be cleared after the resumed purge");
     }
 
@@ -2108,9 +2108,9 @@ internal sealed class TestBranchAwareStorage : BaseTest
 
         // Drop-intent must have been released (so a future drop attempt is not blocked).
         DatabaseRegistryEntry rootEntry = sharedRegistry.Get(rootName)!;
-        bool reacquired = await sharedRegistry.AcquireDropIntentAsync(rootEntry.Id);
+        bool reacquired = await sharedRegistry.DropMarkers.AcquireDropIntentAsync(rootEntry.Id);
         if (reacquired)
-            await sharedRegistry.ReleaseDropIntentAsync(rootEntry.Id);
+            await sharedRegistry.DropMarkers.ReleaseDropIntentAsync(rootEntry.Id);
         Assert.IsTrue(reacquired, "drop-intent must have been released after the aborted drop");
     }
 
@@ -2119,11 +2119,11 @@ internal sealed class TestBranchAwareStorage : BaseTest
     /// <c>CopyMetaForBranchAsync</c> runs — not best-effort. This test verifies the key invariant
     /// that the fix preserves: every meta namespace written by <c>CopyMetaForBranchAsync</c> is
     /// either registered in the persistent registry (success path) or it has a pending-create marker
-    /// visible to <see cref="DatabaseRegistry.LoadOrphanBranchIdsAsync"/> (crash path).
+    /// visible to <see cref="RegistryPendingBranches.LoadOrphanBranchIdsAsync"/> (crash path).
     ///
     /// <para>The test directly exercises the "confirmed write" side of the invariant: calling
-    /// <see cref="DatabaseRegistry.TrackPendingBranchAsync"/> writes a durable key that
-    /// <see cref="DatabaseRegistry.LoadOrphanBranchIdsAsync"/> immediately finds as an orphan
+    /// <see cref="RegistryPendingBranches.TrackPendingBranchAsync"/> writes a durable key that
+    /// <see cref="RegistryPendingBranches.LoadOrphanBranchIdsAsync"/> immediately finds as an orphan
     /// (because the id is not yet registered). This proves that if the process crashes between
     /// the (now-mandatory) marker write and a subsequent <c>RegisterAsync</c>, the startup scrubber
     /// has a reliable handle on the orphaned namespace — there is no window where CopyMeta runs
@@ -2148,18 +2148,18 @@ internal sealed class TestBranchAwareStorage : BaseTest
         // Write the mandatory pending-create marker. This write is confirmed
         // durable before CopyMetaForBranchAsync runs: if it threw, creation would abort and no
         // meta namespace would exist (no orphan possible).
-        await sharedRegistry.TrackPendingBranchAsync(branchId);
+        await sharedRegistry.PendingBranches.TrackPendingBranchAsync(branchId);
 
         // The marker must be immediately visible to the orphan scanner.
         // Because branchId is not registered, it must appear as an orphan.
-        List<string> orphans = await sharedRegistry.LoadOrphanBranchIdsAsync();
+        List<string> orphans = await sharedRegistry.PendingBranches.LoadOrphanBranchIdsAsync();
         Assert.That(orphans, Contains.Item(branchId),
             "confirmed marker write must be visible to the orphan scanner before RegisterAsync runs");
 
         // Clean up: clear the marker (simulates successful creation or clean abort).
-        await sharedRegistry.ClearPendingBranchAsync(branchId);
+        await sharedRegistry.PendingBranches.ClearPendingBranchAsync(branchId);
 
-        List<string> orphansAfter = await sharedRegistry.LoadOrphanBranchIdsAsync();
+        List<string> orphansAfter = await sharedRegistry.PendingBranches.LoadOrphanBranchIdsAsync();
         Assert.That(orphansAfter, Does.Not.Contain(branchId),
             "cleared marker must no longer appear as an orphan");
 

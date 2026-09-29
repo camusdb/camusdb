@@ -573,5 +573,5 @@ Unknown database name → database-not-found error.
 | Create / drop / rename | `DatabaseLifecycleService` (`CreateBranchDatabaseAsync`, `DropDatabase`, `RelinkDatabase`), `DatabaseDropper` (keyspace and meta purges). `CommandExecutor` is a facade that delegates to them. |
 | Metadata copy | `BranchMetaCopier.CopyMetaForBranchAsync`, reached through `CatalogsManager.CopyMetaForBranchAsync` |
 | Durability | `SnapshotHoldRenewer`, `EmbeddedKahuna.AmILeaderForKeyAsync`, `IKahuna` snapshot-floor API |
-| Recovery | `StartupRecoveryService.ScrubOrphanBranchNamespacesAsync`, the marker methods on `DatabaseRegistry` |
+| Recovery | `StartupRecoveryService.ScrubOrphanBranchNamespacesAsync`, `RegistryPendingBranches` and `RegistryDropMarkers` (`DatabaseRegistry.PendingBranches` / `.DropMarkers`) |
 | Branch tree queries | `SchemaQuerier.ShowBranches`, `SchemaQuerier.ShowAncestors` |

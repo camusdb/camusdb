@@ -29,7 +29,7 @@ namespace CamusDB.Core.CommandsExecutor.Controllers;
 ///
 /// <para><b>Fencing &amp; the relink race.</b> A database orphan is purged under its per-id drop-intent
 /// fence — the same fence <c>CREATE DATABASE ... RELINK</c> takes — and a table orphan under the
-/// composite <see cref="DatabaseRegistry.TableFenceId"/> fence that <c>CREATE TABLE ... RELINK</c>
+/// composite <see cref="RegistryDropMarkers.TableFenceId"/> fence that <c>CREATE TABLE ... RELINK</c>
 /// takes, so a reclamation and a recovery of the same id never interleave. Under the fence the reclaimer
 /// re-confirms the object is still an orphan and <em>not</em> currently live (a database id absent from
 /// the registry; a table whose per-object meta key is absent). If it finds the object live — a relink
@@ -224,7 +224,7 @@ internal sealed class OrphanReclaimer : IAsyncDisposable
 
     private async Task<int> ReclaimDatabaseOrphansAsync(HLCTimestamp now, CancellationToken ct)
     {
-        List<OrphanDatabaseRecord> orphans = await registry.LoadDatabaseOrphansAsync().ConfigureAwait(false);
+        List<OrphanDatabaseRecord> orphans = await registry.Orphans.LoadDatabaseOrphansAsync().ConfigureAwait(false);
         if (orphans.Count == 0)
             return 0;
 
@@ -243,13 +243,13 @@ internal sealed class OrphanReclaimer : IAsyncDisposable
 
             // Acquire the fence FIRST, then make every decision from authoritative persistent state read
             // under it — never from a pre-fence snapshot (that is the TOCTOU the review flagged).
-            if (!await registry.AcquireDropIntentAsync(orphan.Id).ConfigureAwait(false))
+            if (!await registry.DropMarkers.AcquireDropIntentAsync(orphan.Id).ConfigureAwait(false))
                 continue; // a relink or another reclaimer holds the fence
 
             try
             {
                 // Still an orphan? (A relink deletes the record under this same fence.)
-                OrphanDatabaseRecord? current = await registry.TryGetDatabaseOrphanAsync(orphan.Id).ConfigureAwait(false);
+                OrphanDatabaseRecord? current = await registry.Orphans.TryGetDatabaseOrphanAsync(orphan.Id).ConfigureAwait(false);
                 if (current is null || !IsExpired(current.DroppedAt, now))
                     continue;
 
@@ -258,18 +258,18 @@ internal sealed class OrphanReclaimer : IAsyncDisposable
                 string? liveName = await registry.TryResolveNameByIdAsync(orphan.Id).ConfigureAwait(false);
                 if (liveName is not null)
                 {
-                    await registry.DeleteDatabaseOrphanAsync(orphan.Id).ConfigureAwait(false);
+                    await registry.Orphans.DeleteDatabaseOrphanAsync(orphan.Id).ConfigureAwait(false);
                     continue;
                 }
 
-                await registry.MarkDroppingAsync(orphan.Id).ConfigureAwait(false);
+                await registry.DropMarkers.MarkDroppingAsync(orphan.Id).ConfigureAwait(false);
 
                 // Only remove the recovery record + drop marker if the purge VERIFIABLY completed.
                 // Otherwise leave both so a later sweep / startup finishes it — never abandon leaked keys.
                 if (await databaseDropper.PurgeKeyspaceByIdAsync(sharedNode.Kahuna, orphan.Id, null, ct).ConfigureAwait(false))
                 {
-                    await registry.DeleteDatabaseOrphanAsync(orphan.Id).ConfigureAwait(false);
-                    await registry.ClearDroppingAsync(orphan.Id).ConfigureAwait(false);
+                    await registry.Orphans.DeleteDatabaseOrphanAsync(orphan.Id).ConfigureAwait(false);
+                    await registry.DropMarkers.ClearDroppingAsync(orphan.Id).ConfigureAwait(false);
                     reclaimed++;
 
                     if (logger.IsEnabled(LogLevel.Information))
@@ -286,7 +286,7 @@ internal sealed class OrphanReclaimer : IAsyncDisposable
             }
             finally
             {
-                await registry.ReleaseDropIntentAsync(orphan.Id).ConfigureAwait(false);
+                await registry.DropMarkers.ReleaseDropIntentAsync(orphan.Id).ConfigureAwait(false);
             }
         }
 
@@ -314,8 +314,8 @@ internal sealed class OrphanReclaimer : IAsyncDisposable
                 if (!await sharedNode.AmILeaderForKeyAsync(registry.RegistryBucket, ct).ConfigureAwait(false))
                     return reclaimed; // leadership lost mid-sweep
 
-                string fenceId = DatabaseRegistry.TableFenceId(db.Id, orphan.TableId);
-                if (!await registry.AcquireDropIntentAsync(fenceId).ConfigureAwait(false))
+                string fenceId = RegistryDropMarkers.TableFenceId(db.Id, orphan.TableId);
+                if (!await registry.DropMarkers.AcquireDropIntentAsync(fenceId).ConfigureAwait(false))
                     continue; // a relink or another reclaimer holds the fence
 
                 try
@@ -365,7 +365,7 @@ internal sealed class OrphanReclaimer : IAsyncDisposable
                 }
                 finally
                 {
-                    await registry.ReleaseDropIntentAsync(fenceId).ConfigureAwait(false);
+                    await registry.DropMarkers.ReleaseDropIntentAsync(fenceId).ConfigureAwait(false);
                 }
             }
         }
