@@ -89,6 +89,9 @@ public sealed class AppendOperation : IWriteOperation, IReadOperation
 
     public long IndeterminateTxns => Interlocked.Read(ref _indeterminateTxns);
 
+    /// <summary>Always 0: an append increments no seeded row's version.</summary>
+    public int RowsPerTransaction => 0;
+
     public long RetryAttempts => Interlocked.Read(ref _retryAttempts);
 
     public long RetriedTxns => Interlocked.Read(ref _retriedTxns);

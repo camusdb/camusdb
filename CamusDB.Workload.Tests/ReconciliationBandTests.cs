@@ -93,7 +93,7 @@ public sealed class ReconciliationBandTests
         ExpectedMin: 1_000, ExpectedMax: 1_000, Observed: 1_000, IndeterminateTxns: 0,
         VersionsMatch: true, RowCount: 100_000, RowCountMatches: true, AccountingBalances: true,
         NoConflicts: true, ConflictsWaived: false, Failures: [],
-        BalanceConserved: true, BalanceBaseline: 42, BalanceFinal: 42, VersionCheckWaived: true,
+        BalanceConserved: true, BalanceBaseline: 42, BalanceFinal: 42,
         RowAttribution: rows);
 
     [Test]
@@ -104,4 +104,66 @@ public sealed class ReconciliationBandTests
         (long min, long max) = Reconciliation.VersionDeltaBand(10, 2, 0);
         Assert.That((min, max), Is.EqualTo((10L, 12L)));
     }
+    /// <summary>
+    /// A transfer writes two rows, so each indeterminate transfer may add two increments. A two-hour
+    /// flag-on fault soak read 26,899,464 against a band computed with one increment per indeterminate
+    /// transfer ([26,895,122; 26,898,663]) and looked 801 over; with two it sits inside, at 2,171 of its
+    /// 3,541 indeterminate transfers landed.
+    /// </summary>
+    [Test]
+    public void TransferBandWidensByTwoRowsPerIndeterminateTransfer()
+    {
+        const long committedRows = 26_895_122;
+        const long indeterminate = 3_541;
+        const long observed = 26_899_464;
+
+        Assert.That(Reconciliation.VersionDeltaBand(committedRows, indeterminate, 1).Max, Is.EqualTo(26_898_663L),
+            "the old one-row unit");
+        Assert.That(Reconciliation.VersionDeltaBand(committedRows, indeterminate, TransferOperationRows).Max,
+            Is.EqualTo(26_902_204L));
+        Assert.That(Reconciliation.DescribeVersionDelta(observed, committedRows, indeterminate, TransferOperationRows,
+            wholeTransactionsOnly: true), Is.Null);
+    }
+
+    /// <summary>
+    /// The case the waived check hid: a run with no indeterminate transfer whose version sum grew by
+    /// four transfers more than the client committed, while SUM(balance) was conserved.
+    /// </summary>
+    [Test]
+    public void TransfersAboveTheCeilingAreAFindingWithTheirExcess()
+    {
+        string? finding = Reconciliation.DescribeVersionDelta(
+            persistedDelta: 1_008, committedRowWrites: 1_000, indeterminateTxns: 0, TransferOperationRows,
+            wholeTransactionsOnly: true);
+
+        Assert.That(finding, Does.Contain("8 above the band [1000, 1000]"));
+
+        ReconciliationResult result = GreenAggregates(null) with { Observed = 1_008, VersionsMatch = false };
+        Assert.That(result.VersionExcess, Is.EqualTo(8));
+        Assert.That(result.Passed, Is.False, "the version band is graded for transfers, not waived");
+    }
+
+    [Test]
+    public void AnOddTransferDeltaIsAHalfAppliedTransfer()
+    {
+        Assert.That(Reconciliation.DescribeVersionDelta(1_003, 1_000, 4, TransferOperationRows, wholeTransactionsOnly: true),
+            Does.Contain("not a whole number of 2-row transactions"));
+        Assert.That(Reconciliation.DescribeVersionDelta(1_003, 1_000, 4, TransferOperationRows, wholeTransactionsOnly: false),
+            Is.Null, "the accounts writes can touch fewer rows than configured, so they are not held to whole transactions");
+    }
+
+    [Test]
+    public void TransfersBelowTheFloorLostACommittedWrite()
+    {
+        Assert.That(Reconciliation.DescribeVersionDelta(998, 1_000, 4, TransferOperationRows, wholeTransactionsOnly: true),
+            Does.Contain("2 below the band"));
+    }
+
+    [Test]
+    public void TheTransferOperationReportsTwoRowsPerTransaction()
+    {
+        Assert.That(TransferOperationRows, Is.EqualTo(2));
+    }
+
+    private const int TransferOperationRows = CamusDB.Workload.Operations.TransferOperation.RowsPerTransfer;
 }

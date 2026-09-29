@@ -662,7 +662,7 @@ public static class Program
             reconciliation = await Reconciliation
                 .VerifyOrInconclusiveAsync(
                     verify, dataset, metrics, baselineVersionSum, writeOperation.CommittedRows,
-                    datasetIndeterminate, o.WritesPerTransaction, o.ExpectFaults, o.Rows, ct,
+                    datasetIndeterminate, writeOperation.RowsPerTransaction, o.ExpectFaults, o.Rows, ct,
                     bankMode: transfers, baselineBalanceSum: baselineBalanceSum,
                     retryBudget: TimeSpan.FromSeconds(Math.Max(1, o.ReconcileTimeout)),
                     rowAttribution: attribution, rowAttributionSkip: attributionSkip,

@@ -39,7 +39,7 @@ public sealed record ReconciliationResult(
     bool BalanceConserved = true,
     long BalanceBaseline = 0,
     long BalanceFinal = 0,
-    bool VersionCheckWaived = false,
+    int RowsPerTransaction = 1,
     RowAttributionResult? RowAttribution = null,
     ScanProbeResult? ScanProbe = null,
     IReadOnlyList<AggregateRead>? Aggregates = null)
@@ -49,11 +49,14 @@ public sealed record ReconciliationResult(
     // chaos run must catch, not tolerate. Defaults to true so the accounts workload (whose writes change
     // balances by design) is unaffected.
     //
-    // VersionCheckWaived turns off the SUM(version) accounting for the bank workload: its transfers
-    // retry on failure and are NOT idempotent, so an indeterminate commit followed by a retry can apply
-    // the transfer twice — which inflates the version count while still conserving balance. The version
-    // band assumes at-most-once application (true only for the non-retrying accounts writes), so in bank
-    // mode SUM(balance) conservation is the consistency guard and the version delta is informational.
+    // The SUM(version) band is graded for the bank workload too. A transfer retries only a conflict the
+    // server answered, and never an indeterminate commit or a failure raised before its commit was sent,
+    // so every transfer applies at most once and the band holds. Each transfer increments two rows,
+    // which RowsPerTransaction carries: the band used to widen by one increment per indeterminate
+    // transfer, so a run with many of them overflowed it, and the check was waived as noise. With the
+    // unit right, a delta above the ceiling is a transfer applied more often than the client committed
+    // it — invisible to SUM(balance), which a duplicated transfer conserves — and a delta that is not a
+    // whole number of transfers is a half-applied one.
     //
     // RowAttribution is the per-row check that the aggregates cannot perform. SUM(balance) proves only
     // that the net of every stray write is zero, so an even number of leaked legs that cancel — one row
@@ -69,7 +72,11 @@ public sealed record ReconciliationResult(
     //
     // Aggregates records how each verification read went — value, client-observed time, attempts — so
     // scan-time growth is visible run to run instead of surfacing only once a read crosses a deadline.
-    public bool Passed => (VersionsMatch || VersionCheckWaived)
+
+    /// <summary>Version increments above <see cref="ExpectedMax"/>: more than every committed and every
+    /// indeterminate transaction together could have written. Zero inside the band.</summary>
+    public long VersionExcess => Math.Max(0, Observed - ExpectedMax);
+    public bool Passed => VersionsMatch
         && RowCountMatches && AccountingBalances && (NoConflicts || ConflictsWaived) && BalanceConserved
         && (RowAttribution is null || RowAttribution.Passed)
         && (ScanProbe is null || ScanProbe.Passed);
@@ -166,6 +173,34 @@ public static class Reconciliation
         return observedDelta >= min && observedDelta <= max;
     }
 
+    /// <summary>
+    /// Grades a persisted <c>SUM(version)</c> delta against the band, or returns null when it is
+    /// admissible. Above the ceiling, more increments landed than every committed and indeterminate
+    /// transaction could have written: some transaction applied more often than the client committed
+    /// it. Below the floor, a committed write was lost. With <paramref name="wholeTransactionsOnly"/>
+    /// every transaction writes exactly <paramref name="rowsPerTransaction"/> rows (a transfer), so a
+    /// delta that is not a whole number of transactions above the floor is one that applied only part
+    /// of its writes.
+    /// </summary>
+    public static string? DescribeVersionDelta(
+        long persistedDelta, long committedRowWrites, long indeterminateTxns, int rowsPerTransaction,
+        bool wholeTransactionsOnly)
+    {
+        (long min, long max) = VersionDeltaBand(committedRowWrites, indeterminateTxns, rowsPerTransaction);
+        string band = $"[{min}, {max}] (committed rows + up to {indeterminateTxns} indeterminate txn(s) × {Math.Max(1, rowsPerTransaction)})";
+
+        if (persistedDelta > max)
+            return $"persisted SUM(version) delta={persistedDelta} is {persistedDelta - max} above the band {band}: " +
+                   "more writes landed than the client committed or left unresolved";
+        if (persistedDelta < min)
+            return $"persisted SUM(version) delta={persistedDelta} is {min - persistedDelta} below the band {band}: " +
+                   "committed writes were lost";
+        if (wholeTransactionsOnly && (persistedDelta - min) % Math.Max(1, rowsPerTransaction) != 0)
+            return $"persisted SUM(version) delta={persistedDelta} is {persistedDelta - min} above the committed floor, " +
+                   $"not a whole number of {rowsPerTransaction}-row transactions: one applied only part of its writes";
+        return null;
+    }
+
     /// <param name="baselineVersionSum">
     /// <c>SUM(version)</c> captured before the run started (warm-up included). The run is correct when
     /// the persisted sum grew by a value inside the band anchored at <paramref name="committedRowWrites"/>.
@@ -207,7 +242,9 @@ public static class Reconciliation
 
         long persistedDelta = persistedSum - baselineVersionSum;
         (long expectedMin, long expectedMax) = VersionDeltaBand(committedRowWrites, indeterminateTxns, writesPerTransaction);
-        bool versionsMatch = persistedDelta >= expectedMin && persistedDelta <= expectedMax;
+        string? versionFailure = DescribeVersionDelta(
+            persistedDelta, committedRowWrites, indeterminateTxns, writesPerTransaction, wholeTransactionsOnly: bankMode);
+        bool versionsMatch = versionFailure is null;
         bool rowCountMatches = rowCount == expectedRows;
         bool accounting = metrics.Offered == metrics.Started + metrics.ScheduleDrops
                           && metrics.Started == metrics.Completed + metrics.Failed;
@@ -227,10 +264,8 @@ public static class Reconciliation
             conn, metrics, rowAttribution, rowAttributionSkip, ct, retryBudget).ConfigureAwait(false);
 
         List<string> failures = new();
-        if (!versionsMatch && !bankMode)
-            failures.Add($"persisted SUM(version) delta={persistedDelta} outside [{expectedMin}, {expectedMax}] " +
-                         $"(committed rows + up to {indeterminateTxns} indeterminate txn(s) × {writesPerTransaction}; " +
-                         $"baseline={baselineVersionSum}, final={persistedSum}).");
+        if (versionFailure is not null)
+            failures.Add($"{versionFailure} (baseline={baselineVersionSum}, final={persistedSum}).");
         if (!rowCountMatches)
             failures.Add($"row count {rowCount} != expected {expectedRows}.");
         if (!accounting)
@@ -248,7 +283,7 @@ public static class Reconciliation
         return new ReconciliationResult(
             expectedMin, expectedMax, persistedDelta, indeterminateTxns,
             versionsMatch, rowCount, rowCountMatches, accounting, noConflicts, expectFaults && !noConflicts, failures,
-            balanceConserved, baselineBalanceSum, balanceFinal, VersionCheckWaived: bankMode,
+            balanceConserved, baselineBalanceSum, balanceFinal, RowsPerTransaction: writesPerTransaction,
             RowAttribution: rowResult, ScanProbe: scanProbe, Aggregates: reads);
     }
 
@@ -480,7 +515,7 @@ public static class Reconciliation
             VersionsMatch: false, RowCount: -1, RowCountMatches: false, AccountingBalances: false,
             NoConflicts: conflicts == 0, ConflictsWaived: false,
             Failures: failures,
-            BalanceConserved: false, BalanceBaseline: baselineBalanceSum, BalanceFinal: 0, VersionCheckWaived: false,
+            BalanceConserved: false, BalanceBaseline: baselineBalanceSum, BalanceFinal: 0,
             RowAttribution: rowAttributionExpected
                 ? RowAttributionResult.Unavailable("reconciliation could not complete: " + reason)
                 : null,

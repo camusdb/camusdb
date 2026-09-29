@@ -29,6 +29,12 @@ public interface IWriteOperation
     /// run; reconciliation widens its expected version-sum delta to admit both outcomes.</summary>
     long IndeterminateTxns { get; }
 
+    /// <summary>The most seeded rows one transaction increments <c>version</c> on. Each indeterminate
+    /// transaction widens the reconciliation band by this many increments, so it has to be the
+    /// operation's own shape, not the <c>--writes-per-transaction</c> option: a transfer always writes
+    /// two rows whatever that option says.</summary>
+    int RowsPerTransaction { get; }
+
     /// <summary>Extra attempts spent on retryable conflicts across the whole run, counting only the
     /// re-runs (a transfer that succeeds first try adds 0). A conflict absorbed by the retry loop never
     /// reaches <c>metrics.Conflicts</c>, so without this counter contention is invisible: 0 conflicts

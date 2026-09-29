@@ -66,6 +66,10 @@ public sealed class WriteOperation : IWriteOperation
     /// </summary>
     public long IndeterminateTxns => System.Threading.Interlocked.Read(ref _indeterminateTxns);
 
+    /// <summary>Writes per transaction as configured; a shard smaller than that writes fewer, so this
+    /// is the ceiling the band needs.</summary>
+    public int RowsPerTransaction => _writesPerTransaction;
+
     /// <summary>Always 0: the shard-disjoint baseline has no retry loop because it cannot conflict.</summary>
     public long RetryAttempts => 0;
 

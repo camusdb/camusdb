@@ -36,6 +36,9 @@ public sealed class TransferOperation : IWriteOperation
 {
     private const long TransferAmount = 1;
 
+    /// <summary>Rows each transfer increments <c>version</c> on: the debited row and the credited row.</summary>
+    public const int RowsPerTransfer = 2;
+
     private readonly CamusTransactionOptions _options;
     private readonly ConnectionSet _connections;
     private readonly Dataset _dataset;
@@ -76,6 +79,8 @@ public sealed class TransferOperation : IWriteOperation
     public long CommittedRows => System.Threading.Interlocked.Read(ref _committedRows);
 
     public long IndeterminateTxns => System.Threading.Interlocked.Read(ref _indeterminateTxns);
+
+    public int RowsPerTransaction => RowsPerTransfer;
 
     public long RetryAttempts => System.Threading.Interlocked.Read(ref _retryAttempts);
 
@@ -151,7 +156,7 @@ public sealed class TransferOperation : IWriteOperation
             await tx.CommitAsync(ct).ConfigureAwait(false);
             commitMs = t.Tick();
 
-            System.Threading.Interlocked.Add(ref _committedRows, 2);
+            System.Threading.Interlocked.Add(ref _committedRows, RowsPerTransfer);
             _ledger?.Record(lowIndex, highIndex, lowDelta, attempt, Metrics.TransferOutcome.Committed, null);
             return (true, new OperationResult(OperationKind.Write, OperationStatus.Ok, null, beginMs, t.ReadMs, t.UpdateMs, commitMs));
         }
