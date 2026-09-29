@@ -310,7 +310,7 @@ internal sealed class KvLargeValueReader
             tx.TransactionId,
             tx.ReadTimestamp,
             fetchKeys,
-            tx.FoldReads ? tx.CoordinatorKey : "",
+            tx.ReadRegistrationKey(fetchKeys),
             "large_values_batch",
             cancellationToken).ConfigureAwait(false);
 
@@ -397,7 +397,7 @@ internal sealed class KvLargeValueReader
             tx.TransactionId,
             tx.ReadTimestamp,
             rowKeys,
-            tx.FoldReads ? tx.CoordinatorKey : "",
+            tx.ReadRegistrationKey(rowKeys),
             "large_values_reread",
             cancellationToken).ConfigureAwait(false);
 

@@ -79,12 +79,19 @@ internal sealed class CompiledRowCodec
     private readonly struct ColumnPlan
     {
         public required ColumnType Type { get; init; }
+        
         public required StorageClass Class { get; init; }
+        
         public required int NullBitIndex { get; init; }
+        
         public int FixedOffset { get; init; }
+        
         public int FixedWidth { get; init; }
+        
         public int BoolBitIndex { get; init; }
+        
         public int VariableOrdinal { get; init; }
+        
         public ColumnType ArrayElementType { get; init; }
     }
 
@@ -199,6 +206,7 @@ internal sealed class CompiledRowCodec
 
         // Rebase fixed offsets to absolute payload offsets now that the header geometry is known.
         int fixedAreaOffset = SchemaVersionSize + nullBitmapBytes + boolBitmapBytes;
+        
         for (int i = 0; i < plans.Length; i++)
         {
             if (plans[i].Class == StorageClass.Fixed)
@@ -436,12 +444,13 @@ internal sealed class CompiledRowCodec
         in RowStorageForms.TrailerLayout carryLayout)
     {
         uint versionWord = (uint)SchemaVersion;
+        
         if (anyMark)
             versionWord |= RowStorageForms.TrailerFlag;
+        
         BinaryPrimitives.WriteUInt32LittleEndian(payload, versionWord);
 
         int variableCursor = 0;
-        int variableAreaOffset = headerSize;
 
         for (int i = 0; i < columns.Length; i++)
         {
@@ -451,7 +460,7 @@ internal sealed class CompiledRowCodec
             if (plan.Class == StorageClass.Variable)
             {
                 ref CellPlan cell = ref cells[plan.VariableOrdinal];
-                Span<byte> dest = payload[(variableAreaOffset + variableCursor)..];
+                Span<byte> dest = payload[(headerSize + variableCursor)..];
 
                 if (cell.Carry)
                 {
@@ -507,12 +516,14 @@ internal sealed class CompiledRowCodec
         if (!anyMark)
             return;
 
-        int trailer = variableAreaOffset + variableCursor;
+        int trailer = headerSize + variableCursor;
         int bitmapBytes = CeilDiv(variableColumnCount, 8);
+        
         for (int v = 0; v < cells.Length; v++)
         {
             if (cells[v].OutOfLine)
                 SetBit(payload.Slice(trailer, bitmapBytes), v);
+            
             if (cells[v].Compressed)
                 SetBit(payload.Slice(trailer + bitmapBytes, bitmapBytes), v);
         }
@@ -574,8 +585,10 @@ internal sealed class CompiledRowCodec
         if (type == ColumnType.String)
         {
             string text = slot.AsString ?? "";
+            
             if (text.Length >= minBytes)
                 return true;
+            
             if (text.Length * 3 < minBytes)
                 return false;
         }
@@ -610,6 +623,7 @@ internal sealed class CompiledRowCodec
             return headerSize;
 
         int variableAreaSize = 0;
+        
         for (int i = 0; i < columns.Length; i++)
         {
             ColumnPlan plan = columns[i];
@@ -634,7 +648,6 @@ internal sealed class CompiledRowCodec
         BinaryPrimitives.WriteUInt32LittleEndian(payload, (uint)SchemaVersion);
 
         int variableCursor = 0; // running end offset within variableArea
-        int variableAreaOffset = headerSize;
 
         for (int i = 0; i < columns.Length; i++)
         {
@@ -662,7 +675,7 @@ internal sealed class CompiledRowCodec
 
                 default: // Variable
                 {
-                    int written = WriteVariablePayload(payload.Slice(variableAreaOffset + variableCursor), plan.Type, plan.ArrayElementType, in slot);
+                    int written = WriteVariablePayload(payload.Slice(headerSize + variableCursor), plan.Type, plan.ArrayElementType, in slot);
                     variableCursor += written;
                     BinaryPrimitives.WriteUInt32LittleEndian(payload.Slice(variableOffsetsOffset + plan.VariableOrdinal * 4, 4), (uint)variableCursor);
                     break;
@@ -680,19 +693,24 @@ internal sealed class CompiledRowCodec
             case ColumnType.DateTime:
                 BinaryPrimitives.WriteInt64LittleEndian(dest, slot.AsLong);
                 break;
+            
             case ColumnType.Float64:
                 BinaryPrimitives.WriteInt64LittleEndian(dest, BitConverter.DoubleToInt64Bits(slot.AsDouble));
                 break;
+            
             case ColumnType.Float32:
                 BinaryPrimitives.WriteInt32LittleEndian(dest, BitConverter.SingleToInt32Bits((float)slot.AsDouble));
                 break;
+            
             case ColumnType.Id:
                 WriteObjectId(dest, ObjectId.ToValue(slot.AsString!));
                 break;
+            
             case ColumnType.Uuid:
                 BinaryPrimitives.WriteInt64LittleEndian(dest, slot.UuidHigh);
                 BinaryPrimitives.WriteInt64LittleEndian(dest[8..], slot.UuidLow);
                 break;
+            
             default:
                 throw new CamusDBException(CamusDBErrorCodes.UnknownType, "Not a fixed-width type: " + type);
         }

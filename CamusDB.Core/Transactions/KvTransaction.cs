@@ -862,6 +862,50 @@ public sealed class KvTransaction
         }
     }
 
+    /// <summary>True when this transaction already wrote or deleted <paramref name="key"/>.</summary>
+    public bool HasModified(string key)
+    {
+        lock (trackSync)
+            return modifiedKeys is not null
+                && (modifiedKeys.Contains((key, KeyValueDurability.Persistent)) || modifiedKeys.Contains((key, KeyValueDurability.Ephemeral)));
+    }
+
+    /// <summary>
+    /// The coordinator key a point read of <paramref name="key"/> registers under, or empty for an
+    /// unregistered read.
+    ///
+    /// <para>A read registers when the transaction folds every read (<see cref="FoldReads"/>), and also
+    /// when the transaction already wrote the key. Kahuna keeps a transaction's staged write in the
+    /// partition leader's memory only; a leader change drops it, and the next read of the key answers the
+    /// committed value with no sign that the transaction's own write is gone. A registered read carries
+    /// its answer to the coordinator, which knows the staged revision and refuses the commit when the
+    /// answer is not it. The cost is one coordinator hop per read of a key this transaction wrote, which
+    /// is the read-after-write shape and not the common read.</para>
+    /// </summary>
+    public string ReadRegistrationKey(string key) => FoldReads || HasModified(key) ? CoordinatorKey : "";
+
+    /// <summary>
+    /// Batch form of <see cref="ReadRegistrationKey(string)"/>: the batch registers when any of its keys
+    /// was written by this transaction, so that key's answer reaches the coordinator.
+    /// </summary>
+    public string ReadRegistrationKey(IReadOnlyList<string> keys)
+    {
+        if (FoldReads)
+            return CoordinatorKey;
+
+        lock (trackSync)
+        {
+            if (modifiedKeys is null)
+                return "";
+
+            for (int i = 0; i < keys.Count; i++)
+                if (modifiedKeys.Contains((keys[i], KeyValueDurability.Persistent)) || modifiedKeys.Contains((keys[i], KeyValueDurability.Ephemeral)))
+                    return CoordinatorKey;
+        }
+
+        return "";
+    }
+
     /// <summary>
     /// Records that <paramref name="key"/> was written or deleted within this transaction.
     /// </summary>

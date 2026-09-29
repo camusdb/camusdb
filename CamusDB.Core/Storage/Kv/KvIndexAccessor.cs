@@ -93,7 +93,7 @@ internal sealed class KvIndexAccessor
         if (tx.IsolationLevel == CamusIsolationLevel.Serializable && tx.TransactionMode == CamusTransactionMode.ReadWrite)
             await locks.AcquireSharedPointLockAsync(tx, keys.BuildIndexBucketPrefix(indexId), kvKey, cancellationToken).ConfigureAwait(false);
 
-        BranchKvValue idx = await branch.ProbeRaw(tx.TransactionId, tx.ReadTimestamp, kvKey, cancellationToken, tx.FoldReads ? tx.CoordinatorKey : "").ConfigureAwait(false);
+        BranchKvValue idx = await branch.ProbeRaw(tx.TransactionId, tx.ReadTimestamp, kvKey, cancellationToken, tx.ReadRegistrationKey(kvKey)).ConfigureAwait(false);
         if (idx.Kind == BranchKvKind.Tombstone)
             return null;   // tombstone at this level
 
@@ -257,7 +257,7 @@ internal sealed class KvIndexAccessor
             tx.TransactionId,
             tx.ReadTimestamp,
             probeKeys,
-            tx.FoldReads ? tx.CoordinatorKey : "",
+            tx.ReadRegistrationKey(probeKeys),
             "fk_unique_lookup_batch",
             cancellationToken).ConfigureAwait(false);
 
@@ -398,7 +398,7 @@ internal sealed class KvIndexAccessor
         if (tx.IsolationLevel == CamusIsolationLevel.Serializable && tx.TransactionMode == CamusTransactionMode.ReadWrite)
             await locks.AcquireSharedPointLockAsync(tx, keys.BuildIndexBucketPrefix(indexId), kvKey, cancellationToken).ConfigureAwait(false);
 
-        BranchKvValue idx = await branch.ProbeRaw(tx.TransactionId, tx.ReadTimestamp, kvKey, cancellationToken, tx.FoldReads ? tx.CoordinatorKey : "").ConfigureAwait(false);
+        BranchKvValue idx = await branch.ProbeRaw(tx.TransactionId, tx.ReadTimestamp, kvKey, cancellationToken, tx.ReadRegistrationKey(kvKey)).ConfigureAwait(false);
         if (idx.Kind == BranchKvKind.Tombstone) return null;
         if (idx.HasPayload) return (RowIdFromPayload(idx.Payload.Span), IncludeTupleFromPayload(idx.Payload));
 
