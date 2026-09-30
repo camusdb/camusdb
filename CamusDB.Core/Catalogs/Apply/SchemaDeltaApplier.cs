@@ -1,4 +1,4 @@
-
+﻿
 /**
  * This file is part of CamusDB
  *
@@ -242,6 +242,14 @@ internal static class SchemaDeltaApplier
             return payload.State == SchemaElementState.Absent
                 ? index is null
                 : index?.State == payload.State;
+        }
+
+        if (payload.ElementKind == SchemaElementKind.ForeignKey)
+        {
+            ForeignKeySchema? foreignKey = table.ForeignKeys?.FirstOrDefault(fk => string.Equals(fk.Name, payload.ElementName, StringComparison.OrdinalIgnoreCase));
+            return payload.State == SchemaElementState.Absent
+                ? foreignKey is null
+                : foreignKey?.State == payload.State;
         }
 
         if (table.Columns is null)

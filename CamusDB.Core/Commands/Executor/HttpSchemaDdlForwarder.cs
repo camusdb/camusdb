@@ -1,4 +1,4 @@
-
+﻿
 /**
  * This file is part of CamusDB
  *
@@ -61,6 +61,7 @@ public sealed class HttpSchemaDdlForwarder : ISchemaDdlForwarder, ISchemaAckSend
             Columns = MapColumns(ticket.Columns),
             Constraints = MapConstraints(ticket.Constraints),
             CheckConstraints = MapCheckConstraints(ticket.CheckConstraints),
+            ForeignKeys = MapForeignKeys(ticket.ForeignKeys),
             IfNotExists = ticket.IfNotExists,
             Comment = ticket.Comment,
         };
@@ -319,6 +320,28 @@ public sealed class HttpSchemaDdlForwarder : ISchemaDdlForwarder, ISchemaAckSend
                 Name = c.Name,
                 Columns = c.Columns.Select(col => new ColumnIndexInfoRequest { Name = col.Name, Order = col.Order }).ToArray(),
                 Comment = c.Comment,
+            };
+        }
+        return result;
+    }
+
+    private static ForeignKeyInfoRequest[] MapForeignKeys(ForeignKeyInfo[] foreignKeys)
+    {
+        ForeignKeyInfoRequest[] result = new ForeignKeyInfoRequest[foreignKeys.Length];
+        for (int i = 0; i < foreignKeys.Length; i++)
+        {
+            ForeignKeyInfo f = foreignKeys[i];
+            result[i] = new()
+            {
+                Name = f.Name,
+                Columns = f.Columns,
+                ReferencedTable = f.ReferencedTable,
+                ReferencedColumns = f.ReferencedColumns,
+                OnDelete = f.OnDelete,
+                OnUpdate = f.OnUpdate,
+                Match = f.Match,
+                Deferrable = f.Deferrable,
+                InitiallyDeferred = f.InitiallyDeferred,
             };
         }
         return result;

@@ -1,4 +1,4 @@
-
+﻿
 /**
  * This file is part of CamusDB
  *
@@ -31,7 +31,8 @@ namespace CamusDB.Core.Catalogs.Replication;
 /// follower must never generate one: two nodes generating independently would each be internally
 /// consistent and mutually wrong.</para>
 ///
-/// <para><b>A CREATE TABLE folds its inline indexes and CHECK constraints into the one delta.</b>
+/// <para><b>A CREATE TABLE folds its inline indexes, CHECK constraints and foreign keys into the one
+/// delta.</b>
 /// Creating a table is therefore exactly one schema version, not one per constraint — which matters
 /// because each version costs a replication round-trip and an ack gate.</para>
 ///
@@ -40,7 +41,21 @@ namespace CamusDB.Core.Catalogs.Replication;
 /// </summary>
 internal static class SchemaChangeEntryFactory
 {
-    internal static SchemaChangeLogEntry CreateTableEntry(DatabaseDescriptor database, CreateTableTicket ticket, KvTransaction tx, string tableId)
+    /// <summary>
+    /// Builds the one <c>CreateTable</c> delta for <paramref name="ticket"/>: its columns, inline
+    /// indexes, CHECK constraints and foreign keys, with every id generated here. The caller holds
+    /// <c>Schema.Semaphore</c>, because a foreign key resolves its parent from the live schema.
+    /// </summary>
+    /// <param name="foreignKeyState">
+    /// The state each foreign key is born in: <c>Public</c> on a standalone node, <c>WriteOnly</c> in a
+    /// cluster until the validation pass publishes it.
+    /// </param>
+    internal static SchemaChangeLogEntry CreateTableEntry(
+        DatabaseDescriptor database,
+        CreateTableTicket ticket,
+        KvTransaction tx,
+        string tableId,
+        SchemaElementState foreignKeyState = SchemaElementState.Public)
     {
         SchemaColumnPayload[] columns = [.. ticket.Columns.Select(column =>
         {
@@ -59,6 +74,11 @@ internal static class SchemaChangeEntryFactory
         // table is created with its constraints already in place.
         CheckConstraintSchema[]? checkConstraints = BuildInlineCheckConstraints(ticket);
 
+        // Foreign keys ride the same delta, with any index a constraint needs for its parent-side
+        // probe appended to the index list, so no second step can leave a constraint without it.
+        (ForeignKeySchema[]? foreignKeys, indexes) = ForeignKeyDefinitionBuilder.Build(
+            database.Schema, ticket, tableId, columns, indexes, foreignKeyState, database.Options);
+
         return new()
         {
             Ts = tx.TransactionId,
@@ -73,6 +93,7 @@ internal static class SchemaChangeEntryFactory
                 Columns = columns,
                 Indexes = indexes,
                 CheckConstraints = checkConstraints,
+                ForeignKeys = foreignKeys,
                 Comment = ticket.Comment,
                 Kind = ticket.Kind,
                 ViewDefinition = ticket.ViewDefinition,

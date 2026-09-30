@@ -13,12 +13,23 @@ namespace CamusDB.Core.Catalogs.Models;
 
 /// <summary>
 /// Discriminator for <see cref="SchemaElementStatePayload"/>: whether the state
-/// transition targets a column or an index element.
+/// transition targets a column, an index or a foreign-key constraint. Persisted as an integer in
+/// the schema log and in coordinator job records, so members are only ever appended.
 /// </summary>
 public enum SchemaElementKind
 {
     Column,
     Index,
+
+    /// <summary>
+    /// A <see cref="ForeignKeySchema"/> on the named table, found by constraint name. Its ladder is
+    /// shorter than the column and index ladder: a constraint is added at <c>WriteOnly</c> (enforced,
+    /// not yet validated), goes to <c>Public</c> after the validation pass, and goes to <c>Absent</c>
+    /// in one step, because an early stop of enforcement is always safe. Like an index, a state
+    /// change does not bump <see cref="TableSchema.Version"/>: a constraint is not part of the row
+    /// encoding.
+    /// </summary>
+    ForeignKey,
 }
 
 public sealed class SchemaCreateTablePayload
@@ -50,6 +61,17 @@ public sealed class SchemaCreateTablePayload
     /// rebuilt from <c>Expression</c> at table-open time.
     /// </summary>
     public CheckConstraintSchema[]? CheckConstraints { get; set; }
+
+    /// <summary>
+    /// Foreign keys declared in the CREATE TABLE statement, fully resolved to ids by the proposer.
+    /// Folded into this one delta together with any index a constraint needs for its parent-side
+    /// probe (in <see cref="Indexes"/>, with <see cref="TableIndexSchema.OwnerConstraintId"/> set),
+    /// so no second DDL step can leave a constraint without its index. Each arrives in the state the
+    /// proposer chose: <c>Public</c> on a standalone node, <c>WriteOnly</c> in a cluster, where the
+    /// validation pass runs after every node has applied this delta. Null when none was declared,
+    /// and absent in log entries written before this field existed.
+    /// </summary>
+    public ForeignKeySchema[]? ForeignKeys { get; set; }
 
     /// <summary>
     /// Table-level comment declared with a trailing <c>) COMMENT '…'</c> on the CREATE TABLE

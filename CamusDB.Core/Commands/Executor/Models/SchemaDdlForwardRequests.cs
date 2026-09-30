@@ -1,4 +1,4 @@
-
+﻿
 /**
  * This file is part of CamusDB
  *
@@ -65,6 +65,28 @@ public sealed class CheckConstraintInfoRequest
     public string[] ReferencedColumns { get; set; } = [];
 }
 
+/// <summary>
+/// Wire form of a foreign key carried on a forwarded CREATE TABLE. Every field of
+/// <see cref="ForeignKeyInfo"/> is here, including the clauses that are refused: the leader validates
+/// the ticket again, and a clause dropped on the wire would turn a refused statement into an accepted
+/// one. Without this the leader would build the table with no constraint at all.
+/// </summary>
+public sealed class ForeignKeyInfoRequest
+{
+    public string Name { get; set; } = "";
+    public string[] Columns { get; set; } = [];
+    public string ReferencedTable { get; set; } = "";
+
+    /// <summary>Empty means the parent's primary key.</summary>
+    public string[] ReferencedColumns { get; set; } = [];
+
+    public ForeignKeyAction OnDelete { get; set; }
+    public ForeignKeyAction OnUpdate { get; set; }
+    public ForeignKeyMatch Match { get; set; }
+    public bool Deferrable { get; set; }
+    public bool InitiallyDeferred { get; set; }
+}
+
 public sealed class ColumnIndexInfoRequest
 {
     public string Name { get; set; } = "";
@@ -89,6 +111,7 @@ public sealed class ForwardCreateTableRequest
     public ColumnInfoRequest[] Columns { get; set; } = [];
     public ConstraintInfoRequest[] Constraints { get; set; } = [];
     public CheckConstraintInfoRequest[] CheckConstraints { get; set; } = [];
+    public ForeignKeyInfoRequest[] ForeignKeys { get; set; } = [];
     public bool IfNotExists { get; set; }
 
     /// <summary>Inline table-level comment (<c>) COMMENT '…'</c>); null when none was declared.</summary>

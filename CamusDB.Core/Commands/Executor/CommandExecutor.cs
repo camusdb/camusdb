@@ -1099,6 +1099,14 @@ public sealed class CommandExecutor : IAsyncDisposable
         Func<string, Task>? onCheckpoint = null
     ) => schemaDdl.BackfillIndexEntriesAsync(database, tableName, indexInfo, startOffset, onCheckpoint);
 
+    /// <summary>
+    /// Runs the foreign-key validation pass for one constraint. Reachable here because
+    /// <see cref="Controllers.DatabaseOpener"/> wires it into the leader-change resume coordinator, so
+    /// a constraint left in <c>WriteOnly</c> by a failed leader is validated before it is published.
+    /// </summary>
+    internal Task ValidateForeignKeyRowsAsync(DatabaseDescriptor database, string tableName, string constraintName) =>
+        schemaDdl.ValidateForeignKeyRowsAsync(database, tableName, constraintName);
+
     public Task<bool> AlterIndex(AlterIndexTicket ticket) => schemaDdl.AlterIndex(ticket);
 
     public Task<bool> DropTable(DropTableTicket ticket) => schemaDdl.DropTable(ticket);

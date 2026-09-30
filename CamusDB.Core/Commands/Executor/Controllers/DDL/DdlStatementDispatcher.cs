@@ -1,4 +1,4 @@
-
+﻿
 /**
  * This file is part of CamusDB
  *
@@ -331,6 +331,7 @@ internal sealed class DdlStatementDispatcher
                 {
                     CreateTableTicket createTableTicket = sqlExecutor.CreateCreateTableTicket(ticket, ast);
                     context.Validator.Validate(createTableTicket);
+                    ForeignKeyPrivileges.RequireReferencePrivileges(database, createTableTicket);
 
                     bool? forwarded = await ddlForwarding.TryForwardCreateTableAsync(database, createTableTicket).ConfigureAwait(false);
                     if (forwarded is not null)

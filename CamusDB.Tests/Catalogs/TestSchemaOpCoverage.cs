@@ -1,4 +1,4 @@
-
+﻿
 /**
  * This file is part of CamusDB
  *
@@ -117,6 +117,53 @@ public sealed class TestSchemaOpCoverage
             SchemaDeltaApplier.WasSchemaDeltaApplied(schema, entry),
             "the storage id now matches the payload, so the truncate has landed"
         );
+    }
+
+    /// <summary>
+    /// A foreign-key state change must be answered from the table's constraint list. Answering it from
+    /// the column list — the default kind — would find no column of that name and report "not applied"
+    /// forever, which stalls the proposer's wait.
+    /// </summary>
+    [Test]
+    public void ForeignKeyStateIsAnsweredFromTheConstraintList()
+    {
+        Schema schema = new() { SchemaVersion = 99 };
+        TableSchema table = new() { Id = "T1", Name = "robots", Columns = [] };
+        schema.Tables["robots"] = table;
+
+        SchemaElementStatePayload payload = new()
+        {
+            TableName = "robots",
+            ElementName = "robots_owner_fkey",
+            ElementKind = SchemaElementKind.ForeignKey,
+            State = SchemaElementState.Public
+        };
+
+        SchemaChangeLogEntry entry = Entry(SchemaOp.SetElementState, SchemaChangeLogEntryCodec.EncodePayload(payload));
+
+        Assert.IsFalse(SchemaDeltaApplier.WasSchemaDeltaApplied(schema, entry), "the constraint does not exist, so it is not Public");
+
+        table.ForeignKeys =
+        [
+            new ForeignKeySchema("F1", "robots_owner_fkey", ["c1"], "T2", ["c2"], "i2", "i1",
+                ForeignKeyAction.NoAction, ForeignKeyAction.NoAction, ForeignKeyMatch.Simple, SchemaElementState.WriteOnly)
+        ];
+
+        Assert.IsFalse(SchemaDeltaApplier.WasSchemaDeltaApplied(schema, entry), "the constraint is still WriteOnly");
+
+        table.ForeignKeys = [table.ForeignKeys[0].WithState(SchemaElementState.Public)];
+
+        Assert.IsTrue(SchemaDeltaApplier.WasSchemaDeltaApplied(schema, entry), "the constraint is Public");
+
+        SchemaElementStatePayload absent = new()
+        {
+            TableName = "robots",
+            ElementName = "robots_owner_fkey",
+            ElementKind = SchemaElementKind.ForeignKey,
+            State = SchemaElementState.Absent
+        };
+
+        Assert.IsFalse(SchemaDeltaApplier.WasSchemaDeltaApplied(schema, Entry(SchemaOp.SetElementState, SchemaChangeLogEntryCodec.EncodePayload(absent))));
     }
 
     /// <summary>

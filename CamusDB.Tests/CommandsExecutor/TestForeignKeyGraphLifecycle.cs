@@ -1,4 +1,4 @@
-/**
+﻿/**
  * This file is part of CamusDB
  *
  * For the full copyright and license information, please view the LICENSE.txt
@@ -20,9 +20,9 @@ namespace CamusDB.Tests.CommandsExecutor;
 
 /// <summary>
 /// The published foreign-key graph against a real database: it follows DDL that renames or drops either
-/// table, and a persisted constraint survives a reopen. No DDL creates a constraint yet, so each scenario
-/// places one directly into the child's schema under the schema lock. Every later DDL on the child then
-/// persists it with the rest of the table.
+/// table, and a persisted constraint survives a reopen. Each scenario places the constraint directly into
+/// the child's schema under the schema lock, so that one of them can also place a constraint that no DDL
+/// would accept. Every later DDL on the child then persists it with the rest of the table.
 /// </summary>
 internal static class ForeignKeyGraphScenarios
 {

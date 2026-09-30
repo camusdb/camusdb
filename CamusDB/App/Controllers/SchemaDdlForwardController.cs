@@ -1,4 +1,4 @@
-
+﻿
 /**
  * This file is part of CamusDB
  *
@@ -95,7 +95,8 @@ public sealed class SchemaDdlForwardController : CommandsController
                 constraints: MapConstraints(req.Constraints),
                 ifNotExists: req.IfNotExists,
                 checkConstraints: MapCheckConstraints(req.CheckConstraints),
-                comment: req.Comment
+                comment: req.Comment,
+                foreignKeys: MapForeignKeys(req.ForeignKeys)
             );
 
             CreateTableResult result = await executor.CreateTable(ticket).ConfigureAwait(false);
@@ -675,6 +676,18 @@ public sealed class SchemaDdlForwardController : CommandsController
             c.Columns.Select(col => new ColumnIndexInfo(col.Name, col.Order)).ToArray(),
             comment: c.Comment
         )).ToArray();
+
+    private static ForeignKeyInfo[] MapForeignKeys(ForeignKeyInfoRequest[]? foreignKeys) =>
+        (foreignKeys ?? []).Select(f => new ForeignKeyInfo(
+            f.Name,
+            f.Columns ?? [],
+            f.ReferencedTable,
+            f.ReferencedColumns ?? [],
+            f.OnDelete,
+            f.OnUpdate,
+            f.Match,
+            f.Deferrable,
+            f.InitiallyDeferred)).ToArray();
 
     private static CheckConstraintInfo[] MapCheckConstraints(CheckConstraintInfoRequest[] checks) =>
         checks.Select(c => new CheckConstraintInfo(c.Name, c.Expression, c.ReferencedColumns)).ToArray();

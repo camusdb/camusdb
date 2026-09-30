@@ -1,4 +1,4 @@
-
+﻿
 /**
  * This file is part of CamusDB
  *
@@ -16,7 +16,8 @@ namespace CamusDB.Core.Catalogs.Apply;
 
 /// <summary>
 /// Applies a staged element-state transition, driving a column or an index through
-/// <c>Absent -> DeleteOnly -> WriteOnly -> Public</c>.
+/// <c>Absent -> DeleteOnly -> WriteOnly -> Public</c>, and a foreign key through its shorter
+/// ladder (see <see cref="ApplyForeignKeyElementState"/>).
 ///
 /// <para><b>The staging exists so the cluster is never in a state where one node writes an element
 /// another node cannot read.</b> A node at <c>DeleteOnly</c> removes entries for the element but
@@ -37,6 +38,9 @@ internal static class ElementStateApplier
 
         if (payload.ElementKind == SchemaElementKind.Index)
             return ApplyIndexElementState(tableSchema, payload);
+
+        if (payload.ElementKind == SchemaElementKind.ForeignKey)
+            return ApplyForeignKeyElementState(tableSchema, payload);
 
         if (tableSchema.Columns is null)
             throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, $"Table '{payload.TableName}' has no columns");
@@ -139,6 +143,102 @@ internal static class ElementStateApplier
         // TableSchema.Version is intentionally NOT bumped: indexes are not part of the
         // row encoding, so index state changes are invisible to the row decoder.
         return tableSchema;
+    }
+
+    /// <summary>
+    /// Applies a <c>SetElementState</c> delta that targets a foreign key, found by constraint name.
+    /// Does not bump <c>tableSchema.Version</c>, for the same reason as the index variant: a
+    /// constraint is not part of the row encoding. The published <see cref="ForeignKeyGraph"/> is
+    /// rebuilt by the caller after every delta, so the DML of both tables sees the new state at once.
+    ///
+    /// <para><b>Absent removes the constraint and releases the index it owned.</b> The owned index
+    /// stays, as an ordinary index, with <see cref="TableIndexSchema.OwnerConstraintId"/> cleared in
+    /// the same delta. An owner id must always name a live constraint; a DROP CONSTRAINT that also
+    /// wants the index gone drops it by name in a later step.</para>
+    ///
+    /// <para>The list is replaced, never edited in place, so a lock-free reader that holds the old
+    /// list keeps a consistent one.</para>
+    /// </summary>
+    internal static TableSchema ApplyForeignKeyElementState(TableSchema tableSchema, SchemaElementStatePayload payload)
+    {
+        int position = tableSchema.ForeignKeys?.FindIndex(fk => string.Equals(fk.Name, payload.ElementName, StringComparison.OrdinalIgnoreCase)) ?? -1;
+        if (position < 0)
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInput,
+                $"Unknown foreign key '{payload.ElementName}' on table '{tableSchema.Name}'"
+            );
+
+        ForeignKeySchema current = tableSchema.ForeignKeys![position];
+        ValidateForeignKeyStateTransition(current.State, payload.State, payload.ElementName);
+
+        if (current.State == payload.State)
+            return tableSchema;
+
+        List<ForeignKeySchema> foreignKeys = [.. tableSchema.ForeignKeys];
+
+        if (payload.State == SchemaElementState.Absent)
+        {
+            foreignKeys.RemoveAt(position);
+            ReleaseOwnedIndexes(tableSchema, current.Id);
+        }
+        else
+        {
+            foreignKeys[position] = current.WithState(payload.State);
+        }
+
+        tableSchema.ForeignKeys = foreignKeys.Count == 0 ? null : foreignKeys;
+        return tableSchema;
+    }
+
+    /// <summary>
+    /// The foreign-key ladder: <c>WriteOnly → Public</c> after validation, and <c>WriteOnly</c> or
+    /// <c>Public → Absent</c> in one step. A constraint is never demoted from Public to WriteOnly, and
+    /// never passes through <c>DeleteOnly</c>: enforcement either covers every write or none.
+    /// </summary>
+    internal static void ValidateForeignKeyStateTransition(SchemaElementState current, SchemaElementState next, string constraintName)
+    {
+        if (current == next)
+            return;
+
+        bool valid = (current, next) switch
+        {
+            (SchemaElementState.WriteOnly, SchemaElementState.Public) => true,
+            (SchemaElementState.WriteOnly, SchemaElementState.Absent) => true,
+            (SchemaElementState.Public, SchemaElementState.Absent) => true,
+            _ => false
+        };
+
+        if (!valid)
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInput,
+                $"Invalid state transition for foreign key '{constraintName}': {current} -> {next}"
+            );
+    }
+
+    private static void ReleaseOwnedIndexes(TableSchema tableSchema, string constraintId)
+    {
+        if (tableSchema.Indexes is null)
+            return;
+
+        for (int i = 0; i < tableSchema.Indexes.Count; i++)
+        {
+            TableIndexSchema index = tableSchema.Indexes[i];
+            if (!string.Equals(index.OwnerConstraintId, constraintId, StringComparison.Ordinal))
+                continue;
+
+            tableSchema.Indexes[i] = new TableIndexSchema(
+                index.Id,
+                index.Name,
+                index.ColumnIds,
+                index.Type,
+                index.State,
+                index.StartOffset,
+                columnDirections: index.ColumnDirections,
+                includeColumnIds: index.IncludeColumnIds,
+                comment: index.Comment,
+                ownerConstraintId: null
+            );
+        }
     }
 
     internal static void ValidateElementStateTransition(

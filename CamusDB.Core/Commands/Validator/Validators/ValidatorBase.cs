@@ -49,10 +49,9 @@ internal abstract class ValidatorBase
     /// the HTTP API — so a clause is refused the same way wherever it was written.
     /// </summary>
     /// <remarks>
-    /// Nothing persists or enforces a foreign key yet, so a well-formed, supported declaration is
-    /// refused too. Accepting it would create a table whose constraint silently does nothing, which is
-    /// worse than an error. The last statement of this method goes away when the DDL path stores the
-    /// constraint.
+    /// Only the statement itself is checked here. Whether the parent exists, whether its columns carry a
+    /// unique index and whether the types match depend on the schema, and are checked when the DDL
+    /// resolves the constraint and again when the schema change is applied.
     /// </remarks>
     protected static void ValidateForeignKey(ForeignKeyInfo foreignKey)
     {
@@ -71,10 +70,6 @@ internal abstract class ValidatorBase
                 $"Foreign key '{foreignKey.Name}' names {foreignKey.Columns.Length} referencing column(s) but {foreignKey.ReferencedColumns.Length} referenced column(s)");
 
         foreignKey.RequireSupported();
-
-        throw new CamusDBException(
-            CamusDBErrorCodes.FeatureNotSupported,
-            $"Foreign key '{foreignKey.Name}': FOREIGN KEY constraints are parsed but cannot be created yet");
     }
 
     /// <summary>

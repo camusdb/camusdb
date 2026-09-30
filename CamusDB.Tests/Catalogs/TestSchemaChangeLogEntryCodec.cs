@@ -1,4 +1,4 @@
-/**
+﻿/**
  * This file is part of CamusDB
  *
  * For the full copyright and license information, please view the LICENSE.txt
@@ -159,6 +159,48 @@ public sealed class TestSchemaChangeLogEntryCodec
             Comment = "retuned",
             SetComment = true
         });
+    }
+
+    /// <summary>
+    /// A foreign-key state change is carried by the same op as a column or index state change, told
+    /// apart only by the element kind. The kind must survive both the framed and the legacy form, or a
+    /// follower would look for a column of that name.
+    /// </summary>
+    [Test]
+    public void SetElementState_RoundTripsTheForeignKeyKind()
+    {
+        SchemaElementStatePayload payload = new()
+        {
+            TableName = "robots",
+            ElementName = "robots_name_fkey",
+            ElementKind = SchemaElementKind.ForeignKey,
+            State = SchemaElementState.Public
+        };
+
+        SchemaChangeLogEntry framed = SchemaChangeLogEntryCodec.Decode(SchemaChangeLogEntryCodec.Encode(Entry(SchemaOp.SetElementState, EncodePayload(payload))));
+        Assert.AreEqual(SchemaElementKind.ForeignKey, framed.GetPayload<SchemaElementStatePayload>().ElementKind);
+
+        SchemaChangeLogEntry legacy = Entry(SchemaOp.SetElementState, Serializator.Serialize(payload));
+        legacy.PayloadFormat = SchemaPayloadFormat.Utf16Legacy;
+        SchemaChangeLogEntry legacyRoundTrip = SchemaChangeLogEntryCodec.Decode(Serializator.Serialize(legacy));
+        Assert.AreEqual(SchemaElementKind.ForeignKey, legacyRoundTrip.GetPayload<SchemaElementStatePayload>().ElementKind);
+    }
+
+    [Test]
+    public void CreateTable_RoundTripsForeignKeysAndTheOwnedIndex()
+    {
+        SchemaChangeLogEntry roundTrip = SchemaChangeLogEntryCodec.Decode(SchemaChangeLogEntryCodec.Encode(
+            Entry(SchemaOp.CreateTable, EncodePayload(CreateTablePayload()))));
+
+        SchemaCreateTablePayload decoded = roundTrip.GetPayload<SchemaCreateTablePayload>();
+        ForeignKeySchema constraint = decoded.ForeignKeys!.Single();
+
+        Assert.AreEqual("robots_name_fkey", constraint.Name);
+        Assert.AreEqual("B7", constraint.ReferencedTableId);
+        Assert.AreEqual(ForeignKeyAction.Restrict, constraint.OnUpdate);
+        Assert.AreEqual(SchemaElementState.WriteOnly, constraint.State);
+        Assert.AreEqual(constraint.Id, decoded.Indexes!.Single().OwnerConstraintId);
+        Assert.AreEqual(constraint.BackingIndexId, decoded.Indexes!.Single().KvId);
     }
 
     [Test]
@@ -390,7 +432,20 @@ public sealed class TestSchemaChangeLogEntryCodec
         TableName = "robots",
         Columns = [ColumnPayload("id", ColumnType.Id), ColumnPayload("name", ColumnType.String)],
         Comment = "robot inventory",
-        Settings = new Dictionary<string, string> { ["ttl_column"] = "created_at" }
+        Settings = new Dictionary<string, string> { ["ttl_column"] = "created_at" },
+        // An index the engine created for a constraint, and the constraint itself: both must survive the
+        // frame, or a follower builds the table without its constraint or with an unowned index.
+        Indexes =
+        [
+            new TableIndexSchema("000000000000000000000201", "~fk_robots_name_fkey", ["000000000000000000000101"],
+                IndexType.Multi, SchemaElementState.Public, ownerConstraintId: "000000000000000000000301")
+        ],
+        ForeignKeys =
+        [
+            new ForeignKeySchema("000000000000000000000301", "robots_name_fkey", ["000000000000000000000101"], "B7",
+                ["000000000000000000000401"], "000000000000000000000501", "000000000000000000000201",
+                ForeignKeyAction.NoAction, ForeignKeyAction.Restrict, ForeignKeyMatch.Simple, SchemaElementState.WriteOnly)
+        ]
     };
 
     private static SchemaColumnPayload ColumnPayload(string name, ColumnType type) => new()

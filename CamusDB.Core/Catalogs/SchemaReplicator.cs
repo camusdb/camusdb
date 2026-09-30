@@ -1,4 +1,4 @@
-/**
+﻿/**
  * This file is part of CamusDB
  *
  * For the full copyright and license information, please view the LICENSE.txt
@@ -260,7 +260,9 @@ public sealed class SchemaReplicator
         if (entry.Op == SchemaOp.SetElementState)
         {
             SchemaElementStatePayload payload = DecodePayload<SchemaElementStatePayload>(entry);
-            if (payload.ElementKind == SchemaElementKind.Index)
+            // A foreign key that goes Absent releases the index it owned, which changes that
+            // index's entry — evicted for the same reason as an index state change.
+            if (payload.ElementKind is SchemaElementKind.Index or SchemaElementKind.ForeignKey)
                 database.TableDescriptors.TryRemove(payload.TableName, out _);
         }
 
@@ -568,6 +570,14 @@ public sealed class SchemaReplicator
             return payload.State == SchemaElementState.Absent
                 ? index is null
                 : index?.State == payload.State;
+        }
+
+        if (payload.ElementKind == SchemaElementKind.ForeignKey)
+        {
+            ForeignKeySchema? foreignKey = table.ForeignKeys?.FirstOrDefault(fk => string.Equals(fk.Name, payload.ElementName, StringComparison.OrdinalIgnoreCase));
+            return payload.State == SchemaElementState.Absent
+                ? foreignKey is null
+                : foreignKey?.State == payload.State;
         }
 
         if (table.Columns is null)

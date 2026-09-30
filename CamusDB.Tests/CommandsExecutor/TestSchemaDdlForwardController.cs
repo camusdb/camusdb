@@ -1,4 +1,4 @@
-/**
+﻿/**
  * This file is part of CamusDB
  *
  * For the full copyright and license information, please view the LICENSE.txt
@@ -271,6 +271,144 @@ public sealed class TestSchemaDdlForwardController
         {
             await DropTestDatabaseAsync(db);
         }
+    }
+
+    /// <summary>
+    /// A CREATE TABLE with a foreign key, forwarded the real way: the follower's forwarder serializes the
+    /// ticket, and the leader's controller rebuilds it from that exact body. The in-process forwarder the
+    /// cluster tests use bypasses the DTOs, so only this path shows a field lost on the wire.
+    /// </summary>
+    [Test]
+    public async Task ForwardCreateTable_AsLeader_KeepsTheForeignKey()
+    {
+        string db = await CreateTestDatabaseAsync();
+        try
+        {
+            await executor!.ExecuteDDLSQL(new ExecuteSQLTicket(txnState: null!, database: db,
+                sql: "CREATE TABLE cities (id int64 PRIMARY KEY NOT NULL, name string NOT NULL, UNIQUE KEY cities_name (name))", parameters: null));
+
+            const string childSql = "CREATE TABLE weather (id int64 PRIMARY KEY NOT NULL, city string, " +
+                "CONSTRAINT weather_city_fk FOREIGN KEY (city) REFERENCES cities (name) ON DELETE RESTRICT)";
+
+            CreateTableTicket ticket = new CamusDB.Core.CommandsExecutor.Controllers.DDL.SQLExecutorCreateTableCreator().CreateCreateTableTicket(
+                new ExecuteSQLTicket(txnState: null!, database: db, sql: childSql, parameters: null),
+                CamusDB.Core.SQLParser.SQLParserProcessor.Parse(childSql));
+
+            CapturingHandler handler = new();
+            HttpSchemaDdlForwarder forwarder = new(new System.Net.Http.HttpClient(handler), _ => new Uri("http://leader:5095"), NullLogger<ICamusDB>.Instance);
+            await forwarder.ForwardCreateTableAsync("leader:7070", ticket, Guid.NewGuid().ToString("N"), CancellationToken.None);
+
+            SchemaDdlForwardController ctrl = BuildController(handler.Body!, clusterNode: node);
+            SchemaDdlForwardResponse? resp = ExtractResponse(await ctrl.ForwardCreateTable());
+
+            Assert.AreEqual("ok", resp!.Status, resp.Message);
+
+            DatabaseDescriptor descriptor = await executor!.OpenDatabase(db);
+            CamusDB.Core.Catalogs.Models.ForeignKeySchema constraint = descriptor.Schema.Tables["weather"].ForeignKeys!.Single();
+            Assert.AreEqual("weather_city_fk", constraint.Name);
+            Assert.AreEqual(CamusDB.Core.Catalogs.Models.ForeignKeyAction.Restrict, constraint.OnDelete);
+            Assert.AreEqual(descriptor.Schema.Tables["cities"].Id, constraint.ReferencedTableId);
+            Assert.AreEqual(CamusDB.Core.Catalogs.Models.SchemaElementState.Public, constraint.State);
+        }
+        finally
+        {
+            await DropTestDatabaseAsync(db);
+        }
+    }
+
+    /// <summary>
+    /// A refused clause must stay refused after the wire: the leader validates the rebuilt ticket, and a
+    /// dropped <c>ON DELETE CASCADE</c> would turn an error into a table that silently keeps orphans.
+    /// </summary>
+    [Test]
+    public async Task ForwardCreateTable_AsLeader_RefusesAnUnsupportedClauseCarriedOnTheWire()
+    {
+        string db = await CreateTestDatabaseAsync();
+        try
+        {
+            string body = JsonSerializer.Serialize(new ForwardCreateTableRequest
+            {
+                OperationId = Guid.NewGuid().ToString("N"),
+                DatabaseName = db,
+                TableName = "weather",
+                Columns =
+                [
+                    new ColumnInfoRequest { Name = "id", Type = CamusDB.Core.Catalogs.Models.ColumnType.Integer64, NotNull = true },
+                    new ColumnInfoRequest { Name = "city", Type = CamusDB.Core.Catalogs.Models.ColumnType.String },
+                ],
+                Constraints =
+                [
+                    new ConstraintInfoRequest
+                    {
+                        Type = ConstraintType.PrimaryKey,
+                        Name = "~pk",
+                        Columns = [new ColumnIndexInfoRequest { Name = "id", Order = OrderType.Ascending }],
+                    }
+                ],
+                ForeignKeys =
+                [
+                    new ForeignKeyInfoRequest
+                    {
+                        Name = "weather_city_fkey",
+                        Columns = ["city"],
+                        ReferencedTable = "cities",
+                        ReferencedColumns = ["name"],
+                        OnDelete = CamusDB.Core.Catalogs.Models.ForeignKeyAction.Cascade,
+                    }
+                ],
+            }, JsonOpts);
+
+            SchemaDdlForwardController ctrl = BuildController(body, clusterNode: node);
+            SchemaDdlForwardResponse? resp = ExtractResponse(await ctrl.ForwardCreateTable());
+
+            Assert.AreEqual("failed", resp!.Status);
+            Assert.AreEqual(CamusDBErrorCodes.FeatureNotSupported, resp.Code);
+
+            DatabaseDescriptor descriptor = await executor!.OpenDatabase(db);
+            Assert.IsFalse(descriptor.Schema.Tables.ContainsKey("weather"));
+        }
+        finally
+        {
+            await DropTestDatabaseAsync(db);
+        }
+    }
+
+    [Test]
+    public void ForwardCreateTableRequest_RoundTripsEveryForeignKeyField()
+    {
+        ForwardCreateTableRequest request = new()
+        {
+            DatabaseName = "db",
+            TableName = "weather",
+            ForeignKeys =
+            [
+                new ForeignKeyInfoRequest
+                {
+                    Name = "weather_city_fk",
+                    Columns = ["city", "country"],
+                    ReferencedTable = "cities",
+                    ReferencedColumns = ["name", "country"],
+                    OnDelete = CamusDB.Core.Catalogs.Models.ForeignKeyAction.Restrict,
+                    OnUpdate = CamusDB.Core.Catalogs.Models.ForeignKeyAction.SetNull,
+                    Match = CamusDB.Core.Catalogs.Models.ForeignKeyMatch.Full,
+                    Deferrable = true,
+                    InitiallyDeferred = true,
+                }
+            ],
+        };
+
+        ForwardCreateTableRequest round = JsonSerializer.Deserialize<ForwardCreateTableRequest>(JsonSerializer.Serialize(request, JsonOpts), JsonOpts)!;
+        ForeignKeyInfoRequest foreignKey = round.ForeignKeys.Single();
+
+        Assert.AreEqual("weather_city_fk", foreignKey.Name);
+        Assert.AreEqual(new[] { "city", "country" }, foreignKey.Columns);
+        Assert.AreEqual("cities", foreignKey.ReferencedTable);
+        Assert.AreEqual(new[] { "name", "country" }, foreignKey.ReferencedColumns);
+        Assert.AreEqual(CamusDB.Core.Catalogs.Models.ForeignKeyAction.Restrict, foreignKey.OnDelete);
+        Assert.AreEqual(CamusDB.Core.Catalogs.Models.ForeignKeyAction.SetNull, foreignKey.OnUpdate);
+        Assert.AreEqual(CamusDB.Core.Catalogs.Models.ForeignKeyMatch.Full, foreignKey.Match);
+        Assert.IsTrue(foreignKey.Deferrable);
+        Assert.IsTrue(foreignKey.InitiallyDeferred);
     }
 
     [Test]
@@ -823,6 +961,24 @@ public sealed class TestSchemaDdlForwardController
     }
 
     // ── Minimal IServiceProvider used by BuildController ─────────────────────
+
+    /// <summary>Answers every request with success and keeps the body it was sent.</summary>
+    private sealed class CapturingHandler : System.Net.Http.HttpMessageHandler
+    {
+        public string? Body { get; private set; }
+
+        protected override async Task<System.Net.Http.HttpResponseMessage> SendAsync(System.Net.Http.HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            Body = await request.Content!.ReadAsStringAsync(cancellationToken);
+
+            return new System.Net.Http.HttpResponseMessage(System.Net.HttpStatusCode.OK)
+            {
+                Content = new System.Net.Http.StringContent(
+                    JsonSerializer.Serialize(new SchemaDdlForwardResponse { Status = "ok", Applied = true }, JsonOpts),
+                    Encoding.UTF8, "application/json")
+            };
+        }
+    }
 
     private sealed class SingleServiceProvider(EmbeddedKahuna? kahuna, DdlOperationIdCache? opCache = null) : IServiceProvider
     {

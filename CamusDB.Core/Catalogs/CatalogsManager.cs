@@ -184,8 +184,13 @@ public sealed class CatalogsManager
     /// <paramref name="tableId"/> is pre-allocated by the proposer and carried verbatim, so every
     /// node applies the same id; a follower must never generate one.
     /// </summary>
-    public Task<TableSchema> CreateTable(DatabaseDescriptor database, CreateTableTicket ticket, KvTransaction tx, string tableId)
-        => relations.CreateTable(database, ticket, tx, tableId);
+    public Task<TableSchema> CreateTable(
+        DatabaseDescriptor database,
+        CreateTableTicket ticket,
+        KvTransaction tx,
+        string tableId,
+        SchemaElementState foreignKeyState = SchemaElementState.Public)
+        => relations.CreateTable(database, ticket, tx, tableId, foreignKeyState);
 
     /// <summary>Adds or removes a column on an existing table.</summary>
     public Task<TableSchema> AlterTable(DatabaseDescriptor database, AlterColumnTicket ticket, KvTransaction tx)

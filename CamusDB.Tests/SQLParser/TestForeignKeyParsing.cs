@@ -1,4 +1,4 @@
-/**
+﻿/**
  * This file is part of CamusDB
  *
  * For the full copyright and license information, please view the LICENSE.txt
@@ -345,22 +345,18 @@ public sealed class TestForeignKeyParsing
 
         Assert.AreEqual(CamusDBErrorCodes.FeatureNotSupported, exception.Code);
         Assert.That(exception.Message, Does.Contain(fragment));
-        Assert.That(exception.Message, Does.Not.Contain("cannot be created yet"), "The clause must be named, not the interim refusal");
     }
 
     /// <summary>
-    /// Nothing stores or enforces a constraint yet, so even a fully supported declaration is refused.
-    /// A table created with a constraint that silently does nothing would be worse than the error.
+    /// A declaration that uses only supported clauses passes the ticket validator. Whether the parent
+    /// and its unique index exist is checked later, against the schema.
     /// </summary>
     [TestCase("")]
     [TestCase("ON DELETE NO ACTION ON UPDATE RESTRICT MATCH SIMPLE NOT DEFERRABLE INITIALLY IMMEDIATE")]
-    public void SupportedDeclarationIsRefusedUntilConstraintsCanBeCreated(string clauses)
+    public void SupportedDeclarationPassesTheTicketValidator(string clauses)
     {
-        CamusDBException exception = Assert.Throws<CamusDBException>(() => Validate(
-            $"CREATE TABLE child (id int64 PRIMARY KEY NOT NULL, a int64, FOREIGN KEY (a) REFERENCES parent (x) {clauses})"))!;
-
-        Assert.AreEqual(CamusDBErrorCodes.FeatureNotSupported, exception.Code);
-        Assert.That(exception.Message, Does.Contain("cannot be created yet"));
+        Assert.DoesNotThrow(() => Validate(
+            $"CREATE TABLE child (id int64 PRIMARY KEY NOT NULL, a int64, FOREIGN KEY (a) REFERENCES parent (x) {clauses})"));
     }
 
     [Test]

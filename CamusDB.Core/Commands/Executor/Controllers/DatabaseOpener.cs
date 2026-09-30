@@ -1,4 +1,4 @@
-
+﻿
 /**
  * This file is part of CamusDB
  *
@@ -90,6 +90,11 @@ internal sealed class DatabaseOpener
             // existing rows with the index entries before the index is published.
             IndexBackfillAsync = (db, tableName, indexInfo, startOffset, onCheckpoint) =>
                 commandExecutor.BackfillIndexEntriesAsync(db, tableName, indexInfo, startOffset, onCheckpoint),
+
+            // Wire the foreign-key validation pass: a constraint left in WriteOnly by a failed leader
+            // is validated before the resumed job publishes it.
+            ForeignKeyValidationAsync = (db, tableName, constraintName) =>
+                commandExecutor.ValidateForeignKeyRowsAsync(db, tableName, constraintName),
         };
         this.logger = logger;
         this.sharedNode = sharedNode ?? throw new ArgumentNullException(nameof(sharedNode), "A shared Kahuna node is required");

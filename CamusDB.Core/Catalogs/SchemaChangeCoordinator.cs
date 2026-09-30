@@ -1,4 +1,4 @@
-
+﻿
 /**
  * This file is part of CamusDB
  *
@@ -74,6 +74,20 @@ public sealed class SchemaChangeCoordinator
     /// </summary>
     public Func<DatabaseDescriptor, string, IndexBuildInfo, string?, Func<string, Task>?, Task>? IndexBackfillAsync { get; set; }
 
+    /// <summary>
+    /// Delegate invoked once, just before a foreign key transitions from <c>WriteOnly</c> to
+    /// <c>Public</c>. Receives the database, the child table name and the constraint name, and throws
+    /// <see cref="CamusDBErrorCodes.ForeignKeyViolation"/> when a row has no parent. It runs after the
+    /// cluster acked <c>WriteOnly</c>, so every write since then is enforced and the pass needs no
+    /// lock; any orphan it finds was made in the window before the ack.
+    ///
+    /// <para>On a violation the coordinator removes the constraint (<c>WriteOnly → Absent</c>), deletes
+    /// the job and rethrows, so the DDL fails and nothing is left half-rolled-out. It must be set on the
+    /// command-path coordinator and on the resume coordinator in <c>DatabaseOpener</c>; without it a
+    /// foreign key would be published unvalidated.</para>
+    /// </summary>
+    public Func<DatabaseDescriptor, string, string, Task>? ForeignKeyValidationAsync { get; set; }
+
     public SchemaChangeCoordinator(CatalogsManager catalogs, ILogger<ICamusDB>? logger = null)
     {
         this.catalogs = catalogs;
@@ -102,7 +116,7 @@ public sealed class SchemaChangeCoordinator
     )
     {
         SchemaElementState current = GetCurrentElementState(database.Schema, job.TableName, job.ElementName, job.ElementKind);
-        SchemaElementState[] path = ComputeTransitionPath(current, job.TargetState);
+        SchemaElementState[] path = ComputePathFor(job.ElementKind, current, job.TargetState);
 
         if (path.Length == 0)
             return;
@@ -169,6 +183,10 @@ public sealed class SchemaChangeCoordinator
 
                         await IndexBackfillAsync(database, job.TableName, indexBuildInfo, startOffset, checkpoint).ConfigureAwait(false);
                     }
+                    else if (job.ElementKind == SchemaElementKind.ForeignKey)
+                    {
+                        await ValidateForeignKeyOrRemoveAsync(database, job).ConfigureAwait(false);
+                    }
                 }
 
                 if (current == SchemaElementState.Absent && nextState == SchemaElementState.DeleteOnly)
@@ -218,6 +236,33 @@ public sealed class SchemaChangeCoordinator
             if (current == job.TargetState)
                 await catalogs.DeleteCoordinatorJobAsync(database, job.TableId, job.ElementName)
                     .ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
+    /// Runs the foreign-key validation pass. On a violation, removes the constraint on every node and
+    /// deletes the job before rethrowing: a constraint that failed validation must neither stay
+    /// half-rolled-out nor be retried by a resume, which would fail the same way.
+    /// </summary>
+    private async Task ValidateForeignKeyOrRemoveAsync(DatabaseDescriptor database, SchemaChangeJob job)
+    {
+        if (ForeignKeyValidationAsync is null)
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInternalOperation,
+                $"Foreign key '{job.ElementName}' on table '{job.TableName}' cannot be published: no validation pass is wired");
+
+        try
+        {
+            await ForeignKeyValidationAsync(database, job.TableName, job.ElementName).ConfigureAwait(false);
+        }
+        catch (CamusDBException ex) when (ex.Code == CamusDBErrorCodes.ForeignKeyViolation)
+        {
+            await catalogs.ReplicateElementStateAsync(
+                database, job.TableName, job.ElementName, SchemaElementState.Absent, SchemaElementKind.ForeignKey
+            ).ConfigureAwait(false);
+
+            await catalogs.DeleteCoordinatorJobAsync(database, job.TableId, job.ElementName).ConfigureAwait(false);
+            throw;
         }
     }
 
@@ -327,7 +372,7 @@ public sealed class SchemaChangeCoordinator
             try
             {
                 SchemaElementState current = GetCurrentElementState(database.Schema, liveTableName, job.ElementName, job.ElementKind);
-                SchemaElementState[] path = ComputeTransitionPath(current, job.TargetState);
+                SchemaElementState[] path = ComputePathFor(job.ElementKind, current, job.TargetState);
 
                 if (path.Length == 0)
                 {
@@ -378,6 +423,12 @@ public sealed class SchemaChangeCoordinator
             return index?.State ?? SchemaElementState.Absent;
         }
 
+        if (kind == SchemaElementKind.ForeignKey)
+        {
+            ForeignKeySchema? foreignKey = tableSchema.ForeignKeys?.FirstOrDefault(fk => string.Equals(fk.Name, elementName, StringComparison.OrdinalIgnoreCase));
+            return foreignKey?.State ?? SchemaElementState.Absent;
+        }
+
         TableColumnSchema? column = tableSchema.Columns?.FirstOrDefault(c => string.Equals(c.Name, elementName, StringComparison.OrdinalIgnoreCase));
         return column?.State ?? SchemaElementState.Absent;
     }
@@ -391,6 +442,23 @@ public sealed class SchemaChangeCoordinator
             names[i] = col?.Name ?? columnIds[i];
         }
         return names;
+    }
+
+    /// <summary>
+    /// The transition path for an element of <paramref name="kind"/>. A foreign key moves in one step
+    /// (see <see cref="Apply.ElementStateApplier.ValidateForeignKeyStateTransition"/>), and a constraint
+    /// that is already Absent has nothing left to drive: it was removed — by a failed validation, or
+    /// by a DROP — and is never re-added by a job.
+    /// </summary>
+    internal static SchemaElementState[] ComputePathFor(SchemaElementKind kind, SchemaElementState from, SchemaElementState to)
+    {
+        if (kind != SchemaElementKind.ForeignKey)
+            return ComputeTransitionPath(from, to);
+
+        if (from == to || from == SchemaElementState.Absent)
+            return [];
+
+        return [to];
     }
 
     /// <summary>

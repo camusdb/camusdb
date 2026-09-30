@@ -1,4 +1,4 @@
-
+﻿
 /**
  * This file is part of CamusDB
  *
@@ -47,7 +47,8 @@ internal sealed class TableCreator
         DatabaseDescriptor database,
         CreateTableTicket ticket,
         KvTransaction tx,
-        string tableId
+        string tableId,
+        SchemaElementState foreignKeyState = SchemaElementState.Public
     )
     {
         if (ticket.IfNotExists && catalogs.TableExists(database, ticket.TableName))
@@ -66,7 +67,7 @@ internal sealed class TableCreator
         // Inline constraints (PRIMARY KEY / UNIQUE / INDEX) are folded into the single CreateTable
         // delta (see SchemaChangeEntryFactory.BuildInlineIndexes), so creating a table is exactly one schema
         // version and the table is born with its indexes at Public — no separate AddIndex round-trips.
-        TableSchema tableSchema = await catalogs.CreateTable(database, ticket, tx, tableId).ConfigureAwait(false);
+        TableSchema tableSchema = await catalogs.CreateTable(database, ticket, tx, tableId, foreignKeyState).ConfigureAwait(false);
 
         await RegisterTableObjectAsync(database, tableSchema).ConfigureAwait(false);
         await catalogs.PersistSystemMetaAsync(database, tx).ConfigureAwait(false);

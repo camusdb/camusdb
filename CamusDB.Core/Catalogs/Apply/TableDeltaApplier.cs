@@ -121,6 +121,14 @@ internal static class TableDeltaApplier
             ConstraintDeltaApplier.ParseCheckConstraintAsts(tableSchema);
         }
 
+        // Checked here, in the apply, rather than only by the proposer: this runs in log order on top
+        // of the version the delta was proposed against, so a parent dropped or changed by another
+        // node's DDL is seen. A self-reference resolves against the table being built.
+        if (payload.ForeignKeys is { Length: > 0 })
+            tableSchema.ForeignKeys = [.. payload.ForeignKeys];
+
+        ForeignKeyDefinitionRules.ValidateTable(schema, tableSchema);
+
         schema.Tables.Add(payload.TableName, tableSchema);
 
         return tableSchema;

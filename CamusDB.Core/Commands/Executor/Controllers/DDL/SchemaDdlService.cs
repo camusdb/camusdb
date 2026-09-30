@@ -1,4 +1,4 @@
-
+﻿
 /**
  * This file is part of CamusDB
  *
@@ -229,6 +229,8 @@ internal sealed class SchemaDdlService
         DatabaseDescriptor database = await context.DatabaseOpener.Open(ticket.DatabaseName).ConfigureAwait(false);
         using DatabaseUseHandle _ = database.Use();
 
+        ForeignKeyPrivileges.RequireReferencePrivileges(database, ticket);
+
         bool? forwarded = await ddlForwarding.TryForwardCreateTableAsync(database, ticket).ConfigureAwait(false);
         if (forwarded is not null)
             return new CreateTableResult(database, forwarded.Value);
@@ -267,6 +269,13 @@ internal sealed class SchemaDdlService
         // and the sequences it had already made would never be cleaned up.
         List<string> createdSequenceNames = [];
 
+        // In a cluster a foreign key is born WriteOnly and published only after the validation pass;
+        // a standalone node has no second schema version and the new table holds no rows, so its
+        // constraints are born Public.
+        bool stagedForeignKeys = context.IsClusterMode && ticket.ForeignKeys.Length > 0;
+        SchemaElementState foreignKeyState = stagedForeignKeys ? SchemaElementState.WriteOnly : SchemaElementState.Public;
+        bool created = false;
+
         try
         {
             // Sequence-backed columns are resolved before the table's own delta: a column stores
@@ -274,25 +283,141 @@ internal sealed class SchemaDdlService
             await ResolveSequenceColumnsAsync(
                 database, ticket, tableId, createdSequenceNames, CancellationToken.None).ConfigureAwait(false);
 
+            // The rollout jobs are recorded before the table exists, so no crash can leave a WriteOnly
+            // constraint without a job to finish it. A job whose table never appeared is removed by
+            // the next resume, which treats a missing table id as stale.
+            if (stagedForeignKeys)
+                await PersistForeignKeyJobsAsync(database, ticket, tableId).ConfigureAwait(false);
+
             CreateTableResult result = await ExecuteDdlInTransaction(database, async tx =>
             {
                 bool ok = await tableCreator.Create(
-                    queryExecutor, context.TableOpener, tableIndexAlterer, database, ticket, tx, tableId).ConfigureAwait(false);
+                    queryExecutor, context.TableOpener, tableIndexAlterer, database, ticket, tx, tableId, foreignKeyState).ConfigureAwait(false);
                 return new CreateTableResult(database, ok);
             }).ConfigureAwait(false);
+
+            created = result.Success;
 
             // A create that did nothing — the IF NOT EXISTS arm losing a race with another node —
             // leaves the sequences it minted with no owner. Cleaned up on that path too, not only
             // on the throwing one.
             if (!result.Success)
+            {
                 await DropSequencesAfterFailedCreateAsync(database, createdSequenceNames).ConfigureAwait(false);
 
-            return result.Success;
+                if (stagedForeignKeys)
+                    await DeleteForeignKeyJobsAsync(database, ticket, tableId).ConfigureAwait(false);
+
+                return false;
+            }
         }
         catch
         {
             await DropSequencesAfterFailedCreateAsync(database, createdSequenceNames).ConfigureAwait(false);
+
+            if (stagedForeignKeys)
+                await DeleteForeignKeyJobsAsync(database, ticket, tableId).ConfigureAwait(false);
+
             throw;
+        }
+
+        // The table exists from here on. A failure while publishing leaves each constraint enforced in
+        // WriteOnly with its job recorded, which a resumed leader finishes; nothing is rolled back.
+        if (created && stagedForeignKeys)
+            await PublishForeignKeysAsync(database, ticket, tableId).ConfigureAwait(false);
+
+        return created;
+    }
+
+    /// <summary>
+    /// Validates each foreign key of a table created in cluster mode and moves it from
+    /// <c>WriteOnly</c> to <c>Public</c>, through the schema-change coordinator. The CREATE TABLE delta
+    /// already passed its post-commit ack gate, so every live node enforces the constraints; the
+    /// validation pass then sees any orphan that the window before the ack could make.
+    ///
+    /// <para>A constraint that fails validation is removed and the others are still published; the
+    /// statement then fails with the first violation. The table stays: its rows were written by other
+    /// sessions after it became visible, and the error says how to add the constraint again.</para>
+    /// </summary>
+    private async Task PublishForeignKeysAsync(DatabaseDescriptor database, CreateTableTicket ticket, string tableId)
+    {
+        CamusDBException? firstViolation = null;
+
+        await database.SchemaDdlSemaphore.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            SchemaChangeCoordinator coordinator = new(catalogs, context.Logger)
+            {
+                ForeignKeyValidationAsync = (db, tableName, constraintName) => ValidateForeignKeyRowsAsync(db, tableName, constraintName)
+            };
+
+            foreach (ForeignKeyInfo foreignKey in ticket.ForeignKeys)
+            {
+                try
+                {
+                    await coordinator.RunJobAsync(
+                        database,
+                        new SchemaChangeJob(database.Name, ticket.TableName, tableId, foreignKey.Name, SchemaElementState.Public, SchemaElementKind.ForeignKey)
+                    ).ConfigureAwait(false);
+                }
+                catch (CamusDBException ex) when (ex.Code == CamusDBErrorCodes.ForeignKeyViolation)
+                {
+                    firstViolation ??= new CamusDBException(
+                        CamusDBErrorCodes.ForeignKeyViolation,
+                        $"{ex.Message}. Table '{ticket.TableName}' was created without this constraint; " +
+                        "remove the rows that have no parent, then add it with ALTER TABLE ... ADD CONSTRAINT");
+                }
+            }
+        }
+        finally
+        {
+            database.SchemaDdlSemaphore.Release();
+            await FireDeferredStepDownIfRequestedAsync(database).ConfigureAwait(false);
+        }
+
+        if (firstViolation is not null)
+            throw firstViolation;
+    }
+
+    /// <summary>Runs the foreign-key validation pass for one constraint of <paramref name="tableName"/>.</summary>
+    internal Task ValidateForeignKeyRowsAsync(DatabaseDescriptor database, string tableName, string constraintName) =>
+        ForeignKeyValidationPass.ValidateAsync(database, context.TableOpener, tableName, constraintName);
+
+    private async Task PersistForeignKeyJobsAsync(DatabaseDescriptor database, CreateTableTicket ticket, string tableId)
+    {
+        foreach (ForeignKeyInfo foreignKey in ticket.ForeignKeys)
+        {
+            await catalogs.PersistCoordinatorJobAsync(database, new PersistedCoordinatorJob
+            {
+                TableName = ticket.TableName,
+                TableId = tableId,
+                ElementName = foreignKey.Name,
+                TargetState = SchemaElementState.Public,
+                ElementKind = SchemaElementKind.ForeignKey,
+            }).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
+    /// Best-effort removal of the jobs recorded for a CREATE TABLE that did not create the table. A job
+    /// left behind is harmless: its table id never becomes live, and a resume deletes it.
+    /// </summary>
+    private async Task DeleteForeignKeyJobsAsync(DatabaseDescriptor database, CreateTableTicket ticket, string tableId)
+    {
+        foreach (ForeignKeyInfo foreignKey in ticket.ForeignKeys)
+        {
+            try
+            {
+                await catalogs.DeleteCoordinatorJobAsync(database, tableId, foreignKey.Name).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                context.Logger.LogWarning(
+                    ex,
+                    "Failed to delete the foreign-key rollout job {ConstraintName} of a table that was not created in database {DatabaseName}",
+                    foreignKey.Name,
+                    database.Name);
+            }
         }
     }
 
