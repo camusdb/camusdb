@@ -310,27 +310,27 @@ public sealed class TestEmbeddedKahunaOptionsBuilder
     // ── Materialize on resolve ───────────────────────────────────────────────
 
     [Test]
-    public void DurableMaterializeOnResolve_UnsetKeepsKahunaDefaultOffOnBothBaselines()
+    public void DurableMaterializeOnResolve_UnsetDefaultsOnOnBothBaselines()
     {
-        // The record shape is a per-group property that stays off until it has passed two clean fault
-        // soaks, and an older node resolving a materializing settle loses the write: CamusDB states no
-        // baseline of its own, so an unset key must leave Kahuna's default (off) untouched.
+        // The record shape passed two consecutive clean two-hour fault soaks on two released Kahuna
+        // versions, so CamusDB's baselines turn it on; Kahuna's own default stays off, which is what a
+        // node built against an older Kahuna would run with, and why the rolling-upgrade rule pins false.
         ConfigDefinition config = new() { DataDir = "/data/camus", Mode = "cluster", InitialPartitions = 3 };
 
         EmbeddedKahunaOptions cluster = EmbeddedKahunaOptionsBuilder.BuildCluster(config, CamusDBOptions.Default);
         EmbeddedKahunaOptions standalone =
             EmbeddedKahunaOptionsBuilder.BuildStandaloneRocksDb("/tmp/materialize-db", new KahunaOptionsConfig(), CamusDBOptions.Default);
 
-        Assert.That(new EmbeddedKahunaOptions().DurableMaterializeOnResolve, Is.False, "the Kahuna default this key passes through");
-        Assert.That(cluster.DurableMaterializeOnResolve, Is.False);
-        Assert.That(standalone.DurableMaterializeOnResolve, Is.False);
+        Assert.That(new EmbeddedKahunaOptions().DurableMaterializeOnResolve, Is.False, "Kahuna's own default, which CamusDB's baseline overrides");
+        Assert.That(cluster.DurableMaterializeOnResolve, Is.True);
+        Assert.That(standalone.DurableMaterializeOnResolve, Is.True);
     }
 
     [Test]
     public void DurableMaterializeOnResolve_OverridesBothBaselines()
     {
-        // The flag-on measurement and the eventual default flip both depend on the stated value reaching
-        // Kahuna on every baseline; an explicit false must be a value too, so a rolling upgrade can pin it off.
+        // An explicit value must reach Kahuna on every baseline, and an explicit false must be a value too:
+        // it is what a rolling upgrade from an older build pins until every node can install on a settle.
         ConfigDefinition on = new()
         {
             DataDir = "/data/camus",

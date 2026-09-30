@@ -125,6 +125,10 @@ public static class EmbeddedKahunaOptionsBuilder
             // load: an idle aggregator still dispatches on arrival. Override with
             // kahuna.key_value_write_post_completion_hold_ms.
             KeyValueWritePostCompletionHoldMs = DefaultKeyValueWritePostCompletionHoldMs,
+            // Materialize on resolve: the commit's settle installs the committed values on every replica and no
+            // materialization record is written. See DefaultDurableMaterializeOnResolve for the evidence and
+            // the rolling-upgrade rule. Override with kahuna.durable_materialize_on_resolve.
+            DurableMaterializeOnResolve = DefaultDurableMaterializeOnResolve,
             // With join_existing the peer list is the SEED list of the running cluster rather than
             // the founding roster: the node contacts a seed, enters the committed roster as a
             // learner, and is promoted once caught up. ConfigDefinition.Validate has already
@@ -188,6 +192,10 @@ public static class EmbeddedKahunaOptionsBuilder
             // load: an idle aggregator still dispatches on arrival. Override with
             // kahuna.key_value_write_post_completion_hold_ms.
             KeyValueWritePostCompletionHoldMs = DefaultKeyValueWritePostCompletionHoldMs,
+            // Materialize on resolve: the commit's settle installs the committed values on every replica and no
+            // materialization record is written. See DefaultDurableMaterializeOnResolve for the evidence and
+            // the rolling-upgrade rule. Override with kahuna.durable_materialize_on_resolve.
+            DurableMaterializeOnResolve = DefaultDurableMaterializeOnResolve,
         };
     }
 
@@ -252,6 +260,10 @@ public static class EmbeddedKahunaOptionsBuilder
             // load: an idle aggregator still dispatches on arrival. Override with
             // kahuna.key_value_write_post_completion_hold_ms.
             KeyValueWritePostCompletionHoldMs = DefaultKeyValueWritePostCompletionHoldMs,
+            // Materialize on resolve: the commit's settle installs the committed values on every replica and no
+            // materialization record is written. See DefaultDurableMaterializeOnResolve for the evidence and
+            // the rolling-upgrade rule. Override with kahuna.durable_materialize_on_resolve.
+            DurableMaterializeOnResolve = DefaultDurableMaterializeOnResolve,
         };
     }
 
@@ -499,12 +511,10 @@ public static class EmbeddedKahunaOptionsBuilder
         if (kahuna.StagedBaseFenceRetentionMs is int stagedBaseFenceRetention)
             baseline.StagedBaseFenceRetentionMs = stagedBaseFenceRetention;
 
-        // Materialize on resolve: the commit's settle installs the committed values on every replica and no
-        // materialization record is written, about two Raft entries fewer per two-row transaction. Stated
-        // by the operator or not at all: Kahuna's default (off) stays, because every node must run a build
-        // that installs on a materializing settle before any node turns it on (an older node resolves
-        // without installing and loses that write locally), and the shape stays off until it has passed
-        // two clean fault soaks. Turning it off is safe at any time.
+        // Materialize on resolve: on in both baselines (DefaultDurableMaterializeOnResolve). An explicit
+        // value always wins, and an explicit false is what a rolling upgrade pins until every node runs a
+        // build that installs on a materializing settle (Kahuna.Core 1.10.1 or later); an older node
+        // resolves without installing and loses that write locally. Turning it off is safe at any time.
         if (kahuna.DurableMaterializeOnResolve is bool materializeOnResolve)
             baseline.DurableMaterializeOnResolve = materializeOnResolve;
 
@@ -805,6 +815,20 @@ public static class EmbeddedKahunaOptionsBuilder
     /// (including 0) always wins.
     /// </summary>
     internal const int DefaultKeyValueWritePostCompletionHoldMs = 1;
+
+    /// <summary>
+    /// CamusDB's baseline for <c>kahuna.durable_materialize_on_resolve</c>: on. The commit's settle installs
+    /// each committed value from the prepared intent on every replica and Kahuna writes no materialization
+    /// record per key, so a two-row transaction costs about four Raft entries and two scheduler submissions
+    /// on its anchor partition instead of six and four. Measured on the tmpfs bank shape: 6.01 -> 4.00
+    /// entries per commit, +2% throughput; on a device under two-hour fault soaks: 4.0 entries, cluster CPU
+    /// -9% per operation, conservation exact and no divergence on two consecutive clean runs across two
+    /// released Kahuna versions (1.10.4 and 1.10.5), which is the bar this default waited for. The record
+    /// shape is a per-group property: every node must run Kahuna.Core 1.10.1 or later before any node has
+    /// it on, so a rolling upgrade from an older build pins <c>durable_materialize_on_resolve: false</c>
+    /// on every node until the last one is upgraded, then removes the key. An explicit value always wins.
+    /// </summary>
+    internal const bool DefaultDurableMaterializeOnResolve = true;
 
     /// <summary>
     /// Core of the proportional sizing for a machine with no GC heap limit, where the native and the

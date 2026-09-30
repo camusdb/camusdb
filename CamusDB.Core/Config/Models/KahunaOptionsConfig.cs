@@ -738,20 +738,21 @@ public sealed class KahunaOptionsConfig
     /// (the one-phase bundle's three plus one settle), and about two scheduler submissions instead of
     /// four; followers apply fewer entries and a device writes fewer bytes per commit.
     ///
-    /// <para><b>Stated by the operator or not at all.</b> CamusDB keeps Kahuna's default (off) rather than a
-    /// baseline of its own: the record shape is a per-group property, and it stays off until the change has
-    /// passed two clean two-hour fault soaks. Two rules once it is turned on:</para>
+    /// <para><b>On by default in CamusDB</b> (Kahuna's own default is off): the shape passed two consecutive
+    /// clean two-hour fault soaks on two released Kahuna versions, and it is a per-group property, so the
+    /// baseline turns it on for every node. Two rules:</para>
     /// <list type="bullet">
     /// <item><description><b>Every node first, then the flag.</b> Every node must run a Kahuna build that
-    /// installs on a materializing settle (1.10.1 or later) before any node turns this on; an older node
-    /// resolves the intent without installing the value and loses that write locally. Turning it off is
-    /// safe at any time.</description></item>
+    /// installs on a materializing settle (1.10.1 or later) before any node has this on; an older node
+    /// resolves the intent without installing the value and loses that write locally. A rolling upgrade
+    /// from an older build therefore pins <c>false</c> on every node until the last one is upgraded, then
+    /// removes the key. Turning it off is safe at any time.</description></item>
     /// <item><description><b>Same value on every node of the group</b>, as for
     /// <see cref="OnePhaseApplyTimeValidation"/>.</description></item>
     /// </list>
     ///
-    /// Maps to <see cref="Kahuna.EmbeddedKahunaOptions.DurableMaterializeOnResolve"/>; unset keeps Kahuna's
-    /// default of off.
+    /// Maps to <see cref="Kahuna.EmbeddedKahunaOptions.DurableMaterializeOnResolve"/>; unset takes CamusDB's
+    /// baseline (on); an explicit value, including <c>false</c>, always wins.
     /// </summary>
     public bool? DurableMaterializeOnResolve { get; set; }
 

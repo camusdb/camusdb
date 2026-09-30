@@ -180,21 +180,23 @@ a ledger.
 
 ### Materialize on resolve
 
-`kahuna.durable_materialize_on_resolve` (default **off**, Kahuna's own default) changes the record shape of
+`kahuna.durable_materialize_on_resolve` (default **on** in CamusDB; Kahuna's own default is off) sets the record shape of
 a committed durable transaction: the commit's settle installs each committed value from the prepared
 intent on every replica, so Kahuna writes no materialization record per key. On the anchor partition a
 two-row transaction then costs about four Raft entries instead of six (the one-phase bundle's three plus
 one settle) and about two scheduler submissions instead of four; followers apply fewer entries and a
-device writes fewer bytes per commit. CamusDB does not set it in its baselines: the shape is a per-group
-property, and it stays off until it has passed two clean two-hour fault soaks. Setting it here passes the
-value through unchanged; unset keeps Kahuna's default.
+device writes fewer bytes per commit. CamusDB turns it on in both baselines: the shape passed two
+consecutive clean two-hour fault soaks on two released Kahuna versions (conservation exact, no divergence,
+every fault recovered), and it is a per-group property, so the baseline decides it for every node. An
+explicit value, including `false`, always wins.
 
 Two operating rules, both enforced by the record shape rather than by CamusDB:
 
 - **Every node first, then the flag.** Every node must run a Kahuna build that installs on a
-  materializing settle (Kahuna.Core 1.10.1 or later) before any node turns this on. An older node resolves
+  materializing settle (Kahuna.Core 1.10.1 or later) before any node has this on. An older node resolves
   the intent without installing the value and loses that write locally. Turning it off is safe at any
-  time, so a rolling upgrade runs with it off and turns it on afterwards.
+  time, so a rolling upgrade from an older build pins `durable_materialize_on_resolve: false` on every
+  node until the last one is upgraded, then removes the key.
 - **Same value on every node of the group**, for the same reason as the one-phase gate above.
 
 ### Persistent MVCC revision retention

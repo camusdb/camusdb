@@ -681,10 +681,11 @@ initial_partitions: 1      # Raft partition count (>= 1). Unset, it is 1 in stan
 #                                           # transaction that began before it is refused
 #   # Materialize on resolve: the commit's settle installs the committed values on every replica instead
 #   # of writing a materialization record per key (about two Raft entries fewer per two-row transaction).
-#   # Off by default (Kahuna's own default) until it has passed two clean fault soaks. Every node must run
-#   # Kahuna 1.10.1 or later before any node turns it on; turning it off is safe at any time. Give every
-#   # node the same value. See docs/configuration.md.
-#   durable_materialize_on_resolve: false
+#   # On by default in CamusDB. Every node must run Kahuna 1.10.1 or later before any node has it on, so a
+#   # rolling upgrade from an older build pins false on every node until the last one is upgraded, then
+#   # removes the key. Turning it off is safe at any time. Give every node the same value. See
+#   # docs/configuration.md.
+#   durable_materialize_on_resolve: true
 #
 #   # MVCC revision retention. Every version of every row is a physical row; without pruning, history
 #   # grows without bound. Unset: prune by age, aligned with the effective PITR window, so a restore
