@@ -26,6 +26,12 @@ public sealed class InsertFluxState
 
     public int InsertedRows { get; set; }
 
+    /// <summary>
+    /// Collects the parent keys the inserted rows reference. <see cref="Controllers.ForeignKeyStatementChecker.None"/>
+    /// when the table owns no enforced foreign key.
+    /// </summary>
+    internal Controllers.ForeignKeyStatementChecker ForeignKeys { get; init; } = Controllers.ForeignKeyStatementChecker.None;
+
     public InsertFluxState(DatabaseDescriptor database, TableDescriptor table, InsertTicket ticket)
     {
         Database = database;

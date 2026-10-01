@@ -436,7 +436,7 @@ public sealed class CommandExecutor : IAsyncDisposable
         tableColumnAlterer = new(catalogs, logger);
         tableIndexAlterer = new(catalogs, logger);
         tableConstraintAlterer = new(logger);
-        rowInserter = new(logger);
+        rowInserter = new(logger, tableOpener);
         rowUpdater = new(logger, statisticsManager);
         tableDropper = new(catalogs, statisticsManager, logger);
         rowDeleter = new(logger, statisticsManager);

@@ -29,8 +29,8 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// releases its index, and a resumed job finishes the rollout after a leader change.
 ///
 /// <para>Each scenario creates the child with its constraint already WriteOnly, through the catalog, to
-/// stand where a CREATE TABLE is between its delta and its validation. DML does not check constraints
-/// yet, so an orphan row can be written directly.</para>
+/// stand where a CREATE TABLE is between its delta and its validation. An orphan is made by hiding the
+/// parent's index entry after the child row is written.</para>
 /// </summary>
 [TestFixture]
 [NonParallelizable]
@@ -76,7 +76,9 @@ public sealed class TestForeignKeyRollout : SharedNodeBaseTest
         (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
         string tableId = await CreateWithWriteOnlyConstraint(executor, database, dbname);
         string ownedIndexId = database.Schema.Tables["weather"].Indexes!.Single(i => i.Name == "~fk_" + ConstraintName).KvId;
+        await Dml(executor, dbname, "INSERT INTO cities (id, name) VALUES (1, 'atlantis')");
         await Dml(executor, dbname, "INSERT INTO weather (id, city) VALUES (1, 'atlantis')");
+        await ForeignKeyCreateTableScenarios.HideParentKey(database, "cities", "cities_name", new ColumnValue(ColumnType.String, "atlantis"));
 
         CamusDBException exception = Assert.ThrowsAsync<CamusDBException>(async () =>
             await Coordinator(executor).RunJobAsync(database, Job(dbname, tableId)))!;

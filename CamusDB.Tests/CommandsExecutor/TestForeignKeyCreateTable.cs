@@ -304,17 +304,21 @@ internal static class ForeignKeyCreateTableScenarios
     }
 
     /// <summary>
-    /// Two keys have no parent. DML does not enforce the constraint yet, so the orphans can be written
-    /// directly. The pass must report the first orphan in key order, and skip the NULL keys.
+    /// Two keys lose their parent: the rows are written while every parent exists, and then the parents'
+    /// index entries are hidden with a test-only tombstone, as a parent DELETE on a node that did not know
+    /// the constraint would leave them. The pass must report the first orphan in key order, and skip the
+    /// NULL keys.
     /// </summary>
     public static async Task ValidationReportsTheFirstOrphanInKeyOrder(CommandExecutor executor, DatabaseDescriptor database, string dbname)
     {
         await Ddl(executor, dbname, CreateCities);
         await Ddl(executor, dbname, "CREATE TABLE weather (id int64 PRIMARY KEY NOT NULL, city string REFERENCES cities(name))");
 
-        await Dml(executor, dbname, "INSERT INTO cities (id, name) VALUES (1, 'lima'), (2, 'quito')");
+        await Dml(executor, dbname, "INSERT INTO cities (id, name) VALUES (1, 'lima'), (2, 'quito'), (3, 'zurich'), (4, 'bogota')");
         await Dml(executor, dbname,
             "INSERT INTO weather (id, city) VALUES (1, 'quito'), (2, 'zurich'), (3, NULL), (4, 'bogota'), (5, 'lima'), (6, 'bogota')");
+        await HideParentKey(database, "cities", "cities_name", new ColumnValue(ColumnType.String, "zurich"));
+        await HideParentKey(database, "cities", "cities_name", new ColumnValue(ColumnType.String, "bogota"));
 
         CamusDBException exception = Assert.ThrowsAsync<CamusDBException>(async () =>
             await executor.ValidateForeignKeyRowsAsync(database, "weather", "weather_city_fkey"))!;
@@ -337,12 +341,14 @@ internal static class ForeignKeyCreateTableScenarios
             "CREATE TABLE sites (id int64 PRIMARY KEY NOT NULL, country string, code int64, KEY sites_code_country (code, country), " +
             "CONSTRAINT sites_region_fk FOREIGN KEY (code, country) REFERENCES regions (code, country))");
 
-        await Dml(executor, dbname, "INSERT INTO regions (id, country, code) VALUES (1, 'pe', 10), (2, 'ec', 20)");
-        await Dml(executor, dbname, "INSERT INTO sites (id, country, code) VALUES (1, 'pe', 10), (2, 'ec', 20), (3, 'pe', NULL)");
+        await Dml(executor, dbname, "INSERT INTO regions (id, country, code) VALUES (1, 'pe', 10), (2, 'ec', 20), (3, 'ec', 10)");
+        await Dml(executor, dbname, "INSERT INTO sites (id, country, code) VALUES (1, 'pe', 10), (2, 'ec', 20), (3, 'pe', NULL), (4, 'ec', 10)");
 
         Assert.DoesNotThrowAsync(async () => await executor.ValidateForeignKeyRowsAsync(database, "sites", "sites_region_fk"));
 
-        await Dml(executor, dbname, "INSERT INTO sites (id, country, code) VALUES (4, 'ec', 10)");
+        // The parent index is (country, code), so the hidden key is in that order.
+        await HideParentKey(database, "regions", "regions_key",
+            new ColumnValue(ColumnType.String, "ec"), new ColumnValue(ColumnType.Integer64, 10));
 
         CamusDBException exception = Assert.ThrowsAsync<CamusDBException>(async () =>
             await executor.ValidateForeignKeyRowsAsync(database, "sites", "sites_region_fk"))!;
@@ -388,6 +394,21 @@ internal static class ForeignKeyCreateTableScenarios
 
             await Dml(executor, dbname, sql.ToString());
         }
+    }
+
+    /// <summary>
+    /// Hides one entry of a parent's unique index behind a test-only tombstone. The parent row stays; only
+    /// the key the child side looks up disappears. No DML can make an orphan once the constraint is
+    /// enforced, so this stands in for the window before the constraint was enforced everywhere.
+    /// </summary>
+    internal static async Task HideParentKey(DatabaseDescriptor database, string table, string index, params ColumnValue[] key)
+    {
+        TableDescriptor parent = await database.TableDescriptors[table];
+        string indexId = parent.Schema.Indexes!.Single(i => i.Name == index).KvId;
+
+        KvTransaction tx = await database.Transactions.BeginAsync();
+        await parent.Store.WriteUniqueIndexTombstoneForTesting(tx, indexId, new CompositeColumnValue(key));
+        await database.Transactions.CommitAsync(tx);
     }
 
     private static string ColumnId(TableSchema table, string name) =>

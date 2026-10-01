@@ -1,4 +1,4 @@
-/**
+﻿/**
  * This file is part of CamusDB
  *
  * For the full copyright and license information, please view the LICENSE.txt
@@ -229,7 +229,7 @@ public sealed class TestForeignKeyStoragePrimitives
         KvTableStore parent = Store(node, "p");
         await CommitParentAsync(mgr, parent, 1);
 
-        using CountingListener counters = CountingListener.Start();
+        using ForeignKeyOperationCounter counters = ForeignKeyOperationCounter.Start();
 
         KvTransaction tx = await mgr.BeginAsync(CamusIsolationLevel.ReadCommitted);
         await parent.LockAndLookupUniqueManyAsync(tx, ParentIndex, [Key(1), Key(1), Key(2), Key(1)]);
@@ -464,68 +464,5 @@ public sealed class TestForeignKeyStoragePrimitives
         Assert.IsTrue(await ancestorChild.IndexPrefixExistsAsync(after, ChildIndex, OneInt, Key(1), unique: false),
             "the branch's delete never touches the ancestor");
         await mgr.RollbackAsync(after);
-    }
-
-    /// <summary>
-    /// Counts <c>camus.foreign_key.operations</c> by kind, keeping only the measurements this test's own
-    /// async flow records: other engines in the process record on the same instrument.
-    /// </summary>
-    private sealed class CountingListener : IDisposable
-    {
-        private static readonly AsyncLocal<object?> OwningFlow = new();
-
-        private readonly MeterListener listener = new();
-        private readonly Dictionary<string, long> counts = new(StringComparer.Ordinal);
-        private readonly bool wasEnabled;
-
-        private CountingListener()
-        {
-            wasEnabled = ServerDiagnostics.Enabled;
-            ServerDiagnostics.Enabled = true;
-
-            object flow = new();
-            OwningFlow.Value = flow;
-
-            listener.InstrumentPublished = (instrument, l) =>
-            {
-                if (instrument.Meter.Name == ServerDiagnostics.MeterName && instrument.Name == "camus.foreign_key.operations")
-                    l.EnableMeasurementEvents(instrument);
-            };
-
-            listener.SetMeasurementEventCallback<long>((_, value, tags, _) =>
-            {
-                if (!ReferenceEquals(OwningFlow.Value, flow))
-                    return;
-
-                string? kind = null;
-                foreach (KeyValuePair<string, object?> tag in tags)
-                {
-                    if (tag.Key == "kind")
-                        kind = tag.Value?.ToString();
-                }
-
-                if (kind is null)
-                    return;
-
-                lock (counts)
-                    counts[kind] = counts.GetValueOrDefault(kind) + value;
-            });
-
-            listener.Start();
-        }
-
-        public static CountingListener Start() => new();
-
-        public long Count(string kind)
-        {
-            lock (counts)
-                return counts.GetValueOrDefault(kind);
-        }
-
-        public void Dispose()
-        {
-            listener.Dispose();
-            ServerDiagnostics.Enabled = wasEnabled;
-        }
     }
 }

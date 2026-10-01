@@ -1,4 +1,4 @@
-
+﻿
 /**
  * This file is part of CamusDB
  *
@@ -23,16 +23,32 @@ using Microsoft.Extensions.Logging;
 namespace CamusDB.Core.CommandsExecutor.Controllers;
 
 /// <summary>
-/// Inserts a single row into a table
+/// Inserts the rows of one INSERT ticket into a table, with their index entries, and checks the
+/// foreign keys the table owns once every row is written (see <see cref="ForeignKeyStatementChecker"/>).
 /// </summary>
 internal sealed class RowInserter
 {
     private readonly ILogger<ICamusDB> logger;
 
-    public RowInserter(ILogger<ICamusDB> logger)
+    /// <summary>Opens the parent tables a foreign-key check reads.</summary>
+    private readonly TableOpener tableOpener;
+
+    public RowInserter(ILogger<ICamusDB> logger, TableOpener tableOpener)
     {
+        ArgumentNullException.ThrowIfNull(tableOpener);
+
         this.logger = logger;
+        this.tableOpener = tableOpener;
     }
+
+    /// <summary>
+    /// Builds the foreign-key checker for a statement that calls <see cref="Insert"/> more than once —
+    /// <c>INSERT … SELECT</c> writes in pages. The caller passes it to every call and completes it once,
+    /// after the last page, so a parent written in a later page still counts for a child in an earlier
+    /// one. Call it before the first write.
+    /// </summary>
+    internal ValueTask<ForeignKeyStatementChecker> CreateStatementCheckerAsync(DatabaseDescriptor database, TableDescriptor table, KvTransaction tx) =>
+        ForeignKeyStatementChecker.ForChildWritesAsync(database, table, tableOpener, tx);
 
     private static void Validate(TableDescriptor table, InsertTicket ticket)
     {
@@ -115,7 +131,13 @@ internal sealed class RowInserter
         }
     }
 
-    private static CompositeColumnValue GetColumnValue(Dictionary<string, ColumnValue> rowValues, string[] columnNames, ColumnValue? extraUniqueValue = null)
+    /// <summary>
+    /// Builds an index key from the row's values. A unique key is built only when every column is
+    /// present and non-NULL (see <see cref="HasNullKeyColumn"/>), so a missing column there is a bug.
+    /// A non-unique key indexes every row: a column the INSERT left out holds NULL, and is indexed as
+    /// NULL, exactly like an explicit NULL — pass <paramref name="absentIsNull"/> for that case.
+    /// </summary>
+    private static CompositeColumnValue GetColumnValue(Dictionary<string, ColumnValue> rowValues, string[] columnNames, ColumnValue? extraUniqueValue = null, bool absentIsNull = false)
     {
         ColumnValue[] columnValues = new ColumnValue[extraUniqueValue is null ? columnNames.Length : columnNames.Length + 1];
 
@@ -130,10 +152,18 @@ internal sealed class RowInserter
                 );
 
             if (!rowValues.TryGetValue(name, out ColumnValue? columnValue))
+            {
+                if (absentIsNull)
+                {
+                    columnValues[i] = ColumnValue.Null;
+                    continue;
+                }
+
                 throw new CamusDBException(
                     CamusDBErrorCodes.InvalidInternalOperation,
                     $"A null value was found for unique key field '{name}'"
                 );
+            }
 
             columnValues[i] = columnValue;
         }
@@ -169,20 +199,40 @@ internal sealed class RowInserter
             ? IndexIncludeValueCodec.EncodeTupleChecked(index.IncludeColumns, values, index.Name, options)
             : null;
 
-    public async Task<int> Insert(DatabaseDescriptor database, TableDescriptor table, InsertTicket ticket)
+    /// <summary>
+    /// Inserts the ticket's rows. With no <paramref name="statementChecker"/>, this call is the whole
+    /// statement: it builds the foreign-key checker before the first write and completes it after the
+    /// last. With one, the caller owns the statement and completes the checker itself.
+    /// </summary>
+    public async Task<int> Insert(
+        DatabaseDescriptor database,
+        TableDescriptor table,
+        InsertTicket ticket,
+        ForeignKeyStatementChecker? statementChecker = null)
     {
         MaterializedViewAccessGuard.RequireWritable(table);
         Validate(table, ticket);
+
+        ForeignKeyStatementChecker checker = statementChecker
+            ?? await ForeignKeyStatementChecker.ForChildWritesAsync(database, table, tableOpener, ticket.TxnState).ConfigureAwait(false);
 
         InsertFluxState state = new(
             database: database,
             table: table,
             ticket: ticket
-        );
+        )
+        {
+            ForeignKeys = checker
+        };
 
         FluxMachine<InsertFluxSteps, InsertFluxState> machine = new(state);
 
-        return await InsertInternal(machine, state).ConfigureAwait(false);
+        int inserted = await InsertInternal(machine, state).ConfigureAwait(false);
+
+        if (statementChecker is null && checker.HasWork)
+            await checker.CompleteAsync(ticket.TxnState).ConfigureAwait(false);
+
+        return inserted;
     }
 
     private async Task<FluxAction> InsertRowsAndIndexes(InsertFluxState state)
@@ -237,12 +287,14 @@ internal sealed class RowInserter
                 }
                 else if (index.Type == IndexType.Multi)
                 {
-                    CompositeColumnValue multiKeyValue = GetColumnValue(values, index.Columns, new ColumnValue(ColumnType.Id, rowId.ToString()));
+                    CompositeColumnValue multiKeyValue = GetColumnValue(values, index.Columns, new ColumnValue(ColumnType.Id, rowId.ToString()), absentIsNull: true);
                     (indexEntries ??= []).Add(new(index.KvId, multiKeyValue, Unique: false, IncludeTuple: BuildIncludeTuple(index, values, state.Database.Options)));
                 }
             }
 
             EncodedRow encoded = codec.EncodeStorageValue(RowSlotAdapter.FromRow(schemaColumns, values), largeValuePolicy);
+
+            state.ForeignKeys.AddChildRow(values);
 
             chunk.Add(new KvTableStore.RowWrite
             {

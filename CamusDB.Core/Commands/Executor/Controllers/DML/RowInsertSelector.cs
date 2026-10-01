@@ -1,4 +1,4 @@
-
+﻿
 /**
  * This file is part of CamusDB
  *
@@ -152,6 +152,11 @@ internal sealed class RowInsertSelector
 
         Functions.SequenceStatementBinder.RecordDrawnValues(bound.Parameters, statementTicket.TxnState);
 
+        // One foreign-key checker for the whole statement, completed after the last page: a parent
+        // that a later page writes still satisfies a child in an earlier page, as in INSERT … VALUES.
+        ForeignKeyStatementChecker foreignKeys = await rowInserter
+            .CreateStatementCheckerAsync(database, table, ticket.TxnState).ConfigureAwait(false);
+
         // Write in pages so a large copy does not hold every serialized row at once. All pages share
         // the caller's transaction, so a failure in a later page rolls back the earlier ones.
         int pageSize = Math.Max(1, database.Options.SpillEffectiveThreshold);
@@ -168,9 +173,12 @@ internal sealed class RowInsertSelector
                 values: page
             );
 
-            inserted += await rowInserter.Insert(database, table, pageTicket).ConfigureAwait(false);
+            inserted += await rowInserter.Insert(database, table, pageTicket, foreignKeys).ConfigureAwait(false);
             statisticsManager.TrackInsert(database, table, page.Count, page);
         }
+
+        if (foreignKeys.HasWork)
+            await foreignKeys.CompleteAsync(ticket.TxnState, statementTicket.CancellationToken).ConfigureAwait(false);
 
         return inserted;
     }
