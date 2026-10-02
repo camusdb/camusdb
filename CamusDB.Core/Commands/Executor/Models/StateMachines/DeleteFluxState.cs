@@ -1,4 +1,4 @@
-
+﻿
 /**
  * This file is part of CamusDB
  *
@@ -39,6 +39,12 @@ internal sealed class DeleteFluxState
     public QueryTicket? LocateTicket { get; set; }
 
     public int DeletedRows { get; set; }
+
+    /// <summary>
+    /// Collects the referenced keys the deleted rows remove. <see cref="ForeignKeyStatementChecker.None"/>
+    /// when nothing references the table, or when the caller removes the whole table.
+    /// </summary>
+    internal ForeignKeyStatementChecker ForeignKeys { get; set; } = ForeignKeyStatementChecker.None;
 
     public DeleteFluxState(DatabaseDescriptor database, TableDescriptor table, DeleteTicket ticket, QueryExecutor queryExecutor)
     {

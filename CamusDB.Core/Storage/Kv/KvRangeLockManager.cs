@@ -1,4 +1,4 @@
-/**
+﻿/**
  * This file is part of CamusDB
  *
  * For the full copyright and license information, please view the LICENSE.txt
@@ -609,6 +609,70 @@ internal sealed class KvRangeLockManager
             pending,
             new ParallelOptions { MaxDegreeOfParallelism = KvStoreConstants.ForeignKeyLockConcurrency, CancellationToken = cancellationToken },
             (key, ct) => new ValueTask(AcquireRangeLockAsync(tx, bucketPrefix, key, true, key, true, ct))
+        ).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// The parent side of the rendezvous for an <b>optimistic</b> writer: takes an exclusive point lock
+    /// on each referenced key that the statement deleted or re-keyed, before the statement probes the
+    /// child index.
+    ///
+    /// <para><b>Why an optimistic parent needs it.</b> A pessimistic writer takes the key's exclusive
+    /// lock before it writes, and that write intent is what refuses a child's shared lock. An optimistic
+    /// writer takes no lock: Kahuna only stages its delete as an MVCC entry, which a shared range-lock
+    /// request does not check. Without this lock a child could lock and read the key as present while
+    /// the delete is pending, commit, and leave an orphan when the parent commits.</para>
+    ///
+    /// <para><b>Why it closes both orderings.</b> Range locks conflict by mode in both directions. A
+    /// child that already holds the shared lock makes this request wait (wait-die) until the child ends,
+    /// and the probe that follows then sees the child's committed row. A child that arrives later is
+    /// refused until this transaction ends, and then reads the key as gone.</para>
+    ///
+    /// <para>A key this transaction already holds exclusively is skipped. The acquires run with at most
+    /// <see cref="KvStoreConstants.ForeignKeyLockConcurrency"/> in flight, as for the shared lock.</para>
+    /// </summary>
+    internal async Task AcquireForeignKeyExclusiveLocksAsync(
+        KvTransaction tx,
+        string bucketPrefix,
+        IReadOnlyList<string> lockKeys,
+        CancellationToken cancellationToken)
+    {
+        if (lockKeys.Count == 0)
+            return;
+
+        await tx.EnsureSessionStartedAsync(cancellationToken, keys.TableKeyPrefix).ConfigureAwait(false);
+
+        if (tx.TransactionId == HLCTimestamp.Zero)
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInternalOperation,
+                "A foreign-key check needs a read-write transaction with an identity to hold its locks");
+
+        List<string>? pending = null;
+        HashSet<string> seen = new(lockKeys.Count, StringComparer.Ordinal);
+
+        foreach (string key in lockKeys)
+        {
+            if (!seen.Add(key) || tx.HasPointLock(bucketPrefix, key, RangeLockMode.Exclusive))
+                continue;
+
+            (pending ??= new(lockKeys.Count)).Add(key);
+        }
+
+        if (pending is null)
+            return;
+
+        ServerDiagnostics.AddForeignKeyOperation(ServerDiagnostics.ForeignKeyOperation.ParentLock, pending.Count);
+
+        if (pending.Count == 1)
+        {
+            await AcquireRangeLockAsync(tx, bucketPrefix, pending[0], true, pending[0], true, cancellationToken, RangeLockMode.Exclusive).ConfigureAwait(false);
+            return;
+        }
+
+        await Parallel.ForEachAsync(
+            pending,
+            new ParallelOptions { MaxDegreeOfParallelism = KvStoreConstants.ForeignKeyLockConcurrency, CancellationToken = cancellationToken },
+            (key, ct) => new ValueTask(AcquireRangeLockAsync(tx, bucketPrefix, key, true, key, true, ct, RangeLockMode.Exclusive))
         ).ConfigureAwait(false);
     }
 

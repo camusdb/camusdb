@@ -1,4 +1,4 @@
-
+﻿
 /**
  * This file is part of CamusDB
  *
@@ -355,6 +355,12 @@ internal sealed class TtlSpanSweeper
             {
                 if (DeleteChunkFaultInjector?.Invoke(slice) == true)
                     throw new CamusDBException(CamusDBErrorCodes.TransactionMustRetry, "Injected TTL delete failure");
+
+                // The sweep deletes without a parent-side foreign-key check. Row-level TTL is refused on
+                // a referenced table, so a sweep must never reach one.
+                System.Diagnostics.Debug.Assert(
+                    !ForeignKeyStatementChecker.IsReferenced(database, table.Id),
+                    $"The TTL sweep reached table '{table.Name}', which a foreign key references");
 
                 (int batchDeleted, int batchSkipped) = await rowDeleter.DeleteExpiredRowsAsync(
                     table, tx, slice, expirationColumn, cutoffEpochMs, ct).ConfigureAwait(false);

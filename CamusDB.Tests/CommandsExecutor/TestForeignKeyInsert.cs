@@ -208,16 +208,15 @@ internal static class ForeignKeyInsertScenarios
     /// pending delete, so it either waits and then finds the parent gone, or is told to retry; it never
     /// sees the stale parent.
     ///
-    /// <para>The parent transaction is pessimistic on purpose. An optimistic DELETE takes no lock until it
-    /// commits, so a child can lock and read the key before the delete is visible; only the parent-side
-    /// check of that DELETE can catch it, and that check belongs to DELETE enforcement.</para>
+    /// <para>In the optimistic cell the DELETE is optimistic too. It takes no lock when it writes, so it
+    /// is the parent-side check that fences the key before the DELETE commits.</para>
     /// </summary>
     public static async Task ChildInsertNeverCommitsAgainstAPendingParentDelete(CommandExecutor executor, DatabaseDescriptor database, string dbname)
     {
         await CreateCitiesAndWeather(executor, database, dbname);
         await Dml(executor, database, dbname, "INSERT INTO cities (id, name) VALUES (1, 'lima')");
 
-        KvTransaction parentTx = await database.Transactions.BeginAsync(locking: KeyValueTransactionLocking.Pessimistic);
+        KvTransaction parentTx = await database.Transactions.BeginAsync();
         try
         {
             await Run(executor, parentTx, dbname, "DELETE FROM cities WHERE id = 1");

@@ -1,4 +1,4 @@
-
+﻿
 /**
  * This file is part of CamusDB
  *
@@ -25,14 +25,24 @@ using Microsoft.Extensions.Logging;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
 
+/// <summary>
+/// Deletes the rows a DELETE statement matches, with their index entries, and checks that no row of
+/// another table still references a deleted row (see <see cref="ForeignKeyStatementChecker"/>).
+/// </summary>
 internal sealed class RowDeleter
 {
     private readonly ILogger<ICamusDB> logger;
     private readonly StatisticsManager? _stats;
 
-    public RowDeleter(ILogger<ICamusDB> logger, StatisticsManager? stats = null)
+    /// <summary>Opens the child tables a foreign-key check probes.</summary>
+    private readonly TableOpener tableOpener;
+
+    public RowDeleter(ILogger<ICamusDB> logger, TableOpener tableOpener, StatisticsManager? stats = null)
     {
+        ArgumentNullException.ThrowIfNull(tableOpener);
+
         this.logger = logger;
+        this.tableOpener = tableOpener;
         _stats = stats;
     }
 
@@ -41,26 +51,46 @@ internal sealed class RowDeleter
     /// view refuses user DML, but dropping one still has to clear its rows, and that removal is the
     /// consequence of a statement that was already authorized against the materialized view itself.
     /// </param>
+    /// <param name="checkForeignKeys">
+    /// False only when the whole table goes with the rows — DROP TABLE. A self-referencing table must
+    /// not refuse its own removal, and a table that another table references cannot be dropped at all.
+    /// </param>
     public async Task<int> Delete(
         QueryExecutor queryExecutor,
         DatabaseDescriptor database,
         TableDescriptor table,
         DeleteTicket ticket,
-        bool allowMaterializedView = false)
+        bool allowMaterializedView = false,
+        bool checkForeignKeys = true)
     {
         if (!allowMaterializedView)
             MaterializedViewAccessGuard.RequireWritable(table);
+
+        // Built before the first write: it opens and pins the child tables, and an open may throw
+        // SchemaCatchingUp, which the dispatcher retries only while nothing has been written.
+        ForeignKeyStatementChecker foreignKeys = checkForeignKeys
+            ? await ForeignKeyStatementChecker.ForParentDeletesAsync(database, table, tableOpener, ticket.TxnState).ConfigureAwait(false)
+            : ForeignKeyStatementChecker.None;
 
         DeleteFluxState state = new(
             queryExecutor: queryExecutor,
             database: database,
             table: table,
             ticket: ticket
-        );
+        )
+        {
+            ForeignKeys = foreignKeys
+        };
 
         FluxMachine<DeleteFluxSteps, DeleteFluxState> machine = new(state);
 
-        return await DeleteInternal(machine, state).ConfigureAwait(false);
+        int deleted = await DeleteInternal(machine, state).ConfigureAwait(false);
+
+        // After the statement's last write, never before: see ForeignKeyStatementChecker.
+        if (deleted > 0 && foreignKeys.HasWork)
+            await foreignKeys.CompleteAsync(ticket.TxnState).ConfigureAwait(false);
+
+        return deleted;
     }
 
     /// <summary>
@@ -83,6 +113,9 @@ internal sealed class RowDeleter
     /// <para>A row that fails the re-check is dropped from the batch and counted, never retried in a
     /// tight loop: the sweep will see it again next run, by which time it may legitimately have
     /// expired.</para>
+    ///
+    /// <para><b>No foreign-key check.</b> Row-level TTL is refused on a table that a foreign key
+    /// references, so this path never removes a row another row can reference. The sweep asserts it.</para>
     /// </summary>
     public async Task<(int deleted, int skipped)> DeleteExpiredRowsAsync(
         TableDescriptor table,
@@ -346,6 +379,10 @@ internal sealed class RowDeleter
         {
             requiredColumns = CollectIndexKeyColumns(writableIndexes);
             requiredColumns.UnionWith(recheck.Columns);
+
+            // The referenced columns are unique-index key columns, so they are here already; added
+            // explicitly so that a later narrowing of the decode cannot drop them.
+            state.ForeignKeys.CollectParentColumns(requiredColumns);
         }
         RowEncoder.DictionaryDecodeState decodeState = new();
 
@@ -384,6 +421,8 @@ internal sealed class RowDeleter
                 IndexEntries = CollectIndexDeletes(writableIndexes, rowId, writableRow),
                 LargeValueOrdinals = outOfLine[i],
             });
+
+            state.ForeignKeys.AddRemovedParentRow(writableRow);
         }
 
         if (_stats is not null && batch.Count > _stats.DeleteBatchMaxChunkSeen)

@@ -439,7 +439,7 @@ public sealed class CommandExecutor : IAsyncDisposable
         rowInserter = new(logger, tableOpener);
         rowUpdater = new(logger, statisticsManager);
         tableDropper = new(catalogs, statisticsManager, logger);
-        rowDeleter = new(logger, statisticsManager);
+        rowDeleter = new(logger, tableOpener, statisticsManager);
         queryExecutor = new(logger, options, statisticsManager, sharedNode?.Kahuna, fragmentTransport);
         // The allocator is the single binding to Kahuna's sequencer; the binder reserves a
         // statement's values through it before the statement runs. Both are built here, ahead of

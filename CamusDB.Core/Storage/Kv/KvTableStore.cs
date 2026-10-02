@@ -1,4 +1,4 @@
-/**
+﻿/**
  * This file is part of CamusDB
  *
  * For the full copyright and license information, please view the LICENSE.txt
@@ -568,6 +568,10 @@ public sealed partial class KvTableStore
     /// <inheritdoc cref="KvIndexAccessor.LockAndLookupUniqueManyAsync"/>
     internal Task<bool[]> LockAndLookupUniqueManyAsync(KvTransaction tx, string indexId, IReadOnlyList<CompositeColumnValue> keys, CancellationToken cancellationToken = default)
         => indexes.LockAndLookupUniqueManyAsync(tx, indexId, keys, cancellationToken);
+
+    /// <inheritdoc cref="KvIndexAccessor.LockUniqueKeysExclusiveAsync"/>
+    internal Task LockUniqueKeysExclusiveAsync(KvTransaction tx, string indexId, IReadOnlyList<CompositeColumnValue> keys, CancellationToken cancellationToken = default)
+        => indexes.LockUniqueKeysExclusiveAsync(tx, indexId, keys, cancellationToken);
 
     /// <inheritdoc cref="KvIndexAccessor.IndexPrefixExistsAsync"/>
     internal Task<bool> IndexPrefixExistsAsync(KvTransaction tx, string indexId, ColumnType[] keyTypes, CompositeColumnValue prefix, bool unique, CancellationToken cancellationToken = default)

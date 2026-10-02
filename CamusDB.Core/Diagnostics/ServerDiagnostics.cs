@@ -1,4 +1,4 @@
-/**
+﻿/**
  * This file is part of CamusDB
  *
  * For the full copyright and license information, please view the LICENSE.txt
@@ -99,6 +99,12 @@ public static class ServerDiagnostics
         /// <summary>One prefix probe of a child index issued by the parent side.</summary>
         ParentProbe,
 
+        /// <summary>
+        /// An exclusive lock an optimistic parent writer took on a referenced key before its probe. A
+        /// pessimistic writer needs none: its write already fences the key.
+        /// </summary>
+        ParentLock,
+
         /// <summary>One distinct key checked by the validation of existing rows.</summary>
         ValidationKey,
 
@@ -118,6 +124,7 @@ public static class ServerDiagnostics
             ForeignKeyOperation.ChildProbeBatch => "child_probe_batch",
             ForeignKeyOperation.ChildProbeKey => "child_probe_key",
             ForeignKeyOperation.ParentProbe => "parent_probe",
+            ForeignKeyOperation.ParentLock => "parent_lock",
             ForeignKeyOperation.ValidationKey => "validation_key",
             _ => "violation",
         };

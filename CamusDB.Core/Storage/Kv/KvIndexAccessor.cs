@@ -1,4 +1,4 @@
-/**
+﻿/**
  * This file is part of CamusDB
  *
  * For the full copyright and license information, please view the LICENSE.txt
@@ -179,6 +179,30 @@ internal sealed class KvIndexAccessor
         await locks.AcquireForeignKeyLocksAsync(tx, keys.BuildIndexBucketPrefix(indexId), lockKeys, cancellationToken).ConfigureAwait(false);
 
         return await ProbeUniqueKeysAsync(tx, indexId, lookupKeys, kvKeys, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Takes an exclusive lock on the unique-index entry of each of <paramref name="lookupKeys"/>. The
+    /// fence an optimistic parent writer needs before its probe; see
+    /// <see cref="KvRangeLockManager.AcquireForeignKeyExclusiveLocksAsync"/>. A key that cannot be encoded
+    /// has no entry and is skipped.
+    /// </summary>
+    internal async Task LockUniqueKeysExclusiveAsync(
+        KvTransaction tx,
+        string indexId,
+        IReadOnlyList<CompositeColumnValue> lookupKeys,
+        CancellationToken cancellationToken = default)
+    {
+        string?[] kvKeys = EncodeUniqueKeys(indexId, lookupKeys);
+
+        List<string> lockKeys = new(kvKeys.Length);
+        foreach (string? kvKey in kvKeys)
+        {
+            if (kvKey is not null)
+                lockKeys.Add(kvKey);
+        }
+
+        await locks.AcquireForeignKeyExclusiveLocksAsync(tx, keys.BuildIndexBucketPrefix(indexId), lockKeys, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>
