@@ -358,9 +358,14 @@ internal sealed class DdlStatementDispatcher
                         ast.leftAst!.yytext!,
                         DML.SQLExecutorBaseCreator.UnquoteStringLiteral(ast.rightAst!.yytext!));
 
+                    // Read before the relink, which deletes the record: a restored table comes back
+                    // without its foreign keys, and the statement says which ones the user must add again.
+                    OrphanTableRecord? relinkRecord = await catalogs.TryGetTableOrphanAsync(database, relinkTicket.OrphanTableId).ConfigureAwait(false);
+
                     // Delegate to the executor method so fencing, forwarding, and orphan-load live in one place.
                     bool relinked = await schemaDdl.RelinkTable(relinkTicket).ConfigureAwait(false);
-                    return new ExecuteDDLSQLResult(database, relinked);
+
+                    return new ExecuteDDLSQLResult(database, relinked, 0, relinked ? DroppedForeignKeysWarning(relinkRecord, relinkTicket.NewTableName) : null);
                 }
 
             case NodeType.AlterTableAddColumn:
@@ -704,5 +709,20 @@ internal sealed class DdlStatementDispatcher
             default:
                 throw new CamusDBException(CamusDBErrorCodes.InvalidAstStmt, "Unknown DDL AST stmt: " + ast.nodeType);
         }
+    }
+    /// <summary>
+    /// The warning a RELINK returns when the restored table had foreign keys. They are not restored:
+    /// while the table was detached, no parent-side check could see its rows, so the parents they
+    /// reference may be gone. ALTER TABLE … ADD CONSTRAINT adds each one again and validates the rows.
+    /// </summary>
+    private static string? DroppedForeignKeysWarning(OrphanTableRecord? record, string tableName)
+    {
+        if (record?.Schema.ForeignKeys is not { Count: > 0 } foreignKeys)
+            return null;
+
+        string names = string.Join(", ", foreignKeys.Select(fk => fk.Name));
+
+        return $"Table '{tableName}' was restored without its foreign keys ({names}). " +
+               "Add each one again with ALTER TABLE ... ADD CONSTRAINT, which validates the restored rows.";
     }
 }

@@ -373,6 +373,59 @@ public sealed class TestSchemaDdlForwardController
         }
     }
 
+    /// <summary>
+    /// A DROP TABLE or TRUNCATE forwarded from a follower runs on the leader through the controller,
+    /// and must meet the same foreign-key guard as a local statement: the parent stays, with its rows.
+    /// </summary>
+    [Test]
+    public async Task ForwardDropAndTruncate_AsLeader_RefuseAReferencedParent()
+    {
+        string db = await CreateTestDatabaseAsync();
+        try
+        {
+            foreach (string sql in new[]
+            {
+                "CREATE TABLE cities (id int64 PRIMARY KEY NOT NULL, name string NOT NULL, UNIQUE KEY cities_name (name))",
+                "CREATE TABLE weather (id int64 PRIMARY KEY NOT NULL, city string REFERENCES cities (name))",
+            })
+                await executor!.ExecuteDDLSQL(new ExecuteSQLTicket(txnState: null!, database: db, sql: sql, parameters: null));
+
+            foreach (bool force in new[] { false, true })
+            {
+                string dropBody = JsonSerializer.Serialize(new ForwardDropTableRequest
+                {
+                    OperationId = Guid.NewGuid().ToString("N"),
+                    DatabaseName = db,
+                    TableName = "cities",
+                    Force = force,
+                }, JsonOpts);
+
+                SchemaDdlForwardResponse? drop = ExtractResponse(await BuildController(dropBody, clusterNode: node).ForwardDropTable());
+                Assert.AreEqual("failed", drop!.Status, $"force={force}");
+                Assert.AreEqual(CamusDBErrorCodes.DependentObjectsExist, drop.Code, $"force={force}");
+            }
+
+            string truncateBody = JsonSerializer.Serialize(new ForwardTruncateTableRequest
+            {
+                OperationId = Guid.NewGuid().ToString("N"),
+                DatabaseName = db,
+                TableName = "cities",
+            }, JsonOpts);
+
+            SchemaDdlForwardResponse? truncate = ExtractResponse(await BuildController(truncateBody, clusterNode: node).ForwardTruncateTable());
+            Assert.AreEqual("failed", truncate!.Status);
+            Assert.AreEqual(CamusDBErrorCodes.DependentObjectsExist, truncate.Code);
+
+            DatabaseDescriptor descriptor = await executor!.OpenDatabase(db);
+            Assert.IsTrue(descriptor.Schema.Tables.ContainsKey("cities"));
+            Assert.IsFalse(descriptor.Schema.ForeignKeys.IsEmpty);
+        }
+        finally
+        {
+            await DropTestDatabaseAsync(db);
+        }
+    }
+
     [Test]
     public void ForwardCreateTableRequest_RoundTripsEveryForeignKeyField()
     {

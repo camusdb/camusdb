@@ -8,6 +8,7 @@
 
 using System.Linq;
 using CamusDB.Core.Catalogs;
+using CamusDB.Core.Catalogs.Apply;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Results;
@@ -1202,6 +1203,12 @@ internal sealed class SchemaDdlService
         await database.SchemaDdlSemaphore.WaitAsync().ConfigureAwait(false);
         try
         {
+            // Under the DDL semaphore and before the local work: a dropped index leaves the in-memory
+            // schema before its delta is proposed, so this is the only place a refusal is safe. Both the
+            // ticket API and the SQL path reach this helper.
+            if (ticket.Operation is AlterIndexOperation.DropIndex or AlterIndexOperation.DropPrimaryKey)
+                ForeignKeyDependencyRules.RequireIndexNotInForeignKey(database.Schema, table.Schema, ticket.IndexName);
+
             // Phase 1: run local DDL (including backfill) and commit so the index KV
             // entries are durable and visible before the schema delta is published.
             KvTransaction tx1 = await database.Transactions.BeginAsync(
@@ -1308,7 +1315,15 @@ internal sealed class SchemaDdlService
             : CollectOwnedSequenceNames(database, table.Id);
 
         bool dropped = await ExecuteDdlInTransaction(database,
-            tx => tableDropper.Drop(queryExecutor, tableIndexAlterer, rowDeleter, database, table, ticket, tx),
+            tx =>
+            {
+                // Under the DDL semaphore and before the dropper removes any row or index: a refusal
+                // after that would leave the table half taken apart. The ticket API, the SQL path and a
+                // forwarded drop on the leader all reach this point.
+                ForeignKeyDependencyRules.RequireNotReferencedByOtherTables(database.Schema, table.Schema, "drop table");
+
+                return tableDropper.Drop(queryExecutor, tableIndexAlterer, rowDeleter, database, table, ticket, tx);
+            },
             postCommitInvalidate: () => database.Cache?.InvalidateByTableId(database.Id, table.Id)
         ).ConfigureAwait(false);
 
@@ -1415,6 +1430,10 @@ internal sealed class SchemaDdlService
         bool deltaCommitted = false;
         try
         {
+            // Under the DDL gate, so a child created by a concurrent CREATE TABLE is seen. The apply
+            // checks it again in log order.
+            ForeignKeyDependencyRules.RequireNotReferencedByOtherTables(database.Schema, table.Schema, "truncate");
+
             // Both index lists are read under the DDL gate, not before it. An ADD INDEX that landed
             // between the read and the proposal would leave its entries out of the retired
             // generation's frozen catalog — unnamed, and so never reclaimed — and out of the new

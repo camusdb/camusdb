@@ -1,4 +1,4 @@
-/**
+﻿/**
  * This file is part of CamusDB
  *
  * For the full copyright and license information, please view the LICENSE.txt
@@ -164,6 +164,75 @@ public sealed class TestForeignKeyDefinitionRules
         Assert.AreEqual(1, child.ForeignKeys!.Count);
     }
 
+    // ── The DDL guards at apply time ────────────────────────────────────────
+    //
+    // These run in the apply, in log order on every node. They are what stops a DROP or TRUNCATE of a
+    // parent that a child created by another node has referenced since the statement was validated.
+
+    [Test]
+    public void DropOfAReferencedParentIsRefusedAtApply()
+    {
+        Schema schema = SchemaWithParent();
+        Apply(schema, Payload(Constraint()));
+
+        CamusDBException exception = Assert.Throws<CamusDBException>(() => ApplyOp(schema, SchemaOp.DropTable,
+            new SchemaDropTablePayload { TableName = "cities" }))!;
+
+        Assert.AreEqual(CamusDBErrorCodes.DependentObjectsExist, exception.Code);
+        Assert.IsTrue(schema.Tables.ContainsKey("cities"));
+
+        // The child goes freely, and then the parent can go.
+        ApplyOp(schema, SchemaOp.DropTable, new SchemaDropTablePayload { TableName = "weather" });
+        ApplyOp(schema, SchemaOp.DropTable, new SchemaDropTablePayload { TableName = "cities" });
+        Assert.IsFalse(schema.Tables.ContainsKey("cities"));
+    }
+
+    [Test]
+    public void TruncateOfAReferencedParentIsRefusedAtApply()
+    {
+        Schema schema = SchemaWithParent();
+        Apply(schema, Payload(Constraint()));
+
+        CamusDBException exception = Assert.Throws<CamusDBException>(() => ApplyOp(schema, SchemaOp.TruncateTable,
+            new SchemaTruncateTablePayload { TableId = ParentId, TableName = "cities", ExpectedStorageId = ParentId, NewStorageId = "P2" }))!;
+
+        Assert.AreEqual(CamusDBErrorCodes.DependentObjectsExist, exception.Code);
+        Assert.AreEqual(ParentId, schema.Tables["cities"].EffectiveStorageId, "A refused truncate must not swap the contents");
+    }
+
+    [Test]
+    public void DropOfAReferencedOrReferencingColumnIsRefusedAtApply()
+    {
+        Schema schema = SchemaWithParent();
+        Apply(schema, Payload(Constraint()));
+        long parentVersion = schema.Tables["cities"].Version;
+
+        foreach ((string table, string column) in new[] { ("cities", "name"), ("weather", "city") })
+        {
+            CamusDBException exception = Assert.Throws<CamusDBException>(() => ApplyOp(schema, SchemaOp.DropColumn,
+                new SchemaAlterColumnPayload { TableName = table, Column = new SchemaColumnPayload { Name = column } }))!;
+
+            Assert.AreEqual(CamusDBErrorCodes.DependentObjectsExist, exception.Code, $"{table}.{column}");
+        }
+
+        Assert.AreEqual(parentVersion, schema.Tables["cities"].Version, "A refused drop must not bump the version");
+    }
+
+    [Test]
+    public void RowLevelTtlOnAReferencedTableIsRefusedAtApply()
+    {
+        Schema schema = SchemaWithParent();
+        Apply(schema, Payload(Constraint()));
+
+        SchemaSetTableSettingsPayload payload = new() { TableName = "cities" };
+        payload.Settings[TableSettings.TtlExpirationExpressionKey] = "id";
+
+        CamusDBException exception = Assert.Throws<CamusDBException>(() => ApplyOp(schema, SchemaOp.SetTableSettings, payload))!;
+
+        Assert.AreEqual(CamusDBErrorCodes.FeatureNotSupported, exception.Code);
+        Assert.IsNull(schema.Tables["cities"].Settings);
+    }
+
     // ── The foreign-key state ladder ────────────────────────────────────────
 
     [Test]
@@ -245,6 +314,17 @@ public sealed class TestForeignKeyDefinitionRules
             FromVersion = schema.SchemaVersion,
             ToVersion = schema.SchemaVersion + 1,
             Op = SchemaOp.CreateTable,
+            Payload = SchemaChangeLogEntryCodec.EncodePayload(payload),
+        });
+
+    private static TableSchema? ApplyOp<T>(Schema schema, SchemaOp op, T payload) =>
+        SchemaDeltaApplier.ApplySchemaDelta(schema, new SchemaChangeLogEntry
+        {
+            Ts = new HLCTimestamp(1, 1, 1),
+            Database = "db",
+            FromVersion = schema.SchemaVersion,
+            ToVersion = schema.SchemaVersion + 1,
+            Op = op,
             Payload = SchemaChangeLogEntryCodec.EncodePayload(payload),
         });
 

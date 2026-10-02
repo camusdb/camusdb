@@ -1,4 +1,4 @@
-
+﻿
 /**
  * This file is part of CamusDB
  *
@@ -30,8 +30,12 @@ public sealed class TableColumnDropper
         this.logger = logger;
     }
 
-    private static void Validate(TableDescriptor table, AlterColumnTicket ticket)
+    private static void Validate(DatabaseDescriptor database, TableDescriptor table, AlterColumnTicket ticket)
     {
+        // Before the index check, which would also refuse the column (a foreign-key column is always an
+        // index key column) but with a message that hides the real dependency.
+        Catalogs.Apply.ForeignKeyDependencyRules.RequireColumnNotInForeignKey(database.Schema, table.Schema, ticket.Column.Name);
+
         foreach (KeyValuePair<string, TableIndexSchema> index in table.Indexes)
         {
             if (index.Value.Columns.Contains(ticket.Column.Name))
@@ -69,7 +73,7 @@ public sealed class TableColumnDropper
 
     internal async Task<int> DropColumn(CatalogsManager catalogs, KvTransaction tx, QueryExecutor queryExecutor, DatabaseDescriptor database, TableDescriptor table, AlterColumnTicket ticket)
     {
-        Validate(table, ticket);
+        Validate(database, table, ticket);
 
         AlterColumnFluxState state = new(
             catalogs: catalogs,

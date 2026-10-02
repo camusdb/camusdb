@@ -1,4 +1,4 @@
-
+﻿
 /**
  * This file is part of CamusDB
  *
@@ -35,6 +35,10 @@ internal static class ColumnDeltaApplier
     {
         if (!schema.Tables.TryGetValue(payload.TableName, out TableSchema? tableSchema))
             throw new CamusDBException(CamusDBErrorCodes.TableDoesntExist, $"Table '{payload.TableName}' does not exist");
+
+        // Checked before anything changes: the version bump below must not happen for a refused drop.
+        if (op == SchemaOp.DropColumn)
+            ForeignKeyDependencyRules.RequireColumnNotInForeignKey(schema, tableSchema, payload.Column.Name);
 
         tableSchema.Version++;
 

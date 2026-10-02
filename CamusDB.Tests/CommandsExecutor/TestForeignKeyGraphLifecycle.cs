@@ -11,6 +11,7 @@ using System.Threading.Tasks;
 
 using NUnit.Framework;
 
+using CamusDB.Core;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor;
 using CamusDB.Core.CommandsExecutor.Models;
@@ -70,19 +71,19 @@ internal static class ForeignKeyGraphScenarios
     }
 
     /// <summary>
-    /// No guard stops this DROP yet. The plan must become unresolved and unenforced, and it must stay
-    /// indexed under the old parent id, without an exception anywhere.
+    /// A referenced parent cannot be dropped, so the graph keeps an enforced plan. A plan whose parent
+    /// is gone anyway is covered by <see cref="DatabaseWithAnUnresolvableConstraintStillOpens"/>.
     /// </summary>
-    public static async Task DroppingTheParentLeavesAnUnenforcedPlan(CommandExecutor executor, DatabaseDescriptor database, string dbname)
+    public static async Task DroppingTheParentIsRefusedAndThePlanStays(CommandExecutor executor, DatabaseDescriptor database, string dbname)
     {
         await CreateTablesWithConstraint(executor, database, dbname);
         string parentId = database.Schema.Tables["cities"].Id!;
 
-        await Ddl(executor, dbname, "DROP TABLE cities");
+        CamusDBException exception = Assert.ThrowsAsync<CamusDBException>(async () => await Ddl(executor, dbname, "DROP TABLE cities"))!;
+        Assert.AreEqual(CamusDBErrorCodes.DependentObjectsExist, exception.Code);
 
         ForeignKeyPlan plan = database.Schema.ForeignKeys.ParentPlansOf(parentId).Single();
-        Assert.IsFalse(plan.IsResolved);
-        Assert.IsFalse(plan.IsEnforced);
+        Assert.IsTrue(plan.IsEnforced, plan.UnresolvedReason);
     }
 
     public static async Task ConstraintSurvivesReopen(CommandExecutor executor, DatabaseDescriptor database, string dbname)
@@ -196,7 +197,7 @@ public sealed class TestForeignKeyGraphLifecycle : BaseTest
     public async Task DroppingTheChildRemovesItsConstraints() => await Run(ForeignKeyGraphScenarios.DroppingTheChildRemovesItsConstraints);
 
     [Test]
-    public async Task DroppingTheParentLeavesAnUnenforcedPlan() => await Run(ForeignKeyGraphScenarios.DroppingTheParentLeavesAnUnenforcedPlan);
+    public async Task DroppingTheParentIsRefusedAndThePlanStays() => await Run(ForeignKeyGraphScenarios.DroppingTheParentIsRefusedAndThePlanStays);
 
     [Test]
     public async Task ConstraintSurvivesReopen() => await Run(ForeignKeyGraphScenarios.ConstraintSurvivesReopen);
@@ -226,7 +227,7 @@ public sealed class TestForeignKeyGraphLifecycleCluster : SharedNodeBaseTest
     public async Task DroppingTheChildRemovesItsConstraints() => await Run(ForeignKeyGraphScenarios.DroppingTheChildRemovesItsConstraints);
 
     [Test]
-    public async Task DroppingTheParentLeavesAnUnenforcedPlan() => await Run(ForeignKeyGraphScenarios.DroppingTheParentLeavesAnUnenforcedPlan);
+    public async Task DroppingTheParentIsRefusedAndThePlanStays() => await Run(ForeignKeyGraphScenarios.DroppingTheParentIsRefusedAndThePlanStays);
 
     [Test]
     public async Task ConstraintSurvivesReopen() => await Run(ForeignKeyGraphScenarios.ConstraintSurvivesReopen);

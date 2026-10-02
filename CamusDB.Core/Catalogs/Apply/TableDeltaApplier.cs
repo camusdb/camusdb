@@ -1,4 +1,4 @@
-
+﻿
 /**
  * This file is part of CamusDB
  *
@@ -219,6 +219,10 @@ internal static class TableDeltaApplier
         if (!schema.Tables.TryGetValue(payload.TableName, out TableSchema? tableSchema))
             return null;
 
+        // In log order on every node: a child created by another node since this drop was validated
+        // still stops it.
+        ForeignKeyDependencyRules.RequireNotReferencedByOtherTables(schema, tableSchema, "drop table");
+
         schema.Tables.Remove(payload.TableName);
         return tableSchema;
     }
@@ -296,6 +300,8 @@ internal static class TableDeltaApplier
 
         foreach (string rawKey in payload.RemovedKeys)
             merged.Remove((rawKey ?? "").Trim().ToLowerInvariant());
+
+        ForeignKeyDependencyRules.RequireNoRowLevelTtlWhenReferenced(schema, tableSchema, merged);
 
         tableSchema.Settings = merged;
         return tableSchema;
@@ -431,6 +437,9 @@ internal static class TableDeltaApplier
                 CamusDBErrorCodes.ConcurrentSchemaChange,
                 $"The contents of '{live.Name}' changed while it was being truncated, so this truncate was " +
                 "discarded rather than applied to a generation it does not describe. Retry it.");
+
+        // A truncate removes every parent row at once, with no parent-side check.
+        ForeignKeyDependencyRules.RequireNotReferencedByOtherTables(schema, live, "truncate");
 
         live.StorageId = payload.NewStorageId;
         live.ContentsGeneration++;

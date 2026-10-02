@@ -228,7 +228,10 @@ internal static class SchemaChangeEntryFactory
                 // Preserve the schema version so rows keep decoding under the version they were written.
                 Version = src.Version,
                 Columns = columns,
-                Indexes = src.Indexes is { Count: > 0 } ? [.. src.Indexes] : null,
+                // The foreign keys stay behind (below), so an index the engine created for one would
+                // name an owner that does not exist. It is kept as an ordinary index: it still serves
+                // queries, and an ADD CONSTRAINT that follows can reuse it.
+                Indexes = src.Indexes is { Count: > 0 } ? [.. src.Indexes.Select(WithoutOwner)] : null,
                 CheckConstraints = src.CheckConstraints is { Count: > 0 } ? [.. src.CheckConstraints] : null,
                 // Foreign keys are deliberately not relinked. While the table was dropped, no
                 // parent-side check could see its rows, so the parents they reference may be gone.
@@ -249,6 +252,21 @@ internal static class SchemaChangeEntryFactory
             })
         };
     }
+
+    private static TableIndexSchema WithoutOwner(TableIndexSchema index) =>
+        index.OwnerConstraintId is null
+            ? index
+            : new TableIndexSchema(
+                index.Id,
+                index.Name,
+                index.ColumnIds,
+                index.Type,
+                index.State,
+                index.StartOffset,
+                columnDirections: index.ColumnDirections,
+                includeColumnIds: index.IncludeColumnIds,
+                comment: index.Comment,
+                ownerConstraintId: null);
 
     internal static SchemaChangeLogEntry AddIndexEntry(
         DatabaseDescriptor database,
