@@ -45,13 +45,23 @@ namespace CamusDB.Core.CommandsExecutor.Controllers;
 /// row.</para>
 ///
 /// <para><b>Parent side.</b> For each constraint that references the written table, the checker keeps
-/// the distinct referenced keys that the statement removed (a DELETE; a key UPDATE later). After the
-/// last write, <see cref="CompleteAsync"/> probes each child's backing index for each key
-/// (<see cref="KvTableStore.IndexPrefixExistsAsync"/>). A live child row raises
-/// <see cref="CamusDBErrorCodes.ForeignKeyRestrictDelete"/>. The probe runs after the write, never before
+/// the distinct referenced keys that the statement removed: the key of a deleted row, or the old key of a
+/// row whose referenced key an UPDATE changed. After the last write, <see cref="CompleteAsync"/> probes
+/// each child's backing index for each key (<see cref="KvTableStore.IndexPrefixExistsAsync"/>). A live
+/// child row raises <see cref="CamusDBErrorCodes.ForeignKeyRestrictDelete"/> for a DELETE and
+/// <see cref="CamusDBErrorCodes.ForeignKeyRestrictUpdate"/> for an UPDATE. The probe runs after the write, never before
 /// it: the write of the referenced key is what waits for a child transaction that holds the rendezvous
 /// lock, so after it the probe sees every child there will be. The probe reads the transaction's own
 /// writes, so children that the same statement deleted do not count.</para>
+///
+/// <para><b>NO ACTION and a key that came back.</b> An UPDATE can move a referenced key to another row
+/// in the same statement (a swap). Under NO ACTION the constraint holds if the old key exists again when
+/// the statement ends, as in PostgreSQL, so such a key is not probed. RESTRICT refuses the change
+/// anyway. A DELETE cannot bring a key back, so it does not pay for the extra read.</para>
+///
+/// <para><b>UPDATE.</b> A statement that assigns no referencing and no referenced column does no
+/// foreign-key work at all (<see cref="ForUpdatesAsync"/>). Otherwise only a row whose key really changed
+/// adds a key: the new referencing key to the child side, the old referenced key to the parent side.</para>
 ///
 /// <para><b>Optimistic parent writers.</b> An optimistic delete takes no lock on the key; Kahuna only
 /// stages it. Before the probe, an optimistic writer therefore takes an exclusive lock on each removed key
@@ -170,10 +180,101 @@ internal sealed class ForeignKeyStatementChecker
                 ? parent
                 : await OpenRelatedAsync(database, tableOpener, plan.ChildTableId, plan, tx).ConfigureAwait(false);
 
-            sides[next++] = new ParentSide(plan, parent, child);
+            sides[next++] = new ParentSide(plan, parent, child, forUpdate: false);
         }
 
         return new ForeignKeyStatementChecker([], sides);
+    }
+
+    /// <summary>
+    /// Builds the checker for an UPDATE of <paramref name="table"/> that assigns
+    /// <paramref name="assignedColumns"/>. Decided before any row is read: a constraint takes part only
+    /// when the statement assigns one of its referencing columns (child side) or one of its referenced
+    /// columns (parent side). A statement that assigns neither gets <see cref="None"/> and does no
+    /// foreign-key work — no table opens, no keys. Call it before the first write, for the same reason as
+    /// <see cref="ForChildWritesAsync"/>.
+    /// </summary>
+    internal static async ValueTask<ForeignKeyStatementChecker> ForUpdatesAsync(
+        DatabaseDescriptor database,
+        TableDescriptor table,
+        TableOpener tableOpener,
+        KvTransaction tx,
+        IReadOnlySet<string> assignedColumns)
+    {
+        ForeignKeyGraph graph = database.Schema.ForeignKeys;
+        if (graph.IsEmpty || assignedColumns.Count == 0)
+            return None;
+
+        List<ChildSide>? childSides = null;
+        List<ParentSide>? parentSides = null;
+
+        foreach (ForeignKeyPlan plan in graph.ChildPlansOf(table.Id))
+        {
+            if (!plan.IsEnforced || !AssignsAny(assignedColumns, plan.ChildColumnNames))
+                continue;
+
+            TableDescriptor parent = plan.IsSelfReference
+                ? table
+                : await OpenParentAsync(database, tableOpener, plan, tx).ConfigureAwait(false);
+
+            (childSides ??= []).Add(new ChildSide(plan, parent, table.Name));
+        }
+
+        foreach (ForeignKeyPlan plan in graph.ParentPlansOf(table.Id))
+        {
+            if (!plan.IsEnforced || !AssignsAny(assignedColumns, plan.ParentColumnNames))
+                continue;
+
+            TableDescriptor child = plan.IsSelfReference
+                ? table
+                : await OpenRelatedAsync(database, tableOpener, plan.ChildTableId, plan, tx).ConfigureAwait(false);
+
+            (parentSides ??= []).Add(new ParentSide(plan, table, child, forUpdate: true));
+        }
+
+        if (childSides is null && parentSides is null)
+            return None;
+
+        return new ForeignKeyStatementChecker(
+            childSides is null ? [] : [.. childSides],
+            parentSides is null ? [] : [.. parentSides]);
+    }
+
+    private static bool AssignsAny(IReadOnlySet<string> assignedColumns, string[] columnNames)
+    {
+        foreach (string name in columnNames)
+        {
+            if (assignedColumns.Contains(name))
+                return true;
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// The columns the checker reads from each row, on either side. A writer that decodes only some
+    /// columns must decode these too.
+    /// </summary>
+    internal void CollectCheckedColumns(HashSet<string> columns)
+    {
+        foreach (ChildSide side in childSides)
+            side.CollectColumns(columns);
+
+        foreach (ParentSide side in parentSides)
+            side.CollectColumns(columns);
+    }
+
+    /// <summary>
+    /// Records one row an UPDATE changed: <paramref name="oldRow"/> as the write phase read it under its
+    /// lock, <paramref name="newRow"/> as it was written. Only a key that changed adds work.
+    /// </summary>
+    internal void AddUpdatedRow(Dictionary<string, ColumnValue> oldRow, Dictionary<string, ColumnValue> newRow)
+    {
+        foreach (ChildSide side in childSides)
+            side.AddIfChanged(oldRow, newRow);
+
+        foreach (ParentSide side in parentSides)
+            side.AddIfChanged(oldRow, newRow);
     }
 
     /// <summary>
@@ -265,6 +366,36 @@ internal sealed class ForeignKeyStatementChecker
         return table;
     }
 
+    /// <summary>
+    /// The values of <paramref name="columnNames"/> in constraint order, or null when one is absent or
+    /// NULL: under MATCH SIMPLE such a row neither needs a parent nor can be one.
+    /// </summary>
+    private static ColumnValue[]? ReadKey(Dictionary<string, ColumnValue> row, string[] columnNames)
+    {
+        ColumnValue[] values = new ColumnValue[columnNames.Length];
+
+        for (int i = 0; i < columnNames.Length; i++)
+        {
+            if (!row.TryGetValue(columnNames[i], out ColumnValue? value) || value.Type == ColumnType.Null)
+                return null;
+
+            values[i] = value;
+        }
+
+        return values;
+    }
+
+    private static bool SameValues(ColumnValue[] left, ColumnValue[] right)
+    {
+        for (int i = 0; i < left.Length; i++)
+        {
+            if (left[i].CompareTo(right[i]) != 0)
+                return false;
+        }
+
+        return true;
+    }
+
     /// <summary>The distinct parent keys one constraint must find, and the table they must be in.</summary>
     private sealed class ChildSide
     {
@@ -290,22 +421,37 @@ internal sealed class ForeignKeyStatementChecker
             columnNames = plan.ChildColumnNames;
         }
 
+        public void CollectColumns(HashSet<string> columns)
+        {
+            foreach (string name in columnNames)
+                columns.Add(name);
+        }
+
         public void Add(Dictionary<string, ColumnValue> values)
         {
-            int width = columnNames.Length;
-            ColumnValue[]? inConstraintOrder = null;
+            if (ReadKey(values, columnNames) is { } inConstraintOrder)
+                AddKey(inConstraintOrder);
+        }
 
-            for (int i = 0; i < width; i++)
-            {
-                if (!values.TryGetValue(columnNames[i], out ColumnValue? value) || value.Type == ColumnType.Null)
-                    return;
+        /// <summary>The new referencing key, when it has no NULL and differs from the old one.</summary>
+        public void AddIfChanged(Dictionary<string, ColumnValue> oldRow, Dictionary<string, ColumnValue> newRow)
+        {
+            if (ReadKey(newRow, columnNames) is not { } newKey)
+                return;
 
-                (inConstraintOrder ??= new ColumnValue[width])[i] = value;
-            }
+            if (ReadKey(oldRow, columnNames) is { } oldKey && SameValues(oldKey, newKey))
+                return;
+
+            AddKey(newKey);
+        }
+
+        private void AddKey(ColumnValue[] inConstraintOrder)
+        {
+            int width = inConstraintOrder.Length;
 
             ColumnValue[] keyValues = new ColumnValue[width];
             for (int j = 0; j < width; j++)
-                keyValues[j] = inConstraintOrder![plan.ParentKeyOrder[j]];
+                keyValues[j] = inConstraintOrder[plan.ParentKeyOrder[j]];
 
             CompositeColumnValue parentKey = new(keyValues);
 
@@ -320,7 +466,7 @@ internal sealed class ForeignKeyStatementChecker
                 return;
 
             parentKeys.Add(parentKey);
-            childValues.Add(inConstraintOrder!);
+            childValues.Add(inConstraintOrder);
         }
 
         public async Task CheckAsync(KvTransaction tx, CancellationToken cancellationToken)
@@ -365,6 +511,9 @@ internal sealed class ForeignKeyStatementChecker
 
         private readonly bool backingUnique;
 
+        /// <summary>True for an UPDATE that changed a referenced key; false for a DELETE.</summary>
+        private readonly bool forUpdate;
+
         private readonly Dictionary<string, int> seen = new(StringComparer.Ordinal);
 
         private readonly List<CompositeColumnValue> parentKeys = [];
@@ -373,9 +522,10 @@ internal sealed class ForeignKeyStatementChecker
 
         private readonly List<ColumnValue[]> parentValues = [];
 
-        public ParentSide(ForeignKeyPlan plan, TableDescriptor parent, TableDescriptor child)
+        public ParentSide(ForeignKeyPlan plan, TableDescriptor parent, TableDescriptor child, bool forUpdate)
         {
             this.plan = plan;
+            this.forUpdate = forUpdate;
             this.parent = parent;
             this.child = child;
             columnNames = plan.ParentColumnNames;
@@ -410,25 +560,33 @@ internal sealed class ForeignKeyStatementChecker
 
         public void Add(Dictionary<string, ColumnValue> values)
         {
-            int width = columnNames.Length;
-            ColumnValue[]? inConstraintOrder = null;
-
             // A row with a NULL in a referenced column has no unique-index entry, so no child can
             // reference it.
-            for (int i = 0; i < width; i++)
-            {
-                if (!values.TryGetValue(columnNames[i], out ColumnValue? value) || value.Type == ColumnType.Null)
-                    return;
+            if (ReadKey(values, columnNames) is { } inConstraintOrder)
+                AddKey(inConstraintOrder);
+        }
 
-                (inConstraintOrder ??= new ColumnValue[width])[i] = value;
-            }
+        /// <summary>The old referenced key, when it had no NULL and the update changed it.</summary>
+        public void AddIfChanged(Dictionary<string, ColumnValue> oldRow, Dictionary<string, ColumnValue> newRow)
+        {
+            if (ReadKey(oldRow, columnNames) is not { } oldKey)
+                return;
 
+            if (ReadKey(newRow, columnNames) is { } newKey && SameValues(oldKey, newKey))
+                return;
+
+            AddKey(oldKey);
+        }
+
+        private void AddKey(ColumnValue[] inConstraintOrder)
+        {
+            int width = inConstraintOrder.Length;
             ColumnValue[] keyValues = new ColumnValue[width];
             ColumnValue[] prefixValues = new ColumnValue[width];
 
             for (int j = 0; j < width; j++)
             {
-                keyValues[j] = inConstraintOrder![plan.ParentKeyOrder[j]];
+                keyValues[j] = inConstraintOrder[plan.ParentKeyOrder[j]];
                 prefixValues[j] = inConstraintOrder[plan.BackingKeyOrder[j]];
             }
 
@@ -443,7 +601,7 @@ internal sealed class ForeignKeyStatementChecker
 
             parentKeys.Add(parentKey);
             childPrefixes.Add(new CompositeColumnValue(prefixValues));
-            parentValues.Add(inConstraintOrder!);
+            parentValues.Add(inConstraintOrder);
         }
 
         public async Task CheckAsync(KvTransaction tx, CancellationToken cancellationToken)
@@ -454,16 +612,25 @@ internal sealed class ForeignKeyStatementChecker
             if (tx.Locking == KeyValueTransactionLocking.Optimistic)
                 await parent.Store.LockUniqueKeysExclusiveAsync(tx, plan.Constraint.ReferencedIndexId, parentKeys, cancellationToken).ConfigureAwait(false);
 
+            // Under NO ACTION an UPDATE may have given the old key to another row. The read sees this
+            // statement's own writes, so a key that exists again holds its children and is not probed.
+            bool[]? backAgain = forUpdate && plan.Constraint.OnUpdate == ForeignKeyAction.NoAction
+                ? await parent.Store.LookupUniqueManyAsync(tx, plan.Constraint.ReferencedIndexId, parentKeys, cancellationToken).ConfigureAwait(false)
+                : null;
+
             for (int i = 0; i < childPrefixes.Count; i++)
             {
+                if (backAgain is not null && backAgain[i])
+                    continue;
+
                 if (!await child.Store.IndexPrefixExistsAsync(tx, backingIndexId, backingKeyTypes, childPrefixes[i], backingUnique, cancellationToken).ConfigureAwait(false))
                     continue;
 
                 ServerDiagnostics.AddForeignKeyOperation(ServerDiagnostics.ForeignKeyOperation.Violation);
 
                 throw new CamusDBException(
-                    CamusDBErrorCodes.ForeignKeyRestrictDelete,
-                    $"Delete on table '{parent.Name}' violates foreign key constraint '{plan.Constraint.Name}' on table '{child.Name}': " +
+                    forUpdate ? CamusDBErrorCodes.ForeignKeyRestrictUpdate : CamusDBErrorCodes.ForeignKeyRestrictDelete,
+                    $"{(forUpdate ? "Update" : "Delete")} on table '{parent.Name}' violates foreign key constraint '{plan.Constraint.Name}' on table '{child.Name}': " +
                     $"key {ForeignKeyKeyText.Format(columnNames, parentValues[i])} is still referenced from table '{child.Name}'");
             }
         }

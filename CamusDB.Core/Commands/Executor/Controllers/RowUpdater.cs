@@ -1,4 +1,4 @@
-
+﻿
 /**
  * This file is part of CamusDB
  *
@@ -28,7 +28,8 @@ using Microsoft.Extensions.Logging;
 namespace CamusDB.Core.CommandsExecutor.Controllers;
 
 /// <summary>
-/// Updates multiple rows by the specified filters
+/// Updates the rows an UPDATE statement matches, with their index entries, and checks the foreign keys
+/// whose columns the statement assigns (see <see cref="ForeignKeyStatementChecker"/>).
 /// </summary>
 public sealed class RowUpdater
 {
@@ -36,9 +37,15 @@ public sealed class RowUpdater
 
     private readonly StatisticsManager? _stats;
 
-    public RowUpdater(ILogger<ICamusDB> logger, StatisticsManager? stats = null)
+    /// <summary>Opens the related tables a foreign-key check reads.</summary>
+    private readonly TableOpener tableOpener;
+
+    internal RowUpdater(ILogger<ICamusDB> logger, TableOpener tableOpener, StatisticsManager? stats = null)
     {
+        ArgumentNullException.ThrowIfNull(tableOpener);
+
         this.logger = logger;
+        this.tableOpener = tableOpener;
         _stats = stats;
     }
 
@@ -154,17 +161,46 @@ public sealed class RowUpdater
         MaterializedViewAccessGuard.RequireWritable(table);
         Validate(table, ticket);
 
+        // Decided from the assigned columns before any row is read, and built before the first write:
+        // it opens and pins the related tables, which may throw SchemaCatchingUp.
+        ForeignKeyStatementChecker foreignKeys = await ForeignKeyStatementChecker.ForUpdatesAsync(
+            database, table, tableOpener, ticket.TxnState, AssignedColumns(ticket)).ConfigureAwait(false);
+
         UpdateFluxState state = new(
             database: database,
             table: table,
             ticket: ticket,
             queryExecutor: queryExecutor,
             retryableAborts: aborts
-        );
+        )
+        {
+            ForeignKeys = foreignKeys
+        };
 
         FluxMachine<UpdateFluxSteps, UpdateFluxState> machine = new(state);
 
-        return await UpdateInternal(machine, state).ConfigureAwait(false);
+        int updated = await UpdateInternal(machine, state).ConfigureAwait(false);
+
+        // After the statement's last write, never before: see ForeignKeyStatementChecker. A statement
+        // that recorded a retryable abort did not complete, and is not checked.
+        if (updated > 0 && foreignKeys.HasWork && aborts is not { HasAbort: true })
+            await foreignKeys.CompleteAsync(ticket.TxnState).ConfigureAwait(false);
+
+        return updated;
+    }
+
+    /// <summary>The columns the statement assigns, case-insensitively.</summary>
+    private static HashSet<string> AssignedColumns(UpdateTicket ticket)
+    {
+        HashSet<string> assigned = new(StringComparer.OrdinalIgnoreCase);
+
+        if (ticket.PlainValues is not null)
+            assigned.UnionWith(ticket.PlainValues.Keys);
+
+        if (ticket.ExprValues is not null)
+            assigned.UnionWith(ticket.ExprValues.Keys);
+
+        return assigned;
     }
 
     private static CompositeColumnValue GetColumnValue(Dictionary<string, ColumnValue> rowValues, string[] columnNames, ColumnValue? extraUniqueValue = null)
@@ -609,7 +645,7 @@ public sealed class RowUpdater
         // so filter once per chunk instead of re-evaluating per index per row.
         List<TableIndexSchema> writableIndexes = SchemaElementStateRules.CollectWritableIndexes(table.Schema, table.Indexes);
 
-        UpdateCarryPlan carry = UpdateCarryPlan.Build(table, ticket, writableIndexes, evaluatedColumns);
+        UpdateCarryPlan carry = UpdateCarryPlan.Build(table, ticket, writableIndexes, evaluatedColumns, state.ForeignKeys);
         
         (ReadOnlyMemory<byte>?[] oldRows, ReadOnlyMemory<byte>?[] storedRows, List<int>?[] oldOutOfLine, bool[] carried) =
             await ResolveRowsForUpdateAsync(table, tx, rowIds, rawRows, carry).ConfigureAwait(false);
@@ -650,6 +686,7 @@ public sealed class RowUpdater
             CoerceRowValues(table, newRow);
             CheckForNotNulls(table, newRow);
             CheckEnforcer.EnforceOnRow(table, newRow);
+            state.ForeignKeys.AddUpdatedRow(oldRow, newRow);
 
             // A carried cell is copied from the row as stored, never from the resolved row: resolution
             // clears the marks of a cell the update decodes, and copying that plain cell would write the
@@ -718,7 +755,11 @@ public sealed class RowUpdater
         /// The columns the write phase evaluates on the locked read (predicate re-check and SET
         /// expressions), in schema case; null means every column.
         /// </param>
-        public static UpdateCarryPlan Build(TableDescriptor table, UpdateTicket ticket, List<TableIndexSchema> writableIndexes, IReadOnlySet<string>? evaluatedColumns)
+        /// <param name="foreignKeys">
+        /// The statement's foreign-key checker. The columns it compares between the old and the new row
+        /// are decoded even when carried.
+        /// </param>
+        public static UpdateCarryPlan Build(TableDescriptor table, UpdateTicket ticket, List<TableIndexSchema> writableIndexes, IReadOnlySet<string>? evaluatedColumns, ForeignKeyStatementChecker foreignKeys)
         {
             HashSet<string> assigned = new(StringComparer.OrdinalIgnoreCase);
 
@@ -740,6 +781,10 @@ public sealed class RowUpdater
                 foreach (CheckConstraintSchema check in checks)
                     validated.UnionWith(check.ReferencedColumns);
             }
+
+            // Index key columns already cover these; named explicitly so that a later narrowing of the
+            // decode cannot drop a column the foreign-key check compares.
+            foreignKeys.CollectCheckedColumns(validated);
 
             List<TableColumnSchema> columns = table.Schema.Columns!;
 

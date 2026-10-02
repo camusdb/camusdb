@@ -39,6 +39,12 @@ internal sealed class UpdateFluxState
     public int ModifiedRows { get; set; }
 
     /// <summary>
+    /// Collects the keys the updated rows changed. <see cref="ForeignKeyStatementChecker.None"/> when the
+    /// statement assigns no column of an enforced foreign key.
+    /// </summary>
+    internal ForeignKeyStatementChecker ForeignKeys { get; init; } = ForeignKeyStatementChecker.None;
+
+    /// <summary>
     /// Where the statement's retryable Kahuna abort is recorded instead of thrown, or null to throw.
     /// Each step tests it after every call it passes it to and aborts the machine when it is set.
     /// See <see cref="Transactions.RetryableAbortSink"/>.
