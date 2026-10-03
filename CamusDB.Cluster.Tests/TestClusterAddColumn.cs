@@ -245,6 +245,7 @@ public sealed class TestClusterAddColumn
             await catalogs.PersistCoordinatorJobAsync(leader.Database!, new PersistedCoordinatorJob
             {
                 TableName   = "robots",
+                TableId     = leader.Database!.Schema.Tables["robots"].Id ?? "",
                 ElementName = "score",
                 TargetState = SchemaElementState.Public,
                 ColumnType  = ColumnType.Integer64,

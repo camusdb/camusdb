@@ -356,35 +356,95 @@ public sealed class InProcessSchemaCluster : IAsyncDisposable
         throw new AssertionException($"No schema leader found for partition {partitionId}");
     }
 
+    /// <summary>
+    /// Waits until every node that holds <paramref name="databaseName"/> open has applied schema
+    /// version <paramref name="version"/>, or a later one.
+    ///
+    /// <para><b>Reads each node's own schema, never one node's ack tracker.</b> A tracker answers for
+    /// the cluster only while its node leads the schema partition, because a follower sends its ack
+    /// to the leader alone. On a follower the tracker's live set is the node itself, so a wait there
+    /// returns as soon as that one node applied the version and says nothing about the others. On a
+    /// node that led until a moment ago the live set still names every peer, but their acks now go to
+    /// the new leader, so a wait there cannot complete before the liveness lease runs out. A wait
+    /// pinned to one node therefore depended on which node won the election: it failed whenever the
+    /// test moved leadership away from that node.</para>
+    ///
+    /// <para>A node counts as converged once its apply has finished, not merely once the version is
+    /// visible. The apply publishes the version, then evicts the changed table's cached descriptor,
+    /// all under the schema lock; <see cref="HasAppliedAsync"/> passes through that lock so a caller
+    /// that queries the node next cannot open a descriptor built from the previous schema.</para>
+    ///
+    /// <para>A node that the test isolated or killed never applies anything, so reconnect it before
+    /// the wait. A node that does not hold the database open has no schema to wait for and is
+    /// skipped.</para>
+    /// </summary>
     public async Task WaitForSchemaConvergenceAsync(
         string databaseName,
         long version,
         TimeSpan? timeout = null
     )
     {
-        // Acks are keyed by database.Id (the opaque UUID), not the user-facing name.
-        // Use the Id when available so WaitForSchemaAcksAsync matches the
-        // tokens that SchemaReplicator publishes via RecordAndPublishSchemaApplied.
-        string dbKey = Nodes[0].Database?.Id ?? databaseName;
-
         TimeSpan waitTimeout = timeout ?? TimeSpan.FromSeconds(10);
-        bool acked = await Nodes[0].Kahuna.WaitForSchemaAcksAsync(
-            dbKey,
-            version,
-            waitTimeout,
-            liveNodeLease: Timeout.InfiniteTimeSpan,
-            cancellationToken: CancellationToken.None
-        ).ConfigureAwait(false);
+        long deadline = Environment.TickCount64 + (long)waitTimeout.TotalMilliseconds;
 
-        if (acked)
-            return;
+        while (true)
+        {
+            if (await HaveAllOpenNodesAppliedAsync(databaseName, version).ConfigureAwait(false))
+                return;
+
+            if (Environment.TickCount64 >= deadline)
+                break;
+
+            await Task.Delay(20).ConfigureAwait(false);
+        }
 
         string versions = string.Join(", ", Nodes.Select(node =>
-            $"{node.Kahuna.Raft.GetLocalNodeName()}={node.Database?.Schema.SchemaVersion.ToString() ?? "<closed>"}"));
+            $"{node.Kahuna.Raft.GetLocalNodeName()}={OpenDescriptor(node, databaseName)?.Schema.SchemaVersion.ToString() ?? "<closed>"}"));
 
         throw new AssertionException(
             $"Timed out waiting for database '{databaseName}' schema convergence to version {version}. Versions: {versions}"
         );
+    }
+
+    private static DatabaseDescriptor? OpenDescriptor(Node node, string databaseName)
+        => node.Database is { } database && string.Equals(database.Name, databaseName, StringComparison.Ordinal)
+            ? database
+            : null;
+
+    private async Task<bool> HaveAllOpenNodesAppliedAsync(string databaseName, long version)
+    {
+        bool anyOpen = false;
+
+        foreach (Node node in Nodes)
+        {
+            DatabaseDescriptor? database = OpenDescriptor(node, databaseName);
+            if (database is null)
+                continue;
+
+            anyOpen = true;
+
+            if (!await HasAppliedAsync(database, version).ConfigureAwait(false))
+                return false;
+        }
+
+        return anyOpen;
+    }
+
+    /// <summary>
+    /// Whether the apply that brought <paramref name="database"/> to <paramref name="version"/> has
+    /// finished. The version alone is not enough: it becomes visible part-way through the apply,
+    /// before the changed table's cached descriptor is evicted. The apply holds the schema lock from
+    /// start to end, so taking the lock once after the version is visible waits out that remainder.
+    /// </summary>
+    private static async Task<bool> HasAppliedAsync(DatabaseDescriptor database, long version)
+    {
+        if (database.Schema.SchemaVersion < version)
+            return false;
+
+        await database.Schema.AcquireLockAsync().ConfigureAwait(false);
+        database.Schema.ReleaseLock();
+
+        return true;
     }
 
     /// <summary>

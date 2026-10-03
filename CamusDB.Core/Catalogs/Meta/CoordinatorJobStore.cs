@@ -32,41 +32,81 @@ namespace CamusDB.Core.Catalogs.Meta;
 /// </summary>
 internal static class CoordinatorJobStore
 {
+    /// <summary>
+    /// Writes <paramref name="job"/> under its <c>{tableId}~{elementName}</c> key, replacing any
+    /// earlier record for the same element.
+    ///
+    /// <para><b>A job must name its table by id.</b> Resume matches a record to a live table through
+    /// <see cref="PersistedCoordinatorJob.TableId"/> only, never through the table name, so a record
+    /// without an id matches nothing: the next leader deletes it as stale and the element stays in its
+    /// intermediate state with no job left to finish it. That loss is silent and shows up only much
+    /// later, so a record without an id or an element name is refused here, where the caller that
+    /// built it can be seen.</para>
+    ///
+    /// <para><b>Retried on a definite non-commit.</b> The write is one blind put, so replaying it is
+    /// safe. Without the retry, a commit aborted by a conflict or a routing change — likely right
+    /// after a leadership change, which is exactly when resume runs — would fail the resume pass of
+    /// that job, and nothing drives the job again until the next leader change.</para>
+    /// </summary>
     internal static async Task PersistCoordinatorJobAsync(DatabaseDescriptor database, PersistedCoordinatorJob job)
     {
+        if (string.IsNullOrEmpty(job.TableId))
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInternalOperation,
+                $"Coordinator job for '{job.TableName}.{job.ElementName}' has no table id; a resume could never match it to a live table");
+
+        if (string.IsNullOrEmpty(job.ElementName))
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInternalOperation,
+                $"Coordinator job for table '{job.TableName}' has no element name");
+
         IKahuna kahuna = database.Kahuna.Kahuna;
         byte[] bytes = MetaJsonSerializer.Serialize(job, MetaJsonContext.Default.PersistedCoordinatorJob);
+        string key = MetaKeys.CoordinatorKey(database.Id, job.TableId, job.ElementName);
 
-        KvTransaction tx = await database.Transactions.BeginAsync(
-            CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite
-        ).ConfigureAwait(false);
-        try
+        await SerializableRetryHelper.ExecuteAutocommitAsync(async _ =>
         {
-            await MetaKeyWriter.WriteMetaKey(kahuna, tx, MetaKeys.CoordinatorKey(database.Id, job.TableId, job.ElementName), bytes).ConfigureAwait(false);
-            await database.Transactions.CommitAsync(tx).ConfigureAwait(false);
-        }
-        finally
-        {
-            await database.Transactions.RollbackIfNotCompletedAsync(tx).ConfigureAwait(false);
-        }
+            KvTransaction tx = await database.Transactions.BeginAsync(
+                CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite
+            ).ConfigureAwait(false);
+            try
+            {
+                await MetaKeyWriter.WriteMetaKey(kahuna, tx, key, bytes).ConfigureAwait(false);
+                await database.Transactions.CommitAsync(tx).ConfigureAwait(false);
+            }
+            finally
+            {
+                await database.Transactions.RollbackIfNotCompletedAsync(tx).ConfigureAwait(false);
+            }
+        }).ConfigureAwait(false);
     }
 
+    /// <summary>
+    /// Deletes the record of one job. Deleting a key that is already gone is a no-op, so the delete is
+    /// retried on a definite non-commit for the same reason as
+    /// <see cref="PersistCoordinatorJobAsync"/>: a record left behind after its job finished costs a
+    /// resume attempt at every later leader change until it is cleaned up.
+    /// </summary>
     internal static async Task DeleteCoordinatorJobAsync(DatabaseDescriptor database, string tableId, string elementName)
     {
         IKahuna kahuna = database.Kahuna.Kahuna;
+        string key = MetaKeys.CoordinatorKey(database.Id, tableId, elementName);
 
-        KvTransaction tx = await database.Transactions.BeginAsync(
-            CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite
-        ).ConfigureAwait(false);
-        try
+        await SerializableRetryHelper.ExecuteAutocommitAsync(async _ =>
         {
-            await MetaKeyWriter.DeleteMetaKey(kahuna, tx, MetaKeys.CoordinatorKey(database.Id, tableId, elementName)).ConfigureAwait(false);
-            await database.Transactions.CommitAsync(tx).ConfigureAwait(false);
-        }
-        finally
-        {
-            await database.Transactions.RollbackIfNotCompletedAsync(tx).ConfigureAwait(false);
-        }
+            KvTransaction tx = await database.Transactions.BeginAsync(
+                CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite
+            ).ConfigureAwait(false);
+            try
+            {
+                await MetaKeyWriter.DeleteMetaKey(kahuna, tx, key).ConfigureAwait(false);
+                await database.Transactions.CommitAsync(tx).ConfigureAwait(false);
+            }
+            finally
+            {
+                await database.Transactions.RollbackIfNotCompletedAsync(tx).ConfigureAwait(false);
+            }
+        }).ConfigureAwait(false);
     }
 
     /// <summary>
