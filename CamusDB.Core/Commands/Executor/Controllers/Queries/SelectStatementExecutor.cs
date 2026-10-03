@@ -701,7 +701,7 @@ internal sealed class SelectStatementExecutor
                     PinSchemaVersion(database, table, ticket.TxnState);
 
                     // A non-null rightAst is the WITHOUT INDEXES marker; its presence is the whole flag.
-                    return (database, schemaQuerier.ShowCreateTable(table, includeSecondaryIndexes: ast.rightAst is null));
+                    return (database, schemaQuerier.ShowCreateTable(database, table, includeSecondaryIndexes: ast.rightAst is null));
                 }
 
             case NodeType.ShowDatabase:

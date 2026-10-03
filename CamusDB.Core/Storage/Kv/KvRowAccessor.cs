@@ -177,7 +177,8 @@ internal sealed class KvRowAccessor
             tx.ReadRegistrationKey(rowKeys),
             "get_rows_batch",
             cancellationToken,
-            aborts).ConfigureAwait(false);
+            aborts
+        ).ConfigureAwait(false);
 
         ReadOnlyMemory<byte>?[] output = new ReadOnlyMemory<byte>?[rowIds.Count];
 
@@ -273,8 +274,8 @@ internal sealed class KvRowAccessor
 
         if (KvRangeLockManager.IsSerializableReadWrite(tx))
         {
-            for (int i = 0; i < rowIds.Count; i++)
-                await locks.AcquireSharedPointLockAsync(tx, keys.RowBucketPrefix, keys.BuildRowKey(rowIds[i]), cancellationToken).ConfigureAwait(false);
+            foreach (ObjectIdValue rowId in rowIds)
+                await locks.AcquireSharedPointLockAsync(tx, keys.RowBucketPrefix, keys.BuildRowKey(rowId), cancellationToken).ConfigureAwait(false);
         }
 
         return await GetRowsBatch(tx, rowIds, cancellationToken, aborts).ConfigureAwait(false);
@@ -377,37 +378,54 @@ internal sealed class KvRowAccessor
             // page retried after a transient then aborts the whole read as soon as one of those keys is
             // overwritten — a read-only aggregate on a hot table under replication lag failed with a
             // write-conflict code. An untracked scan serves each row's committed head and cannot abort.
-            await foreach ((string key, ReadOnlyKeyValueEntry entry) in KvScanFailure.Translate(kahuna.LocateAndScanRange(
-                tx.RangeScanIdentity,
-                keys.RowBucketPrefix,
-                scanStartKey, startInclusive,
-                // The upper bound is exclusive when there is one; with no end key the flag carries no
-                // meaning, and true is what every other unbounded scan in the engine passes.
-                scanEndKey, scanEndKey is null,
-                KvStoreConstants.DefaultPageSize,
-                tx.ReadTimestamp,
-                KeyValueDurability.Persistent,
-                cancellationToken,
-                scanCoordinatorKey,
-                scanOperationId), $"row scan of table {keys.DisplayTableName}", cancellationToken).ConfigureAwait(false))
+            // Counted in a finally block, so a caller that stops early still counts the entries read.
+            long entriesRead = 0;
+
+            try
             {
-                if (entry.Value is null)
-                    continue;
+                ConfiguredCancelableAsyncEnumerable<(string Key, ReadOnlyKeyValueEntry Entry)> cursor = KvScanFailure.Translate(kahuna.LocateAndScanRange(
+                        tx.RangeScanIdentity,
+                        keys.RowBucketPrefix,
+                        scanStartKey, startInclusive,
+                        // The upper bound is exclusive when there is one; with no end key the flag carries no
+                        // meaning, and true is what every other unbounded scan in the engine passes.
+                        scanEndKey, scanEndKey is null,
+                        KvStoreConstants.DefaultPageSize,
+                        tx.ReadTimestamp,
+                        KeyValueDurability.Persistent,
+                        cancellationToken,
+                        scanCoordinatorKey,
+                        scanOperationId), 
+                    $"row scan of table {keys.DisplayTableName}", 
+                    cancellationToken
+                ).ConfigureAwait(false);
+                
+                await foreach ((string key, ReadOnlyKeyValueEntry entry) in cursor)
+                {
+                    entriesRead++;
 
-                BranchKvValue decoded = BranchKvCodec.Decode(entry.Value);
-                if (decoded.Kind == BranchKvKind.Tombstone || !decoded.HasPayload)
-                    continue;
+                    if (entry.Value is null)
+                        continue;
 
-                // Key format: "{dbId}:{tableId}|r/{hex24}" — the hex suffix starts after the prefix.
-                // Every key the scan returns already lies within the bounds; they are enforced once,
-                // by the store, and deliberately not re-checked here.
-                ObjectIdValue rowId = ObjectId.ToValue(key.AsSpan(prefixLen));
+                    BranchKvValue decoded = BranchKvCodec.Decode(entry.Value);
+                    if (decoded.Kind == BranchKvKind.Tombstone || !decoded.HasPayload)
+                        continue;
 
-                if (maxRows is not null && emitted >= maxRows.Value)
-                    yield break;
+                    // Key format: "{dbId}:{tableId}|r/{hex24}" — the hex suffix starts after the prefix.
+                    // Every key the scan returns already lies within the bounds; they are enforced once,
+                    // by the store, and deliberately not re-checked here.
+                    ObjectIdValue rowId = ObjectId.ToValue(key.AsSpan(prefixLen));
 
-                yield return (rowId, decoded.Payload);
-                emitted++;
+                    if (maxRows is not null && emitted >= maxRows.Value)
+                        yield break;
+
+                    yield return (rowId, decoded.Payload);
+                    emitted++;
+                }
+            }
+            finally
+            {
+                ServerDiagnostics.AddKvScanEntries(index: false, entriesRead);
             }
         }
         else
@@ -455,8 +473,7 @@ internal sealed class KvRowAccessor
             BranchMetrics.RecordScanIterators(levels.Length);
 
             // Priority key: (rowIdHex ordinal-ascending, levelIndex ascending) so ties go to the nearest level.
-            PriorityQueue<(int level, string hex, BranchKvKind kind, ReadOnlyMemory<byte>? payload),
-                          (string hex, int level)> heap = new(
+            PriorityQueue<(int level, string hex, BranchKvKind kind, ReadOnlyMemory<byte>? payload), (string hex, int level)> heap = new(
                 Comparer<(string hex, int level)>.Create(static (a, b) =>
                 {
                     int c = string.CompareOrdinal(a.hex, b.hex);

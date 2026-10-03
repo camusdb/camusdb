@@ -64,6 +64,13 @@ internal abstract class ValidatorBase
         if (string.IsNullOrWhiteSpace(foreignKey.ReferencedTable))
             throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Foreign key '{foreignKey.Name}' names no referenced table");
 
+        // A table name cannot hold a dot, so a dot means a qualified name: a table in another
+        // database, or in the parent of a branch. A reference stays inside one database.
+        if (foreignKey.ReferencedTable.Contains('.'))
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidForeignKeyDefinition,
+                $"Foreign key '{foreignKey.Name}' references '{foreignKey.ReferencedTable}': a foreign key can reference a table in its own database only");
+
         if (foreignKey.ReferencedColumns.Length > 0 && foreignKey.ReferencedColumns.Length != foreignKey.Columns.Length)
             throw new CamusDBException(
                 CamusDBErrorCodes.InvalidForeignKeyDefinition,

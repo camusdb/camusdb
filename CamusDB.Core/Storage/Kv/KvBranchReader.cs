@@ -435,20 +435,33 @@ internal sealed class KvBranchReader
         // page from this base id. Empty (default, and all ancestor snapshots) scans unregistered.
         TransactionOperationId operationId = coordinatorKey.Length == 0 ? default : TransactionOperationId.NewRandom();
 
-        await foreach ((string key, ReadOnlyKeyValueEntry entry) in KvScanFailure.Translate(kahuna.LocateAndScanRange(
-            txId, keys.RowBucketPrefix, startKey, startInclusive, endKey, endKey is null, KvStoreConstants.DefaultPageSize,
-            readTimestamp, KeyValueDurability.Persistent, cancellationToken, coordinatorKey, operationId),
-            $"row scan of table {keys.DisplayTableName}", cancellationToken).ConfigureAwait(false))
-        {
-            // Per-entry on the fast path this is one volatile read and one tick comparison; the
-            // renew round-trip happens at most once per refresh window. Checking as the scan
-            // streams keeps every yielded page covered by a confirmation that postdates it.
-            await GuardSnapshotAsync(cancellationToken).ConfigureAwait(false);
+        // Counted in a finally block: a caller that stops early disposes the iterator, and the entries
+        // read until then still count.
+        long entriesRead = 0;
 
-            if (entry.Value is null) continue;
-            string rowIdHex = key.AsSpan(prefixLen).ToString();
-            BranchKvValue decoded = BranchKvCodec.Decode(entry.Value);
-            yield return (rowIdHex, decoded.Kind, decoded.HasPayload ? (ReadOnlyMemory<byte>?)decoded.Payload : null);
+        try
+        {
+            await foreach ((string key, ReadOnlyKeyValueEntry entry) in KvScanFailure.Translate(kahuna.LocateAndScanRange(
+                txId, keys.RowBucketPrefix, startKey, startInclusive, endKey, endKey is null, KvStoreConstants.DefaultPageSize,
+                readTimestamp, KeyValueDurability.Persistent, cancellationToken, coordinatorKey, operationId),
+                $"row scan of table {keys.DisplayTableName}", cancellationToken).ConfigureAwait(false))
+            {
+                entriesRead++;
+
+                // Per-entry on the fast path this is one volatile read and one tick comparison; the
+                // renew round-trip happens at most once per refresh window. Checking as the scan
+                // streams keeps every yielded page covered by a confirmation that postdates it.
+                await GuardSnapshotAsync(cancellationToken).ConfigureAwait(false);
+
+                if (entry.Value is null) continue;
+                string rowIdHex = key.AsSpan(prefixLen).ToString();
+                BranchKvValue decoded = BranchKvCodec.Decode(entry.Value);
+                yield return (rowIdHex, decoded.Kind, decoded.HasPayload ? (ReadOnlyMemory<byte>?)decoded.Payload : null);
+            }
+        }
+        finally
+        {
+            ServerDiagnostics.AddKvScanEntries(index: false, entriesRead);
         }
 
         // End-of-stream is information too: a scan over reclaimed history simply ends early, so the
@@ -505,16 +518,28 @@ internal sealed class KvBranchReader
         ),
         $"index scan of {keys.DisplayTableName}.{indexId}", cancellationToken).ConfigureAwait(false);
 
-        await foreach ((string kvKey, ReadOnlyKeyValueEntry entry) in cursor)
-        {
-            // See ScanRowsRawAsync: cheap per-entry check keeping every streamed page covered by a
-            // snapshot-pin confirmation that postdates it.
-            await GuardSnapshotAsync(cancellationToken).ConfigureAwait(false);
+        // See ScanRowsRawAsync: counted in a finally block so an early stop still counts.
+        long entriesRead = 0;
 
-            if (entry.Value is null || !kvKey.StartsWith(keyPrefix, StringComparison.Ordinal)) continue;
-            string suffix = kvKey.Substring(prefixLen);
-            BranchKvValue decoded = BranchKvCodec.Decode(entry.Value);
-            yield return (suffix, decoded.Kind, decoded.HasPayload ? (ReadOnlyMemory<byte>?)decoded.Payload : null);
+        try
+        {
+            await foreach ((string kvKey, ReadOnlyKeyValueEntry entry) in cursor)
+            {
+                entriesRead++;
+
+                // See ScanRowsRawAsync: cheap per-entry check keeping every streamed page covered by a
+                // snapshot-pin confirmation that postdates it.
+                await GuardSnapshotAsync(cancellationToken).ConfigureAwait(false);
+
+                if (entry.Value is null || !kvKey.StartsWith(keyPrefix, StringComparison.Ordinal)) continue;
+                string suffix = kvKey.Substring(prefixLen);
+                BranchKvValue decoded = BranchKvCodec.Decode(entry.Value);
+                yield return (suffix, decoded.Kind, decoded.HasPayload ? (ReadOnlyMemory<byte>?)decoded.Payload : null);
+            }
+        }
+        finally
+        {
+            ServerDiagnostics.AddKvScanEntries(index: true, entriesRead);
         }
 
         // See ScanRowsRawAsync: an early end over reclaimed history must not read as a normal end.

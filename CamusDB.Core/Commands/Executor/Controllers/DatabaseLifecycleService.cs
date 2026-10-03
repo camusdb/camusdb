@@ -196,6 +196,16 @@ internal sealed class DatabaseLifecycleService
                             throw new CamusDBException(
                                 CamusDBErrorCodes.InvalidInput,
                                 $"Index '{idx.Name}' in table '{table.Name}' of database '{ticket.BranchFrom}' is in state '{idx.State}'; wait for the schema change to reach Public before branching");
+
+                // A WriteOnly foreign key is enforced but not validated yet. The copy leaves out the
+                // coordinator job that validates it, so a branch would inherit a constraint that
+                // nothing ever validates or publishes.
+                if (table.ForeignKeys is not null)
+                    foreach (ForeignKeySchema foreignKey in table.ForeignKeys)
+                        if (foreignKey.State != SchemaElementState.Public)
+                            throw new CamusDBException(
+                                CamusDBErrorCodes.InvalidInput,
+                                $"Foreign key '{foreignKey.Name}' in table '{table.Name}' of database '{ticket.BranchFrom}' is in state '{foreignKey.State}'; wait for the constraint to reach Public before branching");
             }
 
             // Schema stability: no coordinator jobs may be in-flight.  A coordinator job

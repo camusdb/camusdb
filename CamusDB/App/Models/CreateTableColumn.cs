@@ -18,6 +18,12 @@ public sealed class CreateTableColumn
 
     public bool NotNull { get; set; }
 
+    /// <summary>
+    /// True for a column of the primary key. The engine requires a primary key, so at least one
+    /// column must set it. Several columns form a composite key, in declaration order.
+    /// </summary>
+    public bool Primary { get; set; }
+
     public ColumnValue? DefaultValue { get; set; }
 
     /// <summary>

@@ -121,7 +121,16 @@ public sealed class TestClusterForeignKeyAlter
         foreach (InProcessSchemaCluster.Node node in cluster.Nodes)
             Assert.AreEqual(SchemaElementState.Public, node.Database!.Schema.Tables["weather"].ForeignKeys!.Single().State, $"node {node.Index}");
 
-        Assert.IsEmpty(await next.Executor.Catalogs.LoadCoordinatorJobsAsync(next.Database!), "The resumed job must be deleted once it finished");
+        // The coordinator deletes its job after the Public state is replicated, so the job can still be
+        // there when the nodes converge. Wait for the deletion instead of reading once.
+        List<PersistedCoordinatorJob> jobs = await next.Executor.Catalogs.LoadCoordinatorJobsAsync(next.Database!);
+        for (DateTime deadline = DateTime.UtcNow.AddSeconds(30); jobs.Count > 0 && DateTime.UtcNow < deadline; )
+        {
+            await Task.Delay(100);
+            jobs = await next.Executor.Catalogs.LoadCoordinatorJobsAsync(next.Database!);
+        }
+
+        Assert.IsEmpty(jobs, "The resumed job must be deleted once it finished");
     }
 
     /// <summary>

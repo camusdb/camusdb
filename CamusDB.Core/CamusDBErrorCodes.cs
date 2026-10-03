@@ -669,9 +669,14 @@ public static class CamusDBErrorCodes
     /// Returns the HTTP status code that should be used when surfacing <paramref name="code"/>
     /// to an API caller. Client errors (permanent, non-retryable caller mistakes) map to 400;
     /// all other codes map to 500.
+    ///
+    /// <para><see cref="InvalidInput"/> is a caller mistake — a malformed request, a bad name, an
+    /// unknown option — so it is a 400, as gRPC already reports it as <c>InvalidArgument</c>. A 500
+    /// told the caller that the server failed and that a retry could help, and neither was true.</para>
     /// </summary>
     public static int GetHttpStatus(string code) => code switch
     {
+        InvalidInput => 400,
         BackupNotConfigured => 503,
         BackupChainInvalid => 422,
         BackupNeedsFullBackup => 409,

@@ -20,5 +20,8 @@ public sealed class CreateTableRequest
 
     public CreateTableColumn[]? Columns { get; set; }
 
+    /// <summary>The table's foreign keys. Null or empty means none.</summary>
+    public CreateTableForeignKey[]? ForeignKeys { get; set; }
+
     public bool IfNotExists { get; set; }
 }

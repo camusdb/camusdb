@@ -42,6 +42,14 @@ internal static class KvStoreConstants
     internal const int ForeignKeyLockConcurrency = 16;
 
     /// <summary>
+    /// How many parent-side probes of a child index one statement runs at the same time. Each probe is
+    /// one round trip to the child's partition, so a DELETE of many referenced parents would otherwise
+    /// wait for them one after another: measured, 100 sequential probes added about 60% to a 100-row
+    /// DELETE. The bound keeps one large statement from flooding the child partition.
+    /// </summary>
+    internal const int ForeignKeyProbeConcurrency = 16;
+
+    /// <summary>
     /// Upper-bound sentinel appended to the encoded last value for non-unique index keys.
     /// Non-unique stored key = "{encodedValue}{rowId24}" where rowId24 is exactly 24 lowercase
     /// hex chars (code points 0x0030-0x0066). The sentinel U+FFFF is the highest BMP code point

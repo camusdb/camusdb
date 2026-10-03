@@ -73,6 +73,25 @@ public static class ServerDiagnostics
         KvRetryableAborts.Add(1, new TagList { { "site", site }, { "delivery", delivery } });
     }
 
+    // ── KV scans ──────────────────────────────────────────────────────────────────
+    // Entries a range scan read from Kahuna, tagged by family: "row" for a table's row key space and
+    // "index" for an index key space. Added once per scan, when the scan ends or is abandoned, so the
+    // cost while diagnostics are off is one local increment per entry. It counts what storage returned,
+    // tombstones included, not what a caller kept: a statement that scans a whole table shows here even
+    // when it stops after one match. Tests read it to prove that a path reads a bounded number of keys.
+    private static readonly Counter<long> KvScanEntries =
+        Meter.CreateCounter<long>("camus.kv.scan_entries", unit: "{entry}", description: "Entries read by KV range scans, by family.");
+
+    private static readonly KeyValuePair<string, object?> RowFamily = new("family", "row");
+    private static readonly KeyValuePair<string, object?> IndexFamily = new("family", "index");
+
+    public static void AddKvScanEntries(bool index, long count)
+    {
+        if (!Enabled || count <= 0)
+            return;
+        KvScanEntries.Add(count, index ? IndexFamily : RowFamily);
+    }
+
     // ── Foreign keys ────────────────────────────────────────────────────────────
     // One instrument, tagged by kind, so the checks' cost is visible per statement shape: how many
     // rendezvous locks were sent to a parent's partition and how many were already held, how many
@@ -110,6 +129,13 @@ public static class ServerDiagnostics
 
         /// <summary>A statement refused because it would break a foreign key.</summary>
         Violation,
+
+        /// <summary>
+        /// One batched read of parent keys at one ancestry level of a branch, for the keys that the
+        /// nearer levels did not answer. A branch of depth N adds at most N of these per child-side
+        /// batch, whatever the number of keys.
+        /// </summary>
+        AncestorProbeBatch,
     }
 
     public static void AddForeignKeyOperation(ForeignKeyOperation kind, long count = 1)
@@ -126,6 +152,7 @@ public static class ServerDiagnostics
             ForeignKeyOperation.ParentProbe => "parent_probe",
             ForeignKeyOperation.ParentLock => "parent_lock",
             ForeignKeyOperation.ValidationKey => "validation_key",
+            ForeignKeyOperation.AncestorProbeBatch => "ancestor_probe_batch",
             _ => "violation",
         };
 

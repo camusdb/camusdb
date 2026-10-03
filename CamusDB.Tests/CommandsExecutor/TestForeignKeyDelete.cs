@@ -7,6 +7,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Text;
 using System.Threading.Tasks;
 
 using NUnit.Framework;
@@ -173,6 +174,35 @@ internal static class ForeignKeyDeleteScenarios
         await Ddl(executor, database, dbname, "DROP TABLE employees");
 
         Assert.IsFalse(database.Schema.Tables.ContainsKey("employees"));
+    }
+
+    /// <summary>
+    /// A DELETE of many parents probes them side by side. When two are referenced, the error still names
+    /// the first one in statement order, so the message does not depend on which probe finished first.
+    /// </summary>
+    public static async Task ManyProbesReportTheFirstReferencedKey(CommandExecutor executor, DatabaseDescriptor database, string dbname)
+    {
+        await CreateCitiesAndWeather(executor, database, dbname);
+
+        StringBuilder parents = new("INSERT INTO cities (id, name) VALUES ");
+        for (int i = 1; i <= 20; i++)
+            parents.Append(i == 1 ? "" : ", ").Append('(').Append(i).Append(", 'c").Append(i.ToString("D2")).Append("')");
+        await Dml(executor, database, dbname, parents.ToString());
+        await Dml(executor, database, dbname, "INSERT INTO weather (id, city) VALUES (1, 'c15'), (2, 'c05')");
+
+        for (int attempt = 0; attempt < 3; attempt++)
+        {
+            using ForeignKeyOperationCounter work = ForeignKeyOperationCounter.Start();
+
+            CamusDBException exception = Assert.ThrowsAsync<CamusDBException>(async () =>
+                await Dml(executor, database, dbname, "DELETE FROM cities WHERE id >= 1"))!;
+
+            Assert.AreEqual(CamusDBErrorCodes.ForeignKeyRestrictDelete, exception.Code);
+            Assert.That(exception.Message, Does.Contain("key (name)=(c05)"), "The first referenced key in statement order");
+            Assert.AreEqual(20, work.Count("parent_probe"), "Every removed key is probed");
+        }
+
+        Assert.AreEqual(20, await Count(executor, database, dbname, "cities"), "The refused statement must delete nothing");
     }
 
     // ── Concurrency ───────────────────────────────────────────────────────────
@@ -379,6 +409,7 @@ public sealed class TestForeignKeyDelete : BaseTest
     [Test] public async Task UnreferencedTableDoesNoForeignKeyWork() => await Run(ForeignKeyDeleteScenarios.UnreferencedTableDoesNoForeignKeyWork);
     [Test] public async Task OneProbePerDistinctRemovedKey() => await Run((e, d, n) => ForeignKeyDeleteScenarios.OneProbePerDistinctRemovedKey(e, d, n, locking == KeyValueTransactionLocking.Optimistic));
     [Test] public async Task DropOfASelfReferencingTableSucceeds() => await Run(ForeignKeyDeleteScenarios.DropOfASelfReferencingTableSucceeds);
+    [Test] public async Task ManyProbesReportTheFirstReferencedKey() => await Run(ForeignKeyDeleteScenarios.ManyProbesReportTheFirstReferencedKey);
     [Test] public async Task DeleteWaitsForAnOpenChildAndThenRefuses() => await Run(ForeignKeyDeleteScenarios.DeleteWaitsForAnOpenChildAndThenRefuses);
     [Test] public async Task DeleteGivesUpOnAChildThatStaysOpen() => await Run(ForeignKeyDeleteScenarios.DeleteGivesUpOnAChildThatStaysOpen);
     [Test] public async Task ChildCannotCommitAgainstAnOpenDelete() => await Run(ForeignKeyDeleteScenarios.ChildCannotCommitAgainstAnOpenDelete);
@@ -417,6 +448,7 @@ public sealed class TestForeignKeyDeleteCluster : SharedNodeBaseTest
     [Test] public async Task UnreferencedTableDoesNoForeignKeyWork() => await Run(ForeignKeyDeleteScenarios.UnreferencedTableDoesNoForeignKeyWork);
     [Test] public async Task OneProbePerDistinctRemovedKey() => await Run((e, d, n) => ForeignKeyDeleteScenarios.OneProbePerDistinctRemovedKey(e, d, n, locking == KeyValueTransactionLocking.Optimistic));
     [Test] public async Task DropOfASelfReferencingTableSucceeds() => await Run(ForeignKeyDeleteScenarios.DropOfASelfReferencingTableSucceeds);
+    [Test] public async Task ManyProbesReportTheFirstReferencedKey() => await Run(ForeignKeyDeleteScenarios.ManyProbesReportTheFirstReferencedKey);
     [Test] public async Task DeleteWaitsForAnOpenChildAndThenRefuses() => await Run(ForeignKeyDeleteScenarios.DeleteWaitsForAnOpenChildAndThenRefuses);
     [Test] public async Task DeleteGivesUpOnAChildThatStaysOpen() => await Run(ForeignKeyDeleteScenarios.DeleteGivesUpOnAChildThatStaysOpen);
     [Test] public async Task ChildCannotCommitAgainstAnOpenDelete() => await Run(ForeignKeyDeleteScenarios.ChildCannotCommitAgainstAnOpenDelete);

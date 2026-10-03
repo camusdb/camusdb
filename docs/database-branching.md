@@ -200,6 +200,13 @@ timestamp.
 - **A parent's in-flight materialized-view refresh is invisible to the branch.** The branch gets
   the view's published contents as of `forkT` and no refresh job; the parent's rebuild finishes
   or fails on the parent alone (§7, step 6).
+- **Foreign keys are inherited by id.** The copy keeps table, column and index ids, and a
+  constraint stores only ids, so a branch enforces every constraint of its source unchanged. The
+  checks read the branch's own keys merged with the frozen ancestry: a tombstone on the branch
+  hides an inherited row or index entry, and a write in the source after the fork never changes a
+  check on the branch. A child writer and a parent writer on a branch meet on the branch's own copy
+  of the parent's unique-index key, so the lock rendezvous needs no change. A reference names a
+  table in its own database only; a branch cannot reference its source.
 - **Branch DDL is invisible to the parent and siblings** — it writes only the branch dbId's
   metadata/log. Branch `CREATE TABLE`/`ADD INDEX` allocate new ids in the branch; renames stay
   metadata-only and branch-local.
@@ -298,7 +305,13 @@ turn that into a hard error instead:
    both *before* allocating an id, acquiring a hold, or copying metadata.
 2. **Schema stability.** The source must be schema-stable: `HeadSchemaVersion == SchemaVersion`,
    all elements `Public`, no in-flight coordinator jobs. Otherwise the copy could capture a
-   half-applied online schema change.
+   half-applied online schema change. The elements are columns, indexes and foreign keys. A fork
+   is therefore refused while a foreign key is added: between `WriteOnly` and `Public` the
+   constraint is enforced but its existing rows are not validated yet. The copy leaves out the
+   coordinator job that validates it, so a branch that inherited it would keep a constraint that
+   nothing ever validates. The state check holds even when no job is left. A fork that arrives while
+   `ALTER TABLE ... ADD CONSTRAINT` runs on the same node waits on the `SchemaDdlSemaphore`, and
+   then copies the constraint in `Public`.
 3. **Mint `forkT`** (begin+rollback a source transaction — the causal fence) and **allocate
    `branchId`** from the monotonic id sequence.
 4. **Acquire the snapshot hold** on the source at `forkT`; block if not `Set`.

@@ -3,8 +3,8 @@
 // (see accompanying GPPGcopyright.rtf)
 
 // GPPG version 1.5.3
-// DateTime: 26/09/2026 10:55:33 AM
-// Input file <SQLParser/SQLParser.Language.grammar.y - 26/09/2026 10:52:28 AM>
+// DateTime: 3/10/2026 10:55:14 AM
+// Input file <SQLParser/SQLParser.Language.grammar.y - 3/10/2026 10:55:13 AM>
 
 // options: no-lines gplex
 
@@ -2851,18 +2851,18 @@ internal partial class sqlParser: ShiftReduceParser<ValueType, LexLocation>
         break;
       case 222: // alter_table_stmt -> TALTER, TTABLE, any_identifier, TWADD, TCONSTRAINT, 
                 //                     any_identifier, TCHECK, LPAREN, condition, RPAREN
-{ CurrentSemanticValue.n = new(NodeType.AlterTableAddConstraintCheck, ValueStack[ValueStack.Depth-8].n, ValueStack[ValueStack.Depth-2].n, null, null, null, null, null, ValueStack[ValueStack.Depth-5].s); }
+{ CurrentSemanticValue.n = new(NodeType.AlterTableAddConstraintCheck, ValueStack[ValueStack.Depth-8].n, ValueStack[ValueStack.Depth-2].n, null, null, null, null, null, ValueStack[ValueStack.Depth-5].n.yytext); }
         break;
       case 223: // alter_table_stmt -> TALTER, TTABLE, any_identifier, TWADD, fk_table_constraint
 { CurrentSemanticValue.n = new(NodeType.AlterTableAddConstraintForeignKey, ValueStack[ValueStack.Depth-3].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
         break;
       case 224: // alter_table_stmt -> TALTER, TTABLE, any_identifier, TWADD, TCONSTRAINT, 
                 //                     any_identifier, fk_table_constraint
-{ ValueStack[ValueStack.Depth-1].n.yytext = ValueStack[ValueStack.Depth-2].s; CurrentSemanticValue.n = new(NodeType.AlterTableAddConstraintForeignKey, ValueStack[ValueStack.Depth-5].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
+{ ValueStack[ValueStack.Depth-1].n.yytext = ValueStack[ValueStack.Depth-2].n.yytext; CurrentSemanticValue.n = new(NodeType.AlterTableAddConstraintForeignKey, ValueStack[ValueStack.Depth-5].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, null); }
         break;
       case 225: // alter_table_stmt -> TALTER, TTABLE, any_identifier, TDROP, TCONSTRAINT, 
                 //                     any_identifier
-{ CurrentSemanticValue.n = new(NodeType.AlterTableDropConstraint, ValueStack[ValueStack.Depth-4].n, null, null, null, null, null, null, ValueStack[ValueStack.Depth-1].s); }
+{ CurrentSemanticValue.n = new(NodeType.AlterTableDropConstraint, ValueStack[ValueStack.Depth-4].n, null, null, null, null, null, null, ValueStack[ValueStack.Depth-1].n.yytext); }
         break;
       case 226: // alter_table_stmt -> TALTER, TTABLE, any_identifier, TALTER, any_identifier, 
                 //                     TSET, TNOT, TNULL
@@ -3432,7 +3432,7 @@ internal partial class sqlParser: ShiftReduceParser<ValueType, LexLocation>
         break;
       case 344: // create_table_inline_constraint -> TCONSTRAINT, any_identifier, TCHECK, LPAREN, 
                 //                                   condition, RPAREN
-{ CurrentSemanticValue.n = new(NodeType.CreateTableConstraintCheck, ValueStack[ValueStack.Depth-2].n, null, null, null, null, null, null, ValueStack[ValueStack.Depth-5].s); }
+{ CurrentSemanticValue.n = new(NodeType.CreateTableConstraintCheck, ValueStack[ValueStack.Depth-2].n, null, null, null, null, null, null, ValueStack[ValueStack.Depth-5].n.yytext); }
         break;
       case 345: // create_table_inline_constraint -> TCHECK, LPAREN, condition, RPAREN
 { CurrentSemanticValue.n = new(NodeType.CreateTableConstraintCheck, ValueStack[ValueStack.Depth-2].n, null, null, null, null, null, null, null); }
@@ -3442,7 +3442,7 @@ internal partial class sqlParser: ShiftReduceParser<ValueType, LexLocation>
         break;
       case 347: // create_table_inline_constraint -> TCONSTRAINT, any_identifier, 
                 //                                   fk_table_constraint
-{ ValueStack[ValueStack.Depth-1].n.yytext = ValueStack[ValueStack.Depth-2].s; CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
+{ ValueStack[ValueStack.Depth-1].n.yytext = ValueStack[ValueStack.Depth-2].n.yytext; CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }
         break;
       case 348: // fk_table_constraint -> TFOREIGN, TKEY, LPAREN, fk_column_list, RPAREN, 
                 //                        TREFERENCES, any_identifier, opt_fk_ref_columns, 
@@ -3546,7 +3546,7 @@ internal partial class sqlParser: ShiftReduceParser<ValueType, LexLocation>
 { CurrentSemanticValue.n = NodeAst.ConstraintNotNull; }
         break;
       case 377: // create_table_field_constraint -> TCONSTRAINT, any_identifier, TNOT, TNULL
-{ CurrentSemanticValue.n = new(NodeType.ConstraintNotNullNamed, null, null, null, null, null, null, null, ValueStack[ValueStack.Depth-3].s); }
+{ CurrentSemanticValue.n = new(NodeType.ConstraintNotNullNamed, null, null, null, null, null, null, null, ValueStack[ValueStack.Depth-3].n.yytext); }
         break;
       case 378: // create_table_field_constraint -> TPRIMARY, TKEY
 { CurrentSemanticValue.n = NodeAst.ConstraintPrimaryKey; }
@@ -3569,7 +3569,7 @@ internal partial class sqlParser: ShiftReduceParser<ValueType, LexLocation>
         break;
       case 384: // create_table_field_constraint -> TCONSTRAINT, any_identifier, TREFERENCES, 
                 //                                  any_identifier, opt_fk_ref_columns
-{ CurrentSemanticValue.n = new(NodeType.ConstraintForeignKey, ValueStack[ValueStack.Depth-2].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, ValueStack[ValueStack.Depth-4].s); }
+{ CurrentSemanticValue.n = new(NodeType.ConstraintForeignKey, ValueStack[ValueStack.Depth-2].n, ValueStack[ValueStack.Depth-1].n, null, null, null, null, null, ValueStack[ValueStack.Depth-4].n.yytext); }
         break;
       case 385: // create_table_field_constraint -> fk_option
 { CurrentSemanticValue.n = ValueStack[ValueStack.Depth-1].n; }

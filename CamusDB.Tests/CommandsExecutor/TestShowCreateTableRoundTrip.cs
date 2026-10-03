@@ -912,4 +912,193 @@ public sealed class TestShowCreateTableRoundTrip : BaseTest
         Assert.AreEqual("", idx.Row["Comment"].StrValue);
         Assert.AreEqual("ASC", idx.Row["Directions"].StrValue);
     }
+
+    // ── Foreign keys ──────────────────────────────────────────────────────────
+
+    private const string CitiesDdl =
+        "CREATE TABLE cities (id int64 PRIMARY KEY NOT NULL, name string NOT NULL, country string NOT NULL, " +
+        "UNIQUE KEY cities_name (name), UNIQUE KEY cities_place (country, name))";
+
+    /// <summary>
+    /// Reads the child's DDL, recreates it under <paramref name="copyName"/>, and returns the DDL. A
+    /// self-reference names the table itself, so the copy references the copy.
+    /// </summary>
+    private static async Task<string> RecreateAsync(CommandExecutor executor, DatabaseDescriptor db, string dbname, string table, string copyName)
+    {
+        List<QueryResultRow> rows = await QueryAsync(executor, db, dbname, $"SHOW CREATE TABLE {table}");
+        string ddl = rows[0].Row["Create Table"].StrValue!;
+
+        await ForeignKeyAlterScenarios.Ddl(executor, dbname, ddl.Replace($"`{table}`", $"`{copyName}`", System.StringComparison.Ordinal));
+        return ddl;
+    }
+
+    private static async Task ExpectViolationAsync(CommandExecutor executor, string dbname, string sql, string code)
+    {
+        CamusDBException exception = Assert.ThrowsAsync<CamusDBException>(async () => await ForeignKeyAlterScenarios.Dml(executor, dbname, sql))!;
+        Assert.AreEqual(code, exception.Code, exception.Message);
+    }
+
+    [Test]
+    public async Task ShowCreateTable_SingleColumnForeignKey_RoundTripsAndIsEnforced()
+    {
+        (string dbname, DatabaseDescriptor db, CommandExecutor executor) = await CreateDatabase();
+        await ForeignKeyAlterScenarios.Ddl(executor, dbname, CitiesDdl);
+        await ForeignKeyAlterScenarios.Ddl(executor, dbname,
+            "CREATE TABLE weather (id int64 PRIMARY KEY NOT NULL, city string REFERENCES cities (name) ON DELETE RESTRICT)");
+
+        string ddl = await RecreateAsync(executor, db, dbname, "weather", "weather2");
+
+        Assert.That(ddl, Does.Contain("CONSTRAINT `weather_city_fkey` FOREIGN KEY (`city`) REFERENCES `cities` (`name`) ON DELETE RESTRICT"));
+        Assert.That(ddl, Does.Not.Contain("ON UPDATE"), "The default action is not written");
+        Assert.That(ddl, Does.Not.Contain("~fk_"), "The owned index is created again by the constraint");
+
+        ForeignKeySchema copy = db.Schema.Tables["weather2"].ForeignKeys!.Single();
+        Assert.AreEqual(ForeignKeyAction.Restrict, copy.OnDelete);
+        Assert.AreEqual(ForeignKeyAction.NoAction, copy.OnUpdate);
+
+        await ForeignKeyAlterScenarios.Dml(executor, dbname, "INSERT INTO cities (id, name, country) VALUES (1, 'lima', 'pe')");
+        await ForeignKeyAlterScenarios.Dml(executor, dbname, "INSERT INTO weather2 (id, city) VALUES (1, 'lima')");
+        await ExpectViolationAsync(executor, dbname, "INSERT INTO weather2 (id, city) VALUES (2, 'atlantis')", CamusDBErrorCodes.ForeignKeyViolation);
+        await ExpectViolationAsync(executor, dbname, "DELETE FROM cities WHERE id = 1", CamusDBErrorCodes.ForeignKeyRestrictDelete);
+    }
+
+    [Test]
+    public async Task ShowCreateTable_CompositeForeignKey_RoundTripsAndIsEnforced()
+    {
+        (string dbname, DatabaseDescriptor db, CommandExecutor executor) = await CreateDatabase();
+        await ForeignKeyAlterScenarios.Ddl(executor, dbname, CitiesDdl);
+        await ForeignKeyAlterScenarios.Ddl(executor, dbname,
+            "CREATE TABLE visits (id int64 PRIMARY KEY NOT NULL, town string, nation string, " +
+            "CONSTRAINT visits_place_fk FOREIGN KEY (nation, town) REFERENCES cities (country, name) ON UPDATE RESTRICT)");
+
+        string ddl = await RecreateAsync(executor, db, dbname, "visits", "visits2");
+
+        Assert.That(ddl, Does.Contain("CONSTRAINT `visits_place_fk` FOREIGN KEY (`nation`, `town`) REFERENCES `cities` (`country`, `name`) ON UPDATE RESTRICT"));
+
+        await ForeignKeyAlterScenarios.Dml(executor, dbname, "INSERT INTO cities (id, name, country) VALUES (1, 'lima', 'pe')");
+        await ForeignKeyAlterScenarios.Dml(executor, dbname, "INSERT INTO visits2 (id, town, nation) VALUES (1, 'lima', 'pe')");
+        await ExpectViolationAsync(executor, dbname, "INSERT INTO visits2 (id, town, nation) VALUES (2, 'lima', 'cl')", CamusDBErrorCodes.ForeignKeyViolation);
+        await ExpectViolationAsync(executor, dbname, "UPDATE cities SET country = 'cl' WHERE id = 1", CamusDBErrorCodes.ForeignKeyRestrictUpdate);
+    }
+
+    [Test]
+    public async Task ShowCreateTable_SelfReference_RoundTripsAndIsEnforced()
+    {
+        (string dbname, DatabaseDescriptor db, CommandExecutor executor) = await CreateDatabase();
+        await ForeignKeyAlterScenarios.Ddl(executor, dbname,
+            "CREATE TABLE employees (id int64 PRIMARY KEY NOT NULL, manager int64 REFERENCES employees (id))");
+
+        string ddl = await RecreateAsync(executor, db, dbname, "employees", "staff");
+
+        Assert.That(ddl, Does.Contain("REFERENCES `employees` (`id`)"));
+        Assert.AreEqual(db.Schema.Tables["staff"].Id, db.Schema.Tables["staff"].ForeignKeys!.Single().ReferencedTableId,
+            "The copy references itself, not the original");
+
+        await ForeignKeyAlterScenarios.Dml(executor, dbname, "INSERT INTO staff (id, manager) VALUES (1, NULL), (2, 1)");
+        await ExpectViolationAsync(executor, dbname, "INSERT INTO staff (id, manager) VALUES (3, 99)", CamusDBErrorCodes.ForeignKeyViolation);
+        await ExpectViolationAsync(executor, dbname, "DELETE FROM staff WHERE id = 1", CamusDBErrorCodes.ForeignKeyRestrictDelete);
+    }
+
+    [Test]
+    public async Task ShowCreateTable_AfterRenames_ShowsTheCurrentNames()
+    {
+        (string dbname, DatabaseDescriptor db, CommandExecutor executor) = await CreateDatabase();
+        await ForeignKeyAlterScenarios.Ddl(executor, dbname, CitiesDdl);
+        await ForeignKeyAlterScenarios.Ddl(executor, dbname,
+            "CREATE TABLE weather (id int64 PRIMARY KEY NOT NULL, city string REFERENCES cities (name))");
+
+        await ForeignKeyAlterScenarios.Ddl(executor, dbname, "ALTER TABLE cities RENAME TO towns");
+        await ForeignKeyAlterScenarios.Ddl(executor, dbname, "ALTER TABLE towns RENAME COLUMN name TO title");
+        await ForeignKeyAlterScenarios.Ddl(executor, dbname, "ALTER TABLE weather RENAME COLUMN city TO town");
+
+        string ddl = await RecreateAsync(executor, db, dbname, "weather", "weather2");
+
+        Assert.That(ddl, Does.Contain("FOREIGN KEY (`town`) REFERENCES `towns` (`title`)"));
+        Assert.That(ddl, Does.Not.Contain("`cities`"));
+
+        await ForeignKeyAlterScenarios.Dml(executor, dbname, "INSERT INTO towns (id, title, country) VALUES (1, 'lima', 'pe')");
+        await ForeignKeyAlterScenarios.Dml(executor, dbname, "INSERT INTO weather2 (id, town) VALUES (1, 'lima')");
+        await ExpectViolationAsync(executor, dbname, "INSERT INTO weather2 (id, town) VALUES (2, 'atlantis')", CamusDBErrorCodes.ForeignKeyViolation);
+    }
+
+    /// <summary>
+    /// The owned index is not part of the table's DDL, but it costs writes, so SHOW INDEXES lists it.
+    /// A user index that the constraint reuses renders as an ordinary KEY.
+    /// </summary>
+    [Test]
+    public async Task ShowIndexes_ListsTheOwnedIndex_ShowCreateTableKeepsAReusedOne()
+    {
+        (string dbname, DatabaseDescriptor db, CommandExecutor executor) = await CreateDatabase();
+        await ForeignKeyAlterScenarios.Ddl(executor, dbname, CitiesDdl);
+        await ForeignKeyAlterScenarios.Ddl(executor, dbname,
+            "CREATE TABLE weather (id int64 PRIMARY KEY NOT NULL, city string REFERENCES cities (name))");
+        await ForeignKeyAlterScenarios.Ddl(executor, dbname,
+            "CREATE TABLE visits (id int64 PRIMARY KEY NOT NULL, city string, KEY visits_city (city), " +
+            "CONSTRAINT visits_city_fk FOREIGN KEY (city) REFERENCES cities (name))");
+
+        List<QueryResultRow> indexes = await QueryAsync(executor, db, dbname, "SHOW INDEXES FROM weather");
+        QueryResultRow owned = indexes.Single(r => r.Row["Key_name"].StrValue == "~fk_weather_city_fkey");
+        Assert.AreEqual("city", owned.Row["Columns"].StrValue);
+        Assert.AreEqual("1", owned.Row["Non_unique"].StrValue);
+
+        string visits = (await QueryAsync(executor, db, dbname, "SHOW CREATE TABLE visits"))[0].Row["Create Table"].StrValue!;
+        Assert.That(visits, Does.Contain("KEY `visits_city` (`city`)"));
+        Assert.That(visits, Does.Contain("CONSTRAINT `visits_city_fk` FOREIGN KEY (`city`) REFERENCES `cities` (`name`)"));
+    }
+
+    /// <summary>
+    /// A constraint that is still WriteOnly is not part of the table yet, so neither it nor its owned
+    /// index renders. The foreign key also renders in the WITHOUT INDEXES form: a deferred load that
+    /// lost it would raise no error.
+    /// </summary>
+    [Test]
+    public async Task ShowCreateTable_SkipsAWriteOnlyConstraint_AndKeepsForeignKeysWithoutIndexes()
+    {
+        (string dbname, DatabaseDescriptor db, CommandExecutor executor) = await CreateDatabase();
+        await ForeignKeyAlterScenarios.Seed(executor, dbname, withUserIndex: false);
+
+        executor.TestInterceptBeforeForeignKeyValidation = () =>
+        {
+            executor.TestInterceptBeforeForeignKeyValidation = null;
+            throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "The coordinator stopped before the validation");
+        };
+
+        Assert.ThrowsAsync<CamusDBException>(async () =>
+            await ForeignKeyAlterScenarios.Ddl(executor, dbname, ForeignKeyAlterScenarios.AddConstraint));
+        Assert.AreEqual(SchemaElementState.WriteOnly, db.Schema.Tables["weather"].ForeignKeys!.Single().State);
+
+        string writeOnly = (await QueryAsync(executor, db, dbname, "SHOW CREATE TABLE weather"))[0].Row["Create Table"].StrValue!;
+        Assert.That(writeOnly, Does.Not.Contain("FOREIGN KEY"));
+        Assert.That(writeOnly, Does.Not.Contain("~fk_"));
+
+        await ForeignKeyAlterScenarios.Ddl(executor, dbname, "ALTER TABLE weather DROP CONSTRAINT weather_city_fk");
+        await ForeignKeyAlterScenarios.Ddl(executor, dbname, ForeignKeyAlterScenarios.AddConstraint);
+
+        string withoutIndexes = (await QueryAsync(executor, db, dbname, "SHOW CREATE TABLE weather WITHOUT INDEXES"))[0].Row["Create Table"].StrValue!;
+        Assert.That(withoutIndexes, Does.Contain("CONSTRAINT `weather_city_fk` FOREIGN KEY (`city`) REFERENCES `cities` (`name`)"));
+    }
+
+    /// <summary>
+    /// An escaped constraint name is stored without its backquotes. SHOW CREATE TABLE writes every
+    /// constraint name escaped, so a name that kept the backquotes would grow a pair on each round
+    /// trip, and DROP CONSTRAINT with the escaped name would not find it.
+    /// </summary>
+    [Test]
+    public async Task EscapedConstraintNames_AreStoredWithoutBackquotes()
+    {
+        (string dbname, DatabaseDescriptor db, CommandExecutor executor) = await CreateDatabase();
+        await ForeignKeyAlterScenarios.Ddl(executor, dbname,
+            "CREATE TABLE products (id int64 PRIMARY KEY NOT NULL, price int64, CONSTRAINT `price_positive` CHECK (price > 0))");
+
+        Assert.AreEqual("price_positive", db.Schema.Tables["products"].CheckConstraints!.Single().Name);
+
+        await RecreateAsync(executor, db, dbname, "products", "products2");
+        Assert.AreEqual("price_positive", db.Schema.Tables["products2"].CheckConstraints!.Single().Name);
+
+        await ForeignKeyAlterScenarios.Ddl(executor, dbname, "ALTER TABLE products2 DROP CONSTRAINT `price_positive`");
+        Assert.That(db.Schema.Tables["products2"].CheckConstraints, Is.Null.Or.Empty);
+
+        await ForeignKeyAlterScenarios.Ddl(executor, dbname, "ALTER TABLE products ADD CONSTRAINT `price_small` CHECK (price < 1000)");
+        Assert.That(db.Schema.Tables["products"].CheckConstraints!.Select(c => c.Name), Does.Contain("price_small"));
+    }
 }

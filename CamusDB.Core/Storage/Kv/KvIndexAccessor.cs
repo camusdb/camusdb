@@ -319,6 +319,8 @@ internal sealed class KvIndexAccessor
                 BranchMetrics.RecordAncestorProbe();
             }
 
+            ServerDiagnostics.AddForeignKeyOperation(ServerDiagnostics.ForeignKeyOperation.AncestorProbeBatch);
+
             BranchKvValue[] probed = await ancestorReader.ProbeManyRaw(
                 HLCTimestamp.Zero,
                 forkTimestamp,
@@ -524,85 +526,97 @@ internal sealed class KvIndexAccessor
 
             // Identity per KvTransaction.RangeScanIdentity — see KvRowAccessor.ScanRows for why an
             // untracked scan is the only kind that cannot be aborted on a page retry.
-            await foreach ((string kvKey, ReadOnlyKeyValueEntry entry) in KvScanFailure.Translate(kahuna.LocateAndScanRange(
-                tx.RangeScanIdentity,
-                bucketPrefix,
-                startKey, fromInclusive,
-                endKey, toInclusive,
-                pageSize,
-                tx.ReadTimestamp,
-                KeyValueDurability.Persistent,
-                cancellationToken,
-                scanCoordinatorKey,
-                scanOperationId), $"index scan of {keys.DisplayTableName}.{indexId}", cancellationToken).ConfigureAwait(false))
+            // Counted in a finally block, so a caller that stops early still counts the entries read.
+            long entriesRead = 0;
+
+            try
             {
-                if (entry.Value is null)
-                    continue;
-
-                BranchKvValue scanDecoded = BranchKvCodec.Decode(entry.Value);
-                if (scanDecoded.Kind == BranchKvKind.Tombstone)
-                    continue;
-
-                if (!kvKey.StartsWith(keyPrefix, StringComparison.Ordinal))
-                    continue;
-
-                ReadOnlySpan<char> suffix = kvKey.AsSpan(prefixLen);
-
-                string encodedKey;
-                ObjectIdValue rowId;
-
-                if (unique)
+                await foreach ((string kvKey, ReadOnlyKeyValueEntry entry) in KvScanFailure.Translate(kahuna.LocateAndScanRange(
+                    tx.RangeScanIdentity,
+                    bucketPrefix,
+                    startKey, fromInclusive,
+                    endKey, toInclusive,
+                    pageSize,
+                    tx.ReadTimestamp,
+                    KeyValueDurability.Persistent,
+                    cancellationToken,
+                    scanCoordinatorKey,
+                    scanOperationId), $"index scan of {keys.DisplayTableName}.{indexId}", cancellationToken).ConfigureAwait(false))
                 {
-                    // Unique index value = the row-id as UTF-8 bytes (wrapped in the envelope).
-                    // Skip entries whose payload is empty — they indicate a corrupt or partially
-                    // written entry and should not surface to callers.
-                    if (!scanDecoded.HasPayload)
+                    entriesRead++;
+
+                    if (entry.Value is null)
                         continue;
 
-                    encodedKey = suffix.ToString();
-                    rowId = RowIdFromPayload(scanDecoded.Payload.Span);
-                }
-                else
-                {
-                    // Non-unique: suffix = {encodedKey}{rowIdHex24}; rowId is the last 24 chars.
-                    if (suffix.Length < KvStoreConstants.RowIdHexLength)
+                    BranchKvValue scanDecoded = BranchKvCodec.Decode(entry.Value);
+                    if (scanDecoded.Kind == BranchKvKind.Tombstone)
                         continue;
 
-                    encodedKey = suffix[..^KvStoreConstants.RowIdHexLength].ToString();
-                    rowId = ObjectId.ToValue(suffix[^KvStoreConstants.RowIdHexLength..]);
-                }
-
-                CompositeColumnValue decodedKey = KeyEncoder.Decode(encodedKey, keyTypes, directions);
-
-                // Bounds filter on the DECODED value, compared as a PREFIX (trailing columns of
-                // decodedKey are ignored). This is correct for both shapes that carry extra trailing
-                // columns beyond the bound:
-                //   • non-unique single-column index: stored Encode([value, rowId]); a raw encoded
-                //     string compare dropped value==upperBound (Encode([v,rowId]) > Encode([v])),
-                //   • composite index with a prefix bound (e.g. year=2023 AND enabled>false): a
-                //     length-tiebreaking compare leaked/!dropped later prefix values.
-                // This in-range check is load-bearing: when the planner absorbs the predicate into
-                // the scan it is not re-applied by the executor.
-                if (HasNullInBoundColumns(decodedKey, from, to))
-                    continue;
-                if (from is not null)
-                {
-                    int cmp = ComparePrefix(decodedKey, from);
-                    if (fromInclusive ? cmp < 0 : cmp <= 0)
+                    if (!kvKey.StartsWith(keyPrefix, StringComparison.Ordinal))
                         continue;
-                }
-                if (to is not null)
-                {
-                    int cmp = ComparePrefix(decodedKey, to);
-                    if (toInclusive ? cmp > 0 : cmp >= 0)
+
+                    ReadOnlySpan<char> suffix = kvKey.AsSpan(prefixLen);
+
+                    string encodedKey;
+                    ObjectIdValue rowId;
+
+                    if (unique)
+                    {
+                        // Unique index value = the row-id as UTF-8 bytes (wrapped in the envelope).
+                        // Skip entries whose payload is empty — they indicate a corrupt or partially
+                        // written entry and should not surface to callers.
+                        if (!scanDecoded.HasPayload)
+                            continue;
+
+                        encodedKey = suffix.ToString();
+                        rowId = RowIdFromPayload(scanDecoded.Payload.Span);
+                    }
+                    else
+                    {
+                        // Non-unique: suffix = {encodedKey}{rowIdHex24}; rowId is the last 24 chars.
+                        if (suffix.Length < KvStoreConstants.RowIdHexLength)
+                            continue;
+
+                        encodedKey = suffix[..^KvStoreConstants.RowIdHexLength].ToString();
+                        rowId = ObjectId.ToValue(suffix[^KvStoreConstants.RowIdHexLength..]);
+                    }
+
+                    CompositeColumnValue decodedKey = KeyEncoder.Decode(encodedKey, keyTypes, directions);
+
+                    // Bounds filter on the DECODED value, compared as a PREFIX (trailing columns of
+                    // decodedKey are ignored). This is correct for both shapes that carry extra trailing
+                    // columns beyond the bound:
+                    //   • non-unique single-column index: stored Encode([value, rowId]); a raw encoded
+                    //     string compare dropped value==upperBound (Encode([v,rowId]) > Encode([v])),
+                    //   • composite index with a prefix bound (e.g. year=2023 AND enabled>false): a
+                    //     length-tiebreaking compare leaked/!dropped later prefix values.
+                    // This in-range check is load-bearing: when the planner absorbs the predicate into
+                    // the scan it is not re-applied by the executor.
+                    if (HasNullInBoundColumns(decodedKey, from, to))
                         continue;
+                    if (from is not null)
+                    {
+                        int cmp = ComparePrefix(decodedKey, from);
+                        if (fromInclusive ? cmp < 0 : cmp <= 0)
+                            continue;
+                    }
+                    if (to is not null)
+                    {
+                        int cmp = ComparePrefix(decodedKey, to);
+                        if (toInclusive ? cmp > 0 : cmp >= 0)
+                            continue;
+                    }
+
+                    if (maxRows is not null && emitted >= maxRows.Value)
+                        yield break;
+
+                    yield return (decodedKey, rowId, IncludeTupleFromPayload(scanDecoded.Payload));
+                    emitted++;
                 }
-
-                if (maxRows is not null && emitted >= maxRows.Value)
-                    yield break;
-
-                yield return (decodedKey, rowId, IncludeTupleFromPayload(scanDecoded.Payload));
-                emitted++;
+            }
+            finally
+            {
+                ServerDiagnostics.AddKvScanEntries(index: true, entriesRead);
             }
         }
         else

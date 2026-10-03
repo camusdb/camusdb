@@ -777,8 +777,13 @@ internal sealed class SchemaQuerier
     /// for the index-free form is taking responsibility for creating the secondary indexes itself —
     /// a dump that wants the rows loaded before the indexes are built is the case this exists for —
     /// so the DDL it gets back no longer round-trips the table on its own.</para>
+    ///
+    /// <para>Foreign keys render in both forms. A deferred load must still get its constraints: a
+    /// dump that left them out would recreate the table without them and report no error. An index
+    /// that a constraint owns is never rendered, because the constraint creates it again. See
+    /// <see cref="RenderForeignKey"/>.</para>
     /// </summary>
-    internal async IAsyncEnumerable<QueryResultRow> ShowCreateTable(TableDescriptor table, bool includeSecondaryIndexes = true)
+    internal async IAsyncEnumerable<QueryResultRow> ShowCreateTable(DatabaseDescriptor database, TableDescriptor table, bool includeSecondaryIndexes = true)
     {
         await Task.CompletedTask;
 
@@ -817,6 +822,10 @@ internal sealed class SchemaQuerier
             if (!includeSecondaryIndexes && kv.Key != CamusDBConstants.PrimaryKeyInternalName)
                 continue;
 
+            // The constraint that owns the index renders below and builds the index again.
+            if (kv.Value.OwnerConstraintId is not null)
+                continue;
+
             string cols = RenderIndexColumns(kv.Value, ", ", backquote: true);
 
             // Covering indexes render their stored/payload columns as a trailing INCLUDE (...) clause,
@@ -843,6 +852,17 @@ internal sealed class SchemaQuerier
                 createTableSql.Append($" CONSTRAINT `{cc.Name}` CHECK ({cc.Expression}),");
         }
 
+        if (table.Schema.ForeignKeys is { Count: > 0 } foreignKeys)
+        {
+            ForeignKeyPlan[] plans = database.Schema.ForeignKeys.ChildPlansOf(table.Id!);
+
+            foreach (ForeignKeySchema foreignKey in foreignKeys)
+            {
+                if (RenderForeignKey(database.Schema, plans, foreignKey) is { } clause)
+                    createTableSql.Append(' ').Append(clause).Append(',');
+            }
+        }
+
         // Remove trailing comma and close
         if (createTableSql[^1] == ',')
             createTableSql.Length--;
@@ -858,6 +878,71 @@ internal sealed class SchemaQuerier
             { "Create Table", new ColumnValue(ColumnType.String, createTableSql.ToString()) }
         });
     }
+
+    /// <summary>
+    /// Renders one foreign key as a table constraint clause, or returns null when it must not be
+    /// rendered.
+    ///
+    /// <para>The constraint stores ids only. Every name comes from the published foreign-key graph,
+    /// which is rebuilt on each schema change, so the clause shows the current names after a rename
+    /// of the parent table or of a column. A constraint that is not Public is not part of the table
+    /// yet, and one whose ids do not resolve is not enforced; neither renders. <c>ON DELETE</c> and
+    /// <c>ON UPDATE</c> are written only when the action is not the default, <c>NO ACTION</c>.</para>
+    /// </summary>
+    private static string? RenderForeignKey(Schema schema, ForeignKeyPlan[] plans, ForeignKeySchema foreignKey)
+    {
+        if (foreignKey.State != SchemaElementState.Public)
+            return null;
+
+        ForeignKeyPlan? plan = null;
+        foreach (ForeignKeyPlan candidate in plans)
+        {
+            if (string.Equals(candidate.Constraint.Id, foreignKey.Id, StringComparison.Ordinal))
+            {
+                plan = candidate;
+                break;
+            }
+        }
+
+        if (plan is null || !plan.IsResolved || !schema.TryGetRelationNameById(foreignKey.ReferencedTableId, out string? parentName))
+            return null;
+
+        StringBuilder sb = new();
+
+        sb.Append("CONSTRAINT `").Append(foreignKey.Name).Append("` FOREIGN KEY (");
+        AppendQuotedList(sb, plan.ChildColumnNames);
+        sb.Append(") REFERENCES `").Append(parentName).Append("` (");
+        AppendQuotedList(sb, plan.ParentColumnNames);
+        sb.Append(')');
+
+        if (foreignKey.OnDelete != ForeignKeyAction.NoAction)
+            sb.Append(" ON DELETE ").Append(RenderForeignKeyAction(foreignKey.OnDelete));
+
+        if (foreignKey.OnUpdate != ForeignKeyAction.NoAction)
+            sb.Append(" ON UPDATE ").Append(RenderForeignKeyAction(foreignKey.OnUpdate));
+
+        return sb.ToString();
+    }
+
+    private static void AppendQuotedList(StringBuilder sb, string[] names)
+    {
+        for (int i = 0; i < names.Length; i++)
+        {
+            if (i > 0)
+                sb.Append(", ");
+
+            sb.Append('`').Append(names[i]).Append('`');
+        }
+    }
+
+    private static string RenderForeignKeyAction(ForeignKeyAction action) => action switch
+    {
+        ForeignKeyAction.Restrict => "RESTRICT",
+        ForeignKeyAction.Cascade => "CASCADE",
+        ForeignKeyAction.SetNull => "SET NULL",
+        ForeignKeyAction.SetDefault => "SET DEFAULT",
+        _ => "NO ACTION",
+    };
 
     /// <summary>
     /// One row describing the current database. <paramref name="comment"/> comes from the registry

@@ -761,10 +761,10 @@ alter_table_stmt : TALTER TTABLE any_identifier TWADD any_identifier field_type 
                  | TALTER TTABLE any_identifier TRENAME TTO any_identifier { $$.n = new(NodeType.AlterTableRenameTo, $3.n, $6.n, null, null, null, null, null, null); }
                  | TALTER TTABLE any_identifier TRENAME TCOLUMN any_identifier TTO any_identifier { $$.n = new(NodeType.AlterTableRenameColumn, $3.n, $6.n, $8.n, null, null, null, null, null); }
                  | TALTER TTABLE any_identifier TRENAME TINDEX any_identifier TTO any_identifier { $$.n = new(NodeType.AlterTableRenameIndex, $3.n, $6.n, $8.n, null, null, null, null, null); }
-                 | TALTER TTABLE any_identifier TWADD TCONSTRAINT any_identifier TCHECK LPAREN condition RPAREN { $$.n = new(NodeType.AlterTableAddConstraintCheck, $3.n, $9.n, null, null, null, null, null, $6.s); }
+                 | TALTER TTABLE any_identifier TWADD TCONSTRAINT any_identifier TCHECK LPAREN condition RPAREN { $$.n = new(NodeType.AlterTableAddConstraintCheck, $3.n, $9.n, null, null, null, null, null, $6.n.yytext); }
                  | TALTER TTABLE any_identifier TWADD fk_table_constraint { $$.n = new(NodeType.AlterTableAddConstraintForeignKey, $3.n, $5.n, null, null, null, null, null, null); }
-                 | TALTER TTABLE any_identifier TWADD TCONSTRAINT any_identifier fk_table_constraint { $7.n.yytext = $6.s; $$.n = new(NodeType.AlterTableAddConstraintForeignKey, $3.n, $7.n, null, null, null, null, null, null); }
-                 | TALTER TTABLE any_identifier TDROP TCONSTRAINT any_identifier { $$.n = new(NodeType.AlterTableDropConstraint, $3.n, null, null, null, null, null, null, $6.s); }
+                 | TALTER TTABLE any_identifier TWADD TCONSTRAINT any_identifier fk_table_constraint { $7.n.yytext = $6.n.yytext; $$.n = new(NodeType.AlterTableAddConstraintForeignKey, $3.n, $7.n, null, null, null, null, null, null); }
+                 | TALTER TTABLE any_identifier TDROP TCONSTRAINT any_identifier { $$.n = new(NodeType.AlterTableDropConstraint, $3.n, null, null, null, null, null, null, $6.n.yytext); }
                  | TALTER TTABLE any_identifier TALTER any_identifier TSET TNOT TNULL { $$.n = new(NodeType.AlterTableSetNotNull, $3.n, $5.n, null, null, null, null, null, null); }
                  | TALTER TTABLE any_identifier TALTER TCOLUMN any_identifier TSET TNOT TNULL { $$.n = new(NodeType.AlterTableSetNotNull, $3.n, $6.n, null, null, null, null, null, null); }
                  | TALTER TTABLE any_identifier TALTER any_identifier TDROP TNOT TNULL { $$.n = new(NodeType.AlterTableDropNotNull, $3.n, $5.n, null, null, null, null, null, null); }
@@ -1241,10 +1241,10 @@ create_table_inline_constraint : TCONSTRAINT any_identifier TPRIMARY TKEY LPAREN
                                | TPRIMARY TKEY LPAREN identifier_index_list RPAREN { $$.n = new(NodeType.CreateTableConstraintPrimaryKey, $4.n, null, null, null, null, null, null, null); }
                                | TKEY any_identifier LPAREN identifier_index_list RPAREN index_include_clause opt_inline_comment { $$.n = new(NodeType.CreateTableConstraintMultiIndex, $2.n, $4.n, $6.n, $7.n, null, null, null, null); }
                                | TUNIQUE TKEY any_identifier LPAREN identifier_index_list RPAREN index_include_clause opt_inline_comment { $$.n = new(NodeType.CreateTableConstraintUniqueIndex, $3.n, $5.n, $7.n, $8.n, null, null, null, null); }
-                               | TCONSTRAINT any_identifier TCHECK LPAREN condition RPAREN { $$.n = new(NodeType.CreateTableConstraintCheck, $5.n, null, null, null, null, null, null, $2.s); }
+                               | TCONSTRAINT any_identifier TCHECK LPAREN condition RPAREN { $$.n = new(NodeType.CreateTableConstraintCheck, $5.n, null, null, null, null, null, null, $2.n.yytext); }
                                | TCHECK LPAREN condition RPAREN { $$.n = new(NodeType.CreateTableConstraintCheck, $3.n, null, null, null, null, null, null, null); }
                                | fk_table_constraint { $$.n = $1.n; }
-                               | TCONSTRAINT any_identifier fk_table_constraint { $3.n.yytext = $2.s; $$.n = $3.n; }
+                               | TCONSTRAINT any_identifier fk_table_constraint { $3.n.yytext = $2.n.yytext; $$.n = $3.n; }
                                ;
 
 /* FOREIGN KEY (cols) REFERENCES table [(cols)] [clauses]. The table-level form is always followed by
@@ -1321,7 +1321,7 @@ create_table_field_constraint_list : create_table_field_constraint_list create_t
 
 create_table_field_constraint : TNULL { $$.n = NodeAst.ConstraintNull; }
                         | TNOT TNULL { $$.n = NodeAst.ConstraintNotNull; }
-                        | TCONSTRAINT any_identifier TNOT TNULL { $$.n = new(NodeType.ConstraintNotNullNamed, null, null, null, null, null, null, null, $2.s); }
+                        | TCONSTRAINT any_identifier TNOT TNULL { $$.n = new(NodeType.ConstraintNotNullNamed, null, null, null, null, null, null, null, $2.n.yytext); }
 						| TPRIMARY TKEY { $$.n = NodeAst.ConstraintPrimaryKey; }
                         | TUNIQUE { $$.n = NodeAst.ConstraintUnique; }
                         | TDEFAULT LPAREN default_expr RPAREN { $$.n = new(NodeType.ConstraintDefault, $3.n, null, null, null, null, null, null, null); }
@@ -1332,7 +1332,7 @@ create_table_field_constraint : TNULL { $$.n = NodeAst.ConstraintNull; }
                            could start NOT DEFERRABLE or NOT NULL. The executor attaches each clause to
                            the REFERENCES before it on the same column. */
                         | TREFERENCES any_identifier opt_fk_ref_columns { $$.n = new(NodeType.ConstraintForeignKey, $2.n, $3.n, null, null, null, null, null, null); }
-                        | TCONSTRAINT any_identifier TREFERENCES any_identifier opt_fk_ref_columns { $$.n = new(NodeType.ConstraintForeignKey, $4.n, $5.n, null, null, null, null, null, $2.s); }
+                        | TCONSTRAINT any_identifier TREFERENCES any_identifier opt_fk_ref_columns { $$.n = new(NodeType.ConstraintForeignKey, $4.n, $5.n, null, null, null, null, null, $2.n.yytext); }
                         | fk_option { $$.n = $1.n; }
                         /* Two shapes share this production because they share their first two
                            tokens: STORAGE <mode>, and GENERATED ALWAYS AS IDENTITY. Splitting them

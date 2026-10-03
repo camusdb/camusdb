@@ -10,6 +10,7 @@ using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Controllers.Queries;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.Diagnostics;
+using CamusDB.Core.SQLParser;
 using CamusDB.Core.Storage.Kv;
 using CamusDB.Core.Transactions;
 using Kahuna.Shared.KeyValue;
@@ -73,6 +74,19 @@ internal sealed class ForeignKeyStatementChecker
     /// <summary>The checker of a statement that writes a table with no enforced foreign key.</summary>
     internal static ForeignKeyStatementChecker None { get; } = new([], []);
 
+    private static int CountEnforced(ForeignKeyPlan[] plans)
+    {
+        int enforced = 0;
+
+        foreach (ForeignKeyPlan plan in plans)
+        {
+            if (plan.IsEnforced)
+                enforced++;
+        }
+
+        return enforced;
+    }
+
     private readonly ChildSide[] childSides;
 
     private readonly ParentSide[] parentSides;
@@ -100,28 +114,33 @@ internal sealed class ForeignKeyStatementChecker
     /// the parent's layout or contents generation changed under the statement: a TRUNCATE of the parent
     /// moves its rows to a new key-space, where the lock this statement took no longer stands.</para>
     /// </summary>
-    internal static async ValueTask<ForeignKeyStatementChecker> ForChildWritesAsync(
+    internal static ValueTask<ForeignKeyStatementChecker> ForChildWritesAsync(
         DatabaseDescriptor database,
         TableDescriptor child,
         TableOpener tableOpener,
         KvTransaction tx)
     {
+        // Not async on purpose: the common answer is None, and it must not allocate a state machine.
         ForeignKeyGraph graph = database.Schema.ForeignKeys;
         if (graph.IsEmpty)
-            return None;
+            return new ValueTask<ForeignKeyStatementChecker>(None);
 
         ForeignKeyPlan[] plans = graph.ChildPlansOf(child.Id);
-        int enforced = 0;
+        int enforced = CountEnforced(plans);
 
-        foreach (ForeignKeyPlan plan in plans)
-        {
-            if (plan.IsEnforced)
-                enforced++;
-        }
+        return enforced == 0
+            ? new ValueTask<ForeignKeyStatementChecker>(None)
+            : BuildChildWritesAsync(database, child, tableOpener, tx, plans, enforced);
+    }
 
-        if (enforced == 0)
-            return None;
-
+    private static async ValueTask<ForeignKeyStatementChecker> BuildChildWritesAsync(
+        DatabaseDescriptor database,
+        TableDescriptor child,
+        TableOpener tableOpener,
+        KvTransaction tx,
+        ForeignKeyPlan[] plans,
+        int enforced)
+    {
         ChildSide[] sides = new ChildSide[enforced];
         int next = 0;
 
@@ -146,28 +165,33 @@ internal sealed class ForeignKeyStatementChecker
     /// Each child is opened by id without the caller's privilege check and pinned: a TRUNCATE of a child
     /// moves its rows to a new key-space, and a probe through a stale descriptor would miss a new child.
     /// </summary>
-    internal static async ValueTask<ForeignKeyStatementChecker> ForParentDeletesAsync(
+    internal static ValueTask<ForeignKeyStatementChecker> ForParentDeletesAsync(
         DatabaseDescriptor database,
         TableDescriptor parent,
         TableOpener tableOpener,
         KvTransaction tx)
     {
+        // Not async on purpose, as in ForChildWritesAsync.
         ForeignKeyGraph graph = database.Schema.ForeignKeys;
         if (graph.IsEmpty)
-            return None;
+            return new ValueTask<ForeignKeyStatementChecker>(None);
 
         ForeignKeyPlan[] plans = graph.ParentPlansOf(parent.Id);
-        int enforced = 0;
+        int enforced = CountEnforced(plans);
 
-        foreach (ForeignKeyPlan plan in plans)
-        {
-            if (plan.IsEnforced)
-                enforced++;
-        }
+        return enforced == 0
+            ? new ValueTask<ForeignKeyStatementChecker>(None)
+            : BuildParentDeletesAsync(database, parent, tableOpener, tx, plans, enforced);
+    }
 
-        if (enforced == 0)
-            return None;
-
+    private static async ValueTask<ForeignKeyStatementChecker> BuildParentDeletesAsync(
+        DatabaseDescriptor database,
+        TableDescriptor parent,
+        TableOpener tableOpener,
+        KvTransaction tx,
+        ForeignKeyPlan[] plans,
+        int enforced)
+    {
         ParentSide[] sides = new ParentSide[enforced];
         int next = 0;
 
@@ -187,22 +211,51 @@ internal sealed class ForeignKeyStatementChecker
     }
 
     /// <summary>
-    /// Builds the checker for an UPDATE of <paramref name="table"/> that assigns
-    /// <paramref name="assignedColumns"/>. Decided before any row is read: a constraint takes part only
-    /// when the statement assigns one of its referencing columns (child side) or one of its referenced
-    /// columns (parent side). A statement that assigns neither gets <see cref="None"/> and does no
-    /// foreign-key work — no table opens, no keys. Call it before the first write, for the same reason as
-    /// <see cref="ForChildWritesAsync"/>.
+    /// Builds the checker for an UPDATE of <paramref name="table"/> that assigns the columns named by
+    /// <paramref name="plainValues"/> and <paramref name="exprValues"/>. Decided before any row is read:
+    /// a constraint takes part only when the statement assigns one of its referencing columns (child
+    /// side) or one of its referenced columns (parent side). A statement that assigns neither gets
+    /// <see cref="None"/> and does no foreign-key work — no table opens, no keys. Call it before the first
+    /// write, for the same reason as <see cref="ForChildWritesAsync"/>.
+    ///
+    /// <para>The set of assigned columns is built only after the graph is known to hold a constraint, so
+    /// an UPDATE in a database without one allocates nothing here.</para>
     /// </summary>
-    internal static async ValueTask<ForeignKeyStatementChecker> ForUpdatesAsync(
+    internal static ValueTask<ForeignKeyStatementChecker> ForUpdatesAsync(
         DatabaseDescriptor database,
         TableDescriptor table,
         TableOpener tableOpener,
         KvTransaction tx,
-        IReadOnlySet<string> assignedColumns)
+        Dictionary<string, ColumnValue>? plainValues,
+        Dictionary<string, NodeAst>? exprValues)
     {
+        // Not async on purpose, as in ForChildWritesAsync. A table that no constraint touches needs no
+        // look at the assigned columns either.
         ForeignKeyGraph graph = database.Schema.ForeignKeys;
-        if (graph.IsEmpty || assignedColumns.Count == 0)
+        if (graph.IsEmpty || (graph.ChildPlansOf(table.Id).Length == 0 && graph.ParentPlansOf(table.Id).Length == 0))
+            return new ValueTask<ForeignKeyStatementChecker>(None);
+
+        return BuildUpdatesAsync(database, table, tableOpener, tx, graph, plainValues, exprValues);
+    }
+
+    private static async ValueTask<ForeignKeyStatementChecker> BuildUpdatesAsync(
+        DatabaseDescriptor database,
+        TableDescriptor table,
+        TableOpener tableOpener,
+        KvTransaction tx,
+        ForeignKeyGraph graph,
+        Dictionary<string, ColumnValue>? plainValues,
+        Dictionary<string, NodeAst>? exprValues)
+    {
+        HashSet<string> assignedColumns = new(StringComparer.OrdinalIgnoreCase);
+
+        if (plainValues is not null)
+            assignedColumns.UnionWith(plainValues.Keys);
+
+        if (exprValues is not null)
+            assignedColumns.UnionWith(exprValues.Keys);
+
+        if (assignedColumns.Count == 0)
             return None;
 
         List<ChildSide>? childSides = null;
@@ -319,7 +372,10 @@ internal sealed class ForeignKeyStatementChecker
     /// <see cref="CamusDBErrorCodes.ForeignKeyViolation"/> for the first missing parent key, in
     /// constraint order and then in the order the rows were written.
     /// </summary>
-    internal async Task CompleteAsync(KvTransaction tx, CancellationToken cancellationToken = default)
+    internal Task CompleteAsync(KvTransaction tx, CancellationToken cancellationToken = default) =>
+        HasWork ? CompleteCoreAsync(tx, cancellationToken) : Task.CompletedTask;
+
+    private async Task CompleteCoreAsync(KvTransaction tx, CancellationToken cancellationToken)
     {
         foreach (ChildSide side in childSides)
             await side.CheckAsync(tx, cancellationToken).ConfigureAwait(false);
@@ -618,12 +674,31 @@ internal sealed class ForeignKeyStatementChecker
                 ? await parent.Store.LookupUniqueManyAsync(tx, plan.Constraint.ReferencedIndexId, parentKeys, cancellationToken).ConfigureAwait(false)
                 : null;
 
-            for (int i = 0; i < childPrefixes.Count; i++)
-            {
-                if (backAgain is not null && backAgain[i])
-                    continue;
+            bool[] referenced = new bool[childPrefixes.Count];
 
-                if (!await child.Store.IndexPrefixExistsAsync(tx, backingIndexId, backingKeyTypes, childPrefixes[i], backingUnique, cancellationToken).ConfigureAwait(false))
+            if (childPrefixes.Count == 1)
+            {
+                if (backAgain is null || !backAgain[0])
+                    referenced[0] = await child.Store.IndexPrefixExistsAsync(tx, backingIndexId, backingKeyTypes, childPrefixes[0], backingUnique, cancellationToken).ConfigureAwait(false);
+            }
+            else
+            {
+                // The probes only read, and a scan reads the transaction's identity without changing
+                // it, so they run side by side. All of them finish before a violation is reported, so
+                // the error names the first referenced key in statement order, whatever finished first.
+                await Parallel.ForEachAsync(
+                    Enumerable.Range(0, childPrefixes.Count),
+                    new ParallelOptions { MaxDegreeOfParallelism = KvStoreConstants.ForeignKeyProbeConcurrency, CancellationToken = cancellationToken },
+                    async (i, ct) =>
+                    {
+                        if (backAgain is null || !backAgain[i])
+                            referenced[i] = await child.Store.IndexPrefixExistsAsync(tx, backingIndexId, backingKeyTypes, childPrefixes[i], backingUnique, ct).ConfigureAwait(false);
+                    }).ConfigureAwait(false);
+            }
+
+            for (int i = 0; i < referenced.Length; i++)
+            {
+                if (!referenced[i])
                     continue;
 
                 ServerDiagnostics.AddForeignKeyOperation(ServerDiagnostics.ForeignKeyOperation.Violation);

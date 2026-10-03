@@ -101,6 +101,69 @@ public sealed class CreateTableController : CommandsController
         return columnInfos;
     }
 
+    /// <summary>
+    /// The primary key over the columns that set <see cref="CreateTableColumn.Primary"/>, in
+    /// declaration order. None when no column sets it; the validator then refuses the table.
+    /// </summary>
+    private static ConstraintInfo[] GetConstraintInfos(CreateTableColumn[]? columns)
+    {
+        if (columns is null)
+            return [];
+
+        List<ColumnIndexInfo> keyColumns = [];
+
+        foreach (CreateTableColumn column in columns)
+        {
+            if (column.Primary)
+                keyColumns.Add(new ColumnIndexInfo(column.Name ?? "", OrderType.Ascending));
+        }
+
+        if (keyColumns.Count == 0)
+            return [];
+
+        return [new ConstraintInfo(ConstraintType.PrimaryKey, CamusDBConstants.PrimaryKeyInternalName, keyColumns.ToArray())];
+    }
+
+    private static ForeignKeyAction GetForeignKeyAction(string? action, string clause)
+    {
+        if (string.IsNullOrEmpty(action))
+            return ForeignKeyAction.NoAction;
+
+        return action.Replace('_', ' ').ToLowerInvariant() switch
+        {
+            "no action"   => ForeignKeyAction.NoAction,
+            "restrict"    => ForeignKeyAction.Restrict,
+            "cascade"     => ForeignKeyAction.Cascade,
+            "set null"    => ForeignKeyAction.SetNull,
+            "set default" => ForeignKeyAction.SetDefault,
+            _             => throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Unknown {clause} action: {action}"),
+        };
+    }
+
+    private static ForeignKeyInfo[] GetForeignKeyInfos(CreateTableForeignKey[]? foreignKeys)
+    {
+        if (foreignKeys is null || foreignKeys.Length == 0)
+            return [];
+
+        ForeignKeyInfo[] infos = new ForeignKeyInfo[foreignKeys.Length];
+
+        for (int i = 0; i < foreignKeys.Length; i++)
+        {
+            CreateTableForeignKey foreignKey = foreignKeys[i];
+
+            infos[i] = new ForeignKeyInfo(
+                name: foreignKey.Name ?? "",
+                columns: foreignKey.Columns ?? [],
+                referencedTable: foreignKey.ReferencedTable ?? "",
+                referencedColumns: foreignKey.ReferencedColumns ?? [],
+                onDelete: GetForeignKeyAction(foreignKey.OnDelete, "ON DELETE"),
+                onUpdate: GetForeignKeyAction(foreignKey.OnUpdate, "ON UPDATE")
+            );
+        }
+
+        return infos;
+    }
+
     [HttpPost]
     [Route("/create-table")]
     public async Task<JsonResult> CreateTable()
@@ -118,8 +181,9 @@ public sealed class CreateTableController : CommandsController
                 databaseName: request.DatabaseName ?? "",
                 tableName: request.TableName ?? "",
                 columns: GetColumnInfos(request.Columns),
-                constraints: Array.Empty<ConstraintInfo>(),
-                ifNotExists: request.IfNotExists
+                constraints: GetConstraintInfos(request.Columns),
+                ifNotExists: request.IfNotExists,
+                foreignKeys: GetForeignKeyInfos(request.ForeignKeys)
             );
 
             await executor.CreateTable(ticket).ConfigureAwait(false);
@@ -130,7 +194,7 @@ public sealed class CreateTableController : CommandsController
         {
             LogCommandFailure(e);
 
-            return new JsonResult(new CreateTableResponse("failed", e.Code, e.Message)) { StatusCode = 500 };
+            return new JsonResult(new CreateTableResponse("failed", e.Code, e.Message)) { StatusCode = CamusDBErrorCodes.GetHttpStatus(e.Code) };
         }
         catch (Exception e)
         {

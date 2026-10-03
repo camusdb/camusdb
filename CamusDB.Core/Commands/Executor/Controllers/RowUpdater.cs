@@ -164,7 +164,7 @@ public sealed class RowUpdater
         // Decided from the assigned columns before any row is read, and built before the first write:
         // it opens and pins the related tables, which may throw SchemaCatchingUp.
         ForeignKeyStatementChecker foreignKeys = await ForeignKeyStatementChecker.ForUpdatesAsync(
-            database, table, tableOpener, ticket.TxnState, AssignedColumns(ticket)).ConfigureAwait(false);
+            database, table, tableOpener, ticket.TxnState, ticket.PlainValues, ticket.ExprValues).ConfigureAwait(false);
 
         UpdateFluxState state = new(
             database: database,
@@ -187,20 +187,6 @@ public sealed class RowUpdater
             await foreignKeys.CompleteAsync(ticket.TxnState).ConfigureAwait(false);
 
         return updated;
-    }
-
-    /// <summary>The columns the statement assigns, case-insensitively.</summary>
-    private static HashSet<string> AssignedColumns(UpdateTicket ticket)
-    {
-        HashSet<string> assigned = new(StringComparer.OrdinalIgnoreCase);
-
-        if (ticket.PlainValues is not null)
-            assigned.UnionWith(ticket.PlainValues.Keys);
-
-        if (ticket.ExprValues is not null)
-            assigned.UnionWith(ticket.ExprValues.Keys);
-
-        return assigned;
     }
 
     private static CompositeColumnValue GetColumnValue(Dictionary<string, ColumnValue> rowValues, string[] columnNames, ColumnValue? extraUniqueValue = null)
