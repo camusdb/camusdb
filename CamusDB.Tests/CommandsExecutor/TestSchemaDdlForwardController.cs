@@ -426,6 +426,88 @@ public sealed class TestSchemaDdlForwardController
         }
     }
 
+    /// <summary>
+    /// ALTER TABLE ... ADD CONSTRAINT ... FOREIGN KEY, forwarded the real way: the follower's forwarder
+    /// serializes the ticket and the leader's controller rebuilds it from that body. Before the constraint
+    /// was carried on the wire, the leader received an ADD FOREIGN KEY with no constraint in it.
+    /// </summary>
+    [Test]
+    public async Task ForwardAlterConstraint_AsLeader_AddsTheForeignKey()
+    {
+        string db = await CreateTestDatabaseAsync();
+        try
+        {
+            foreach (string sql in new[]
+            {
+                "CREATE TABLE cities (id int64 PRIMARY KEY NOT NULL, name string NOT NULL, UNIQUE KEY cities_name (name))",
+                "CREATE TABLE weather (id int64 PRIMARY KEY NOT NULL, city string)",
+            })
+                await executor!.ExecuteDDLSQL(new ExecuteSQLTicket(txnState: null!, database: db, sql: sql, parameters: null));
+
+            AlterConstraintTicket ticket = new(
+                databaseName: db,
+                tableName: "weather",
+                constraintName: "weather_city_fk",
+                expression: null,
+                referencedColumns: null,
+                operation: AlterConstraintOperation.AddForeignKey,
+                foreignKey: new ForeignKeyInfo("weather_city_fk", ["city"], "cities", ["name"],
+                    CamusDB.Core.Catalogs.Models.ForeignKeyAction.Restrict, CamusDB.Core.Catalogs.Models.ForeignKeyAction.NoAction,
+                    CamusDB.Core.Catalogs.Models.ForeignKeyMatch.Simple, false, false));
+
+            CapturingHandler handler = new();
+            HttpSchemaDdlForwarder forwarder = new(new System.Net.Http.HttpClient(handler), _ => new Uri("http://leader:5095"), NullLogger<ICamusDB>.Instance);
+            await forwarder.ForwardAlterConstraintAsync("leader:7070", ticket, Guid.NewGuid().ToString("N"), CancellationToken.None);
+
+            SchemaDdlForwardController ctrl = BuildController(handler.Body!, clusterNode: node);
+            SchemaDdlForwardResponse? resp = ExtractResponse(await ctrl.ForwardAlterConstraint());
+
+            Assert.AreEqual("ok", resp!.Status, resp.Message);
+
+            DatabaseDescriptor descriptor = await executor!.OpenDatabase(db);
+            CamusDB.Core.Catalogs.Models.ForeignKeySchema constraint = descriptor.Schema.Tables["weather"].ForeignKeys!.Single();
+            Assert.AreEqual("weather_city_fk", constraint.Name);
+            Assert.AreEqual(CamusDB.Core.Catalogs.Models.ForeignKeyAction.Restrict, constraint.OnDelete);
+            Assert.AreEqual(descriptor.Schema.Tables["cities"].Id, constraint.ReferencedTableId);
+            Assert.AreEqual(CamusDB.Core.Catalogs.Models.SchemaElementState.Public, constraint.State);
+        }
+        finally
+        {
+            await DropTestDatabaseAsync(db);
+        }
+    }
+
+    [Test]
+    public void ForwardAlterConstraintRequest_RoundTripsTheForeignKey()
+    {
+        ForwardAlterConstraintRequest request = new()
+        {
+            DatabaseName = "db",
+            TableName = "weather",
+            ConstraintName = "weather_city_fk",
+            Operation = AlterConstraintOperation.AddForeignKey,
+            ForeignKey = new ForeignKeyInfoRequest
+            {
+                Name = "weather_city_fk",
+                Columns = ["city", "country"],
+                ReferencedTable = "cities",
+                ReferencedColumns = ["name", "country"],
+                OnDelete = CamusDB.Core.Catalogs.Models.ForeignKeyAction.Restrict,
+                OnUpdate = CamusDB.Core.Catalogs.Models.ForeignKeyAction.NoAction,
+                Match = CamusDB.Core.Catalogs.Models.ForeignKeyMatch.Simple,
+            },
+        };
+
+        ForwardAlterConstraintRequest round = JsonSerializer.Deserialize<ForwardAlterConstraintRequest>(JsonSerializer.Serialize(request, JsonOpts), JsonOpts)!;
+
+        Assert.AreEqual(AlterConstraintOperation.AddForeignKey, round.Operation);
+        Assert.AreEqual("weather_city_fk", round.ForeignKey!.Name);
+        Assert.AreEqual(new[] { "city", "country" }, round.ForeignKey.Columns);
+        Assert.AreEqual("cities", round.ForeignKey.ReferencedTable);
+        Assert.AreEqual(new[] { "name", "country" }, round.ForeignKey.ReferencedColumns);
+        Assert.AreEqual(CamusDB.Core.Catalogs.Models.ForeignKeyAction.Restrict, round.ForeignKey.OnDelete);
+    }
+
     [Test]
     public void ForwardCreateTableRequest_RoundTripsEveryForeignKeyField()
     {

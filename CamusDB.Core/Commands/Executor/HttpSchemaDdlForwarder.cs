@@ -154,6 +154,7 @@ public sealed class HttpSchemaDdlForwarder : ISchemaDdlForwarder, ISchemaAckSend
             Operation = ticket.Operation,
             ColumnName = ticket.ColumnName,
             Storage = ticket.Storage,
+            ForeignKey = ticket.ForeignKey is { } foreignKey ? MapForeignKeys([foreignKey])[0] : null,
         };
 
         return await PostAsync(leader, "alter-constraint", request, cancellationToken).ConfigureAwait(false);

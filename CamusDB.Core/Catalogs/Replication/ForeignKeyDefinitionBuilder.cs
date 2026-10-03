@@ -79,23 +79,7 @@ internal static class ForeignKeyDefinitionBuilder
             ParentView parent = ResolveParent(schema, ticket, tableId, columns, indexes, info, subject);
             string[] parentIds = ResolveParentColumns(parent, info, subject, out ColumnType[] parentTypes);
 
-            if (parentIds.Length != childIds.Length)
-                throw new CamusDBException(
-                    CamusDBErrorCodes.InvalidForeignKeyDefinition,
-                    $"{subject} names {childIds.Length} referencing column(s) but '{parent.Name}' has {parentIds.Length} referenced column(s)");
-
-            for (int c = 0; c < childIds.Length; c++)
-            {
-                if (childTypes[c] == ColumnType.Array || parentTypes[c] == ColumnType.Array)
-                    throw new CamusDBException(
-                        CamusDBErrorCodes.InvalidForeignKeyDefinition,
-                        $"{subject}: an array column cannot take part in a foreign key");
-
-                if (childTypes[c] != parentTypes[c])
-                    throw new CamusDBException(
-                        CamusDBErrorCodes.InvalidForeignKeyDefinition,
-                        $"{subject}: column '{info.Columns[c]}' is {childTypes[c]}, but the referenced column of '{parent.Name}' is {parentTypes[c]}");
-            }
+            CheckColumnPairs(info, subject, parent.Name, childTypes, parentTypes, childIds.Length, parentIds.Length);
 
             TableIndexSchema referencedIndex = FindReferencedIndex(parent.Indexes, parentIds)
                 ?? throw new CamusDBException(
@@ -131,6 +115,161 @@ internal static class ForeignKeyDefinitionBuilder
                 $"Table '{ticket.TableName}' would have {indexes.Count} indexes, including those its foreign keys need, which exceeds the maximum of {options.MaxIndexesPerTable}");
 
         return (foreignKeys, [.. indexes]);
+    }
+
+    /// <summary>
+    /// Resolves one constraint that <c>ALTER TABLE ... ADD CONSTRAINT</c> adds to the existing table
+    /// <paramref name="child"/>. Reads both tables from the live schema; the caller holds the DDL
+    /// semaphore, so no other DDL of this node changes them before the constraint is proposed, and the
+    /// apply checks the result again by id in log order.
+    ///
+    /// <para>When no index can serve as the backing index, the plan names the index to build,
+    /// <c>~fk_{constraint}</c>, and the caller builds it through the staged index build before the
+    /// constraint exists. A table with rows needs a backfill, which a single schema delta cannot do.</para>
+    /// </summary>
+    internal static ForeignKeyAlterPlan ResolveForAlter(Schema schema, TableSchema child, ForeignKeyInfo info, CamusDBOptions options)
+    {
+        string childName = child.Name ?? "";
+        string subject = $"Foreign key '{info.Name}' on table '{childName}'";
+
+        if (child.Kind != RelationKind.Table)
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidForeignKeyDefinition,
+                $"Relation '{childName}': a materialized view cannot hold a foreign key");
+
+        ForeignKeyDeltaApplier.RequireUnusedConstraintName(child, info.Name);
+
+        string[] childIds = new string[info.Columns.Length];
+        string[] childNames = new string[info.Columns.Length];
+        ColumnType[] childTypes = new ColumnType[info.Columns.Length];
+
+        for (int i = 0; i < info.Columns.Length; i++)
+        {
+            TableColumnSchema column = child.Columns?.Find(c =>
+                c.State == SchemaElementState.Public && string.Equals(c.Name, info.Columns[i], StringComparison.OrdinalIgnoreCase))
+                ?? throw new CamusDBException(
+                    CamusDBErrorCodes.InvalidForeignKeyDefinition,
+                    $"{subject}: column '{info.Columns[i]}' does not exist");
+
+            if (Array.IndexOf(childIds, column.Id, 0, i) >= 0)
+                throw new CamusDBException(
+                    CamusDBErrorCodes.InvalidForeignKeyDefinition,
+                    $"{subject} names column '{column.Name}' more than once");
+
+            childIds[i] = column.Id;
+            childNames[i] = column.Name;
+            childTypes[i] = column.Type;
+        }
+
+        TableSchema parentSchema = FindExistingParent(schema, info, subject);
+        ParentView parent = ViewOf(parentSchema, info.ReferencedTable);
+        string[] parentIds = ResolveParentColumns(parent, info, subject, out ColumnType[] parentTypes);
+
+        CheckColumnPairs(info, subject, parent.Name, childTypes, parentTypes, childIds.Length, parentIds.Length);
+
+        TableIndexSchema referencedIndex = FindReferencedIndex(parent.Indexes, parentIds)
+            ?? throw new CamusDBException(
+                CamusDBErrorCodes.InvalidForeignKeyDefinition,
+                $"{subject}: there is no unique index or primary key on '{parent.Name}' over exactly the referenced columns");
+
+        TableIndexSchema? backingIndex = FindBackingIndex((IReadOnlyList<TableIndexSchema>?)child.Indexes ?? [], childIds);
+        string? ownedIndexName = null;
+
+        if (backingIndex is null)
+        {
+            ownedIndexName = OwnedIndexPrefix + info.Name;
+
+            if (child.Indexes?.Exists(ix => string.Equals(ix.Name, ownedIndexName, StringComparison.OrdinalIgnoreCase)) == true)
+                throw new CamusDBException(
+                    CamusDBErrorCodes.InvalidInput,
+                    $"{subject} needs an index named '{ownedIndexName}', and that name is already taken");
+
+            if (options.MaxIndexColumns > 0 && childIds.Length > options.MaxIndexColumns)
+                throw new CamusDBException(
+                    CamusDBErrorCodes.SchemaLimitExceeded,
+                    $"{subject} spans {childIds.Length} columns, exceeding the maximum of {options.MaxIndexColumns} for the index it needs");
+        }
+
+        return new ForeignKeyAlterPlan(
+            ObjectIdGenerator.Generate().ToString(),
+            info.Name,
+            childIds,
+            childNames,
+            parent.Id,
+            parentIds,
+            referencedIndex.KvId,
+            backingIndex?.KvId,
+            ownedIndexName,
+            info.OnDelete,
+            info.OnUpdate,
+            info.Match);
+    }
+
+    private static TableSchema FindExistingParent(Schema schema, ForeignKeyInfo info, string subject)
+    {
+        if (!schema.Tables.TryGetValue(info.ReferencedTable, out TableSchema? parent))
+        {
+            if (schema.Views.ContainsKey(info.ReferencedTable))
+                throw new CamusDBException(
+                    CamusDBErrorCodes.InvalidForeignKeyDefinition,
+                    $"{subject} cannot reference '{info.ReferencedTable}': it is a view");
+
+            throw new CamusDBException(
+                CamusDBErrorCodes.TableDoesntExist,
+                $"{subject} references table '{info.ReferencedTable}', which does not exist");
+        }
+
+        string parentName = parent.Name ?? info.ReferencedTable;
+
+        if (parent.Kind != RelationKind.Table)
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidForeignKeyDefinition,
+                $"{subject} cannot reference '{parentName}': it is a materialized view, and a refresh replaces its rows without any foreign-key check");
+
+        if (ForeignKeyDefinitionRules.HasRowLevelTtl(parent))
+            throw RowLevelTtlRefusal(subject, parentName);
+
+        return parent;
+    }
+
+    private static ParentView ViewOf(TableSchema parent, string fallbackName) => new(
+        parent.Id!,
+        parent.Name ?? fallbackName,
+        name =>
+        {
+            TableColumnSchema? column = parent.Columns?.Find(c =>
+                c.State == SchemaElementState.Public && string.Equals(c.Name, name, StringComparison.OrdinalIgnoreCase));
+            return column is null ? null : (column.Id, column.Type);
+        },
+        id => parent.Columns?.Find(c => string.Equals(c.Id, id, StringComparison.Ordinal))?.Type,
+        (IReadOnlyList<TableIndexSchema>?)parent.Indexes ?? []);
+
+    private static void CheckColumnPairs(
+        ForeignKeyInfo info,
+        string subject,
+        string parentName,
+        ColumnType[] childTypes,
+        ColumnType[] parentTypes,
+        int childCount,
+        int parentCount)
+    {
+        if (parentCount != childCount)
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidForeignKeyDefinition,
+                $"{subject} names {childCount} referencing column(s) but '{parentName}' has {parentCount} referenced column(s)");
+
+        for (int c = 0; c < childCount; c++)
+        {
+            if (childTypes[c] == ColumnType.Array || parentTypes[c] == ColumnType.Array)
+                throw new CamusDBException(
+                    CamusDBErrorCodes.InvalidForeignKeyDefinition,
+                    $"{subject}: an array column cannot take part in a foreign key");
+
+            if (childTypes[c] != parentTypes[c])
+                throw new CamusDBException(
+                    CamusDBErrorCodes.InvalidForeignKeyDefinition,
+                    $"{subject}: column '{info.Columns[c]}' is {childTypes[c]}, but the referenced column of '{parentName}' is {parentTypes[c]}");
+        }
     }
 
     /// <summary>What a constraint needs to know about its parent, whether it exists yet or not.</summary>
@@ -216,39 +355,7 @@ internal static class ForeignKeyDefinitionBuilder
                 indexes);
         }
 
-        if (!schema.Tables.TryGetValue(info.ReferencedTable, out TableSchema? parent))
-        {
-            if (schema.Views.ContainsKey(info.ReferencedTable))
-                throw new CamusDBException(
-                    CamusDBErrorCodes.InvalidForeignKeyDefinition,
-                    $"{subject} cannot reference '{info.ReferencedTable}': it is a view");
-
-            throw new CamusDBException(
-                CamusDBErrorCodes.TableDoesntExist,
-                $"{subject} references table '{info.ReferencedTable}', which does not exist");
-        }
-
-        string parentName = parent.Name ?? info.ReferencedTable;
-
-        if (parent.Kind != RelationKind.Table)
-            throw new CamusDBException(
-                CamusDBErrorCodes.InvalidForeignKeyDefinition,
-                $"{subject} cannot reference '{parentName}': it is a materialized view, and a refresh replaces its rows without any foreign-key check");
-
-        if (ForeignKeyDefinitionRules.HasRowLevelTtl(parent))
-            throw RowLevelTtlRefusal(subject, parentName);
-
-        return new(
-            parent.Id!,
-            parentName,
-            name =>
-            {
-                TableColumnSchema? column = parent.Columns?.Find(c =>
-                    c.State == SchemaElementState.Public && string.Equals(c.Name, name, StringComparison.OrdinalIgnoreCase));
-                return column is null ? null : (column.Id, column.Type);
-            },
-            id => parent.Columns?.Find(c => string.Equals(c.Id, id, StringComparison.Ordinal))?.Type,
-            (IReadOnlyList<TableIndexSchema>?)parent.Indexes ?? []);
+        return ViewOf(FindExistingParent(schema, info, subject), info.ReferencedTable);
     }
 
     private static string[] ResolveParentColumns(ParentView parent, ForeignKeyInfo info, string subject, out ColumnType[] types)
@@ -391,4 +498,38 @@ internal static class ForeignKeyDefinitionBuilder
     private static CamusDBException RowLevelTtlRefusal(string subject, string parentName) => new(
         CamusDBErrorCodes.FeatureNotSupported,
         $"{subject} cannot reference '{parentName}': it has row-level TTL, and expired rows are deleted without a foreign-key check");
+}
+
+/// <summary>
+/// One constraint that <c>ALTER TABLE ... ADD CONSTRAINT</c> resolved against the live schema, before
+/// its backing index exists. Exactly one of <see cref="BackingIndexId"/> (an index the table already
+/// has) and <see cref="OwnedIndexName"/> (an index to build for this constraint) is set.
+/// </summary>
+internal sealed record ForeignKeyAlterPlan(
+    string ConstraintId,
+    string Name,
+    string[] ChildColumnIds,
+    string[] ChildColumnNames,
+    string ParentTableId,
+    string[] ParentColumnIds,
+    string ReferencedIndexId,
+    string? BackingIndexId,
+    string? OwnedIndexName,
+    ForeignKeyAction OnDelete,
+    ForeignKeyAction OnUpdate,
+    ForeignKeyMatch Match)
+{
+    /// <summary>The constraint in <c>WriteOnly</c>, backed by the index with <paramref name="backingIndexId"/>.</summary>
+    internal ForeignKeySchema ToSchema(string backingIndexId) => new(
+        ConstraintId,
+        Name,
+        ChildColumnIds,
+        ParentTableId,
+        ParentColumnIds,
+        ReferencedIndexId,
+        backingIndexId,
+        OnDelete,
+        OnUpdate,
+        Match,
+        SchemaElementState.WriteOnly);
 }

@@ -44,6 +44,7 @@ namespace CamusDB.Core.Catalogs;
 [JsonSerializable(typeof(SchemaCheckConstraintPayload))]
 [JsonSerializable(typeof(ForeignKeySchema))]
 [JsonSerializable(typeof(List<ForeignKeySchema>))]
+[JsonSerializable(typeof(SchemaAddForeignKeyPayload))]
 [JsonSerializable(typeof(ForeignKeyAction))]
 [JsonSerializable(typeof(ForeignKeyMatch))]
 [JsonSerializable(typeof(SchemaSetColumnNotNullPayload))]

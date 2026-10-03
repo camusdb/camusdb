@@ -5,6 +5,7 @@
  * file that was distributed with this source code.
  */
 
+using CamusDB.Core.Catalogs.Apply;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.Catalogs.Replication;
 using CamusDB.Core.CommandsExecutor.Models;
@@ -257,6 +258,10 @@ public sealed class SchemaReplicator
         // TableDescriptor.Indexes is rebuilt with the updated index state on next access.
         // Column SetElementState does not need this because DML reads column state directly
         // from table.Schema.Columns (updated in place by ApplyElementState).
+        // A new constraint can take ownership of an index, which changes that index's entry.
+        if (entry.Op == SchemaOp.AddForeignKey)
+            database.TableDescriptors.TryRemove(DecodePayload<SchemaAddForeignKeyPayload>(entry).TableName, out _);
+
         if (entry.Op == SchemaOp.SetElementState)
         {
             SchemaElementStatePayload payload = DecodePayload<SchemaElementStatePayload>(entry);
@@ -510,6 +515,7 @@ public sealed class SchemaReplicator
             // A truncate leaves TableSchema.Version alone, so the version fallback below would call a
             // re-delivered entry "already applied" only by accident. Compare the storage id instead.
             SchemaOp.TruncateTable => WasTruncateApplied(schema, DecodePayload<SchemaTruncateTablePayload>(entry)),
+            SchemaOp.AddForeignKey => SchemaDeltaApplier.HasForeignKey(schema, DecodePayload<SchemaAddForeignKeyPayload>(entry)),
             _ => schema.SchemaVersion >= entry.ToVersion
         };
     }

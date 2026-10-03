@@ -270,21 +270,6 @@ internal static class ForeignKeyCreateTableScenarios
         Assert.That(exception.Message, Does.Contain("ON DELETE CASCADE"));
     }
 
-    /// <summary>ALTER TABLE cannot add a foreign key until its own rollout exists, and changes nothing.</summary>
-    public static async Task AlterTableAddForeignKeyIsStillRefused(CommandExecutor executor, DatabaseDescriptor database, string dbname)
-    {
-        await Ddl(executor, dbname, CreateCities);
-        await Ddl(executor, dbname, "CREATE TABLE weather (id int64 PRIMARY KEY NOT NULL, city string)");
-        long version = database.Schema.SchemaVersion;
-
-        CamusDBException exception = Assert.ThrowsAsync<CamusDBException>(async () => await Ddl(executor, dbname,
-            "ALTER TABLE weather ADD CONSTRAINT weather_city_fk FOREIGN KEY (city) REFERENCES cities (name)"))!;
-
-        Assert.AreEqual(CamusDBErrorCodes.FeatureNotSupported, exception.Code);
-        Assert.IsNull(database.Schema.Tables["weather"].ForeignKeys);
-        Assert.AreEqual(version, database.Schema.SchemaVersion, "A refused ALTER must not advance the schema");
-    }
-
     // ── The validation pass ───────────────────────────────────────────────────
 
     /// <summary>
@@ -457,7 +442,6 @@ public sealed class TestForeignKeyCreateTable : BaseTest
     [Test] public async Task ParentWithRowLevelTtlIsRefused() => await Run(ForeignKeyCreateTableScenarios.ParentWithRowLevelTtlIsRefused);
     [Test] public async Task NameTakenByACheckConstraintIsRefused() => await Run(ForeignKeyCreateTableScenarios.NameTakenByACheckConstraintIsRefused);
     [Test] public async Task UnsupportedActionIsRefusedByName() => await Run(ForeignKeyCreateTableScenarios.UnsupportedActionIsRefusedByName);
-    [Test] public async Task AlterTableAddForeignKeyIsStillRefused() => await Run(ForeignKeyCreateTableScenarios.AlterTableAddForeignKeyIsStillRefused);
     [Test] public async Task ValidationPassesWhenEveryRowHasAParent() => await Run(ForeignKeyCreateTableScenarios.ValidationPassesWhenEveryRowHasAParent);
     [Test] public async Task ValidationReportsTheFirstOrphanInKeyOrder() => await Run(ForeignKeyCreateTableScenarios.ValidationReportsTheFirstOrphanInKeyOrder);
     [Test] public async Task ValidationMapsCompositeKeysAcrossColumnOrders() => await Run(ForeignKeyCreateTableScenarios.ValidationMapsCompositeKeysAcrossColumnOrders);
@@ -495,7 +479,6 @@ public sealed class TestForeignKeyCreateTableCluster : SharedNodeBaseTest
     [Test] public async Task ParentWithRowLevelTtlIsRefused() => await Run(ForeignKeyCreateTableScenarios.ParentWithRowLevelTtlIsRefused);
     [Test] public async Task NameTakenByACheckConstraintIsRefused() => await Run(ForeignKeyCreateTableScenarios.NameTakenByACheckConstraintIsRefused);
     [Test] public async Task UnsupportedActionIsRefusedByName() => await Run(ForeignKeyCreateTableScenarios.UnsupportedActionIsRefusedByName);
-    [Test] public async Task AlterTableAddForeignKeyIsStillRefused() => await Run(ForeignKeyCreateTableScenarios.AlterTableAddForeignKeyIsStillRefused);
     [Test] public async Task ValidationPassesWhenEveryRowHasAParent() => await Run(ForeignKeyCreateTableScenarios.ValidationPassesWhenEveryRowHasAParent);
     [Test] public async Task ValidationReportsTheFirstOrphanInKeyOrder() => await Run(ForeignKeyCreateTableScenarios.ValidationReportsTheFirstOrphanInKeyOrder);
     [Test] public async Task ValidationMapsCompositeKeysAcrossColumnOrders() => await Run(ForeignKeyCreateTableScenarios.ValidationMapsCompositeKeysAcrossColumnOrders);

@@ -394,6 +394,14 @@ public sealed class CatalogsManager
         string constraintName)
         => await elements.ReplicateDropCheckConstraintAsync(database, tableName, constraintName).ConfigureAwait(false);
 
+    internal async Task ReplicateAddForeignKeyAsync(
+        DatabaseDescriptor database,
+        string tableName,
+        string tableId,
+        ForeignKeySchema foreignKey,
+        string? claimedIndexId)
+        => await elements.ReplicateAddForeignKeyAsync(database, tableName, tableId, foreignKey, claimedIndexId).ConfigureAwait(false);
+
     public async Task ReplicateSetColumnStorageAsync(
         DatabaseDescriptor database,
         string tableName,

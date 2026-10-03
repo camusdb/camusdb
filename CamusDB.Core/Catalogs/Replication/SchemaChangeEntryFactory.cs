@@ -648,6 +648,29 @@ internal static class SchemaChangeEntryFactory
     }
 
     /// <summary>
+    /// Adds a foreign key in <c>WriteOnly</c> to an existing table. <paramref name="claimedIndexId"/> names
+    /// an index the statement built for the constraint, which the apply then marks as owned by it.
+    /// </summary>
+    internal static SchemaChangeLogEntry AddForeignKeyEntry(
+        DatabaseDescriptor database, TableSchema table, ForeignKeySchema foreignKey, string? claimedIndexId)
+    {
+        return new()
+        {
+            Database = database.Id,
+            FromVersion = database.Schema.SchemaVersion,
+            ToVersion = database.Schema.SchemaVersion + 1,
+            Op = SchemaOp.AddForeignKey,
+            Payload = SchemaChangeLogEntryCodec.EncodePayload(new SchemaAddForeignKeyPayload
+            {
+                TableName = table.Name!,
+                TableId = table.Id!,
+                ForeignKey = foreignKey,
+                ClaimedIndexId = claimedIndexId
+            })
+        };
+    }
+
+    /// <summary>
     /// Drops a CHECK constraint. The payload carries an empty expression and no referenced columns:
     /// a drop is identified by name alone, and repeating the expression would invite a reader to
     /// match on it.

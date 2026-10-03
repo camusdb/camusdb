@@ -25,8 +25,8 @@ namespace CamusDB.Tests.CommandsExecutor;
 
 /// <summary>
 /// The cluster rollout of a foreign key through the schema-change coordinator: a WriteOnly constraint is
-/// enforced but not trusted, the validation pass publishes it, a failed validation removes it and
-/// releases its index, and a resumed job finishes the rollout after a leader change.
+/// enforced but not trusted, the validation pass publishes it, a failed validation removes it and the
+/// index the engine built for it, and a resumed job finishes the rollout after a leader change.
 ///
 /// <para>Each scenario creates the child with its constraint already WriteOnly, through the catalog, to
 /// stand where a CREATE TABLE is between its delta and its validation. An orphan is made by hiding the
@@ -67,11 +67,11 @@ public sealed class TestForeignKeyRollout : SharedNodeBaseTest
     }
 
     /// <summary>
-    /// An orphan written before the ack fails the validation. The constraint must go, its owned index
-    /// must stay as an ordinary index, and no job may be left for a resume to retry.
+    /// An orphan written before the ack fails the validation. The constraint must go, the index the
+    /// engine built for it must go with it, and no job may be left for a resume to retry.
     /// </summary>
     [Test]
-    public async Task FailedValidationRemovesTheConstraintAndReleasesItsIndex()
+    public async Task FailedValidationRemovesTheConstraintAndItsIndex()
     {
         (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
         string tableId = await CreateWithWriteOnlyConstraint(executor, database, dbname);
@@ -90,9 +90,7 @@ public sealed class TestForeignKeyRollout : SharedNodeBaseTest
         Assert.IsNull(weather.ForeignKeys);
         Assert.IsTrue(database.Schema.ForeignKeys.IsEmpty);
 
-        TableIndexSchema released = weather.Indexes!.Single(i => i.KvId == ownedIndexId);
-        Assert.IsNull(released.OwnerConstraintId, "The index must no longer name a constraint that is gone");
-        Assert.AreEqual(SchemaElementState.Public, released.State);
+        Assert.IsFalse(weather.Indexes!.Any(i => i.KvId == ownedIndexId), "The index built for the constraint must be dropped with it");
 
         Assert.IsEmpty(await executor.Catalogs.LoadCoordinatorJobsAsync(database));
     }

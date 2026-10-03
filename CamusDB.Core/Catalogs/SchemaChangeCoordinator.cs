@@ -88,6 +88,15 @@ public sealed class SchemaChangeCoordinator
     /// </summary>
     public Func<DatabaseDescriptor, string, string, Task>? ForeignKeyValidationAsync { get; set; }
 
+    /// <summary>
+    /// Delegate that drops one index of a table: its entries and its schema entry. Called after a
+    /// foreign key that failed validation was removed, for the index the engine had built for that
+    /// constraint (<see cref="TableIndexSchema.OwnerConstraintId"/>). Receives the database, the table
+    /// name and the index name. Without it, the coordinator drops only the schema entry, and the
+    /// entries stay in storage, unreachable.
+    /// </summary>
+    public Func<DatabaseDescriptor, string, string, Task>? DropIndexAsync { get; set; }
+
     public SchemaChangeCoordinator(CatalogsManager catalogs, ILogger<ICamusDB>? logger = null)
     {
         this.catalogs = catalogs;
@@ -257,12 +266,58 @@ public sealed class SchemaChangeCoordinator
         }
         catch (CamusDBException ex) when (ex.Code == CamusDBErrorCodes.ForeignKeyViolation)
         {
+            // Read before the removal: the same delta clears the index's owner, and afterwards nothing
+            // tells the index the engine built apart from one the user made.
+            string? ownedIndexName = FindOwnedIndexName(database.Schema, job.TableName, job.ElementName);
+
             await catalogs.ReplicateElementStateAsync(
                 database, job.TableName, job.ElementName, SchemaElementState.Absent, SchemaElementKind.ForeignKey
             ).ConfigureAwait(false);
 
+            if (ownedIndexName is not null)
+                await DropReleasedIndexAsync(database, job.TableName, ownedIndexName).ConfigureAwait(false);
+
             await catalogs.DeleteCoordinatorJobAsync(database, job.TableId, job.ElementName).ConfigureAwait(false);
             throw;
+        }
+    }
+
+    /// <summary>
+    /// The name of the index that the foreign key <paramref name="constraintName"/> of
+    /// <paramref name="tableName"/> owns, or null when the constraint reuses an index the user made.
+    /// </summary>
+    internal static string? FindOwnedIndexName(Schema schema, string tableName, string constraintName)
+    {
+        if (!schema.Tables.TryGetValue(tableName, out TableSchema? table))
+            return null;
+
+        ForeignKeySchema? foreignKey = table.ForeignKeys?.Find(fk => string.Equals(fk.Name, constraintName, StringComparison.OrdinalIgnoreCase));
+        if (foreignKey is null)
+            return null;
+
+        return table.Indexes?.Find(ix => string.Equals(ix.OwnerConstraintId, foreignKey.Id, StringComparison.Ordinal))?.Name;
+    }
+
+    /// <summary>
+    /// Best effort: the constraint is already gone, so a failure here must not hide the violation the
+    /// caller is about to report. An index left behind is an ordinary index; it still serves queries.
+    /// </summary>
+    private async Task DropReleasedIndexAsync(DatabaseDescriptor database, string tableName, string indexName)
+    {
+        try
+        {
+            if (DropIndexAsync is not null)
+                await DropIndexAsync(database, tableName, indexName).ConfigureAwait(false);
+            else
+                await catalogs.ReplicateDropIndexAsync(database, tableName, indexName).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            logger?.LogWarning(
+                ex,
+                "A foreign key on {TableName} failed validation and was removed, but its index {IndexName} could not be dropped",
+                tableName,
+                indexName);
         }
     }
 

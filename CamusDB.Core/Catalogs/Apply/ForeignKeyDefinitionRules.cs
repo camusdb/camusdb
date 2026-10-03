@@ -181,6 +181,53 @@ internal static class ForeignKeyDefinitionRules
     }
 
     /// <summary>
+    /// Refuses a constraint that would close a cycle of two or more tables. The walk starts at the
+    /// parent and follows the parent's own constraints, and the constraints of every table it reaches.
+    /// If it reaches <paramref name="child"/>, the new constraint closes a cycle. A self-reference is
+    /// accepted, and a self-reference met on the walk is not followed.
+    ///
+    /// <para>Only <c>ALTER TABLE ... ADD CONSTRAINT</c> can close a cycle: a table that CREATE TABLE
+    /// makes is referenced by nothing yet. The check runs at apply time, so two concurrent ADDs that
+    /// would together close a cycle are ordered in the log, and the second one is refused.</para>
+    /// </summary>
+    internal static void RequireNoCycle(Schema schema, TableSchema child, ForeignKeySchema foreignKey)
+    {
+        if (child.Id is null || string.Equals(foreignKey.ReferencedTableId, child.Id, StringComparison.Ordinal))
+            return;
+
+        HashSet<string> visited = new(StringComparer.Ordinal) { foreignKey.ReferencedTableId };
+        Stack<string> pending = new();
+        pending.Push(foreignKey.ReferencedTableId);
+
+        while (pending.Count > 0)
+        {
+            TableSchema? table = SchemaDeltaApplier.FindRelationById(schema, pending.Pop());
+            if (table?.ForeignKeys is null)
+                continue;
+
+            foreach (ForeignKeySchema edge in table.ForeignKeys)
+            {
+                string next = edge.ReferencedTableId;
+
+                if (string.Equals(next, table.Id, StringComparison.Ordinal))
+                    continue;
+
+                if (string.Equals(next, child.Id, StringComparison.Ordinal))
+                {
+                    string parentName = SchemaDeltaApplier.FindRelationById(schema, foreignKey.ReferencedTableId)?.Name ?? foreignKey.ReferencedTableId;
+
+                    throw new CamusDBException(
+                        CamusDBErrorCodes.ForeignKeyCycle,
+                        $"Foreign key '{foreignKey.Name}' on table '{child.Name}' would close a cycle: '{parentName}' already references '{child.Name}', directly or through other tables (foreign key '{edge.Name}' on table '{table.Name}')");
+                }
+
+                if (visited.Add(next))
+                    pending.Push(next);
+            }
+        }
+    }
+
+    /// <summary>
     /// True when <paramref name="table"/> has row-level TTL configured, paused or not: a paused sweep
     /// can be resumed without any DDL that this check would see.
     /// </summary>

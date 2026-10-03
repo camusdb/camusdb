@@ -19,8 +19,9 @@ public enum AlterConstraintOperation
     AddCheck,
 
     /// <summary>
-    /// Drops a named constraint by name. The name is resolved against CHECK constraints and
-    /// named NOT NULL constraints on each column.
+    /// Drops a named constraint by name. The name is resolved against CHECK constraints, named
+    /// NOT NULL constraints on each column, and foreign keys, in that order. A foreign key takes the
+    /// index the engine built for it along.
     /// </summary>
     DropConstraint,
 
@@ -56,7 +57,8 @@ public enum AlterConstraintOperation
 }
 
 /// <summary>
-/// Ticket for <c>ALTER TABLE … ADD CONSTRAINT … CHECK</c>, <c>ALTER TABLE … DROP CONSTRAINT …</c>,
+/// Ticket for <c>ALTER TABLE … ADD CONSTRAINT … CHECK</c>, <c>ALTER TABLE … ADD CONSTRAINT … FOREIGN KEY</c>,
+/// <c>ALTER TABLE … DROP CONSTRAINT …</c>,
 /// <c>ALTER TABLE … ALTER COLUMN … SET NOT NULL</c>, and
 /// <c>ALTER TABLE … ALTER COLUMN … DROP NOT NULL</c> operations.
 /// </summary>

@@ -195,6 +195,40 @@ internal sealed class SchemaElementReplicator
     }
 
     /// <summary>
+    /// Proposes an <see cref="SchemaOp.AddForeignKey"/> delta for the table named
+    /// <paramref name="tableName"/>, which must still have the id <paramref name="tableId"/>, and waits
+    /// for the cluster to apply it. Valid in both modes: a standalone node is the only member of its own
+    /// schema group. The dry run under the schema lock refuses a constraint that the live schema no
+    /// longer allows, here, where the caller still gets the error.
+    /// </summary>
+    internal async Task ReplicateAddForeignKeyAsync(
+        DatabaseDescriptor database,
+        string tableName,
+        string tableId,
+        ForeignKeySchema foreignKey,
+        string? claimedIndexId)
+    {
+        SchemaChangeLogEntry entry;
+
+        await database.Schema.AcquireLockAsync().ConfigureAwait(false);
+        try
+        {
+            if (!database.Schema.Tables.TryGetValue(tableName, out TableSchema? table)
+                || !string.Equals(table.Id, tableId, StringComparison.Ordinal))
+                throw new CamusDBException(CamusDBErrorCodes.TableDoesntExist, $"Table '{tableName}' does not exist");
+
+            entry = SchemaChangeEntryFactory.AddForeignKeyEntry(database, table, foreignKey, claimedIndexId);
+            SchemaDeltaApplier.ValidateSchemaDelta(database, entry);
+        }
+        finally
+        {
+            database.Schema.ReleaseLock();
+        }
+
+        await publisher.ReplicateAndWaitLocalApplyAsync(database, entry).ConfigureAwait(false);
+    }
+
+    /// <summary>
     /// Proposes a <see cref="SchemaOp.SetTableSettings"/> delta and replicates it to all cluster nodes,
     /// so every node's in-memory <see cref="TableSchema.Settings"/> updates and the KV checkpoint is
     /// rewritten. Advances the database schema version (like check constraints) but not

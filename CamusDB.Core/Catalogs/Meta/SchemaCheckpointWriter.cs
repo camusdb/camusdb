@@ -324,6 +324,7 @@ internal sealed class SchemaCheckpointWriter
         SchemaOp.SetColumnNotNull => SchemaDeltaApplier.DecodePayload<SchemaSetColumnNotNullPayload>(entry).TableName,
         SchemaOp.SetColumnStorage => SchemaDeltaApplier.DecodePayload<SchemaSetColumnStoragePayload>(entry).TableName,
         SchemaOp.TruncateTable => SchemaDeltaApplier.DecodePayload<SchemaTruncateTablePayload>(entry).TableName,
+        SchemaOp.AddForeignKey => SchemaDeltaApplier.DecodePayload<SchemaAddForeignKeyPayload>(entry).TableName,
         _ => throw new CamusDBException(
             CamusDBErrorCodes.InvalidInternalOperation,
             $"Cannot resolve table name for schema operation '{entry.Op}'"

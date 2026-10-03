@@ -221,7 +221,10 @@ public sealed class TestSchemaOpCoverage
             // AlterSequence is deliberately absent: it changes a record's fields rather than its
             // presence, so there is nothing structural to compare and the version fallback is the
             // only answer available. The other three are answered from Schema.Sequences.
-            SchemaOp.CreateSequence, SchemaOp.DropSequence, SchemaOp.RenameSequence
+            SchemaOp.CreateSequence, SchemaOp.DropSequence, SchemaOp.RenameSequence,
+            // Answered from the constraint id, so a later constraint of the same name is not mistaken
+            // for this one.
+            SchemaOp.AddForeignKey
         ];
 
         // A structurally checked op answers "not applied" against an empty schema even when the

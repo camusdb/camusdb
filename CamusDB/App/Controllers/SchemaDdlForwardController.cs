@@ -532,7 +532,8 @@ public sealed class SchemaDdlForwardController : CommandsController
                 referencedColumns: req.ReferencedColumns,
                 operation: req.Operation,
                 columnName: req.ColumnName,
-                storage: req.Storage
+                storage: req.Storage,
+                foreignKey: req.ForeignKey is { } foreignKey ? MapForeignKeys([foreignKey])[0] : null
             );
 
             ExecuteDDLSQLResult result = await executor.AlterConstraint(ticket).ConfigureAwait(false);

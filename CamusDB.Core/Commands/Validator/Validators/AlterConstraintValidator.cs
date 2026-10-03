@@ -43,13 +43,6 @@ internal sealed class AlterConstraintValidator : ValidatorBase
                 throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "A foreign key definition is required for ADD FOREIGN KEY");
 
             ValidateForeignKey(ticket.ForeignKey);
-
-            // ALTER TABLE cannot add a foreign key yet: it needs the backing-index build and the
-            // validation of existing rows before the constraint may exist. Refused rather than
-            // accepted, because a constraint that silently does nothing is worse than an error.
-            throw new CamusDBException(
-                CamusDBErrorCodes.FeatureNotSupported,
-                $"Foreign key '{ticket.ForeignKey.Name}': ALTER TABLE cannot add a foreign key yet; declare it in CREATE TABLE");
         }
 
         if (ticket.Operation == AlterConstraintOperation.SetStorage)

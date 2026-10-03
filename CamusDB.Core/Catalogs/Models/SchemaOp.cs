@@ -210,5 +210,22 @@ public enum SchemaOp
     /// what makes <c>RESTART</c> and <c>setval</c> safe. This delta records the catalog side so
     /// every node agrees on the parameters.</para>
     /// </summary>
-    AlterSequence = 27
+    AlterSequence = 27,
+
+    /// <summary>
+    /// Add a foreign key to an existing table (payload: <c>SchemaAddForeignKeyPayload</c>), from
+    /// <c>ALTER TABLE ... ADD CONSTRAINT ... FOREIGN KEY</c>. The constraint arrives in
+    /// <c>WriteOnly</c>: enforced on both sides from this version on, and validated against the existing
+    /// rows before a <see cref="SetElementState"/> makes it <c>Public</c>.
+    ///
+    /// <para>There is no matching drop op. <c>DROP CONSTRAINT</c> and a failed validation remove the
+    /// constraint with <see cref="SetElementState"/> to <c>Absent</c>, which also releases the index it
+    /// owned in the same delta.</para>
+    ///
+    /// <para>The apply checks the definition again by id, and refuses a constraint that would close a
+    /// cycle, so a concurrent <c>DROP TABLE</c> of the parent or another <c>ADD CONSTRAINT</c> is
+    /// ordered against it in log order. Touches only the child table. Does not bump
+    /// <c>TableSchema.Version</c>: a constraint is not part of the row encoding.</para>
+    /// </summary>
+    AddForeignKey = 28
 }

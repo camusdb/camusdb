@@ -95,6 +95,11 @@ internal sealed class DatabaseOpener
             // is validated before the resumed job publishes it.
             ForeignKeyValidationAsync = (db, tableName, constraintName) =>
                 commandExecutor.ValidateForeignKeyRowsAsync(db, tableName, constraintName),
+
+            // Wire the index drop: a constraint that fails validation on resume takes the index the
+            // engine built for it along.
+            DropIndexAsync = (db, tableName, indexName) =>
+                commandExecutor.DropIndexForRemovedConstraintAsync(db, tableName, indexName),
         };
         this.logger = logger;
         this.sharedNode = sharedNode ?? throw new ArgumentNullException(nameof(sharedNode), "A shared Kahuna node is required");

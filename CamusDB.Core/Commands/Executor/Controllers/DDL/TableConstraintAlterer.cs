@@ -36,6 +36,10 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.DDL;
 /// <see cref="CatalogsManager.ReplicateSetColumnNotNullAsync"/>.
 ///
 /// <b>DROP NOT NULL</b>: unconditional; replicates and clears the NOT NULL flag and constraint name.
+///
+/// <para>Foreign keys do not come here. <c>SchemaDdlService.AlterConstraintLocalAsync</c> routes
+/// <c>ADD ... FOREIGN KEY</c>, and a <c>DROP CONSTRAINT</c> that names only a foreign key, to the staged
+/// rollout, which needs the index build and the coordinator.</para>
 /// </summary>
 internal sealed class TableConstraintAlterer
 {

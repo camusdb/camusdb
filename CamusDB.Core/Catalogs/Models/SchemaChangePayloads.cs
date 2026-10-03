@@ -504,6 +504,34 @@ public sealed class SchemaCheckConstraintPayload
 }
 
 /// <summary>
+/// Payload for <see cref="SchemaOp.AddForeignKey"/>: one constraint, fully resolved to ids by the
+/// proposer, and the child table that holds it.
+/// </summary>
+public sealed class SchemaAddForeignKeyPayload
+{
+    /// <summary>The child table, by name, as every other table delta addresses its target.</summary>
+    public string TableName { get; set; } = "";
+
+    /// <summary>
+    /// The child table's immutable id. The apply refuses the delta when the table under
+    /// <see cref="TableName"/> has another id, so a constraint resolved against one table never lands
+    /// on a table that replaced it.
+    /// </summary>
+    public string TableId { get; set; } = "";
+
+    /// <summary>The constraint, in <c>WriteOnly</c>.</summary>
+    public ForeignKeySchema? ForeignKey { get; set; }
+
+    /// <summary>
+    /// The <see cref="TableIndexSchema.KvId"/> of an index the statement built for this constraint, or
+    /// null when the constraint reuses an index the table already had. The apply sets that index's
+    /// <see cref="TableIndexSchema.OwnerConstraintId"/> in the same delta, so the index and its owner
+    /// appear together and the index goes when the constraint goes.
+    /// </summary>
+    public string? ClaimedIndexId { get; set; }
+}
+
+/// <summary>
 /// Payload for <see cref="SchemaOp.SetColumnStorage"/>: the target column and its new storage
 /// strategy. The column is matched by name, case-insensitively, like every other column delta.
 /// </summary>

@@ -612,7 +612,6 @@ public sealed class CommandExecutor : IAsyncDisposable
             tableIndexAlterer,
             tableDropper,
             rowDeleter,
-            tableConstraintAlterer,
             viewCreator,
             matViewCreator,
             matViewRefresher,
@@ -1083,6 +1082,18 @@ public sealed class CommandExecutor : IAsyncDisposable
         set => schemaDdl.TestInterceptAfterBackfillCheckpoint = value;
     }
 
+    /// <summary>
+    /// Test-only seam: runs inside <c>ALTER TABLE ... ADD CONSTRAINT ... FOREIGN KEY</c> after the
+    /// constraint is enforced in <c>WriteOnly</c> on every node and before the validation pass. Null in
+    /// production; a test clears it after use.
+    /// </summary>
+    [System.ComponentModel.EditorBrowsable(System.ComponentModel.EditorBrowsableState.Never)]
+    internal Func<Task>? TestInterceptBeforeForeignKeyValidation
+    {
+        get => schemaDdl.TestInterceptBeforeForeignKeyValidation;
+        set => schemaDdl.TestInterceptBeforeForeignKeyValidation = value;
+    }
+
     [System.ComponentModel.EditorBrowsable(System.ComponentModel.EditorBrowsableState.Never)]
     internal CatalogsManager Catalogs => catalogs;
 
@@ -1106,6 +1117,14 @@ public sealed class CommandExecutor : IAsyncDisposable
     /// </summary>
     internal Task ValidateForeignKeyRowsAsync(DatabaseDescriptor database, string tableName, string constraintName) =>
         schemaDdl.ValidateForeignKeyRowsAsync(database, tableName, constraintName);
+
+    /// <summary>
+    /// Drops one index, entries and schema entry, without taking the DDL semaphore. Reachable here
+    /// because <see cref="Controllers.DatabaseOpener"/> wires it into the leader-change resume
+    /// coordinator, which drops the index a foreign key owned when that constraint fails validation.
+    /// </summary>
+    internal Task DropIndexForRemovedConstraintAsync(DatabaseDescriptor database, string tableName, string indexName) =>
+        schemaDdl.DropIndexWithinGateAsync(database, tableName, indexName);
 
     public Task<bool> AlterIndex(AlterIndexTicket ticket) => schemaDdl.AlterIndex(ticket);
 

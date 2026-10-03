@@ -92,6 +92,7 @@ internal static class SchemaDeltaApplier
             SchemaOp.DropSequence => SequenceDeltaApplier.ApplyDropSequence(schema, SchemaDeltaApplier.DecodePayload<SchemaDropSequencePayload>(entry)),
             SchemaOp.RenameSequence => SequenceDeltaApplier.ApplyRenameSequence(schema, SchemaDeltaApplier.DecodePayload<SchemaRenamePayload>(entry)),
             SchemaOp.AlterSequence => SequenceDeltaApplier.ApplyAlterSequence(schema, SchemaDeltaApplier.DecodePayload<SchemaAlterSequencePayload>(entry)),
+            SchemaOp.AddForeignKey => ForeignKeyDeltaApplier.ApplyAddForeignKey(schema, SchemaDeltaApplier.DecodePayload<SchemaAddForeignKeyPayload>(entry)),
             _ => throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Unknown schema operation '{entry.Op}'")
         };
 
@@ -195,9 +196,17 @@ internal static class SchemaDeltaApplier
             // A truncate does not move TableSchema.Version, so the fallback below would answer
             // "applied" for any unrelated DDL that did. The storage id is the only proof.
             SchemaOp.TruncateTable => WasTruncateApplied(schema, DecodePayload<SchemaTruncateTablePayload>(entry)),
+            // Answered from the constraint's immutable id, so a constraint of the same name that a
+            // later statement added is not mistaken for this one.
+            SchemaOp.AddForeignKey => HasForeignKey(schema, DecodePayload<SchemaAddForeignKeyPayload>(entry)),
             _ => schema.SchemaVersion >= entry.ToVersion
         };
     }
+
+    internal static bool HasForeignKey(Schema schema, SchemaAddForeignKeyPayload payload) =>
+        payload.ForeignKey is { } foreignKey
+        && schema.Tables.TryGetValue(payload.TableName, out TableSchema? table)
+        && table.ForeignKeys?.Exists(fk => string.Equals(fk.Id, foreignKey.Id, StringComparison.Ordinal)) == true;
 
     internal static bool WasRenamed(Schema schema, SchemaRenamePayload payload)
     {

@@ -187,6 +187,12 @@ public sealed class ForwardAlterConstraintRequest
 
     /// <summary>Target strategy for SET STORAGE; null for every other operation.</summary>
     public ColumnStorageStrategy? Storage { get; set; }
+
+    /// <summary>
+    /// The constraint for ADD FOREIGN KEY, by name, as the statement wrote it; null for every other
+    /// operation. The leader resolves the names against its own schema.
+    /// </summary>
+    public ForeignKeyInfoRequest? ForeignKey { get; set; }
 }
 
 public sealed class ForwardRenameTableRequest

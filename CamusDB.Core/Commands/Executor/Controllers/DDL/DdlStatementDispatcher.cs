@@ -73,8 +73,6 @@ internal sealed class DdlStatementDispatcher
 
     private readonly RowDeleter rowDeleter;
 
-    private readonly TableConstraintAlterer tableConstraintAlterer;
-
     private readonly ViewCreator viewCreator;
 
     private readonly MaterializedViewCreator matViewCreator;
@@ -111,7 +109,6 @@ internal sealed class DdlStatementDispatcher
         TableIndexAlterer tableIndexAlterer,
         TableDropper tableDropper,
         RowDeleter rowDeleter,
-        TableConstraintAlterer tableConstraintAlterer,
         ViewCreator viewCreator,
         MaterializedViewCreator matViewCreator,
         MaterializedViewRefresher matViewRefresher,
@@ -150,7 +147,6 @@ internal sealed class DdlStatementDispatcher
         this.tableIndexAlterer = tableIndexAlterer;
         this.tableDropper = tableDropper;
         this.rowDeleter = rowDeleter;
-        this.tableConstraintAlterer = tableConstraintAlterer;
         this.viewCreator = viewCreator;
         this.matViewCreator = matViewCreator;
         this.matViewRefresher = matViewRefresher;
@@ -490,13 +486,14 @@ internal sealed class DdlStatementDispatcher
                     AlterConstraintTicket alterConstraintTicket = sqlExecutor.CreateAlterConstraintTicket(ticket, ast, tableForConstraint.Schema);
                     context.Validator.Validate(alterConstraintTicket);
 
+                    // Before the forward: a forwarded statement runs on the leader with no user principal.
+                    ForeignKeyPrivileges.RequireReferencePrivileges(database, alterConstraintTicket);
+
                     bool? constraintForwarded = await ddlForwarding.TryForwardAlterConstraintAsync(database, alterConstraintTicket).ConfigureAwait(false);
                     if (constraintForwarded is not null)
                         return new ExecuteDDLSQLResult(database, constraintForwarded.Value);
 
-                    bool constraintOk = await this.tableConstraintAlterer.Alter(
-                        catalogs, database, tableForConstraint, alterConstraintTicket, context.IsClusterMode
-                    ).ConfigureAwait(false);
+                    bool constraintOk = await schemaDdl.AlterConstraintLocalAsync(database, tableForConstraint, alterConstraintTicket).ConfigureAwait(false);
                     database.Cache?.InvalidateByTableId(database.Id, tableForConstraint.Id);
                     return new ExecuteDDLSQLResult(database, constraintOk);
                 }

@@ -6,6 +6,7 @@
  */
 
 using System;
+using System.Linq;
 using System.Threading.Tasks;
 
 using NUnit.Framework;
@@ -70,6 +71,44 @@ internal sealed class TestForeignKeyPrivileges : BaseTest
 
         Assert.IsNotNull((await ex.OpenDatabase(db)).Schema.Tables["employees"].ForeignKeys);
     }
+
+    /// <summary>
+    /// ALTER TABLE ... ADD CONSTRAINT needs the same SELECT on the parent as CREATE TABLE. The ALTER
+    /// privilege on the child is not enough.
+    /// </summary>
+    [Test]
+    public async Task AddingAConstraintWithoutSelectOnTheParentIsRefused()
+    {
+        (string db, CommandExecutor ex, Principal user) = await Setup();
+        Principal root = await Login(ex, "root", "root-pw");
+        await TxnDdl(ex, db, "CREATE TABLE weather (id int64 PRIMARY KEY NOT NULL, city string)", user);
+        await ServerDdl(ex, $"GRANT ALTER ON {db}.* TO u", root);
+        user = await Login(ex, "u", "pw");
+
+        CamusDBException exception = Assert.ThrowsAsync<CamusDBException>(async () =>
+            await TxnDdl(ex, db, AlterSql, user))!;
+
+        Assert.AreEqual(CamusDBErrorCodes.InsufficientPrivilege, exception.Code);
+        Assert.That(exception.Message, Does.Contain("cities"));
+        Assert.IsNull((await ex.OpenDatabase(db)).Schema.Tables["weather"].ForeignKeys);
+    }
+
+    [Test]
+    public async Task AddingAConstraintWithSelectOnTheParentIsAllowed()
+    {
+        (string db, CommandExecutor ex, Principal user) = await Setup();
+        Principal root = await Login(ex, "root", "root-pw");
+        await TxnDdl(ex, db, "CREATE TABLE weather (id int64 PRIMARY KEY NOT NULL, city string)", user);
+        await ServerDdl(ex, $"GRANT ALTER ON {db}.* TO u", root);
+        await ServerDdl(ex, $"GRANT SELECT ON {db}.cities TO u", root);
+        user = await Login(ex, "u", "pw");
+
+        await TxnDdl(ex, db, AlterSql, user);
+
+        Assert.AreEqual("weather_city_fk", (await ex.OpenDatabase(db)).Schema.Tables["weather"].ForeignKeys!.Single().Name);
+    }
+
+    private const string AlterSql = "ALTER TABLE weather ADD CONSTRAINT weather_city_fk FOREIGN KEY (city) REFERENCES cities (name)";
 
     /// <summary>Creates the database and cities as root, and a user u who may only create tables.</summary>
     private async Task<(string db, CommandExecutor ex, Principal user)> Setup()

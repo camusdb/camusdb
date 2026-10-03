@@ -297,6 +297,114 @@ public sealed class TestForeignKeyDefinitionRules
             "A constraint that is gone is never re-added by a job");
     }
 
+    // ── ALTER TABLE ADD CONSTRAINT at apply time ────────────────────────────
+    //
+    // The AddForeignKey delta checks the constraint again by id, in log order. These are the races the
+    // proposer's own checks cannot see.
+
+    [Test]
+    public void AddForeignKeyAddsAWriteOnlyConstraintAndClaimsItsIndex()
+    {
+        Schema schema = SchemaWithParent();
+        Apply(schema, PayloadWithoutConstraint(ownedIndex: true));
+
+        SchemaAddForeignKeyPayload payload = AddPayload(Constraint(state: SchemaElementState.WriteOnly), claimedIndexId: ChildIndex);
+        long tableVersion = schema.Tables["weather"].Version;
+        ApplyOp(schema, SchemaOp.AddForeignKey, payload);
+
+        TableSchema weather = schema.Tables["weather"];
+        Assert.AreEqual(SchemaElementState.WriteOnly, weather.ForeignKeys!.Single().State);
+        Assert.AreEqual("fk-1", weather.Indexes!.Single(i => i.KvId == ChildIndex).OwnerConstraintId);
+        Assert.AreEqual(tableVersion, weather.Version, "A constraint is not part of the row encoding");
+        Assert.IsTrue(schema.ForeignKeys.ChildPlansOf(ChildId).Single().IsEnforced, "DML must enforce the constraint from this version on");
+        Assert.IsTrue(SchemaDeltaApplier.WasSchemaDeltaApplied(schema, Entry(SchemaOp.AddForeignKey, payload)));
+    }
+
+    [Test]
+    public void AddForeignKeyIsRefusedWhenTheParentWasDroppedFirst()
+    {
+        Schema schema = SchemaWithParent();
+        Apply(schema, PayloadWithoutConstraint(ownedIndex: false));
+        ApplyOp(schema, SchemaOp.DropTable, new SchemaDropTablePayload { TableName = "cities" });
+
+        CamusDBException exception = Assert.Throws<CamusDBException>(() =>
+            ApplyOp(schema, SchemaOp.AddForeignKey, AddPayload(Constraint(state: SchemaElementState.WriteOnly))))!;
+
+        Assert.AreEqual(CamusDBErrorCodes.TableDoesntExist, exception.Code);
+        Assert.IsNull(schema.Tables["weather"].ForeignKeys);
+    }
+
+    [Test]
+    public void DropOfTheParentIsRefusedOnceTheConstraintWasAdded()
+    {
+        Schema schema = SchemaWithParent();
+        Apply(schema, PayloadWithoutConstraint(ownedIndex: false));
+        ApplyOp(schema, SchemaOp.AddForeignKey, AddPayload(Constraint(state: SchemaElementState.WriteOnly)));
+
+        CamusDBException exception = Assert.Throws<CamusDBException>(() =>
+            ApplyOp(schema, SchemaOp.DropTable, new SchemaDropTablePayload { TableName = "cities" }))!;
+
+        Assert.AreEqual(CamusDBErrorCodes.DependentObjectsExist, exception.Code);
+    }
+
+    [Test]
+    public void AddForeignKeyRefusesAConstraintThatClosesACycle()
+    {
+        Schema schema = SchemaWithParent();
+        Apply(schema, PayloadWithoutConstraint(ownedIndex: false));
+
+        // cities gets a column and an index that reference weather, then a constraint to weather.
+        TableSchema cities = schema.Tables["cities"];
+        cities.Columns!.Add(new TableColumnSchema("pc-weather", "weather_id", ColumnType.Integer64, notNull: false, defaultValue: null));
+        cities.Indexes!.Add(new TableIndexSchema("pi-weather", "cities_weather", ["pc-weather"], IndexType.Multi, SchemaElementState.Public));
+        ApplyOp(schema, SchemaOp.AddForeignKey, new SchemaAddForeignKeyPayload
+        {
+            TableName = "cities",
+            TableId = ParentId,
+            ForeignKey = new ForeignKeySchema("fk-0", "cities_weather_fk", ["pc-weather"], ChildId, ["cc-id"], "ci-pk", "pi-weather",
+                ForeignKeyAction.NoAction, ForeignKeyAction.NoAction, ForeignKeyMatch.Simple, SchemaElementState.WriteOnly),
+        });
+
+        CamusDBException exception = Assert.Throws<CamusDBException>(() =>
+            ApplyOp(schema, SchemaOp.AddForeignKey, AddPayload(Constraint(state: SchemaElementState.WriteOnly))))!;
+
+        Assert.AreEqual(CamusDBErrorCodes.ForeignKeyCycle, exception.Code, exception.Message);
+        Assert.IsNull(schema.Tables["weather"].ForeignKeys);
+    }
+
+    [Test]
+    public void AddForeignKeyRefusesATakenNameAndAPublicState()
+    {
+        Schema schema = SchemaWithParent();
+        Apply(schema, PayloadWithoutConstraint(ownedIndex: false));
+        ApplyOp(schema, SchemaOp.AddForeignKey, AddPayload(Constraint(state: SchemaElementState.WriteOnly)));
+
+        ForeignKeySchema sameName = new("fk-2", "weather_city_fkey", [ChildCityColumn], ParentId, [ParentNameColumn], ParentUnique, ChildIndex,
+            ForeignKeyAction.NoAction, ForeignKeyAction.NoAction, ForeignKeyMatch.Simple, SchemaElementState.WriteOnly);
+        CamusDBException taken = Assert.Throws<CamusDBException>(() => ApplyOp(schema, SchemaOp.AddForeignKey, AddPayload(sameName)))!;
+        Assert.AreEqual(CamusDBErrorCodes.InvalidInput, taken.Code);
+
+        ForeignKeySchema born = new("fk-3", "weather_other_fk", [ChildCityColumn], ParentId, [ParentNameColumn], ParentUnique, ChildIndex,
+            ForeignKeyAction.NoAction, ForeignKeyAction.NoAction, ForeignKeyMatch.Simple, SchemaElementState.Public);
+        CamusDBException state = Assert.Throws<CamusDBException>(() => ApplyOp(schema, SchemaOp.AddForeignKey, AddPayload(born)))!;
+        Assert.AreEqual(CamusDBErrorCodes.InvalidInternalOperation, state.Code, "A constraint must be validated before it is Public");
+
+        Assert.AreEqual(1, schema.Tables["weather"].ForeignKeys!.Count);
+    }
+
+    [Test]
+    public void AddForeignKeyRefusesAClaimOnAnIndexThatIsNotItsBackingIndex()
+    {
+        Schema schema = SchemaWithParent();
+        Apply(schema, PayloadWithoutConstraint(ownedIndex: false));
+
+        CamusDBException exception = Assert.Throws<CamusDBException>(() =>
+            ApplyOp(schema, SchemaOp.AddForeignKey, AddPayload(Constraint(state: SchemaElementState.WriteOnly), claimedIndexId: "ci-pk")))!;
+
+        Assert.AreEqual(CamusDBErrorCodes.InvalidInternalOperation, exception.Code);
+        Assert.IsTrue(schema.Tables["weather"].Indexes!.All(i => i.OwnerConstraintId is null));
+    }
+
     // ── Helpers ─────────────────────────────────────────────────────────────
 
     private static void AssertApplyRefused(Schema schema, SchemaCreateTablePayload payload, string expectedCode)
@@ -396,6 +504,36 @@ public sealed class TestForeignKeyDefinitionRules
             new TableIndexSchema(ChildIndex, "weather_city", [ChildCityColumn], IndexType.Multi, SchemaElementState.Public),
         ],
         ForeignKeys = [constraint],
+    };
+
+    private static SchemaCreateTablePayload PayloadWithoutConstraint(bool ownedIndex) => new()
+    {
+        TableId = ChildId,
+        TableName = "weather",
+        Columns = [Column("cc-id", "id", ColumnType.Integer64), Column(ChildCityColumn, "city", ColumnType.String)],
+        Indexes =
+        [
+            new TableIndexSchema("ci-pk", "~pk", ["cc-id"], IndexType.Unique, SchemaElementState.Public),
+            new TableIndexSchema(ChildIndex, ownedIndex ? "~fk_weather_city_fkey" : "weather_city", [ChildCityColumn], IndexType.Multi, SchemaElementState.Public),
+        ],
+    };
+
+    private static SchemaAddForeignKeyPayload AddPayload(ForeignKeySchema constraint, string? claimedIndexId = null) => new()
+    {
+        TableName = "weather",
+        TableId = ChildId,
+        ForeignKey = constraint,
+        ClaimedIndexId = claimedIndexId,
+    };
+
+    private static SchemaChangeLogEntry Entry<T>(SchemaOp op, T payload) => new()
+    {
+        Ts = new HLCTimestamp(1, 1, 1),
+        Database = "db",
+        FromVersion = 1,
+        ToVersion = 2,
+        Op = op,
+        Payload = SchemaChangeLogEntryCodec.EncodePayload(payload),
     };
 
     private static SchemaColumnPayload Column(string id, string name, ColumnType type) => new()

@@ -146,6 +146,7 @@ public sealed class TestSchemaChangeLogEntryCodec
             TableName = "order_no",
             NewName = "order_number"
         });
+        yield return (SchemaOp.AddForeignKey, AddForeignKeyPayload());
         yield return (SchemaOp.AlterSequence, new SchemaAlterSequencePayload
         {
             SequenceId = "A2",
@@ -201,6 +202,23 @@ public sealed class TestSchemaChangeLogEntryCodec
         Assert.AreEqual(SchemaElementState.WriteOnly, constraint.State);
         Assert.AreEqual(constraint.Id, decoded.Indexes!.Single().OwnerConstraintId);
         Assert.AreEqual(constraint.BackingIndexId, decoded.Indexes!.Single().KvId);
+    }
+
+    [Test]
+    public void AddForeignKey_RoundTripsTheConstraintAndTheClaimedIndex()
+    {
+        SchemaChangeLogEntry roundTrip = SchemaChangeLogEntryCodec.Decode(SchemaChangeLogEntryCodec.Encode(
+            Entry(SchemaOp.AddForeignKey, EncodePayload(AddForeignKeyPayload()))));
+
+        SchemaAddForeignKeyPayload decoded = roundTrip.GetPayload<SchemaAddForeignKeyPayload>();
+
+        Assert.AreEqual("robots", decoded.TableName);
+        Assert.AreEqual("A0", decoded.TableId);
+        Assert.AreEqual("000000000000000000000201", decoded.ClaimedIndexId);
+        Assert.AreEqual("robots_name_fkey", decoded.ForeignKey!.Name);
+        Assert.AreEqual(decoded.ClaimedIndexId, decoded.ForeignKey.BackingIndexId);
+        Assert.AreEqual(ForeignKeyAction.Restrict, decoded.ForeignKey.OnUpdate);
+        Assert.AreEqual(SchemaElementState.WriteOnly, decoded.ForeignKey.State);
     }
 
     [Test]
@@ -446,6 +464,16 @@ public sealed class TestSchemaChangeLogEntryCodec
                 ["000000000000000000000401"], "000000000000000000000501", "000000000000000000000201",
                 ForeignKeyAction.NoAction, ForeignKeyAction.Restrict, ForeignKeyMatch.Simple, SchemaElementState.WriteOnly)
         ]
+    };
+
+    private static SchemaAddForeignKeyPayload AddForeignKeyPayload() => new()
+    {
+        TableName = "robots",
+        TableId = "A0",
+        ClaimedIndexId = "000000000000000000000201",
+        ForeignKey = new ForeignKeySchema("000000000000000000000301", "robots_name_fkey", ["000000000000000000000101"], "B7",
+            ["000000000000000000000401"], "000000000000000000000501", "000000000000000000000201",
+            ForeignKeyAction.NoAction, ForeignKeyAction.Restrict, ForeignKeyMatch.Simple, SchemaElementState.WriteOnly)
     };
 
     private static SchemaColumnPayload ColumnPayload(string name, ColumnType type) => new()

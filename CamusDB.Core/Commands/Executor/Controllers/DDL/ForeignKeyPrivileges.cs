@@ -37,17 +37,37 @@ internal static class ForeignKeyPrivileges
             return;
 
         foreach (ForeignKeyInfo foreignKey in ticket.ForeignKeys)
-        {
-            if (string.Equals(foreignKey.ReferencedTable, ticket.TableName, StringComparison.OrdinalIgnoreCase))
-                continue;
+            RequireSelectOnParent(database, principal, ticket.TableName, foreignKey);
+    }
 
-            if (!database.Schema.Tables.TryGetValue(foreignKey.ReferencedTable, out TableSchema? parent) || parent.Id is null)
-                continue;
+    /// <summary>
+    /// The same check for <c>ALTER TABLE ... ADD CONSTRAINT ... FOREIGN KEY</c>. Every other operation
+    /// of <paramref name="ticket"/> passes.
+    /// </summary>
+    internal static void RequireReferencePrivileges(DatabaseDescriptor database, AlterConstraintTicket ticket)
+    {
+        if (ticket.Operation != AlterConstraintOperation.AddForeignKey
+            || ticket.ForeignKey is not { } foreignKey
+            || !database.Options.AuthenticationEnabled)
+            return;
 
-            if (!principal.HasPrivilege(Privilege.Select, database.Id, parent.Id))
-                throw new CamusDBException(
-                    CamusDBErrorCodes.InsufficientPrivilege,
-                    $"Missing Select privilege on table '{database.Name}.{parent.Name}', which foreign key '{foreignKey.Name}' references");
-        }
+        if (AuthorizationContext.Current.Principal is not { } principal)
+            return;
+
+        RequireSelectOnParent(database, principal, ticket.TableName, foreignKey);
+    }
+
+    private static void RequireSelectOnParent(DatabaseDescriptor database, Principal principal, string childTableName, ForeignKeyInfo foreignKey)
+    {
+        if (string.Equals(foreignKey.ReferencedTable, childTableName, StringComparison.OrdinalIgnoreCase))
+            return;
+
+        if (!database.Schema.Tables.TryGetValue(foreignKey.ReferencedTable, out TableSchema? parent) || parent.Id is null)
+            return;
+
+        if (!principal.HasPrivilege(Privilege.Select, database.Id, parent.Id))
+            throw new CamusDBException(
+                CamusDBErrorCodes.InsufficientPrivilege,
+                $"Missing Select privilege on table '{database.Name}.{parent.Name}', which foreign key '{foreignKey.Name}' references");
     }
 }
