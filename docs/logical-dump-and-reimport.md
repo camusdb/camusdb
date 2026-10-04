@@ -50,8 +50,22 @@ what makes the dump in section 4 possible after an upgrade, and what makes a rol
 `camus-dump` writes SQL. For each database it emits `CREATE DATABASE IF NOT EXISTS`, a `USE`
 line, then for each table a `CREATE TABLE`, the `CREATE INDEX` statements, and `INSERT`
 statements for the rows. The `CREATE TABLE` text comes from `SHOW CREATE TABLE`, so it carries
-column defaults, `CHECK` constraints, `COMMENT` clauses, covering-index `INCLUDE` columns, and the
-row-level TTL configuration of the table.
+column defaults, `CHECK` constraints, foreign keys, `COMMENT` clauses, covering-index `INCLUDE`
+columns, and the row-level TTL configuration of the table.
+
+**Foreign keys and the load order.** A `CREATE TABLE` with a foreign key fails when its parent table
+does not exist yet, and a child `INSERT` fails when its parent row is not loaded yet. The
+`WITHOUT INDEXES` form, which `--defer-indexes` uses, keeps the foreign keys too. Load a dump with
+foreign keys in one of two ways:
+
+- **Parents first.** Order the tables so that each parent, with its rows, comes before its
+  children. A self-reference loads in any order inside one table only when each `INSERT`
+  statement holds a row's parent in the same statement or an earlier one.
+- **Constraints last.** Remove the `CONSTRAINT ... FOREIGN KEY` clauses from the `CREATE TABLE`
+  statements, load all the rows, then add each constraint with `ALTER TABLE ... ADD CONSTRAINT`.
+  The ADD validates the loaded rows and reports the first row without a parent.
+
+See [foreign-keys.md](foreign-keys.md).
 
 Index definitions carry their **per-column sort direction** and their **comment**, both in the
 inline `KEY` clause of the `CREATE TABLE` and in the separate `CREATE INDEX` statements, so a
@@ -253,7 +267,8 @@ version cannot read the `v1` key layout, and every table would appear empty.
 Restore in this order, so that each step finds what it depends on:
 
 1. Users, so that the objects created later can be granted to them.
-2. Databases, tables, indexes and rows, which is the dump.
+2. Databases, tables, indexes and rows, which is the dump. With foreign keys, load the parent
+   tables before their children, or add the constraints after the rows (section 2).
 3. Views and materialized views, which reference the tables.
 4. Grants, which reference users and objects.
 5. Cluster settings.

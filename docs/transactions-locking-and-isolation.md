@@ -314,6 +314,28 @@ Pessimistic is the default. Optimistic is opt-in, chosen three ways (precedence:
 See `kahuna-transaction-coordinator.md` for the deferred-session-start mechanism and how optimistic
 folding and validation work.
 
+### 6.5 Foreign-key rendezvous locks — every isolation level
+A foreign key (see [foreign-keys.md](foreign-keys.md)) adds one more lock, and it is the one
+exception to "Read Committed takes no read locks." A child writer and a parent writer must not both
+commit when one of them removes what the other needs, at **any** isolation level. They meet on one
+key: the parent's unique-index entry for the referenced key.
+
+- A **child** INSERT or UPDATE takes a **shared point lock** on that entry, then reads it. It takes
+  the lock at Read Committed and at Serializable, pessimistic or optimistic, and holds it to the end
+  of the transaction.
+- A **parent** DELETE, or an UPDATE that changes the key, deletes that entry. Its write meets the
+  child's shared lock and waits (up to `lock_wait_deadline_ms`), so it cannot remove the key while a
+  child that read it is still open. After the write, the parent reads the child's index for the
+  key, and fails if a child row holds it.
+- An **optimistic** parent stages its delete without a write intent, so it takes an **exclusive**
+  point lock on the entry before its read. Range locks conflict by mode both ways, so the effect is
+  the same.
+- A parent UPDATE that does not change the key does not touch the entry, and never waits.
+
+These locks **never escalate** to a whole-index lock (unlike the point read locks of §6.3): an
+escalated shared lock on the parent's index would block every new parent INSERT until the child
+transaction ends. A child transaction holds at most one such lock per distinct parent key.
+
 ---
 
 ## 7. MVCC, in one picture

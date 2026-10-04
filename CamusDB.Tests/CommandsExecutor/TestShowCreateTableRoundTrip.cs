@@ -1063,8 +1063,9 @@ public sealed class TestShowCreateTableRoundTrip : BaseTest
             throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "The coordinator stopped before the validation");
         };
 
-        Assert.ThrowsAsync<CamusDBException>(async () =>
-            await ForeignKeyAlterScenarios.Ddl(executor, dbname, ForeignKeyAlterScenarios.AddConstraint));
+        CamusDBException stopped = Assert.ThrowsAsync<CamusDBException>(async () =>
+            await ForeignKeyAlterScenarios.Ddl(executor, dbname, ForeignKeyAlterScenarios.AddConstraint))!;
+        Assert.That(stopped.Message, Does.Contain("stopped before the validation"));
         Assert.AreEqual(SchemaElementState.WriteOnly, db.Schema.Tables["weather"].ForeignKeys!.Single().State);
 
         string writeOnly = (await QueryAsync(executor, db, dbname, "SHOW CREATE TABLE weather"))[0].Row["Create Table"].StrValue!;

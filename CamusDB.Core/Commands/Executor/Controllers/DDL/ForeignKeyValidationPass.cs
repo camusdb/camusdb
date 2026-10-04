@@ -26,14 +26,19 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.DDL;
 /// <para><b>How it reads.</b> It reads the child's backing index in key order, in pages, each page in
 /// its own Read Committed read-only transaction, so no transaction stays open for the whole table.
 /// Rows that share a key are adjacent in that order and collapse to one distinct key; each next page
-/// starts after the last key of the page before, so a key is never checked twice. A key with a NULL
+/// starts after the last key of the page before, so a key is never checked twice. The cursor is a
+/// position in the scan order of the index, not a value bound: on a descending column the keys after
+/// it are smaller values, and a value bound would end the pass after its first page. A key with a NULL
 /// column is skipped, because MATCH SIMPLE is satisfied by any NULL. The parent keys of a page are
 /// checked in one batched read (<c>LookupUniqueManyAsync</c>), never one read per child row.</para>
 ///
-/// <para><b>Before it reports an orphan, it reads both sides again</b> in a fresh transaction. A child
+/// <para><b>Before it reports an orphan, it reads both sides again</b>, in one snapshot. A child
 /// DELETE or a parent INSERT that committed after the page was read can have removed the orphan, and
-/// the constraint must not fail for a row that no longer exists. The first orphan in key order is
-/// reported, so the error is the same on every run.</para>
+/// the constraint must not fail for a row that no longer exists. The two reads use a Serializable
+/// read-only transaction, which reads at one timestamp: two Read Committed reads each see the newest
+/// state at their own time, and a child seen by the first and a parent missed by the second need not
+/// ever have been committed together. The first orphan in key order is reported, so the error is the
+/// same on every run.</para>
 ///
 /// <para>On a branch, both reads merge the ancestry as of the fork, so inherited rows count.</para>
 /// </summary>
@@ -44,6 +49,18 @@ internal static class ForeignKeyValidationPass
     /// read that follows it.
     /// </summary>
     internal const int PageEntries = 1024;
+
+    /// <summary>
+    /// Test-only seam: invoked after a page found a key without its parent and before the recheck
+    /// takes its snapshot, so a test can commit a change exactly in that window. Null in production.
+    /// </summary>
+    internal static Func<Task>? BeforeRecheckForTesting { get; set; }
+
+    /// <summary>
+    /// Test-only seam: invoked between the recheck's read of the child and its read of the parent, so
+    /// a test can commit a change between the two reads. Null in production.
+    /// </summary>
+    internal static Func<Task>? BetweenRecheckReadsForTesting { get; set; }
 
     /// <summary>
     /// Validates the constraint <paramref name="constraintName"/> of <paramref name="childTableName"/>.
@@ -115,7 +132,8 @@ internal static class ForeignKeyValidationPass
             {
                 await foreach ((CompositeColumnValue key, _, _) in child.Store.ScanIndex(
                     tx, backing.KvId, keyTypes, after, null, unique,
-                    fromInclusive: false, toInclusive: true, maxRows: PageEntries, cancellationToken).ConfigureAwait(false))
+                    fromInclusive: false, toInclusive: true, maxRows: PageEntries, cancellationToken,
+                    boundsInIndexOrder: true).ConfigureAwait(false))
                 {
                     emitted++;
 
@@ -167,8 +185,8 @@ internal static class ForeignKeyValidationPass
     }
 
     /// <summary>
-    /// Reads the child entry and the parent key again in a fresh transaction. True only when the child
-    /// still has the key and the parent still does not.
+    /// Reads the child entry and the parent key again, both at one snapshot timestamp. True only when,
+    /// at that timestamp, the child has the key and the parent does not: a state that was committed.
     /// </summary>
     private static async Task<bool> IsStillOrphanAsync(
         DatabaseDescriptor database,
@@ -182,8 +200,11 @@ internal static class ForeignKeyValidationPass
         CompositeColumnValue parentKey,
         CancellationToken cancellationToken)
     {
+        if (BeforeRecheckForTesting is { } beforeRecheck)
+            await beforeRecheck().ConfigureAwait(false);
+
         KvTransaction tx = await database.Transactions.BeginAsync(
-            CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadOnly
+            CamusIsolationLevel.Serializable, CamusTransactionMode.ReadOnly
         ).ConfigureAwait(false);
         try
         {
@@ -198,6 +219,9 @@ internal static class ForeignKeyValidationPass
 
             if (!childPresent)
                 return false;
+
+            if (BetweenRecheckReadsForTesting is { } betweenReads)
+                await betweenReads().ConfigureAwait(false);
 
             bool[] parentPresent = await parent.Store.LookupUniqueManyAsync(tx, referencedIndexId, [parentKey], cancellationToken).ConfigureAwait(false);
             return !parentPresent[0];

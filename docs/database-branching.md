@@ -206,7 +206,8 @@ timestamp.
   hides an inherited row or index entry, and a write in the source after the fork never changes a
   check on the branch. A child writer and a parent writer on a branch meet on the branch's own copy
   of the parent's unique-index key, so the lock rendezvous needs no change. A reference names a
-  table in its own database only; a branch cannot reference its source.
+  table in its own database only; a branch cannot reference its source. See
+  [foreign-keys.md](foreign-keys.md) §8.
 - **Branch DDL is invisible to the parent and siblings** — it writes only the branch dbId's
   metadata/log. Branch `CREATE TABLE`/`ADD INDEX` allocate new ids in the branch; renames stay
   metadata-only and branch-local.

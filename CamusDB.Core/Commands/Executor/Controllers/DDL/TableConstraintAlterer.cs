@@ -75,12 +75,9 @@ internal sealed class TableConstraintAlterer
         AlterConstraintTicket ticket,
         bool isClusterMode)
     {
-        // Duplicate constraint name check.
-        if (table.Schema.CheckConstraints?.Any(c =>
-                string.Equals(c.Name, ticket.ConstraintName, StringComparison.OrdinalIgnoreCase)) == true)
-            throw new CamusDBException(
-                CamusDBErrorCodes.InvalidInput,
-                $"Constraint '{ticket.ConstraintName}' already exists on table '{table.Name}'");
+        // CHECK, named NOT NULL and foreign keys share one name space (ConstraintNameRules). Checked
+        // here so a taken name is refused before the scan, and again under the schema lock below.
+        ConstraintNameRules.RequireUnused(table.Schema, ticket.ConstraintName);
 
         // Parse the condition once for the existence scan.
         var parsedCondition = SQLParser.SQLParserProcessor.ParseCondition(ticket.Expression!);
@@ -111,6 +108,8 @@ internal sealed class TableConstraintAlterer
                     // Snapshot for revert: persist serializes the in-memory schema, so the mutation
                     // must precede persist. If persist/commit then fails we must undo it, or the node
                     // enforces a constraint that never became durable.
+                    ConstraintNameRules.RequireUnused(table.Schema, ticket.ConstraintName);
+
                     previousChecks = table.Schema.CheckConstraints is null ? null : [.. table.Schema.CheckConstraints];
                     CheckConstraintSchema check = new()
                     {
@@ -331,8 +330,10 @@ internal sealed class TableConstraintAlterer
         // Scan existing rows — reject if any row has NULL in this column.
         await ScanAndValidateNotNullAsync(database, table, columnName).ConfigureAwait(false);
 
-        // Auto-name: {table}_{col}_not_null
+        // Auto-name: {table}_{col}_not_null. The generated name must not be one that a CHECK or a
+        // foreign key already uses (ConstraintNameRules); checked again under the schema lock below.
         string constraintName = $"{table.Name}_{columnName}_not_null";
+        ConstraintNameRules.RequireUnusedForNotNull(table.Schema, constraintName, column.Id);
 
         if (isClusterMode)
         {
@@ -355,6 +356,7 @@ internal sealed class TableConstraintAlterer
                     List<TableColumnSchema> columns = table.Schema.Columns!;
                     int idx = columns.FindIndex(c => string.Equals(c.Name, columnName, StringComparison.OrdinalIgnoreCase));
                     TableColumnSchema old = columns[idx];
+                    ConstraintNameRules.RequireUnusedForNotNull(table.Schema, constraintName, old.Id);
                     revertIdx = idx;
                     revertColumn = old;
                     columns[idx] = new TableColumnSchema(

@@ -452,6 +452,16 @@ internal sealed class KvIndexAccessor
     /// consistent snapshot as the point reads across all pages, and folds reads according to
     /// <see cref="KvTransaction.FoldReads"/> — see <see cref="KvRowAccessor.ScanRows"/> for why
     /// folding is a transaction property rather than a call-site choice.
+    ///
+    /// <para><b>Two meanings of the bounds.</b> The raw range always uses the encoded key order, in
+    /// which a descending column runs from its largest value to its smallest. By default the decoded
+    /// filter then compares the keys with the bounds in natural value order. That is what the query
+    /// planner relies on: it gives a descending column an equality bound only, where both orders
+    /// agree. With <paramref name="boundsInIndexOrder"/> the filter compares each column in the
+    /// direction of the index instead, so <paramref name="from"/> and <paramref name="to"/> are
+    /// positions in the scan order. A caller that pages through an index by passing the last key of
+    /// one page as the exclusive start of the next needs this mode: in natural order, the keys after a
+    /// descending cursor are smaller and the filter would reject every one of them.</para>
     /// </summary>
     internal async IAsyncEnumerable<(CompositeColumnValue key, ObjectIdValue rowId, ReadOnlyMemory<byte> includeTuple)> ScanIndex(
         KvTransaction tx,
@@ -464,7 +474,8 @@ internal sealed class KvIndexAccessor
         bool toInclusive = true,
         long? maxRows = null,
         [EnumeratorCancellation] CancellationToken cancellationToken = default,
-        int pageSize = KvStoreConstants.DefaultPageSize)
+        int pageSize = KvStoreConstants.DefaultPageSize,
+        bool boundsInIndexOrder = false)
     {
         if (maxRows is <= 0)
             yield break;
@@ -480,6 +491,7 @@ internal sealed class KvIndexAccessor
         int prefixLen = keyPrefix.Length;
 
         OrderType[]? directions = keys.DirectionsOf(indexId);
+        OrderType[]? boundDirections = boundsInIndexOrder ? directions : null;
 
         string? fromEncoded = from is not null ? KeyEncoder.Encode(from, directions) : null;
         string? toEncoded   = to   is not null ? KeyEncoder.Encode(to, directions)   : null;
@@ -596,13 +608,13 @@ internal sealed class KvIndexAccessor
                         continue;
                     if (from is not null)
                     {
-                        int cmp = ComparePrefix(decodedKey, from);
+                        int cmp = ComparePrefix(decodedKey, from, boundDirections);
                         if (fromInclusive ? cmp < 0 : cmp <= 0)
                             continue;
                     }
                     if (to is not null)
                     {
-                        int cmp = ComparePrefix(decodedKey, to);
+                        int cmp = ComparePrefix(decodedKey, to, boundDirections);
                         if (toInclusive ? cmp > 0 : cmp >= 0)
                             continue;
                     }
@@ -700,12 +712,12 @@ internal sealed class KvIndexAccessor
                                 bool inRange = !HasNullInBoundColumns(decodedKey, from, to);
                                 if (inRange && from is not null)
                                 {
-                                    int cmp = ComparePrefix(decodedKey, from);
+                                    int cmp = ComparePrefix(decodedKey, from, boundDirections);
                                     if (fromInclusive ? cmp < 0 : cmp <= 0) inRange = false;
                                 }
                                 if (inRange && to is not null)
                                 {
-                                    int cmp = ComparePrefix(decodedKey, to);
+                                    int cmp = ComparePrefix(decodedKey, to, boundDirections);
                                     if (toInclusive ? cmp > 0 : cmp >= 0) inRange = false;
                                 }
 
@@ -938,9 +950,11 @@ internal sealed class KvIndexAccessor
     /// Compares <paramref name="key"/> against <paramref name="bound"/> over the bound's columns
     /// only, ignoring any trailing columns in <paramref name="key"/> (the appended rowId on a
     /// non-unique index, or lower-significance columns when the bound is a composite prefix).
-    /// Returns &lt;0 / 0 / &gt;0 like <see cref="IComparable{T}.CompareTo"/>.
+    /// Returns &lt;0 / 0 / &gt;0 like <see cref="IComparable{T}.CompareTo"/>. With
+    /// <paramref name="directions"/>, a descending column compares in reverse, so the result follows
+    /// the scan order of the index; without, every column compares in natural value order.
     /// </summary>
-    private static int ComparePrefix(CompositeColumnValue key, CompositeColumnValue bound)
+    private static int ComparePrefix(CompositeColumnValue key, CompositeColumnValue bound, OrderType[]? directions)
     {
         int n = Math.Min(key.Values.Length, bound.Values.Length);
 
@@ -948,7 +962,7 @@ internal sealed class KvIndexAccessor
         {
             int cmp = key.Values[i].CompareTo(bound.Values[i]);
             if (cmp != 0)
-                return cmp;
+                return directions is not null && i < directions.Length && directions[i] == OrderType.Descending ? -cmp : cmp;
         }
 
         // Every bound column matched: equal for range purposes (prefix match); trailing

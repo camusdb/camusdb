@@ -92,17 +92,8 @@ internal static class ForeignKeyDeltaApplier
 
     /// <summary>
     /// <c>DROP CONSTRAINT name</c> resolves the name across CHECK, named NOT NULL and foreign-key
-    /// constraints, so a name must be unique across all three.
+    /// constraints, so a name must be unique across all three; see <see cref="ConstraintNameRules"/>.
     /// </summary>
-    internal static void RequireUnusedConstraintName(TableSchema table, string name)
-    {
-        bool taken = table.CheckConstraints?.Exists(c => string.Equals(c.Name, name, StringComparison.OrdinalIgnoreCase)) == true
-            || table.ForeignKeys?.Exists(fk => string.Equals(fk.Name, name, StringComparison.OrdinalIgnoreCase)) == true
-            || table.Columns?.Exists(c => string.Equals(c.NotNullConstraintName, name, StringComparison.OrdinalIgnoreCase)) == true;
-
-        if (taken)
-            throw new CamusDBException(
-                CamusDBErrorCodes.InvalidInput,
-                $"Constraint '{name}' already exists on table '{table.Name}'");
-    }
+    internal static void RequireUnusedConstraintName(TableSchema table, string name) =>
+        ConstraintNameRules.RequireUnused(table, name);
 }

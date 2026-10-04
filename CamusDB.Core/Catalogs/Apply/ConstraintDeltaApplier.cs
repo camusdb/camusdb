@@ -31,15 +31,18 @@ namespace CamusDB.Core.Catalogs.Apply;
 internal static class ConstraintDeltaApplier
 {
     /// <summary>
-    /// Applies an AddCheckConstraint delta. Idempotent: an existing constraint with the same name
-    /// is replaced. Rebuilds the <c>ParsedCondition</c> AST cache so enforcement is immediately
-    /// available on the applying node. Does not bump <c>TableSchema.Version</c> — check constraints
+    /// Applies an AddCheckConstraint delta. Idempotent: an existing CHECK with the same name is
+    /// replaced. A name that a foreign key or a named NOT NULL uses is refused, in log order, so two
+    /// kinds never share a name (<see cref="ConstraintNameRules"/>). Rebuilds the
+    /// <c>ParsedCondition</c> AST cache so enforcement is immediately available on the applying node. Does not bump <c>TableSchema.Version</c> — check constraints
     /// do not affect row encoding.
     /// </summary>
     internal static TableSchema ApplyAddCheckConstraint(Schema schema, SchemaCheckConstraintPayload payload)
     {
         if (!schema.Tables.TryGetValue(payload.TableName, out TableSchema? tableSchema))
             throw new CamusDBException(CamusDBErrorCodes.TableDoesntExist, $"Table '{payload.TableName}' does not exist");
+
+        ConstraintNameRules.RequireUnusedByOtherKinds(tableSchema, payload.ConstraintName);
 
         CheckConstraintSchema check = new()
         {
@@ -125,8 +128,9 @@ internal static class ConstraintDeltaApplier
     /// <summary>
     /// Applies a SetColumnNotNull delta. Replaces the target column with an updated copy that has
     /// the new <c>NotNull</c> flag and <c>NotNullConstraintName</c>. Idempotent: setting the flag
-    /// to its current value is a no-op. Does not bump <c>TableSchema.Version</c> because the NOT
-    /// NULL flag is not encoded in row bytes.
+    /// to its current value is a no-op. A constraint name that a CHECK, a foreign key or another
+    /// column's NOT NULL uses is refused (<see cref="ConstraintNameRules"/>). Does not bump
+    /// <c>TableSchema.Version</c> because the NOT NULL flag is not encoded in row bytes.
     /// </summary>
     internal static TableSchema ApplySetColumnNotNull(Schema schema, SchemaSetColumnNotNullPayload payload)
     {
@@ -141,6 +145,10 @@ internal static class ConstraintDeltaApplier
             throw new CamusDBException(CamusDBErrorCodes.UnknownColumn, $"Column '{payload.ColumnName}' does not exist on table '{payload.TableName}'");
 
         TableColumnSchema old = tableSchema.Columns[idx];
+
+        if (payload.ConstraintName is { Length: > 0 } constraintName)
+            ConstraintNameRules.RequireUnusedForNotNull(tableSchema, constraintName, old.Id);
+
         tableSchema.Columns[idx] = new TableColumnSchema(
             id: old.Id,
             name: old.Name,

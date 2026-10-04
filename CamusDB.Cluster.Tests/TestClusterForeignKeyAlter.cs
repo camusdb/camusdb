@@ -78,6 +78,52 @@ public sealed class TestClusterForeignKeyAlter
     }
 
     /// <summary>
+    /// CREATE TABLE with a foreign key sent to a follower is forwarded to the leader and keeps the
+    /// constraint. Every node then enforces both sides: a child insert on one node and a parent delete
+    /// on another are refused.
+    /// </summary>
+    [Test]
+    public async Task CreateTableSentToAFollowerIsEnforcedOnEveryNode()
+    {
+        await using InProcessSchemaCluster cluster = await InProcessSchemaCluster.StartAsync(nodeCount: 3, wireLeaderForwarder: true);
+        string db = cluster.NextSchemaLogDatabaseName();
+        await cluster.OpenDatabaseOnAllNodesAsync(db);
+
+        InProcessSchemaCluster.Node leader = await cluster.WaitForSchemaLeaderNodeAsync(db);
+        InProcessSchemaCluster.Node follower = cluster.Nodes.First(n => n.Index != leader.Index);
+        InProcessSchemaCluster.Node other = cluster.Nodes.First(n => n.Index != leader.Index && n.Index != follower.Index);
+
+        await DdlAsync(follower, db, "CREATE TABLE cities (id int64 PRIMARY KEY NOT NULL, name string NOT NULL, UNIQUE KEY cities_name (name))");
+        await DdlAsync(follower, db, "CREATE TABLE weather (id int64 PRIMARY KEY NOT NULL, city string REFERENCES cities (name) ON DELETE RESTRICT)");
+        await cluster.WaitForSchemaConvergenceAsync(db, leader.Database!.Schema.SchemaVersion, timeout: TimeSpan.FromSeconds(30));
+
+        string? constraintId = null;
+        foreach (InProcessSchemaCluster.Node node in cluster.Nodes)
+        {
+            ForeignKeySchema constraint = node.Database!.Schema.Tables["weather"].ForeignKeys!.Single();
+            Assert.AreEqual(SchemaElementState.Public, constraint.State, $"node {node.Index}");
+            Assert.AreEqual(ForeignKeyAction.Restrict, constraint.OnDelete, $"node {node.Index}: the forward must keep the action");
+            Assert.That(constraintId is null || constraintId == constraint.Id, $"node {node.Index}: every node holds the same constraint");
+            constraintId = constraint.Id;
+        }
+
+        await DmlAsync(leader, db, "INSERT INTO cities (id, name) VALUES (1, 'lima')");
+        await DmlAsync(follower, db, "INSERT INTO weather (id, city) VALUES (1, 'lima')");
+
+        CamusDBException orphan = Assert.ThrowsAsync<CamusDBException>(async () =>
+            await DmlAsync(follower, db, "INSERT INTO weather (id, city) VALUES (2, 'atlantis')"))!;
+        Assert.AreEqual(CamusDBErrorCodes.ForeignKeyViolation, orphan.Code, orphan.Message);
+
+        CamusDBException parent = Assert.ThrowsAsync<CamusDBException>(async () =>
+            await DmlAsync(other, db, "DELETE FROM cities WHERE id = 1"))!;
+        Assert.AreEqual(CamusDBErrorCodes.ForeignKeyRestrictDelete, parent.Code, parent.Message);
+
+        CamusDBException drop = Assert.ThrowsAsync<CamusDBException>(async () =>
+            await DdlAsync(other, db, "DROP TABLE cities"))!;
+        Assert.AreEqual(CamusDBErrorCodes.DependentObjectsExist, drop.Code, drop.Message);
+    }
+
+    /// <summary>
     /// The coordinator stops after every node acked the constraint in WriteOnly, and leadership moves.
     /// The ALTER fails, the constraint stays enforced in WriteOnly, and the new leader's resume validates
     /// it and publishes it on every node.

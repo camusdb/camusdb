@@ -121,8 +121,19 @@ CREATE TABLE   orders_restored RELINK TO 'A0';
   they are given as a string literal, exactly as shown by `SHOW ORPHAN …`.
 - `CREATE TABLE … RELINK TO` runs in the context of the current database and recovers one of *its*
   table orphans.
-- The recovered object opens fully populated: all rows, indexes, and constraints are present, because
-  they were never deleted.
+- The recovered object opens fully populated: all rows, indexes, and CHECK and NOT NULL constraints
+  are present, because they were never deleted.
+- **A recovered table comes back without its foreign keys.** While the table was dropped, nothing
+  checked its rows against their parents, and a parent can be gone. The SQL `RELINK` returns a
+  warning that names each foreign key it did not restore:
+
+  ```text
+  Table 'x' was restored without its foreign keys (…). Add each one again with
+  ALTER TABLE ... ADD CONSTRAINT, which validates the restored rows.
+  ```
+
+  An index that a foreign key created and owned stays as an ordinary index. See
+  [foreign-keys.md](foreign-keys.md).
 
 Recovery succeeds as long as the orphan still exists (i.e. the garbage collector has not reclaimed it
 yet) — even slightly past `expires_at`.

@@ -432,8 +432,10 @@ internal static class ForeignKeyDefinitionBuilder
     }
 
     /// <summary>
-    /// A public, unowned index whose leading columns are exactly <paramref name="childIds"/>. Prefers an
-    /// index of exactly that width, then the shortest; ties keep declaration order.
+    /// A public, unowned index whose leading columns are exactly <paramref name="childIds"/> and that
+    /// holds an entry for every row the constraint checks
+    /// (<see cref="ForeignKeyDefinitionRules.HoldsEveryReferencingRow"/>). Prefers an index of exactly
+    /// that width, then the shortest; ties keep declaration order.
     /// </summary>
     internal static TableIndexSchema? FindBackingIndex(IReadOnlyList<TableIndexSchema> indexes, string[] childIds)
     {
@@ -444,7 +446,8 @@ internal static class ForeignKeyDefinitionBuilder
             if (index.State != SchemaElementState.Public
                 || index.OwnerConstraintId is not null
                 || index.ColumnIds is null
-                || !ForeignKeyDefinitionRules.LeadsWithExactly(index.ColumnIds, childIds))
+                || !ForeignKeyDefinitionRules.LeadsWithExactly(index.ColumnIds, childIds)
+                || !ForeignKeyDefinitionRules.HoldsEveryReferencingRow(index, childIds.Length))
                 continue;
 
             if (best is null || index.ColumnIds.Length < best.ColumnIds!.Length)

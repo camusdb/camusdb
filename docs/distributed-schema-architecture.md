@@ -180,6 +180,10 @@ A cluster `ADD INDEX` is driven by the coordinator as a staged
 `AddIndex(DeleteOnly) → SetElementState(WriteOnly) → [backfill] → SetElementState(Public)`
 sequence — see §7.3 and §8.2.
 
+`SchemaOp.AddForeignKey` adds a foreign key to its child table in the `WriteOnly` state. There is
+no drop op: a DROP CONSTRAINT is `SetElementState(Absent)` with the foreign-key element kind. See
+§8.3.
+
 ### 3.1 How an entry is written on the wire
 
 An entry is replicated as a fixed header followed by the entry itself as UTF-8 JSON. The one place
@@ -222,10 +226,10 @@ cannot read a framed entry — it fails with a JSON error and Kommander raises a
 That is deliberate. The log type string is unchanged, so an old node fails loudly instead of
 filtering the entry out by type and silently falling behind. There is no dual-write mode.
 
-`SetElementState` carries a `SchemaElementKind { Column, Index }` discriminator
+`SetElementState` carries a `SchemaElementKind { Column, Index, ForeignKey }` discriminator
 (`SchemaElementStatePayload.ElementKind`, default `Column` so legacy entries deserialize
-correctly). The same delta type therefore advances either kind; the apply path branches on
-the discriminator (`ApplyElementState` vs `ApplyIndexElementState`).
+correctly). The same delta type therefore advances any kind; the apply path branches on
+the discriminator. A foreign key is found by its constraint name on the named table (§8.3).
 
 ---
 
@@ -923,6 +927,43 @@ land directly in `Public`. The cluster entry points
 `targetState = Public`, and the staged path carries the element through
 `Absent → DeleteOnly → WriteOnly → [backfill] → Public`. An interrupted add therefore leaves the
 element in a valid intermediate state that resume completes — never a stuck half-add.
+
+### 8.3 Foreign keys: a shorter ladder
+
+A foreign key is an element too (`SchemaElementKind.ForeignKey`), with a shorter ladder. It is
+not data that a backfill fills in, but a rule that the DML enforces and a validation pass proves:
+
+```
+ADD:   Absent ──AddForeignKey──► WriteOnly ──(ack gate, validation pass)──► Public
+DROP:  Public ──SetElementState(Absent)──► Absent        (then the owned index is dropped)
+```
+
+| State | Child side enforced | Parent side enforced | Trusted (SHOW CREATE TABLE) |
+| --- | --- | --- | --- |
+| `Absent` | No | No | No |
+| `WriteOnly` | Yes | Yes | No |
+| `Public` | Yes | Yes | Yes |
+
+- **No `DeleteOnly`.** A constraint has no data of its own to keep on delete.
+- **`WriteOnly` comes before the validation.** In the two-version window a node on the old
+  version enforces nothing, and can delete a parent while another node inserts its child. The
+  validation pass (`ForeignKeyValidationPass`) runs only after every live node acked `WriteOnly`,
+  so it sees any orphan from the window, and none can form after it.
+- **DROP is one step**, because an early stop of enforcement is always safe.
+- **`WriteOnly` is a safe resting state.** After a leader change the constraint stays enforced
+  but untrusted, and the resumed coordinator job finishes the validation.
+- **A state change does not bump `TableSchema.Version`**: a constraint is not part of the row
+  encoding.
+- **Apply-time checks** run in `ForeignKeyDeltaApplier` and `ForeignKeyDependencyRules`, in log
+  order: the definition resolves, the name is free across CHECK, NOT NULL and FOREIGN KEY, no cycle
+  is closed, and DDL that a constraint depends on (DROP TABLE, TRUNCATE, DROP COLUMN, TTL) is
+  refused. A check before the proposal is not enough: only the log orders an ADD against a
+  concurrent DROP TABLE of its parent on another node.
+- **The published graph.** `Schema.ForeignKeys` is an immutable `ForeignKeyGraph`, rebuilt with
+  the relation-name index on every apply, load and freshness repair, before the version advances.
+  DML reads the plans from it, so a parent finds its children without the child table being open.
+
+The user-facing description is [foreign-keys.md](foreign-keys.md).
 
 ---
 

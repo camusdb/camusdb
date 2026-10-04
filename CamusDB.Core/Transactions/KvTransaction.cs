@@ -164,6 +164,16 @@ public sealed class KvTransaction
 
     private readonly Lock trackSync = new();
     private HashSet<RangeLockBounds>? acquiredRangeLocks;
+
+    /// <summary>
+    /// The prefixes on which <see cref="acquiredRangeLocks"/> holds a whole-bucket lock, kept beside it
+    /// so <see cref="HasWholeBucketLock"/> is one lookup. Point locks never escalate on the foreign-key
+    /// path, so a long transaction can hold thousands of them, and that check runs once per constraint
+    /// per statement: a walk of the whole set there made N small statements cost O(N²). Only grows,
+    /// because a whole-bucket lock is never released before the transaction ends, and an Exclusive
+    /// acquire that replaces a Shared one keeps the same bounds.
+    /// </summary>
+    private HashSet<string>? wholeBucketPrefixes;
     private HashSet<(string key, KeyValueDurability durability)>? modifiedKeys;
     private Dictionary<string, SchemaVersionPin>? schemaPins;
 
@@ -752,6 +762,9 @@ public sealed class KvTransaction
                     new RangeLockBounds(prefix, startKey, startInclusive, endKey, endInclusive, durability, RangeLockMode.Shared));
 
             acquiredRangeLocks.Add(new RangeLockBounds(prefix, startKey, startInclusive, endKey, endInclusive, durability, mode));
+
+            if (startKey is null && endKey is null)
+                (wholeBucketPrefixes ??= new(StringComparer.Ordinal)).Add(prefix);
         }
     }
 
@@ -759,23 +772,13 @@ public sealed class KvTransaction
     /// Returns <c>true</c> if the transaction holds a whole-bucket range lock (start and end
     /// both <c>null</c>) on <paramref name="prefix"/>, regardless of Shared/Exclusive mode.
     /// A whole-bucket lock already covers every point within the bucket, so callers can skip
-    /// per-point lock acquisition.
+    /// per-point lock acquisition. O(1): it reads the prefix set that <see cref="TrackRangeLock"/>
+    /// keeps, not the tracked bounds.
     /// </summary>
     public bool HasWholeBucketLock(string prefix)
     {
         lock (trackSync)
-        {
-            if (acquiredRangeLocks is null)
-                return false;
-            
-            foreach (RangeLockBounds b in acquiredRangeLocks)
-            {
-                if (b.Prefix == prefix && b.StartKey is null && b.EndKey is null)
-                    return true;
-            }
-            
-            return false;
-        }
+            return wholeBucketPrefixes?.Contains(prefix) == true;
     }
 
     /// <summary>

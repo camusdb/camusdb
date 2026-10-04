@@ -37,12 +37,13 @@ CREATE TABLE orders_before_truncate RELINK TO 'A0';
 - Exactly **one** base table. Several tables in one statement are not supported.
 - The `TABLE` keyword is optional.
 - There are no options. `RESTART IDENTITY` is meaningless in CamusDB (there are no user sequences),
-  and `CASCADE` has nothing to cascade to (foreign keys are not a live feature yet).
+  and there is no `CASCADE`: a table that a foreign key references cannot be truncated (see below).
 
 `TRUNCATE` is refused on:
 
 | Target | Error | What to use instead |
 |--------|-------|---------------------|
+| A table that another table's foreign key references | `CADB0530` (`DependentObjectsExist`) | Truncate or drop the child first, or drop its constraint. See [foreign-keys.md](foreign-keys.md). |
 | A materialized view | `CADB0525` (`ViewNotUpdatable`) | `REFRESH MATERIALIZED VIEW … WITH NO DATA` |
 | A plain view | `CADB0525` (`ViewNotUpdatable`) | Truncate the underlying table |
 | A table that does not exist | `CADB0002` (`TableDoesntExist`) | — |
@@ -264,6 +265,7 @@ span plan never described). The stale run's records are cleaned up in the backgr
 
 - `TRUNCATE a, b, c` — several tables in one statement.
 - `RESTART IDENTITY` — CamusDB has no user sequences.
-- `CASCADE` — foreign keys are not a live feature.
+- `CASCADE` — a table that a foreign key references is refused with `CADB0530`. The child table,
+  and a table that references only itself, can be truncated.
 - Automatically refreshing or invalidating a dependent materialized view.
 - Reading a snapshot from before the current contents generation.

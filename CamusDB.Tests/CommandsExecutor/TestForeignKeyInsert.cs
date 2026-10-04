@@ -161,8 +161,9 @@ internal static class ForeignKeyInsertScenarios
         KvTransaction tx = await database.Transactions.BeginAsync();
         try
         {
-            Assert.ThrowsAsync<CamusDBException>(async () =>
-                await Run(executor, tx, dbname, "INSERT INTO weather (id, city) VALUES (1, 'nowhere')"));
+            CamusDBException violation = Assert.ThrowsAsync<CamusDBException>(async () =>
+                await Run(executor, tx, dbname, "INSERT INTO weather (id, city) VALUES (1, 'nowhere')"))!;
+            Assert.AreEqual(CamusDBErrorCodes.ForeignKeyViolation, violation.Code, violation.Message);
 
             Assert.AreEqual(1, await CountIn(executor, tx, dbname, "weather"),
                 "The failed statement's row is still staged in the transaction");

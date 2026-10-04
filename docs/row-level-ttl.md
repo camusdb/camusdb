@@ -31,6 +31,12 @@ is what enables TTL for the table.
 A row expires when its column value is in the past. **A `NULL` never expires** — that gives you an
 explicit "keep this forever" value without a second flag column.
 
+**A table that a foreign key references cannot be a TTL table.** The sweep deletes expired rows on
+its own path, which does not check for child rows, so it could leave a child without its parent.
+Both orders are refused with `CADB0533` (`FeatureNotSupported`): setting
+`ttl_expiration_expression` on a referenced table, and adding a foreign key that references a TTL
+table. A TTL table can still be a child. See [foreign-keys.md](foreign-keys.md).
+
 ### Turning it off
 
 ```sql

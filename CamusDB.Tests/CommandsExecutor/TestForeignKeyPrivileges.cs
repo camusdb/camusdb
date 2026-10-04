@@ -23,11 +23,10 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// A foreign key needs SELECT on the table it references. Each child insert answers whether a parent
 /// key exists, so a constraint on a table the caller cannot read would be a way to read it.
 /// </summary>
-[TestFixture]
-[NonParallelizable]
-internal sealed class TestForeignKeyPrivileges : BaseTest
+internal static class ForeignKeyPrivilegeScenarios
 {
-    protected override CamusDBOptions ConfigureOptions(CamusDBOptions defaults) => defaults with
+    /// <summary>The engine options every fixture of these scenarios needs: authentication with a root user.</summary>
+    public static CamusDBOptions WithAuthentication(CamusDBOptions defaults) => defaults with
     {
         AuthenticationEnabled = true,
         AccessTokenServerKey = "test-key-padded-to-meet-the-32-byte-secret-floor",
@@ -37,10 +36,9 @@ internal sealed class TestForeignKeyPrivileges : BaseTest
 
     private const string ChildSql = "CREATE TABLE weather (id int64 PRIMARY KEY NOT NULL, city string REFERENCES cities (name))";
 
-    [Test]
-    public async Task ReferencingATableWithoutSelectIsRefused()
+    public static async Task ReferencingATableWithoutSelectIsRefused(Func<Task<(string db, CommandExecutor ex, Principal user)>> setup)
     {
-        (string db, CommandExecutor ex, Principal user) = await Setup();
+        (string db, CommandExecutor ex, Principal user) = await setup();
 
         CamusDBException exception = Assert.ThrowsAsync<CamusDBException>(async () => await TxnDdl(ex, db, ChildSql, user))!;
 
@@ -49,10 +47,9 @@ internal sealed class TestForeignKeyPrivileges : BaseTest
         Assert.IsFalse((await ex.OpenDatabase(db)).Schema.Tables.ContainsKey("weather"));
     }
 
-    [Test]
-    public async Task ReferencingATableWithSelectIsAllowed()
+    public static async Task ReferencingATableWithSelectIsAllowed(Func<Task<(string db, CommandExecutor ex, Principal user)>> setup)
     {
-        (string db, CommandExecutor ex, Principal user) = await Setup();
+        (string db, CommandExecutor ex, Principal user) = await setup();
         Principal root = await Login(ex, "root", "root-pw");
         await ServerDdl(ex, $"GRANT SELECT ON {db}.cities TO u", root);
         user = await Login(ex, "u", "pw");
@@ -62,10 +59,9 @@ internal sealed class TestForeignKeyPrivileges : BaseTest
         Assert.IsNotNull((await ex.OpenDatabase(db)).Schema.Tables["weather"].ForeignKeys);
     }
 
-    [Test]
-    public async Task SelfReferenceNeedsNoExtraGrant()
+    public static async Task SelfReferenceNeedsNoExtraGrant(Func<Task<(string db, CommandExecutor ex, Principal user)>> setup)
     {
-        (string db, CommandExecutor ex, Principal user) = await Setup();
+        (string db, CommandExecutor ex, Principal user) = await setup();
 
         await TxnDdl(ex, db, "CREATE TABLE employees (id int64 PRIMARY KEY NOT NULL, manager_id int64 REFERENCES employees)", user);
 
@@ -76,10 +72,9 @@ internal sealed class TestForeignKeyPrivileges : BaseTest
     /// ALTER TABLE ... ADD CONSTRAINT needs the same SELECT on the parent as CREATE TABLE. The ALTER
     /// privilege on the child is not enough.
     /// </summary>
-    [Test]
-    public async Task AddingAConstraintWithoutSelectOnTheParentIsRefused()
+    public static async Task AddingAConstraintWithoutSelectOnTheParentIsRefused(Func<Task<(string db, CommandExecutor ex, Principal user)>> setup)
     {
-        (string db, CommandExecutor ex, Principal user) = await Setup();
+        (string db, CommandExecutor ex, Principal user) = await setup();
         Principal root = await Login(ex, "root", "root-pw");
         await TxnDdl(ex, db, "CREATE TABLE weather (id int64 PRIMARY KEY NOT NULL, city string)", user);
         await ServerDdl(ex, $"GRANT ALTER ON {db}.* TO u", root);
@@ -93,10 +88,9 @@ internal sealed class TestForeignKeyPrivileges : BaseTest
         Assert.IsNull((await ex.OpenDatabase(db)).Schema.Tables["weather"].ForeignKeys);
     }
 
-    [Test]
-    public async Task AddingAConstraintWithSelectOnTheParentIsAllowed()
+    public static async Task AddingAConstraintWithSelectOnTheParentIsAllowed(Func<Task<(string db, CommandExecutor ex, Principal user)>> setup)
     {
-        (string db, CommandExecutor ex, Principal user) = await Setup();
+        (string db, CommandExecutor ex, Principal user) = await setup();
         Principal root = await Login(ex, "root", "root-pw");
         await TxnDdl(ex, db, "CREATE TABLE weather (id int64 PRIMARY KEY NOT NULL, city string)", user);
         await ServerDdl(ex, $"GRANT ALTER ON {db}.* TO u", root);
@@ -110,18 +104,22 @@ internal sealed class TestForeignKeyPrivileges : BaseTest
 
     private const string AlterSql = "ALTER TABLE weather ADD CONSTRAINT weather_city_fk FOREIGN KEY (city) REFERENCES cities (name)";
 
-    /// <summary>Creates the database and cities as root, and a user u who may only create tables.</summary>
-    private async Task<(string db, CommandExecutor ex, Principal user)> Setup()
+    /// <summary>
+    /// Creates the database and cities as root, and a user u who may only create tables.
+    /// <paramref name="track"/> registers the database for the fixture's cleanup.
+    /// </summary>
+    public static async Task<(string db, CommandExecutor ex, Principal user)> Setup(CommandExecutor ex, CamusDBOptions options, Action<string, CommandExecutor> track)
     {
-        CommandExecutor ex = CreateCommandExecutor();
         string db = "fkauth" + Guid.NewGuid().ToString("n");
         await ex.CreateDatabase(new CreateDatabaseTicket(name: db, ifNotExists: false));
-        TrackDatabase(db, ex);
+        track(db, ex);
 
-        await ex.EnsureBootstrapSuperuserAsync(Options.BootstrapSuperuser, Options.BootstrapSuperuserPassword);
+        await ex.EnsureBootstrapSuperuserAsync(options.BootstrapSuperuser, options.BootstrapSuperuserPassword);
         Principal root = await Login(ex, "root", "root-pw");
 
         await TxnDdl(ex, db, "CREATE TABLE cities (id int64 PRIMARY KEY NOT NULL, name string NOT NULL, UNIQUE KEY cities_name (name))", root);
+        // The cluster base shares one node across a fixture's tests, and users live on the node.
+        await ServerDdl(ex, "DROP USER IF EXISTS u", root);
         await ServerDdl(ex, "CREATE USER u IDENTIFIED BY 'pw'", root);
         await ServerDdl(ex, $"GRANT CREATE TABLE ON {db}.* TO u", root);
 
@@ -141,4 +139,38 @@ internal sealed class TestForeignKeyPrivileges : BaseTest
         await ex.ExecuteDDLSQL(new ExecuteSQLTicket(tx, db, sql, null, p));
         await d.Transactions.CommitAsync(tx);
     }
+}
+
+/// <summary>Foreign-key privileges on a standalone engine.</summary>
+[TestFixture]
+[NonParallelizable]
+internal sealed class TestForeignKeyPrivileges : BaseTest
+{
+    protected override CamusDBOptions ConfigureOptions(CamusDBOptions defaults) => ForeignKeyPrivilegeScenarios.WithAuthentication(defaults);
+
+    [Test] public Task ReferencingATableWithoutSelectIsRefused() => ForeignKeyPrivilegeScenarios.ReferencingATableWithoutSelectIsRefused(Setup);
+    [Test] public Task ReferencingATableWithSelectIsAllowed() => ForeignKeyPrivilegeScenarios.ReferencingATableWithSelectIsAllowed(Setup);
+    [Test] public Task SelfReferenceNeedsNoExtraGrant() => ForeignKeyPrivilegeScenarios.SelfReferenceNeedsNoExtraGrant(Setup);
+    [Test] public Task AddingAConstraintWithoutSelectOnTheParentIsRefused() => ForeignKeyPrivilegeScenarios.AddingAConstraintWithoutSelectOnTheParentIsRefused(Setup);
+    [Test] public Task AddingAConstraintWithSelectOnTheParentIsAllowed() => ForeignKeyPrivilegeScenarios.AddingAConstraintWithSelectOnTheParentIsAllowed(Setup);
+
+    private Task<(string db, CommandExecutor ex, Principal user)> Setup() =>
+        ForeignKeyPrivilegeScenarios.Setup(CreateCommandExecutor(), Options, TrackDatabase);
+}
+
+/// <summary>Foreign-key privileges on a cluster-mode engine: the check runs before a forward to the leader.</summary>
+[TestFixture]
+[NonParallelizable]
+internal sealed class TestForeignKeyPrivilegesCluster : SharedNodeBaseTest
+{
+    protected override CamusDBOptions ConfigureOptions(CamusDBOptions defaults) => ForeignKeyPrivilegeScenarios.WithAuthentication(defaults);
+
+    [Test] public Task ReferencingATableWithoutSelectIsRefused() => ForeignKeyPrivilegeScenarios.ReferencingATableWithoutSelectIsRefused(Setup);
+    [Test] public Task ReferencingATableWithSelectIsAllowed() => ForeignKeyPrivilegeScenarios.ReferencingATableWithSelectIsAllowed(Setup);
+    [Test] public Task SelfReferenceNeedsNoExtraGrant() => ForeignKeyPrivilegeScenarios.SelfReferenceNeedsNoExtraGrant(Setup);
+    [Test] public Task AddingAConstraintWithoutSelectOnTheParentIsRefused() => ForeignKeyPrivilegeScenarios.AddingAConstraintWithoutSelectOnTheParentIsRefused(Setup);
+    [Test] public Task AddingAConstraintWithSelectOnTheParentIsAllowed() => ForeignKeyPrivilegeScenarios.AddingAConstraintWithSelectOnTheParentIsAllowed(Setup);
+
+    private Task<(string db, CommandExecutor ex, Principal user)> Setup() =>
+        ForeignKeyPrivilegeScenarios.Setup(CreateCommandExecutor(), Options, TrackDatabase);
 }

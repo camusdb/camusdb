@@ -16,18 +16,17 @@ using Grpc.Core;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using NUnit.Framework;
+using Microsoft.Extensions.Logging;
 
 using CamusDB.App.Controllers;
 using CamusDB.App.Grpc;
 using CamusDB.App.Models;
 using CamusDB.App.Services;
 using CamusDB.Core;
-using CamusDB.Core.Catalogs;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
-using CamusDB.Core.CommandsValidator;
 using CamusDB.Grpc;
 using CamusDB.Tests.Grpc;
 
@@ -40,34 +39,28 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// service are driven in-process, with no HTTP pipeline, so the assertions read the exact response
 /// objects the controllers return.
 /// </summary>
-[TestFixture]
-[NonParallelizable]
-public sealed class TestForeignKeyTransports : BaseTest
+internal sealed class ForeignKeyTransportScenarios
 {
     private static readonly JsonSerializerOptions CamelCase = new() { PropertyNamingPolicy = JsonNamingPolicy.CamelCase };
 
-    private CommandExecutor executor = null!;
-    private HttpTransactionCoordinator coordinator = null!;
-    private PreparedStatementRegistry registry = null!;
-    private CamusSqlService service = null!;
+    private readonly CommandExecutor executor;
+    private readonly ILogger<ICamusDB> logger;
+    private readonly CamusDBOptions options;
+    private readonly HttpTransactionCoordinator coordinator;
+    private readonly PreparedStatementRegistry registry;
+    private readonly CamusSqlService service;
 
-    [SetUp]
-    public void SetUpHost()
+    /// <summary>Wraps the fixture's engine in the controllers' and the gRPC service's dependencies.</summary>
+    public ForeignKeyTransportScenarios(CommandExecutor executor, ILogger<ICamusDB> logger, CamusDBOptions options)
     {
-        executor = new(new CommandValidator(Options), new CatalogsManager(logger), logger, Options,
-            sharedNode: TestNode!, registry: sharedRegistry!, isClusterMode: false);
+        this.executor = executor;
+        this.logger = logger;
+        this.options = options;
         coordinator = new(executor);
-        registry = new(Options);
-        service = new(executor, coordinator, logger, TestHostApplicationLifetime.Instance, new ForegroundRequestGauge(), Options);
+        registry = new(options);
+        service = new(executor, coordinator, logger, TestHostApplicationLifetime.Instance, new ForegroundRequestGauge(), options);
     }
 
-    [TearDown]
-    public async Task TearDownHost()
-    {
-        try { await executor.DisposeAsync(); } catch { }
-    }
-
-    [Test]
     public async Task CreateTableOverHttpAddsTheForeignKey()
     {
         string db = await CreateCitiesAsync();
@@ -98,7 +91,6 @@ public sealed class TestForeignKeyTransports : BaseTest
         AssertFailed(orphan, 409, CamusDBErrorCodes.ForeignKeyViolation, "weather_city_fk");
     }
 
-    [Test]
     public async Task CreateTableOverHttpRefusesInvalidDefinitionsWithTheirCodes()
     {
         string db = await CreateCitiesAsync();
@@ -116,7 +108,6 @@ public sealed class TestForeignKeyTransports : BaseTest
         Assert.IsFalse(database.Schema.Tables.Keys.Any(name => name.StartsWith('t') && name.Length == 2), "No refused table may exist");
     }
 
-    [Test]
     public async Task EachViolationOverHttpHasItsOwnCodeAndStatus()
     {
         string db = await CreateCitiesAndWeatherAsync();
@@ -139,7 +130,6 @@ public sealed class TestForeignKeyTransports : BaseTest
         Assert.AreEqual(400, cycle.StatusCode, cycleResponse.Message);
     }
 
-    [Test]
     public async Task EachViolationOverGrpcHasItsOwnCodeAndStatus()
     {
         string db = await CreateCitiesAndWeatherAsync();
@@ -164,7 +154,6 @@ public sealed class TestForeignKeyTransports : BaseTest
     /// Both tables over HTTP: the parent declares only a primary key, and the child references it
     /// with no column list, which means the parent's primary key.
     /// </summary>
-    [Test]
     public async Task ParentAndChildOverHttpReferenceThePrimaryKey()
     {
         string db = "db" + Guid.NewGuid().ToString("n")[..12];
@@ -177,7 +166,7 @@ public sealed class TestForeignKeyTransports : BaseTest
             Columns = [new CreateTableColumn { Name = "code", Type = "string", NotNull = true, Primary = true }],
         };
 
-        CreateTableResponse parentResponse = (CreateTableResponse)(await new CreateTableController(executor, coordinator, logger, Options)
+        CreateTableResponse parentResponse = (CreateTableResponse)(await new CreateTableController(executor, coordinator, logger, options)
             { ControllerContext = Context(parent) }.CreateTable()).Value!;
         Assert.AreEqual("ok", parentResponse.Status, parentResponse.Message);
 
@@ -239,11 +228,11 @@ public sealed class TestForeignKeyTransports : BaseTest
             ForeignKeys = [foreignKey],
         };
 
-        return new CreateTableController(executor, coordinator, logger, Options) { ControllerContext = Context(request) }.CreateTable();
+        return new CreateTableController(executor, coordinator, logger, options) { ControllerContext = Context(request) }.CreateTable();
     }
 
     private ExecuteSQLController Sql(string db, string sql) =>
-        new(executor, coordinator, registry, logger, Options) { ControllerContext = Context(new { databaseName = db, sql }) };
+        new(executor, coordinator, registry, logger, options) { ControllerContext = Context(new { databaseName = db, sql }) };
 
     private static ControllerContext Context(object body)
     {
@@ -279,4 +268,32 @@ public sealed class TestForeignKeyTransports : BaseTest
         Assert.AreEqual(status, exception.StatusCode, exception.Status.Detail);
         Assert.That(exception.Trailers.GetValue("camus-error-code"), Is.AnyOf(codes), exception.Status.Detail);
     }
+}
+
+/// <summary>Foreign keys through HTTP and gRPC on a standalone engine.</summary>
+[TestFixture]
+[NonParallelizable]
+public sealed class TestForeignKeyTransports : BaseTest
+{
+    [Test] public Task CreateTableOverHttpAddsTheForeignKey() => Host().CreateTableOverHttpAddsTheForeignKey();
+    [Test] public Task CreateTableOverHttpRefusesInvalidDefinitionsWithTheirCodes() => Host().CreateTableOverHttpRefusesInvalidDefinitionsWithTheirCodes();
+    [Test] public Task EachViolationOverHttpHasItsOwnCodeAndStatus() => Host().EachViolationOverHttpHasItsOwnCodeAndStatus();
+    [Test] public Task EachViolationOverGrpcHasItsOwnCodeAndStatus() => Host().EachViolationOverGrpcHasItsOwnCodeAndStatus();
+    [Test] public Task ParentAndChildOverHttpReferenceThePrimaryKey() => Host().ParentAndChildOverHttpReferenceThePrimaryKey();
+
+    private ForeignKeyTransportScenarios Host() => new(CreateCommandExecutor(), logger, Options);
+}
+
+/// <summary>Foreign keys through HTTP and gRPC on a cluster-mode engine.</summary>
+[TestFixture]
+[NonParallelizable]
+public sealed class TestForeignKeyTransportsCluster : SharedNodeBaseTest
+{
+    [Test] public Task CreateTableOverHttpAddsTheForeignKey() => Host().CreateTableOverHttpAddsTheForeignKey();
+    [Test] public Task CreateTableOverHttpRefusesInvalidDefinitionsWithTheirCodes() => Host().CreateTableOverHttpRefusesInvalidDefinitionsWithTheirCodes();
+    [Test] public Task EachViolationOverHttpHasItsOwnCodeAndStatus() => Host().EachViolationOverHttpHasItsOwnCodeAndStatus();
+    [Test] public Task EachViolationOverGrpcHasItsOwnCodeAndStatus() => Host().EachViolationOverGrpcHasItsOwnCodeAndStatus();
+    [Test] public Task ParentAndChildOverHttpReferenceThePrimaryKey() => Host().ParentAndChildOverHttpReferenceThePrimaryKey();
+
+    private ForeignKeyTransportScenarios Host() => new(CreateCommandExecutor(), logger, Options);
 }

@@ -600,8 +600,9 @@ public sealed partial class KvTableStore
         bool fromInclusive = true,
         bool toInclusive = true,
         long? maxRows = null,
-        CancellationToken cancellationToken = default)
-        => indexes.ScanIndex(tx, indexId, keyTypes, from, to, unique, fromInclusive, toInclusive, maxRows, cancellationToken);
+        CancellationToken cancellationToken = default,
+        bool boundsInIndexOrder = false)
+        => indexes.ScanIndex(tx, indexId, keyTypes, from, to, unique, fromInclusive, toInclusive, maxRows, cancellationToken, boundsInIndexOrder: boundsInIndexOrder);
 
     /// <inheritdoc cref="KvIndexAccessor.PutIndexEntry"/>
     public Task PutIndexEntry(

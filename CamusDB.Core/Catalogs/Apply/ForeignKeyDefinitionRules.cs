@@ -174,6 +174,11 @@ internal static class ForeignKeyDefinitionRules
                 CamusDBErrorCodes.InvalidInternalOperation,
                 $"{subject}: index '{backingIndex.Name}' is not a public index that leads with the referencing columns");
 
+        if (!HoldsEveryReferencingRow(backingIndex, width))
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInternalOperation,
+                $"{subject}: unique index '{backingIndex.Name}' has more columns than the constraint, so a row with a NULL in an extra column has no entry in it");
+
         if (backingIndex.OwnerConstraintId is { } owner && !string.Equals(owner, foreignKey.Id, StringComparison.Ordinal))
             throw new CamusDBException(
                 CamusDBErrorCodes.InvalidInternalOperation,
@@ -235,6 +240,27 @@ internal static class ForeignKeyDefinitionRules
         table.Settings is not null
         && table.Settings.TryGetValue(TableSettings.TtlExpirationExpressionKey, out string? expression)
         && !string.IsNullOrWhiteSpace(expression);
+
+    /// <summary>
+    /// True when <paramref name="index"/> holds an entry for every row whose first
+    /// <paramref name="width"/> key columns are all non-NULL: the rows a MATCH SIMPLE constraint checks.
+    /// The parent-side probe and the validation pass read only the backing index, so a row without an
+    /// entry is a child they cannot see.
+    ///
+    /// <para>A non-unique index stores every row. A unique index stores no entry for a row with a NULL
+    /// in <b>any</b> of its columns, so a unique index wider than the constraint would hide a child whose
+    /// constraint columns are set and whose extra column is NULL. It qualifies only at exactly the width
+    /// of the constraint, where a NULL hides only a row the constraint does not check, or as the primary
+    /// key, whose columns can never be NULL.</para>
+    /// </summary>
+    internal static bool HoldsEveryReferencingRow(TableIndexSchema index, int width) =>
+        index.Type switch
+        {
+            IndexType.Multi => true,
+            IndexType.Unique => index.ColumnIds?.Length == width
+                || string.Equals(index.Name, CamusDBConstants.PrimaryKeyInternalName, StringComparison.Ordinal),
+            _ => false
+        };
 
     /// <summary>
     /// True when the first <c>ids.Length</c> entries of <paramref name="indexColumnIds"/> are exactly

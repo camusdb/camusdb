@@ -230,6 +230,68 @@ public class ParentDeleteWithConstraint : ParentDeleteBenchmarks
 }
 
 /// <summary>
+/// Many one-row child INSERT statements in one explicit transaction, each to a parent that no earlier
+/// statement referenced. Each statement takes one new rendezvous lock, and the transaction keeps every
+/// lock to its end, so the statement count is also the number of locks held. The lock-coverage check
+/// before each statement must not walk the locks already held: with a walk, the total cost grows with
+/// the square of the statement count. The transaction rolls back, so every iteration starts from the
+/// same table.
+/// </summary>
+[SimpleJob(RunStrategy.Monitoring, warmupCount: 2, iterationCount: 10)]
+[MemoryDiagnoser]
+[HideColumns("Error", "StdDev", "Median", "RatioSD")]
+public class ManyChildStatementsInOneTransaction
+{
+    private const int Parents = 4000;
+
+    [Params(1000, 4000)]
+    public int Statements { get; set; }
+
+    private readonly ForeignKeyBenchHarness harness = new();
+    private string[] statements = [];
+
+    [GlobalSetup]
+    public void GlobalSetup()
+    {
+        harness.StartAsync(constraint: true).GetAwaiter().GetResult();
+
+        for (int done = 0; done < Parents; done += 500)
+        {
+            StringBuilder insert = new("INSERT INTO cities (id, name, population) VALUES ");
+            for (int i = done; i < done + 500; i++)
+                insert.Append(i == done ? "" : ", ").Append('(').Append(10 + i).Append(", 'p").Append(i).Append("', 0)");
+            harness.ExecuteAsync(insert.ToString()).GetAwaiter().GetResult();
+        }
+    }
+
+    [GlobalCleanup]
+    public void GlobalCleanup() => harness.StopAsync().GetAwaiter().GetResult();
+
+    [IterationSetup]
+    public void IterationSetup()
+    {
+        statements = new string[Statements];
+        for (int i = 0; i < Statements; i++)
+            statements[i] = $"INSERT INTO weather (id, city, temp) VALUES ({harness.NextId++}, 'p{i}', 20)";
+    }
+
+    [Benchmark]
+    public async Task InsertOneRowPerStatement()
+    {
+        KvTransaction tx = await harness.Database.Transactions.BeginAsync();
+        try
+        {
+            foreach (string sql in statements)
+                await harness.Executor.ExecuteNonSQLQuery(new ExecuteSQLTicket(tx, harness.DbName, sql, parameters: null));
+        }
+        finally
+        {
+            await harness.Database.Transactions.RollbackIfNotCompletedAsync(tx);
+        }
+    }
+}
+
+/// <summary>
 /// An UPDATE of a column that no constraint uses, on 100 child rows and on the 3 parents. With the
 /// constraint, both tables have one, and the statement must still do no foreign-key work.
 /// </summary>

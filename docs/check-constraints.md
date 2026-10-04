@@ -60,8 +60,11 @@ Every check has a name, used by `DROP CONSTRAINT` and shown in `SHOW CREATE TABL
 | Table-level `CONSTRAINT name CHECK (…)`  | `name` (as written)         |
 | Table-level unnamed `CHECK (…)`          | `{table}_check{N}`          |
 
-Names must be **unique per table**. Auto-naming skips any slot a user name already claimed, and a
-genuine duplicate (two identically-named constraints) is rejected at `CREATE`/`ALTER`.
+Names must be **unique per table**, across CHECK, named NOT NULL and FOREIGN KEY constraints,
+because `DROP CONSTRAINT` finds a constraint by name across all three kinds. Auto-naming skips any
+slot a user name already claimed, and a genuine duplicate is rejected at `CREATE`/`ALTER` with
+`CADB0400`. That includes a CHECK that takes the name of a foreign key, and a `SET NOT NULL` whose
+generated name is the name of a CHECK or a foreign key. The comparison ignores case.
 
 > Note: a *column-level named* check (`col … CONSTRAINT name CHECK (…)`) is **not** in the grammar.
 > Use the table-level form when you need to choose the name.
@@ -233,9 +236,9 @@ Semantics:
 - **`SET NOT NULL`** scans existing rows and is rejected (`CADB0301` / `NotNullViolation`) if any
   value is NULL, exactly like ADD CHECK's existing-data scan.
 - **`DROP NOT NULL`** is unconditional — relaxing a constraint needs no scan.
-- **`DROP CONSTRAINT <name>`** resolves the name against **both** the table's check constraints
-  **and** each column's NOT NULL constraint name; not found in either → "constraint '…' does not
-  exist".
+- **`DROP CONSTRAINT <name>`** resolves the name against the table's check constraints, then each
+  column's NOT NULL constraint name, then the table's foreign keys; not found in any →
+  "constraint '…' does not exist".
 
 ---
 
@@ -426,7 +429,8 @@ path that populates `CheckConstraints` without parsing would silently disable en
 
 ## Part V — Limitations & non-goals
 
-- **No `FOREIGN KEY`** — a separate constraint, and not part of this feature.
+- **Foreign keys** are a separate constraint, described in [foreign-keys.md](foreign-keys.md). They
+  share the constraint name space with CHECK and named NOT NULL (see "Constraint names").
 - **No `NOT VALID` / deferred / `NOT ENFORCED`** checks — ADD always full-scans existing rows.
 - **No cross-row / subquery / aggregate / non-deterministic** conditions — a check is a pure function
   of one row.
