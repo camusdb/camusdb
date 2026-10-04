@@ -74,23 +74,36 @@ The same engine also compiles to WebAssembly and runs in a browser tab, with not
 
 Features
 --------
-- **SQL dialect** — SELECT (including `FROM`-less `SELECT <expr>`), INSERT, UPDATE, DELETE, TRUNCATE, CREATE/DROP/ALTER TABLE, transactions (BEGIN / COMMIT / ROLLBACK), parameterized placeholders, prepared statements, table aliases, derived tables, simple inner joins, comma joins, row-level DISTINCT, and case-insensitive identifier handling.
-- **ACID transactions** — pessimistic locking; serializable isolation is the default (range/predicate locks with wait-die deadlock avoidance and snapshot reads), with read-committed available per transaction (`SET TRANSACTION` or the begin-request field) or as a process default; cross-partition writes use two-phase commit (2PC).
+- **SQL dialect** — SELECT (including `FROM`-less `SELECT <expr>`), INSERT, UPDATE, DELETE, TRUNCATE, CREATE/DROP/ALTER TABLE, transactions (BEGIN / COMMIT / ROLLBACK), parameterized placeholders, prepared statements, table aliases, derived tables, inner joins, comma joins, row-level DISTINCT, `CASE` expressions, `CAST` and the `::` shorthand, `INSERT INTO … SELECT`, `CREATE TABLE … AS SELECT`, `DESCRIBE` / `SHOW TABLES` / `SHOW COLUMNS` / `SHOW INDEXES`, PostgreSQL expression forms (digit separators such as `200_000`, `%`, array subscripts), and case-insensitive identifier handling.
+- **ACID transactions** — pessimistic locking by default, with optimistic locking per transaction (`SET TRANSACTION LOCKING OPTIMISTIC`); serializable isolation is the default (range/predicate locks with wait-die deadlock avoidance and snapshot reads), with read-committed available per transaction (`SET TRANSACTION` or the begin-request field) or as a process default; cross-partition writes use two-phase commit (2PC). Transactions can carry a priority (`SET TRANSACTION PRIORITY`) that orders admission on a saturated node once an operator sets a concurrency ceiling.
 - **Copy-on-write database branching** — fork a database instantly with `CREATE DATABASE feature_x BRANCH FROM prod`; inspect the tree with `SHOW BRANCHES FROM db` and `SHOW ANCESTORS FROM db`.
 - **Recovering dropped objects** — deferred physical deletion with `RELINK TO '<id>'` recovery, `SHOW ORPHAN DATABASES` / `SHOW ORPHAN TABLES`, and a background reclaimer.
 - **Time-travel reads** — `SELECT … AS OF SYSTEM TIME '-10s'` (or an absolute UTC timestamp / epoch ms) runs the whole statement against a consistent historical snapshot; lock-free, never blocks writers, usable to read back accidentally deleted or overwritten rows while their history is retained.
 - **Query result cache** — opt-in per query via `{cache=…}` hints, with TTL, `strict` per-hit validation, and `EVICT CACHE` statements; same-node writes invalidate dependent entries before they become visible.
 - **Aggregation** — COUNT, SUM, AVG, MIN, MAX with GROUP BY and HAVING filters.
-- **Filtering and ordering** — WHERE clauses with =, !=, <, >, <=, >=, AND, OR, LIKE, ILIKE, regex match operators (~, ~*, !~, !~*), BETWEEN, IS NULL, IN, NOT IN, scalar subqueries, and EXISTS subqueries; ORDER BY (ASC/DESC), projection aliases, ordinal references, LIMIT, and OFFSET.
-- **Scalar functions** — string, math, date/time, cast, object id, regex, and JSON helpers including `json_valid`, `json_type`, `json_extract`, `json_value`, `json_array_length`, and `json_contains`.
-- **Query planning** — physical plan trees for table scans, index scans, joins, aggregation, distinct, sorting, and limits, with predicate/projection/limit pushdown, index-based sort elision, join-order heuristics, index nested-loop joins for eligible equi-joins, semi/anti-join rewrite of indexed `IN`/`NOT IN` subqueries, index-driven value-list `IN`, and streaming `DISTINCT`. A small statistics-backed cost model (row counts, per-index counts, per-column min/max) chooses between index and full scans.
+- **Filtering and ordering** — WHERE clauses with =, !=, <, >, <=, >=, AND, OR, LIKE, ILIKE, regex match operators (~, ~*, !~, !~*), BETWEEN, IS NULL, IN, NOT IN, quantified comparisons (`= ANY`, `= SOME`, `<> ALL`, and other operators with `ANY`/`ALL`), scalar subqueries, and EXISTS subqueries; ORDER BY (ASC/DESC), projection aliases, ordinal references, LIMIT, and OFFSET.
+- **Scalar functions** — string, math, date/time, cast, object id, UUID (`gen_uuid_v4()`, `gen_uuid_v7()`), regex (`regexp_*`), hash digests (`md5`, `sha1`, `sha256`, `sha512`), and JSON helpers including `json_valid`, `json_type`, `json_extract`, `json_value`, `json_array_length`, and `json_contains`.
+- **Query planning** — physical plan trees for table scans, index scans, joins, aggregation, distinct, sorting, and limits, with predicate/projection/limit pushdown, index-based sort elision, cost-based join ordering, hash joins, merge joins, index nested-loop joins for eligible equi-joins, semi/anti-join rewrite of indexed `IN`/`NOT IN` subqueries, index-driven value-list `IN`, and streaming `DISTINCT`. A statistics-backed cost model (row counts, per-column min/max, equi-depth histograms, and distinct-value counts) chooses access paths and join order; a background job re-`ANALYZE`s tables whose statistics go stale. Sort, hash join, `GROUP BY`, `DISTINCT`, and DML row buffers spill to temporary files past a configured threshold, so a large statement completes instead of exhausting memory. A client cancel stops a running `SELECT`.
 - **Query introspection** — `EXPLAIN`, `EXPLAIN (LOGICAL)`, `EXPLAIN (PHYSICAL)`, and `EXPLAIN (ANALYZE)` return the plan as result rows (node names, details, estimated rows/cost, and — for `ANALYZE` — actual row counts and KV access counters).
-- **Indexes** — PRIMARY KEY, inline UNIQUE column constraints, UNIQUE indexes, multi-column indexes, per-column ascending/descending ordered indexes, CREATE INDEX IF NOT EXISTS, CREATE UNIQUE INDEX IF NOT EXISTS, and ALTER TABLE ADD/DROP INDEX.
+- **Indexes** — PRIMARY KEY, inline UNIQUE column constraints, UNIQUE indexes, multi-column indexes, per-column ascending/descending ordered indexes, covering indexes (`INCLUDE` stored columns, so a query is answered from the index alone), CREATE INDEX IF NOT EXISTS, CREATE UNIQUE INDEX IF NOT EXISTS, and ALTER TABLE ADD/DROP INDEX.
 - **Database management** — databases must be created explicitly (`CREATE DATABASE`, `DROP DATABASE [IF EXISTS]`, `RENAME DATABASE old TO new`); there is no magic creation. Each database is assigned an immutable internal id at creation time; the name is a display-only label that can be renamed without moving any data.
-- **Schema management** — CREATE TABLE IF NOT EXISTS, DROP TABLE IF EXISTS, TRUNCATE TABLE, ALTER TABLE ADD/DROP COLUMN, ALTER TABLE RENAME TABLE/COLUMN/INDEX, column DEFAULT values (including function defaults such as `gen_uuid_v7()`), CHECK constraints, and `SHOW CREATE TABLE`.
-- **Multi-node cluster** — Raft consensus (via Kommander) partitions data across nodes; each partition elects its own leader. Nodes join a cluster with `--mode=cluster` and a static peer list.
+- **Schema management** — CREATE TABLE IF NOT EXISTS, DROP TABLE IF EXISTS, TRUNCATE TABLE, ALTER TABLE ADD/DROP COLUMN, ALTER TABLE RENAME TABLE/COLUMN/INDEX, column DEFAULT values (including function defaults such as `gen_uuid_v7()`), CHECK constraints, named NOT NULL constraints, foreign keys, `COMMENT ON` descriptions for databases, tables, columns, and indexes, and `SHOW CREATE TABLE`. In a cluster, DDL is online: schema changes replicate through Raft and move through staged states, so tables stay readable and writable while an index backfills.
+- **Foreign keys** — `REFERENCES` and `FOREIGN KEY … REFERENCES` with composite keys, self-references, `ON DELETE` / `ON UPDATE` `NO ACTION` or `RESTRICT`, and `ALTER TABLE ADD/DROP CONSTRAINT` that validates existing rows; checked at every isolation level, in standalone and cluster mode, and on database branches.
+- **Data types** — `int64`, `float64`, `float32`, `bool`, `string` / `string(N)`, `bytes`, `date`, `datetime`, `uuid`, `oid` (ObjectId), and `array(T)`.
+- **Views and materialized views** — `CREATE VIEW` (expanded at every reference, with `WITH CHECK OPTION`) and `CREATE MATERIALIZED VIEW` (stored rows, `REFRESH MATERIALIZED VIEW`); `SHOW VIEWS`, `SHOW MATERIALIZED VIEWS`, and `SHOW CREATE VIEW`.
+- **Sequences** — `CREATE SEQUENCE` with `nextval`, `currval`, and `setval`, usable as a column default (`DEFAULT nextval('order_no')`); `SHOW SEQUENCES` and `SHOW CREATE SEQUENCE`.
+- **Vector search** — embeddings stored as `bytes` columns, ranked with exact `l2_distance`, `cosine_distance`, and `inner_product` in an ordinary `ORDER BY … LIMIT`.
+- **Row-level TTL** — a table names an expiry column (`ALTER TABLE t SET (ttl_expiration_expression = 'expires_at')`) and a background sweep deletes expired rows; the parameters follow CockroachDB's row-level TTL.
+- **Large values** — `string`, `bytes`, and array cells are compressed with LZ4 and moved out of the row when they are large, with a per-column storage strategy; query results do not change.
+- **Authentication and authorization** — off by default; `CREATE USER` / `ALTER USER` / `DROP USER`, `GRANT` / `REVOKE` privileges, `SHOW GRANTS`, `SHOW USERS`, and token-based access over both APIs.
+- **Backups and point-in-time recovery** — node-wide full and incremental backups and restore through a server-admin HTTP API, with retention and garbage collection.
+- **Multi-node cluster** — Raft consensus (via Kommander) partitions data across nodes; each partition elects its own leader. Nodes join a cluster with `--mode=cluster` and a static peer list. Data is placed by hash routing by default; opt-in key-range sharding routes key spaces by key order, and a hot range can split automatically by load.
 - **Standalone mode** — runs as a single embedded process with no cluster configuration required.
 - **APIs** — all database operations are accessible over a JSON/HTTP endpoint and over a gRPC endpoint (streaming query results and a duplex batch-execute channel with per-transaction chains).
+- **Observability** — `SHOW ENGINE STATS`, `SHOW SLOW QUERIES`, `SHOW STATISTICS FOR`, `SHOW RANGES`, and `SHOW VARIABLES` from a SQL prompt; a read-only operator dashboard on each node's HTTP port; and opt-in OpenTelemetry metrics and traces.
+- **Runtime cluster settings** — `SET CLUSTER SETTING` / `RESET CLUSTER SETTING` change a defined subset of the configuration on every node without a restart.
+- **Learned client routing** — servers attach advisory routing metadata to SQL responses, so a multi-endpoint client sends repeated statements straight to the node that leads their data.
+- **Logical dump and reimport** — move data across storage revisions or machines with `camus-dump` and `camus-cli`.
 - **Multi-platform** — runs on any platform supported by .NET 10.
 
 SQL examples
@@ -254,20 +267,6 @@ CREATE DATABASE app RELINK TO '<id>';    -- recover a dropped database
 ```
 
 A background reclaimer garbage-collects orphans once their retention window elapses; until then, a drop is reversible.
-
-Emptying a Table
-----------------
-
-`TRUNCATE` empties a base table without reading or deleting a single row. It replaces the physical key-space the table's rows and index entries live in, so the statement costs the same on an empty table and on a billion-row one. The table keeps its name, its id, its columns, its indexes and its grants; only its contents generation moves.
-
-```sql
-TRUNCATE TABLE events;                   -- constant in row count; no mutation limit to hit
-TRUNCATE events;                         -- the TABLE keyword is optional
-```
-
-The previous contents are retained as recoverable retired contents, exactly like a deferred drop: `SHOW ORPHAN TABLES` lists them, `CREATE TABLE events_before RELINK TO '<id>'` brings them back as a separate table, and the background reclaimer purges them once retention elapses. A time-travel read of a point before the truncate is refused rather than answered with a misleading empty result.
-
-See [docs/truncate-table.md](docs/truncate-table.md) for privileges, transaction rules, concurrency semantics, branch behavior, and recovery.
 
 Time-Travel Reads
 -----------------
