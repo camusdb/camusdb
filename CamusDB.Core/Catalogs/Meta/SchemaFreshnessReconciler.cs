@@ -89,6 +89,12 @@ internal static class SchemaFreshnessReconciler
                 // collect the union of both table sets before the maps are replaced.
                 invalidatedTableIds = CollectTableIds(database.Schema.Tables, snapshot.Tables);
 
+                // The swap replaces every TableSchema instance. A transaction that wrote a table
+                // planned against the stale instance, and the missed deltas say nothing about what
+                // it lacks, so each old instance is retired: a write-shape pin on it fails at commit.
+                foreach (TableSchema retired in database.Schema.Tables.Values)
+                    database.WriteShape.Retire(retired);
+
                 database.Schema.SchemaVersion = snapshot.SchemaVersion;
                 database.Schema.Tables = snapshot.Tables;
                 database.Schema.Views = snapshot.Views;
@@ -126,7 +132,7 @@ internal static class SchemaFreshnessReconciler
             // leader's ack gate this node reached the checkpoint version — the deltas that would
             // have acked were never delivered here.
             database.ObserveSchemaEntryHead(snapshot.SchemaVersion);
-            database.Kahuna.RecordAndPublishSchemaApplied(database.Id, snapshot.SchemaVersion);
+            database.PublishSchemaApplied(snapshot.SchemaVersion);
 
             logger.LogWarning(
                 "Schema for database '{Db}' was stale on this node (memory at {OldVersion}, checkpoint at {NewVersion}); " +

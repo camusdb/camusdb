@@ -299,6 +299,112 @@ public sealed record DatabaseDescriptor : IDisposable
     }
 
     /// <summary>
+    /// The clock of the write-shape fence for this database on this node. See
+    /// <see cref="Catalogs.WriteShapeClock"/> for the protocol and the order it depends on.
+    /// </summary>
+    internal Catalogs.WriteShapeClock WriteShape { get; } = new();
+
+    /// <summary>
+    /// Stamps every table of <paramref name="tables"/> with a new write-shape epoch, and returns a
+    /// task that completes when every commit in flight on this node that wrote one of them under an
+    /// earlier epoch has a terminal outcome. Returns null when there is no such commit.
+    ///
+    /// <para>Call it after the new index or constraint is fully visible to new statements on this
+    /// node, and before anything reads the table to backfill or validate. After the task completes,
+    /// each write planned without the new obligation is either committed, and so visible to that
+    /// read, or can never commit.</para>
+    /// </summary>
+    internal Task? FenceWritersPlannedBefore(IReadOnlyList<Catalogs.Models.TableSchema> tables)
+    {
+        long epoch = WriteShape.Advance(tables);
+
+        return Transactions.WaitForCommitsPlannedBeforeAsync(tables, epoch);
+    }
+
+    /// <summary>
+    /// <see cref="FenceWritersPlannedBefore"/> for a schema change that this node runs by itself and
+    /// does not replicate first: the stamp, then a bounded wait for the commits in flight. Throws the
+    /// retryable <see cref="CamusDBErrorCodes.TransactionMustRetry"/> when a commit does not end in
+    /// time; the caller must then undo its change and must not read the table.
+    /// </summary>
+    internal async Task FenceWritersAndWaitAsync(Catalogs.Models.TableSchema table, TimeSpan timeout)
+    {
+        Task? drain = FenceWritersPlannedBefore([table]);
+        if (drain is null)
+            return;
+
+        try
+        {
+            await drain.WaitAsync(timeout).ConfigureAwait(false);
+        }
+        catch (TimeoutException)
+        {
+            throw new CamusDBException(
+                CamusDBErrorCodes.TransactionMustRetry,
+                $"The schema change on table '{table.Name}' of database '{Name}' waited {(long)timeout.TotalMilliseconds} ms for " +
+                "a commit that began before it and has no outcome yet; resolve that transaction and retry the statement");
+        }
+    }
+
+    private readonly Lock appliedAckSync = new();
+
+    // The last deferred acknowledgement, or a completed task. Guarded by appliedAckSync.
+    private Task appliedAckTail = Task.CompletedTask;
+
+    /// <summary>
+    /// Tells the schema ack gate that this node applied <paramref name="version"/>. When
+    /// <paramref name="settled"/> is given, the acknowledgement waits for it: it is the task of
+    /// <see cref="FenceWritersPlannedBefore"/>, and an acknowledgement sent earlier would let the
+    /// schema leader start a backfill or a validation pass while a commit planned under the older
+    /// schema can still land on this node.
+    ///
+    /// <para><b>Acknowledgements leave in version order.</b> The gate keeps the highest version a
+    /// node reported, so an acknowledgement of a later version also vouches for every earlier one. A
+    /// later version must therefore not overtake an earlier one that still waits, and every caller,
+    /// including a repeated acknowledgement of a version already applied, goes through this method.
+    /// </para>
+    ///
+    /// <para><b>It never blocks.</b> The schema apply calls it from inside the commit pipeline of the
+    /// schema partition, where a wait for a commit could wait on that same partition. The deferred
+    /// part runs as a continuation that this descriptor owns. It sends nothing when the wait is
+    /// cancelled, which happens when the database is closed; the leader's gate then decides by its
+    /// own timeout.</para>
+    /// </summary>
+    internal void PublishSchemaApplied(long version, Task? settled = null)
+    {
+        lock (appliedAckSync)
+        {
+            if (settled is null && appliedAckTail.IsCompleted)
+            {
+                Kahuna.RecordAndPublishSchemaApplied(Id, version);
+                return;
+            }
+
+            appliedAckTail = PublishSchemaAppliedAfterAsync(appliedAckTail, settled, version);
+        }
+    }
+
+    private async Task PublishSchemaAppliedAfterAsync(Task previous, Task? settled, long version)
+    {
+        // Never faults: the next acknowledgement awaits this task, and a fault here would break the
+        // chain for the rest of the database's life.
+        try
+        {
+            await previous.ConfigureAwait(false);
+
+            if (settled is not null)
+                await settled.ConfigureAwait(false);
+
+            Kahuna.RecordAndPublishSchemaApplied(Id, version);
+        }
+        catch (Exception ex)
+        {
+            Diagnostics.SchemaDiag.Log(
+                $"ACK-WITHHELD node={Kahuna.Raft.GetLocalEndpoint()} db={Name} ver={version} ex={ex.GetType().Name}:{ex.Message}");
+        }
+    }
+
+    /// <summary>
     /// Immutable branch ancestry chain inherited from the registry entry at open time,
     /// nearest parent first.  Empty for root databases.  The full read lineage at
     /// query-execution time is <c>[(this.Id, tx.ReadTimestamp)] + Ancestors</c>; the

@@ -77,9 +77,11 @@ public sealed class SchemaChangeCoordinator
     /// <summary>
     /// Delegate invoked once, just before a foreign key transitions from <c>WriteOnly</c> to
     /// <c>Public</c>. Receives the database, the child table name and the constraint name, and throws
-    /// <see cref="CamusDBErrorCodes.ForeignKeyViolation"/> when a row has no parent. It runs after the
-    /// cluster acked <c>WriteOnly</c>, so every write since then is enforced and the pass needs no
-    /// lock; any orphan it finds was made in the window before the ack.
+    /// <see cref="CamusDBErrorCodes.ForeignKeyViolation"/> when a row has no parent. It runs after
+    /// every live node acked <c>WriteOnly</c> and settled the transactions that wrote either table
+    /// before that (<see cref="RequireEarlierWritersSettledAsync"/>). So every write since then is
+    /// enforced, no write from before can still commit, and the pass needs no lock; any orphan it
+    /// finds was committed in the window before the ack.
     ///
     /// <para>On a violation the coordinator removes the constraint (<c>WriteOnly → Absent</c>), deletes
     /// the job and rethrows, so the DDL fails and nothing is left half-rolled-out. It must be set on the
@@ -171,6 +173,8 @@ public sealed class SchemaChangeCoordinator
                 // on a leader-change resume that starts from WriteOnly.
                 if (current == SchemaElementState.WriteOnly && nextState == SchemaElementState.Public)
                 {
+                    await RequireEarlierWritersSettledAsync(database, job).ConfigureAwait(false);
+
                     if (job.ElementKind == SchemaElementKind.Column &&
                         BackfillAsync is not null &&
                         columnDefinition is not null)
@@ -246,6 +250,50 @@ public sealed class SchemaChangeCoordinator
                 await catalogs.DeleteCoordinatorJobAsync(database, job.TableId, job.ElementName)
                     .ConfigureAwait(false);
         }
+    }
+
+    /// <summary>
+    /// Waits until every live node acknowledged the schema version that holds the element in
+    /// <c>WriteOnly</c>, before the backfill or the validation pass reads the table.
+    ///
+    /// <para><b>What the acknowledgement means here.</b> A node acknowledges a version only after the
+    /// commits that were in flight on it, and that wrote the table without the new element, have a
+    /// terminal outcome (<c>DatabaseDescriptor.PublishSchemaApplied</c>). Every later commit of such
+    /// a write is refused by the write-shape fence. So once every live node acknowledged, each write
+    /// planned without the element is either committed, and the read that follows sees it, or it can
+    /// never commit. Without this wait a commit could land after the backfill read its key range,
+    /// and leave a row with no index entry, or an orphan under a validated foreign key.</para>
+    ///
+    /// <para><b>Full convergence, not the quorum backstop.</b> The post-commit gate of the
+    /// <c>WriteOnly</c> step may have returned on a majority. A node outside that majority can still
+    /// hold such a commit, so a majority is not enough to read. The proposal of <c>Public</c> requires
+    /// the same full convergence anyway (the two-version gate), so this adds no new way to stall: it
+    /// only moves that wait in front of the read.</para>
+    ///
+    /// <para>On a timeout the element stays in <c>WriteOnly</c>, which is a safe resting state, and
+    /// the job stays persisted for a resume or for the caller's compensation.</para>
+    /// </summary>
+    private static async Task RequireEarlierWritersSettledAsync(DatabaseDescriptor database, SchemaChangeJob job)
+    {
+        long version = database.Schema.SchemaVersion;
+
+        bool settled = await database.Kahuna.WaitForSchemaAcksAsync(
+            database.Id,
+            version,
+            database.Kahuna.SchemaAckWaitTimeout,
+            enforceFullConvergence: true,
+            cancellationToken: CancellationToken.None
+        ).ConfigureAwait(false);
+
+        if (settled)
+            return;
+
+        throw new CamusDBException(
+            CamusDBErrorCodes.InvalidInternalOperation,
+            $"Timed out waiting for every live node to settle the transactions that wrote table '{job.TableName}' of database " +
+            $"'{database.Name}' before {job.ElementKind.ToString().ToLowerInvariant()} '{job.ElementName}' existed " +
+            $"(schema version {version}); a node has not applied the change, or a commit that began before it has no outcome yet"
+        );
     }
 
     /// <summary>

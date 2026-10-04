@@ -404,7 +404,8 @@ under Schema.Semaphore:
 
   ApplySchemaDelta(database.Schema, entry)          // mutate in place — leader AND follower
   InvalidateAppliedTableDescriptor(...)             // drop cached descriptor on DropTable
-  record ack(ToVersion)
+  stamp the write shape of the affected tables      // §9.1 — only when the delta adds a write duty
+  record ack(ToVersion)                             // deferred while an earlier commit is in flight, §9.1
 ```
 
 **`ApplyAsync` never persists.** It runs inside the schema partition's commit pipeline
@@ -859,7 +860,9 @@ All read/write paths respect the visibility/writability table above:
   elements (`SchemaElementStateRules.IsReadableIndex/IsWritableIndex` centralize the composite
   "index + all its columns" check).
 - DML/read transactions **pin** each touched table's `(version, identity)` and the commit path
-  rejects the transaction if the schema moved underneath it (see §9).
+  rejects the transaction if the schema moved underneath it (see §9). A write statement also pins
+  the table's **write shape**, so a transaction that staged writes before an index or a constraint
+  existed cannot commit after it (see §9.1).
 
 This is what makes the staged rollout safe: while a column is `WriteOnly` on the node running
 the change and `Public`/`DeleteOnly` on another (the two-version window), concurrent DML on
@@ -897,6 +900,15 @@ targetState }, columnDefinition?, indexBuildInfo?)`:
   default is physically materialized (not just read-time injected) before it becomes readable.
 - **Index:** `IndexBackfillAsync(db, table, indexBuildInfo, startOffset)` →
   `CommandExecutor.BackfillIndexEntriesAsync` (see §7.3).
+
+**Earlier writers settle first.** Before any of these delegates reads the table, the coordinator
+waits for a **full-convergence** ack of the current schema version (`RequireEarlierWritersSettledAsync`).
+The `WriteOnly` step makes *new* statements maintain the element, but a transaction that wrote the
+table before that step did not, and the backfill reads committed rows only. An ack now means "applied,
+and no commit planned before the change is still in flight on this node" (§9.1), so after the wait
+every such write is either committed, and visible to the backfill, or can never commit. The quorum
+backstop is not enough here: a node outside the majority can still hold such a commit. The `Public`
+proposal requires the same full convergence anyway, so the wait adds no new way to stall.
 
 Firing the backfill at exactly this point means it runs **after** `WriteOnly` is committed (so
 `RowEncoder.Encode` already includes the column / the index accepts writes) and **before**
@@ -948,7 +960,9 @@ DROP:  Public ──SetElementState(Absent)──► Absent        (then the own
 - **`WriteOnly` comes before the validation.** In the two-version window a node on the old
   version enforces nothing, and can delete a parent while another node inserts its child. The
   validation pass (`ForeignKeyValidationPass`) runs only after every live node acked `WriteOnly`,
-  so it sees any orphan from the window, and none can form after it.
+  so it sees any orphan from the window, and none can form after it. The ack also covers
+  transactions: a write of the child or the parent that was staged before `WriteOnly` cannot commit
+  after the pass (§9.1).
 - **DROP is one step**, because an early stop of enforcement is always safe.
 - **`WriteOnly` is a safe resting state.** After a leader change the constraint stays enforced
   but untrusted, and the resumed coordinator job finishes the validation.
@@ -1004,6 +1018,95 @@ Read queries capture the visibility version at **plan time** (`QueryPlan.TableSc
 and per-alias `TableSchemaVersionByAlias` for joins) and decode against it, so a long scan
 sees a consistent schema snapshot even if an `ALTER` lands mid-stream. Read-only autocommit
 SELECTs don't run the commit-time validation step (they have a consistent snapshot already).
+
+### 9.1 The write-shape fence (transactions that span a schema change)
+
+The version pin above watches the **row layout**. An index and a constraint are not part of it:
+`CREATE INDEX`, `ADD CONSTRAINT ... FOREIGN KEY`, `ADD CONSTRAINT ... CHECK` and `SET NOT NULL` leave
+`TableSchema.Version` alone. The staged rollout (§8) waits for every *node* to apply each step, but a
+*transaction* can stay open across any number of steps. Without a second guard this happens:
+
+```
+T:    BEGIN; INSERT INTO weather ... ('atlantis')      -- planned without the index; row staged
+DDL:  CREATE INDEX weather_city ON weather (city)       -- WriteOnly, backfill, Public; returns
+T:    COMMIT                                            -- succeeds: a row with no index entry
+```
+
+The backfill reads committed rows only, so it cannot see the staged row, and the insert wrote no
+entry because the index did not exist when it was planned. The index is incomplete for good. The
+same shape lets an orphan child, or the delete of a referenced parent, commit after a foreign-key
+validation pass.
+
+The **write shape** of a table is everything a write must maintain or obey beyond the row itself:
+the indexes that take entries, the foreign keys enforced on either side, the CHECK and NOT NULL
+constraints. The fence makes one rule hold: *the writes a transaction staged for a table commit only
+if the table gained no write duty since they were planned.* It has three parts.
+
+**1. The pin.** Each database has a node-local `WriteShapeClock`. A write statement (INSERT, UPDATE,
+DELETE, INSERT ... SELECT, through SQL or the row API) reads the clock's epoch **before it opens the
+table**, and pins the table with it (`SelectStatementExecutor.PinForWrite` →
+`KvTransaction.PinWriteShape`). The first pin of a table wins: a later statement may plan against a
+newer shape, but the first statement's writes are still staged. Reads take no pin.
+
+**2. The stamp.** When a node applies a delta that adds a write duty, it stamps the affected
+`TableSchema` with a new epoch (`SchemaReplicator.ApplyAsync` → `WriteShapeDeltaRules.Resolve` →
+`WriteShapeClock.Advance`). A foreign key stamps the child **and** the parent; a `CREATE TABLE` that
+declares foreign keys stamps each parent. At commit,
+`KvTransaction.TryEnterCommit` compares each pin with the stamp; a stamp later than the pin refuses
+the commit with the retryable `CADB0502`, and the manager rolls the transaction back. Two orders make
+this sound, and both are deliberate:
+
+- The stamp comes **after** the schema mutation, the foreign-key graph rebuild and the descriptor
+  eviction. A statement that reads the new epoch is then certain to plan with the new shape.
+- `Advance` writes the stamp **before** it publishes the epoch. A statement that read the old epoch
+  is then certain to find the stamp at commit.
+
+**3. The drain.** A stamp cannot refuse a commit that passed its gate *before* the stamp and has not
+landed yet. `TryEnterCommit` therefore checks the pins and moves the transaction to `Finalizing` in
+**one critical section**, and the apply looks for such commits under the same lock, after the stamp
+(`KvTransactionsManager.WaitForCommitsPlannedBeforeAsync`). Every commit falls on one side: the apply
+sees it and waits for its outcome, or it sees the stamp and is refused. The apply itself never
+blocks — it runs inside the schema partition's commit pipeline, which a commit may need — so the wait
+is attached to the node's **ack** instead: `DatabaseDescriptor.PublishSchemaApplied` sends the ack for
+a version only when the drain of that version, and of every earlier version, has completed. The
+coordinator's full-convergence wait before a backfill or a validation pass (§8.2) is what turns
+those acks into "the whole cluster is past the earlier writers".
+
+Which deltas stamp is decided in one place, `WriteShapeDeltaRules`. Only **additions** stamp: a new
+index (unless the proposer already maintains it in memory, as the single-node build does), an index
+or foreign key that moves to `DeleteOnly`/`WriteOnly`, a new CHECK, a `SET NOT NULL`. Drops, renames,
+comments, the step to `Public` and column changes (already covered by the version pin) do not. A
+`SchemaOp` the rules do not list **does** stamp, so a new operation is safe until somebody decides it
+adds nothing. The single-node index build, which adds the index in memory before it replicates,
+calls `DatabaseDescriptor.FenceWritersAndWaitAsync` directly before its backfill.
+
+What a schema change waits for is small: **commits in flight**, never open transactions. An idle
+client that holds a transaction open does not delay DDL; its commit is refused instead.
+
+Limits of the fence:
+
+- **It is node-local and in memory.** A node the leader's liveness lease has dropped (§6.2) is not
+  waited for. If that node is alive, cut off from the schema leader only, and still able to commit to
+  data partitions, a write it planned before the change can land after the backfill. The strict lease
+  (`schema_ack_live_node_lease_ms: -1`) closes this at the price of DDL that stalls on a dead node.
+- **A commit with an unknown outcome blocks DDL on its table, for a bounded time.** A commit that
+  returned the non-terminal `CADB0509` stays in flight until the client resumes it. The node withholds
+  its ack, and the DDL fails at the gate timeout rather than read the table too early. The node stops
+  waiting when the transaction is older than the session ceiling plus the coordinator's reclaim grace
+  (`KahunaSessionLifetime`, 330 s by default): past that age nothing the session started can still
+  arrive. Acks leave in version order, so until then the node acknowledges no later schema version
+  either.
+- **CHECK and NOT NULL still validate before they enforce.** Their `ALTER` scans the table and only
+  then installs the constraint, so a row committed between the scan and the install is not checked.
+  The fence refuses a transaction that wrote before the install and commits after it, but it cannot
+  repair that order.
+- **A freshness reload (§6.4) retires every `TableSchema` instance**, so each transaction that wrote
+  a table before the reload is refused at commit. The node missed deltas, and nothing says what the
+  transaction lacks.
+
+Tests: `TestSchemaChangeSpanningTransactions` (single node and shared node) and
+`CamusDB.Cluster.Tests/TestClusterSchemaChangeSpanningTransactions` (the transaction on a follower,
+the change on the leader).
 
 ---
 

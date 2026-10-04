@@ -65,8 +65,11 @@ internal sealed class RowCommandService
         DatabaseDescriptor database = await context.DatabaseOpener.Open(ticket.DatabaseName).ConfigureAwait(false);
         using DatabaseUseHandle _ = database.Use();
 
+        // Captured before the table is opened; see WriteShapeClock for why the order matters.
+        long writeShapeEpoch = database.WriteShape.Current;
+
         TableDescriptor table = await context.TableOpener.Open(database, ticket.TableName).ConfigureAwait(false);
-        SelectStatementExecutor.PinSchemaVersion(database, table, ticket.TxnState);
+        SelectStatementExecutor.PinForWrite(database, table, ticket.TxnState, writeShapeEpoch);
 
         int inserted = await rowInserter.Insert(database, table, ticket).ConfigureAwait(false);
         context.Statistics.TrackInsert(database, table, inserted, ticket.Values);
@@ -86,8 +89,11 @@ internal sealed class RowCommandService
         DatabaseDescriptor database = await context.DatabaseOpener.Open(ticket.DatabaseName).ConfigureAwait(false);
         using DatabaseUseHandle _ = database.Use();
 
+        // Captured before the table is opened; see WriteShapeClock for why the order matters.
+        long writeShapeEpoch = database.WriteShape.Current;
+
         TableDescriptor table = await context.TableOpener.Open(database, ticket.TableName).ConfigureAwait(false);
-        SelectStatementExecutor.PinSchemaVersion(database, table, ticket.TxnState);
+        SelectStatementExecutor.PinForWrite(database, table, ticket.TxnState, writeShapeEpoch);
 
         int updated = await rowUpdater.Update(queryExecutor, database, table, ticket).ConfigureAwait(false);
         context.Statistics.TrackUpdate(database, table, updated, ticket.PlainValues);
@@ -107,8 +113,11 @@ internal sealed class RowCommandService
         DatabaseDescriptor database = await context.DatabaseOpener.Open(ticket.DatabaseName).ConfigureAwait(false);
         using DatabaseUseHandle _ = database.Use();
 
+        // Captured before the table is opened; see WriteShapeClock for why the order matters.
+        long writeShapeEpoch = database.WriteShape.Current;
+
         TableDescriptor table = await context.TableOpener.Open(database, ticket.TableName).ConfigureAwait(false);
-        SelectStatementExecutor.PinSchemaVersion(database, table, ticket.TxnState);
+        SelectStatementExecutor.PinForWrite(database, table, ticket.TxnState, writeShapeEpoch);
 
         int deleted = await rowDeleter.Delete(queryExecutor, database, table, ticket).ConfigureAwait(false);
         context.Statistics.TrackDelete(database, table, deleted);

@@ -177,6 +177,12 @@ public sealed class KvTransaction
     private HashSet<(string key, KeyValueDurability durability)>? modifiedKeys;
     private Dictionary<string, SchemaVersionPin>? schemaPins;
 
+    // Write-shape fence state, guarded by trackSync. See PinWriteShape and TryEnterCommit. The first
+    // pin is held inline, because most transactions write one table and then need no list at all.
+    private WriteShapePin firstWriteShapePin;
+    private List<WriteShapePin>? moreWriteShapePins;
+    private bool commitInFlight;
+
     /// <summary>
     /// When true this is a synthetic read-only transaction backed by <see cref="HLCTimestamp.Zero"/>.
     /// Kahuna uses <c>HLCTimestamp.Zero</c> as the non-transactional snapshot signal (read-committed
@@ -1012,6 +1018,150 @@ public sealed class KvTransaction
         return schemaPins is not null && schemaPins.TryGetValue(resource, out SchemaVersionPin pin)
             ? pin.SchemaVersion
             : null;
+    }
+
+    /// <summary>
+    /// Records that a statement of this transaction writes <paramref name="table"/>, and that it
+    /// captured <paramref name="epoch"/> from the database's write-shape clock <b>before</b> it
+    /// resolved the table. The commit is refused when the table gained a write obligation after that
+    /// epoch (see <see cref="TryEnterCommit"/>).
+    ///
+    /// <para><b>The first pin of a table wins.</b> A later statement can plan against a newer shape,
+    /// but the writes of the first statement are still staged, and they are the ones that lack the
+    /// new index entry or the new constraint check. So the oldest epoch decides.</para>
+    ///
+    /// <para>Guarded by <c>trackSync</c>, although one transaction runs on one logical thread: the
+    /// schema-change drain reads the pins from another thread
+    /// (<see cref="IsCommitInFlightPlannedBefore"/>).</para>
+    /// </summary>
+    public void PinWriteShape(IWriteShapeSource table, long epoch)
+    {
+        ArgumentNullException.ThrowIfNull(table);
+
+        lock (trackSync)
+        {
+            if (firstWriteShapePin.Table is null)
+            {
+                firstWriteShapePin = new(table, epoch);
+                return;
+            }
+
+            if (ReferenceEquals(firstWriteShapePin.Table, table))
+                return;
+
+            if (moreWriteShapePins is not null)
+            {
+                for (int i = 0; i < moreWriteShapePins.Count; i++)
+                {
+                    if (ReferenceEquals(moreWriteShapePins[i].Table, table))
+                        return;
+                }
+            }
+
+            (moreWriteShapePins ??= []).Add(new(table, epoch));
+        }
+    }
+
+    /// <summary>
+    /// The commit gate of the write-shape fence. In one critical section it checks every write-shape
+    /// pin and, when all hold, moves the transaction to <see cref="KvTransactionStatus.Finalizing"/>
+    /// and marks its commit as in flight. Returns false, and changes nothing, when a pinned table
+    /// gained a write obligation after the pin; <paramref name="changed"/> is that table.
+    ///
+    /// <para><b>The check and the status change must be atomic.</b> A schema change first stamps the
+    /// table and then looks for commits in flight (<see cref="IsCommitInFlightPlannedBefore"/>, under
+    /// this same lock). With one critical section, every commit falls on one side: it entered before
+    /// the look, so the schema change sees it and waits for its outcome; or it enters after the
+    /// stamp, so it sees the stamp and is refused. With a check and a separate status write, a commit
+    /// could pass the check before the stamp and become visible after the look. Then the backfill or
+    /// the validation pass reads the table without the row, and the commit lands afterwards.</para>
+    /// </summary>
+    internal bool TryEnterCommit(out IWriteShapeSource? changed)
+    {
+        lock (trackSync)
+        {
+            if (firstWriteShapePin.Table is not null)
+            {
+                if (firstWriteShapePin.Table.WriteShapeChangedAt > firstWriteShapePin.Epoch)
+                {
+                    changed = firstWriteShapePin.Table;
+                    return false;
+                }
+
+                if (moreWriteShapePins is not null)
+                {
+                    for (int i = 0; i < moreWriteShapePins.Count; i++)
+                    {
+                        WriteShapePin pin = moreWriteShapePins[i];
+
+                        if (pin.Table.WriteShapeChangedAt > pin.Epoch)
+                        {
+                            changed = pin.Table;
+                            return false;
+                        }
+                    }
+                }
+            }
+
+            commitInFlight = true;
+            Status = KvTransactionStatus.Finalizing;
+        }
+
+        changed = null;
+        return true;
+    }
+
+    /// <summary>
+    /// True while a commit of this transaction passed <see cref="TryEnterCommit"/> and has no terminal
+    /// outcome yet. A commit that returned the non-terminal <c>MustRetry</c> stays in flight: the
+    /// client can resume it at any time, and it can still land.
+    /// </summary>
+    internal bool IsCommitInFlight
+    {
+        get { lock (trackSync) return commitInFlight && Status == KvTransactionStatus.Finalizing; }
+    }
+
+    /// <summary>
+    /// True when a commit of this transaction is in flight and one of its statements wrote one of
+    /// <paramref name="tables"/> under a write-shape epoch earlier than <paramref name="epoch"/>.
+    /// Such a commit passed the gate before the table was stamped, so only its outcome tells whether
+    /// its rows exist. Called by the schema-change drain.
+    /// </summary>
+    internal bool IsCommitInFlightPlannedBefore(IReadOnlyList<IWriteShapeSource> tables, long epoch)
+    {
+        lock (trackSync)
+        {
+            if (!commitInFlight || Status != KvTransactionStatus.Finalizing || firstWriteShapePin.Table is null)
+                return false;
+
+            if (WasPlannedBefore(firstWriteShapePin, tables, epoch))
+                return true;
+
+            if (moreWriteShapePins is not null)
+            {
+                for (int i = 0; i < moreWriteShapePins.Count; i++)
+                {
+                    if (WasPlannedBefore(moreWriteShapePins[i], tables, epoch))
+                        return true;
+                }
+            }
+
+            return false;
+        }
+    }
+
+    private static bool WasPlannedBefore(WriteShapePin pin, IReadOnlyList<IWriteShapeSource> tables, long epoch)
+    {
+        if (pin.Epoch >= epoch)
+            return false;
+
+        for (int i = 0; i < tables.Count; i++)
+        {
+            if (ReferenceEquals(pin.Table, tables[i]))
+                return true;
+        }
+
+        return false;
     }
 
     /// <summary>

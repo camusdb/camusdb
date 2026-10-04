@@ -299,7 +299,8 @@ There is no `REFERENCES` privilege.
    `CREATE INDEX`.
 3. It adds the constraint in the **WriteOnly** state. From this point every INSERT, UPDATE and
    DELETE checks the constraint.
-4. In a cluster, it waits until every live node acknowledges the WriteOnly state.
+4. It waits until every live node acknowledges the WriteOnly state. A node acknowledges only when
+   no commit that wrote the child or the parent before step 3 is still in flight on it.
 5. It reads the backing index in key order, in pages, and checks the distinct keys of each page
    against the parent in one batched read.
 6. When every row has its parent, the constraint becomes **Public**.
@@ -318,8 +319,24 @@ constraint, so it sees any orphan from that window, and no new orphan can form a
 WriteOnly: it is enforced but not yet trusted. The new leader finishes the validation and makes it
 Public.
 
-In standalone mode the same steps run without the wait in step 4. `CREATE TABLE` with a constraint
-goes through the same states in a cluster, and is Public at once in standalone mode.
+**A transaction that was open during the ADD.** A transaction that wrote the child table or the
+parent table before step 3 ran no check: the constraint did not exist yet. The validation in step 5
+reads committed rows only, so it cannot see a write that is still staged. The engine therefore
+does not let such a write commit after the validation:
+
+- A commit that starts after step 3 is refused with `CADB0502` (`TransactionConflict`), and the
+  transaction is rolled back. Run the transaction again; the new statements check the constraint.
+  An autocommit statement is retried for you.
+- A commit that was already in flight at step 3 cannot be refused any more. Step 4 waits for its
+  outcome, so step 5 sees its rows. If the commit made an orphan, the ADD fails with `CADB0304`.
+
+The ADD never waits for an idle open transaction, only for a commit in flight. Both the child and
+the parent are covered: a `DELETE` of a parent row that was staged before the ADD is refused at
+commit in the same way. `CREATE TABLE` with a foreign key protects its parents by the same rule. A transaction that only read the tables, or that writes them after step 3,
+is not affected. `CREATE INDEX` uses the same rule, so an index never misses a row.
+
+In standalone mode the same steps run on the one node. `CREATE TABLE` with a constraint goes
+through the same states in a cluster, and is Public at once in standalone mode.
 
 ### DROP CONSTRAINT
 
@@ -437,7 +454,7 @@ work, tagged by `kind`: `lock_acquired`, `lock_covered`, `parent_lock`, `child_p
 | `CADB0530` | `DependentObjectsExist` | A schema change that section 7 refuses. | 409 | `FailedPrecondition` |
 | `CADB0533` | `FeatureNotSupported` | An action other than NO ACTION and RESTRICT; MATCH FULL or PARTIAL; DEFERRABLE; row-level TTL on a parent. | 501 | `Internal` |
 | `CADB0504` | `TransactionMustRetry` | A parent write waited for a child transaction longer than `lock_wait_deadline_ms`. | 500 | `Aborted` |
-| `CADB0502` | `TransactionConflict` | An optimistic transaction lost the rendezvous at commit. | 500 | `Aborted` |
+| `CADB0502` | `TransactionConflict` | An optimistic transaction lost the rendezvous at commit; or the transaction wrote the child or the parent before an `ADD CONSTRAINT` and commits after it started (section 6). | 500 | `Aborted` |
 
 Each violation message names the constraint, the child table, the parent table and the key values.
 
@@ -447,19 +464,21 @@ again".
 
 ---
 
-## 11. Known limitation
+## 11. Limitations
 
-**A transaction that spans ADD CONSTRAINT can commit an orphan.** A transaction that writes a child
-row before the ADD starts, and commits after the ADD finished, is checked by nothing. Its INSERT
-ran before the constraint existed, and the validation read only committed rows. The ADD returns
-with the constraint Public, and the commit then succeeds. `CREATE INDEX` has the same gap: the
-index misses the row. Until this is fixed, do not run `ADD CONSTRAINT` while transactions that
-write the child table are open, or check for orphans after the ADD:
+**A lagging node in a cluster.** Step 4 of the ADD waits for every *live* node. A node that the
+schema leader has not heard from for `schema_ack_live_node_lease_ms` (30 s by default) is treated
+as dead and is not waited for. If that node is alive, cut off from the schema leader only, and still
+able to commit to the data partitions, a commit of a write that it planned before the constraint
+can land after the validation. Set the lease to `-1` to make the ADD wait for every configured
+node, at the price of a schema change that stalls while a node is down.
 
-```sql
-SELECT id FROM weather
-WHERE city IS NOT NULL AND city NOT IN (SELECT name FROM cities);
-```
+**A commit whose outcome is unknown.** A commit that returned `CADB0509` stays in flight until
+the client resolves it. While it is in flight on a table, an `ADD CONSTRAINT` or `CREATE INDEX` on
+that table waits, and fails after `schema_ack_wait_timeout_ms`. Retry the COMMIT of that transaction
+until it gives an outcome, then run the schema change again. If the client is gone, the engine stops
+the wait by itself when the transaction is older than the longest life of a session (330 s by
+default); until then that node acknowledges no schema change of the database.
 
 ---
 
@@ -519,4 +538,4 @@ Every scenario runs on a standalone engine and on a cluster-mode engine.
 | SHOW CREATE TABLE and SHOW INDEXES | `TestShowCreateTableRoundTrip` |
 | HTTP and gRPC codes, privileges | `TestForeignKeyTransports`, `TestForeignKeyPrivileges` |
 | Cost budgets | `TestForeignKeyBudgets`, `CamusDB.Cluster.Tests/TestClusterForeignKeyOnePhaseCommit`, `CamusDB.MicroBenchmarks/ForeignKeyBenchmarks.cs` |
-| The limitation in section 11 | `TestSchemaChangeSpanningTransactions` (ignored until it is fixed) |
+| Transactions that span an ADD CONSTRAINT or a CREATE INDEX | `TestSchemaChangeSpanningTransactions`, `CamusDB.Cluster.Tests/TestClusterSchemaChangeSpanningTransactions` |

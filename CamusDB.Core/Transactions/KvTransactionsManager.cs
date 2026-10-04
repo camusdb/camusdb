@@ -761,6 +761,23 @@ public sealed class KvTransactionsManager : IDisposable
         {
             tx.ValidateSchemaPins();
 
+            // The write-shape fence. A table this transaction wrote gained an index or a constraint
+            // after the write was planned, so the staged work is incomplete: it lacks the index entry,
+            // or it never ran the constraint check. The backfill and the validation pass read
+            // committed rows only, so neither can repair a commit that lands after them. The gate
+            // also moves the transaction to Finalizing in the same critical section, which is what
+            // lets a schema change wait for exactly the commits that passed before its stamp.
+            if (!tx.TryEnterCommit(out IWriteShapeSource? changedTable))
+            {
+                await AbandonRefusedCommitAsync(tx, cancellationToken).ConfigureAwait(false);
+
+                throw new CamusDBException(
+                    CamusDBErrorCodes.TransactionConflict,
+                    $"Transaction {tx.UniqueId} cannot commit: table '{changedTable!.WriteShapeName}' gained an index or a " +
+                    "constraint after the transaction wrote to it, so the staged writes do not maintain it; " +
+                    "the transaction was rolled back, retry it from BeginAsync");
+            }
+
             // Enforce the serializable transaction lifetime deadline before touching Kahuna. Only
             // Serializable+RW transactions acquire range locks whose TTL could expire mid-transaction;
             // ReadCommitted and Serializable+RO transactions are exempt. A Serializable+RW transaction
@@ -771,22 +788,8 @@ public sealed class KvTransactionsManager : IDisposable
             if (tx is { IsolationLevel: CamusIsolationLevel.Serializable, TransactionMode: CamusTransactionMode.ReadWrite } &&
                 tx.IsExpired(options.MaxSerializableTransactionLifetimeMs))
             {
-                tx.Status = KvTransactionStatus.Finalizing;
-                try
-                {
-                    // Best-effort handle rollback so the coordinator drops the staged working set and
-                    // session; if it stays unresolved, the session's own timeout is the backstop.
-                    await RollbackHandleWithRetryAsync(tx, cancellationToken).ConfigureAwait(false);
-                }
-                catch
-                {
-                    // Never let cleanup mask the lifetime error the caller must see.
-                }
-                
-                tx.Status = KvTransactionStatus.RolledBack;
-                
-                Untrack(tx);
-                
+                await AbandonRefusedCommitAsync(tx, cancellationToken).ConfigureAwait(false);
+
                 throw new CamusDBException(
                     CamusDBErrorCodes.TransactionLifetimeExceeded,
                     $"Serializable transaction {tx.UniqueId} exceeded the maximum lifetime " +
@@ -1021,6 +1024,115 @@ public sealed class KvTransactionsManager : IDisposable
                 else
                     _cache!.PublishGate.AbortWrite(keyspaces!);
             }
+        }
+    }
+
+    /// <summary>
+    /// Ends a transaction whose commit was refused before any commit request left this node: the
+    /// lifetime deadline, or the write-shape fence. Nothing was asked to commit, so the outcome is a
+    /// definite non-commit and the caller can replay from <see cref="BeginAsync"/>.
+    ///
+    /// <para>The staged writes, the locks and the session are handed to a coordinator rollback and not
+    /// left to the reaper: a replay of the same statement would otherwise wait on the locks of its own
+    /// earlier attempt. The rollback is best effort; if it stays unresolved, the session's own timeout
+    /// is the backstop. A cleanup failure never masks the refusal the caller must see.</para>
+    /// </summary>
+    private async Task AbandonRefusedCommitAsync(KvTransaction tx, CancellationToken cancellationToken)
+    {
+        tx.Status = KvTransactionStatus.Finalizing;
+
+        try
+        {
+            await RollbackHandleWithRetryAsync(tx, cancellationToken).ConfigureAwait(false);
+        }
+        catch
+        {
+            // Never let cleanup mask the error the caller must see.
+        }
+
+        tx.Status = KvTransactionStatus.RolledBack;
+
+        Untrack(tx);
+    }
+
+    /// <summary>
+    /// Finds the commits in flight on this node that wrote one of <paramref name="tables"/> under a
+    /// write-shape epoch earlier than <paramref name="epoch"/>, and returns a task that completes
+    /// when each of them has a terminal outcome. Returns null when there
+    /// is none, which is the usual case, so the caller pays no task.
+    ///
+    /// <para><b>Call it after the tables were stamped with <paramref name="epoch"/>, never before.</b>
+    /// The stamp refuses every commit that reaches its gate later
+    /// (<see cref="KvTransaction.TryEnterCommit"/>). This method covers the other half: the commits
+    /// that passed the gate before the stamp. Their rows are not visible yet and can still land, so a
+    /// backfill or a validation pass that reads the table now would miss them.</para>
+    ///
+    /// <para><b>Only commits are waited for, not open transactions.</b> An open transaction that
+    /// planned its writes before the stamp is refused when it commits, however late that is, so a
+    /// schema change never waits on an idle client.</para>
+    ///
+    /// <para><b>The wait for one commit is bounded by the life of its session.</b> A commit that
+    /// returned the non-terminal <c>MustRetry</c> stays in flight until the client resumes it, and a
+    /// client can leave for good. Past the session ceiling plus the coordinator's reclaim grace
+    /// (<see cref="Config.KahunaSessionLifetime"/>) nothing that the session started can still
+    /// arrive, so the commit is counted as settled although it has no outcome here. Without the
+    /// bound, one abandoned commit would hold back every later schema acknowledgement of this node,
+    /// and with them every schema change of the database. A caller that cannot wait that long bounds
+    /// the wait itself. The task ends early, as cancelled, when this manager is disposed.</para>
+    /// </summary>
+    internal Task? WaitForCommitsPlannedBeforeAsync(IReadOnlyList<IWriteShapeSource> tables, long epoch)
+    {
+        List<KvTransaction>? pending = null;
+
+        foreach (KvTransaction tx in activeTransactions.Values)
+        {
+            if (tx.IsCommitInFlightPlannedBefore(tables, epoch))
+                (pending ??= []).Add(tx);
+        }
+
+        return pending is null ? null : WaitUntilFinalizedAsync(pending);
+    }
+
+    /// <summary>
+    /// The transaction age past which a commit in flight can no longer land anything: the session
+    /// ceiling plus the coordinator's reclaim grace. The operator's
+    /// <see cref="CamusDBOptions.AbandonedTransactionReleaseAfterMs"/> is used when it is positive,
+    /// which is how a test compresses the timeline. When that setting disables the release of
+    /// abandoned holdings, the derived age still applies here: the bound is a fact about sessions,
+    /// not a part of that release. Read on every pass, so a runtime change of the options applies.
+    /// </summary>
+    private long CommitSettledAgeMs() =>
+        Config.KahunaSessionLifetime.AbandonedReleaseAgeMs(options)
+        ?? (long)Config.KahunaSessionLifetime.MaxSessionTimeoutMs(
+               options.Kahuna.MaxTransactionTimeoutMs ?? Config.KahunaSessionLifetime.NodeDefaultMaxTransactionTimeoutMs,
+               options.MaxSerializableTransactionLifetimeMs)
+           + Config.KahunaSessionLifetime.CoordinatorReclaimGraceMs;
+
+    private async Task WaitUntilFinalizedAsync(List<KvTransaction> pending)
+    {
+        int delayMs = 1;
+
+        while (true)
+        {
+            long settledAgeMs = CommitSettledAgeMs();
+
+            for (int i = pending.Count - 1; i >= 0; i--)
+            {
+                KvTransaction tx = pending[i];
+
+                // No session clock means no session, and a transaction without one staged nothing.
+                if (!tx.IsCommitInFlight || tx.AgeMs is not { } ageMs || ageMs >= settledAgeMs)
+                    pending.RemoveAt(i);
+            }
+
+            if (pending.Count == 0)
+                return;
+
+            if (Volatile.Read(ref disposed) != 0)
+                throw new OperationCanceledException("The transaction manager was disposed while a schema change waited for commits in flight");
+
+            await Task.Delay(delayMs).ConfigureAwait(false);
+            delayMs = Math.Min(delayMs * 2, 50);
         }
     }
 
@@ -1577,8 +1689,14 @@ public sealed class KvTransactionsManager : IDisposable
         await RollbackAsync(tx, cancellationToken).ConfigureAwait(false);
     }
 
+    // Set once by Dispose. Read by the write-shape drain, which must not keep polling transactions
+    // that a disposed manager will never finalize.
+    private int disposed;
+
     public void Dispose()
     {
+        Volatile.Write(ref disposed, 1);
+
         // Drain through Untrack rather than clearing: a disposed manager has no active transactions,
         // and a gauge left standing at whatever was live when it died reads as a leak for the rest of
         // the process's life.

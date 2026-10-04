@@ -158,6 +158,72 @@ internal sealed class TableOpener
         }
     }
 
+    /// <summary>
+    /// Attempts that <see cref="SnapshotIndexes"/> makes before it gives up. A schema change touches
+    /// the list a few times at most, so a second attempt is nearly always clean.
+    /// </summary>
+    private const int IndexSnapshotAttempts = 32;
+
+    /// <summary>
+    /// Copies the index list of a table for a descriptor build, and repeats the copy when a schema
+    /// change mutated the list during it.
+    ///
+    /// <para><b>Why a copy.</b> <c>TableSchema.Indexes</c> is mutated in place by the schema apply
+    /// (under the schema lock) and by the single-node index build (under the system-schema
+    /// semaphore). A descriptor build holds neither lock, and it cannot take them: it runs on the
+    /// statement path, and it awaits between entries when it registers key ranges. An enumeration of
+    /// the live list across those awaits met a concurrent change and threw, which failed an unrelated
+    /// statement during an <c>ALTER</c>.</para>
+    ///
+    /// <para><b>Why the repeat is enough.</b> The list's own enumerator detects a change between its
+    /// first and its last step, so a pass that completes saw one state of the list. Which state does
+    /// not matter: every change of the list is followed by an eviction of the cached descriptor, so a
+    /// descriptor built from the state before the change is replaced on the next open.</para>
+    ///
+    /// <para>After the last attempt the statement fails with the retryable
+    /// <see cref="CamusDBErrorCodes.SchemaCatchingUp"/>, as it does when the node is behind on schema
+    /// changes; nothing was written at this point.</para>
+    /// </summary>
+    private static TableIndexSchema[] SnapshotIndexes(List<TableIndexSchema> live, string? tableName)
+    {
+        List<TableIndexSchema> copy = new(live.Count);
+
+        for (int attempt = 0; attempt < IndexSnapshotAttempts; attempt++)
+        {
+            copy.Clear();
+
+            try
+            {
+                bool torn = false;
+
+                foreach (TableIndexSchema? index in live)
+                {
+                    // A removal clears the tail of the list before it marks the change, so a pass can
+                    // read an emptied slot. That pass saw no single state of the list.
+                    if (index is null)
+                    {
+                        torn = true;
+                        break;
+                    }
+
+                    copy.Add(index);
+                }
+
+                if (!torn)
+                    return copy.ToArray();
+            }
+            catch (InvalidOperationException)
+            {
+                // The list changed during the pass. Let the writer finish, then copy again.
+                Thread.Yield();
+            }
+        }
+
+        throw new CamusDBException(
+            CamusDBErrorCodes.SchemaCatchingUp,
+            $"The indexes of table '{tableName}' changed repeatedly while the table was opened; retry this operation");
+    }
+
     private async Task<TableDescriptor> LoadTable(DatabaseDescriptor database, TableSchema tableSchema)
     {
         // Rows and index entries are addressed by the STORAGE id, which is the relation's own id for
@@ -242,9 +308,12 @@ internal sealed class TableOpener
         // TableSchema.Indexes in-memory via MigrateIndexesFromSystemSchema, so the
         // SystemSchema fallback is only reached for code paths that open a table descriptor
         // before LoadMetaAsync has run (e.g. unit tests that bypass LoadMetaAsync).
+        //
+        // A copy, never the live list: the loop below awaits, and a schema change mutates
+        // TableSchema.Indexes in place while it runs. See SnapshotIndexes.
         IReadOnlyList<TableIndexSchema> indexSource =
-            tableSchema.Indexes is { Count: > 0 }
-                ? tableSchema.Indexes
+            tableSchema.Indexes is { Count: > 0 } liveIndexes
+                ? SnapshotIndexes(liveIndexes, tableSchema.Name)
                 : GetSystemObjectIndexes(database, tableSchema.Id ?? "").Select(
                     ix => new TableIndexSchema(ix.Id, ix.Name, ix.ColumnIds, ix.Type, ix.State, ix.StartOffset)
                 ).ToList();

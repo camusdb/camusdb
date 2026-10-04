@@ -62,7 +62,7 @@ public sealed class SchemaReplicator
     {
         ArgumentNullException.ThrowIfNull(database);
 
-        database.Kahuna.RecordAndPublishSchemaApplied(database.Id, database.Schema.SchemaVersion);
+        database.PublishSchemaApplied(database.Schema.SchemaVersion);
 
         IDisposable applySubscription = database.Kahuna.RegisterSchemaApply(
             (partitionId, bytes) => ApplyAsync(database, partitionId, bytes),
@@ -152,7 +152,7 @@ public sealed class SchemaReplicator
             if (header.ToVersion <= database.Schema.SchemaVersion &&
                 database.WasSchemaEntryApplied(header.ToVersion, SchemaChangeLogEntryCodec.Fingerprint(bytes)))
             {
-                database.Kahuna.RecordAndPublishSchemaApplied(database.Id, header.ToVersion);
+                database.PublishSchemaApplied(header.ToVersion);
                 return true;
             }
         }
@@ -180,7 +180,7 @@ public sealed class SchemaReplicator
                     Diagnostics.SchemaDiag.Log(
                         $"APPLY-DUP node={database.Kahuna.Raft.GetLocalEndpoint()} db={database.Name} " +
                         $"entry={entry.FromVersion}->{entry.ToVersion} localVer={database.Schema.SchemaVersion} (already applied; re-ack)");
-                    database.Kahuna.RecordAndPublishSchemaApplied(database.Id, entry.ToVersion);
+                    database.PublishSchemaApplied(entry.ToVersion);
                     return true;
                 }
 
@@ -195,7 +195,7 @@ public sealed class SchemaReplicator
 
             if (entry.ToVersion <= database.Schema.SchemaVersion)
             {
-                database.Kahuna.RecordAndPublishSchemaApplied(database.Id, entry.ToVersion);
+                database.PublishSchemaApplied(entry.ToVersion);
                 return true;
             }
 
@@ -213,8 +213,17 @@ public sealed class SchemaReplicator
             // recorded in memory and written by the checkpoint that follows.
             CatalogsManager.CaptureContentsRetirementIntent(database, entry);
 
+            // Resolved before the apply: the answer depends on the state the delta replaces.
+            WriteShapeTargets writeShapeTargets = WriteShapeDeltaRules.Resolve(database.Schema, entry);
+
             TableSchema? appliedTableSchema = CatalogsManager.ApplySchemaDelta(database.Schema, database, entry);
             InvalidateAppliedTableDescriptor(database, entry, appliedTableSchema);
+
+            // After the mutation, the published foreign-key graph and the descriptor eviction, never
+            // before: a write statement that reads the new write-shape epoch must be certain to plan
+            // with the new index or constraint. The returned task is the commits in flight that
+            // passed their gate before the stamp; the acknowledgement below waits for them.
+            Task? writersSettled = FenceEarlierWriters(database, writeShapeTargets, appliedTableSchema);
 
             Log.LogSchemaChangeApplied(logger, entry.Op, database.Name, entry.FromVersion, entry.ToVersion);
 
@@ -226,7 +235,10 @@ public sealed class SchemaReplicator
             // recognized from the frame and never deserialized again.
             database.RecordAppliedSchemaEntry(entry.ToVersion, SchemaChangeLogEntryCodec.Fingerprint(bytes));
 
-            database.Kahuna.RecordAndPublishSchemaApplied(database.Id, entry.ToVersion);
+            // Not awaited here: this callback runs inside the schema partition's commit pipeline, and
+            // a commit in flight can need that same partition. The descriptor defers the
+            // acknowledgement instead, and keeps later versions behind it.
+            database.PublishSchemaApplied(entry.ToVersion, writersSettled);
 
             return true;
         }
@@ -234,6 +246,20 @@ public sealed class SchemaReplicator
         {
             database.Schema.ReleaseLock();
         }
+    }
+
+    /// <summary>
+    /// Stamps the tables that <paramref name="targets"/> names with a new write-shape epoch and
+    /// returns the task of the commits in flight that were planned before it, or null when the delta
+    /// adds no write obligation or no such commit exists. Runs under the schema lock, after the delta
+    /// is fully visible on this node. See <see cref="WriteShapeClock"/>.
+    /// </summary>
+    private static Task? FenceEarlierWriters(DatabaseDescriptor database, WriteShapeTargets targets, TableSchema? appliedTableSchema)
+    {
+        if (targets.UseAppliedTable)
+            return appliedTableSchema is null ? null : database.FenceWritersPlannedBefore([appliedTableSchema]);
+
+        return targets.Tables is null ? null : database.FenceWritersPlannedBefore(targets.Tables);
     }
 
     private static void InvalidateAppliedTableDescriptor(
@@ -434,7 +460,7 @@ public sealed class SchemaReplicator
             // alone is the whole condition it evaluates.
             if (header.ToVersion <= database.Schema.SchemaVersion)
             {
-                database.Kahuna.RecordAndPublishSchemaApplied(database.Id, header.ToVersion);
+                database.PublishSchemaApplied(header.ToVersion);
                 return true;
             }
         }
@@ -451,7 +477,7 @@ public sealed class SchemaReplicator
         {
             if (entry.ToVersion <= database.Schema.SchemaVersion)
             {
-                database.Kahuna.RecordAndPublishSchemaApplied(database.Id, entry.ToVersion);
+                database.PublishSchemaApplied(entry.ToVersion);
                 return true;
             }
 
@@ -480,7 +506,7 @@ public sealed class SchemaReplicator
 
             database.RecordAppliedSchemaEntry(entry.ToVersion, SchemaChangeLogEntryCodec.Fingerprint(bytes));
 
-            database.Kahuna.RecordAndPublishSchemaApplied(database.Id, entry.ToVersion);
+            database.PublishSchemaApplied(entry.ToVersion);
 
             return true;
         }

@@ -206,8 +206,11 @@ internal sealed class NonQueryStatementDispatcher
                     {
                         try
                         {
+                            // Captured before the table is opened; see WriteShapeClock for why the order matters.
+                            long writeShapeEpoch = database.WriteShape.Current;
+
                             TableDescriptor table = await context.TableOpener.Open(database, insertTicket.TableName).ConfigureAwait(false);
-                            SelectStatementExecutor.PinSchemaVersion(database, table, ticket.TxnState);
+                            SelectStatementExecutor.PinForWrite(database, table, ticket.TxnState, writeShapeEpoch);
                             int inserted = await rowInserter.Insert(database, table, insertTicket).ConfigureAwait(false);
                             // Track statistics on the SQL path too, mirroring the ticket-based Insert()
                             // wrapper — otherwise SQL DML never updates row/mutation counts and auto-analyze
@@ -231,8 +234,11 @@ internal sealed class NonQueryStatementDispatcher
                     {
                         try
                         {
+                            // Captured before the table is opened; see WriteShapeClock for why the order matters.
+                            long writeShapeEpoch = database.WriteShape.Current;
+
                             TableDescriptor table = await context.TableOpener.Open(database, insertSelectTicket.TableName).ConfigureAwait(false);
-                            SelectStatementExecutor.PinSchemaVersion(database, table, ticket.TxnState);
+                            SelectStatementExecutor.PinForWrite(database, table, ticket.TxnState, writeShapeEpoch);
 
                             await using SelectRowSource source = await selectExecutor.BuildSelectSourceAsync(
                                 database, insertSelectTicket.SourceSelect, ticket, "INSERT ... SELECT").ConfigureAwait(false);
@@ -264,8 +270,11 @@ internal sealed class NonQueryStatementDispatcher
                     {
                         try
                         {
+                            // Captured before the table is opened; see WriteShapeClock for why the order matters.
+                            long writeShapeEpoch = database.WriteShape.Current;
+
                             TableDescriptor table = await context.TableOpener.Open(database, updateTicket.TableName).ConfigureAwait(false);
-                            SelectStatementExecutor.PinSchemaVersion(database, table, ticket.TxnState);
+                            SelectStatementExecutor.PinForWrite(database, table, ticket.TxnState, writeShapeEpoch);
                             int updated = await rowUpdater.Update(queryExecutor, database, table, updateTicket, ticket.RetryableAborts).ConfigureAwait(false);
 
                             // A retryable abort recorded instead of thrown: the statement did not
@@ -313,8 +322,11 @@ internal sealed class NonQueryStatementDispatcher
                     {
                         try
                         {
+                            // Captured before the table is opened; see WriteShapeClock for why the order matters.
+                            long writeShapeEpoch = database.WriteShape.Current;
+
                             TableDescriptor table = await context.TableOpener.Open(database, deleteTicket.TableName).ConfigureAwait(false);
-                            SelectStatementExecutor.PinSchemaVersion(database, table, ticket.TxnState);
+                            SelectStatementExecutor.PinForWrite(database, table, ticket.TxnState, writeShapeEpoch);
                             int deleted = await rowDeleter.Delete(queryExecutor, database, table, deleteTicket).ConfigureAwait(false);
                             context.Statistics.TrackDelete(database, table, deleted);
                             return new(database, table, deleted);

@@ -128,6 +128,10 @@ internal sealed class TableConstraintAlterer
                     database.Schema.ReleaseLock();
                 }
 
+                // The constraint is enforced from here. A transaction that wrote the table before
+                // it ran no check, so the write-shape fence refuses its commit.
+                database.WriteShape.Advance(table.Schema);
+
                 await catalogs.PersistSchemaTableAsync(database, table.Schema, tx).ConfigureAwait(false);
                 await database.Transactions.CommitAsync(tx).ConfigureAwait(false);
                 mutated = false;
@@ -380,6 +384,10 @@ internal sealed class TableConstraintAlterer
                 {
                     database.Schema.ReleaseLock();
                 }
+
+                // NOT NULL is enforced from here. A transaction that wrote the table before it ran
+                // no check, so the write-shape fence refuses its commit.
+                database.WriteShape.Advance(table.Schema);
 
                 await catalogs.PersistSchemaTableAsync(database, table.Schema, tx).ConfigureAwait(false);
                 await database.Transactions.CommitAsync(tx).ConfigureAwait(false);

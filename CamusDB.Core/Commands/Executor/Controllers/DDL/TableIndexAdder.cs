@@ -317,6 +317,13 @@ internal sealed class TableIndexAdder
             ?? table.Schema.Indexes?.FirstOrDefault(ix => string.Equals(ix.Name, ticket.IndexName, StringComparison.OrdinalIgnoreCase))?.Id
             ?? throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, $"Index '{ticket.IndexName}' was not found in schema");
 
+        // The index is WriteOnly in the schema and in the descriptor, so every statement that starts
+        // now maintains it. A transaction that wrote the table before that did not, and the scan below
+        // reads committed rows only. The fence refuses the later commit of such a transaction, and
+        // waits for one whose commit is already in flight, so that its rows are either visible to the
+        // scan or never exist. Without it such a row gets no entry and the index stays incomplete.
+        await database.FenceWritersAndWaitAsync(table.Schema, database.Kahuna.SchemaAckWaitTimeout).ConfigureAwait(false);
+
         TableIndexSchema? schemaIndex = table.Schema.Indexes?.FirstOrDefault(ix => ix.Id == indexId);
         ObjectIdValue? afterRowId = string.IsNullOrWhiteSpace(schemaIndex?.StartOffset)
             ? null

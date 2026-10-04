@@ -1476,6 +1476,28 @@ internal sealed class SelectStatementExecutor
     /// </summary>
     private static readonly Dictionary<string, ColumnValue> EmptyRow = new();
 
+    /// <summary>
+    /// <see cref="PinSchemaVersion"/> for a statement that writes <paramref name="table"/>, plus the
+    /// write-shape pin: the commit is refused when the table gained an index or a constraint after
+    /// <paramref name="writeShapeEpoch"/>, because the statement staged its writes without it.
+    ///
+    /// <para><b>The caller reads <paramref name="writeShapeEpoch"/> from
+    /// <c>database.WriteShape.Current</c> before it opens the table</b>, never after. An epoch read
+    /// after the open could be newer than the descriptor the statement plans with, and the pin would
+    /// then vouch for writes that lack the new index entry. See <see cref="Catalogs.WriteShapeClock"/>.
+    /// </para>
+    ///
+    /// <para>Only the write statements of a user take this pin. A read does not: an index or a
+    /// constraint added later cannot make a read wrong. The backfill and the validation pass do not
+    /// either: they are the work that the pin protects.</para>
+    /// </summary>
+    internal static void PinForWrite(DatabaseDescriptor database, TableDescriptor table, KvTransaction tx, long writeShapeEpoch)
+    {
+        PinSchemaVersion(database, table, tx);
+
+        tx.PinWriteShape(table.Schema, writeShapeEpoch);
+    }
+
     internal static void PinSchemaVersion(DatabaseDescriptor database, TableDescriptor table, KvTransaction tx)
     {
         RequireSnapshotWithinContentsGeneration(table, tx);

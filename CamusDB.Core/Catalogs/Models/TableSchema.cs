@@ -9,12 +9,13 @@
 namespace CamusDB.Core.Catalogs.Models;
 
 using System.Text.Json.Serialization;
+using CamusDB.Core.Transactions;
 using Kommander.Time;
 
 /// <summary>
 /// Represents the current version of the table schema.
 /// </summary>
-public sealed class TableSchema
+public sealed class TableSchema : IWriteShapeSource
 {
     /// <summary>
     /// Unique identifier of the table. It remains immutable throughout the life of the table.
@@ -102,6 +103,31 @@ public sealed class TableSchema
     /// reintroduce precisely the lost-update it exists to prevent.</para>
     /// </summary>
     public long MetadataGeneration { get; set; }
+
+    private long writeShapeChangedAt;
+
+    /// <summary>
+    /// The write-shape epoch of the last change that added a write obligation to this table on this
+    /// node: an index that started to take entries, a foreign key that became enforced on either
+    /// side, a CHECK or NOT NULL constraint. A transaction that wrote the table under an earlier
+    /// epoch is refused at commit (<see cref="KvTransaction.TryEnterCommit"/>).
+    ///
+    /// <para><b>Node-local and in memory only.</b> It orders this node's statements against this
+    /// node's applies, so it is neither persisted nor replicated, and it restarts at zero on load.
+    /// That is safe: no transaction of this process can hold a pin from before the load.</para>
+    ///
+    /// <para>Stamped only by <see cref="WriteShapeClock"/>, which also defines the order of the
+    /// stamp and the published epoch. <c>long.MaxValue</c> marks an instance that the node replaced
+    /// with a reloaded one; a pin on it can never be valid again.</para>
+    /// </summary>
+    [JsonIgnore]
+    public long WriteShapeChangedAt => Volatile.Read(ref writeShapeChangedAt);
+
+    /// <summary>Name shown by a commit that the write-shape fence refused.</summary>
+    string? IWriteShapeSource.WriteShapeName => Name;
+
+    /// <summary>Sets <see cref="WriteShapeChangedAt"/>. Only <see cref="WriteShapeClock"/> calls it.</summary>
+    internal void StampWriteShapeChange(long epoch) => Volatile.Write(ref writeShapeChangedAt, epoch);
 
     /// <summary>
     /// The list of columns that make up the table
