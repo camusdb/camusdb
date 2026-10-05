@@ -192,9 +192,15 @@ incompatible types", HTTP 400) — not a raw crash / 500.
 ### ALTER adds validate existing data
 
 `ALTER TABLE … ADD CONSTRAINT … CHECK` **scans the whole table** and evaluates the new check against
-every existing row. If any row violates it, the `ALTER` is rejected (with `CADB0303`) and the schema
-is left unchanged. This matches PostgreSQL. `NOT VALID` (add without scanning) is a deferred
-follow-up, not yet supported.
+every existing row. If any row violates it, the `ALTER` is rejected (with `CADB0303`) and the
+constraint is removed again. This matches PostgreSQL. `NOT VALID` (add without scanning) is a
+deferred follow-up, not yet supported.
+
+The check is **enforced before the scan starts**. While the scan runs, an INSERT or UPDATE that
+breaks the new check is refused with `CADB0303`, even if the `ALTER` fails later. This order is what
+makes the result correct: a write that commits while the scan runs was checked by its own statement,
+so no violating row can appear behind the scan. A transaction that wrote the table before the
+`ALTER` started is refused at commit with the retryable `CADB0502`.
 
 ### Error code
 
@@ -234,7 +240,9 @@ Semantics:
 - Every `NOT NULL` gets a name — the explicit one, or an auto-name `{table}_{col}_not_null` — so
   `DROP CONSTRAINT` and introspection work uniformly.
 - **`SET NOT NULL`** scans existing rows and is rejected (`CADB0301` / `NotNullViolation`) if any
-  value is NULL, exactly like ADD CHECK's existing-data scan.
+  value is NULL, exactly like ADD CHECK's existing-data scan. NULLs are refused from the start of
+  the scan, and the column is nullable again if the scan fails. On a column that is already
+  `NOT NULL`, it only sets the generated name and reads no row.
 - **`DROP NOT NULL`** is unconditional — relaxing a constraint needs no scan.
 - **`DROP CONSTRAINT <name>`** resolves the name against the table's check constraints, then each
   column's NOT NULL constraint name, then the table's foreign keys; not found in any →
@@ -353,19 +361,34 @@ collapses NULL → false):
 
 ### ALTER execution
 
-`TableConstraintAlterer` runs the four ALTER operations (`AddCheck`, `DropConstraint`, `SetNotNull`,
-`DropNotNull`). ADD CHECK and SET NOT NULL scan existing rows first
-(`ScanAndValidateExistingRowsAsync` / `ScanAndValidateNotNullAsync`) and reject before touching the
-schema.
+`TableConstraintAlterer` runs the ALTER operations (`AddCheck`, `DropConstraint`, `SetNotNull`,
+`DropNotNull`, `SetStorage`).
 
-Two persistence paths, selected by `isClusterMode`:
+**ADD CHECK and SET NOT NULL enforce first, then scan** (`RowConstraintValidationPass`). The scan
+takes no lock, so a write that commits after the scan passed its row is not seen. With the
+constraint enforced before the scan, and every write planned without it settled by the write-shape
+fence ([distributed-schema-architecture.md](distributed-schema-architecture.md) §9.1), each such
+write was checked by its own statement. In the opposite order, a short autocommit `UPDATE` can commit
+a violating value between the scan and the start of enforcement, and the constraint is then
+published over a row that breaks it. Both operations hold `SchemaDdlSemaphore` for the whole
+statement, as a foreign-key ADD does.
 
-- **Standalone:** apply the delta to `table.Schema` under `Schema.Semaphore`, then persist inside a
-  DDL `KvTransaction` and commit. Because persist serializes the in-memory schema, the mutation must
-  precede persist; if persist/commit then fails, the in-memory change is **reverted**
-  (`RevertChecksAsync` / `RevertColumnAsync`) so the node never enforces a constraint that didn't
-  become durable.
-- **Cluster:** replicated as a schema-log op (below).
+Two paths, selected by `isClusterMode`:
+
+- **Standalone:** under `Schema.Semaphore`, publish a new constraint list or column list on
+  `table.Schema` (copy-on-write, never in place: DML iterates both lists without the lock). Then
+  `DatabaseDescriptor.FenceWritersAndWaitAsync` refuses the later commit of each earlier writer and
+  waits for the commits in flight. Then scan, then persist inside a DDL `KvTransaction` and commit.
+  Any failure before the commit **reverts** the in-memory change (`RevertChecksAsync` /
+  `RevertColumnAsync`), so the node never enforces a constraint that is not proven and durable. A
+  crash before the persist leaves no constraint.
+- **Cluster:** record a coordinator job (`SchemaElementKind.Check` / `SchemaElementKind.NotNull`,
+  keyed by the constraint name), replicate the delta (below), then
+  `SchemaChangeCoordinator.ValidateRowConstraintAsync` waits until every live node settled its
+  earlier writers, scans, and deletes the job. On a violation it replicates the removal first
+  (`DropCheckConstraint`, or `SetColumnNotNull` with `NotNull = false`). A new schema leader that
+  finds the job validates again (`ResumeJobsAsync`), so a constraint that is enforced but never proven
+  cannot stay after a crash. While the job runs, the constraint is visible in `SHOW CREATE TABLE`.
 
 ### Cluster / replication
 
@@ -450,6 +473,7 @@ path that populates `CheckConstraints` without parsing would silently disable en
 | Three-valued evaluation + INSERT/UPDATE enforcement | `CommandsExecutor/TestCheckConstraintsEnforcement.cs` |
 | Persistence, reopen, render→parse round-trip | `CommandsExecutor/TestCheckConstraintsPersistence.cs` |
 | ALTER ADD/DROP + existing-row validation | `CommandsExecutor/TestCheckConstraintsAlter.cs` |
+| Enforce-before-scan order, writes during the scan, removal on violation, job resume | `CommandsExecutor/TestRowConstraintValidationOrder.cs` |
 | Named / droppable NOT NULL | `CommandsExecutor/TestNotNullConstraints.cs` |
 | `SHOW CREATE TABLE` rendering | `CommandsExecutor/TestShowCreateTableRoundTrip.cs` |
 | Date/type coercion, precedence & IN-list fidelity, per-operator NULL end-to-end, ALTER-reject-leaves-unchanged, NOT NULL reopen, forwarding-DTO round-trip | `CommandsExecutor/TestCheckConstraintsFixes.cs` |

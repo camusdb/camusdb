@@ -21,21 +21,35 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.DDL;
 
 /// <summary>
 /// Executes ALTER TABLE constraint DDL operations: ADD CONSTRAINT CHECK, DROP CONSTRAINT,
-/// ALTER COLUMN SET NOT NULL, and ALTER COLUMN DROP NOT NULL.
+/// ALTER COLUMN SET NOT NULL, ALTER COLUMN DROP NOT NULL and ALTER COLUMN SET STORAGE.
 ///
-/// <b>ADD CHECK</b>: validates the expression against all existing rows before committing
-/// so the constraint is true of the table at the moment it is added. Replicates via
-/// <see cref="CatalogsManager.ReplicateAddCheckConstraintAsync"/>.
+/// <para><b>ADD CHECK and SET NOT NULL enforce first, then read the existing rows.</b> The read takes
+/// no lock, so a write that commits after the read passed its row is not seen. With the constraint
+/// enforced before the read, and every write planned without it settled (the write-shape fence), each
+/// such write was checked by its own statement. The opposite order lets a short autocommit UPDATE commit
+/// a violating value between the read and the start of enforcement. If a row breaks the constraint, the
+/// constraint is removed again and the statement fails. See <see cref="RowConstraintValidationPass"/>.
+/// </para>
 ///
-/// <b>DROP CONSTRAINT</b>: resolves the name against <see cref="TableSchema.CheckConstraints"/>
+/// <para><b>Standalone</b>: the constraint is enforced in memory, the fence waits for the commits in
+/// flight, the rows are read, and only then is the schema persisted. A crash before the persist leaves
+/// no constraint, which is correct, because none was proven.</para>
+///
+/// <para><b>Cluster</b>: a coordinator job (<see cref="SchemaElementKind.Check"/> or
+/// <see cref="SchemaElementKind.NotNull"/>) is recorded before the constraint replicates, and
+/// <see cref="SchemaChangeCoordinator.ValidateRowConstraintAsync"/> waits for every live node, reads the
+/// rows and deletes the job. A new leader that finds the job validates again, so a constraint that is
+/// enforced but was never proven cannot stay after a crash.</para>
+///
+/// <para>Both run under <see cref="DatabaseDescriptor.SchemaDdlSemaphore"/>, as a foreign key ADD does,
+/// so two ALTERs of one database cannot interleave their checks and their replication.</para>
+///
+/// <para><b>DROP CONSTRAINT</b>: resolves the name against <see cref="TableSchema.CheckConstraints"/>
 /// AND each column's <see cref="TableColumnSchema.NotNullConstraintName"/>. Immediate — no
-/// existing-row scan required.
+/// existing-row scan required, because an early stop of enforcement is always safe.</para>
 ///
-/// <b>SET NOT NULL</b>: scans all existing rows; rejects if any row has NULL in the target column.
-/// Assigns an auto-name <c>{table}_{col}_not_null</c> for the constraint. Replicates via
-/// <see cref="CatalogsManager.ReplicateSetColumnNotNullAsync"/>.
-///
-/// <b>DROP NOT NULL</b>: unconditional; replicates and clears the NOT NULL flag and constraint name.
+/// <para><b>DROP NOT NULL</b>: unconditional; replicates and clears the NOT NULL flag and constraint name.
+/// </para>
 ///
 /// <para>Foreign keys do not come here. <c>SchemaDdlService.AlterConstraintLocalAsync</c> routes
 /// <c>ADD ... FOREIGN KEY</c>, and a <c>DROP CONSTRAINT</c> that names only a foreign key, to the staged
@@ -45,6 +59,13 @@ internal sealed class TableConstraintAlterer
 {
     private readonly ILogger<ICamusDB> logger;
 
+    /// <summary>
+    /// Test-only hook, invoked by ADD CHECK and SET NOT NULL after the constraint is enforced and the
+    /// earlier writers settled, and before the existing rows are read. A test writes rows at exactly that
+    /// point. Null in production; a test clears it after use.
+    /// </summary>
+    internal Func<Task>? TestInterceptBeforeRowValidation;
+
     public TableConstraintAlterer(ILogger<ICamusDB> logger)
     {
         this.logger = logger;
@@ -52,6 +73,7 @@ internal sealed class TableConstraintAlterer
 
     public async Task<bool> Alter(
         CatalogsManager catalogs,
+        TableOpener tableOpener,
         DatabaseDescriptor database,
         TableDescriptor table,
         AlterConstraintTicket ticket,
@@ -59,9 +81,9 @@ internal sealed class TableConstraintAlterer
     {
         return ticket.Operation switch
         {
-            AlterConstraintOperation.AddCheck => await AddCheck(catalogs, database, table, ticket, isClusterMode).ConfigureAwait(false),
+            AlterConstraintOperation.AddCheck => await AddCheck(catalogs, tableOpener, database, table, ticket, isClusterMode).ConfigureAwait(false),
             AlterConstraintOperation.DropConstraint => await DropConstraint(catalogs, database, table, ticket, isClusterMode).ConfigureAwait(false),
-            AlterConstraintOperation.SetNotNull => await SetNotNull(catalogs, database, table, ticket, isClusterMode).ConfigureAwait(false),
+            AlterConstraintOperation.SetNotNull => await SetNotNull(catalogs, tableOpener, database, table, ticket, isClusterMode).ConfigureAwait(false),
             AlterConstraintOperation.DropNotNull => await DropNotNull(catalogs, database, table, ticket, isClusterMode).ConfigureAwait(false),
             AlterConstraintOperation.SetStorage => await SetStorage(catalogs, database, table, ticket, isClusterMode).ConfigureAwait(false),
             _ => throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Unknown alter constraint operation '{ticket.Operation}'")
@@ -70,83 +92,148 @@ internal sealed class TableConstraintAlterer
 
     private async Task<bool> AddCheck(
         CatalogsManager catalogs,
+        TableOpener tableOpener,
         DatabaseDescriptor database,
         TableDescriptor table,
         AlterConstraintTicket ticket,
         bool isClusterMode)
     {
         // CHECK, named NOT NULL and foreign keys share one name space (ConstraintNameRules). Checked
-        // here so a taken name is refused before the scan, and again under the schema lock below.
+        // here so a taken name is refused before any work, and again under the gate and the schema lock.
         ConstraintNameRules.RequireUnused(table.Schema, ticket.ConstraintName);
 
-        // Parse the condition once for the existence scan.
-        var parsedCondition = SQLParser.SQLParserProcessor.ParseCondition(ticket.Expression!);
+        SQLParser.NodeAst parsedCondition = SQLParser.SQLParserProcessor.ParseCondition(ticket.Expression!);
 
-        // Validate all existing rows against the new constraint before committing it.
-        // Any failing row causes the ALTER to be rejected (Postgres semantics; NOT VALID is deferred).
-        await ScanAndValidateExistingRowsAsync(database, table, ticket.ConstraintName, parsedCondition).ConfigureAwait(false);
-
-        if (isClusterMode)
+        await database.SchemaDdlSemaphore.WaitAsync().ConfigureAwait(false);
+        try
         {
-            await catalogs.ReplicateAddCheckConstraintAsync(
-                database, ticket.TableName, ticket.ConstraintName, ticket.Expression!, ticket.ReferencedColumns ?? [])
-                .ConfigureAwait(false);
+            if (isClusterMode)
+                await AddCheckClusterAsync(catalogs, tableOpener, database, ticket).ConfigureAwait(false);
+            else
+                await AddCheckStandaloneAsync(catalogs, database, table, ticket, parsedCondition).ConfigureAwait(false);
         }
-        else
+        finally
         {
-            // Standalone: apply the constraint directly inside a DDL transaction.
-            KvTransaction tx = await database.Transactions.BeginAsync(
-                CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite
-            ).ConfigureAwait(false);
-            List<CheckConstraintSchema>? previousChecks = null;
-            bool mutated = false;
-            try
-            {
-                await database.Schema.AcquireLockAsync().ConfigureAwait(false);
-                try
-                {
-                    // Snapshot for revert: persist serializes the in-memory schema, so the mutation
-                    // must precede persist. If persist/commit then fails we must undo it, or the node
-                    // enforces a constraint that never became durable.
-                    ConstraintNameRules.RequireUnused(table.Schema, ticket.ConstraintName);
-
-                    previousChecks = table.Schema.CheckConstraints is null ? null : [.. table.Schema.CheckConstraints];
-                    CheckConstraintSchema check = new()
-                    {
-                        Name = ticket.ConstraintName,
-                        Expression = ticket.Expression!,
-                        ReferencedColumns = ticket.ReferencedColumns ?? [],
-                        ParsedCondition = parsedCondition,
-                    };
-                    table.Schema.CheckConstraints ??= [];
-                    table.Schema.CheckConstraints.RemoveAll(c => string.Equals(c.Name, ticket.ConstraintName, StringComparison.OrdinalIgnoreCase));
-                    table.Schema.CheckConstraints.Add(check);
-                    mutated = true;
-                }
-                finally
-                {
-                    database.Schema.ReleaseLock();
-                }
-
-                // The constraint is enforced from here. A transaction that wrote the table before
-                // it ran no check, so the write-shape fence refuses its commit.
-                database.WriteShape.Advance(table.Schema);
-
-                await catalogs.PersistSchemaTableAsync(database, table.Schema, tx).ConfigureAwait(false);
-                await database.Transactions.CommitAsync(tx).ConfigureAwait(false);
-                mutated = false;
-            }
-            finally
-            {
-                if (mutated)
-                    await RevertChecksAsync(database, table, previousChecks).ConfigureAwait(false);
-                await database.Transactions.RollbackIfNotCompletedAsync(tx).ConfigureAwait(false);
-            }
+            database.SchemaDdlSemaphore.Release();
         }
 
         if (logger.IsEnabled(Microsoft.Extensions.Logging.LogLevel.Information))
             logger.LogInformation("Check constraint '{Constraint}' added to table '{Table}'", ticket.ConstraintName, ticket.TableName);
         return true;
+    }
+
+    /// <summary>
+    /// ADD CHECK on one node: enforce in memory, fence and wait for the commits in flight, read the
+    /// rows, then persist. Every failure before the commit restores the previous list, so the node never
+    /// enforces a constraint that is not durable or not proven.
+    /// </summary>
+    private async Task AddCheckStandaloneAsync(
+        CatalogsManager catalogs,
+        DatabaseDescriptor database,
+        TableDescriptor table,
+        AlterConstraintTicket ticket,
+        SQLParser.NodeAst parsedCondition)
+    {
+        List<CheckConstraintSchema>? previousChecks = null;
+        bool mutated = false;
+        KvTransaction? tx = null;
+
+        try
+        {
+            await database.Schema.AcquireLockAsync().ConfigureAwait(false);
+            try
+            {
+                ConstraintNameRules.RequireUnused(table.Schema, ticket.ConstraintName);
+
+                previousChecks = table.Schema.CheckConstraints;
+
+                CheckConstraintSchema check = new()
+                {
+                    Name = ticket.ConstraintName,
+                    Expression = ticket.Expression!,
+                    ReferencedColumns = ticket.ReferencedColumns ?? [],
+                    ParsedCondition = parsedCondition,
+                };
+
+                // A new list, not an Add: a statement on another thread can be iterating the old one.
+                table.Schema.CheckConstraints = previousChecks is null ? [check] : [.. previousChecks, check];
+                mutated = true;
+            }
+            finally
+            {
+                database.Schema.ReleaseLock();
+            }
+
+            // Every statement that starts now checks the constraint. The fence refuses the later commit
+            // of a transaction that wrote the table before, and waits for one whose commit is in flight.
+            await database.FenceWritersAndWaitAsync(table.Schema, database.Kahuna.SchemaAckWaitTimeout).ConfigureAwait(false);
+
+            if (TestInterceptBeforeRowValidation is { } intercept)
+                await intercept().ConfigureAwait(false);
+
+            await RowConstraintValidationPass.ScanForCheckViolationAsync(database, table, ticket.ConstraintName, parsedCondition).ConfigureAwait(false);
+
+            tx = await database.Transactions.BeginAsync(
+                CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite
+            ).ConfigureAwait(false);
+
+            await catalogs.PersistSchemaTableAsync(database, table.Schema, tx).ConfigureAwait(false);
+            await database.Transactions.CommitAsync(tx).ConfigureAwait(false);
+            mutated = false;
+        }
+        finally
+        {
+            if (mutated)
+                await RevertChecksAsync(database, table, previousChecks).ConfigureAwait(false);
+
+            if (tx is not null)
+                await database.Transactions.RollbackIfNotCompletedAsync(tx).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
+    /// ADD CHECK in a cluster: record the job, replicate the constraint (every node enforces it from its
+    /// apply on), then let the coordinator wait for every node, read the rows and delete the job, or
+    /// remove the constraint on a violation.
+    /// </summary>
+    private async Task AddCheckClusterAsync(
+        CatalogsManager catalogs,
+        TableOpener tableOpener,
+        DatabaseDescriptor database,
+        AlterConstraintTicket ticket)
+    {
+        // Opened inside the gate: a drop and re-create of the same name between an open outside and the
+        // proposal would put the job on a table that is gone.
+        TableDescriptor table = await tableOpener.Open(database, ticket.TableName).ConfigureAwait(false);
+        string tableName = table.Name;
+        string constraintName = ticket.ConstraintName;
+
+        ConstraintNameRules.RequireUnused(table.Schema, constraintName);
+        await RequireNoOtherJobNamedAsync(catalogs, database, table.Id, tableName, constraintName).ConfigureAwait(false);
+
+        await PersistRowConstraintJobAsync(catalogs, database, table.Id, tableName, constraintName, SchemaElementKind.Check).ConfigureAwait(false);
+
+        try
+        {
+            await catalogs.ReplicateAddCheckConstraintAsync(
+                database, tableName, constraintName, ticket.Expression!, ticket.ReferencedColumns ?? [])
+                .ConfigureAwait(false);
+        }
+        catch
+        {
+            // The entry can commit and the wait for the acks fail afterwards. Then the constraint is
+            // enforced and its job must stay for the next leader. Only a job whose constraint did not
+            // land is removed here.
+            bool landed = database.Schema.Tables.TryGetValue(tableName, out TableSchema? current)
+                && current.CheckConstraints?.Exists(c => string.Equals(c.Name, constraintName, StringComparison.OrdinalIgnoreCase)) == true;
+
+            if (!landed)
+                await DeleteJobAfterFailureAsync(catalogs, database, table.Id, constraintName).ConfigureAwait(false);
+
+            throw;
+        }
+
+        await ValidateThroughCoordinatorAsync(catalogs, tableOpener, database, table.Id, tableName, constraintName, SchemaElementKind.Check).ConfigureAwait(false);
     }
 
     private async Task<bool> DropConstraint(
@@ -211,8 +298,9 @@ internal sealed class TableConstraintAlterer
                 await database.Schema.AcquireLockAsync().ConfigureAwait(false);
                 try
                 {
-                    previousChecks = table.Schema.CheckConstraints is null ? null : [.. table.Schema.CheckConstraints];
-                    table.Schema.CheckConstraints?.RemoveAll(c => string.Equals(c.Name, ticket.ConstraintName, StringComparison.OrdinalIgnoreCase));
+                    previousChecks = table.Schema.CheckConstraints;
+                    if (previousChecks is not null)
+                        table.Schema.CheckConstraints = ConstraintDeltaApplier.WithoutCheck(previousChecks, ticket.ConstraintName);
                     mutated = true;
                 }
                 finally
@@ -290,7 +378,7 @@ internal sealed class TableConstraintAlterer
                     TableColumnSchema old = columns[idx];
                     revertIdx = idx;
                     revertColumn = old;
-                    columns[idx] = ConstraintDeltaApplier.WithStorage(old, storage);
+                    ConstraintDeltaApplier.ReplaceColumn(table.Schema, idx, ConstraintDeltaApplier.WithStorage(old, storage));
                 }
                 finally
                 {
@@ -316,6 +404,7 @@ internal sealed class TableConstraintAlterer
 
     private async Task<bool> SetNotNull(
         CatalogsManager catalogs,
+        TableOpener tableOpener,
         DatabaseDescriptor database,
         TableDescriptor table,
         AlterConstraintTicket ticket,
@@ -331,79 +420,243 @@ internal sealed class TableConstraintAlterer
                 CamusDBErrorCodes.InvalidInput,
                 $"Column '{columnName}' does not exist on table '{table.Name}'");
 
-        // Scan existing rows — reject if any row has NULL in this column.
-        await ScanAndValidateNotNullAsync(database, table, columnName).ConfigureAwait(false);
-
         // Auto-name: {table}_{col}_not_null. The generated name must not be one that a CHECK or a
-        // foreign key already uses (ConstraintNameRules); checked again under the schema lock below.
+        // foreign key already uses (ConstraintNameRules); checked again under the gate and the lock.
         string constraintName = $"{table.Name}_{columnName}_not_null";
         ConstraintNameRules.RequireUnusedForNotNull(table.Schema, constraintName, column.Id);
 
-        if (isClusterMode)
+        await database.SchemaDdlSemaphore.WaitAsync().ConfigureAwait(false);
+        try
         {
-            await catalogs.ReplicateSetColumnNotNullAsync(
-                database, ticket.TableName, columnName, notNull: true, constraintName)
-                .ConfigureAwait(false);
+            if (isClusterMode)
+                await SetNotNullClusterAsync(catalogs, tableOpener, database, ticket.TableName, columnName, constraintName).ConfigureAwait(false);
+            else
+                await SetNotNullStandaloneAsync(catalogs, database, table, columnName, constraintName).ConfigureAwait(false);
         }
-        else
+        finally
         {
-            KvTransaction tx = await database.Transactions.BeginAsync(
-                CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite
-            ).ConfigureAwait(false);
-            int revertIdx = -1;
-            TableColumnSchema? revertColumn = null;
-            try
-            {
-                await database.Schema.AcquireLockAsync().ConfigureAwait(false);
-                try
-                {
-                    List<TableColumnSchema> columns = table.Schema.Columns!;
-                    int idx = columns.FindIndex(c => string.Equals(c.Name, columnName, StringComparison.OrdinalIgnoreCase));
-                    TableColumnSchema old = columns[idx];
-                    ConstraintNameRules.RequireUnusedForNotNull(table.Schema, constraintName, old.Id);
-                    revertIdx = idx;
-                    revertColumn = old;
-                    columns[idx] = new TableColumnSchema(
-                        id: old.Id,
-                        name: old.Name,
-                        type: old.Type,
-                        notNull: true,
-                        defaultValue: old.DefaultValue,
-                        state: old.State,
-                        maxLength: old.MaxLength,
-                        arrayElementType: old.ArrayElementType,
-                        defaultFunction: old.DefaultFunction,
-                        notNullConstraintName: constraintName,
-                        comment: old.Comment,
-                        storage: old.Storage,
-                        defaultSequenceId: old.DefaultSequenceId,
-                        identityAlways: old.IdentityAlways
-                    );
-                }
-                finally
-                {
-                    database.Schema.ReleaseLock();
-                }
-
-                // NOT NULL is enforced from here. A transaction that wrote the table before it ran
-                // no check, so the write-shape fence refuses its commit.
-                database.WriteShape.Advance(table.Schema);
-
-                await catalogs.PersistSchemaTableAsync(database, table.Schema, tx).ConfigureAwait(false);
-                await database.Transactions.CommitAsync(tx).ConfigureAwait(false);
-                revertColumn = null;
-            }
-            finally
-            {
-                if (revertColumn is not null)
-                    await RevertColumnAsync(database, table, revertIdx, revertColumn).ConfigureAwait(false);
-                await database.Transactions.RollbackIfNotCompletedAsync(tx).ConfigureAwait(false);
-            }
+            database.SchemaDdlSemaphore.Release();
         }
 
         if (logger.IsEnabled(Microsoft.Extensions.Logging.LogLevel.Information))
             logger.LogInformation("NOT NULL set on column '{Column}' of table '{Table}'", columnName, ticket.TableName);
         return true;
+    }
+
+    /// <summary>
+    /// SET NOT NULL on one node: enforce in memory, fence and wait for the commits in flight, read the
+    /// rows, then persist. A column that is already NOT NULL only takes the new name: its rows are
+    /// already proven, so there is nothing to read. Every failure before the commit restores the column.
+    /// </summary>
+    private async Task SetNotNullStandaloneAsync(
+        CatalogsManager catalogs,
+        DatabaseDescriptor database,
+        TableDescriptor table,
+        string columnName,
+        string constraintName)
+    {
+        int revertIdx = -1;
+        TableColumnSchema? revertColumn = null;
+        bool wasNotNull = false;
+        KvTransaction? tx = null;
+
+        try
+        {
+            await database.Schema.AcquireLockAsync().ConfigureAwait(false);
+            try
+            {
+                List<TableColumnSchema> columns = table.Schema.Columns!;
+                int idx = columns.FindIndex(c => string.Equals(c.Name, columnName, StringComparison.OrdinalIgnoreCase));
+                if (idx < 0)
+                    throw new CamusDBException(
+                        CamusDBErrorCodes.InvalidInput,
+                        $"Column '{columnName}' does not exist on table '{table.Name}'");
+
+                TableColumnSchema old = columns[idx];
+                ConstraintNameRules.RequireUnusedForNotNull(table.Schema, constraintName, old.Id);
+                revertIdx = idx;
+                revertColumn = old;
+                wasNotNull = old.NotNull;
+                ConstraintDeltaApplier.ReplaceColumn(table.Schema, idx, ConstraintDeltaApplier.WithNotNull(old, notNull: true, constraintName));
+            }
+            finally
+            {
+                database.Schema.ReleaseLock();
+            }
+
+            if (!wasNotNull)
+            {
+                // Every statement that starts now refuses a NULL. The fence refuses the later commit of
+                // a transaction that wrote the table before, and waits for one whose commit is in flight.
+                await database.FenceWritersAndWaitAsync(table.Schema, database.Kahuna.SchemaAckWaitTimeout).ConfigureAwait(false);
+
+                if (TestInterceptBeforeRowValidation is { } intercept)
+                    await intercept().ConfigureAwait(false);
+
+                await RowConstraintValidationPass.ScanForNullAsync(database, table, columnName).ConfigureAwait(false);
+            }
+
+            tx = await database.Transactions.BeginAsync(
+                CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite
+            ).ConfigureAwait(false);
+
+            await catalogs.PersistSchemaTableAsync(database, table.Schema, tx).ConfigureAwait(false);
+            await database.Transactions.CommitAsync(tx).ConfigureAwait(false);
+            revertColumn = null;
+        }
+        finally
+        {
+            if (revertColumn is not null)
+                await RevertColumnAsync(database, table, revertIdx, revertColumn).ConfigureAwait(false);
+
+            if (tx is not null)
+                await database.Transactions.RollbackIfNotCompletedAsync(tx).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
+    /// SET NOT NULL in a cluster. A column that is already NOT NULL only takes the new name. Otherwise
+    /// the job is recorded, the flag replicates (every node refuses a NULL from its apply on), and the
+    /// coordinator waits for every node, reads the rows and deletes the job, or makes the column
+    /// nullable again on a violation.
+    /// </summary>
+    private async Task SetNotNullClusterAsync(
+        CatalogsManager catalogs,
+        TableOpener tableOpener,
+        DatabaseDescriptor database,
+        string ticketTableName,
+        string columnName,
+        string constraintName)
+    {
+        TableDescriptor table = await tableOpener.Open(database, ticketTableName).ConfigureAwait(false);
+        string tableName = table.Name;
+
+        TableColumnSchema column = table.Schema.Columns?.Find(c => string.Equals(c.Name, columnName, StringComparison.OrdinalIgnoreCase))
+            ?? throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Column '{columnName}' does not exist on table '{tableName}'");
+
+        ConstraintNameRules.RequireUnusedForNotNull(table.Schema, constraintName, column.Id);
+
+        if (column.NotNull)
+        {
+            await catalogs.ReplicateSetColumnNotNullAsync(database, tableName, columnName, notNull: true, constraintName).ConfigureAwait(false);
+            return;
+        }
+
+        await RequireNoOtherJobNamedAsync(catalogs, database, table.Id, tableName, constraintName).ConfigureAwait(false);
+
+        await PersistRowConstraintJobAsync(catalogs, database, table.Id, tableName, constraintName, SchemaElementKind.NotNull).ConfigureAwait(false);
+
+        try
+        {
+            await catalogs.ReplicateSetColumnNotNullAsync(database, tableName, columnName, notNull: true, constraintName).ConfigureAwait(false);
+        }
+        catch
+        {
+            bool landed = database.Schema.Tables.TryGetValue(tableName, out TableSchema? current)
+                && current.Columns is not null
+                && RowConstraintValidationPass.FindNotNullColumn(current, constraintName) is not null;
+
+            if (!landed)
+                await DeleteJobAfterFailureAsync(catalogs, database, table.Id, constraintName).ConfigureAwait(false);
+
+            throw;
+        }
+
+        await ValidateThroughCoordinatorAsync(catalogs, tableOpener, database, table.Id, tableName, constraintName, SchemaElementKind.NotNull).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Runs <see cref="SchemaChangeCoordinator.ValidateRowConstraintAsync"/> for a constraint this node
+    /// just replicated, with the test hook in front of the read.
+    /// </summary>
+    private async Task ValidateThroughCoordinatorAsync(
+        CatalogsManager catalogs,
+        TableOpener tableOpener,
+        DatabaseDescriptor database,
+        string tableId,
+        string tableName,
+        string constraintName,
+        SchemaElementKind kind)
+    {
+        database.Cache?.InvalidateByTableId(database.Id, tableId);
+
+        SchemaChangeCoordinator coordinator = new(catalogs, logger)
+        {
+            RowConstraintValidationAsync = async (db, t, k, name) =>
+            {
+                if (TestInterceptBeforeRowValidation is { } intercept)
+                    await intercept().ConfigureAwait(false);
+
+                await RowConstraintValidationPass.ValidateAsync(db, tableOpener, t, k, name).ConfigureAwait(false);
+            }
+        };
+
+        await coordinator.ValidateRowConstraintAsync(
+            database,
+            new SchemaChangeJob(database.Name, tableName, tableId, constraintName, SchemaElementState.Public, kind)
+        ).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Records the job before the constraint replicates, so no crash can leave an enforced constraint
+    /// without a job to validate it. A job whose constraint never appeared is removed by the next resume.
+    /// </summary>
+    private static Task PersistRowConstraintJobAsync(
+        CatalogsManager catalogs,
+        DatabaseDescriptor database,
+        string tableId,
+        string tableName,
+        string constraintName,
+        SchemaElementKind kind) =>
+        catalogs.PersistCoordinatorJobAsync(database, new PersistedCoordinatorJob
+        {
+            TableName = tableName,
+            TableId = tableId,
+            ElementName = constraintName,
+            TargetState = SchemaElementState.Public,
+            ElementKind = kind,
+        });
+
+    /// <summary>
+    /// A job is keyed by table id and element name. A column, index or foreign-key job of the same name
+    /// is a change still in progress, and one job would overwrite the other. A CHECK or NOT NULL job of
+    /// the same name is left from an earlier attempt whose constraint is gone (its name was found unused),
+    /// so it is safe to replace.
+    /// </summary>
+    private static async Task RequireNoOtherJobNamedAsync(
+        CatalogsManager catalogs,
+        DatabaseDescriptor database,
+        string tableId,
+        string tableName,
+        string constraintName)
+    {
+        List<PersistedCoordinatorJob> jobs = await catalogs.LoadCoordinatorJobsAsync(database).ConfigureAwait(false);
+
+        foreach (PersistedCoordinatorJob job in jobs)
+        {
+            if (job.ElementKind is not (SchemaElementKind.Check or SchemaElementKind.NotNull)
+                && string.Equals(job.TableId, tableId, StringComparison.Ordinal)
+                && string.Equals(job.ElementName, constraintName, StringComparison.OrdinalIgnoreCase))
+                throw new CamusDBException(
+                    CamusDBErrorCodes.InvalidInput,
+                    $"Cannot add constraint '{constraintName}' to table '{tableName}': a change to the {job.ElementKind.ToString().ToLowerInvariant()} '{job.ElementName}' is still in progress. Retry when it finishes");
+        }
+    }
+
+    /// <summary>
+    /// Best effort: the statement is already failing, and a job left behind is harmless, because a
+    /// resume finds no constraint and deletes it.
+    /// </summary>
+    private async Task DeleteJobAfterFailureAsync(CatalogsManager catalogs, DatabaseDescriptor database, string tableId, string constraintName)
+    {
+        try
+        {
+            await catalogs.DeleteCoordinatorJobAsync(database, tableId, constraintName).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Could not delete the job of constraint {Constraint} after its replication failed", constraintName);
+        }
     }
 
     private async Task<bool> DropNotNull(
@@ -447,22 +700,7 @@ internal sealed class TableConstraintAlterer
                     TableColumnSchema old = columns[idx];
                     revertIdx = idx;
                     revertColumn = old;
-                    columns[idx] = new TableColumnSchema(
-                        id: old.Id,
-                        name: old.Name,
-                        type: old.Type,
-                        notNull: false,
-                        defaultValue: old.DefaultValue,
-                        state: old.State,
-                        maxLength: old.MaxLength,
-                        arrayElementType: old.ArrayElementType,
-                        defaultFunction: old.DefaultFunction,
-                        notNullConstraintName: null,
-                        comment: old.Comment,
-                        storage: old.Storage,
-                        defaultSequenceId: old.DefaultSequenceId,
-                        identityAlways: old.IdentityAlways
-                    );
+                    ConstraintDeltaApplier.ReplaceColumn(table.Schema, idx, ConstraintDeltaApplier.WithNotNull(old, notNull: false, constraintName: null));
                 }
                 finally
                 {
@@ -520,102 +758,11 @@ internal sealed class TableConstraintAlterer
         try
         {
             if (table.Schema.Columns is { } columns && index >= 0 && index < columns.Count)
-                columns[index] = previousColumn;
+                ConstraintDeltaApplier.ReplaceColumn(table.Schema, index, previousColumn);
         }
         finally
         {
             database.Schema.ReleaseLock();
-        }
-    }
-
-    /// <summary>
-    /// Scans all existing rows and verifies that no row has NULL in <paramref name="columnName"/>.
-    /// Throws <see cref="CamusDBErrorCodes.InvalidInput"/> if any row would violate the new
-    /// NOT NULL constraint, aborting the ALTER before any schema change is committed.
-    /// </summary>
-    private static async Task ScanAndValidateNotNullAsync(
-        DatabaseDescriptor database,
-        TableDescriptor table,
-        string columnName)
-    {
-        KvTransaction tx = await database.Transactions.BeginAsync(
-            CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadOnly
-        ).ConfigureAwait(false);
-        try
-        {
-            // Only the candidate column's value matters here, so narrow the per-row decode to it —
-            // its decoded value (including an injected default for rows written before the column
-            // existed) is identical to what a full decode would produce.
-            HashSet<string> requiredColumns = new(StringComparer.OrdinalIgnoreCase) { columnName };
-            RowEncoder.DictionaryDecodeState decodeState = new();
-
-            await foreach ((Util.ObjectIds.ObjectIdValue rowId, ReadOnlyMemory<byte> data)
-                in table.Store.ScanRows(tx, afterRowId: null).ConfigureAwait(false))
-            {
-                Dictionary<string, ColumnValue> row = await RowEncoder.DecodeWritableAsync(
-                    table.Schema,
-                    tx.TransactionId,
-                    rowId,
-                    data,
-                    requiredColumns: requiredColumns,
-                    visibilitySchemaVersion: table.Schema.Version,
-                    decodeState: decodeState
-                ).ConfigureAwait(false);
-
-                if (!row.TryGetValue(columnName, out ColumnValue? cv) || cv is null || cv.Type == ColumnType.Null)
-                    throw new CamusDBException(
-                        CamusDBErrorCodes.NotNullViolation,
-                        $"column \"{columnName}\" of table \"{table.Name}\" contains null values");
-            }
-        }
-        finally
-        {
-            await database.Transactions.RollbackIfNotCompletedAsync(tx).ConfigureAwait(false);
-        }
-    }
-
-    /// <summary>
-    /// Scans all existing rows and evaluates the new CHECK constraint against each one.
-    /// Throws <see cref="CamusDBErrorCodes.CheckConstraintViolation"/> if any row fails,
-    /// aborting the ALTER before any schema change is committed.
-    /// </summary>
-    private static async Task ScanAndValidateExistingRowsAsync(
-        DatabaseDescriptor database,
-        TableDescriptor table,
-        string constraintName,
-        SQLParser.NodeAst parsedCondition)
-    {
-        KvTransaction tx = await database.Transactions.BeginAsync(
-            CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadOnly
-        ).ConfigureAwait(false);
-        try
-        {
-            // The CHECK condition may reference any column, so no required-column narrowing here —
-            // but the per-row decode plan is still shared across the scan.
-            RowEncoder.DictionaryDecodeState decodeState = new();
-
-            await foreach ((Util.ObjectIds.ObjectIdValue rowId, ReadOnlyMemory<byte> data)
-                in table.Store.ScanRows(tx, afterRowId: null).ConfigureAwait(false))
-            {
-                Dictionary<string, ColumnValue> row = await RowEncoder.DecodeWritableAsync(
-                    table.Schema,
-                    tx.TransactionId,
-                    rowId,
-                    data,
-                    visibilitySchemaVersion: table.Schema.Version,
-                    decodeState: decodeState
-                ).ConfigureAwait(false);
-
-                bool? result = CheckEvaluator.Evaluate(parsedCondition, row);
-                if (result == false)
-                    throw new CamusDBException(
-                        CamusDBErrorCodes.CheckConstraintViolation,
-                        $"existing row violates check constraint \"{constraintName}\"");
-            }
-        }
-        finally
-        {
-            await database.Transactions.RollbackIfNotCompletedAsync(tx).ConfigureAwait(false);
         }
     }
 }

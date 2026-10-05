@@ -100,6 +100,11 @@ internal sealed class DatabaseOpener
             // engine built for it along.
             DropIndexAsync = (db, tableName, indexName) =>
                 commandExecutor.DropIndexForRemovedConstraintAsync(db, tableName, indexName),
+
+            // Wire the row validation pass: a CHECK or NOT NULL constraint that a failed leader
+            // enforced but did not validate is validated, or removed, by the resumed job.
+            RowConstraintValidationAsync = (db, tableName, kind, constraintName) =>
+                commandExecutor.ValidateRowConstraintAsync(db, tableName, kind, constraintName),
         };
         this.logger = logger;
         this.sharedNode = sharedNode ?? throw new ArgumentNullException(nameof(sharedNode), "A shared Kahuna node is required");

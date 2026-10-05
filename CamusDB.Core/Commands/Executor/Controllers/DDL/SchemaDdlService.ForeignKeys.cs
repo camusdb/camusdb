@@ -59,7 +59,7 @@ internal sealed partial class SchemaDdlService
         if (ticket.Operation == AlterConstraintOperation.DropConstraint && NamesOnlyAForeignKey(table.Schema, ticket.ConstraintName))
             return await DropForeignKeyAsync(database, ticket).ConfigureAwait(false);
 
-        return await tableConstraintAlterer.Alter(catalogs, database, table, ticket, context.IsClusterMode).ConfigureAwait(false);
+        return await tableConstraintAlterer.Alter(catalogs, context.TableOpener, database, table, ticket, context.IsClusterMode).ConfigureAwait(false);
     }
 
     /// <summary>

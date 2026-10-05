@@ -385,6 +385,10 @@ internal sealed partial class SchemaDdlService
     internal Task ValidateForeignKeyRowsAsync(DatabaseDescriptor database, string tableName, string constraintName) =>
         ForeignKeyValidationPass.ValidateAsync(database, context.TableOpener, tableName, constraintName);
 
+    /// <summary>Reads every row of <paramref name="tableName"/> against one CHECK or NOT NULL constraint.</summary>
+    internal Task ValidateRowConstraintAsync(DatabaseDescriptor database, string tableName, SchemaElementKind kind, string constraintName) =>
+        RowConstraintValidationPass.ValidateAsync(database, context.TableOpener, tableName, kind, constraintName);
+
     private async Task PersistForeignKeyJobsAsync(DatabaseDescriptor database, CreateTableTicket ticket, string tableId)
     {
         foreach (ForeignKeyInfo foreignKey in ticket.ForeignKeys)

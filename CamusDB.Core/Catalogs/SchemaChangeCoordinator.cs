@@ -99,6 +99,16 @@ public sealed class SchemaChangeCoordinator
     /// </summary>
     public Func<DatabaseDescriptor, string, string, Task>? DropIndexAsync { get; set; }
 
+    /// <summary>
+    /// Reads every row of a table against a CHECK or a NOT NULL constraint, by table name, element kind
+    /// (<see cref="SchemaElementKind.Check"/> or <see cref="SchemaElementKind.NotNull"/>) and constraint
+    /// name. It throws <see cref="CamusDBErrorCodes.CheckConstraintViolation"/> or
+    /// <see cref="CamusDBErrorCodes.NotNullViolation"/> for a row that breaks the constraint, and
+    /// returns when the constraint no longer exists. Required by
+    /// <see cref="ValidateRowConstraintAsync"/>, and by a resume that finds such a job.
+    /// </summary>
+    public Func<DatabaseDescriptor, string, SchemaElementKind, string, Task>? RowConstraintValidationAsync { get; set; }
+
     public SchemaChangeCoordinator(CatalogsManager catalogs, ILogger<ICamusDB>? logger = null)
     {
         this.catalogs = catalogs;
@@ -331,6 +341,78 @@ public sealed class SchemaChangeCoordinator
     }
 
     /// <summary>
+    /// Validates the existing rows against a CHECK or a NOT NULL constraint that is already enforced on
+    /// every node, then deletes the job that <paramref name="job"/> names. The proposer of
+    /// <c>ADD CONSTRAINT ... CHECK</c> and <c>SET NOT NULL</c> calls it after the replication, and a new
+    /// leader calls it for a job it finds.
+    ///
+    /// <para><b>The order is the point.</b> It first waits until every live node settled the commits
+    /// that wrote the table before the constraint existed (<see cref="RequireEarlierWritersSettledAsync"/>),
+    /// so the read that follows sees each such row, and each later write was checked by its own
+    /// statement. A read before the enforcement can miss a write that commits between the two.</para>
+    ///
+    /// <para>On a violation it removes the constraint on every node, deletes the job and rethrows: a
+    /// resume would fail the same way. Any other failure, for example a lost leadership, leaves the job
+    /// for the next leader, and the constraint stays enforced until that leader validates it.</para>
+    /// </summary>
+    public async Task ValidateRowConstraintAsync(DatabaseDescriptor database, SchemaChangeJob job)
+    {
+        if (RowConstraintValidationAsync is null)
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInternalOperation,
+                $"Constraint '{job.ElementName}' on table '{job.TableName}' cannot be validated: no row validation pass is wired");
+
+        await RequireEarlierWritersSettledAsync(database, job).ConfigureAwait(false);
+
+        try
+        {
+            await RowConstraintValidationAsync(database, job.TableName, job.ElementKind, job.ElementName).ConfigureAwait(false);
+        }
+        catch (CamusDBException ex) when (ex.Code is CamusDBErrorCodes.CheckConstraintViolation or CamusDBErrorCodes.NotNullViolation)
+        {
+            await RemoveRowConstraintAsync(database, job).ConfigureAwait(false);
+            await catalogs.DeleteCoordinatorJobAsync(database, job.TableId, job.ElementName).ConfigureAwait(false);
+            throw;
+        }
+
+        await catalogs.DeleteCoordinatorJobAsync(database, job.TableId, job.ElementName).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Takes back a CHECK or NOT NULL constraint that failed validation. A constraint that is already
+    /// gone needs nothing. A NOT NULL job exists only for a column that was nullable before, so the
+    /// column becomes nullable again, with no constraint name.
+    /// </summary>
+    private async Task RemoveRowConstraintAsync(DatabaseDescriptor database, SchemaChangeJob job)
+    {
+        if (!database.Schema.Tables.TryGetValue(job.TableName, out TableSchema? table))
+            return;
+
+        if (job.ElementKind == SchemaElementKind.Check)
+        {
+            if (table.CheckConstraints?.Exists(c => string.Equals(c.Name, job.ElementName, StringComparison.OrdinalIgnoreCase)) == true)
+                await catalogs.ReplicateDropCheckConstraintAsync(database, job.TableName, job.ElementName).ConfigureAwait(false);
+
+            return;
+        }
+
+        TableColumnSchema? column = table.Columns?.Find(
+            c => c.NotNull && string.Equals(c.NotNullConstraintName, job.ElementName, StringComparison.OrdinalIgnoreCase));
+
+        if (column is not null)
+            await catalogs.ReplicateSetColumnNotNullAsync(database, job.TableName, column.Name, notNull: false, constraintName: null).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// True when <paramref name="table"/> still holds the CHECK or NOT NULL constraint that a job of
+    /// <paramref name="kind"/> names. A resumed job whose constraint is gone has nothing to validate.
+    /// </summary>
+    private static bool RowConstraintExists(TableSchema table, SchemaElementKind kind, string constraintName) =>
+        kind == SchemaElementKind.Check
+            ? table.CheckConstraints?.Exists(c => string.Equals(c.Name, constraintName, StringComparison.OrdinalIgnoreCase)) == true
+            : table.Columns?.Exists(c => c.NotNull && string.Equals(c.NotNullConstraintName, constraintName, StringComparison.OrdinalIgnoreCase)) == true;
+
+    /// <summary>
     /// The name of the index that the foreign key <paramref name="constraintName"/> of
     /// <paramref name="tableName"/> owns, or null when the constraint reuses an index the user made.
     /// </summary>
@@ -455,6 +537,12 @@ public sealed class SchemaChangeCoordinator
                 continue;
             }
 
+            if (persisted.ElementKind is SchemaElementKind.Check or SchemaElementKind.NotNull)
+            {
+                await ResumeRowConstraintJobAsync(database, persisted, liveTable, job).ConfigureAwait(false);
+                continue;
+            }
+
             ColumnInfo? columnDefinition = persisted.ColumnType.HasValue
                 ? new ColumnInfo(persisted.ElementName, persisted.ColumnType.Value, persisted.ColumnNotNull, persisted.ColumnDefault)
                 : null;
@@ -502,6 +590,38 @@ public sealed class SchemaChangeCoordinator
                     "Coordinator resume failed for {TableName}.{ElementName} → {TargetState} on database {DbName}",
                     liveTableName, persisted.ElementName, persisted.TargetState, database.Name);
             }
+        }
+    }
+
+    /// <summary>
+    /// Finishes a CHECK or NOT NULL job that a previous leader left: the constraint is enforced, but its
+    /// existing rows were not proven. A job whose constraint is gone is deleted. Otherwise the attempt
+    /// is recorded first, as for every resumed job, and the rows are validated. A failure is logged,
+    /// not thrown, so one job cannot stop the resume of the others.
+    /// </summary>
+    private async Task ResumeRowConstraintJobAsync(DatabaseDescriptor database, PersistedCoordinatorJob persisted, TableSchema liveTable, SchemaChangeJob job)
+    {
+        try
+        {
+            if (!RowConstraintExists(liveTable, persisted.ElementKind, persisted.ElementName))
+            {
+                await catalogs.DeleteCoordinatorJobAsync(database, persisted.TableId, persisted.ElementName).ConfigureAwait(false);
+                return;
+            }
+
+            persisted.Attempts++;
+            await catalogs.PersistCoordinatorJobAsync(database, persisted).ConfigureAwait(false);
+
+            if (logger is not null)
+                Log.LogResumingCoordinatorJob(logger, job.TableName, persisted.ElementName, persisted.TargetState, database.Name, persisted.Attempts);
+
+            await ValidateRowConstraintAsync(database, job).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            logger?.LogError(ex,
+                "Coordinator resume failed to validate {ElementKind} constraint {TableName}.{ElementName} on database {DbName}",
+                persisted.ElementKind, job.TableName, persisted.ElementName, database.Name);
         }
     }
 

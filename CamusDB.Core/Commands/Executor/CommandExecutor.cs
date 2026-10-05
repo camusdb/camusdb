@@ -1119,6 +1119,26 @@ public sealed class CommandExecutor : IAsyncDisposable
         schemaDdl.ValidateForeignKeyRowsAsync(database, tableName, constraintName);
 
     /// <summary>
+    /// Reads every row of <paramref name="tableName"/> against one CHECK or NOT NULL constraint.
+    /// Reachable here because <see cref="Controllers.DatabaseOpener"/> wires it into the leader-change
+    /// resume coordinator, which validates a constraint that a previous leader enforced but did not
+    /// validate.
+    /// </summary>
+    internal Task ValidateRowConstraintAsync(DatabaseDescriptor database, string tableName, Catalogs.Models.SchemaElementKind kind, string constraintName) =>
+        schemaDdl.ValidateRowConstraintAsync(database, tableName, kind, constraintName);
+
+    /// <summary>
+    /// Test-only hook, invoked by <c>ADD CONSTRAINT ... CHECK</c> and by <c>SET NOT NULL</c> after the
+    /// constraint is enforced and the earlier writers settled, and before the existing rows are read.
+    /// Null in production; a test clears it after use.
+    /// </summary>
+    internal Func<Task>? TestInterceptBeforeRowConstraintValidation
+    {
+        get => tableConstraintAlterer.TestInterceptBeforeRowValidation;
+        set => tableConstraintAlterer.TestInterceptBeforeRowValidation = value;
+    }
+
+    /// <summary>
     /// Drops one index, entries and schema entry, without taking the DDL semaphore. Reachable here
     /// because <see cref="Controllers.DatabaseOpener"/> wires it into the leader-change resume
     /// coordinator, which drops the index a foreign key owned when that constraint fails validation.

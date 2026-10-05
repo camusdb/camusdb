@@ -30,6 +30,24 @@ public enum SchemaElementKind
     /// encoding.
     /// </summary>
     ForeignKey,
+
+    /// <summary>
+    /// A CHECK constraint on the named table, found by constraint name. It has no state ladder and
+    /// never appears in a <see cref="SchemaOp.SetElementState"/> delta. It names only a coordinator job:
+    /// the job is recorded before <c>ADD CONSTRAINT ... CHECK</c> replicates the constraint, and is
+    /// deleted after the existing rows were validated, or after a failed validation removed the
+    /// constraint. A leader that finds the job validates again, so a constraint that is enforced but
+    /// was never validated cannot stay after a crash.
+    /// </summary>
+    Check,
+
+    /// <summary>
+    /// A column's NOT NULL constraint, found by its constraint name
+    /// (<see cref="TableColumnSchema.NotNullConstraintName"/>). Like <see cref="Check"/>, it names only a
+    /// coordinator job, recorded by <c>ALTER COLUMN ... SET NOT NULL</c> on a column that was nullable.
+    /// A failed validation makes the column nullable again.
+    /// </summary>
+    NotNull,
 }
 
 public sealed class SchemaCreateTablePayload

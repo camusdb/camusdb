@@ -54,9 +54,7 @@ internal static class ConstraintDeltaApplier
         if (!string.IsNullOrEmpty(payload.Expression))
             check.ParsedCondition = SQLParserProcessor.ParseCondition(payload.Expression);
 
-        tableSchema.CheckConstraints ??= [];
-        tableSchema.CheckConstraints.RemoveAll(c => string.Equals(c.Name, payload.ConstraintName, StringComparison.OrdinalIgnoreCase));
-        tableSchema.CheckConstraints.Add(check);
+        tableSchema.CheckConstraints = [.. WithoutCheck(tableSchema.CheckConstraints, payload.ConstraintName), check];
         return tableSchema;
     }
 
@@ -69,8 +67,45 @@ internal static class ConstraintDeltaApplier
         if (!schema.Tables.TryGetValue(payload.TableName, out TableSchema? tableSchema))
             return null;
 
-        tableSchema.CheckConstraints?.RemoveAll(c => string.Equals(c.Name, payload.ConstraintName, StringComparison.OrdinalIgnoreCase));
+        if (tableSchema.CheckConstraints is not null)
+            tableSchema.CheckConstraints = WithoutCheck(tableSchema.CheckConstraints, payload.ConstraintName);
+
         return tableSchema;
+    }
+
+    /// <summary>
+    /// A new list with every constraint of <paramref name="checks"/> except the one named
+    /// <paramref name="constraintName"/>. The published list is never changed in place: DML iterates
+    /// <see cref="TableSchema.CheckConstraints"/> without the schema lock, and a change in place makes
+    /// that iteration throw.
+    /// </summary>
+    internal static List<CheckConstraintSchema> WithoutCheck(List<CheckConstraintSchema>? checks, string constraintName)
+    {
+        if (checks is null)
+            return [];
+
+        List<CheckConstraintSchema> kept = new(checks.Count);
+        foreach (CheckConstraintSchema check in checks)
+        {
+            if (!string.Equals(check.Name, constraintName, StringComparison.OrdinalIgnoreCase))
+                kept.Add(check);
+        }
+
+        return kept;
+    }
+
+    /// <summary>
+    /// Publishes a copy of the column list with the column at <paramref name="index"/> replaced. The
+    /// published list is never changed in place: DML iterates <see cref="TableSchema.Columns"/> without
+    /// the schema lock, and a write into the list makes that iteration throw
+    /// <see cref="InvalidOperationException"/>. A swapped list also invalidates the current-version
+    /// history that <see cref="TableSchema"/> caches by list identity.
+    /// </summary>
+    internal static void ReplaceColumn(TableSchema tableSchema, int index, TableColumnSchema column)
+    {
+        List<TableColumnSchema> columns = new(tableSchema.Columns!);
+        columns[index] = column;
+        tableSchema.Columns = columns;
     }
 
     /// <summary>
@@ -93,7 +128,7 @@ internal static class ConstraintDeltaApplier
             throw new CamusDBException(CamusDBErrorCodes.UnknownColumn, $"Column '{payload.ColumnName}' does not exist on table '{payload.TableName}'");
 
         TableColumnSchema old = tableSchema.Columns[idx];
-        tableSchema.Columns[idx] = WithStorage(old, payload.Storage);
+        ReplaceColumn(tableSchema, idx, WithStorage(old, payload.Storage));
         return tableSchema;
     }
 
@@ -149,24 +184,27 @@ internal static class ConstraintDeltaApplier
         if (payload.ConstraintName is { Length: > 0 } constraintName)
             ConstraintNameRules.RequireUnusedForNotNull(tableSchema, constraintName, old.Id);
 
-        tableSchema.Columns[idx] = new TableColumnSchema(
-            id: old.Id,
-            name: old.Name,
-            type: old.Type,
-            notNull: payload.NotNull,
-            defaultValue: old.DefaultValue,
-            state: old.State,
-            maxLength: old.MaxLength,
-            arrayElementType: old.ArrayElementType,
-            defaultFunction: old.DefaultFunction,
-            notNullConstraintName: payload.ConstraintName,
-            comment: old.Comment,
-            storage: old.Storage,
-            defaultSequenceId: old.DefaultSequenceId,
-            identityAlways: old.IdentityAlways
-        );
+        ReplaceColumn(tableSchema, idx, WithNotNull(old, payload.NotNull, payload.ConstraintName));
         return tableSchema;
     }
+
+    /// <summary>A copy of <paramref name="old"/> with the NOT NULL flag and constraint name replaced.</summary>
+    internal static TableColumnSchema WithNotNull(TableColumnSchema old, bool notNull, string? constraintName) => new(
+        id: old.Id,
+        name: old.Name,
+        type: old.Type,
+        notNull: notNull,
+        defaultValue: old.DefaultValue,
+        state: old.State,
+        maxLength: old.MaxLength,
+        arrayElementType: old.ArrayElementType,
+        defaultFunction: old.DefaultFunction,
+        notNullConstraintName: constraintName,
+        comment: old.Comment,
+        storage: old.Storage,
+        defaultSequenceId: old.DefaultSequenceId,
+        identityAlways: old.IdentityAlways
+    );
 
     /// <summary>
     /// Rebuilds the transient <see cref="CheckConstraintSchema.ParsedCondition"/> AST cache for

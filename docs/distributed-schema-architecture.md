@@ -1078,7 +1078,15 @@ or foreign key that moves to `DeleteOnly`/`WriteOnly`, a new CHECK, a `SET NOT N
 comments, the step to `Public` and column changes (already covered by the version pin) do not. A
 `SchemaOp` the rules do not list **does** stamp, so a new operation is safe until somebody decides it
 adds nothing. The single-node index build, which adds the index in memory before it replicates,
-calls `DatabaseDescriptor.FenceWritersAndWaitAsync` directly before its backfill.
+calls `DatabaseDescriptor.FenceWritersAndWaitAsync` directly before its backfill. The single-node
+`ADD CONSTRAINT ... CHECK` and `SET NOT NULL` do the same before their scan of the existing rows.
+
+**A validation scan must come after the enforcement, never before it.** The fence only refuses
+writes that were planned before the stamp. A write planned and committed between a scan and a later
+install of the constraint has no pin older than any stamp, and nothing checks it. So every operation
+that proves existing rows (an index backfill, a foreign-key validation, a CHECK or NOT NULL scan)
+first makes new statements maintain or obey the element, then waits for the earlier writers, then
+reads.
 
 What a schema change waits for is small: **commits in flight**, never open transactions. An idle
 client that holds a transaction open does not delay DDL; its commit is refused instead.
@@ -1096,10 +1104,6 @@ Limits of the fence:
   (`KahunaSessionLifetime`, 330 s by default): past that age nothing the session started can still
   arrive. Acks leave in version order, so until then the node acknowledges no later schema version
   either.
-- **CHECK and NOT NULL still validate before they enforce.** Their `ALTER` scans the table and only
-  then installs the constraint, so a row committed between the scan and the install is not checked.
-  The fence refuses a transaction that wrote before the install and commits after it, but it cannot
-  repair that order.
 - **A freshness reload (§6.4) retires every `TableSchema` instance**, so each transaction that wrote
   a table before the reload is refused at commit. The node missed deltas, and nothing says what the
   transaction lacks.
