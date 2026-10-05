@@ -105,6 +105,7 @@ public static class GrpcErrorMapper
 
         // Resource exhaustion (permanent for this operation)
         CamusDBErrorCodes.TransactionMutationLimitExceeded => StatusCode.ResourceExhausted,
+        CamusDBErrorCodes.ReturningResultTooLarge           => StatusCode.ResourceExhausted,
         CamusDBErrorCodes.SpillStorageUnavailable           => StatusCode.ResourceExhausted,
         CamusDBErrorCodes.SpillLimitExceeded                => StatusCode.ResourceExhausted,
         CamusDBErrorCodes.TooManyAuthAttempts               => StatusCode.ResourceExhausted,

@@ -641,6 +641,16 @@ public sealed class CommandExecutor : IAsyncDisposable
             matViewRefresher,
             sequenceBinder
         );
+        // The query entry point times the statement itself, so this calls the dispatcher directly
+        // rather than ExecuteNonSQLQuery, which would record it in the slow query log a second time.
+        // Routing advice is still recorded, as ExecuteNonSQLQuery records it.
+        selectExecutor.InsertReturningHandler = async ticket =>
+        {
+            ExecuteNonSQLResult result = await nonQueryDispatcher.ExecuteNonSQLQuery(this, ticket).ConfigureAwait(false);
+            if (ticket.RetryableAborts is not { HasAbort: true })
+                RecordRoutingForNonQuery(ticket, result);
+            return result;
+        };
 
         // Keep every branch's snapshot-floor hold alive for as long as the branch exists. The
         // registry is opened asynchronously, so defer the start until it is ready; the loops

@@ -391,10 +391,14 @@ internal sealed class GrpcBatcher : IAsyncDisposable
                     Routing.CamusRoutingAdvice.From(resp.QueryComplete.Routing)));
                 break;
             case BatchExecuteResponse.PayloadOneofCase.NonQuery:
+                // returning_schema is a message field, so "unset" (no RETURNING, or the count only) is
+                // told apart from "set with no rows" (RETURNING that inserted nothing).
                 Complete(op, new NonQueryResult(
                     resp.NonQuery.AffectedRows,
                     new CausalToken(resp.NonQuery.CausalTokenN, resp.NonQuery.CausalTokenL, resp.NonQuery.CausalTokenC),
-                    Routing.CamusRoutingAdvice.From(resp.NonQuery.Routing)));
+                    Routing.CamusRoutingAdvice.From(resp.NonQuery.Routing),
+                    resp.NonQuery.ReturningSchema,
+                    resp.NonQuery.ReturningSchema is null ? null : resp.NonQuery.ReturningRows));
                 break;
             case BatchExecuteResponse.PayloadOneofCase.StartReply:
                 Complete(op, resp.StartReply);

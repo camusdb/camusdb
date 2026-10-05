@@ -322,12 +322,22 @@ public sealed class CamusConnection : IAsyncDisposable
         }
     }
 
-    public async Task<NonQueryResult> ExecuteNonQueryAsync(string database, string sql, CancellationToken cancellationToken = default)
+    public Task<NonQueryResult> ExecuteNonQueryAsync(string database, string sql, CancellationToken cancellationToken = default)
+        => ExecuteNonQueryAsync(database, sql, discardReturningRows: false, cancellationToken);
+
+    /// <summary>
+    /// Executes a no-rows statement. With <paramref name="discardReturningRows"/> set, the server
+    /// does not send the rows of an <c>INSERT … RETURNING</c> and the result carries the count only;
+    /// the statement still checks its RETURNING list and the SELECT privilege it needs. Use it when
+    /// only the count matters, or when the rows would be larger than one reply can carry.
+    /// </summary>
+    public async Task<NonQueryResult> ExecuteNonQueryAsync(
+        string database, string sql, bool discardReturningRows, CancellationToken cancellationToken = default)
     {
         StatementRouteKey key = new(database, sql, RouteOpKind.NonQuery);
         RoutedEndpoint endpoint = SelectEndpoint(key, out long observed);
 
-        SqlRequest request = new() { Database = database, Sql = sql };
+        SqlRequest request = new() { Database = database, Sql = sql, DiscardReturningRows = discardReturningRows };
         if (negotiate)
             request.RoutingAcceptVersion = RoutingWire.AcceptVersion;
 

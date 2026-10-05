@@ -51,6 +51,10 @@ internal sealed class RowInsertSelector
     /// The statement the insert came from, carrying the parameter dictionary the reservation is
     /// installed in. Distinct from <paramref name="ticket"/>, which describes the insert itself.
     /// </param>
+    /// <param name="insertedRows">
+    /// Receives one (row id, stored values) pair for each written row, in source order, for an
+    /// <c>INSERT … SELECT … RETURNING</c>. Null when the statement returns no rows.
+    /// </param>
     public async Task<int> InsertSelect(
         RowInserter rowInserter,
         StatisticsManager statisticsManager,
@@ -60,7 +64,8 @@ internal sealed class RowInsertSelector
         InsertSelectTicket ticket,
         ExecuteSQLTicket statementTicket,
         IReadOnlyList<DerivedColumnSchema> sourceColumns,
-        IAsyncEnumerable<QueryResultRow> cursor)
+        IAsyncEnumerable<QueryResultRow> cursor,
+        List<QueryResultRow>? insertedRows = null)
     {
         // Target columns: the explicit list, or every column in schema order. The implicit list
         // deliberately mirrors INSERT … VALUES (which also takes every column) so the two forms
@@ -173,7 +178,7 @@ internal sealed class RowInsertSelector
                 values: page
             );
 
-            inserted += await rowInserter.Insert(database, table, pageTicket, foreignKeys).ConfigureAwait(false);
+            inserted += await rowInserter.Insert(database, table, pageTicket, foreignKeys, insertedRows).ConfigureAwait(false);
             statisticsManager.TrackInsert(database, table, page.Count, page);
         }
 

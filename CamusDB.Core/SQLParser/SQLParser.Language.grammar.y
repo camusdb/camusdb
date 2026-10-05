@@ -70,6 +70,9 @@
    grammar ambiguous. Every other word the clauses use (MATCH, SIMPLE, FULL, PARTIAL, RESTRICT,
    CASCADE, DEFERRED, IMMEDIATE) is a plain identifier validated in the parse action. */
 %token TREFERENCES TFOREIGN TDEFERRABLE TINITIALLY TNOACTION
+/* RETURNING is reserved, as it is in PostgreSQL: it ends an INSERT and starts the list of values the
+   statement sends back, so it cannot also be a bare table or column name there. */
+%token TRETURNING
 /* One unquoted "table@index" pair, produced by a single scanner rule so the '@' never reaches the
    parser as a placeholder. Accepted only in the SHOW ... FROM INDEX productions and split there. */
 %token TQUALIFIED_INDEX
@@ -198,13 +201,20 @@ group_list : group_list TCOMMA expr { $$.n = new(NodeType.ExprList, $1.n, $3.n, 
            | expr { $$.n = $1.n; }
            ;
 
-insert_stmt : TINSERT TINTO any_identifier LPAREN insert_field_list RPAREN TVALUES insert_batch_list { $$.n = new(NodeType.Insert, $3.n, $5.n, $8.n, null, null, null, null, null); }
-            | TINSERT TINTO any_identifier TVALUES insert_batch_list { $$.n = new(NodeType.Insert, $3.n, null, $5.n, null, null, null, null, null); }
+/* The optional RETURNING list hangs off extendedTwo in all four forms, so the executor finds it in
+   one place whatever the row source is. */
+insert_stmt : TINSERT TINTO any_identifier LPAREN insert_field_list RPAREN TVALUES insert_batch_list opt_returning { $$.n = new(NodeType.Insert, $3.n, $5.n, $8.n, $9.n, null, null, null, null); }
+            | TINSERT TINTO any_identifier TVALUES insert_batch_list opt_returning { $$.n = new(NodeType.Insert, $3.n, null, $5.n, $6.n, null, null, null, null); }
             /* INSERT ... SELECT: the source query hangs off extendedOne, the same slot the VALUES
                batch list uses, so both INSERT forms stay structurally parallel. */
-            | TINSERT TINTO any_identifier LPAREN insert_field_list RPAREN select_stmt { $$.n = new(NodeType.InsertSelect, $3.n, $5.n, $7.n, null, null, null, null, null); }
-            | TINSERT TINTO any_identifier select_stmt { $$.n = new(NodeType.InsertSelect, $3.n, null, $4.n, null, null, null, null, null); }
+            | TINSERT TINTO any_identifier LPAREN insert_field_list RPAREN select_stmt opt_returning { $$.n = new(NodeType.InsertSelect, $3.n, $5.n, $7.n, $8.n, null, null, null, null); }
+            | TINSERT TINTO any_identifier select_stmt opt_returning { $$.n = new(NodeType.InsertSelect, $3.n, null, $4.n, $5.n, null, null, null, null); }
 			;
+
+/* The list is a select list: the same items, aliases and * a SELECT accepts. */
+opt_returning : TRETURNING select_field_list { $$.n = $2.n; }
+              | /* empty */ { $$.n = null; }
+              ;
 
 insert_batch_list : insert_batch_list TCOMMA insert_values { $$.n = new(NodeType.InsertBatchList, $1.n, $3.n, null, null, null, null, null, null); }
                   | insert_values { $$.n = $1.n; $$.s = $1.s; }

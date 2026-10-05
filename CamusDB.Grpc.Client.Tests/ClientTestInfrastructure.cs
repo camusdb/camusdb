@@ -41,6 +41,12 @@ internal sealed class FakeBatchTransport : IBatchTransport
     /// </summary>
     public Func<BatchExecuteRequest, RoutingAdvice?>? AdviceFactory { get; set; }
 
+    /// <summary>
+    /// When set, a NON_QUERY reply carries RETURNING rows — a one-column schema and two rows — unless
+    /// the request asked for the count only, the way the server answers an <c>INSERT … RETURNING</c>.
+    /// </summary>
+    public bool ReturnRows { get; set; }
+
     public FakeBatchTransport(long id) => Id = id;
 
     public Task SendAsync(BatchExecuteRequest request, CancellationToken cancellationToken)
@@ -101,6 +107,21 @@ internal sealed class FakeBatchTransport : IBatchTransport
 
             case BatchStatementKind.NonQuery:
                 NonQueryReply reply = new() { AffectedRows = 1, CausalTokenL = id, CausalTokenC = 1, CausalTokenN = 1 };
+                if (ReturnRows)
+                {
+                    reply.AffectedRows = 2;
+                    if (!req.Request.DiscardReturningRows)
+                    {
+                        reply.ReturningSchema = new ResultSchema();
+                        reply.ReturningSchema.Columns.Add(new ColumnSchema { Name = "n", Type = CamusDB.Grpc.ColumnType.Integer64 });
+                        for (int i = 0; i < 2; i++)
+                        {
+                            ResultRow returned = new();
+                            returned.Values.Add(new Value { Int64Value = 10 + i });
+                            reply.ReturningRows.Add(returned);
+                        }
+                    }
+                }
                 if (AdviceFactory?.Invoke(req) is RoutingAdvice nonQueryAdvice)
                     reply.Routing = nonQueryAdvice;
                 yield return new BatchExecuteResponse { RequestId = id, NonQuery = reply };

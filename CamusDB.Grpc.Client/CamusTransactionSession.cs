@@ -100,13 +100,19 @@ public sealed class CamusTransactionSession
         return result;
     }
 
-    public async Task<NonQueryResult> ExecuteNonQueryAsync(string sql, CancellationToken cancellationToken = default)
+    public Task<NonQueryResult> ExecuteNonQueryAsync(string sql, CancellationToken cancellationToken = default)
+        => ExecuteNonQueryAsync(sql, discardReturningRows: false, cancellationToken);
+
+    /// <inheritdoc cref="CamusConnection.ExecuteNonQueryAsync(string, string, bool, CancellationToken)"/>
+    public async Task<NonQueryResult> ExecuteNonQueryAsync(string sql, bool discardReturningRows, CancellationToken cancellationToken = default)
     {
         EnsureLive();
         StatementRouteKey key = new(database, sql, RouteOpKind.NonQuery);
         await EnsureStartedAsync(key, cancellationToken).ConfigureAwait(false);
         long observed = owner?.ObserveRouteRevision(key) ?? 0;
-        NonQueryResult result = await batcher!.EnqueueNonQueryAsync(BuildRequest(sql), slot, cancellationToken).ConfigureAwait(false);
+        SqlRequest request = BuildRequest(sql);
+        request.DiscardReturningRows = discardReturningRows;
+        NonQueryResult result = await batcher!.EnqueueNonQueryAsync(request, slot, cancellationToken).ConfigureAwait(false);
         Advance(result.Token);
         owner?.LearnFromResult(key, result.Routing, observed);
         return result;
@@ -132,14 +138,24 @@ public sealed class CamusTransactionSession
     }
 
     /// <inheritdoc cref="ExecuteQueryAsync(CamusPreparedStatement, IReadOnlyList{object?}, CancellationToken)"/>
-    public async Task<NonQueryResult> ExecuteNonQueryAsync(
+    public Task<NonQueryResult> ExecuteNonQueryAsync(
         CamusPreparedStatement statement, IReadOnlyList<object?> values, CancellationToken cancellationToken = default)
+        => ExecuteNonQueryAsync(statement, values, discardReturningRows: false, cancellationToken);
+
+    /// <summary>
+    /// Runs a prepared no-rows statement inside this transaction. With
+    /// <paramref name="discardReturningRows"/> set, the server does not send the rows of an
+    /// <c>INSERT … RETURNING</c>; see
+    /// <see cref="CamusConnection.ExecuteNonQueryAsync(string, string, bool, CancellationToken)"/>.
+    /// </summary>
+    public async Task<NonQueryResult> ExecuteNonQueryAsync(
+        CamusPreparedStatement statement, IReadOnlyList<object?> values, bool discardReturningRows, CancellationToken cancellationToken = default)
     {
         EnsureLive();
         await EnsureStartedAsync(statement.NonQueryRouteKey, cancellationToken).ConfigureAwait(false);
         long observed = owner?.ObserveRouteRevision(statement.NonQueryRouteKey) ?? 0;
         NonQueryResult result = await statement
-            .ExecuteNonQueryAsync(batcher!, slot, ResumeHandle(), values, negotiate, cancellationToken).ConfigureAwait(false);
+            .ExecuteNonQueryAsync(batcher!, slot, ResumeHandle(), values, negotiate, discardReturningRows, cancellationToken).ConfigureAwait(false);
         Advance(result.Token);
         owner?.LearnFromResult(statement.NonQueryRouteKey, result.Routing, observed);
         return result;

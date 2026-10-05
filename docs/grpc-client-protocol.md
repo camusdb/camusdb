@@ -222,7 +222,7 @@ locking fields on the request are **ignored** — the transaction's properties w
 | RPC | Shape | Notes |
 |-----|-------|-------|
 | `ExecuteQuery(SqlRequest) → stream QueryStreamMessage` | server-stream | Schema-first (§3). Use for `SELECT`. |
-| `ExecuteNonQuery(SqlRequest) → NonQueryReply` | unary | `INSERT`/`UPDATE`/`DELETE`. Reply carries `affected_rows` + causal token. |
+| `ExecuteNonQuery(SqlRequest) → NonQueryReply` | unary | `INSERT`/`UPDATE`/`DELETE`. Reply carries `affected_rows` + causal token, plus `returning_schema` / `returning_rows` for an `INSERT … RETURNING` (see below). |
 | `ExecuteDdl(SqlRequest) → DdlReply` | unary | `CREATE`/`ALTER`/`DROP`, `CREATE DATABASE`, etc. Reply carries only a causal token. |
 | `BatchExecute(stream … → stream …)` | duplex | Pipelined batching (§7). |
 | `StartTransaction(StartTxnRequest) → TxnHandle` | unary | Begin explicit transaction. |
@@ -232,6 +232,21 @@ locking fields on the request are **ignored** — the transaction's properties w
 
 `SqlRequest.parameters` is a `map<string, Value>` for bound parameters — prefer it over string
 interpolation to avoid injection and to carry typed values (dates, uuids, bytes) losslessly.
+
+**`INSERT … RETURNING`.** Both `ExecuteQuery` and `ExecuteNonQuery` accept it (see
+[insert-returning.md](insert-returning.md)):
+
+- On `ExecuteQuery` (and a `QUERY` batch op) the rows arrive as an ordinary query stream. An autocommit
+  statement runs in a writable transaction, and the schema is sent only after the commit.
+- On `ExecuteNonQuery` (and a `NON_QUERY` batch op) the reply carries `returning_schema` (field 7) and
+  `returning_rows` (field 8) beside `affected_rows`. `returning_schema` is a message field: unset means
+  "no RETURNING list, or the count only was asked for"; set with no rows means the statement inserted
+  nothing. A client that ignores the two fields sees the same reply as before.
+- `SqlRequest.discard_returning_rows` (field 15) asks a no-rows call for the count only. The list and
+  the SELECT privilege are still checked. `ExecuteQuery` refuses a request that sets it (`CADB0400`).
+- All rows of a no-rows reply travel in one message. A reply larger than a client receives by default
+  (4 MiB) is refused with `CADB0550` (`RESOURCE_EXHAUSTED`) **before** the commit, so nothing is
+  stored. Use `ExecuteQuery` or `discard_returning_rows` for such a statement.
 
 ---
 

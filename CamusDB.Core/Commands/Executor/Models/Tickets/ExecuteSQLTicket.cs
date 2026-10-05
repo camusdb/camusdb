@@ -74,6 +74,19 @@ public readonly struct ExecuteSQLTicket
     /// </summary>
     public RetryableAbortSink? RetryableAborts { get; }
 
+    /// <summary>
+    /// True when the caller wants only the row count of an <c>INSERT … RETURNING</c>, not its rows.
+    /// The statement still validates its RETURNING list and still demands the SELECT privilege the
+    /// list needs, so the same statement fails the same way with and without the flag; only the
+    /// buffer, the projection and the serialization of the rows are skipped.
+    ///
+    /// <para>Only the no-rows entry point honors it. The row-returning entry point refuses a ticket
+    /// that sets it, because a query that asks for no rows is a client error. It has no effect on a
+    /// statement without a RETURNING list. Carried forward like <see cref="Probe"/> by every rebuild
+    /// of this ticket.</para>
+    /// </summary>
+    public bool DiscardReturningRows { get; }
+
     public ExecuteSQLTicket(
         KvTransaction txnState,
         string database,
@@ -83,7 +96,8 @@ public readonly struct ExecuteSQLTicket
         CancellationToken cancellationToken = default,
         Diagnostics.StatementProbe? probe = null,
         Routing.StatementRoutingCollector? routing = null,
-        RetryableAbortSink? retryableAborts = null)
+        RetryableAbortSink? retryableAborts = null,
+        bool discardReturningRows = false)
     {
         TxnState = txnState;
         DatabaseName = database;
@@ -94,6 +108,7 @@ public readonly struct ExecuteSQLTicket
         Probe = probe;
         Routing = routing;
         RetryableAborts = retryableAborts;
+        DiscardReturningRows = discardReturningRows;
     }
 
     /// <summary>
@@ -101,5 +116,5 @@ public readonly struct ExecuteSQLTicket
     /// slow query log creates the probe after the ticket has already been built by the transport.
     /// </summary>
     public ExecuteSQLTicket WithProbe(Diagnostics.StatementProbe? probe)
-        => new(TxnState, DatabaseName, Sql, Parameters, Principal, CancellationToken, probe, Routing, RetryableAborts);
+        => new(TxnState, DatabaseName, Sql, Parameters, Principal, CancellationToken, probe, Routing, RetryableAborts, DiscardReturningRows);
 }

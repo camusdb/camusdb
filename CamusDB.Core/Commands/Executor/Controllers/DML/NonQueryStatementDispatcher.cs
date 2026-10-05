@@ -149,6 +149,41 @@ internal sealed class NonQueryStatementDispatcher
     }
 
     /// <summary>
+    /// Binds the RETURNING list of an INSERT against the table the current attempt opened. The bind
+    /// demands SELECT on the target; see <see cref="InsertReturningPlan"/>.
+    /// </summary>
+    private Task<InsertReturningPlan> BindReturningAsync(
+        DatabaseDescriptor database, TableDescriptor table, NodeAst insertAst, NodeAst returningList, ExecuteSQLTicket ticket) =>
+        InsertReturningPlan.BindAsync(
+            selectExecutor.selectQueryCreator,
+            selectExecutor.queryBinder,
+            database,
+            table,
+            insertAst.leftAst!,
+            returningList,
+            ticket);
+
+    /// <summary>
+    /// Builds the result of an INSERT. With a RETURNING list and no count-only request, the
+    /// buffered rows are projected and carried on the result with their schema; otherwise the result
+    /// has the row count only, in the same shape as an INSERT without RETURNING.
+    /// </summary>
+    private static async Task<ExecuteNonSQLResult> CompleteInsertAsync(
+        DatabaseDescriptor database,
+        TableDescriptor table,
+        int inserted,
+        string? warning,
+        InsertReturningPlan? returning,
+        List<QueryResultRow>? insertedRows)
+    {
+        if (returning is null || insertedRows is null)
+            return new(database, table, inserted, warning);
+
+        List<QueryResultRow> projected = await returning.ProjectAsync(insertedRows).ConfigureAwait(false);
+        return new(database, table, inserted, warning, returning.Columns, projected);
+    }
+
+    /// <summary>
     /// Execute a SQL statement that doesn't return rows
     /// </summary>
     /// <param name="ticket"></param>
@@ -200,6 +235,12 @@ internal sealed class NonQueryStatementDispatcher
         {
             case NodeType.Insert:
                 {
+                    // A RETURNING list is checked on the AST before the ticket is built, so a refused
+                    // list fails before the statement reserves any sequence value.
+                    NodeAst? returningList = InsertReturningPlan.GetReturningList(ast);
+                    if (returningList is not null)
+                        InsertReturningPlan.Validate(returningList);
+
                     InsertTicket insertTicket = await sqlExecutor.CreateInsertTicket(executor, database, ticket, ast).ConfigureAwait(false);
 
                     for (int fenceAttempt = 0; ; fenceAttempt++)
@@ -211,12 +252,23 @@ internal sealed class NonQueryStatementDispatcher
 
                             TableDescriptor table = await context.TableOpener.Open(database, insertTicket.TableName).ConfigureAwait(false);
                             SelectStatementExecutor.PinForWrite(database, table, ticket.TxnState, writeShapeEpoch);
-                            int inserted = await rowInserter.Insert(database, table, insertTicket).ConfigureAwait(false);
+
+                            // Bound inside the attempt, against the table this attempt opened, and before
+                            // the first write. The buffer is new on each attempt, so a retried attempt
+                            // never returns a row from the attempt that failed.
+                            InsertReturningPlan? returning = returningList is null
+                                ? null
+                                : await BindReturningAsync(database, table, ast, returningList, ticket).ConfigureAwait(false);
+                            List<QueryResultRow>? insertedRows = returning is not null && !ticket.DiscardReturningRows
+                                ? new(insertTicket.Values.Count)
+                                : null;
+
+                            int inserted = await rowInserter.Insert(database, table, insertTicket, insertedRows: insertedRows).ConfigureAwait(false);
                             // Track statistics on the SQL path too, mirroring the ticket-based Insert()
                             // wrapper — otherwise SQL DML never updates row/mutation counts and auto-analyze
                             // never triggers for the common SQL workload.
                             context.Statistics.TrackInsert(database, table, inserted, insertTicket.Values);
-                            return new(database, table, inserted);
+                            return await CompleteInsertAsync(database, table, inserted, warning: null, returning, insertedRows).ConfigureAwait(false);
                         }
                         catch (CamusDBException ex) when (ex.Code == CamusDBErrorCodes.SchemaCatchingUp && fenceAttempt < SelectStatementExecutor.MaxFenceRetries)
                         {
@@ -227,6 +279,10 @@ internal sealed class NonQueryStatementDispatcher
 
             case NodeType.InsertSelect:
                 {
+                    NodeAst? returningList = InsertReturningPlan.GetReturningList(ast);
+                    if (returningList is not null)
+                        InsertReturningPlan.Validate(returningList);
+
                     InsertSelectTicket insertSelectTicket = sqlExecutor.CreateInsertSelectTicket(ticket, ast);
                     context.Validator.Validate(insertSelectTicket);
 
@@ -240,19 +296,29 @@ internal sealed class NonQueryStatementDispatcher
                             TableDescriptor table = await context.TableOpener.Open(database, insertSelectTicket.TableName).ConfigureAwait(false);
                             SelectStatementExecutor.PinForWrite(database, table, ticket.TxnState, writeShapeEpoch);
 
+                            // Bound before the source query runs, so a refused list or a missing SELECT
+                            // privilege fails before any row is read or written. See the VALUES arm for
+                            // why the buffer is per attempt.
+                            InsertReturningPlan? returning = returningList is null
+                                ? null
+                                : await BindReturningAsync(database, table, ast, returningList, ticket).ConfigureAwait(false);
+                            List<QueryResultRow>? insertedRows = returning is not null && !ticket.DiscardReturningRows
+                                ? new()
+                                : null;
+
                             await using SelectRowSource source = await selectExecutor.BuildSelectSourceAsync(
                                 database, insertSelectTicket.SourceSelect, ticket, "INSERT ... SELECT").ConfigureAwait(false);
 
                             int insertedFromSelect = await rowInsertSelector
                                 .InsertSelect(
                                     rowInserter, context.Statistics, sequenceBinder, database, table,
-                                    insertSelectTicket, ticket, source.Columns, source.Cursor)
+                                    insertSelectTicket, ticket, source.Columns, source.Cursor, insertedRows)
                                 .ConfigureAwait(false);
 
                             string? insertWarning = ctasExecutor.WarnIfTimeTravelCopyReadNothing(
                                 source, insertedFromSelect, insertSelectTicket.TableName);
 
-                            return new(database, table, insertedFromSelect, insertWarning);
+                            return await CompleteInsertAsync(database, table, insertedFromSelect, insertWarning, returning, insertedRows).ConfigureAwait(false);
                         }
                         catch (CamusDBException ex) when (ex.Code == CamusDBErrorCodes.SchemaCatchingUp && fenceAttempt < SelectStatementExecutor.MaxFenceRetries)
                         {

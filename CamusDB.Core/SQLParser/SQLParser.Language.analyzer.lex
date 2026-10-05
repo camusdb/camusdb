@@ -109,6 +109,7 @@ TForeign        (F|f)(O|o)(R|r)(E|e)(I|i)(G|g)(N|n)
 TDeferrable     (D|d)(E|e)(F|f)(E|e)(R|r)(R|r)(A|a)(B|b)(L|l)(E|e)
 TInitially      (I|i)(N|n)(I|i)(T|t)(I|i)(A|a)(L|l)(L|l)(Y|y)
 TNoAction       (N|n)(O|o)[ \t\r\n]+(A|a)(C|c)(T|t)(I|i)(O|o)(N|n)
+TReturning      (R|r)(E|e)(T|t)(U|u)(R|r)(N|n)(I|i)(N|n)(G|g)
 TExplain        (E|e)(X|x)(P|p)(L|l)(A|a)(I|i)(N|n)
 TBegin          (B|b)(E|e)(G|g)(I|i)(N|n)
 TStart          (S|s)(T|t)(A|a)(R|r)(T|t)
@@ -443,6 +444,8 @@ TSequence       (S|s)(E|e)(Q|q)(U|u)(E|e)(N|n)(C|c)(E|e)
 {TInitially} { return (int)Token.TINITIALLY; }
 
 {TNoAction} { return (int)Token.TNOACTION; }
+
+{TReturning} { return (int)Token.TRETURNING; }
 
 {TAt} { return (int)Token.TAT; }
 

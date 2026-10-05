@@ -63,10 +63,11 @@ public sealed class ExecuteSQLRequest
     /// <summary>
     /// Optional locking mode for the autocommit transaction begun by this request.
     /// Accepted values (case-insensitive): <c>"Pessimistic"</c>, <c>"Optimistic"</c>.
-    /// Ignored when <c>TxnIdPT</c> resumes an existing transaction, and ignored on the read-only
+    /// Ignored when <c>TxnIdPT</c> resumes an existing transaction, and ignored for a read on the
     /// <c>/execute-sql-query</c> path (an autocommit <c>SELECT</c> runs as a read-only snapshot,
     /// which has no locking mode). Applies to the writable autocommit paths
-    /// (<c>/execute-sql-non-query</c>, <c>/execute-sql-ddl</c>).
+    /// (<c>/execute-sql-non-query</c>, <c>/execute-sql-ddl</c>, and an <c>INSERT … RETURNING</c>
+    /// sent to <c>/execute-sql-query</c>).
     /// </summary>
     public string? Locking { get; set; }
 
@@ -91,4 +92,13 @@ public sealed class ExecuteSQLRequest
     /// so old clients keep their exact response shape. Today the only accepted value is 1.
     /// </summary>
     public int RoutingAcceptVersion { get; set; }
+
+    /// <summary>
+    /// True to receive only the row count of an <c>INSERT … RETURNING</c> sent to
+    /// <c>/execute-sql-non-query</c>. The statement still checks its RETURNING list and the SELECT
+    /// privilege it needs; the response then has no <c>columns</c> and no <c>returningRows</c>.
+    /// No effect on a statement without RETURNING. <c>/execute-sql-query</c> and its stream refuse a
+    /// request that sets it, because a query that asks for no rows is a client error.
+    /// </summary>
+    public bool DiscardReturningRows { get; set; }
 }

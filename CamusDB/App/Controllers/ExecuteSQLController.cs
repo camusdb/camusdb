@@ -131,6 +131,29 @@ public sealed class ExecuteSQLController : CommandsController
             statement.RootNodeType);
     }
 
+    /// <summary>
+    /// Copies the RETURNING columns and rows of <paramref name="result"/> onto a no-rows response.
+    /// Leaves both fields null — and so out of the JSON — when the statement had no RETURNING list or
+    /// the request asked for the count only.
+    /// </summary>
+    private static ExecuteNonSQLQueryResponse WithReturning(ExecuteNonSQLQueryResponse response, ExecuteNonSQLResult result)
+    {
+        if (result.ReturningColumns is { } columns && result.ReturningRows is { } rows)
+        {
+            response.Columns = ToColumnDtos(columns);
+            response.ReturningRows = new PositionalRowSet(rows, columns);
+        }
+
+        return response;
+    }
+
+    /// <summary>
+    /// True for a statement the row-returning endpoints answer by writing: an INSERT, which reaches
+    /// those endpoints only with a RETURNING list. Its autocommit transaction must be a writable one,
+    /// not the read-only snapshot a SELECT runs in.
+    /// </summary>
+    private static bool WritesRows(NodeType rootType) => rootType is NodeType.Insert or NodeType.InsertSelect;
+
     private static List<ColumnSchemaDto> ToColumnDtos(IReadOnlyList<DerivedColumnSchema> schema)
     {
         List<ColumnSchemaDto> dtos = new(schema.Count);
@@ -191,13 +214,18 @@ public sealed class ExecuteSQLController : CommandsController
         // cancelled commit or rollback abandons locks that only a lease expiry can reclaim.
         CancellationToken requestAborted = HttpContext.RequestAborted;
 
+        // Set once the statement is resolved. A write answered here (INSERT … RETURNING) must not
+        // have a Kahuna failure translated into a retryable code: unlike a read, it is not known to
+        // be idempotent.
+        bool writesRows = false;
+
         try
         {
             ExecuteSQLRequest? request = await JsonSerializer.DeserializeAsync<ExecuteSQLRequest>(Request.Body, jsonOptions, requestAborted).ConfigureAwait(false);
             if (request == null)
                 throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "ExecuteSQLQuery request is not valid");
 
-            (CamusIsolationLevel? reqLevel, CamusTransactionMode? reqMode, _, TransactionPriority? reqPriority) = ParseRequestLevelMode(request);
+            (CamusIsolationLevel? reqLevel, CamusTransactionMode? reqMode, KeyValueTransactionLocking? reqLocking, TransactionPriority? reqPriority) = ParseRequestLevelMode(request);
 
             Principal? principal = await ResolveRequestPrincipalAsync().ConfigureAwait(false);
 
@@ -205,6 +233,7 @@ public sealed class ExecuteSQLController : CommandsController
             // mid-replay, where a concurrent close would turn a conflict into a 404.
             ResolvedSql resolved = Resolve(request, principal);
             string sql = resolved.Sql;
+            writesRows = WritesRows(resolved.RootType);
 
             LogExecutingSqlRedacted(sql);
 
@@ -219,7 +248,8 @@ public sealed class ExecuteSQLController : CommandsController
                     sql: sql,
                     parameters: resolved.Parameters,
                         principal: principal,
-                        cancellationToken: requestAborted
+                        cancellationToken: requestAborted,
+                        discardReturningRows: request.DiscardReturningRows
                 );
                 (_, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(ticket, schemaOut: schemaHolder).ConfigureAwait(false);
                 List<QueryResultRow> rows = [];
@@ -247,7 +277,8 @@ public sealed class ExecuteSQLController : CommandsController
                         parameters: resolved.Parameters,
                         principal: principal,
                         cancellationToken: requestAborted,
-                        routing: txnCollector
+                        routing: txnCollector,
+                        discardReturningRows: request.DiscardReturningRows
                     );
                     List<QueryResultRow> rows = [];
                     (DatabaseDescriptor database, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(ticket, schemaOut: schemaHolder).ConfigureAwait(false);
@@ -278,9 +309,15 @@ public sealed class ExecuteSQLController : CommandsController
 
             async Task AutocommitBody(CancellationToken ct)
             {
-                KvTransaction tx = await transactions.BeginReadOnlyAsync(
-                    resolved.Database, promote: true, request.CausalToken, priority: reqPriority,
-                    cancellationToken: ct).ConfigureAwait(false);
+                // An INSERT … RETURNING writes, so it begins the same writable transaction the no-rows
+                // endpoint begins for it; every other statement here reads from a snapshot.
+                KvTransaction tx = writesRows
+                    ? await transactions.StartAsync(
+                        resolved.Database, reqLevel, reqMode, reqLocking, priority: reqPriority,
+                        cancellationToken: ct).ConfigureAwait(false)
+                    : await transactions.BeginReadOnlyAsync(
+                        resolved.Database, promote: true, request.CausalToken, priority: reqPriority,
+                        cancellationToken: ct).ConfigureAwait(false);
                 try
                 {
                     QuerySchemaHolder schemaHolder = new();
@@ -293,7 +330,8 @@ public sealed class ExecuteSQLController : CommandsController
                         // The query observes the client's disconnect; the surrounding begin/commit/
                         // rollback keep `ct`, which the serializable retry owns.
                         cancellationToken: requestAborted,
-                        routing: routingCollector
+                        routing: routingCollector,
+                        discardReturningRows: request.DiscardReturningRows
                     );
                     // Fully buffer the decoded, transaction-independent rows, THEN commit — so a
                     // serializable retry can restart cleanly (no bytes are written until the
@@ -348,14 +386,14 @@ public sealed class ExecuteSQLController : CommandsController
 
             return new JsonResult(new ExecuteSQLQueryResponse("failed", e.Code, e.Message) { ServerTimeMs = stopwatch.Elapsed.TotalMilliseconds }) { StatusCode = CamusDBErrorCodes.GetHttpStatus(e.Code) };
         }
-        catch (Kahuna.KahunaServerException e)
+        catch (Kahuna.KahunaServerException e) when (!writesRows)
         {
             // Same translation as the gRPC query path (StreamQueryAsync): a read Kahuna cannot
             // currently serve — a scan page whose retry budget expired on an unresolved intent — is
             // safe to retry because a read is idempotent, and its message names the failed range.
             // The generic catch below would bury both under an internal error the caller cannot
-            // distinguish from corruption. This method only reads, so the translation is safe here;
-            // write and finalize surfaces keep the conservative mapping.
+            // distinguish from corruption. The filter limits it to reads: an INSERT … RETURNING answered
+            // here keeps the conservative mapping, as the write and finalize surfaces do.
             LogCommandFailure(new CamusDBException(CamusDBErrorCodes.TransactionMustRetry, e.Message));
 
             return new JsonResult(new ExecuteSQLQueryResponse("failed", CamusDBErrorCodes.TransactionMustRetry, e.Message) { ServerTimeMs = stopwatch.Elapsed.TotalMilliseconds }) { StatusCode = CamusDBErrorCodes.GetHttpStatus(CamusDBErrorCodes.TransactionMustRetry) };
@@ -435,7 +473,8 @@ public sealed class ExecuteSQLController : CommandsController
                     sql: sql,
                     parameters: resolved.Parameters,
                         principal: principal,
-                        cancellationToken: ct
+                        cancellationToken: ct,
+                        discardReturningRows: request.DiscardReturningRows
                 );
                 (_, total) = await StreamQueryRowsAsync(ticket, ndjson, ct).ConfigureAwait(false);
             }
@@ -451,7 +490,8 @@ public sealed class ExecuteSQLController : CommandsController
                         sql: sql,
                         parameters: resolved.Parameters,
                         principal: principal,
-                        cancellationToken: ct
+                        cancellationToken: ct,
+                        discardReturningRows: request.DiscardReturningRows
                     );
                     (_, total) = await StreamQueryRowsAsync(ticket, ndjson, ct).ConfigureAwait(false);
                 }
@@ -459,6 +499,27 @@ public sealed class ExecuteSQLController : CommandsController
                 {
                     await transactions.RollbackIfNotCompletedAsync(txnState).ConfigureAwait(false);
                     throw;
+                }
+            }
+            // Autocommit INSERT … RETURNING: a write, so no byte may reach the wire before its
+            // commit. It runs fully buffered — the same begin, retry and commit as the buffered
+            // endpoint — and its rows are streamed only after the commit.
+            else if (WritesRows(resolved.RootType))
+            {
+                (IReadOnlyList<DerivedColumnSchema> schema, List<QueryResultRow> rows, causalToken) =
+                    await ExecuteAutocommitWriteReturningAsync(request, resolved, principal, ct).ConfigureAwait(false);
+
+                Response.StatusCode  = 200;
+                Response.ContentType = QueryStreamNdjsonWriter.ContentType;
+                ndjson.WriteHeader(schema);
+
+                foreach (QueryResultRow row in rows)
+                {
+                    ndjson.WriteRow(row, schema);
+                    total++;
+
+                    if ((total & 0x7F) == 0)
+                        await Response.BodyWriter.FlushAsync(ct).ConfigureAwait(false);
                 }
             }
             // Autocommit: single attempt — streaming forfeits the buffered path's transparent
@@ -480,7 +541,8 @@ public sealed class ExecuteSQLController : CommandsController
                         sql: sql,
                         parameters: resolved.Parameters,
                         principal: principal,
-                        cancellationToken: ct
+                        cancellationToken: ct,
+                        discardReturningRows: request.DiscardReturningRows
                     );
                     (DatabaseDescriptor? db, int count) = await StreamQueryRowsAsync(ticket, ndjson, ct).ConfigureAwait(false);
                     total = count;
@@ -535,6 +597,64 @@ public sealed class ExecuteSQLController : CommandsController
                 await WriteSetupErrorAsync(e, stopwatch).ConfigureAwait(false);
             }
         }
+    }
+
+    /// <summary>
+    /// Runs an autocommit <c>INSERT … RETURNING</c> for the stream endpoint and returns its schema, its
+    /// rows and the commit's causal token. Every row is buffered and the transaction is committed
+    /// before this returns, so a Serializable conflict can be retried from a fresh transaction with
+    /// nothing on the wire. The rows come from the attempt that committed.
+    /// </summary>
+    private async Task<(IReadOnlyList<DerivedColumnSchema> Schema, List<QueryResultRow> Rows, Kommander.Time.HLCTimestamp CausalToken)>
+        ExecuteAutocommitWriteReturningAsync(ExecuteSQLRequest request, ResolvedSql resolved, Principal? principal, CancellationToken requestAborted)
+    {
+        (CamusIsolationLevel? level, CamusTransactionMode? mode, KeyValueTransactionLocking? locking, TransactionPriority? priority) =
+            ParseRequestLevelMode(request);
+
+        IReadOnlyList<DerivedColumnSchema> schema = [];
+        List<QueryResultRow> rows = [];
+        Kommander.Time.HLCTimestamp causalToken = default;
+
+        async Task Body(CancellationToken ct)
+        {
+            KvTransaction tx = await transactions.StartAsync(
+                resolved.Database, level, mode, locking, priority: priority, cancellationToken: ct).ConfigureAwait(false);
+            try
+            {
+                QuerySchemaHolder schemaHolder = new();
+                ExecuteSQLTicket ticket = new(
+                    txnState: tx,
+                    database: resolved.Database,
+                    sql: resolved.Sql,
+                    parameters: resolved.Parameters,
+                    principal: principal,
+                    cancellationToken: requestAborted,
+                    discardReturningRows: request.DiscardReturningRows
+                );
+
+                List<QueryResultRow> attemptRows = [];
+                (DatabaseDescriptor? db, IAsyncEnumerable<QueryResultRow> cursor) =
+                    await executor.ExecuteSQLQuery(ticket, schemaOut: schemaHolder).ConfigureAwait(false);
+                await foreach (QueryResultRow row in cursor)
+                    attemptRows.Add(row);
+
+                causalToken = await transactions.CommitOrReleaseAsync(db, tx, ct).ConfigureAwait(false);
+                schema = schemaHolder.Schema;
+                rows = attemptRows;
+            }
+            catch
+            {
+                await transactions.RollbackIfNotCompletedAsync(tx, ct).ConfigureAwait(false);
+                throw;
+            }
+        }
+
+        if ((level ?? options.DefaultIsolationLevel) == CamusIsolationLevel.Serializable)
+            await SerializableRetryHelper.ExecuteAutocommitAsync(Body).ConfigureAwait(false);
+        else
+            await Body(CancellationToken.None).ConfigureAwait(false);
+
+        return (schema, rows, causalToken);
     }
 
     /// <summary>
@@ -660,15 +780,16 @@ public sealed class ExecuteSQLController : CommandsController
                         sql: resolved.Sql,
                         parameters: resolved.Parameters,
                         principal: principal,
-                        routing: txnCollector
+                        routing: txnCollector,
+                        discardReturningRows: request.DiscardReturningRows
                     );
                     ExecuteNonSQLResult result = await executor.ExecuteNonSQLQuery(ticket).ConfigureAwait(false);
-                    return new JsonResult(new ExecuteNonSQLQueryResponse("ok", result.ModifiedRows)
+                    return new JsonResult(WithReturning(new ExecuteNonSQLQueryResponse("ok", result.ModifiedRows)
                     {
                         Warning = result.Warning,
                         ServerTimeMs = stopwatch.Elapsed.TotalMilliseconds,
                         Routing = ResolveRoutingDto(result.Database, txnCollector),
-                    });
+                    }, result));
                 }
                 catch (Exception)
                 {
@@ -684,6 +805,9 @@ public sealed class ExecuteSQLController : CommandsController
             // Reset on every attempt below, not accumulated: a retried autocommit statement reports the
             // warning of the attempt that actually committed, not one left over from an aborted try.
             string? warning = null;
+            // The result of the attempt that committed, for its RETURNING rows. Assigned only after the
+            // commit, so an aborted attempt's rows are never sent.
+            ExecuteNonSQLResult committed = default;
             Kommander.Time.HLCTimestamp causalToken2 = default;
             StatementRoutingCollector? routingCollector2 = BeginRoutingCollection(request);
             DatabaseDescriptor? routingDb2 = null;
@@ -701,12 +825,14 @@ public sealed class ExecuteSQLController : CommandsController
                         sql: resolved.Sql,
                         parameters: resolved.Parameters,
                         principal: principal,
-                        routing: routingCollector2
+                        routing: routingCollector2,
+                        discardReturningRows: request.DiscardReturningRows
                     );
                     ExecuteNonSQLResult r = await executor.ExecuteNonSQLQuery(ticket).ConfigureAwait(false);
                     causalToken2 = await transactions.CommitOrReleaseAsync(r.Database, tx, ct).ConfigureAwait(false);
                     modifiedRows = r.ModifiedRows;
                     warning = r.Warning;
+                    committed = r;
                     routingDb2 = r.Database;
                 }
                 catch
@@ -722,13 +848,13 @@ public sealed class ExecuteSQLController : CommandsController
             else
                 await AutocommitDmlBody(CancellationToken.None).ConfigureAwait(false);
 
-            return new JsonResult(new ExecuteNonSQLQueryResponse("ok", modifiedRows)
+            return new JsonResult(WithReturning(new ExecuteNonSQLQueryResponse("ok", modifiedRows)
             {
                 Warning = warning,
                 CausalToken = causalToken2.IsNull() ? null : causalToken2,
                 Routing = ResolveRoutingDto(routingDb2, routingCollector2),
                 ServerTimeMs = stopwatch.Elapsed.TotalMilliseconds
-            });
+            }, committed));
         }
         catch (CamusDBException e)
         {

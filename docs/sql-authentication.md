@@ -260,6 +260,9 @@ With auth enabled, every statement is checked before it runs:
   `EXPLAIN` all require the privilege on **each** referenced table — a `db.orders`-only grant authorizes
   `orders` and nothing else. A broader `db.*` or global grant, or superuser, satisfies any table in
   scope. A denial is `403 Insufficient privilege`.
+- **`INSERT … RETURNING`** needs `SELECT` on the target table in addition to `INSERT`, as in
+  PostgreSQL: the RETURNING list reads stored values, defaults and sequence draws. A user with
+  `INSERT` only can run a plain `INSERT`. The count-only request flag does not lift the requirement.
 - **The typed gRPC rows API** (`CamusRows`) is checked the same way, on the table the request names:
   `InsertRow` needs `INSERT`, `Query` and `QueryById` need `SELECT`, `UpdateRows` and `UpdateById`
   need `UPDATE`, and `DeleteRows` and `DeleteById` need `DELETE`. A filtered update or delete needs

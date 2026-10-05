@@ -45,6 +45,23 @@ public sealed class ExecuteNonSQLQueryResponse
     [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
     public SqlRoutingMetadataDto? Routing { get; set; }
 
+    /// <summary>
+    /// The output columns of an <c>INSERT … RETURNING</c>, in RETURNING-list order. Omitted from the
+    /// JSON for a statement without RETURNING and for a request that set
+    /// <c>discardReturningRows</c>, so a client that never uses RETURNING sees its exact response
+    /// shape. Present with an empty <see cref="ReturningRows"/> when the statement inserted no rows.
+    /// </summary>
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public List<ColumnSchemaDto>? Columns { get; set; }
+
+    /// <summary>
+    /// The RETURNING rows, positional against <see cref="Columns"/> — the same encoding
+    /// <see cref="ExecuteSQLQueryResponse.Rows"/> uses, so one decoder reads both. Present exactly
+    /// when <see cref="Columns"/> is. <see cref="Rows"/> (the affected-row count) equals its count.
+    /// </summary>
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public PositionalRowSet? ReturningRows { get; set; }
+
     public ExecuteNonSQLQueryResponse(string status, int rows)
     {
         Status = status;

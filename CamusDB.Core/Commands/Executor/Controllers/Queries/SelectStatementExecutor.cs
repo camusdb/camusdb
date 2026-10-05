@@ -163,6 +163,41 @@ internal sealed class SelectStatementExecutor
     }
 
     /// <summary>
+    /// Runs an <c>INSERT … RETURNING</c> statement through the no-rows dispatcher. Set once by
+    /// <see cref="CommandExecutor"/> after it builds the dispatcher: the dispatcher depends on this
+    /// class, so it cannot be a constructor argument here.
+    /// </summary>
+    internal Func<ExecuteSQLTicket, Task<Models.Results.ExecuteNonSQLResult>>? InsertReturningHandler { get; set; }
+
+    /// <summary>
+    /// Answers an <c>INSERT … RETURNING</c> on the row-returning entry point: runs the statement,
+    /// publishes the RETURNING schema, and returns the buffered rows as a cursor.
+    /// </summary>
+    private async Task<(DatabaseDescriptor database, IAsyncEnumerable<QueryResultRow> cursor)> ExecuteInsertReturningAsync(
+        ExecuteSQLTicket ticket, QuerySchemaHolder? schemaOut)
+    {
+        if (InsertReturningHandler is null)
+            throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "INSERT ... RETURNING is not wired on this executor");
+
+        Models.Results.ExecuteNonSQLResult result = await InsertReturningHandler(ticket).ConfigureAwait(false);
+
+        // A retryable abort recorded instead of thrown: the statement did not complete, and the
+        // transport that owns the sink reports it. No rows are exposed.
+        if (ticket.RetryableAborts is { HasAbort: true } || result.ReturningColumns is null || result.ReturningRows is null)
+        {
+            if (schemaOut is not null)
+                schemaOut.Schema = result.ReturningColumns ?? [];
+
+            return (result.Database!, QueryResultStream.Empty());
+        }
+
+        if (schemaOut is not null)
+            schemaOut.Schema = result.ReturningColumns;
+
+        return (result.Database!, QueryResultStream.FromRows(result.ReturningRows));
+    }
+
+    /// <summary>
     /// Swaps in a newly published configuration snapshot. Each statement pins the field once, so an
     /// in-flight statement keeps the snapshot it started with.
     /// </summary>
@@ -238,11 +273,25 @@ internal sealed class SelectStatementExecutor
     {
         context.Validator.Validate(ticket);
 
+        // A row-returning request that asks for no rows is a client error, whatever the statement.
+        // Refused before the parse so the answer does not depend on the statement text.
+        if (ticket.DiscardReturningRows)
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInput,
+                "Discarding RETURNING rows is only supported for statements that return no rows");
+
         NodeAst ast;
         using (Diagnostics.QueryStageProfile.Measure(Diagnostics.QueryStage.Parse))
             ast = SQLParserProcessor.Parse(ticket.Sql, sqlParserCache);
 
         recording?.Describe(ast.nodeType);
+
+        // INSERT … RETURNING is a write that returns rows. The no-rows dispatcher owns every write
+        // statement, so it runs the statement and this path only exposes its buffered rows as a
+        // cursor. The statement completes before the cursor exists, so draining the cursor does no
+        // further work.
+        if (InsertReturningPlan.HasReturning(ast))
+            return await ExecuteInsertReturningAsync(ticket, schemaOut).ConfigureAwait(false);
 
         // Reading the log must not change it. Recording this statement would make every read evict
         // an entry, so a dashboard polling the log every few seconds would erase the history it
@@ -836,7 +885,8 @@ internal sealed class SelectStatementExecutor
         // fails open. Carrying it costs nothing and removes that trap.
         return new ExecuteSQLTicket(
             snapshotTx, ticket.DatabaseName, ticket.Sql, ticket.Parameters, ticket.Principal,
-            ticket.CancellationToken, ticket.Probe, ticket.Routing, ticket.RetryableAborts);
+            ticket.CancellationToken, ticket.Probe, ticket.Routing, ticket.RetryableAborts,
+            ticket.DiscardReturningRows);
     }
 
     /// <summary>

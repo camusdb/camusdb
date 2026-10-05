@@ -579,6 +579,18 @@ public static class CamusDBErrorCodes
     /// </summary>
     public const string SpillLimitExceeded = "CADB0549";
 
+    /// <summary>
+    /// The rows of an <c>INSERT … RETURNING</c> do not fit in one reply of a transport that sends
+    /// them all at once — the gRPC <c>ExecuteNonQuery</c> reply and a non-query batch op — because
+    /// the reply would be larger than a client receives by default.
+    ///
+    /// <para>The check runs before the commit, so the statement is rolled back and nothing it
+    /// inserted is kept: a client is never told a committed write failed. Send the statement to
+    /// <c>ExecuteQuery</c>, which streams the rows, or set <c>discard_returning_rows</c> to receive
+    /// the count only. Maps to HTTP 400.</para>
+    /// </summary>
+    public const string ReturningResultTooLarge = "CADB0550";
+
     public const string InvalidConfig = "CADB0600";
 
     /// <summary>
@@ -753,6 +765,7 @@ public static class CamusDBErrorCodes
         SequenceInUse => 409,
         InsufficientDiskSpace => 507,
         SpillLimitExceeded => 507,
+        ReturningResultTooLarge => 400,
         SnapshotPrecedesContentsGeneration => 400,
         StatementNotAllowedInTransaction => 400,
         BranchSnapshotProtectionLost => 410,

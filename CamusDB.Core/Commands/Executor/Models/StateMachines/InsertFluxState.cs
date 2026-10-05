@@ -32,6 +32,15 @@ public sealed class InsertFluxState
     /// </summary>
     internal Controllers.ForeignKeyStatementChecker ForeignKeys { get; init; } = Controllers.ForeignKeyStatementChecker.None;
 
+    /// <summary>
+    /// Receives each written row as a (row id, shaped values) pair for an <c>INSERT … RETURNING</c>,
+    /// or null when the statement returns no rows. The values are the dictionary the row was encoded
+    /// from — after coercion, defaults and sequence draws — so RETURNING reports what was stored. A
+    /// failed write throws out of the statement, and the caller then discards this list with the
+    /// statement, so it never reaches a client holding a row that was not stored.
+    /// </summary>
+    internal List<QueryResultRow>? ReturningRows { get; init; }
+
     public InsertFluxState(DatabaseDescriptor database, TableDescriptor table, InsertTicket ticket)
     {
         Database = database;

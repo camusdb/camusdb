@@ -50,7 +50,15 @@ public sealed class QueryResult
     }
 }
 
-/// <summary>Result of a batched NON_QUERY: affected-row count plus the trailing causal token.</summary>
+/// <summary>
+/// Result of a batched NON_QUERY: affected-row count plus the trailing causal token, and the rows of
+/// an <c>INSERT … RETURNING</c>.
+///
+/// <para>A statement that returns rows never makes a no-rows call fail: the count is here as always,
+/// and the rows are available beside it. A client that wants only the count asks the server not to
+/// send the rows (the <c>discardReturningRows</c> overloads), which leaves both RETURNING members
+/// null.</para>
+/// </summary>
 public sealed class NonQueryResult
 {
     public int AffectedRows { get; }
@@ -59,11 +67,32 @@ public sealed class NonQueryResult
     /// <inheritdoc cref="QueryResult.Routing"/>
     public Routing.CamusRoutingAdvice? Routing { get; }
 
-    public NonQueryResult(int affectedRows, CausalToken token, Routing.CamusRoutingAdvice? routing = null)
+    /// <summary>
+    /// The output columns of an <c>INSERT … RETURNING</c>. Null for a statement without RETURNING and
+    /// for a call that asked for the count only. Not null with an empty <see cref="ReturningRows"/>
+    /// when the statement inserted no rows.
+    /// </summary>
+    public ResultSchema? ReturningSchema { get; }
+
+    /// <summary>
+    /// The RETURNING rows, one per inserted row, positional against <see cref="ReturningSchema"/> —
+    /// the same shape as <see cref="QueryResult.Rows"/>. Null exactly when
+    /// <see cref="ReturningSchema"/> is null.
+    /// </summary>
+    public IReadOnlyList<ResultRow>? ReturningRows { get; }
+
+    public NonQueryResult(
+        int affectedRows,
+        CausalToken token,
+        Routing.CamusRoutingAdvice? routing = null,
+        ResultSchema? returningSchema = null,
+        IReadOnlyList<ResultRow>? returningRows = null)
     {
-        AffectedRows = affectedRows;
-        Token        = token;
-        Routing      = routing;
+        AffectedRows    = affectedRows;
+        Token           = token;
+        Routing         = routing;
+        ReturningSchema = returningSchema;
+        ReturningRows   = returningSchema is null ? null : returningRows ?? [];
     }
 }
 

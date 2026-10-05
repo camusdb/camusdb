@@ -195,6 +195,10 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
             NodeAst ast = executor.ParseSql(sql);
             QueryStreamSink sink = new(responseStream);
 
+            // An INSERT … RETURNING writes: it needs a writable transaction, no row may reach the wire
+            // before its commit, and a Kahuna failure must not be reported as a retryable read failure.
+            bool writesRows = StatementScope.IsWriteReturningRows(ast);
+
             // A server-level query needs no database context and no transaction.
             if (StatementScope.IsServerLevelQuery(ast.nodeType))
             {
@@ -204,7 +208,8 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
                     sql: sql,
                     parameters: ToColumnValueMap(request.Parameters),
                     principal: principal,
-                    cancellationToken: ct
+                    cancellationToken: ct,
+                    discardReturningRows: request.DiscardReturningRows
                 );
                 await StreamQueryAsync(ticket, sink, ct).ConfigureAwait(false);
                 return;
@@ -217,7 +222,7 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
             {
                 Core.Routing.StatementRoutingCollector? txnCollector = BeginRoutingCollection(request);
                 DatabaseDescriptor? txnDb =
-                    await RunExplicitTxnQuery(request, sql, handle, sink, principal, txnCollector, ct).ConfigureAwait(false);
+                    await RunExplicitTxnQuery(request, sql, handle, sink, principal, txnCollector, writesRows, ct).ConfigureAwait(false);
                 RoutingAdvice? txnAdvice = BuildRoutingAdvice(txnDb, txnCollector);
                 if (txnAdvice is not null)
                     await responseStream.WriteAsync(new QueryStreamMessage { RoutingAdvice = txnAdvice }, ct).ConfigureAwait(false);
@@ -231,8 +236,9 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
 
             CacheMetadataHolder cacheMeta = new();
             Core.Routing.StatementRoutingCollector? routingCollector = BeginRoutingCollection(request);
-            (HLCTimestamp commitToken, DatabaseDescriptor? routingDb) =
-                await RunAutocommitQuery(request, sql, sink, retry, principal, cacheMeta, routingCollector, ct).ConfigureAwait(false);
+            (HLCTimestamp commitToken, DatabaseDescriptor? routingDb) = writesRows
+                ? await RunAutocommitWriteReturning(request, sql, sink, retry, principal, routingCollector, ct).ConfigureAwait(false)
+                : await RunAutocommitQuery(request, sql, sink, retry, principal, cacheMeta, routingCollector, ct).ConfigureAwait(false);
 
             // Trailing cache verdict, mirroring the REST envelope: written only when the statement went
             // through the cache path, and necessarily after the last row since the holder is populated
@@ -267,11 +273,16 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
     /// verdict as the cursor drains, so it is readable only after this method returns — a caller must
     /// therefore emit it after the last row, never before.</para>
     /// </summary>
+    /// <param name="writesRows">
+    /// True for an <c>INSERT … RETURNING</c>. Its Kahuna failures keep the conservative mapping,
+    /// because a write is not known to be idempotent.
+    /// </param>
     private async Task<DatabaseDescriptor?> StreamQueryAsync(
         ExecuteSQLTicket ticket,
         IQueryRowSink sink,
         CancellationToken ct,
-        CacheMetadataHolder? cacheMeta = null)
+        CacheMetadataHolder? cacheMeta = null,
+        bool writesRows = false)
     {
         try
         {
@@ -309,7 +320,7 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
 
             return db;
         }
-        catch (Kahuna.KahunaServerException ex)
+        catch (Kahuna.KahunaServerException ex) when (!writesRows)
         {
             // A Kahuna read that cannot currently be served — a scan page whose retry budget expired
             // on an unresolved write intent, an unroutable range — is safe to retry, because a read
@@ -335,6 +346,7 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
         IQueryRowSink sink,
         Principal? principal,
         Core.Routing.StatementRoutingCollector? routingCollector,
+        bool writesRows,
         CancellationToken ct)
     {
         KvTransaction? txnState = null;
@@ -348,9 +360,10 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
                 parameters: ToColumnValueMap(request.Parameters),
                 principal: principal,
                 cancellationToken: ct,
-                routing: routingCollector
+                routing: routingCollector,
+                discardReturningRows: request.DiscardReturningRows
             );
-            return await StreamQueryAsync(ticket, sink, ct).ConfigureAwait(false);
+            return await StreamQueryAsync(ticket, sink, ct, writesRows: writesRows).ConfigureAwait(false);
         }
         catch (Exception)
         {
@@ -400,7 +413,8 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
                     parameters: ToColumnValueMap(request.Parameters),
                     principal: principal,
                     cancellationToken: innerCt,
-                    routing: routingCollector
+                    routing: routingCollector,
+                    discardReturningRows: request.DiscardReturningRows
                 );
                 DatabaseDescriptor? db = await StreamQueryAsync(ticket, sink, innerCt, cacheMeta).ConfigureAwait(false);
                 commitToken = await transactions.CommitOrReleaseAsync(db, tx, CancellationToken.None).ConfigureAwait(false);
@@ -419,6 +433,78 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
                 Attempt, canRetry: () => !sink.HasWritten, cancellationToken: ct).ConfigureAwait(false);
         else
             await Attempt(ct).ConfigureAwait(false);
+
+        return (commitToken, committedDb);
+    }
+
+    /// <summary>
+    /// Runs an autocommit <c>INSERT … RETURNING</c> sent to <c>ExecuteQuery</c>: begins the same
+    /// writable transaction <c>ExecuteNonQuery</c> begins, buffers every row, commits, and only then
+    /// writes the schema and the rows. Nothing is on the wire before the commit, so a Serializable
+    /// conflict replays from a fresh transaction, and a client never receives rows from an attempt
+    /// that did not commit.
+    /// </summary>
+    private async Task<(HLCTimestamp CommitToken, DatabaseDescriptor? Database)> RunAutocommitWriteReturning(
+        SqlRequest request,
+        string sql,
+        IQueryRowSink sink,
+        bool retry,
+        Principal? principal,
+        Core.Routing.StatementRoutingCollector? routingCollector,
+        CancellationToken ct)
+    {
+        (CamusIsolationLevel? reqLevel, CamusTransactionMode? reqMode, KeyValueTransactionLocking? reqLocking, EnginePriority? reqPriority) =
+            ParseLevelMode(request);
+
+        HLCTimestamp commitToken = default;
+        DatabaseDescriptor? committedDb = null;
+        IReadOnlyList<DerivedColumnSchema> schema = [];
+        List<QueryResultRow> rows = [];
+
+        async Task Attempt(CancellationToken innerCt)
+        {
+            KvTransaction tx = await transactions.StartAsync(
+                request.Database, reqLevel, reqMode, reqLocking, priority: reqPriority, cancellationToken: innerCt).ConfigureAwait(false);
+            try
+            {
+                QuerySchemaHolder schemaHolder = new();
+                ExecuteSQLTicket ticket = new(
+                    txnState: tx,
+                    database: request.Database,
+                    sql: sql,
+                    parameters: ToColumnValueMap(request.Parameters),
+                    principal: principal,
+                    cancellationToken: ct,
+                    routing: routingCollector,
+                    discardReturningRows: request.DiscardReturningRows
+                );
+
+                List<QueryResultRow> attemptRows = [];
+                (DatabaseDescriptor? db, IAsyncEnumerable<QueryResultRow> cursor) =
+                    await executor.ExecuteSQLQuery(ticket, schemaOut: schemaHolder).ConfigureAwait(false);
+                await foreach (QueryResultRow row in cursor.ConfigureAwait(false))
+                    attemptRows.Add(row);
+
+                commitToken = await transactions.CommitOrReleaseAsync(db, tx, innerCt).ConfigureAwait(false);
+                committedDb = db;
+                schema = schemaHolder.Schema;
+                rows = attemptRows;
+            }
+            catch
+            {
+                await transactions.RollbackIfNotCompletedAsync(tx, innerCt).ConfigureAwait(false);
+                throw;
+            }
+        }
+
+        if (retry)
+            await SerializableRetryHelper.ExecuteAutocommitAsync(Attempt).ConfigureAwait(false);
+        else
+            await Attempt(CancellationToken.None).ConfigureAwait(false);
+
+        await sink.WriteSchemaAsync(schema, ct).ConfigureAwait(false);
+        foreach (QueryResultRow row in rows)
+            await sink.WriteRowAsync(row.Row, schema, ct).ConfigureAwait(false);
 
         return (commitToken, committedDb);
     }
@@ -471,11 +557,13 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
                         sql: request.Sql ?? "",
                         parameters: ToColumnValueMap(request.Parameters),
                         principal: principal,
-                        routing: txnCollector
+                        routing: txnCollector,
+                        discardReturningRows: request.DiscardReturningRows
                     );
                     ExecuteNonSQLResult result = await executor.ExecuteNonSQLQuery(ticket).ConfigureAwait(false);
                     // proto3 strings are never null; an absent warning is the empty string.
                     NonQueryReply txnReply = new() { AffectedRows = result.ModifiedRows, Warning = result.Warning ?? "" };
+                    AttachReturning(txnReply, result);
                     RoutingAdvice? txnAdvice = BuildRoutingAdvice(result.Database, txnCollector);
                     if (txnAdvice is not null)
                         txnReply.Routing = txnAdvice;
@@ -497,6 +585,9 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
             HLCTimestamp causalToken = default;
             Core.Routing.StatementRoutingCollector? routingCollector = BeginRoutingCollection(request);
             DatabaseDescriptor? routingDb = null;
+            // The RETURNING part of the reply, built inside each attempt before its commit so an
+            // oversized result rolls the statement back rather than failing after it committed.
+            NonQueryReply returningReply = new();
 
             async Task AutocommitDml(CancellationToken innerCt)
             {
@@ -510,13 +601,17 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
                         sql: request.Sql ?? "",
                         parameters: ToColumnValueMap(request.Parameters),
                         principal: principal,
-                        routing: routingCollector
+                        routing: routingCollector,
+                        discardReturningRows: request.DiscardReturningRows
                     );
                     ExecuteNonSQLResult r = await executor.ExecuteNonSQLQuery(ticket).ConfigureAwait(false);
+                    NonQueryReply attemptReply = new();
+                    AttachReturning(attemptReply, r);
                     causalToken = await transactions.CommitOrReleaseAsync(r.Database, tx, innerCt).ConfigureAwait(false);
                     modifiedRows = r.ModifiedRows;
                     warning = r.Warning;
                     routingDb = r.Database;
+                    returningReply = attemptReply;
                 }
                 catch
                 {
@@ -531,7 +626,9 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
             else
                 await AutocommitDml(ct).ConfigureAwait(false);
 
-            NonQueryReply reply = new() { AffectedRows = modifiedRows, Warning = warning ?? "" };
+            NonQueryReply reply = returningReply;
+            reply.AffectedRows = modifiedRows;
+            reply.Warning = warning ?? "";
             if (!causalToken.IsNull())
                 ApplyCausalToken(reply, causalToken);
             RoutingAdvice? advice = BuildRoutingAdvice(routingDb, routingCollector);
@@ -1237,6 +1334,11 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
             resolved = ResolveStatement(request, prepared);
         string sql = resolved.Sql;
         BatchQuerySink sink = new(writer, requestId);
+
+        // An INSERT reaches the query kind only with a RETURNING list (without one the executor
+        // refuses it). It writes, so its autocommit form takes a writable transaction and sends its
+        // rows only after the commit.
+        bool writesRows = resolved.RootType is NodeType.Insert or NodeType.InsertSelect;
         HLCTimestamp commitToken = default;
         CacheMetadataHolder cacheMeta = new();
         Core.Routing.StatementRoutingCollector? routingCollector = null;
@@ -1248,7 +1350,7 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
             ExecuteSQLTicket ticket = new(
                 txnState: null!, database: resolved.Database, sql: sql,
                 parameters: resolved.Parameters, principal: principal,
-                cancellationToken: ct);
+                cancellationToken: ct, discardReturningRows: request.DiscardReturningRows);
             await StreamQueryAsync(ticket, sink, ct).ConfigureAwait(false);
         }
         else if (request.TxnHandle is { TxnIdPt: > 0 } handle)
@@ -1263,8 +1365,50 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
             ExecuteSQLTicket ticket = new(
                 txnState: txnState, database: resolved.Database, sql: sql,
                 parameters: resolved.Parameters, principal: principal,
-                cancellationToken: ct, routing: routingCollector);
-            routingDb = await StreamQueryAsync(ticket, sink, ct).ConfigureAwait(false);
+                cancellationToken: ct, routing: routingCollector,
+                discardReturningRows: request.DiscardReturningRows);
+            routingDb = await StreamQueryAsync(ticket, sink, ct, writesRows: writesRows).ConfigureAwait(false);
+        }
+        else if (writesRows)
+        {
+            // Autocommit INSERT … RETURNING: begin a writable transaction, buffer the rows, commit,
+            // and only then hand the schema and rows to the sink. Not server-retried, like the read
+            // below: a retryable conflict is reported as BatchError for the client to replay, and
+            // nothing of this op is on the stream yet when it is.
+            if (stageClock is not null)
+                stageClock.Path = QueryStageProfile.Paths.Autocommit;
+            (CamusIsolationLevel? reqLevel, CamusTransactionMode? reqMode, KeyValueTransactionLocking? reqLocking, EnginePriority? reqPriority) =
+                ParseLevelMode(request);
+            KvTransaction tx = await transactions.StartAsync(
+                resolved.Database, reqLevel, reqMode, reqLocking, priority: reqPriority, cancellationToken: CancellationToken.None).ConfigureAwait(false);
+            IReadOnlyList<DerivedColumnSchema> schema;
+            List<QueryResultRow> rows = [];
+            try
+            {
+                routingCollector = BeginRoutingCollection(request);
+                QuerySchemaHolder schemaHolder = new();
+                ExecuteSQLTicket ticket = new(
+                    txnState: tx, database: resolved.Database, sql: sql,
+                    parameters: resolved.Parameters, principal: principal,
+                    cancellationToken: ct, routing: routingCollector,
+                    discardReturningRows: request.DiscardReturningRows);
+                (DatabaseDescriptor? db, IAsyncEnumerable<QueryResultRow> cursor) =
+                    await executor.ExecuteSQLQuery(ticket, schemaOut: schemaHolder).ConfigureAwait(false);
+                await foreach (QueryResultRow row in cursor.ConfigureAwait(false))
+                    rows.Add(row);
+                schema = schemaHolder.Schema;
+                commitToken = await transactions.CommitOrReleaseAsync(db, tx, CancellationToken.None).ConfigureAwait(false);
+                routingDb = db;
+            }
+            catch
+            {
+                await transactions.RollbackIfNotCompletedAsync(tx, CancellationToken.None).ConfigureAwait(false);
+                throw;
+            }
+
+            await sink.WriteSchemaAsync(schema, ct).ConfigureAwait(false);
+            foreach (QueryResultRow row in rows)
+                await sink.WriteRowAsync(row.Row, schema, ct).ConfigureAwait(false);
         }
         else
         {
@@ -1286,7 +1430,8 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
                 ExecuteSQLTicket ticket = new(
                     txnState: tx, database: resolved.Database, sql: sql,
                     parameters: resolved.Parameters, principal: principal,
-                    cancellationToken: ct, routing: routingCollector);
+                    cancellationToken: ct, routing: routingCollector,
+                    discardReturningRows: request.DiscardReturningRows);
                 DatabaseDescriptor? db = await StreamQueryAsync(ticket, sink, ct, cacheMeta).ConfigureAwait(false);
                 using (QueryStageProfile.Measure(QueryStage.Commit))
                     commitToken = await transactions.CommitOrReleaseAsync(db, tx, CancellationToken.None).ConfigureAwait(false);
@@ -1387,12 +1532,25 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
             ExecuteSQLTicket ticket = new(
                 txnState: txnState, database: resolved.Database, sql: resolved.Sql,
                 parameters: resolved.Parameters, principal: principal,
-                routing: routingCollector, retryableAborts: aborts);
+                routing: routingCollector, retryableAborts: aborts,
+                discardReturningRows: request.DiscardReturningRows);
             ExecuteNonSQLResult result = await executor.ExecuteNonSQLQuery(ticket).ConfigureAwait(false);
             if (aborts.Abort is { } txnAbort)
                 return txnAbort;
 
             reply = new NonQueryReply { AffectedRows = result.ModifiedRows, Warning = result.Warning ?? "" };
+            try
+            {
+                AttachReturning(reply, result);
+            }
+            catch (CamusDBException)
+            {
+                // The statement's rows are staged in the client's transaction, but the client is told
+                // the statement failed. Rolling the transaction back makes its later COMMIT fail, so
+                // rows the client believes were refused can never be committed.
+                await transactions.RollbackIfNotCompletedAsync(txnState).ConfigureAwait(false);
+                throw;
+            }
             RoutingAdvice? advice = BuildRoutingAdvice(result.Database, routingCollector);
             if (advice is not null)
                 reply.Routing = advice;
@@ -1407,12 +1565,16 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
             Core.Routing.StatementRoutingCollector? routingCollector = BeginRoutingCollection(request);
             DatabaseDescriptor? routingDb;
             RetryableAbortSink aborts = new();
+            // The RETURNING part of the reply, built before the commit so an oversized result rolls
+            // the statement back rather than failing after it committed.
+            NonQueryReply returningReply = new();
             try
             {
                 ExecuteSQLTicket ticket = new(
                     txnState: tx, database: resolved.Database, sql: resolved.Sql,
                     parameters: resolved.Parameters, principal: principal,
-                    routing: routingCollector, retryableAborts: aborts);
+                    routing: routingCollector, retryableAborts: aborts,
+                    discardReturningRows: request.DiscardReturningRows);
                 ExecuteNonSQLResult r = await executor.ExecuteNonSQLQuery(ticket).ConfigureAwait(false);
 
                 // The statement lost to a concurrent commit: roll back, never commit what it wrote.
@@ -1422,6 +1584,7 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
                     return autocommitAbort;
                 }
 
+                AttachReturning(returningReply, r);
                 token = await transactions.CommitOrReleaseAsync(r.Database, tx, ct).ConfigureAwait(false);
                 rows = r.ModifiedRows;
                 batchWarning = r.Warning;
@@ -1433,7 +1596,9 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
                 throw;
             }
 
-            reply = new NonQueryReply { AffectedRows = rows, Warning = batchWarning ?? "" };
+            reply = returningReply;
+            reply.AffectedRows = rows;
+            reply.Warning = batchWarning ?? "";
             if (!token.IsNull())
                 ApplyCausalToken(reply, token);
             // Best-effort routing advice on the terminator — the mutation already committed.
@@ -1652,6 +1817,42 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
         => InvokeAsync(async () => { await body().ConfigureAwait(false); return true; });
 
     // ─── Message builders ────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Largest <c>NonQueryReply</c> that carries RETURNING rows. The reply holds every row at once,
+    /// and a gRPC client receives at most 4 MiB in one message by default; the margin leaves room for
+    /// the batch envelope and the reply's other fields.
+    /// </summary>
+    internal const int MaxReturningReplyBytes = 4 * 1024 * 1024 - 16 * 1024;
+
+    /// <summary>
+    /// Copies the RETURNING schema and rows of <paramref name="result"/> onto a no-rows reply, and
+    /// refuses a reply a client could not receive (<see cref="CamusDBErrorCodes.ReturningResultTooLarge"/>).
+    /// Leaves <c>returning_schema</c> unset when the statement had no RETURNING list or the request
+    /// asked for the count only, so that reply is the same as before RETURNING existed.
+    ///
+    /// <para>An autocommit caller must call this <b>before</b> it commits: the size refusal must roll
+    /// the statement back, never fail a write that already committed.</para>
+    /// </summary>
+    internal static void AttachReturning(NonQueryReply reply, ExecuteNonSQLResult result)
+    {
+        if (result.ReturningColumns is not { } columns || result.ReturningRows is not { } rows)
+            return;
+
+        reply.ReturningSchema = BuildResultSchema(columns);
+
+        ResultRowBinder binder = new();
+        foreach (QueryResultRow row in rows)
+            reply.ReturningRows.Add(BuildResultRow(row.Row, columns, binder));
+
+        int size = reply.CalculateSize();
+        if (size > MaxReturningReplyBytes)
+            throw new CamusDBException(
+                CamusDBErrorCodes.ReturningResultTooLarge,
+                $"The RETURNING rows of this statement need {size} bytes, more than the {MaxReturningReplyBytes} " +
+                "bytes one reply can carry. Send the statement to ExecuteQuery, which streams the rows, or " +
+                "set discard_returning_rows to receive the count only.");
+    }
 
     /// <summary>
     /// Builds the ordered output-column <c>ResultSchema</c>. Shared by the unary query stream and the

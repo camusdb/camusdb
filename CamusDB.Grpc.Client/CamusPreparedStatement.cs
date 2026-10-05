@@ -120,6 +120,7 @@ public sealed class CamusPreparedStatement : IAsyncDisposable
         {
             QueryResult result = await ExecuteAsync(
                 endpoint.Batcher, endpoint.Batcher.ReserveSlot(), values, txn: null, negotiate: owner.RoutingNegotiated,
+                discardReturningRows: false,
                 static (b, request, slot, transportId, ct) => b.EnqueueQueryAsync(request, slot, ct, transportId),
                 cancellationToken).ConfigureAwait(false);
             owner.LearnFromResult(queryRouteKey, result.Routing, observed);
@@ -133,14 +134,25 @@ public sealed class CamusPreparedStatement : IAsyncDisposable
     }
 
     /// <inheritdoc cref="ExecuteQueryAsync(IReadOnlyList{object?}, CancellationToken)"/>
-    public async Task<NonQueryResult> ExecuteNonQueryAsync(
+    public Task<NonQueryResult> ExecuteNonQueryAsync(
         IReadOnlyList<object?> values, CancellationToken cancellationToken = default)
+        => ExecuteNonQueryAsync(values, discardReturningRows: false, cancellationToken);
+
+    /// <summary>
+    /// Executes the statement as an autocommit no-rows statement. With
+    /// <paramref name="discardReturningRows"/> set, the server does not send the rows of an
+    /// <c>INSERT … RETURNING</c>; see
+    /// <see cref="CamusConnection.ExecuteNonQueryAsync(string, string, bool, CancellationToken)"/>.
+    /// </summary>
+    public async Task<NonQueryResult> ExecuteNonQueryAsync(
+        IReadOnlyList<object?> values, bool discardReturningRows, CancellationToken cancellationToken = default)
     {
         RoutedEndpoint endpoint = owner.SelectEndpoint(nonQueryRouteKey, out long observed);
         try
         {
             NonQueryResult result = await ExecuteAsync(
                 endpoint.Batcher, endpoint.Batcher.ReserveSlot(), values, txn: null, negotiate: owner.RoutingNegotiated,
+                discardReturningRows: discardReturningRows,
                 static (b, request, slot, transportId, ct) => b.EnqueueNonQueryAsync(request, slot, ct, transportId),
                 cancellationToken).ConfigureAwait(false);
             owner.LearnFromResult(nonQueryRouteKey, result.Routing, observed);
@@ -175,6 +187,10 @@ public sealed class CamusPreparedStatement : IAsyncDisposable
     /// <inheritdoc cref="ExecuteQueryAsync(object, CancellationToken)"/>
     public Task<NonQueryResult> ExecuteNonQueryAsync(object parameters, CancellationToken cancellationToken = default)
         => ExecuteNonQueryAsync(BindByName(parameters), cancellationToken);
+
+    /// <inheritdoc cref="ExecuteNonQueryAsync(IReadOnlyList{object?}, bool, CancellationToken)"/>
+    public Task<NonQueryResult> ExecuteNonQueryAsync(object parameters, bool discardReturningRows, CancellationToken cancellationToken = default)
+        => ExecuteNonQueryAsync(BindByName(parameters), discardReturningRows, cancellationToken);
 
     /// <summary>
     /// Projects <paramref name="parameters"/>' public properties onto this statement's declared
@@ -224,15 +240,15 @@ public sealed class CamusPreparedStatement : IAsyncDisposable
     internal Task<QueryResult> ExecuteQueryAsync(
         GrpcBatcher batcher, int slot, TxnHandle txn, IReadOnlyList<object?> values, bool negotiate, CancellationToken ct)
         => ExecuteAsync(
-            batcher, slot, values, txn, negotiate,
+            batcher, slot, values, txn, negotiate, discardReturningRows: false,
             static (b, request, s, transportId, c) => b.EnqueueQueryAsync(request, s, c, transportId),
             ct);
 
     /// <inheritdoc cref="ExecuteQueryAsync(GrpcBatcher, int, TxnHandle, IReadOnlyList{object?}, bool, CancellationToken)"/>
     internal Task<NonQueryResult> ExecuteNonQueryAsync(
-        GrpcBatcher batcher, int slot, TxnHandle txn, IReadOnlyList<object?> values, bool negotiate, CancellationToken ct)
+        GrpcBatcher batcher, int slot, TxnHandle txn, IReadOnlyList<object?> values, bool negotiate, bool discardReturningRows, CancellationToken ct)
         => ExecuteAsync(
-            batcher, slot, values, txn, negotiate,
+            batcher, slot, values, txn, negotiate, discardReturningRows,
             static (b, request, s, transportId, c) => b.EnqueueNonQueryAsync(request, s, c, transportId),
             ct);
 
@@ -259,6 +275,7 @@ public sealed class CamusPreparedStatement : IAsyncDisposable
         IReadOnlyList<object?> values,
         TxnHandle? txn,
         bool negotiate,
+        bool discardReturningRows,
         Func<GrpcBatcher, SqlRequest, int, long, CancellationToken, Task<TResult>> send,
         CancellationToken cancellationToken)
     {
@@ -284,7 +301,7 @@ public sealed class CamusPreparedStatement : IAsyncDisposable
                     $"({string.Join(", ", entry.ParameterNames)}) but {values.Count} value(s) were supplied",
                     nameof(values));
 
-            SqlRequest request = new() { StatementId = entry.StatementId };
+            SqlRequest request = new() { StatementId = entry.StatementId, DiscardReturningRows = discardReturningRows };
             foreach (object? value in values)
                 request.PositionalParameters.Add(CamusValue.From(value));
             if (txn is not null)

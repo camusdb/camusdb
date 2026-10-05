@@ -175,3 +175,8 @@ something to say. Over gRPC the same values arrive as `DdlReply.affected_rows` /
 `INSERT … SELECT` requires `Insert` on the target and `Select` on every source, including tables
 reached only through a join or subquery. `CREATE TABLE … AS SELECT` requires `CreateTable` on the
 database plus `Select` on every source.
+
+## RETURNING
+
+An `INSERT … SELECT` can end with a `RETURNING` list that sends back values from the copied rows;
+see [insert-returning.md](insert-returning.md).

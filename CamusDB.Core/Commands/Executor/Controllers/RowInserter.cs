@@ -204,11 +204,16 @@ internal sealed class RowInserter
     /// statement: it builds the foreign-key checker before the first write and completes it after the
     /// last. With one, the caller owns the statement and completes the checker itself.
     /// </summary>
+    /// <param name="insertedRows">
+    /// Receives one (row id, stored values) pair for each written row, in insert order, for an
+    /// <c>INSERT … RETURNING</c>. Null when the statement returns no rows, which costs nothing.
+    /// </param>
     public async Task<int> Insert(
         DatabaseDescriptor database,
         TableDescriptor table,
         InsertTicket ticket,
-        ForeignKeyStatementChecker? statementChecker = null)
+        ForeignKeyStatementChecker? statementChecker = null,
+        List<QueryResultRow>? insertedRows = null)
     {
         MaterializedViewAccessGuard.RequireWritable(table);
         Validate(table, ticket);
@@ -222,7 +227,8 @@ internal sealed class RowInserter
             ticket: ticket
         )
         {
-            ForeignKeys = checker
+            ForeignKeys = checker,
+            ReturningRows = insertedRows
         };
 
         FluxMachine<InsertFluxSteps, InsertFluxState> machine = new(state);
@@ -295,6 +301,7 @@ internal sealed class RowInserter
             EncodedRow encoded = codec.EncodeStorageValue(RowSlotAdapter.FromRow(schemaColumns, values), largeValuePolicy);
 
             state.ForeignKeys.AddChildRow(values);
+            state.ReturningRows?.Add(new QueryResultRow(rowId, values));
 
             chunk.Add(new KvTableStore.RowWrite
             {
