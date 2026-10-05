@@ -5,6 +5,7 @@
  * file that was distributed with this source code.
  */
 
+using System.Collections.Concurrent;
 using System.IO;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers.Queries.Spill;
@@ -35,8 +36,8 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Queries.Spill;
 ///
 /// <b>Per-query usage pattern:</b>
 /// <code>
-/// await using SpillScope scope = SpillFileManager.CreateScope(dataDir);
-/// string path = scope.OpenWriter(out FileStream writer);
+/// await using SpillScope scope = SpillFileManager.CreateScope(context.SpillDirectory, context.Options);
+/// string path = scope.OpenWriter(out SpillWriteStream writer);
 /// // … write rows …
 /// await writer.FlushAsync();
 /// writer.Close();
@@ -183,8 +184,13 @@ public static class SpillFileManager
 
     /// <summary>
     /// Allocates a new per-query <see cref="SpillScope"/> under
-    /// <c>{dataDirectory}/tmp/spill/{InstanceId}/{newScopeId}/</c> and creates the
+    /// <c>{spillDirectory}/tmp/spill/{InstanceId}/{newScopeId}/</c> and creates the
     /// scope directory.
+    ///
+    /// <para>The scope takes its byte limits from <paramref name="options"/>:
+    /// <see cref="CamusDBOptions.SpillMaxTotalBytes"/> and <see cref="CamusDBOptions.MinFreeDiskBytes"/>.
+    /// It charges its writes to the one <see cref="SpillDiskBudget"/> of its spill root, which every
+    /// scope under that root shares (see <see cref="BudgetFor"/>).</para>
     ///
     /// Throws <see cref="CamusDBException"/> (<see cref="CamusDBErrorCodes.SpillStorageUnavailable"/>)
     /// if the directory cannot be created (disk full, bad path, permission denied, etc.).
@@ -192,9 +198,11 @@ public static class SpillFileManager
     /// Callers should check <see cref="CamusDBOptions.SpillEnabled"/> before calling this
     /// method; the scope itself does not enforce the flag.
     /// </summary>
-    public static SpillScope CreateScope(string dataDirectory)
+    public static SpillScope CreateScope(string spillDirectory, CamusDBOptions options)
     {
-        string scopeDir = BuildScopeDir(dataDirectory, Guid.NewGuid().ToString("N"));
+        ArgumentNullException.ThrowIfNull(options);
+
+        string scopeDir = BuildScopeDir(spillDirectory, Guid.NewGuid().ToString("N"));
 
         try
         {
@@ -207,7 +215,28 @@ public static class SpillFileManager
                 $"Cannot create spill scope directory '{scopeDir}': {ex.Message}");
         }
 
-        return new SpillScope(scopeDir);
+        return new SpillScope(scopeDir, BudgetFor(spillDirectory), options.SpillMaxTotalBytes, options.MinFreeDiskBytes);
+    }
+
+    // ──────────────────────────────────────────────────────────────────────────
+    // Byte budgets
+    // ──────────────────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// One budget per spill root, keyed by its full path. In production a process is one node with
+    /// one data directory, so this is the per-node total. A test process can host many engines; each
+    /// data directory then has its own total, which matches what each directory holds on disk.
+    /// </summary>
+    private static readonly ConcurrentDictionary<string, SpillDiskBudget> Budgets = new(StringComparer.Ordinal);
+
+    /// <summary>
+    /// The shared budget for the spill root under <paramref name="spillDirectory"/>. The factory
+    /// only builds an object, so a second run of it under contention is harmless.
+    /// </summary>
+    internal static SpillDiskBudget BudgetFor(string spillDirectory)
+    {
+        string root = Path.GetFullPath(Path.Combine(spillDirectory, "tmp", "spill"));
+        return Budgets.GetOrAdd(root, static r => new SpillDiskBudget(r));
     }
 
     // ──────────────────────────────────────────────────────────────────────────

@@ -65,7 +65,7 @@ internal sealed class SpillableRowList : IAsyncDisposable
 
     private string? _spillPath;
 
-    private FileStream? _spillWriter;
+    private SpillWriteStream? _spillWriter;
     
     private bool _overflowed;
 
@@ -149,7 +149,7 @@ internal sealed class SpillableRowList : IAsyncDisposable
     private async Task OverflowToSpillAsync(CancellationToken ct)
     {
         _context.Probe?.NoteSpill();
-        _scope = SpillFileManager.CreateScope(_context.SpillDirectory);
+        _scope = SpillFileManager.CreateScope(_context.SpillDirectory, _context.Options);
         _spillPath = _scope.OpenWriter(out _spillWriter);
 
         foreach (QueryResultRow r in _memoryRows)

@@ -448,6 +448,9 @@ public static class CamusDBErrorCodes
     /// must be able to <c>DROP TABLE</c>/<c>DROP DATABASE</c> to recover space. Retryable only
     /// after space is freed on this node (or the threshold is lowered at runtime), so it maps to
     /// HTTP 507 (Insufficient Storage) rather than a generic 503.</para>
+    ///
+    /// <para>A query that spills to disk gets the same code when a spill write would take the
+    /// volume below the same watermark. The statement fails and its spill files are deleted.</para>
     /// </summary>
     public const string InsufficientDiskSpace = "CADB0536";
 
@@ -562,6 +565,19 @@ public static class CamusDBErrorCodes
     /// default first. Maps to HTTP 409.
     /// </summary>
     public const string SequenceInUse = "CADB0548";
+
+    /// <summary>
+    /// A spill write would take the total bytes of live spill files on this node past
+    /// <see cref="CamusDBOptions.SpillMaxTotalBytes"/>. The limit is shared by every query that
+    /// spills at the same time, and it keeps spill files from filling the volume the storage engine
+    /// needs. The statement fails and its spill files are deleted; nothing it wrote is kept.
+    ///
+    /// <para>It can succeed later, when other queries release their spill files, so it maps to HTTP
+    /// 507 (Insufficient Storage) like <see cref="InsufficientDiskSpace"/>. It is not retried
+    /// automatically by <see cref="SerializableRetryHelper"/>: the same statement on the same node
+    /// usually needs the same space again.</para>
+    /// </summary>
+    public const string SpillLimitExceeded = "CADB0549";
 
     public const string InvalidConfig = "CADB0600";
 
@@ -736,6 +752,7 @@ public static class CamusDBErrorCodes
         SequenceCallNotAllowedHere => 400,
         SequenceInUse => 409,
         InsufficientDiskSpace => 507,
+        SpillLimitExceeded => 507,
         SnapshotPrecedesContentsGeneration => 400,
         StatementNotAllowedInTransaction => 400,
         BranchSnapshotProtectionLost => 410,

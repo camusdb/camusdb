@@ -193,7 +193,7 @@ internal sealed class QueryAggregator
         int K = context.Options.SpillMergeFanIn;
 
         SpillScope? scope = null;
-        FileStream[]? writers = null;
+        SpillWriteStream[]? writers = null;
         string[]? paths = null;
         List<KeyValuePair<CompositeColumnValue, GroupAccumulator>>[]? carried = null;
 
@@ -231,9 +231,9 @@ internal sealed class QueryAggregator
                 }
 
                 context.Probe?.NoteSpill();
-                scope = SpillFileManager.CreateScope(context.SpillDirectory);
+                scope = SpillFileManager.CreateScope(context.SpillDirectory, context.Options);
                 paths = new string[K];
-                writers = new FileStream[K];
+                writers = new SpillWriteStream[K];
                 for (int i = 0; i < K; i++)
                     paths[i] = scope.OpenWriter(out writers[i]);
 
@@ -306,7 +306,7 @@ internal sealed class QueryAggregator
         IReadOnlyList<NodeAst> groupBy,
         QueryTicket ticket,
         int K,
-        FileStream[] writers,
+        SpillWriteStream[] writers,
         GroupKeyBuilder builder,
         ColumnValue[] scratch,
         int seed = 0)
@@ -337,7 +337,12 @@ internal sealed class QueryAggregator
     internal static int GroupPartitionIndex(ReadOnlySpan<ColumnValue> key, int K, int seed = 0)
         => PartitionFromHash(GroupKeyComparer.Instance.GetHashCode(key), K, seed);
 
-    private static int PartitionFromHash(int hashCode, int K, int seed)
+    /// <summary>
+    /// Maps a hash code to a partition bucket in [0, <paramref name="K"/>) under
+    /// <paramref name="seed"/>. Shared by GROUP BY and DISTINCT spill partitioning, so both use the
+    /// same finalizer and the same per-level seed rule.
+    /// </summary>
+    internal static int PartitionFromHash(int hashCode, int K, int seed)
     {
         uint h = (uint)hashCode;
         h ^= (uint)seed * 0x9E3779B9u;
@@ -413,7 +418,7 @@ internal sealed class QueryAggregator
         int newSeed = seed + 1;
 
         string[]? subPaths = null;
-        FileStream[]? subWriters = null;
+        SpillWriteStream[]? subWriters = null;
         List<KeyValuePair<CompositeColumnValue, GroupAccumulator>>[]? subCarried = null;
 
         await using (reader)
@@ -451,7 +456,7 @@ internal sealed class QueryAggregator
                     stats.GroupByPartitionRecursionCount++;
 
                 subPaths = new string[K];
-                subWriters = new FileStream[K];
+                subWriters = new SpillWriteStream[K];
                 for (int i = 0; i < K; i++)
                     subPaths[i] = scope.OpenWriter(out subWriters[i]);
 

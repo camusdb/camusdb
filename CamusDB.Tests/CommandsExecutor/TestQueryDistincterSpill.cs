@@ -29,10 +29,10 @@ namespace CamusDB.Tests.CommandsExecutor;
 ///
 /// <para>
 /// The spill path is activated by <c>SpillEnabled = true</c> with a small
-/// <c>ForceSpillThresholdRows</c>. It sorts all rows by the projected columns using the
-/// external merge sort then deduplicates adjacent equal rows with the O(1)-memory streaming
-/// dedup. Correctness is asserted by comparing sorted results against the flag-off hash-set
-/// path.
+/// <c>ForceSpillThresholdRows</c>. It dedups through a hash set and, once the count of distinct
+/// tuples reaches the threshold, partitions the rest of the input to disk by tuple hash.
+/// Correctness is asserted end to end through SQL by comparing results against the flag-off
+/// hash-set path; <see cref="TestQueryDistincterHashSpill"/> covers the operator in detail.
 /// </para>
 ///
 /// <para>
@@ -324,5 +324,37 @@ public sealed class TestQueryDistincterSpill : SharedNodeBaseTest
 
         CollectionAssert.AreEqual(Pairs(offRows), Pairs(onRows),
             "spill and in-memory multi-column DISTINCT must produce identical tuples");
+    }
+    [Test]
+    public async Task DistinctSpill_WithLimit_ReturnsLimitedDistinctRows()
+    {
+        DistFixture f = await SetupPeople(SpillOn(2, 4), cities: 8, dupsPerCity: 3);
+        List<QueryResultRow> rows = await Run(f, "SELECT DISTINCT city FROM people LIMIT 3");
+
+        Assert.That(rows, Has.Count.EqualTo(3));
+        Assert.That(SortedCities(rows), Is.Unique);
+    }
+
+    [Test]
+    public async Task DistinctSpill_RepeatedOutputColumn_MatchesInMemoryPath()
+    {
+        // Rows past the threshold come back from a spill file as decoded rows. A select list that
+        // names the same column twice must survive that round trip with both cells intact.
+        const string sql = "SELECT DISTINCT city, city FROM people";
+
+        DistFixture fOff = await SetupPeople(SpillOff, cities: 8, dupsPerCity: 3);
+        List<QueryResultRow> offRows = await Run(fOff, sql);
+
+        DistFixture fOn = await SetupPeople(SpillOn(2, 4), cities: 8, dupsPerCity: 3);
+        List<QueryResultRow> onRows = await Run(fOn, sql);
+
+        static List<string> Cells(List<QueryResultRow> rows) =>
+            rows.Select(r => r.Row.Count + ":" + string.Join(",", r.Row.Values.Select(v => v.StrValue)))
+                .OrderBy(x => x, StringComparer.Ordinal)
+                .ToList();
+
+        Assert.That(offRows, Has.Count.EqualTo(8));
+        CollectionAssert.AreEqual(Cells(offRows), Cells(onRows),
+            "spill and in-memory DISTINCT must return the same cells for a repeated output column");
     }
 }

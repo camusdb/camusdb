@@ -115,7 +115,7 @@ internal sealed class GraceHashJoinOperator
         IReadOnlyList<string> keyColumns,
         CancellationToken ct)
     {
-        FileStream[] writers = new FileStream[K];
+        SpillWriteStream[] writers = new SpillWriteStream[K];
         string[] paths = new string[K];
 
         for (int i = 0; i < K; i++)
@@ -225,7 +225,8 @@ internal sealed class GraceHashJoinOperator
         }
 
         plan.Ticket.Probe?.NoteSpill();
-        SpillScope scope = SpillFileManager.CreateScope(QueryExecutionContext.For(plan.Database, plan.Ticket).SpillDirectory);
+        QueryExecutionContext spillContext = QueryExecutionContext.For(plan.Database, plan.Ticket);
+        SpillScope scope = SpillFileManager.CreateScope(spillContext.SpillDirectory, spillContext.Options);
 
         try
         {

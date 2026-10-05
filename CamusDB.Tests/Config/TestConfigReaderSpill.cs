@@ -164,4 +164,27 @@ public sealed class TestConfigReaderSpill
         Assert.That(resolved.SpillThresholdRows, Is.EqualTo(500_000), "omitted spill_threshold_rows must default to 500000");
         Assert.That(resolved.SpillMergeFanIn,    Is.EqualTo(16),      "omitted spill_merge_fan_in must default to 16");
     }
+
+    /// <summary>
+    /// <c>spill_max_total_bytes</c> is read and carried to the options. A value of zero or less is
+    /// accepted, because it is the documented way to remove the limit.
+    /// </summary>
+    [TestCase("spill_max_total_bytes: 1073741824", 1L << 30)]
+    [TestCase("spill_max_total_bytes: 0", 0L)]
+    [TestCase("spill_max_total_bytes: -1", -1L)]
+    public void SpillMaxTotalBytes_ReadAndResolved(string yml, long expected)
+    {
+        CamusDBOptions resolved = ConfigResolver.Resolve(new ConfigReader().Read(yml));
+
+        Assert.That(resolved.SpillMaxTotalBytes, Is.EqualTo(expected));
+    }
+
+    /// <summary>When <c>spill_max_total_bytes</c> is absent, the options keep the 8 GiB default.</summary>
+    [Test]
+    public void SpillMaxTotalBytes_Omitted_DefaultsToEightGiB()
+    {
+        CamusDBOptions resolved = ConfigResolver.Resolve(new ConfigReader().Read("mode: standalone"));
+
+        Assert.That(resolved.SpillMaxTotalBytes, Is.EqualTo(8L * 1024 * 1024 * 1024));
+    }
 }

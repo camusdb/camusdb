@@ -1393,6 +1393,28 @@ public sealed record CamusDBOptions
     public int SpillMaxFrameBytes { get; init; } = 256 * 1024 * 1024;
 
     /// <summary>
+    /// Limit on the total bytes of all live spill files on this node, summed over every query that
+    /// spills at the same time. A write that would pass it fails its statement with
+    /// <see cref="CamusDBErrorCodes.SpillLimitExceeded"/>, and the statement's spill files are deleted.
+    ///
+    /// <para>Spill files share the volume with the storage engine, and a storage engine that hits a
+    /// full disk enters an error state that a restart does not clear. This limit stops one large query
+    /// from taking that space. A spill also never takes the volume below
+    /// <see cref="MinFreeDiskBytes"/>, the watermark that stops DML, whatever this limit is: that check
+    /// fails with <see cref="CamusDBErrorCodes.InsufficientDiskSpace"/>. Size this limit to the space
+    /// the node can lend to temporary files.</para>
+    ///
+    /// <para><c>&lt;= 0</c> removes the total limit; the free-space floor still applies.
+    /// Node-scoped: disks fill per node. Runtime-mutable: each spill scope reads the value from the
+    /// options of its statement, so a change applies from the next spilling statement. Ignored when
+    /// <see cref="SpillEnabled"/> is <c>false</c>.</para>
+    ///
+    /// Default: <c>8 GiB</c>.
+    /// </summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Node)]
+    public long SpillMaxTotalBytes { get; init; } = 8L * 1024 * 1024 * 1024;
+
+    /// <summary>
     /// <b>Test-only override.</b> When non-null, replaces <see cref="SpillThresholdRows"/> with
     /// this value for every operator, forcing spill on tiny inputs so the spill code path runs
     /// deterministically in unit tests without large data sets. Has no production use.

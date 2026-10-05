@@ -285,13 +285,18 @@ internal sealed class RowDeleter
         // The scan still runs to completion and the list still seals before the first mutation,
         // so the full match set is fixed up front (Halloween barrier) exactly as before.
         SpillableRowList rowList = new(QueryExecutionContext.For(state.Database, queryTicket));
-        
+
+        // Handed to the state before the scan, so DeleteInternal disposes it on every path. A scan
+        // or a spill write that throws (a conflict, a cancellation, a spill limit) must still delete
+        // the spill files the list wrote. The list it replaces never received a row, so it holds no file.
+        await state.RowsToDelete.DisposeAsync().ConfigureAwait(false);
+        state.RowsToDelete = rowList;
+
         await foreach (QueryResultRow row in cursor.ConfigureAwait(false))
             await rowList.AddAsync(new(row.RowId, QueryResultRow.EmptyRow)).ConfigureAwait(false);
-        
+
         await rowList.SealAsync().ConfigureAwait(false);
-        
-        state.RowsToDelete = rowList;
+
         state.LocateTicket = queryTicket;
 
         return FluxAction.Continue;

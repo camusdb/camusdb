@@ -520,36 +520,6 @@ internal sealed class QuerySorter
             yield return row;
     }
 
-    /// <summary>
-    /// Sorts <paramref name="input"/> using the supplied <paramref name="comparer"/>. When
-    /// <see cref="context.Options.SpillEnabled"/> is <c>true</c> and the input exceeds
-    /// <see cref="context.Options.SpillEffectiveThreshold"/>, sorted runs are spilled to temp
-    /// files and k-way merged. Otherwise rows are sorted in memory.
-    ///
-    /// Intended for callers that supply their own comparison, such as the DISTINCT deduplication
-    /// path, which sorts by all projected columns before streaming dedup.
-    /// </summary>
-    internal static async IAsyncEnumerable<QueryResultRow> SortAsync(
-        IAsyncEnumerable<QueryResultRow> input,
-        IComparer<QueryResultRow> comparer,
-        QueryExecutionContext context,
-        [EnumeratorCancellation] CancellationToken ct = default)
-    {
-        if (!context.Options.SpillEnabled)
-        {
-            List<QueryResultRow> rows = new();
-            await foreach (QueryResultRow row in input.WithCancellation(ct).ConfigureAwait(false))
-                rows.Add(row);
-            rows.Sort(comparer);
-            foreach (QueryResultRow row in rows)
-                yield return row;
-            yield break;
-        }
-
-        await foreach (QueryResultRow row in SortWithPossibleSpillAsync(input, comparer, context, ct).ConfigureAwait(false))
-            yield return row;
-    }
-
     // ──────────────────────────────────────────────────────────────────────────
     // Core: drain + optional spill + merge
     // ──────────────────────────────────────────────────────────────────────────
@@ -584,7 +554,7 @@ internal sealed class QuerySorter
                     if (scope is null)
                     {
                         context.Probe?.NoteSpill();
-                        scope = SpillFileManager.CreateScope(context.SpillDirectory);
+                        scope = SpillFileManager.CreateScope(context.SpillDirectory, context.Options);
                     }
                     buffer.Sort(comparer);
                     runs.Add(await SpillSortedBufferAsync(scope, buffer, context, ct).ConfigureAwait(false));
@@ -654,7 +624,7 @@ internal sealed class QuerySorter
             }
         }
 
-        string path = scope.OpenWriter(out FileStream writer);
+        string path = scope.OpenWriter(out SpillWriteStream writer);
         try
         {
             if (layout is not null)
@@ -737,7 +707,7 @@ internal sealed class QuerySorter
             }
         }
 
-        string outPath = scope.OpenWriter(out FileStream writer);
+        string outPath = scope.OpenWriter(out SpillWriteStream writer);
         try
         {
             await foreach (QueryResultRow row in MergeRunsLazilyAsync(runs, comparer, context, ct).ConfigureAwait(false))

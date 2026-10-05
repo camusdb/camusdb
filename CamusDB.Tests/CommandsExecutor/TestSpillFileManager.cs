@@ -48,7 +48,7 @@ public sealed class TestSpillFileManager
     [Test]
     public async Task Scope_NormalDispose_DirectoryGone()
     {
-        SpillScope scope = SpillFileManager.CreateScope(_dataDir);
+        SpillScope scope = SpillFileManager.CreateScope(_dataDir, CamusDBOptions.Default);
         string dir = scope.ScopeDirectory;
 
         Assert.That(Directory.Exists(dir), Is.True, "scope dir should exist after creation");
@@ -62,7 +62,7 @@ public sealed class TestSpillFileManager
     public async Task Scope_AwaitUsing_DirectoryGone()
     {
         string dir;
-        await using (SpillScope scope = SpillFileManager.CreateScope(_dataDir))
+        await using (SpillScope scope = SpillFileManager.CreateScope(_dataDir, CamusDBOptions.Default))
         {
             dir = scope.ScopeDirectory;
             Assert.That(Directory.Exists(dir), Is.True);
@@ -76,7 +76,7 @@ public sealed class TestSpillFileManager
         string dir = "";
         try
         {
-            await using SpillScope scope = SpillFileManager.CreateScope(_dataDir);
+            await using SpillScope scope = SpillFileManager.CreateScope(_dataDir, CamusDBOptions.Default);
             dir = scope.ScopeDirectory;
             throw new InvalidOperationException("test exception");
         }
@@ -95,9 +95,9 @@ public sealed class TestSpillFileManager
     {
         byte[] payload = [0xDE, 0xAD, 0xBE, 0xEF, 0x01, 0x02, 0x03];
 
-        await using SpillScope scope = SpillFileManager.CreateScope(_dataDir);
+        await using SpillScope scope = SpillFileManager.CreateScope(_dataDir, CamusDBOptions.Default);
 
-        string path = scope.OpenWriter(out FileStream writer);
+        string path = scope.OpenWriter(out SpillWriteStream writer);
         await writer.WriteAsync(payload);
         await writer.FlushAsync();
         writer.Close();
@@ -116,15 +116,15 @@ public sealed class TestSpillFileManager
         string dir;
         string path1, path2;
 
-        await using (SpillScope scope = SpillFileManager.CreateScope(_dataDir))
+        await using (SpillScope scope = SpillFileManager.CreateScope(_dataDir, CamusDBOptions.Default))
         {
             dir = scope.ScopeDirectory;
-            path1 = scope.OpenWriter(out FileStream w1);
+            path1 = scope.OpenWriter(out SpillWriteStream w1);
             await w1.WriteAsync(new byte[] { 1 });
             await w1.FlushAsync();
             w1.Close();
 
-            path2 = scope.OpenWriter(out FileStream w2);
+            path2 = scope.OpenWriter(out SpillWriteStream w2);
             await w2.WriteAsync(new byte[] { 2 });
             await w2.FlushAsync();
             w2.Close();
@@ -146,7 +146,7 @@ public sealed class TestSpillFileManager
     public void CreateScope_ScopeDirIsUnderInstanceDir()
     {
         SpillFileManager.InstanceId = "test-inst";
-        SpillScope scope = SpillFileManager.CreateScope(_dataDir);
+        SpillScope scope = SpillFileManager.CreateScope(_dataDir, CamusDBOptions.Default);
 
         string expected = Path.Combine(_dataDir, "tmp", "spill", "test-inst");
         Assert.That(scope.ScopeDirectory, Does.StartWith(expected));
@@ -157,8 +157,8 @@ public sealed class TestSpillFileManager
     [Test]
     public void CreateScope_TwoScopes_HaveDistinctDirs()
     {
-        SpillScope s1 = SpillFileManager.CreateScope(_dataDir);
-        SpillScope s2 = SpillFileManager.CreateScope(_dataDir);
+        SpillScope s1 = SpillFileManager.CreateScope(_dataDir, CamusDBOptions.Default);
+        SpillScope s2 = SpillFileManager.CreateScope(_dataDir, CamusDBOptions.Default);
 
         Assert.That(s1.ScopeDirectory, Is.Not.EqualTo(s2.ScopeDirectory));
 
@@ -277,7 +277,7 @@ public sealed class TestSpillFileManager
         string badDir = "/proc/camusdb_spill_test_impossible_path";
 
         CamusDBException ex = Assert.Throws<CamusDBException>(
-            () => SpillFileManager.CreateScope(badDir))!;
+            () => SpillFileManager.CreateScope(badDir, CamusDBOptions.Default))!;
 
         Assert.That(ex.Code, Is.EqualTo(CamusDBErrorCodes.SpillStorageUnavailable));
     }

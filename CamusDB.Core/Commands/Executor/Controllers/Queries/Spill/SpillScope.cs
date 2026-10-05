@@ -16,18 +16,49 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Queries.Spill;
 ///
 /// On dispose all open file handles are closed and the entire scope directory — including
 /// every file created via <see cref="OpenWriter"/> — is deleted recursively.
+///
+/// <para><b>Byte limits:</b> each write through a <see cref="SpillWriteStream"/> reserves its bytes
+/// in the node's <see cref="SpillDiskBudget"/> first, and dispose gives back the whole total of the
+/// scope. A reservation that would pass a limit throws, so the statement fails, and its owner's
+/// <c>finally</c> disposes the scope and deletes its files. The limits are read from the options of
+/// the statement when the scope is created, so a runtime change applies from the next scope.</para>
 /// </summary>
 public sealed class SpillScope : IAsyncDisposable
 {
     private readonly string _scopeDir;
-    // Not thread-safe: file numbering and handle tracking assume a single writer at a time.
-    // Per-query execution is sequential today; revisit if intra-query parallelism is added.
-    private readonly List<FileStream> _openHandles = new();
+    private readonly SpillDiskBudget _budget;
+    private readonly long _maxTotalBytes;
+    private readonly long _minFreeDiskBytes;
+    // Not thread-safe: file numbering, handle tracking and the reserved total assume a single
+    // writer at a time. Per-query execution is sequential today; revisit if intra-query
+    // parallelism is added. The budget itself is shared and thread-safe.
+    private readonly List<Stream> _openHandles = new();
+    private int _fileCount;
+    private long _reservedBytes;
     private bool _disposed;
 
-    internal SpillScope(string scopeDir)
+    internal SpillScope(string scopeDir, SpillDiskBudget budget, long maxTotalBytes, long minFreeDiskBytes)
     {
         _scopeDir = scopeDir;
+        _budget = budget;
+        _maxTotalBytes = maxTotalBytes;
+        _minFreeDiskBytes = minFreeDiskBytes;
+    }
+
+    /// <summary>Bytes the files of this scope hold, as reserved by its writers.</summary>
+    public long ReservedBytes => _reservedBytes;
+
+    /// <summary>
+    /// Reserves <paramref name="bytes"/> for a write by one of this scope's writers, or throws
+    /// <see cref="CamusDBErrorCodes.SpillLimitExceeded"/> or
+    /// <see cref="CamusDBErrorCodes.InsufficientDiskSpace"/> and reserves nothing.
+    /// </summary>
+    internal void Reserve(int bytes)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+
+        _budget.Reserve(bytes, _maxTotalBytes, _minFreeDiskBytes);
+        _reservedBytes += bytes;
     }
 
     /// <summary>
@@ -38,20 +69,21 @@ public sealed class SpillScope : IAsyncDisposable
     /// Throws <see cref="CamusDBException"/> with
     /// <see cref="CamusDBErrorCodes.SpillStorageUnavailable"/> if the file cannot be created.
     /// </summary>
-    public string OpenWriter(out FileStream stream)
+    public string OpenWriter(out SpillWriteStream stream)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
 
-        string path = Path.Combine(_scopeDir, $"{_openHandles.Count:D6}.spill");
+        string path = Path.Combine(_scopeDir, $"{_fileCount++:D6}.spill");
         try
         {
-            stream = new FileStream(
+            FileStream file = new FileStream(
                 path,
                 FileMode.Create,
                 FileAccess.Write,
                 FileShare.None,
                 bufferSize: 65536,
                 useAsync: true);
+            stream = new SpillWriteStream(file, this);
             _openHandles.Add(stream);
             return path;
         }
@@ -98,7 +130,8 @@ public sealed class SpillScope : IAsyncDisposable
     public string ScopeDirectory => _scopeDir;
 
     /// <summary>
-    /// Closes all open spill-file handles and deletes the scope directory recursively.
+    /// Closes all open spill-file handles, deletes the scope directory recursively, and gives back
+    /// the bytes this scope reserved.
     /// Safe to call from a <c>finally</c> block — exceptions during file deletion are
     /// swallowed so the original exception (if any) propagates unobstructed.
     /// </summary>
@@ -108,7 +141,7 @@ public sealed class SpillScope : IAsyncDisposable
             return;
         _disposed = true;
 
-        foreach (FileStream handle in _openHandles)
+        foreach (Stream handle in _openHandles)
         {
             try { await handle.DisposeAsync().ConfigureAwait(false); }
             catch { /* swallow */ }
@@ -121,5 +154,11 @@ public sealed class SpillScope : IAsyncDisposable
                 Directory.Delete(_scopeDir, recursive: true);
         }
         catch { /* swallow */ }
+
+        // Given back even when the delete failed: an undeletable file is a permission problem, and
+        // holding its bytes forever would make every later spill on this node fail. The startup
+        // sweep removes such a directory.
+        _budget.Release(_reservedBytes);
+        _reservedBytes = 0;
     }
 }

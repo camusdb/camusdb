@@ -416,6 +416,8 @@ initial_partitions: 1      # Raft partition count (>= 1). Unset, it is 1 in stan
 # spill_threshold_rows: 500000     # per-operator row cap before spilling; must be > 0
 # spill_merge_fan_in: 16           # run readers open at once in a k-way merge; must be > 0
 # spill_max_frame_bytes: 268435456 # largest spill record a reader accepts before it allocates (256 MiB); must be > 0
+# spill_max_total_bytes: 8589934592 # bytes all live spill files on this node may hold (8 GiB); <= 0 = no limit.
+#                                   # A spill also never takes the volume below min_free_disk_bytes.
 
 # ── Planner and caches ────────────────────────────────────────────────────────
 # The cost-based switches are on by default. A table that was never ANALYZEd is costed from its

@@ -162,6 +162,7 @@ public class ConfigReader
         "slot_backed_decode",
         "borrowed_decode",
         "spill_max_frame_bytes",
+        "spill_max_total_bytes",
         "default_read_validation",
         "default_decision_durability",
         "password_hash_iterations",

@@ -150,7 +150,7 @@ public sealed class DiskSpaceMonitor
     /// handle would keep answering for an unmounted volume. <c>AvailableFreeSpace</c> (not
     /// <c>TotalFreeSpace</c>) is deliberate — it honors per-user quotas.
     /// </summary>
-    private static Func<long?> BuildDriveProvider(string? dataDirectory)
+    internal static Func<long?> BuildDriveProvider(string? dataDirectory)
     {
         if (string.IsNullOrWhiteSpace(dataDirectory))
             return static () => null;

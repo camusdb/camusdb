@@ -24,7 +24,8 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 /// below the threshold, all rows remain in memory — byte-identical to a plain list. When
 /// the threshold is exceeded, rows overflow to a spill file managed by
 /// <see cref="SpillableRowList"/>. The caller is responsible for disposing the returned
-/// list via <see cref="QueryPlan.DisposeMaterializationsAsync"/>.
+/// list via <see cref="QueryPlan.DisposeMaterializationsAsync"/>. When the fill throws, no list
+/// is returned, so this executor disposes it and its spill file itself.
 /// </para>
 /// </summary>
 internal sealed class DerivedTableExecutor
@@ -72,27 +73,37 @@ internal sealed class DerivedTableExecutor
 
         SpillableRowList rows = new(QueryExecutionContext.For(database, outerTicket));
 
-        await foreach (QueryResultRow row in cursor.ConfigureAwait(false))
+        try
         {
-            if (executionFilter is not null)
+            await foreach (QueryResultRow row in cursor.ConfigureAwait(false))
             {
-                IReadOnlyDictionary<string, ColumnValue> evalRow = outerTicket.RowNameResolver is { } resolver
-                                                         && resolver.UsesQualifiedRowKeys()
-                    ? QueryRowMerger.QualifyRow(row.Row, source.Alias)
-                    : row.Row;
-
-                if (!await queryFilterer
-                        .MeetWhereAsync(executionFilter, evalRow, outerTicket, database)
-                        .ConfigureAwait(false))
+                if (executionFilter is not null)
                 {
-                    continue;
+                    IReadOnlyDictionary<string, ColumnValue> evalRow = outerTicket.RowNameResolver is { } resolver
+                                                             && resolver.UsesQualifiedRowKeys()
+                        ? QueryRowMerger.QualifyRow(row.Row, source.Alias)
+                        : row.Row;
+
+                    if (!await queryFilterer
+                            .MeetWhereAsync(executionFilter, evalRow, outerTicket, database)
+                            .ConfigureAwait(false))
+                    {
+                        continue;
+                    }
                 }
+
+                await rows.AddAsync(row).ConfigureAwait(false);
             }
 
-            await rows.AddAsync(row).ConfigureAwait(false);
+            await rows.SealAsync().ConfigureAwait(false);
+        }
+        catch
+        {
+            // The caller gets no list to dispose, so the spill files it wrote are deleted here.
+            await rows.DisposeAsync().ConfigureAwait(false);
+            throw;
         }
 
-        await rows.SealAsync().ConfigureAwait(false);
         return rows;
     }
 }

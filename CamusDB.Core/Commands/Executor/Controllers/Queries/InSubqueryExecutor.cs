@@ -50,22 +50,31 @@ internal sealed class InSubqueryExecutor
         bool containsNull = false;
         bool anyRow = false;
 
-        await foreach (QueryResultRow row in queryExecutor.ExecuteSelectAsync(
-            database, selectAst, txnState, parameters, cancellationToken).ConfigureAwait(false))
+        try
         {
-            anyRow = true;
-            ColumnValue value = SubqueryQueryExecutor.ExtractSingleColumnValue(row);
-
-            if (value.Type == ColumnType.Null)
+            await foreach (QueryResultRow row in queryExecutor.ExecuteSelectAsync(
+                database, selectAst, txnState, parameters, cancellationToken).ConfigureAwait(false))
             {
-                containsNull = true;
-                continue;
+                anyRow = true;
+                ColumnValue value = SubqueryQueryExecutor.ExtractSingleColumnValue(row);
+
+                if (value.Type == ColumnType.Null)
+                {
+                    containsNull = true;
+                    continue;
+                }
+
+                await valueList.AddAsync(value).ConfigureAwait(false);
             }
 
-            await valueList.AddAsync(value).ConfigureAwait(false);
+            await valueList.SealAsync().ConfigureAwait(false);
         }
-
-        await valueList.SealAsync().ConfigureAwait(false);
+        catch
+        {
+            // The caller gets no list to dispose, so the spill files it wrote are deleted here.
+            await valueList.DisposeAsync().ConfigureAwait(false);
+            throw;
+        }
 
         if (valueList.IsSpilled && stats is not null)
             stats.InSubqueryValueListSpillCount++;

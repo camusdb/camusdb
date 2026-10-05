@@ -364,11 +364,13 @@ public sealed class RowUpdater
         // is fixed up front (Halloween barrier).
         SpillableRowList rowList = new(QueryExecutionContext.For(state.Database, queryTicket));
 
+        // Handed to the state before the scan, so UpdateInternal disposes it on every path: after
+        // an abort, and when the scan or a spill write throws (a conflict, a cancellation, a spill
+        // limit). Either way the spill files the list wrote must be deleted.
+        state.RowsToUpdate = rowList;
+
         await foreach (QueryResultRow row in cursor.ConfigureAwait(false))
             await rowList.AddAsync(new(row.RowId, QueryResultRow.EmptyRow)).ConfigureAwait(false);
-
-        // Handed to the state before the abort test, so UpdateInternal disposes it either way.
-        state.RowsToUpdate = rowList;
 
         // A scan that recorded an abort ended early: what it located is not the match set.
         if (state.RetryableAborts is { HasAbort: true })

@@ -74,6 +74,7 @@ Example: YAML `mode: cluster` with `--mode standalone` starts in standalone mode
 | `spill_enabled` | — | `false` |
 | `spill_threshold_rows` | — | `500000` |
 | `spill_merge_fan_in` | — | `16` |
+| `spill_max_total_bytes` | — | `8589934592` (8 GiB; `<= 0` = no limit) |
 | `query_result_cache_enabled` | — | `true` |
 | `query_result_cache_default_ttl_ms` | — | `5000` |
 | `query_result_cache_max_entries` | — | `1024` |

@@ -874,6 +874,14 @@ public class ConfigDefinition
     public int SpillMaxFrameBytes { get; set; } = 256 * 1024 * 1024;
 
     /// <summary>
+    /// Limit on the total bytes of all live spill files on this node. A spill write that would pass
+    /// it fails its statement with CADB0549. &lt;= 0 removes the limit (the <c>min_free_disk_bytes</c>
+    /// floor still applies). Default 8 589 934 592 (8 GiB). Maps to
+    /// <c>CamusDBOptions.SpillMaxTotalBytes</c>.
+    /// </summary>
+    public long SpillMaxTotalBytes { get; set; } = 8L * 1024 * 1024 * 1024;
+
+    /// <summary>
     /// Default read-set validation when a transaction omits one: <c>none</c> or
     /// <c>track_and_validate</c>. Default <c>none</c>. Maps to
     /// <c>CamusDBOptions.DefaultReadValidation</c>.

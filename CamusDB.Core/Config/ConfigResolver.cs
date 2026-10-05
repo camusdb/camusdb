@@ -253,6 +253,7 @@ public static class ConfigResolver
         SlotBackedDecode = config.SlotBackedDecode,
         BorrowedDecode = config.ParseBorrowedDecode(),
         SpillMaxFrameBytes = config.SpillMaxFrameBytes,
+        SpillMaxTotalBytes = config.SpillMaxTotalBytes,
         DefaultReadValidation = config.ParseDefaultReadValidation(),
         DefaultDecisionDurability = config.ParseDefaultDecisionDurability(),
 

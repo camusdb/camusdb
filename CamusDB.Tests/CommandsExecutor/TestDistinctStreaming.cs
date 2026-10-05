@@ -529,17 +529,16 @@ public sealed class TestDistinctStreaming : BaseTest
 
     /// <summary>
     /// Same mixed-layout hazard as <see cref="StreamingDistinct_MixedLayoutQueryRows_deduplicatesCorrectly"/>,
-    /// but exercises the non-streaming hash/sort dedup path (<c>SpillEnabled = true</c> routes
-    /// DISTINCT through the sort-based comparer rather than adjacent-row streaming). The sort
-    /// comparer must apply the same ReferenceEquals layout guard: rows whose RowLayout instance
-    /// differs from the one the ordinals were resolved from degrade to the dictionary path instead
-    /// of reading the wrong column ordinals.
+    /// but exercises the non-streaming spill-aware hash dedup path (<c>SpillEnabled = true</c>)
+    /// rather than adjacent-row streaming. The hash comparer must apply the same ReferenceEquals
+    /// layout guard: rows whose RowLayout instance differs from the one the ordinals were resolved
+    /// from degrade to the dictionary path instead of reading the wrong column ordinals.
     /// </summary>
     [Test]
     public async Task HashDistinct_MixedLayoutQueryRows_deduplicatesCorrectly()
     {
-        // SpillEnabled routes DistinctResultset through the sort-based DistinctRowComparer; it is
-        // passed to the distincter below in its execution context.
+        // SpillEnabled routes DistinctResultset through the spill-aware hash path; it is passed to
+        // the distincter below in its execution context.
         // Layout A: [name=0, score=1]; Layout B: [score=0, name=1] — reversed ordinal order.
         RowLayout layoutA = RowLayout.ForColumns(["name", "score"]);
         RowLayout layoutB = RowLayout.ForColumns(["score", "name"]);
@@ -551,7 +550,7 @@ public sealed class TestDistinctStreaming : BaseTest
             new(default, new QueryRow(default, layoutB,
                 [new(ColumnType.Integer64, score), new(ColumnType.String, name)]));
 
-        // Unsorted input; the sort-based dedup orders internally. "robot-a" (name+score equal)
+        // "robot-a" (name+score equal)
         // appears once from each layout and must collapse to a single output row.
         List<QueryResultRow> input =
         [
