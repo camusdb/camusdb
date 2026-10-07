@@ -123,11 +123,18 @@ The same rule applies to tables:
 ```sql
 DROP TABLE orders;
 -- ERROR (CADB0530): Cannot drop table 'orders' because other objects depend on it: open_orders.
+--                   Drop them first.
 ```
 
 > **`DROP TABLE` has no `CASCADE` form.** Drop the dependent views first. This makes `DROP TABLE`
 > stricter than it was before views existed; the alternative is a table drop that silently converts
 > every dependent view into a delayed error for whoever reads it next.
+
+The rule holds on every way into a drop: `DROP TABLE … FORCE`, the ticket API, and a statement a
+follower forwards to the schema leader. It is checked before the drop changes anything, and checked
+again in log order when the drop's schema entry is applied, so a view that another node created in
+between still stops the drop. A refused drop, whenever the refusal arrives, leaves the table whole:
+its rows, its indexes and its unique enforcement.
 
 ### Columns a view reads
 

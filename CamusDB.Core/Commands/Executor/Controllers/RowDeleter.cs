@@ -55,13 +55,20 @@ internal sealed class RowDeleter
     /// False only when the whole table goes with the rows — DROP TABLE. A self-referencing table must
     /// not refuse its own removal, and a table that another table references cannot be dropped at all.
     /// </param>
+    /// <param name="maintainIndexes">
+    /// False only when the caller has already purged every index bucket of the table wholesale, in
+    /// this same transaction — an immediate DROP TABLE. The per-row index deletes would then only
+    /// repeat work the purge did. The indexes themselves stay in the schema: the table's drop delta
+    /// removes them, so a refused drop leaves them intact.
+    /// </param>
     public async Task<int> Delete(
         QueryExecutor queryExecutor,
         DatabaseDescriptor database,
         TableDescriptor table,
         DeleteTicket ticket,
         bool allowMaterializedView = false,
-        bool checkForeignKeys = true)
+        bool checkForeignKeys = true,
+        bool maintainIndexes = true)
     {
         if (!allowMaterializedView)
             MaterializedViewAccessGuard.RequireWritable(table);
@@ -79,7 +86,8 @@ internal sealed class RowDeleter
             ticket: ticket
         )
         {
-            ForeignKeys = foreignKeys
+            ForeignKeys = foreignKeys,
+            MaintainIndexes = maintainIndexes
         };
 
         FluxMachine<DeleteFluxSteps, DeleteFluxState> machine = new(state);
@@ -378,7 +386,9 @@ internal sealed class RowDeleter
         // columns — the only values this path consumes (the row bytes are deleted wholesale, never
         // re-encoded). Values for those columns are identical to a full decode; other columns are
         // simply never materialized. A predicate column that cannot be named exactly decodes all.
-        List<TableIndexSchema> writableIndexes = SchemaElementStateRules.CollectWritableIndexes(table.Schema, table.Indexes);
+        List<TableIndexSchema> writableIndexes = state.MaintainIndexes
+            ? SchemaElementStateRules.CollectWritableIndexes(table.Schema, table.Indexes)
+            : [];
         HashSet<string>? requiredColumns = null;
         if (recheck.Columns is not null)
         {

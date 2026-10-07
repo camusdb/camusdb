@@ -27,6 +27,7 @@ using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.CommandsValidator;
 using CamusDB.Core.Storage.Kv;
+using CamusDB.Core.Transactions;
 using CamusDB.App.Controllers;
 using CamusDB.App.Services;
 using CamusConfig = CamusDB.Core.CamusDBConfig;
@@ -424,6 +425,82 @@ public sealed class TestSchemaDdlForwardController
         {
             await DropTestDatabaseAsync(db);
         }
+    }
+
+    /// <summary>
+    /// A DROP TABLE forwarded from a follower runs on the leader through the controller, and must
+    /// meet the same view rules as a local statement: a table a view reads stays, with its indexes,
+    /// and a materialized view is refused unless the request says the caller is DROP MATERIALIZED VIEW.
+    /// Before the rules lived in the shared path, the forward skipped both.
+    /// </summary>
+    [Test]
+    public async Task ForwardDropTable_AsLeader_RefusesATableAViewReadsAndAMaterializedView()
+    {
+        string db = await CreateTestDatabaseAsync();
+        try
+        {
+            DatabaseDescriptor descriptor = await executor!.OpenDatabase(db);
+
+            // A view body is bound inside a transaction, so these run in one each.
+            foreach (string sql in new[]
+            {
+                "CREATE TABLE cities (id int64 PRIMARY KEY NOT NULL, name string NOT NULL, UNIQUE KEY cities_name (name))",
+                "CREATE VIEW city_list AS SELECT id, name FROM cities",
+                "CREATE MATERIALIZED VIEW city_names AS SELECT name FROM cities",
+            })
+            {
+                KvTransaction tx = await descriptor.Transactions.BeginAsync();
+                try
+                {
+                    await executor.ExecuteDDLSQL(new ExecuteSQLTicket(tx, db, sql, null));
+                    await descriptor.Transactions.CommitAsync(tx);
+                }
+                finally
+                {
+                    await descriptor.Transactions.RollbackIfNotCompletedAsync(tx);
+                }
+            }
+
+            int indexes = descriptor.Schema.Tables["cities"].Indexes!.Count;
+
+            foreach (bool force in new[] { false, true })
+            {
+                SchemaDdlForwardResponse? drop = ExtractResponse(await BuildController(DropBody(db, "cities", force), clusterNode: node).ForwardDropTable());
+                Assert.AreEqual("failed", drop!.Status, $"force={force}");
+                Assert.AreEqual(CamusDBErrorCodes.DependentObjectsExist, drop.Code, $"force={force}");
+                Assert.That(drop.Message, Does.Contain("city_list"), $"force={force}");
+
+                SchemaDdlForwardResponse? dropView = ExtractResponse(await BuildController(DropBody(db, "city_names", force), clusterNode: node).ForwardDropTable());
+                Assert.AreEqual("failed", dropView!.Status, $"force={force}");
+                Assert.AreEqual(CamusDBErrorCodes.TableDoesntExist, dropView.Code, $"force={force}");
+                Assert.That(dropView.Message, Does.Contain("use DROP MATERIALIZED VIEW"), $"force={force}");
+            }
+
+            Assert.IsTrue(descriptor.Schema.Tables.ContainsKey("cities"));
+            Assert.AreEqual(indexes, descriptor.Schema.Tables["cities"].Indexes!.Count, "A refused drop must not have dropped any index");
+            Assert.IsTrue(descriptor.Schema.Tables.ContainsKey("city_names"));
+
+            // The request DROP MATERIALIZED VIEW forwards carries the flag, and goes through.
+            SchemaDdlForwardResponse? dropAsMatView = ExtractResponse(await BuildController(
+                DropBody(db, "city_names", force: false, allowMaterializedView: true), clusterNode: node).ForwardDropTable());
+            Assert.AreEqual("ok", dropAsMatView!.Status);
+            Assert.IsTrue(dropAsMatView.Applied);
+            Assert.IsFalse(descriptor.Schema.Tables.ContainsKey("city_names"));
+        }
+        finally
+        {
+            await DropTestDatabaseAsync(db);
+        }
+
+        static string DropBody(string db, string table, bool force, bool allowMaterializedView = false) =>
+            JsonSerializer.Serialize(new ForwardDropTableRequest
+            {
+                OperationId = Guid.NewGuid().ToString("N"),
+                DatabaseName = db,
+                TableName = table,
+                Force = force,
+                AllowMaterializedView = allowMaterializedView,
+            }, JsonOpts);
     }
 
     /// <summary>

@@ -219,9 +219,10 @@ internal static class TableDeltaApplier
         if (!schema.Tables.TryGetValue(payload.TableName, out TableSchema? tableSchema))
             return null;
 
-        // In log order on every node: a child created by another node since this drop was validated
-        // still stops it.
+        // In log order on every node: a child or a view created by another node since this drop was
+        // validated still stops it.
         ForeignKeyDependencyRules.RequireNotReferencedByOtherTables(schema, tableSchema, "drop table");
+        ViewDependencyRules.RequireNotReadByViews(schema, tableSchema);
 
         schema.Tables.Remove(payload.TableName);
         return tableSchema;

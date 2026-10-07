@@ -300,7 +300,9 @@ internal sealed class CreateTableAsSelectExecutor
     {
         using AuthorizationContext.PrivilegeSwap _ = AuthorizationContext.SuspendTableCheck();
 
-        await schemaDdl.DropTable(new DropTableTicket(database.Name, relationName, ifExists: true, force: true))
+        // A staging relation is dropped whatever its kind: the statement that created it is the
+        // one removing it, so the rule that keeps DROP TABLE off a materialized view does not apply.
+        await schemaDdl.DropTable(new DropTableTicket(database.Name, relationName, ifExists: true, force: true, allowMaterializedView: true))
             .ConfigureAwait(false);
     }
 

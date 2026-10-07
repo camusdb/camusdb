@@ -663,33 +663,11 @@ internal sealed class DdlStatementDispatcher
                     DropTableTicket dropTableTicket = sqlExecutor.CreateDropTableTicket(ticket, ast);
                     context.Validator.Validate(dropTableTicket);
 
-                    bool? forwarded = await ddlForwarding.TryForwardDropTableAsync(database, dropTableTicket).ConfigureAwait(false);
-                    if (forwarded is not null)
-                        return new ExecuteDDLSQLResult(database, forwarded.Value);
-
-                    if (dropTableTicket.IfExists && !catalogs.TableExists(database, dropTableTicket.TableName))
-                        return new(database, false);
-
-                    TableDescriptor table = await context.TableOpener.Open(database, dropTableTicket.TableName).ConfigureAwait(false);
-
-                    // A materialized view is stored as a relation, so DROP TABLE would happily remove
-                    // one. Refusing keeps the statement that creates an object and the statement that
-                    // removes it symmetric, and matches PostgreSQL.
-                    if (table.Schema.IsMaterializedView)
-                        throw new CamusDBException(
-                            CamusDBErrorCodes.TableDoesntExist,
-                            $"'{dropTableTicket.TableName}' is a materialized view; use DROP MATERIALIZED VIEW");
-
-                    // Dropping a table a view reads would turn that view into a delayed error for
-                    // whoever reads it next. Refuse instead, as PostgreSQL does. DROP TABLE has no
-                    // CASCADE form yet, so there is deliberately no way to force it past this.
-                    ViewDependencyMaintainer.RequireNoDependentViews(
-                        database.Schema, dropTableTicket.TableName, table.Id, cascade: false);
-
-                    // Shared with the ticket API's DropTable so an identity column's sequence goes
-                    // with its table on both paths.
-                    bool droppedTable = await schemaDdl
-                        .DropTableWithSequencesAsync(database, table, dropTableTicket).ConfigureAwait(false);
+                    // The same path as the ticket API, on purpose. The rules that can refuse a drop (a
+                    // materialized view, a dependent view, a referencing foreign key) live inside it,
+                    // under the DDL semaphore, so a statement forwarded to the schema leader meets them
+                    // exactly as a local one does. A check here would be skipped by the forward.
+                    bool droppedTable = await schemaDdl.DropTable(dropTableTicket).ConfigureAwait(false);
 
                     return new ExecuteDDLSQLResult(database, droppedTable);
                 }

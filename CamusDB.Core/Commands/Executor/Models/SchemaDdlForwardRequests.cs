@@ -147,6 +147,9 @@ public sealed class ForwardDropTableRequest
     public string TableName { get; set; } = "";
     public bool IfExists { get; set; }
     public bool Force { get; set; }
+
+    /// <summary>Carries <c>DropTableTicket.AllowMaterializedView</c> to the leader.</summary>
+    public bool AllowMaterializedView { get; set; }
 }
 
 public sealed class ForwardTruncateTableRequest

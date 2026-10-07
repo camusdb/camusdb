@@ -46,6 +46,12 @@ internal sealed class DeleteFluxState
     /// </summary>
     internal ForeignKeyStatementChecker ForeignKeys { get; set; } = ForeignKeyStatementChecker.None;
 
+    /// <summary>
+    /// Whether each deleted row also removes its index entries. False only for an immediate DROP
+    /// TABLE, which purges every index bucket wholesale in the same transaction before the rows go.
+    /// </summary>
+    internal bool MaintainIndexes { get; set; } = true;
+
     public DeleteFluxState(DatabaseDescriptor database, TableDescriptor table, DeleteTicket ticket, QueryExecutor queryExecutor)
     {
         Database = database;

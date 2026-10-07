@@ -1,4 +1,3 @@
-﻿
 /**
  * This file is part of CamusDB
  *
@@ -16,6 +15,21 @@ using Microsoft.Extensions.Logging;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
 
+/// <summary>
+/// Removes one table: its row and index entries when the drop is immediate, then its schema entry
+/// through the replicated <c>DropTable</c> delta.
+///
+/// <para><b>Nothing in memory changes before the delta is applied.</b> Every step ahead of
+/// <see cref="CatalogsManager.DropTableSchema"/> is a write inside the caller's DDL transaction, which
+/// rolls back if the delta is refused; the in-memory schema, the cached descriptor and the statistics
+/// entry are touched only after the delta commits. The immediate path used to drop each index through
+/// the <c>DROP INDEX</c> machinery, which removes the index from <c>TableSchema.Indexes</c> and from
+/// the descriptor as it goes. A delta refused after that (at validation, at apply, or by a failed
+/// replication) left the table in the schema with no primary key, no unique enforcement and no index
+/// paths until the schema was reloaded — and a concurrent write in that window produced rows with no
+/// index entries. The index entries are now purged at the key-value level only; the delta's apply
+/// removes the whole <see cref="TableSchema"/>, indexes included, on every node.</para>
+/// </summary>
 internal sealed class TableDropper
 {
     private readonly CatalogsManager catalogs;
@@ -31,9 +45,14 @@ internal sealed class TableDropper
         this.logger = logger;
     }
 
+    /// <summary>
+    /// Drops <paramref name="table"/> inside <paramref name="tx"/>. The caller holds the DDL semaphore
+    /// and has already run every rule that can refuse the drop; the delta's apply runs the rules that
+    /// depend on other relations once more, in log order, and may still refuse. Up to that point this
+    /// method has made no change outside the transaction.
+    /// </summary>
     public async Task<bool> Drop(
         QueryExecutor queryExecutor,
-        TableIndexAlterer tableIndexAlterer,
         RowDeleter rowDeleter,
         DatabaseDescriptor database,
         TableDescriptor table,
@@ -60,17 +79,14 @@ internal sealed class TableDropper
         }
         else
         {
-            foreach (KeyValuePair<string, TableIndexSchema> index in table.Indexes)
+            // Key-value entries only. The index stays in TableSchema.Indexes and in the descriptor
+            // until the DropTable delta removes the table as a whole, so a refusal of that delta rolls
+            // this transaction back and leaves nothing to repair. The stable index id is the Kahuna
+            // key segment, so the purge reaches the physical key space even after a RENAME INDEX.
+            foreach (TableIndexSchema index in table.Indexes.Values)
             {
-                AlterIndexTicket alterIndexTicket = new(
-                    databaseName: ticket.DatabaseName,
-                    tableName: ticket.TableName,
-                    indexName: index.Key,
-                    columns: Array.Empty<ColumnIndexInfo>(),
-                    operation: index.Key == CamusDBConstants.PrimaryKeyInternalName ? AlterIndexOperation.DropPrimaryKey : AlterIndexOperation.DropIndex
-                );
-
-                await tableIndexAlterer.Alter(queryExecutor, database, table, alterIndexTicket, tx).ConfigureAwait(false);
+                int purged = await table.Store.DropIndexEntries(tx, index.KvId).ConfigureAwait(false);
+                Log.LogIndexEntriesPurged(logger, purged, index.Name);
             }
 
             // On a branch database the table's inherited rows live in ancestor keyspaces and are already
@@ -92,9 +108,19 @@ internal sealed class TableDropper
                     filters: null
                 );
 
-                await rowDeleter.Delete(queryExecutor, database, table, deleteTicket, allowMaterializedView: true, checkForeignKeys: false).ConfigureAwait(false);
+                // Every index bucket was purged wholesale above, in this same transaction, so the
+                // per-row index deletes the delete path would otherwise issue are wasted mutations.
+                await rowDeleter.Delete(
+                    queryExecutor, database, table, deleteTicket,
+                    allowMaterializedView: true, checkForeignKeys: false, maintainIndexes: false
+                ).ConfigureAwait(false);
             }
         }
+
+        // The replicated delta. It is the last step that can refuse the drop; once it returns the
+        // table is gone from every node's schema and nothing below may fail the statement.
+        TableSchema? droppedSchema = await catalogs.DropTableSchema(database, ticket.TableName, tableId, tx, deferred).ConfigureAwait(false);
+        Log.LogTableRemovedFromDatabaseSchema(logger, ticket.TableName);
 
         // Statistics cleanup. Both paths evict the in-memory entry (otherwise it leaks for the
         // process lifetime, and a pending background flush could re-create the persisted blob
@@ -118,9 +144,6 @@ internal sealed class TableDropper
                 logger.LogWarning(ex, "Failed to delete stats blob for dropped table '{TableName}'", ticket.TableName);
             }
         }
-
-        TableSchema? droppedSchema = await catalogs.DropTableSchema(database, ticket.TableName, tableId, tx, deferred).ConfigureAwait(false);
-        Log.LogTableRemovedFromDatabaseSchema(logger, ticket.TableName);
 
         // In cluster mode delete all persisted coordinator job records for this table so a
         // subsequent leader-change resume cannot replay them against a new table that happens

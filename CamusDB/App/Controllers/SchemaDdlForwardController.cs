@@ -359,7 +359,8 @@ public sealed class SchemaDdlForwardController : CommandsController
                 databaseName: req.DatabaseName,
                 tableName: req.TableName,
                 ifExists: req.IfExists,
-                force: req.Force
+                force: req.Force,
+                allowMaterializedView: req.AllowMaterializedView
             );
 
             bool result = await executor.DropTable(ticket).ConfigureAwait(false);

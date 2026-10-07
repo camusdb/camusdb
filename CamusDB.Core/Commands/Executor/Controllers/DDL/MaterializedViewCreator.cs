@@ -168,7 +168,7 @@ internal sealed class MaterializedViewCreator
                 executor, catalogs, database, view.Id!, logger).ConfigureAwait(false);
 
             await executor.DropTable(
-                new DropTableTicket(database.Name, name, ifExists: true, force: false)).ConfigureAwait(false);
+                new DropTableTicket(database.Name, name, ifExists: true, force: false, allowMaterializedView: true)).ConfigureAwait(false);
 
             droppedAny = true;
         }

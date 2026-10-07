@@ -1342,11 +1342,31 @@ internal sealed partial class SchemaDdlService
     }
 
     /// <summary>
+    /// Refuses <c>DROP TABLE</c> on a materialized view unless the ticket says the caller knows what
+    /// it is dropping. A materialized view is stored as a relation, so the table-drop path would
+    /// happily remove one; refusing keeps the statement that creates an object and the statement
+    /// that removes it symmetric, and matches PostgreSQL.
+    /// </summary>
+    private static void RequireDroppableAsTable(TableDescriptor table, DropTableTicket ticket)
+    {
+        if (table.Schema.IsMaterializedView && !ticket.AllowMaterializedView)
+            throw new CamusDBException(
+                CamusDBErrorCodes.TableDoesntExist,
+                $"'{ticket.TableName}' is a materialized view; use DROP MATERIALIZED VIEW");
+    }
+
+    /// <summary>
     /// Drops one table and, when the drop is not deferred, the sequences its identity columns own.
-    /// Both entry points into <c>DROP TABLE</c> — the ticket API and the SQL dispatcher — go
-    /// through here, so neither can be the one that leaks a counter.
+    /// Every entry point into <c>DROP TABLE</c> — the ticket API, the SQL dispatcher, and a statement
+    /// forwarded from a follower, which the leader runs through the ticket API — goes through here,
+    /// so none of them can be the one that skips a guard or leaks a counter.
     /// </summary>
     /// <remarks>
+    /// <para><b>Every rule that can refuse the drop runs first, under the DDL semaphore.</b> The
+    /// materialized-view rule, the dependent-view rule and the foreign-key rule all run inside the
+    /// DDL transaction before <see cref="TableDropper"/> removes a row or an index entry. The rules
+    /// that depend on other relations run again when the drop's delta is applied, in log order.</para>
+    ///
     /// <para><b>A deferred drop deliberately keeps the sequences.</b> The relation is detached, not
     /// gone: its rows are retained and <c>RELINK</c> can bring it back, and a table whose identity
     /// column cannot issue is not the table that was dropped. The counters go when the garbage
@@ -1371,12 +1391,14 @@ internal sealed partial class SchemaDdlService
         bool dropped = await ExecuteDdlInTransaction(database,
             tx =>
             {
-                // Under the DDL semaphore and before the dropper removes any row or index: a refusal
-                // after that would leave the table half taken apart. The ticket API, the SQL path and a
-                // forwarded drop on the leader all reach this point.
+                // Under the DDL semaphore and before the dropper removes any row or index entry, so a
+                // refusal costs nothing to undo. The ticket API, the SQL path and a forwarded drop on
+                // the leader all reach this point.
+                RequireDroppableAsTable(table, ticket);
+                ViewDependencyRules.RequireNotReadByViews(database.Schema, table.Schema);
                 ForeignKeyDependencyRules.RequireNotReferencedByOtherTables(database.Schema, table.Schema, "drop table");
 
-                return tableDropper.Drop(queryExecutor, tableIndexAlterer, rowDeleter, database, table, ticket, tx);
+                return tableDropper.Drop(queryExecutor, rowDeleter, database, table, ticket, tx);
             },
             postCommitInvalidate: () => database.Cache?.InvalidateByTableId(database.Id, table.Id)
         ).ConfigureAwait(false);
