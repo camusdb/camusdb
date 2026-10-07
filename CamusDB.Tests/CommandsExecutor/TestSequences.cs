@@ -161,6 +161,37 @@ internal sealed class TestSequences : SharedNodeBaseTest
     }
 
     /// <summary>
+    /// An autocommit SELECT over HTTP or gRPC runs in a read-only snapshot with no Kahuna identity.
+    /// Every such statement must still draw a new value: a reservation key built only from the
+    /// snapshot is the same for every statement, and Kahuna would replay the first run to all of
+    /// them.
+    /// </summary>
+    [Test]
+    [NonParallelizable]
+    public async Task TestNextValInReadOnlySnapshotsAdvances()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupDatabase();
+
+        await ExecuteDdl(executor, dbname, "CREATE SEQUENCE snapshot_no START WITH 100 INCREMENT BY 5");
+
+        List<long> drawn = [];
+
+        for (int i = 0; i < 3; i++)
+        {
+            KvTransaction tx = await database.Transactions.BeginReadOnlyAsync(promote: false);
+            Assert.That(tx.UniqueId, Is.Empty);
+
+            (DatabaseDescriptor _, IAsyncEnumerable<QueryResultRow> cursor) =
+                await executor.ExecuteSQLQuery(new ExecuteSQLTicket(tx, dbname, "SELECT nextval('snapshot_no') AS v", null));
+
+            await foreach (QueryResultRow row in cursor)
+                drawn.Add(row.Row["v"].LongValue);
+        }
+
+        Assert.That(drawn, Is.EqualTo(new long[] { 100, 105, 110 }));
+    }
+
+    /// <summary>
     /// <c>CYCLE</c> parses and is refused with a message naming the reason, rather than being
     /// accepted and ignored. A user told their register wraps, and silently given one that does
     /// not, finds out from their data.

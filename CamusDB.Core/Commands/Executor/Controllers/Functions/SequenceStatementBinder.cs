@@ -265,8 +265,16 @@ internal sealed class SequenceStatementBinder
         // which Kahuna answers by replaying the first allocation, silently handing the second
         // statement values it already had. Replay is guaranteed only inside Kahuna's retention
         // window; past it a retry draws fresh values, which is a gap and therefore allowed.
+        //
+        // A read-only snapshot (an autocommit SELECT over HTTP or gRPC) has no Kahuna identity: its
+        // UniqueId is empty and its ordinal restarts with every statement, so every such statement
+        // would build the same key and Kahuna would replay the first statement's run to all of them —
+        // `SELECT nextval('s')` returning the same value forever, to every client. A fresh identity
+        // per reservation fixes that, and loses no replay: the allocator's own retries still reuse
+        // the key, and a retried statement opens a new snapshot that would draw fresh values anyway.
+        string owner = string.IsNullOrEmpty(transaction.UniqueId) ? Guid.NewGuid().ToString("N") : transaction.UniqueId;
         string idempotencyKey =
-            $"{transaction.UniqueId}:{sequence.Id}:{transaction.NextSequenceAllocationOrdinal()}:{count}";
+            $"{owner}:{sequence.Id}:{transaction.NextSequenceAllocationOrdinal()}:{count}";
 
         SequenceRun run = await allocator.ReserveAsync(
             database.Kahuna.Kahuna, database.Id, sequence, count, idempotencyKey, cancellationToken).ConfigureAwait(false);
