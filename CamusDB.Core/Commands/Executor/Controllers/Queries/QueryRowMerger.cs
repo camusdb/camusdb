@@ -96,10 +96,20 @@ internal static class QueryRowMerger
     public static Dictionary<string, int> BuildRightKeyOrdinalMap(
         IReadOnlyDictionary<string, ColumnValue> rightRow,
         string rightAlias,
+        RowLayout joinLayout) =>
+        BuildRightKeyOrdinalMap(rightRow.Keys, rightAlias, joinLayout);
+
+    /// <summary>
+    /// Same as the row overload, for a key list known ahead of any right row — the left outer
+    /// join builds its map from metadata before the first right row exists.
+    /// </summary>
+    public static Dictionary<string, int> BuildRightKeyOrdinalMap(
+        IEnumerable<string> rightKeys,
+        string rightAlias,
         RowLayout joinLayout)
     {
-        Dictionary<string, int> map = new(rightRow.Count, StringComparer.OrdinalIgnoreCase);
-        foreach (string key in rightRow.Keys)
+        Dictionary<string, int> map = new(StringComparer.OrdinalIgnoreCase);
+        foreach (string key in rightKeys)
         {
             string qualKey = IsQualifiedKey(key) ? key : QueryRowNameResolver.FormatQualifiedKey(rightAlias, key);
             map[key] = joinLayout.IndexOf(qualKey);
@@ -157,9 +167,20 @@ internal static class QueryRowMerger
     public static RowLayout BuildJoinLayout(
         IReadOnlyDictionary<string, ColumnValue> leftQualified,
         IReadOnlyDictionary<string, ColumnValue> rightRow,
+        string rightAlias) =>
+        BuildJoinLayout(leftQualified, rightRow.Keys, rightAlias);
+
+    /// <summary>
+    /// Same as the row overload, for a right key list known ahead of any right row. The left outer
+    /// join uses it to build one layout eagerly from metadata (see <see cref="OuterJoinPadding"/>),
+    /// so a padded row and a matched row share the same slots.
+    /// </summary>
+    public static RowLayout BuildJoinLayout(
+        IReadOnlyDictionary<string, ColumnValue> leftQualified,
+        IEnumerable<string> rightKeys,
         string rightAlias)
     {
-        List<string> physicalNames = new(leftQualified.Count + rightRow.Count);
+        List<string> physicalNames = new(leftQualified.Count + 8);
 
         // Left keys are already qualified (QualifyRow was applied); add them as-is.
         foreach (string key in leftQualified.Keys)
@@ -167,7 +188,7 @@ internal static class QueryRowMerger
 
         // Right keys: qualify bare names, leave already-qualified names unchanged.
         HashSet<string> leftKeySet = new(leftQualified.Keys, StringComparer.OrdinalIgnoreCase);
-        foreach (string key in rightRow.Keys)
+        foreach (string key in rightKeys)
         {
             string qualKey = IsQualifiedKey(key) ? key : QueryRowNameResolver.FormatQualifiedKey(rightAlias, key);
             if (leftKeySet.Contains(qualKey))
@@ -221,9 +242,10 @@ internal static class QueryRowMerger
     /// Fail-fast guard: if a later row pair has an extra key (unmapped by the layout) or is
     /// missing a key (leaving a slot unfilled), a <see cref="CamusDBException"/> is thrown rather
     /// than emitting a half-null row. This surfaces real bugs early — a silent null slot would
-    /// produce deferred NREs or wrong results far from the join. When LEFT JOIN is added, that
-    /// code should build a null-padded partial row explicitly instead of relying on this path,
-    /// and bypass the slot-count check for the null side.
+    /// produce deferred NREs or wrong results far from the join. A left outer join never relies
+    /// on this path for its padded rows: <see cref="OuterJoinPadding.Pad"/> builds them explicitly
+    /// over a layout computed from metadata, and this guard then also proves that a real right
+    /// row carries exactly the keys that layout expected.
     /// </para>
     /// </summary>
     /// <exception cref="CamusDBException">

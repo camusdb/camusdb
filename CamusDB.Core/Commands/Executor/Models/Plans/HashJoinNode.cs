@@ -21,12 +21,19 @@ namespace CamusDB.Core.CommandsExecutor.Models.Plans;
 public enum HashJoinBuildSide { Right, Left }
 
 /// <summary>
-/// Hash inner join: materialise the build side into an in-memory hash table keyed on the
+/// Hash join: materialise the build side into an in-memory hash table keyed on the
 /// equi-join columns, then stream the probe side (<see cref="PhysicalPlanNode.Input"/>) and
 /// look up each row.
 ///
-/// NULL join-key values are excluded from both the build table and the probe stream —
-/// consistent with SQL inner-join semantics where NULL = NULL is unknown.
+/// NULL join-key values are excluded from the build table and never match from the probe
+/// stream — consistent with SQL semantics where NULL = NULL is unknown. For an inner join such a
+/// probe row is dropped; for <see cref="JoinKind.LeftOuter"/> it is emitted padded.
+///
+/// <para>A <see cref="JoinKind.LeftOuter"/> node always has <see cref="BuildSide"/> =
+/// <see cref="HashJoinBuildSide.Right"/>: the preserved (left) side is the probe, so an
+/// unmatched probe row is padded at once, in stream order, with no per-build-row matched flag
+/// and no second pass over the hash table. The planner does not consult the smaller-side rule
+/// for this kind, and the executor refuses the other pairing.</para>
 ///
 /// When <c>CamusDBOptions.SpillEnabled</c> is true and the build side exceeds
 /// <c>CamusDBOptions.SpillEffectiveThreshold</c>, the executor routes to the Grace/hybrid hash
@@ -42,6 +49,9 @@ public enum HashJoinBuildSide { Right, Left }
 /// </summary>
 public sealed class HashJoinNode : PhysicalPlanNode
 {
+    /// <summary>Inner or left outer; see the class summary for the build-side rule.</summary>
+    public JoinKind Kind { get; init; } = JoinKind.Inner;
+
     /// <summary>
     /// The build (materialised) side of the join.
     ///

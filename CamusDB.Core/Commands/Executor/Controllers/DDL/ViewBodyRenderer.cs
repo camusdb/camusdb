@@ -302,11 +302,22 @@ internal sealed class ViewBodyRenderer : SqlAstRenderer
                 return;
 
             case NodeType.Join:
+                // The kind is rendered in its canonical spelling so the stored body re-parses to the
+                // same join form; a cross join has no ON clause to render.
                 RenderFrom(sb, from.leftAst!);
-                sb.Append(" INNER JOIN ");
+                sb.Append(JoinAstKind.Read(from) switch
+                {
+                    JoinAstKind.Kind.Left => " LEFT OUTER JOIN ",
+                    JoinAstKind.Kind.Right => " RIGHT OUTER JOIN ",
+                    JoinAstKind.Kind.Cross => " CROSS JOIN ",
+                    _ => " INNER JOIN ",
+                });
                 RenderFrom(sb, from.rightAst!);
-                sb.Append(" ON ");
-                RenderNode(sb, from.extendedOne!);
+                if (from.extendedOne is not null)
+                {
+                    sb.Append(" ON ");
+                    RenderNode(sb, from.extendedOne);
+                }
                 return;
 
             case NodeType.CommaJoin:

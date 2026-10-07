@@ -27,7 +27,11 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 /// needs an internal sort, the materializing mode collects that side and sorts it. A side the
 /// plan already ordered is never re-sorted.</para>
 ///
-/// <para>NULL keys are excluded from both sides, which matches SQL inner-join semantics.</para>
+/// <para>NULL keys never match. An inner join drops them on both sides. A left outer join pads a
+/// left row whose key is NULL, pads every left row the right stream has already passed, and after
+/// the right side ends drains the rest of the left side with padding; a left row inside an
+/// equal-key run whose pairs all fail the residual <c>ON</c> conjuncts is padded as well. The
+/// streaming path must therefore never stop on the right side's end alone.</para>
 /// </summary>
 internal sealed class MergeJoinOperator
 {
@@ -51,7 +55,11 @@ internal sealed class MergeJoinOperator
     /// O(max right run size) memory rather than O(n + m). When one or both sides need an
     /// internal sort, the materializing path is used.
     ///
-    /// NULL keys are excluded from both sides — consistent with SQL inner-join semantics.
+    /// A NULL key never matches. An inner join drops the row on either side. A left outer join
+    /// keeps a NULL-keyed left row in its place in the key order and pads it, because the node
+    /// advertises its output as ordered by the left key and a downstream merge join relies on
+    /// that; the streaming path pads it as it arrives, the materialized path keeps it in the
+    /// buffered list with a "not matchable" mark (see <see cref="JoinKeyExtractor.ExtractOrderingKey"/>).
     /// </summary>
     internal async IAsyncEnumerable<QueryResultRow> ExecuteMergeJoin(
         MergeJoinNode joinNode,
@@ -67,9 +75,20 @@ internal sealed class MergeJoinOperator
 
         QueryTicket ticket = plan.Ticket;
         string rightAlias = joinNode.RightSource.Alias;
+        OuterJoinPadding? padding = joinNode.Kind == JoinKind.LeftOuter
+            ? await OuterJoinPadding.CreateAsync(joinNode.RightSource, plan).ConfigureAwait(false)
+            : null;
+
+        // Once both sides are buffered no scan observes the token any more, so the merge loop
+        // polls it once per left row.
+        using CancellationTokenSource? linked = JoinCancellation.Link(plan, ct);
+        CancellationToken token = JoinCancellation.Effective(plan, linked);
 
         // ── Materialise left side (qualify each row immediately) ────────────
-        List<(ColumnValue[] Key, IReadOnlyDictionary<string, ColumnValue> QualifiedRow)> leftRows = new();
+        // Matchable is false for a left outer row whose key holds a NULL: it can pair with nothing
+        // and is padded, but it keeps its place in the key order (NULL sorts first within its
+        // component), because a downstream merge join trusts the ordering this node advertises.
+        List<(ColumnValue[] Key, bool Matchable, IReadOnlyDictionary<string, ColumnValue> QualifiedRow)> leftRows = new();
         RowLayout? qualifiedLeftLayout = null;
 
         await foreach (QueryResultRow leftRow in tree.ExecuteNode(joinNode.Input!, plan).ConfigureAwait(false))
@@ -86,10 +105,17 @@ internal sealed class MergeJoinOperator
                 qualified = QueryRowMerger.QualifyRow(leftRow.Row, leftAlias);
             }
 
-            ColumnValue[]? key = JoinKeyExtractor.ExtractMergeKey(qualified, joinNode.LeftKeyColumns);
-            if (key is null) continue;
+            if (padding is null)
+            {
+                ColumnValue[]? key = JoinKeyExtractor.ExtractMergeKey(qualified, joinNode.LeftKeyColumns);
+                if (key is null) continue;
 
-            leftRows.Add((key, qualified));
+                leftRows.Add((key, true, qualified));
+                continue;
+            }
+
+            ColumnValue[] orderingKey = JoinKeyExtractor.ExtractOrderingKey(qualified, joinNode.LeftKeyColumns, out bool matchable);
+            leftRows.Add((orderingKey, matchable, qualified));
         }
 
         // Sort only when not already ordered by the plan (via SortNode or ForcedIndex scan).
@@ -130,9 +156,28 @@ internal sealed class MergeJoinOperator
 
         while (li < leftRows.Count && ri < rightRows.Count)
         {
+            token.ThrowIfCancellationRequested();
+
+            // A NULL-keyed left row (left outer join only) matches nothing: pad it in place.
+            if (!leftRows[li].Matchable)
+            {
+                yield return new QueryResultRow(default(ObjectIdValue), padding!.Pad(leftRows[li].QualifiedRow));
+                li++;
+                continue;
+            }
+
             int cmp = JoinKeyExtractor.CompareMergeKeys(leftRows[li].Key, rightRows[ri].Key);
 
-            if (cmp < 0) { li++; continue; }
+            if (cmp < 0)
+            {
+                // The right side holds no row with this key.
+                if (padding is not null)
+                    yield return new QueryResultRow(default(ObjectIdValue), padding.Pad(leftRows[li].QualifiedRow));
+
+                li++;
+                continue;
+            }
+
             if (cmp > 0) { ri++; continue; }
 
             // Equal keys — find the extent of both equal-key runs.
@@ -145,6 +190,11 @@ internal sealed class MergeJoinOperator
             // Emit cross-product of left[leftRunStart..li) × right[rightRunStart..ri).
             for (int l = leftRunStart; l < li; l++)
             {
+                if (padding is not null)
+                    (joinLayout, rightOrdinalMap) = padding.Bind(leftRows[l].QualifiedRow);
+
+                bool matched = false;
+
                 for (int r = rightRunStart; r < ri; r++)
                 {
                     joinLayout      ??= QueryRowMerger.BuildJoinLayout(leftRows[l].QualifiedRow, rightRows[r].Row, rightAlias);
@@ -155,8 +205,22 @@ internal sealed class MergeJoinOperator
                     if (!await services.Filterer.MeetWhereAsync(joinNode.OnPredicate!, merged, ticket, plan.Database).ConfigureAwait(false))
                         continue;
 
+                    matched = true;
                     yield return new QueryResultRow(default(ObjectIdValue), merged);
                 }
+
+                if (padding is not null && !matched)
+                    yield return new QueryResultRow(default(ObjectIdValue), padding.Pad(leftRows[l].QualifiedRow));
+            }
+        }
+
+        // The right side ended first: every left row that remains has no match.
+        if (padding is not null)
+        {
+            for (; li < leftRows.Count; li++)
+            {
+                token.ThrowIfCancellationRequested();
+                yield return new QueryResultRow(default(ObjectIdValue), padding.Pad(leftRows[li].QualifiedRow));
             }
         }
     }
@@ -177,6 +241,9 @@ internal sealed class MergeJoinOperator
         RowLayout? joinLayout = null;
         RowLayout? qualifiedLeftLayout = null;
         Dictionary<string, int>? rightOrdinalMap = null;
+        OuterJoinPadding? padding = joinNode.Kind == JoinKind.LeftOuter
+            ? await OuterJoinPadding.CreateAsync(joinNode.RightSource, plan).ConfigureAwait(false)
+            : null;
 
         await using IAsyncEnumerator<QueryResultRow> leftEnum  =
             tree.ExecuteNode(joinNode.Input!, plan).GetAsyncEnumerator(ct);
@@ -186,23 +253,24 @@ internal sealed class MergeJoinOperator
         bool leftHasMore  = await leftEnum.MoveNextAsync().ConfigureAwait(false);
         bool rightHasMore = await rightEnum.MoveNextAsync().ConfigureAwait(false);
 
+        // The current left row, qualified; null once the row was consumed (emitted, padded, or
+        // dropped) and the next one has not been read yet.
+        IReadOnlyDictionary<string, ColumnValue>? leftQualified = null;
+
         while (leftHasMore && rightHasMore)
         {
             // Qualify current left row and extract its key.
-            string leftAlias = JoinAliasMetadata.ResolveLeftAlias(joinNode.Input!, leftEnum.Current);
-            IReadOnlyDictionary<string, ColumnValue> leftQualified;
-            if (leftEnum.Current.Row is QueryRow leftQr)
-            {
-                qualifiedLeftLayout ??= QueryRowMerger.BuildQualifiedLayout(leftQr.Layout, leftAlias);
-                leftQualified = QueryRowMerger.QualifyRowAsQueryRow(leftQr, qualifiedLeftLayout);
-            }
-            else
-            {
-                leftQualified = QueryRowMerger.QualifyRow(leftEnum.Current.Row, leftAlias);
-            }
+            leftQualified ??= QualifyLeft(joinNode, leftEnum.Current, ref qualifiedLeftLayout);
+            if (padding is not null)
+                (joinLayout, rightOrdinalMap) = padding.Bind(leftQualified);
+
             ColumnValue[]? leftKey = JoinKeyExtractor.ExtractMergeKey(leftQualified, joinNode.LeftKeyColumns);
             if (leftKey is null)
             {
+                if (padding is not null)
+                    yield return new QueryResultRow(default(ObjectIdValue), padding.Pad(leftQualified));
+
+                leftQualified = null;
                 leftHasMore = await leftEnum.MoveNextAsync().ConfigureAwait(false);
                 continue;
             }
@@ -215,7 +283,16 @@ internal sealed class MergeJoinOperator
             }
 
             int cmp = JoinKeyExtractor.CompareMergeKeys(leftKey, rightKey);
-            if (cmp < 0) { leftHasMore  = await leftEnum.MoveNextAsync().ConfigureAwait(false);  continue; }
+            if (cmp < 0)
+            {
+                // The right stream is already past this key: no right row can match it.
+                if (padding is not null)
+                    yield return new QueryResultRow(default(ObjectIdValue), padding.Pad(leftQualified));
+
+                leftQualified = null;
+                leftHasMore = await leftEnum.MoveNextAsync().ConfigureAwait(false);
+                continue;
+            }
             if (cmp > 0) { rightHasMore = await rightEnum.MoveNextAsync().ConfigureAwait(false); continue; }
 
             // Equal keys — buffer the right equal-key run.
@@ -233,6 +310,8 @@ internal sealed class MergeJoinOperator
             // Current left row is already qualified; loop advances after each emission.
             while (true)
             {
+                bool matched = false;
+
                 foreach (IReadOnlyDictionary<string, ColumnValue> rightRow in rightRun)
                 {
                     joinLayout      ??= QueryRowMerger.BuildJoinLayout(leftQualified, rightRow, rightAlias);
@@ -242,25 +321,55 @@ internal sealed class MergeJoinOperator
                     if (!await services.Filterer.MeetWhereAsync(joinNode.OnPredicate!, merged, ticket, plan.Database).ConfigureAwait(false))
                         continue;
 
+                    matched = true;
                     yield return new QueryResultRow(default(ObjectIdValue), merged);
                 }
 
+                if (padding is not null && !matched)
+                    yield return new QueryResultRow(default(ObjectIdValue), padding.Pad(leftQualified));
+
+                leftQualified = null;
                 leftHasMore = await leftEnum.MoveNextAsync().ConfigureAwait(false);
                 if (!leftHasMore) break;
 
-                string la = JoinAliasMetadata.ResolveLeftAlias(joinNode.Input!, leftEnum.Current);
-                if (leftEnum.Current.Row is QueryRow nextQr)
-                {
-                    qualifiedLeftLayout ??= QueryRowMerger.BuildQualifiedLayout(nextQr.Layout, la);
-                    leftQualified = QueryRowMerger.QualifyRowAsQueryRow(nextQr, qualifiedLeftLayout);
-                }
-                else
-                {
-                    leftQualified = QueryRowMerger.QualifyRow(leftEnum.Current.Row, la);
-                }
+                leftQualified = QualifyLeft(joinNode, leftEnum.Current, ref qualifiedLeftLayout);
                 ColumnValue[]? lk = JoinKeyExtractor.ExtractMergeKey(leftQualified, joinNode.LeftKeyColumns);
+                // A left row outside the run stays current (not consumed) for the outer loop.
                 if (lk is null || JoinKeyExtractor.CompareMergeKeys(lk, runKey) != 0) break;
             }
         }
+
+        // The right side ended first: every left row that remains, the current one included, has
+        // no match and is padded. An inner join simply stops here.
+        if (padding is not null)
+        {
+            while (leftHasMore)
+            {
+                leftQualified ??= QualifyLeft(joinNode, leftEnum.Current, ref qualifiedLeftLayout);
+                yield return new QueryResultRow(default(ObjectIdValue), padding.Pad(leftQualified));
+                leftQualified = null;
+                leftHasMore = await leftEnum.MoveNextAsync().ConfigureAwait(false);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Qualifies one left row with its alias, reusing the layout built from the first left row so a
+    /// <see cref="QueryRow"/> is re-wrapped without a per-row dictionary.
+    /// </summary>
+    private static IReadOnlyDictionary<string, ColumnValue> QualifyLeft(
+        MergeJoinNode joinNode,
+        QueryResultRow leftRow,
+        ref RowLayout? qualifiedLeftLayout)
+    {
+        string leftAlias = JoinAliasMetadata.ResolveLeftAlias(joinNode.Input!, leftRow);
+
+        if (leftRow.Row is QueryRow leftQr)
+        {
+            qualifiedLeftLayout ??= QueryRowMerger.BuildQualifiedLayout(leftQr.Layout, leftAlias);
+            return QueryRowMerger.QualifyRowAsQueryRow(leftQr, qualifiedLeftLayout);
+        }
+
+        return QueryRowMerger.QualifyRow(leftRow.Row, leftAlias);
     }
 }

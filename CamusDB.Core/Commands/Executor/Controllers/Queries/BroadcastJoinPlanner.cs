@@ -58,7 +58,8 @@ internal sealed class BroadcastJoinPlanner
     /// <summary>
     /// Decides whether this hash join's probe runs as broadcast fragments, and prepares the
     /// shipping plan when it does. Every condition falls back to the standard local probe —
-    /// declining is never an error. Gates: distributed execution on, a transport, a positive
+    /// declining is never an error. Gates: distributed execution on, a transport, an inner join
+    /// (a remote probe returns matched rows only, so it cannot pad), a positive
     /// broadcast cap the build's <b>actual</b> row count fits under, a plain primary-row base
     /// table on the probe side (the left leaf when the right side was built; the right table
     /// source when the left subtree was built), a transaction whose reads need no session
@@ -81,6 +82,11 @@ internal sealed class BroadcastJoinPlanner
 
         if (!liveOptions.DistributedQueryExecutionEnabled || liveOptions.BroadcastJoinMaxBuildRows <= 0)
             return null;
+
+        // A remote probe span returns matched rows only; it has no way to pad an unmatched
+        // probe row, so an outer join always runs the local probe.
+        if (joinNode.Kind != JoinKind.Inner)
+            return Decline(plan, $"join kind {joinNode.Kind} needs padded rows a remote probe cannot produce");
 
         // The probe side must be a plain primary-row base table so its keyspace can be
         // span-fragmented: the left scan leaf when the right side was built, or the right

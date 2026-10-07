@@ -175,7 +175,7 @@ internal static class ViewExpander
 
                     return ReferenceEquals(l, from.leftAst) && ReferenceEquals(r, from.rightAst) && ReferenceEquals(on, from.extendedOne)
                         ? from
-                        : new NodeAst(NodeType.Join, l, r, on, null, null, null, null, null);
+                        : new NodeAst(NodeType.Join, l, r, on, null, null, null, null, from.yytext);
                 }
 
             case NodeType.CommaJoin:

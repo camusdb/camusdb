@@ -31,6 +31,12 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 /// <para>Every partition file is written into one scope that is disposed in a <c>finally</c>,
 /// which covers normal completion, an abandoned enumeration, cancellation, and a fault. Spill
 /// files are real files; a dropped scope would leak them.</para>
+///
+/// <para>A left outer join (always build right, probe left) pads the same way the in-memory join
+/// does, applied per partition: the probe side is partitioned by the same key hash as the build
+/// side, so a probe row is unmatched overall exactly when it is unmatched in its own partition.
+/// The one row the partitioning would otherwise drop is a probe row with a NULL key; for the
+/// kind those rows go to one extra spill file and are emitted padded, once each, at the end.</para>
 /// </summary>
 internal sealed class GraceHashJoinOperator
 {
@@ -104,8 +110,10 @@ internal sealed class GraceHashJoinOperator
     /// <summary>
     /// Partitions every row in <paramref name="input"/> into <paramref name="K"/> spill files
     /// using a seed-mixed hash of the join-key columns (see <see cref="PartitionIndex"/>).
-    /// Rows with any NULL key column are silently dropped — consistent with SQL inner-join
-    /// NULL exclusion. Returns the <paramref name="K"/> file paths in partition order.
+    /// Rows with any NULL key column are dropped — consistent with SQL NULL exclusion — unless
+    /// <paramref name="keepUnkeyed"/> is set, in which case they go to one extra file appended as
+    /// the last path, so a left outer join can pad them later. Returns the file paths in
+    /// partition order.
     /// </summary>
     private static async Task<string[]> PartitionStreamToFilesAsync(
         SpillScope scope,
@@ -113,12 +121,14 @@ internal sealed class GraceHashJoinOperator
         int seed,
         IAsyncEnumerable<QueryResultRow> input,
         IReadOnlyList<string> keyColumns,
-        CancellationToken ct)
+        CancellationToken ct,
+        bool keepUnkeyed = false)
     {
-        SpillWriteStream[] writers = new SpillWriteStream[K];
-        string[] paths = new string[K];
+        int fileCount = keepUnkeyed ? K + 1 : K;
+        SpillWriteStream[] writers = new SpillWriteStream[fileCount];
+        string[] paths = new string[fileCount];
 
-        for (int i = 0; i < K; i++)
+        for (int i = 0; i < fileCount; i++)
             paths[i] = scope.OpenWriter(out writers[i]);
 
         try
@@ -127,13 +137,19 @@ internal sealed class GraceHashJoinOperator
 
             await foreach (QueryResultRow row in input.WithCancellation(ct).ConfigureAwait(false))
             {
-                if (!JoinKeyExtractor.TryExtractKeyInto(row.Row, keyColumns, keyScratch)) continue;
+                if (!JoinKeyExtractor.TryExtractKeyInto(row.Row, keyColumns, keyScratch))
+                {
+                    if (keepUnkeyed)
+                        SpillRowCodec.EncodeToStream(writers[K], row);
+
+                    continue;
+                }
 
                 int p = PartitionIndex(keyScratch, K, seed);
                 SpillRowCodec.EncodeToStream(writers[p], row);
             }
 
-            for (int i = 0; i < K; i++)
+            for (int i = 0; i < fileCount; i++)
             {
                 await writers[i].FlushAsync(ct).ConfigureAwait(false);
                 writers[i].Close();
@@ -144,7 +160,7 @@ internal sealed class GraceHashJoinOperator
         }
         catch
         {
-            for (int i = 0; i < K; i++)
+            for (int i = 0; i < fileCount; i++)
                 try { writers[i]?.Close(); } catch { }
             throw;
         }
@@ -204,6 +220,19 @@ internal sealed class GraceHashJoinOperator
         if (services.Statistics is not null)
             services.Statistics.HashJoinGracePathCount++;
 
+        bool leftOuter = joinNode.Kind == JoinKind.LeftOuter;
+
+        if (leftOuter && joinNode.BuildSide != HashJoinBuildSide.Right)
+        {
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInternalOperation,
+                "A left outer hash join must build the right side: the preserved left side is the probe");
+        }
+
+        OuterJoinPadding? padding = leftOuter
+            ? await OuterJoinPadding.CreateAsync(joinNode.BuildSource, plan).ConfigureAwait(false)
+            : null;
+
         IAsyncEnumerable<QueryResultRow> buildStream;
         IReadOnlyList<string> buildKeyColumns;
         IAsyncEnumerable<QueryResultRow> probeStream;
@@ -231,14 +260,24 @@ internal sealed class GraceHashJoinOperator
         try
         {
             string[] buildFiles = await PartitionStreamToFilesAsync(scope, K, seed: 0, buildStream, buildKeyColumns, ct).ConfigureAwait(false);
-            string[] probeFiles = await PartitionStreamToFilesAsync(scope, K, seed: 0, probeStream, probeKeyColumns, ct).ConfigureAwait(false);
+            string[] probeFiles = await PartitionStreamToFilesAsync(scope, K, seed: 0, probeStream, probeKeyColumns, ct, keepUnkeyed: leftOuter).ConfigureAwait(false);
 
             for (int p = 0; p < K; p++)
             {
                 await foreach (QueryResultRow row in JoinPartitionAsync(
                     joinNode, plan, scope, buildFiles[p], probeFiles[p],
-                    buildKeyColumns, probeKeyColumns, seed: 0, depth: 0, ct).ConfigureAwait(false))
+                    buildKeyColumns, probeKeyColumns, seed: 0, depth: 0, padding, ct).ConfigureAwait(false))
                     yield return row;
+            }
+
+            // Probe rows with a NULL key belong to no partition and match nothing; each is padded once.
+            if (padding is not null)
+            {
+                await foreach (QueryResultRow unkeyed in ReadSpillFileAsync(probeFiles[K], services.Options.SpillMaxFrameBytes, ct).ConfigureAwait(false))
+                {
+                    ct.ThrowIfCancellationRequested();
+                    yield return new QueryResultRow(default(ObjectIdValue), padding.Pad(unkeyed.Row));
+                }
             }
         }
         finally
@@ -270,6 +309,7 @@ internal sealed class GraceHashJoinOperator
         IReadOnlyList<string> probeKeyColumns,
         int seed,
         int depth,
+        OuterJoinPadding? padding,
         [EnumeratorCancellation] CancellationToken ct)
     {
         int threshold = plan.Database.Options.SpillEffectiveThreshold;
@@ -326,7 +366,7 @@ internal sealed class GraceHashJoinOperator
                 {
                     await foreach (QueryResultRow row in JoinPartitionAsync(
                         joinNode, plan, scope, subBuildFiles[p], subProbeFiles[p],
-                        buildKeyColumns, probeKeyColumns, newSeed, depth + 1, ct).ConfigureAwait(false))
+                        buildKeyColumns, probeKeyColumns, newSeed, depth + 1, padding, ct).ConfigureAwait(false))
                         yield return row;
                 }
             }
@@ -339,14 +379,16 @@ internal sealed class GraceHashJoinOperator
                     services.Statistics.HashJoinNljPartitionFallbackCount++;
 
                 await foreach (QueryResultRow row in NestedLoopPartitionJoinAsync(
-                    joinNode, buildFile, probeFile, buildKeyColumns, probeKeyColumns, ticket, plan, ct)
+                    joinNode, buildFile, probeFile, buildKeyColumns, probeKeyColumns, ticket, plan, padding, ct)
                     .ConfigureAwait(false))
                     yield return row;
             }
             yield break;
         }
 
-        if (hashTable.Count == 0) yield break;
+        // An empty build partition matches nothing; an inner join is done, a left outer join
+        // still owes one padded row per probe row of the partition.
+        if (hashTable.Count == 0 && padding is null) yield break;
 
         // Probe phase: stream probe partition against the loaded hash table.
         RowLayout? joinLayout = null;
@@ -354,9 +396,23 @@ internal sealed class GraceHashJoinOperator
         ColumnValue[] probeKeyScratch = new ColumnValue[probeKeyColumns.Count];
         await foreach (QueryResultRow probeRow in ReadSpillFileAsync(probeFile, services.Options.SpillMaxFrameBytes, ct).ConfigureAwait(false))
         {
-            if (!JoinKeyExtractor.TryExtractKeyInto(probeRow.Row, probeKeyColumns, probeKeyScratch)) continue;
+            // No scan runs any more at this point, so the token is polled here, once per probe row.
+            ct.ThrowIfCancellationRequested();
 
-            if (!hashLookup.TryGetValue(probeKeyScratch.AsSpan(), out List<IReadOnlyDictionary<string, ColumnValue>>? bucket)) continue;
+            if (padding is not null)
+                (joinLayout, rightOrdinalMap) = padding.Bind(probeRow.Row);
+
+            // Probe files hold keyed rows only (the unkeyed ones were set aside at partitioning).
+            if (!JoinKeyExtractor.TryExtractKeyInto(probeRow.Row, probeKeyColumns, probeKeyScratch)
+                || !hashLookup.TryGetValue(probeKeyScratch.AsSpan(), out List<IReadOnlyDictionary<string, ColumnValue>>? bucket))
+            {
+                if (padding is not null)
+                    yield return new QueryResultRow(default(ObjectIdValue), padding.Pad(probeRow.Row));
+
+                continue;
+            }
+
+            bool matched = false;
 
             foreach (IReadOnlyDictionary<string, ColumnValue> buildRow in bucket)
             {
@@ -371,8 +427,12 @@ internal sealed class GraceHashJoinOperator
                 if (!await services.Filterer.MeetWhereAsync(joinNode.OnPredicate!, merged, ticket, plan.Database).ConfigureAwait(false))
                     continue;
 
+                matched = true;
                 yield return new QueryResultRow(default(ObjectIdValue), merged);
             }
+
+            if (padding is not null && !matched)
+                yield return new QueryResultRow(default(ObjectIdValue), padding.Pad(probeRow.Row));
         }
     }
 
@@ -390,6 +450,7 @@ internal sealed class GraceHashJoinOperator
         IReadOnlyList<string> probeKeyColumns,
         QueryTicket ticket,
         QueryPlan plan,
+        OuterJoinPadding? padding,
         [EnumeratorCancellation] CancellationToken ct)
     {
         string rightAlias = joinNode.BuildSource.Alias;
@@ -403,7 +464,20 @@ internal sealed class GraceHashJoinOperator
 
         await foreach (QueryResultRow probeRow in ReadSpillFileAsync(probeFile, services.Options.SpillMaxFrameBytes, ct).ConfigureAwait(false))
         {
-            if (!JoinKeyExtractor.TryExtractKeyInto(probeRow.Row, probeKeyColumns, probeKeyScratch)) continue;
+            ct.ThrowIfCancellationRequested();
+
+            if (padding is not null)
+                (joinLayout, rightOrdinalMap) = padding.Bind(probeRow.Row);
+
+            if (!JoinKeyExtractor.TryExtractKeyInto(probeRow.Row, probeKeyColumns, probeKeyScratch))
+            {
+                if (padding is not null)
+                    yield return new QueryResultRow(default(ObjectIdValue), padding.Pad(probeRow.Row));
+
+                continue;
+            }
+
+            bool matched = false;
 
             await foreach (QueryResultRow buildRow in ReadSpillFileAsync(buildFile, services.Options.SpillMaxFrameBytes, ct).ConfigureAwait(false))
             {
@@ -421,8 +495,12 @@ internal sealed class GraceHashJoinOperator
                 if (!await services.Filterer.MeetWhereAsync(joinNode.OnPredicate!, merged, ticket, plan.Database).ConfigureAwait(false))
                     continue;
 
+                matched = true;
                 yield return new QueryResultRow(default(ObjectIdValue), merged);
             }
+
+            if (padding is not null && !matched)
+                yield return new QueryResultRow(default(ObjectIdValue), padding.Pad(probeRow.Row));
         }
     }
 }

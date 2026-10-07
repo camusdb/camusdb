@@ -65,6 +65,10 @@ THaving         (H|h)(A|a)(V|v)(I|i)(N|n)(G|g)
 TDistinct       (D|d)(I|i)(S|s)(T|t)(I|i)(N|n)(C|c)(T|t)
 TJoin           (J|j)(O|o)(I|i)(N|n)
 TInner          (I|i)(N|n)(N|n)(E|e)(R|r)
+TLeft           (L|l)(E|e)(F|f)(T|t)
+TRight          (R|r)(I|i)(G|g)(H|h)(T|t)
+TOuter          (O|o)(U|u)(T|t)(E|e)(R|r)
+TCross          (C|c)(R|r)(O|o)(S|s)(S|s)
 TShow 		    (S|s)(H|h)(O|o)(W|w)
 TColumns 	    (C|c)(O|o)(L|l)(U|u)(M|m)(N|n)(S|s)
 TTables         (T|t)(A|a)(B|b)(L|l)(E|e)(S|s)
@@ -360,6 +364,14 @@ TSequence       (S|s)(E|e)(Q|q)(U|u)(E|e)(N|n)(C|c)(E|e)
 {TJoin} { return (int)Token.TJOIN; }
 
 {TInner} { return (int)Token.TINNER; }
+
+{TLeft} { return (int)Token.TLEFT; }
+
+{TRight} { return (int)Token.TRIGHT; }
+
+{TOuter} { return (int)Token.TOUTER; }
+
+{TCross} { return (int)Token.TCROSS; }
 
 {TShow} { return (int)Token.TSHOW; }
 

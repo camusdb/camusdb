@@ -65,7 +65,38 @@ internal sealed class SelectQueryCreator
         if (fromAst.nodeType == NodeType.CommaJoin)
             return CommaJoinNormalizer.Normalize(fromAst, where, CreateTableReferenceSource);
 
+        // A FROM made only of cross joins is the comma form spelled differently: the same leaves in
+        // the same order go through the same equi-join hoist, so both spellings get one plan.
+        if (fromAst.nodeType == NodeType.Join && IsCrossJoinOnlyTree(fromAst))
+        {
+            List<QuerySource> sources = new();
+            CollectCrossJoinLeaves(fromAst, sources);
+            return CommaJoinNormalizer.NormalizeSources(sources, where);
+        }
+
         return (CreateQuerySource(fromAst), where);
+    }
+
+    private static bool IsCrossJoinOnlyTree(NodeAst ast)
+    {
+        if (ast.nodeType != NodeType.Join)
+            return ast.nodeType is NodeType.TableReference or NodeType.DerivedTableReference;
+
+        return JoinAstKind.Read(ast) == JoinAstKind.Kind.Cross
+            && IsCrossJoinOnlyTree(ast.leftAst!)
+            && IsCrossJoinOnlyTree(ast.rightAst!);
+    }
+
+    private static void CollectCrossJoinLeaves(NodeAst ast, List<QuerySource> sources)
+    {
+        if (ast.nodeType != NodeType.Join)
+        {
+            sources.Add(CreateTableReferenceSource(ast));
+            return;
+        }
+
+        CollectCrossJoinLeaves(ast.leftAst!, sources);
+        CollectCrossJoinLeaves(ast.rightAst!, sources);
     }
 
     private static QuerySource CreateTableReferenceSource(NodeAst tableAst) =>
@@ -82,11 +113,7 @@ internal sealed class SelectQueryCreator
         {
             NodeType.TableReference => CreateTableSource(fromAst),
             NodeType.DerivedTableReference => CreateDerivedTableSource(fromAst),
-            NodeType.Join => new JoinSource(
-                CreateQuerySource(fromAst.leftAst!),
-                CreateQuerySource(fromAst.rightAst!),
-                JoinKind.Inner,
-                fromAst.extendedOne!),
+            NodeType.Join => CreateJoinSource(fromAst),
             NodeType.Identifier => new TableSource(fromAst.yytext!),
             NodeType.IdentifierWithOpts => new TableSource(
                 fromAst.leftAst!.yytext!,
@@ -94,6 +121,59 @@ internal sealed class SelectQueryCreator
                 ForcedIndexName: GetForcedIndex(fromAst)),
             _ => throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Invalid FROM clause"),
         };
+    }
+
+    /// <summary>
+    /// Turns one parsed join node into a <see cref="JoinSource"/>. A right join becomes a left outer
+    /// join with its operands swapped, which is allowed only when the left operand is a leaf: the
+    /// planner requires the right operand of a join to be one table or one derived table, so a join
+    /// subtree has nowhere to go after the swap. A cross join that sits among <c>ON</c> joins becomes
+    /// an inner join on the literal true; a tree made of cross joins only never reaches here, because
+    /// <see cref="CreateFromClause"/> routes it through the comma-join hoist.
+    /// </summary>
+    private static JoinSource CreateJoinSource(NodeAst joinAst)
+    {
+        NodeAst leftAst = joinAst.leftAst!;
+        NodeAst rightAst = joinAst.rightAst!;
+
+        switch (JoinAstKind.Read(joinAst))
+        {
+            case JoinAstKind.Kind.Left:
+                return new JoinSource(
+                    CreateQuerySource(leftAst),
+                    CreateQuerySource(rightAst),
+                    JoinKind.LeftOuter,
+                    joinAst.extendedOne!);
+
+            case JoinAstKind.Kind.Right:
+                if (leftAst.nodeType is not (NodeType.TableReference or NodeType.DerivedTableReference))
+                {
+                    throw new CamusDBException(
+                        CamusDBErrorCodes.FeatureNotSupported,
+                        "A RIGHT JOIN whose left operand is another join is not supported; " +
+                        "rewrite it as a LEFT JOIN with the preserved table on the left");
+                }
+
+                return new JoinSource(
+                    CreateQuerySource(rightAst),
+                    CreateQuerySource(leftAst),
+                    JoinKind.LeftOuter,
+                    joinAst.extendedOne!);
+
+            case JoinAstKind.Kind.Cross:
+                return new JoinSource(
+                    CreateQuerySource(leftAst),
+                    CreateQuerySource(rightAst),
+                    JoinKind.Inner,
+                    CommaJoinNormalizer.CreateCrossJoinOnPredicate());
+
+            default:
+                return new JoinSource(
+                    CreateQuerySource(leftAst),
+                    CreateQuerySource(rightAst),
+                    JoinKind.Inner,
+                    joinAst.extendedOne!);
+        }
     }
 
     private static TableSource CreateTableSource(NodeAst tableAst)

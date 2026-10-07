@@ -181,7 +181,8 @@ Running `dotnet build CamusDB.Core/CamusDB.Core.csproj` regenerates the two `Gen
 **are committed** — stage the regenerated files with your grammar change, and never hand-edit them.
 
 **What the parser already understands:** `SELECT [DISTINCT]`, `WHERE`, `GROUP BY`, `HAVING`, `ORDER BY`,
-`LIMIT`/`OFFSET`, `[INNER] JOIN … ON …`, comma joins, dotted identifiers (`u.email`), scalar / `IN` /
+`LIMIT`/`OFFSET`, `[INNER] JOIN … ON …`, `LEFT [OUTER] JOIN`, `RIGHT [OUTER] JOIN`, `CROSS JOIN`, comma joins,
+dotted identifiers (`u.email`), scalar / `IN` /
 `NOT IN` / `EXISTS` subqueries, and `EXPLAIN [(LOGICAL|PHYSICAL|ANALYZE)]`.
 
 ## Stage 2 — Logical Query Model
@@ -437,20 +438,30 @@ in `SQLExecutorBaseCreator.EvalComparison`, `EvalAnd` and `EvalOr`, which every 
 
 **File:** `Controllers/Queries/JoinQueryPlanner.cs`. Runs when `IsMultiSource`:
 
-1. **Join-order heuristics** — `JoinOrderOptimizer.Reorder` may reorder sources first (§Part V).
+1. **Join-order heuristics** — `JoinOrderOptimizer.Reorder` may reorder sources first (§Part V). A
+   tree that contains an outer join keeps its declared order.
 2. **Predicate pushdown** — `JoinPredicatePushdown.Analyze` splits WHERE into per-source scan filters
-   (`ScanFiltersByAlias`) and a cross-source `PostJoinFilter`.
+   (`ScanFiltersByAlias`) and a cross-source `PostJoinFilter`. A single-alias conjunct is pushed only
+   when its alias is not *null-extended* (in the right subtree of a `LeftOuter` join on its path to
+   the root); a conjunct on the null-extended side stays post-join, because pushing it below the
+   outer join would filter before padding and turn the join back into an inner join.
 3. **Tree construction** — `BuildJoinTree` recurses the (possibly reordered) `QuerySource`:
    - `TableSource` → `TableScanNode` with its pushed-down filter
    - `DerivedTableSource` → `DerivedTableScanNode` (inner query materialized lazily at execution)
    - `JoinSource` → left built recursively; the right source is checked by `JoinEquiJoinAnalyzer`
-     and `JoinQueryPlanner` for algorithm selection:
+     and `JoinQueryPlanner` for algorithm selection. Every physical join node carries the
+     `JoinKind` (`Inner` or `LeftOuter`); the same operators serve both kinds, because in each of
+     them the left input is the preserved side:
      - Right join key has a single-column index → `IndexNestedLoopJoinNode` (INLJ); unless…
      - Both sides have free index ordering (secondary index prefix covers the join key) **and** the
        outer side is large (> 100 rows estimated) → `MergeJoinNode` (streaming merge join); or…
      - Equi-join with stats available and hash preferred over INLJ → `HashJoinNode` (build =
-       smaller estimated side); else…
+       smaller estimated side for an inner join; **always the right side for a left outer join**,
+       so the preserved side is the probe and an unmatched probe row is padded in stream order); else…
      - No suitable right index → `HashJoinNode` for equi-joins, `NestedLoopJoinNode` otherwise.
+   - A `RIGHT JOIN` never reaches the planner: `SelectQueryCreator` rewrites it into a `LeftOuter`
+     join with the operands swapped. A `CROSS JOIN` becomes the comma form (or an inner join on the
+     literal `TRUE` when mixed with `ON` joins). See [`docs/joins.md`](./joins.md).
 4. Same Phase-C passes as the single-table planner.
 
 ## Stage 5 — Execution
@@ -486,15 +497,29 @@ applies the `PostJoinFilter`, then hands the cursor to `QueryPostScanPipeline.Ap
 - `TableScanNode` → full scan with per-alias inline filter.
 - `DerivedTableScanNode` → materializes the inner query once, caches in `plan.DerivedMaterializations`.
 - `NestedLoopJoinNode` → for each left row, scan the full right source, merge, evaluate `ON`.
+  Left outer: a left row whose inner scan accepted no pair is emitted once, padded.
 - `IndexNestedLoopJoinNode` → for each left row, probe the right index (unique → point lookup;
-  non-unique → equality-prefix scan).
+  non-unique → equality-prefix scan). A NULL lookup value is never probed. Left outer: a NULL
+  lookup value, an empty probe, or a probe whose rows all fail `ON` yields one padded row.
 - `HashJoinNode` → materialise the build side into an in-memory hash table keyed on the equi-join
   columns; stream the probe side and look up each row. Falls back to nested-loop if the build
-  side exceeds `HashJoinMaxBuildRows`. Build side is the smaller estimated input.
+  side exceeds `HashJoinMaxBuildRows`. Build side is the smaller estimated input for an inner
+  join and always the right input for a left outer join. Left outer: a probe row with a NULL key,
+  no bucket, or no bucket row that passes `ON` is padded at once. The Grace path applies the same
+  rule per partition (a probe row is unmatched overall exactly when it is unmatched in its own
+  partition) and sets NULL-keyed probe rows aside in one extra spill file to pad them once each.
 - `MergeJoinNode` → when both sides have free index ordering (ForcedIndex scan or upstream
   SortNode), advance two enumerators in lockstep; buffer only the current equal-key run on the
   right side (O(run size) memory). When only one or neither side is pre-ordered, the unordered
-  side(s) are materialised and sorted first.
+  side(s) are materialised and sorted first. Left outer: a left row with a NULL key, a left row
+  the right stream has passed, a left row whose run produced no `ON` pass, and every left row that
+  remains after the right stream ends are padded; the streaming path never stops on the right
+  side's end alone.
+
+The padded row of a left outer join is built by `OuterJoinPadding`: its right-column key list is
+computed up front from the alias's required-column set and schema version (the same inputs the leaf
+scanner decodes from), so the layout exists before any right row is seen and is shared by matched
+and padded rows. A real right row with a key outside that layout throws "shape diverged".
 
 Row merging (`QueryRowMerger`): right columns are stored as `alias.column` and also unqualified when
 there is no collision; **merged rows carry `RowId = default`** — there is no single source row id.
@@ -658,7 +683,7 @@ when stats are missing, so the optimizer is strictly additive.
 | **Join-order heuristics** | `JoinOrderOptimizer` | Reorder inner-join sources before tree construction (scan-selectivity scoring, left-deep). The default when the join-order flag is off. |
 | **Cost-based scan veto** | `CostEstimator.ShouldPreferFullScan` | Always-on: replace a predicate-driven index range scan with a full table scan when it would touch too much of the table. Selectivity is histogram → min/max → fixed-constant. |
 | **Cost-based access-path selection** | `IndexScanSelector.EnumerateViableSteps` + `QueryPlanner.PickCheapestIndexOrFullScan` | Flag `cost_based_access_path_enabled`: enumerate *every* viable index for the predicate plus the full-scan baseline, cost each, pick the cheapest — subsuming the rule-scored "first viable index" pick and the veto above. |
-| **Cost-based join-order enumeration** | `JoinEnumerator` (System-R DP) | Flag `cost_based_join_order_enabled`: bottom-up dynamic program over table subsets that memoizes the cheapest left-deep sub-plan, replacing the scan-selectivity heuristic. Falls back to the heuristic for outer joins or >12 tables. |
+| **Cost-based join-order enumeration** | `JoinEnumerator` (System-R DP) | Flag `cost_based_join_order_enabled`: bottom-up dynamic program over table subsets that memoizes the cheapest left-deep sub-plan, replacing the scan-selectivity heuristic. Falls back to the heuristic for >12 tables; a tree with an outer join keeps its declared order under both. |
 | **Semi-/anti-join rewrite** | `SemiJoinAnalyzer` + `SemiJoinExecutor` | Rewrite eligible uncorrelated `IN`/`NOT IN` into an index-probing semi/anti/null-aware-anti join (instead of materializing), but only when the inner column is indexed; otherwise fall back to materialization. |
 | **DISTINCT streaming** | `QueryDistincter` + `IndexScanSelector` | When the `DISTINCT` columns form an index set-prefix and are all NOT NULL, and the index holds every row (any non-unique index; a unique index only when *all* of its key columns are NOT NULL), scan in index order and dedup by comparing adjacent rows (O(1) memory) instead of a hash set. The same condition gates streaming `GROUP BY`. |
 | **Value-list `IN` → index seeks** | `PredicateAnalyzer` + `QueryPlanner` + `IndexInListScanNode` | Turn `x IN (v1, v2, …)` on an indexed column into one index seek per value (point lookup for a unique index, equality range for a non-unique one), unioned and row-id-deduped, instead of a full scan + residual membership filter. Cost-gated, and cost-compared against a competing range scan so a selective unique `IN` wins. Falls back to a residual filter when the column is unindexed or the list is too large. |
@@ -825,7 +850,8 @@ Subsets of each size are walked with **Gosper's hack** (next integer with the sa
 joined by a connecting predicate are considered, so cross products are never enumerated; the N−1 tree-edge
 `ON` predicates are each attached exactly once, and cycle/extra predicates ride in the post-join filter
 (`pushdown.PostJoinFilter`) — so reordering is result-preserving. The search is **capped at 12 tables**
-(`MaxTablesForEnumeration`); wider joins, and any outer join, fall back to the heuristic.
+(`MaxTablesForEnumeration`); wider joins fall back to the heuristic, and a tree with an outer join keeps its
+declared order under both (the heuristic bails on a non-inner kind as well).
 
 The classic win this unlocks: a star join `events ⋈ sessions ⋈ users` where the heuristic keeps the large
 declared-first `events` outermost (paying a full `events` scan), while the DP drives the tiny filtered
@@ -902,8 +928,9 @@ disabling it degrades to the uncached code path with no correctness risk.
 Parse, bind, plan, and execute for: single-table SELECT with index selection (unique/composite/range),
 `WHERE` with predicate analysis and filter absorption, `GROUP BY` + `HAVING`, global and grouped
 aggregates (`COUNT`/`SUM`/`AVG`/`MIN`/`MAX`), `SELECT DISTINCT` (hash or index-ordered streaming),
-`ORDER BY` (with index-based sort elision), `LIMIT`/`OFFSET` (with pushdown), `[INNER]`/comma joins
-(nested-loop, index-nested-loop, hash, and merge join — chosen cost-based), derived tables,
+`ORDER BY` (with index-based sort elision), `LIMIT`/`OFFSET` (with pushdown), inner, left/right outer,
+cross and comma joins (nested-loop, index-nested-loop, hash, and merge join — chosen cost-based;
+see [`docs/joins.md`](./joins.md)), derived tables,
 scalar/`IN`/`NOT IN`/`EXISTS` subqueries with
 semi/anti-join rewrite for indexed `IN`/`NOT IN`, index-driven value-list `IN` (`x IN (v1, v2, …)`),
 projection pushdown (including partial-decode locate for `UPDATE`/`DELETE`), an error/semantics matrix,
@@ -943,7 +970,9 @@ These are the meaningful missing pieces and where new work fits.
 | **Error/semantics matrix** | **Done** | `TestErrorMatrix.cs` — 14 negative cases (ambiguous column, bad HAVING refs, multi-column/multi-row subqueries, `COUNT(DISTINCT)`, etc.) asserting precise codes + messages. |
 | **Query microbenchmarks** | **Missing** | No benchmarks for grouped aggregation, join algorithms, or subquery materialization. The last item from the original optimizer backlog (R14). |
 
-Explicitly deferred (by design): OUTER joins, window functions, CTEs, quantified predicates beyond
+Explicitly deferred (by design): `FULL OUTER JOIN`, `NATURAL JOIN`, `USING`, join-order enumeration
+across an outer join, outer-join simplification (a null-rejecting `WHERE` turning a left join into an
+inner join), window functions, CTEs, quantified predicates beyond
 `IN`/`NOT IN` (`ANY`/`ALL`/`SOME`), `COUNT(DISTINCT …)`, the optimized-plan cache, bushy join plans,
 "interesting orders" in the join DP, and distributed *execution* (the distribution property and network
 cost are modeled; remote operator execution is not).

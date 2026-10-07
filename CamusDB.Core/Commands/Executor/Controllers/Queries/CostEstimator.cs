@@ -448,6 +448,7 @@ internal static class CostEstimator
                     nljRightCols, nlj.RightSource.Table?.Table,
                     nljLeftCols, TryResolveLeftTable(node.Input),
                     database, stats);
+                rows = ApplyOuterJoinFloor(nlj.Kind, rows, inputCardinality);
 
                 return (rows, new PlanCost
                 {
@@ -461,7 +462,8 @@ internal static class CostEstimator
 
             case IndexNestedLoopJoinNode inlj:
             {
-                // Outer row drives one unique-index lookup on the inner side.
+                // Outer row drives one unique-index lookup on the inner side. A left outer join
+                // emits at least one row per outer row, which this estimate already does.
                 long rows = inputCardinality;
                 return (rows, new PlanCost
                 {
@@ -508,6 +510,7 @@ internal static class CostEstimator
                     buildKeyCols, hj.BuildSource.Table?.Table,
                     probeKeyCols, TryResolveLeftTable(node.Input),
                     database, stats);
+                rows = ApplyOuterJoinFloor(hj.Kind, rows, inputCardinality);
 
                 return (rows, new PlanCost
                 {
@@ -540,6 +543,7 @@ internal static class CostEstimator
                     rightKeyCols, mj.RightSource.Table?.Table,
                     leftKeyCols, TryResolveLeftTable(node.Input),
                     database, stats);
+                rows = ApplyOuterJoinFloor(mj.Kind, rows, inputCardinality);
 
                 return (rows, new PlanCost
                 {
@@ -566,6 +570,14 @@ internal static class CostEstimator
     }
 
     // ─────────────────────────────────────────────────────────────────────────
+    /// <summary>
+    /// A left outer join emits every left row at least once, so its output can never be smaller
+    /// than its left input: the inner estimate is raised to that floor. Nothing else in the cost
+    /// model changes for the kind.
+    /// </summary>
+    private static long ApplyOuterJoinFloor(JoinKind kind, long innerEstimate, long leftRows) =>
+        kind == JoinKind.LeftOuter ? Math.Max(innerEstimate, leftRows) : innerEstimate;
+
     // Join-key helpers
     // ─────────────────────────────────────────────────────────────────────────
 

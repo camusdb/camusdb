@@ -12,11 +12,13 @@ using CamusDB.Core.SQLParser;
 namespace CamusDB.Core.CommandsExecutor.Models.Plans;
 
 /// <summary>
-/// Sort-merge inner join: advance two pointers in lockstep over equi-join key(s), skip on
+/// Sort-merge join: advance two pointers in lockstep over equi-join key(s), skip on
 /// mismatch, emit the cross-product of equal-key groups via <c>QueryRowMerger</c>.
 ///
-/// NULL join-key values are excluded from both sides (consistent with inner-join semantics
-/// where NULL = NULL is unknown).
+/// NULL join-key values never match (NULL = NULL is unknown). An inner join drops such rows on
+/// both sides; a <see cref="JoinKind.LeftOuter"/> join pads a NULL-keyed left row, pads every
+/// left row the right stream skips past, and drains the left side with padding after the right
+/// stream ends.
 ///
 /// When both <see cref="LeftIsOrdered"/> and <see cref="RightIsOrdered"/> are true the
 /// executor uses a streaming two-pointer path that buffers only the current equal-key run
@@ -29,6 +31,9 @@ namespace CamusDB.Core.CommandsExecutor.Models.Plans;
 /// </summary>
 public sealed class MergeJoinNode : PhysicalPlanNode
 {
+    /// <summary>Inner or left outer; the left input is the preserved side of an outer join.</summary>
+    public JoinKind Kind { get; init; } = JoinKind.Inner;
+
     /// <summary>Right (build) source of the join.</summary>
     public BoundJoinRightSource RightSource { get; }
 

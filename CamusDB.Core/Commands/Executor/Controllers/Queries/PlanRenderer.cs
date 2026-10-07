@@ -251,11 +251,23 @@ public static class PlanRenderer
 
     // ── join nodes ─────────────────────────────────────────────────────────
 
+    /// <summary>
+    /// The kind suffix of a join node. An inner node renders nothing, so every existing EXPLAIN
+    /// line stays byte-identical; a left outer node appends <c>kind=left-outer</c>.
+    /// </summary>
+    private static string RenderJoinKind(JoinKind kind) => kind switch
+    {
+        JoinKind.Inner => "",
+        JoinKind.LeftOuter => ", kind=left-outer",
+        _ => $", kind={kind}",
+    };
+
     private static string RenderNestedLoopJoin(NestedLoopJoinNode node)
     {
         string detail = $"on={RenderExpr(node.OnPredicate)}, right={node.RightSource.Alias}";
         if (node.RightExecutionFilter is not null)
             detail += $", right-filter={RenderExpr(node.RightExecutionFilter)}";
+        detail += RenderJoinKind(node.Kind);
         return $"nested-loop-join({detail})";
     }
 
@@ -264,6 +276,7 @@ public static class PlanRenderer
         string detail = $"on={RenderExpr(node.OnPredicate)}, index={node.Index.Name}, left={node.LeftLookupColumn}, right={node.RightIndexColumn}";
         if (node.RightExecutionFilter is not null)
             detail += $", right-filter={RenderExpr(node.RightExecutionFilter)}";
+        detail += RenderJoinKind(node.Kind);
         return $"index-nested-loop-join({detail})";
     }
 
@@ -277,6 +290,7 @@ public static class PlanRenderer
         string detail = $"on={keys}, build={build}";
         if (node.BuildExecutionFilter is not null)
             detail += $", build-filter={RenderExpr(node.BuildExecutionFilter)}";
+        detail += RenderJoinKind(node.Kind);
         return $"hash-join({detail})";
     }
 
@@ -294,6 +308,7 @@ public static class PlanRenderer
         string detail = $"on={keys}";
         if (node.RightExecutionFilter is not null)
             detail += $", right-filter={RenderExpr(node.RightExecutionFilter)}";
+        detail += RenderJoinKind(node.Kind);
         return $"merge-join({detail})";
     }
 

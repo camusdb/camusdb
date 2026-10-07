@@ -145,7 +145,7 @@ internal sealed class JoinLeafScanner
         deps?.RecordRange(table.Store.IndexKeySpace(index.KvId));
         deps?.RecordSchema(table.Id, JoinAliasMetadata.GetTableSchemaVersionForAlias(plan, source.Alias), table.Schema.ContentsGeneration);
 
-        using CancellationTokenSource? linked = LinkEnumeratorCancellation(plan, cancellationToken);
+        using CancellationTokenSource? linked = JoinCancellation.Link(plan, cancellationToken);
         CancellationToken scanToken = linked?.Token ?? plan.Ticket.CancellationToken;
 
         JoinLeafRowPage page = new(services, plan, source, executionFilter);
@@ -200,7 +200,7 @@ internal sealed class JoinLeafScanner
         deps?.RecordRange(table.Store.IndexKeySpace(rangeNode.Index.KvId));
         deps?.RecordSchema(table.Id, JoinAliasMetadata.GetTableSchemaVersionForAlias(plan, source.Alias), table.Schema.ContentsGeneration);
 
-        using CancellationTokenSource? linked = LinkEnumeratorCancellation(plan, cancellationToken);
+        using CancellationTokenSource? linked = JoinCancellation.Link(plan, cancellationToken);
         CancellationToken scanToken = linked?.Token ?? plan.Ticket.CancellationToken;
 
         JoinLeafRowPage page = new(services, plan, source, rangeNode.ExecutionFilter);
@@ -260,7 +260,7 @@ internal sealed class JoinLeafScanner
         deps?.RecordRange(table.Store.IndexKeySpace(inListNode.Index.KvId));
         deps?.RecordSchema(table.Id, JoinAliasMetadata.GetTableSchemaVersionForAlias(plan, source.Alias), table.Schema.ContentsGeneration);
 
-        using CancellationTokenSource? linked = LinkEnumeratorCancellation(plan, cancellationToken);
+        using CancellationTokenSource? linked = JoinCancellation.Link(plan, cancellationToken);
         CancellationToken scanToken = linked?.Token ?? plan.Ticket.CancellationToken;
 
         // One page spans the whole IN list: ids are appended in list order (and, per value, in index
@@ -329,23 +329,6 @@ internal sealed class JoinLeafScanner
             await foreach (QueryResultRow row in page.FlushAsync(scanToken).ConfigureAwait(false))
                 yield return row;
         }
-    }
-
-    /// <summary>
-    /// Links the token an <c>await foreach</c> consumer supplied through <c>WithCancellation</c> with
-    /// the ticket's own cancellation token, and returns <see langword="null"/> when there is nothing to
-    /// link — the consumer passed no token, or the same one the ticket already carries. A join leaf
-    /// must observe both: the ticket token cancels the whole statement, while the enumerator token
-    /// cancels just this enumeration.
-    /// </summary>
-    private static CancellationTokenSource? LinkEnumeratorCancellation(QueryPlan plan, CancellationToken cancellationToken)
-    {
-        CancellationToken ticketToken = plan.Ticket.CancellationToken;
-
-        if (!cancellationToken.CanBeCanceled || cancellationToken == ticketToken)
-            return null;
-
-        return CancellationTokenSource.CreateLinkedTokenSource(ticketToken, cancellationToken);
     }
 
     private static CompositeColumnValue? BuildInListScanUpperBound(

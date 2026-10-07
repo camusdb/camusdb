@@ -31,6 +31,11 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 /// <para>One <see cref="RightDecodeState"/> is created per execution and threaded through every
 /// probe, so the join owns exactly one row-decode plan and one alias-qualified layout no matter
 /// which fetch path a row takes.</para>
+///
+/// <para>A NULL lookup value is never probed: NULL = NULL is unknown, and a non-unique index walk
+/// from a NULL key would otherwise pair the row with every NULL-keyed right row. An inner join
+/// drops the row; a left outer join pads it, as it pads any left row whose probe returned nothing
+/// the <c>ON</c> predicate accepted.</para>
 /// </summary>
 internal sealed class IndexNestedLoopJoinOperator
 {
@@ -57,6 +62,9 @@ internal sealed class IndexNestedLoopJoinOperator
         RowLayout? qualifiedLeftLayout = null;
         Dictionary<string, int>? rightOrdinalMap = null;
         RightDecodeState rightDecodeState = new();
+        OuterJoinPadding? padding = joinNode.Kind == JoinKind.LeftOuter
+            ? await OuterJoinPadding.CreateAsync(BoundJoinRightSource.FromTable(joinNode.RightSource), plan).ConfigureAwait(false)
+            : null;
 
         // A non-unique probe pages its primary-row fetches through one buffer that lives for the whole
         // join, not one per outer row: the buffer and its decode plan would otherwise be rebuilt for
@@ -89,7 +97,19 @@ internal sealed class IndexNestedLoopJoinOperator
                     $"Join lookup column '{joinNode.LeftLookupColumn}' is missing from left row");
             }
 
+            if (padding is not null)
+                (joinLayout, rightOrdinalMap) = padding.Bind(leftQualified);
+
+            if (lookupValue.Type == ColumnType.Null)
+            {
+                if (padding is not null)
+                    yield return new QueryResultRow(default(ObjectIdValue), padding.Pad(leftQualified));
+
+                continue;
+            }
+
             CompositeColumnValue lookupKey = new(new[] { lookupValue });
+            bool matched = false;
 
             await foreach (QueryResultRow rightRow in ProbeRightIndex(
                 joinNode,
@@ -105,8 +125,12 @@ internal sealed class IndexNestedLoopJoinOperator
                 if (!await services.Filterer.MeetWhereAsync(joinNode.OnPredicate, merged, ticket, plan.Database).ConfigureAwait(false))
                     continue;
 
+                matched = true;
                 yield return new QueryResultRow(default(ObjectIdValue), merged);
             }
+
+            if (padding is not null && !matched)
+                yield return new QueryResultRow(default(ObjectIdValue), padding.Pad(leftQualified));
         }
     }
 

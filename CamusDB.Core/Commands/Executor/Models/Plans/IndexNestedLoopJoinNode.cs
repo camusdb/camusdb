@@ -13,10 +13,15 @@ using CamusDB.Core.SQLParser;
 namespace CamusDB.Core.CommandsExecutor.Models.Plans;
 
 /// <summary>
-/// Index nested-loop inner join: probe the right table via a secondary index per left row.
+/// Index nested-loop join: probe the right table via a secondary index per left row. For
+/// <see cref="JoinKind.LeftOuter"/> a left row whose probe returns no accepted row, or whose lookup
+/// value is NULL (never probed), is emitted once, padded with NULL right columns.
 /// </summary>
 public sealed class IndexNestedLoopJoinNode : PhysicalPlanNode
 {
+    /// <summary>Inner or left outer; the left input is the preserved side of an outer join.</summary>
+    public JoinKind Kind { get; init; } = JoinKind.Inner;
+
     public BoundTableSource RightSource { get; }
 
     public NodeAst OnPredicate { get; }

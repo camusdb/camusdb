@@ -276,8 +276,11 @@ internal sealed class JoinQueryPlanner
                 pushdown.ScanFiltersByAlias.TryGetValue(right.Alias, out NodeAst? rightFilter);
 
                 // Pre-extract equi-keys (no index required) — shared by both hash-join paths below.
+                // A left outer join keys the same way as an inner join: every operator keeps the
+                // left input as the preserved side, so index, hash and merge are all valid for it.
+                JoinKind kind = joinSource.Kind;
                 IReadOnlyList<JoinEquiKeyPair>? equiKeys = null;
-                bool hasEquiKeys = joinSource.Kind == JoinKind.Inner
+                bool hasEquiKeys = kind is JoinKind.Inner or JoinKind.LeftOuter
                     && JoinEquiJoinAnalyzer.TryExtractEquiKeys(right, joinSource.OnPredicate, bound, out equiKeys);
 
                 // Try to find an index match on the right side (INLJ candidate).
@@ -288,13 +291,13 @@ internal sealed class JoinQueryPlanner
                 // Test-only overrides — checked before any algorithm selection.
                 if (stats?.ForceNestedLoopForTesting == true)
                     return new NestedLoopJoinNode(left, right, joinSource.OnPredicate)
-                        { RightExecutionFilter = rightFilter };
+                        { RightExecutionFilter = rightFilter, Kind = kind };
 
                 if (hasEquiKeys && stats?.ForceHashJoinForTesting == true)
-                    return BuildHashJoinNode(left, right, joinSource.OnPredicate, equiKeys!, rightFilter, database, stats);
+                    return BuildHashJoinNode(left, right, joinSource.OnPredicate, equiKeys!, rightFilter, database, stats, kind);
 
                 if (hasEquiKeys && stats?.ForceMergeJoinForTesting == true)
-                    return BuildMergeJoinNode(left, right, joinSource.OnPredicate!, equiKeys!, rightFilter);
+                    return BuildMergeJoinNode(left, right, joinSource.OnPredicate!, equiKeys!, rightFilter, kind);
 
                 // Cost-based merge-join selection: check whether both sides have free index
                 // ordering before entering the index/hash branches; if yes, merge join beats
@@ -315,10 +318,10 @@ internal sealed class JoinQueryPlanner
                         long leftRows = EstimatePhysicalNodeRows(left, database, stats);
 
                         if (leftFree && rightFree && leftRows > MergeJoinPreferenceThreshold)
-                            return BuildMergeJoinNode(left, right, joinSource.OnPredicate!, equiKeys!, rightFilter);
+                            return BuildMergeJoinNode(left, right, joinSource.OnPredicate!, equiKeys!, rightFilter, kind);
 
                         if (ShouldPreferHashOverIndexNestedLoop(left, right, database, stats, rightFilter))
-                            return BuildHashJoinNode(left, right, joinSource.OnPredicate, equiKeys!, rightFilter, database, stats);
+                            return BuildHashJoinNode(left, right, joinSource.OnPredicate, equiKeys!, rightFilter, database, stats, kind);
                     }
 
                     return new IndexNestedLoopJoinNode(
@@ -330,6 +333,7 @@ internal sealed class JoinQueryPlanner
                         indexMatch.RightIndexColumn)
                     {
                         RightExecutionFilter = rightFilter,
+                        Kind = kind,
                     };
                 }
 
@@ -343,15 +347,16 @@ internal sealed class JoinQueryPlanner
                     {
                         long leftRows = EstimatePhysicalNodeRows(left, database, stats);
                         if (leftRows > MergeJoinPreferenceThreshold)
-                            return BuildMergeJoinNode(left, right, joinSource.OnPredicate!, equiKeys!, rightFilter);
+                            return BuildMergeJoinNode(left, right, joinSource.OnPredicate!, equiKeys!, rightFilter, kind);
                     }
 
-                    return BuildHashJoinNode(left, right, joinSource.OnPredicate, equiKeys!, rightFilter, database, stats);
+                    return BuildHashJoinNode(left, right, joinSource.OnPredicate, equiKeys!, rightFilter, database, stats, kind);
                 }
 
                 return new NestedLoopJoinNode(left, right, joinSource.OnPredicate)
                 {
                     RightExecutionFilter = rightFilter,
+                    Kind = kind,
                 };
             }
 
@@ -384,7 +389,8 @@ internal sealed class JoinQueryPlanner
         BoundJoinRightSource right,
         NodeAst onPredicate,
         IReadOnlyList<JoinEquiKeyPair> equiKeys,
-        NodeAst? rightFilter)
+        NodeAst? rightFilter,
+        JoinKind kind = JoinKind.Inner)
     {
         string[] leftKeys  = new string[equiKeys.Count];
         string[] rightKeys = new string[equiKeys.Count];
@@ -466,6 +472,7 @@ internal sealed class JoinQueryPlanner
 
         MergeJoinNode node = new(leftInput, right, onPredicate, leftKeys, rightKeys)
         {
+            Kind = kind,
             RightExecutionFilter = rightFilter,
             LeftIsOrdered  = true,  // left is always ordered: either free-ordering or SortNode
             RightIsOrdered = rightIsOrdered,
@@ -489,6 +496,13 @@ internal sealed class JoinQueryPlanner
     /// <summary>
     /// Returns true when <paramref name="outputOrdering"/> already covers
     /// <paramref name="keyOrdering"/> as an ascending leading prefix.
+    ///
+    /// <para>A leaf scan advertises bare column names, and its alias is the only alias the key can
+    /// carry, so a bare entry compares by bare name. An interior join advertises alias-qualified
+    /// names, and there the alias matters: an ordering on <c>a.id</c> does not cover a key on
+    /// <c>b.id</c>, even though both are called <c>id</c>. Comparing bare names there skipped the
+    /// sort a chained merge join needed, and the merge then walked an unsorted left side and
+    /// silently dropped (inner) or padded (outer) rows that had a match.</para>
     /// </summary>
     private static bool OutputOrderingCoversKeys(
         IReadOnlyList<QueryOrderBy>? outputOrdering,
@@ -501,9 +515,15 @@ internal sealed class JoinQueryPlanner
         {
             if (outputOrdering[i].Type != OrderType.Ascending)
                 return false;
-            if (!string.Equals(BareColumnName(outputOrdering[i].ColumnName),
-                               BareColumnName(keyOrdering[i].ColumnName),
-                               StringComparison.Ordinal))
+
+            string ordered = outputOrdering[i].ColumnName;
+            string key = keyOrdering[i].ColumnName;
+
+            bool covers = ordered.Contains('.') && key.Contains('.')
+                ? string.Equals(ordered, key, StringComparison.OrdinalIgnoreCase)
+                : string.Equals(BareColumnName(ordered), BareColumnName(key), StringComparison.Ordinal);
+
+            if (!covers)
                 return false;
         }
 
@@ -576,6 +596,9 @@ internal sealed class JoinQueryPlanner
     /// <summary>
     /// Constructs a <see cref="HashJoinNode"/> from pre-extracted equi-keys, choosing the
     /// optimal build side. Shared by the indexed and unindexed hash-join selection paths.
+    /// A left outer join pins the build side to the right input and never consults
+    /// <see cref="ChooseBuildSide"/>: the preserved side must be the probe so an unmatched
+    /// probe row can be padded in stream order (see <see cref="HashJoinNode"/>).
     /// </summary>
     private HashJoinNode BuildHashJoinNode(
         PhysicalPlanNode left,
@@ -584,7 +607,8 @@ internal sealed class JoinQueryPlanner
         IReadOnlyList<JoinEquiKeyPair> equiKeys,
         NodeAst? rightFilter,
         DatabaseDescriptor database,
-        StatisticsManager? stats)
+        StatisticsManager? stats,
+        JoinKind kind = JoinKind.Inner)
     {
         string[] probeKeys = new string[equiKeys.Count];
         string[] buildKeys = new string[equiKeys.Count];
@@ -595,10 +619,13 @@ internal sealed class JoinQueryPlanner
             buildKeys[i] = equiKeys[i].RightColumnName;
         }
 
-        HashJoinBuildSide buildSide = ChooseBuildSide(left, right, database, stats, rightFilter);
+        HashJoinBuildSide buildSide = kind == JoinKind.LeftOuter
+            ? HashJoinBuildSide.Right
+            : ChooseBuildSide(left, right, database, stats, rightFilter);
 
         return new HashJoinNode(left, right, onPredicate, probeKeys, buildKeys)
         {
+            Kind = kind,
             BuildExecutionFilter = rightFilter,
             BuildSide = buildSide,
         };
@@ -610,17 +637,25 @@ internal sealed class JoinQueryPlanner
     /// by <see cref="FindIndexForJoinKey"/>, right via <see cref="FindIndexForJoinKey"/>.
     /// Used by cost-based merge-join selection to detect the "both free → merge beats hash
     /// and INLJ" case without calling <see cref="BuildMergeJoinNode"/> speculatively.
+    ///
+    /// <para>The output-ordering check uses the same alias-qualified left keys that
+    /// <see cref="BuildMergeJoinNode"/> uses, so selection and construction agree. With bare
+    /// keys an interior join ordered on <c>a.x</c> counted as free ordering for a key on
+    /// <c>b.x</c>; merge was then selected without costing, and construction, which does
+    /// compare the aliases, inserted a sort of the whole intermediate result. Bare names are
+    /// used only to look up an index on a base-table leaf, whose alias is the only one the
+    /// key can carry.</para>
     /// </summary>
     private static (bool LeftFree, bool RightFree) CheckFreeOrdering(
         PhysicalPlanNode left,
         BoundJoinRightSource right,
         IReadOnlyList<JoinEquiKeyPair> equiKeys)
     {
+        string[] leftKeys      = equiKeys.Select(k => k.LeftLookupColumn).ToArray();
         string[] leftBareKeys  = equiKeys.Select(k => BareColumnName(k.LeftLookupColumn)).ToArray();
         string[] rightBareKeys = equiKeys.Select(k => k.RightColumnName).ToArray();
 
-        List<QueryOrderBy> leftKeyOrdering  = BuildKeyOrdering(leftBareKeys);
-        List<QueryOrderBy> rightKeyOrdering = BuildKeyOrdering(rightBareKeys);
+        List<QueryOrderBy> leftKeyOrdering = BuildKeyOrdering(leftKeys);
 
         bool leftFree = OutputOrderingCoversKeys(left.OutputOrdering, leftKeyOrdering);
         if (!leftFree && left is TableScanNode { Source: TableScanSource.PrimaryRows, BoundSource: not null } leftScan)

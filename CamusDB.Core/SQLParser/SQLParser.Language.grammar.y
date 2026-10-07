@@ -44,6 +44,10 @@
 %token TCOLUMNS TTABLES TDESCRIBE TDATABASES TDATABASE TAT LBRACE RBRACE TINDEXES TLIKE TILIKE TDEFAULT TIF TEXISTS TON TIN TIS
 %token TREGEXMATCH TREGEXIMATCH TREGEXNOTMATCH TREGEXNOTIMATCH
 %token TBEGIN TSTART TTRANSACTION TROLLBACK TCOMMIT TJOIN TINNER TDOT THAVING TDISTINCT TBETWEEN TEXPLAIN
+/* LEFT, RIGHT, OUTER and CROSS are reserved for the join forms, as they are in PostgreSQL. FULL,
+   NATURAL and USING are not: FULL is already a plain identifier that the foreign-key MATCH FULL
+   clause validates in its parse action, and the other two have no join form here yet. */
+%token TLEFT TRIGHT TOUTER TCROSS
 %token TRENAME TTO TANALYZE TBRANCH TBRANCHES TANCESTORS TEVICT TFORCE TRELINK TORPHAN
 %token TTRUNCATE TWITHOUT
 %token TCASE TWHEN TTHEN TELSE TEND
@@ -1080,10 +1084,30 @@ from_clause : explicit_join_from
             | table_reference { $$.n = $1.n; $$.s = $1.s; }
             ;
 
-explicit_join_from : table_reference join_op table_reference TON condition
-                   { $$.n = new(NodeType.Join, $1.n, $3.n, $5.n, null, null, null, null, null); }
+/* A join node carries its kind as a fixed word in yytext (see JoinAstKind); a null yytext reads
+   as an inner join, so a node built by code that predates the outer-join forms is still inner.
+   A cross join has no ON clause, so its node carries a null extendedOne.
+
+   The semantic value .s of a table_reference, and of a chain, is the bare implicit alias of the
+   table that sits before the next keyword ("a full JOIN b" -> "full"), or null when the alias was
+   written with AS, was quoted, or is absent. FULL is a plain identifier (MATCH FULL needs it), so
+   "a FULL JOIN b" lexes as that alias form; the bare-JOIN productions hand the word to
+   JoinAstKind.RejectFullJoin, which refuses it. An explicit or quoted alias is never refused,
+   and neither is a bare alias before INNER, LEFT or RIGHT, where no FULL form exists. */
+explicit_join_from : table_reference TJOIN table_reference TON condition
+                   { JoinAstKind.RejectFullJoin($1.s); $$.n = new(NodeType.Join, $1.n, $3.n, $5.n, null, null, null, null, JoinAstKind.Write(JoinAstKind.Kind.Inner)); $$.s = $3.s; }
+                   | table_reference join_op table_reference TON condition
+                   { $$.n = new(NodeType.Join, $1.n, $3.n, $5.n, null, null, null, null, $2.s); $$.s = $3.s; }
+                   | explicit_join_from TJOIN table_reference TON condition
+                   { JoinAstKind.RejectFullJoin($1.s); $$.n = new(NodeType.Join, $1.n, $3.n, $5.n, null, null, null, null, JoinAstKind.Write(JoinAstKind.Kind.Inner)); $$.s = $3.s; }
                    | explicit_join_from join_op table_reference TON condition
-                   { $$.n = new(NodeType.Join, $1.n, $3.n, $5.n, null, null, null, null, null); }
+                   { $$.n = new(NodeType.Join, $1.n, $3.n, $5.n, null, null, null, null, $2.s); $$.s = $3.s; }
+                   | table_reference TCROSS TJOIN table_reference
+                   { $$.n = new(NodeType.Join, $1.n, $4.n, null, null, null, null, null, JoinAstKind.Write(JoinAstKind.Kind.Cross)); $$.s = $4.s; }
+                   | explicit_join_from TCROSS TJOIN table_reference
+                   { $$.n = new(NodeType.Join, $1.n, $4.n, null, null, null, null, null, JoinAstKind.Write(JoinAstKind.Kind.Cross)); $$.s = $4.s; }
+                   | table_reference TOUTER TJOIN table_reference TON condition
+                   { JoinAstKind.RejectOuterJoinWithoutSide($1.s); }
                    ;
 
 comma_join_from : table_reference TCOMMA comma_table_list
@@ -1095,29 +1119,37 @@ comma_table_list : comma_table_list TCOMMA table_reference
                  | table_reference { $$.n = $1.n; $$.s = $1.s; }
                  ;
 
-join_op : TJOIN
-        | TINNER TJOIN
+join_op : TINNER TJOIN { $$.s = JoinAstKind.Write(JoinAstKind.Kind.Inner); }
+        | TLEFT TJOIN { $$.s = JoinAstKind.Write(JoinAstKind.Kind.Left); }
+        | TLEFT TOUTER TJOIN { $$.s = JoinAstKind.Write(JoinAstKind.Kind.Left); }
+        | TRIGHT TJOIN { $$.s = JoinAstKind.Write(JoinAstKind.Kind.Right); }
+        | TRIGHT TOUTER TJOIN { $$.s = JoinAstKind.Write(JoinAstKind.Kind.Right); }
         ;
 
+/* .s carries the bare implicit alias word (see explicit_join_from), null for every other form. */
 table_reference : table_name opt_table_alias opt_table_hint
-                { $$.n = new(NodeType.TableReference, $1.n, $2.n, $3.n, null, null, null, null, null); }
-                | derived_table_reference
+                { $$.n = new(NodeType.TableReference, $1.n, $2.n, $3.n, null, null, null, null, null); $$.s = $2.s; }
+                | derived_table_reference { $$.n = $1.n; $$.s = $1.s; }
                 ;
 
 derived_table_reference : query_expr derived_table_alias
-                { $$.n = new(NodeType.DerivedTableReference, $1.n, $2.n, null, null, null, null, null, null); }
+                { $$.n = new(NodeType.DerivedTableReference, $1.n, $2.n, null, null, null, null, null, null); $$.s = $2.s; }
                 ;
 
-derived_table_alias : TAS any_identifier { $$.n = $2.n; }
-                    | any_identifier { $$.n = $1.n; }
+derived_table_alias : TAS any_identifier { $$.n = $2.n; $$.s = null; }
+                    | identifier { $$.n = $1.n; $$.s = $1.n.yytext; }
+                    | escaped_identifier { $$.n = $1.n; $$.s = null; }
+                    | qualified_identifier { $$.n = $1.n; $$.s = null; }
                     ;
 
 table_name : any_identifier { $$.n = $1.n; $$.s = $1.s; }
            ;
 
-opt_table_alias : TAS any_identifier { $$.n = $2.n; }
-                | any_identifier { $$.n = $1.n; }
-                | { $$.n = null; }
+opt_table_alias : TAS any_identifier { $$.n = $2.n; $$.s = null; }
+                | identifier { $$.n = $1.n; $$.s = $1.n.yytext; }
+                | escaped_identifier { $$.n = $1.n; $$.s = null; }
+                | qualified_identifier { $$.n = $1.n; $$.s = null; }
+                | { $$.n = null; $$.s = null; }
                 ;
 
 opt_table_hint : TAT LBRACE identifier TEQUALS identifier RBRACE

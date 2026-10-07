@@ -104,8 +104,10 @@ internal static class QueryShapeComputer
                 break;
 
             case JoinSource js:
+                // The kind is part of the shape: a left outer and an inner join over the same text
+                // plan differently and must never share a plan-cache entry.
                 AppendSource(js.Left, sb);
-                sb.Append(" INNER_JOIN ");
+                sb.Append(js.Kind == JoinKind.LeftOuter ? " LEFT_OUTER_JOIN " : " INNER_JOIN ");
                 AppendSource(js.Right, sb);
                 sb.Append(" ON ");
                 AppendExpr(js.OnPredicate, sb);

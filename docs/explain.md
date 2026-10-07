@@ -102,10 +102,10 @@ One row is emitted per physical plan node, in depth-first order (parent before c
 | `semi-join`              | `IN (subquery)` rewritten to a semi-join over an indexed inner column | `outer=<col>, inner=<table>.<col>, index=<name>` |
 | `anti-join`              | `NOT IN (subquery)` over a **NOT NULL** indexed inner column | `outer=<col>, inner=<table>.<col>, index=<name>` |
 | `null-aware-anti-join`   | `NOT IN (subquery)` over a **nullable** indexed inner column (SQL three-valued semantics) | `outer=<col>, inner=<table>.<col>, index=<name>` |
-| `nested-loop-join`       | Inner join without a usable index on the right side | `on=<expr>, right=<alias>` |
-| `index-nested-loop-join` | Inner join where the right side's join key is indexed | `on=<expr>, index=<name>, left=<col>, right=<col>` |
-| `hash-join`              | Inner equi-join using an in-memory hash table; chosen over INLJ when the outer side is large relative to the inner | `on=<left>=<right>, build=<alias>` (build-filter appended when a pushed-down filter is present) |
-| `merge-join`             | Inner equi-join using a streaming two-pointer merge; chosen when both sides have free index ordering on the join key | `on=<left>=<right>` (right-filter appended when present) |
+| `nested-loop-join`       | Join without a usable index on the right side | `on=<expr>, right=<alias>` |
+| `index-nested-loop-join` | Join where the right side's join key is indexed | `on=<expr>, index=<name>, left=<col>, right=<col>` |
+| `hash-join`              | Equi-join using an in-memory hash table; chosen over INLJ when the outer side is large relative to the inner | `on=<left>=<right>, build=<alias>` (build-filter appended when a pushed-down filter is present) |
+| `merge-join`             | Equi-join using a streaming two-pointer merge; chosen when both sides have free index ordering on the join key | `on=<left>=<right>` (right-filter appended when present) |
 | `derived-table-scan`     | Subquery in the `FROM` clause | `alias=<alias>` |
 | `constant-source`        | The single synthetic row of a **FROM-less** `SELECT` (no table access) | `1 row` |
 
@@ -116,7 +116,17 @@ Notes:
 - A `distinct` row reports `streaming: true` when the input arrives in index order covering
   all (NOT NULL) DISTINCT columns; otherwise `hash`.
 - `hash-join` `build=<alias>` names the side materialised into the in-memory hash table; the
-  planner picks the smaller estimated side as the build side to minimise memory.
+  planner picks the smaller estimated side as the build side to minimise memory. For a left outer
+  join the build side is always the right table, so the preserved side is the probe.
+- Every join node appends `kind=left-outer` for a `LEFT [OUTER] JOIN` (a `RIGHT JOIN` is executed as
+  a left join with the operands swapped). An inner join renders no kind. Example:
+
+  ```text
+  hash-join(on=e.game_id=id, build=g, kind=left-outer)
+    table-scan(table=environments)
+  ```
+
+  See [`docs/joins.md`](./joins.md) for the contract and the pushdown rule the plan reflects.
 - `merge-join` streams both inputs when both arrive pre-ordered (ForcedIndex scan or an upstream
   sort); only the current equal-key run is buffered — O(run size) memory, not O(n+m).
 

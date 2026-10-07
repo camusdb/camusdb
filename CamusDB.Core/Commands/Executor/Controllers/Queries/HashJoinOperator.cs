@@ -35,6 +35,13 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 /// <para>The broadcast decision happens after the build exists, so it gates on the build's
 /// <b>actual</b> row count rather than a cardinality estimate — interior-node estimates are
 /// constants on a multi-way join, so an estimate would be worthless here.</para>
+///
+/// <para>A left outer join always builds the right side and probes the left: the preserved side
+/// streams, so a probe row with a NULL key, no bucket, or no bucket row the <c>ON</c> predicate
+/// accepts is padded at once (<see cref="OuterJoinPadding"/>), in stream order, with no matched
+/// flag on the build rows. The planner never pairs the kind with a left build; this operator
+/// refuses that pairing rather than emit inner-join rows for it. The broadcast probe is declined
+/// by its planner for the kind, and both fallbacks carry the kind through.</para>
 /// </summary>
 internal sealed class HashJoinOperator
 {
@@ -184,6 +191,18 @@ internal sealed class HashJoinOperator
     {
         HashJoinBuildSide buildSide = joinNode.BuildSide;
 
+        if (joinNode.Kind == JoinKind.LeftOuter && buildSide != HashJoinBuildSide.Right)
+        {
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInternalOperation,
+                "A left outer hash join must build the right side: the preserved left side is the probe");
+        }
+
+        // The dispatcher passes no enumerator token, so without this the Grace path below and the
+        // probe loop would see a default token and run to the end after the request was abandoned.
+        using CancellationTokenSource? linked = JoinCancellation.Link(plan, ct);
+        CancellationToken token = JoinCancellation.Effective(plan, linked);
+
         Dictionary<CompositeColumnValue, List<IReadOnlyDictionary<string, ColumnValue>>>? hashTable =
             await BuildHashTable(joinNode, plan, buildSide).ConfigureAwait(false);
 
@@ -194,7 +213,7 @@ internal sealed class HashJoinOperator
             // Both paths re-scan the build side from scratch (~2× cost on this rare path).
             if (plan.Database.Options.SpillEnabled)
             {
-                await foreach (QueryResultRow row in graceHashJoin.GraceHashJoinAsync(joinNode, plan, ct).ConfigureAwait(false))
+                await foreach (QueryResultRow row in graceHashJoin.GraceHashJoinAsync(joinNode, plan, token).ConfigureAwait(false))
                     yield return row;
                 yield break;
             }
@@ -203,6 +222,7 @@ internal sealed class HashJoinOperator
             NestedLoopJoinNode fallback = new(joinNode.Input!, joinNode.BuildSource, joinNode.OnPredicate!)
             {
                 RightExecutionFilter = joinNode.BuildExecutionFilter,
+                Kind = joinNode.Kind,
             };
 
             await foreach (QueryResultRow row in nestedLoopJoin.ExecuteNestedLoopJoin(fallback, plan).ConfigureAwait(false))
@@ -216,6 +236,9 @@ internal sealed class HashJoinOperator
         RowLayout? joinLayout = null;
         RowLayout? qualifiedLeftLayout = null;
         Dictionary<string, int>? rightOrdinalMap = null;
+        OuterJoinPadding? padding = joinNode.Kind == JoinKind.LeftOuter
+            ? await OuterJoinPadding.CreateAsync(joinNode.BuildSource, plan).ConfigureAwait(false)
+            : null;
 
         if (buildSide == HashJoinBuildSide.Right)
         {
@@ -244,6 +267,9 @@ internal sealed class HashJoinOperator
 
             await foreach (QueryResultRow leftRow in tree.ExecuteNode(joinNode.Input!, plan).ConfigureAwait(false))
             {
+                // A probe row read from a materialized input passes no scan that would observe the token.
+                token.ThrowIfCancellationRequested();
+
                 IReadOnlyDictionary<string, ColumnValue> leftQualified;
                 string leftAlias = JoinAliasMetadata.ResolveLeftAlias(joinNode.Input!, leftRow);
                 if (leftRow.Row is QueryRow leftQr)
@@ -256,10 +282,21 @@ internal sealed class HashJoinOperator
                     leftQualified = QueryRowMerger.QualifyRow(leftRow.Row, leftAlias);
                 }
 
-                if (!JoinKeyExtractor.TryExtractKeyInto(leftQualified, probeKeys, probeKeyScratch)) continue;
+                if (padding is not null)
+                    (joinLayout, rightOrdinalMap) = padding.Bind(leftQualified);
 
-                if (!probeLookup.TryGetValue(probeKeyScratch.AsSpan(), out List<IReadOnlyDictionary<string, ColumnValue>>? bucket))
+                // A NULL key or an absent bucket matches nothing: dropped for an inner join,
+                // padded once for a left outer join.
+                if (!JoinKeyExtractor.TryExtractKeyInto(leftQualified, probeKeys, probeKeyScratch)
+                    || !probeLookup.TryGetValue(probeKeyScratch.AsSpan(), out List<IReadOnlyDictionary<string, ColumnValue>>? bucket))
+                {
+                    if (padding is not null)
+                        yield return new QueryResultRow(default(ObjectIdValue), padding.Pad(leftQualified));
+
                     continue;
+                }
+
+                bool matched = false;
 
                 foreach (IReadOnlyDictionary<string, ColumnValue> buildRow in bucket)
                 {
@@ -270,8 +307,12 @@ internal sealed class HashJoinOperator
                     if (!await services.Filterer.MeetWhereAsync(joinNode.OnPredicate!, merged, ticket, plan.Database).ConfigureAwait(false))
                         continue;
 
+                    matched = true;
                     yield return new QueryResultRow(default(ObjectIdValue), merged);
                 }
+
+                if (padding is not null && !matched)
+                    yield return new QueryResultRow(default(ObjectIdValue), padding.Pad(leftQualified));
             }
         }
         else

@@ -22,7 +22,9 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 ///
 /// <para>The left row is qualified once per outer iteration and the join layout is built from the
 /// first emitted pair, so the per-row cost is the right-side scan and the predicate, not layout
-/// construction.</para>
+/// construction. A left outer join instead takes its layout from <see cref="OuterJoinPadding"/>,
+/// which knows the right columns before any right row exists, and pads a left row whose inner
+/// scan ended with no accepted pair.</para>
 /// </summary>
 internal sealed class NestedLoopJoinOperator
 {
@@ -48,6 +50,9 @@ internal sealed class NestedLoopJoinOperator
         RowLayout? joinLayout = null;
         RowLayout? qualifiedLeftLayout = null;
         Dictionary<string, int>? rightOrdinalMap = null;
+        OuterJoinPadding? padding = joinNode.Kind == JoinKind.LeftOuter
+            ? await OuterJoinPadding.CreateAsync(joinNode.RightSource, plan).ConfigureAwait(false)
+            : null;
 
         await foreach (QueryResultRow leftRow in tree.ExecuteNode(joinNode.Input!, plan).ConfigureAwait(false))
         {
@@ -63,6 +68,11 @@ internal sealed class NestedLoopJoinOperator
                 leftQualified = QueryRowMerger.QualifyRow(leftRow.Row, leftAlias);
             }
 
+            if (padding is not null)
+                (joinLayout, rightOrdinalMap) = padding.Bind(leftQualified);
+
+            bool matched = false;
+
             await foreach (QueryResultRow rightRow in scanner.ScanJoinRightSource(
                 joinNode.RightSource,
                 joinNode.RightExecutionFilter,
@@ -75,8 +85,12 @@ internal sealed class NestedLoopJoinOperator
                 if (!await services.Filterer.MeetWhereAsync(joinNode.OnPredicate, merged, ticket, plan.Database).ConfigureAwait(false))
                     continue;
 
+                matched = true;
                 yield return new QueryResultRow(default(ObjectIdValue), merged);
             }
+
+            if (padding is not null && !matched)
+                yield return new QueryResultRow(default(ObjectIdValue), padding.Pad(leftQualified));
         }
     }
 }

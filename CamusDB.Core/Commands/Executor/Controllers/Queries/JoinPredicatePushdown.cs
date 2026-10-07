@@ -14,6 +14,15 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 
 /// <summary>
 /// Splits join WHERE clauses into per-source scan filters and post-join residuals.
+///
+/// <para>A single-alias conjunct is pushed to that alias's scan only when the alias is not
+/// <b>null-extended</b>: an alias is null-extended when it sits in the right subtree of any
+/// <see cref="JoinKind.LeftOuter"/> join on its path to the root. Pushing a conjunct below the
+/// outer join on that side would filter rows before padding and turn the join back into an inner
+/// join with no error; a conjunct on the preserved side filters the same rows either way, so it is
+/// pushed as for an inner join. Every multi-alias conjunct stays post-join, and a join kind this
+/// class does not know gets no pushdown at all (<see cref="AnalyzeWithoutPushdown"/>), which is
+/// always correct and never optimal.</para>
 /// </summary>
 internal static class JoinPredicatePushdown
 {
@@ -27,12 +36,9 @@ internal static class JoinPredicatePushdown
 
     public static Result Analyze(BoundSelectQuery bound, NodeAst? where)
     {
-        // Pushdown below a join is only sound for INNER joins: pushing a WHERE conjunct into
-        // the null-extending side of an outer join filters rows before null-extension and
-        // changes the result (and removing it from the post-join filter loses the NULL checks).
-        // Only Inner exists today; this guard makes the first outer-join implementation fail
-        // safe (everything stays post-join) instead of silently returning wrong rows.
-        if (ContainsNonInnerJoin(bound.Query.Source))
+        HashSet<string> nullExtended = new(StringComparer.OrdinalIgnoreCase);
+
+        if (!TryCollectNullExtendedAliases(bound.Query.Source, nullExtended, underNullExtendingSide: false))
             return AnalyzeWithoutPushdown(bound, where);
 
         Dictionary<string, List<NodeAst>> conjunctsByAlias = new(StringComparer.OrdinalIgnoreCase);
@@ -54,7 +60,7 @@ internal static class JoinPredicatePushdown
             {
                 HashSet<string> referencedAliases = CollectReferencedAliases(conjunct, bound);
 
-                if (referencedAliases.Count == 1)
+                if (referencedAliases.Count == 1 && !nullExtended.Contains(referencedAliases.First()))
                     conjunctsByAlias[referencedAliases.First()].Add(conjunct);
                 else
                     postJoinConjuncts.Add(conjunct);
@@ -73,17 +79,40 @@ internal static class JoinPredicatePushdown
         };
     }
 
-    private static bool ContainsNonInnerJoin(QuerySource source) => source switch
+    /// <summary>
+    /// Walks the source tree and adds every alias that is null-extended (see the class summary).
+    /// Returns false when a join kind is not one this class knows how to place, so the caller can
+    /// fall back to no pushdown at all instead of guessing.
+    /// </summary>
+    private static bool TryCollectNullExtendedAliases(QuerySource source, HashSet<string> nullExtended, bool underNullExtendingSide)
     {
-        JoinSource js => js.Kind != JoinKind.Inner
-                         || ContainsNonInnerJoin(js.Left)
-                         || ContainsNonInnerJoin(js.Right),
-        _ => false,
-    };
+        switch (source)
+        {
+            case TableSource ts:
+                if (underNullExtendingSide)
+                    nullExtended.Add(ts.Alias ?? ts.TableName);
+                return true;
+
+            case DerivedTableSource ds:
+                if (underNullExtendingSide)
+                    nullExtended.Add(ds.Alias);
+                return true;
+
+            case JoinSource js:
+                if (js.Kind is not (JoinKind.Inner or JoinKind.LeftOuter))
+                    return false;
+
+                return TryCollectNullExtendedAliases(js.Left, nullExtended, underNullExtendingSide)
+                    && TryCollectNullExtendedAliases(js.Right, nullExtended, underNullExtendingSide || js.Kind == JoinKind.LeftOuter);
+
+            default:
+                return false;
+        }
+    }
 
     /// <summary>
-    /// Fallback for join trees containing a non-inner join: no per-source scan filters are
-    /// derived (every alias maps to null = no pushed filter) and the whole WHERE stays a
+    /// Fallback for a join tree with a kind the walker does not know: no per-source scan filters
+    /// are derived (every alias maps to null = no pushed filter) and the whole WHERE stays a
     /// post-join residual — always correct, never optimal.
     /// </summary>
     private static Result AnalyzeWithoutPushdown(BoundSelectQuery bound, NodeAst? where)

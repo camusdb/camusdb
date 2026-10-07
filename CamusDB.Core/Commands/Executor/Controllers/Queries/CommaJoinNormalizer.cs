@@ -37,6 +37,24 @@ internal static class CommaJoinNormalizer
         return HoistEquiJoinPredicates(sources, where);
     }
 
+    /// <summary>
+    /// The hoist for a source list that was collected elsewhere, in declared order. A FROM made of
+    /// cross joins only takes this entry so that it gets exactly the comma form's tree and plan.
+    /// </summary>
+    public static (QuerySource Source, BoundPredicate? Where) NormalizeSources(
+        IReadOnlyList<QuerySource> sources,
+        BoundPredicate? where)
+    {
+        if (sources.Count < 2)
+        {
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInput,
+                "Cross join requires at least two table sources");
+        }
+
+        return HoistEquiJoinPredicates(sources, where);
+    }
+
     private static List<QuerySource> CollectCommaJoinSources(
         NodeAst commaJoinAst,
         Func<NodeAst, QuerySource> createQuerySource)
