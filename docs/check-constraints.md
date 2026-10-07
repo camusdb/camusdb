@@ -196,6 +196,10 @@ every existing row. If any row violates it, the `ALTER` is rejected (with `CADB0
 constraint is removed again. This matches PostgreSQL. `NOT VALID` (add without scanning) is a
 deferred follow-up, not yet supported.
 
+An `ALTER` that fails for any other reason (for example, a timeout while it waits for the other nodes)
+also removes the constraint. A failed `ALTER` therefore leaves no constraint, and you can run the same
+statement again.
+
 The check is **enforced before the scan starts**. While the scan runs, an INSERT or UPDATE that
 breaks the new check is refused with `CADB0303`, even if the `ALTER` fails later. This order is what
 makes the result correct: a write that commits while the scan runs was checked by its own statement,
@@ -385,10 +389,15 @@ Two paths, selected by `isClusterMode`:
 - **Cluster:** record a coordinator job (`SchemaElementKind.Check` / `SchemaElementKind.NotNull`,
   keyed by the constraint name), replicate the delta (below), then
   `SchemaChangeCoordinator.ValidateRowConstraintAsync` waits until every live node settled its
-  earlier writers, scans, and deletes the job. On a violation it replicates the removal first
-  (`DropCheckConstraint`, or `SetColumnNotNull` with `NotNull = false`). A new schema leader that
-  finds the job validates again (`ResumeJobsAsync`), so a constraint that is enforced but never proven
-  cannot stay after a crash. While the job runs, the constraint is visible in `SHOW CREATE TABLE`.
+  earlier writers, scans, and deletes the job. On any failure (a violation, a timeout, a lost
+  leadership, or a replication that committed but whose acknowledgements timed out) it replicates the
+  removal (`DropCheckConstraint`, or `SetColumnNotNull` with `NotNull = false`) and then deletes the
+  job (`SchemaChangeCoordinator.TakeBackRowConstraintAsync`). The job stays only if the removal also
+  fails. A new schema leader that finds the job validates again (`ResumeJobsAsync`), so a constraint
+  that is enforced but never proven cannot stay after a crash. A job that spent `MaxResumeAttempts`
+  is abandoned, and its constraint is removed, not kept. A CHECK or NOT NULL has no element state that
+  would show that it was never proven. While the job runs, the constraint is visible in
+  `SHOW CREATE TABLE`.
 
 ### Cluster / replication
 

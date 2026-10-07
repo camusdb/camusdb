@@ -126,6 +126,52 @@ internal static class RowConstraintValidationScenarios
     }
 
     /// <summary>
+    /// A read that fails with an error that is not a violation (a timeout, a lost leadership) also takes
+    /// the CHECK back. The statement reports that error, so a constraint left in place would be enforced
+    /// over unproven rows, and the same statement could not run again because its name would be taken.
+    /// </summary>
+    public static async Task AddCheckWhoseReadFailsLeavesNoConstraint(CommandExecutor executor, string dbname)
+    {
+        await CreateItems(executor, dbname, rows: 3);
+
+        CamusDBException exception = Assert.ThrowsAsync<CamusDBException>(async () =>
+            await WithHook(executor, () => throw InjectedReadFailure(), () => Ddl(executor, dbname, AddCheck)))!;
+
+        Assert.AreEqual(CamusDBErrorCodes.InvalidInternalOperation, exception.Code);
+        Assert.IsFalse((await Table(executor, dbname)).CheckConstraints?.Exists(c => c.Name == "items_price_pos") ?? false);
+        Assert.IsEmpty(await executor.Catalogs.LoadCoordinatorJobsAsync(await executor.OpenDatabase(dbname)));
+        await Dml(executor, dbname, "INSERT INTO items (id, price) VALUES (50, -7)");
+
+        // The same statement runs again once the rows are fixed.
+        await Dml(executor, dbname, "DELETE FROM items WHERE price <= 0");
+        await Ddl(executor, dbname, AddCheck);
+        await ExpectDml(executor, dbname, "INSERT INTO items (id, price) VALUES (51, 0)", CamusDBErrorCodes.CheckConstraintViolation);
+    }
+
+    /// <summary>The same failure for SET NOT NULL: the column is nullable again and has no constraint name.</summary>
+    public static async Task SetNotNullWhoseReadFailsLeavesTheColumnNullable(CommandExecutor executor, string dbname)
+    {
+        await CreateItems(executor, dbname, rows: 3);
+
+        CamusDBException exception = Assert.ThrowsAsync<CamusDBException>(async () =>
+            await WithHook(executor, () => throw InjectedReadFailure(), () => Ddl(executor, dbname, SetNotNull)))!;
+
+        Assert.AreEqual(CamusDBErrorCodes.InvalidInternalOperation, exception.Code);
+        TableColumnSchema column = await Column(executor, dbname);
+        Assert.IsFalse(column.NotNull);
+        Assert.IsNull(column.NotNullConstraintName);
+        Assert.IsEmpty(await executor.Catalogs.LoadCoordinatorJobsAsync(await executor.OpenDatabase(dbname)));
+        await Dml(executor, dbname, "INSERT INTO items (id, price) VALUES (50, NULL)");
+
+        await Dml(executor, dbname, "DELETE FROM items WHERE price IS NULL");
+        await Ddl(executor, dbname, SetNotNull);
+        Assert.IsTrue((await Column(executor, dbname)).NotNull);
+    }
+
+    internal static CamusDBException InjectedReadFailure() =>
+        new(CamusDBErrorCodes.InvalidInternalOperation, "Injected failure of the row read");
+
+    /// <summary>
     /// SET NOT NULL on a column that is already NOT NULL reads no row and takes the generated name. A
     /// failure path that made it nullable would be wrong here, so the flag must stay.
     /// </summary>
@@ -270,6 +316,8 @@ public sealed class TestRowConstraintValidationOrder : BaseTest
     [Test] public async Task SetNotNullOverANullRowLeavesTheColumnNullable() => await Run(RowConstraintValidationScenarios.SetNotNullOverANullRowLeavesTheColumnNullable);
     [Test] public async Task AddCheckOverAViolatingRowRemovesTheConstraint() => await Run(RowConstraintValidationScenarios.AddCheckOverAViolatingRowRemovesTheConstraint);
     [Test] public async Task SetNotNullOnANotNullColumnOnlyRenames() => await Run(RowConstraintValidationScenarios.SetNotNullOnANotNullColumnOnlyRenames);
+    [Test] public async Task AddCheckWhoseReadFailsLeavesNoConstraint() => await Run(RowConstraintValidationScenarios.AddCheckWhoseReadFailsLeavesNoConstraint);
+    [Test] public async Task SetNotNullWhoseReadFailsLeavesTheColumnNullable() => await Run(RowConstraintValidationScenarios.SetNotNullWhoseReadFailsLeavesTheColumnNullable);
 
     [Test]
     public async Task ConcurrentViolatingUpdatesNeverSurviveTheAlter()
@@ -302,6 +350,8 @@ public sealed class TestRowConstraintValidationOrderCluster : SharedNodeBaseTest
     [Test] public async Task SetNotNullOverANullRowLeavesTheColumnNullable() => await Run(RowConstraintValidationScenarios.SetNotNullOverANullRowLeavesTheColumnNullable);
     [Test] public async Task AddCheckOverAViolatingRowRemovesTheConstraint() => await Run(RowConstraintValidationScenarios.AddCheckOverAViolatingRowRemovesTheConstraint);
     [Test] public async Task SetNotNullOnANotNullColumnOnlyRenames() => await Run(RowConstraintValidationScenarios.SetNotNullOnANotNullColumnOnlyRenames);
+    [Test] public async Task AddCheckWhoseReadFailsLeavesNoConstraint() => await Run(RowConstraintValidationScenarios.AddCheckWhoseReadFailsLeavesNoConstraint);
+    [Test] public async Task SetNotNullWhoseReadFailsLeavesTheColumnNullable() => await Run(RowConstraintValidationScenarios.SetNotNullWhoseReadFailsLeavesTheColumnNullable);
 
     /// <summary>
     /// A leader stopped after the CHECK replicated and before it read the rows: the constraint is
@@ -376,12 +426,73 @@ public sealed class TestRowConstraintValidationOrderCluster : SharedNodeBaseTest
         Assert.IsEmpty(await executor.Catalogs.LoadCoordinatorJobsAsync(database));
     }
 
+    /// <summary>
+    /// A resumed job whose read fails with an error that is not a violation removes the constraint and
+    /// deletes the job. Left in place, the constraint would stay enforced and unproven until the next
+    /// leader change, which may never come.
+    /// </summary>
+    [Test]
+    public async Task ResumedJobWhoseReadFailsRemovesTheConstraint()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+        await RowConstraintValidationScenarios.CreateItems(executor, dbname, rows: 3);
+        string tableId = (await RowConstraintValidationScenarios.Table(executor, dbname)).Id;
+
+        await PersistJob(executor, database, tableId, "items_price_pos", SchemaElementKind.Check);
+        await executor.Catalogs.ReplicateAddCheckConstraintAsync(database, "items", "items_price_pos", "price > 0", ["price"]);
+
+        SchemaChangeCoordinator coordinator = new(executor.Catalogs)
+        {
+            RowConstraintValidationAsync = (_, _, _, _) => throw RowConstraintValidationScenarios.InjectedReadFailure()
+        };
+
+        await coordinator.ResumeJobsAsync(database);
+
+        Assert.IsFalse((await RowConstraintValidationScenarios.Table(executor, dbname)).CheckConstraints?.Exists(c => c.Name == "items_price_pos") ?? false);
+        Assert.IsEmpty(await executor.Catalogs.LoadCoordinatorJobsAsync(database));
+    }
+
+    /// <summary>
+    /// A job that spent its resume attempts is abandoned without a read, and its constraint is removed.
+    /// Deleting only the job would leave a NOT NULL enforced and shown as valid over rows nobody proved.
+    /// The rows here satisfy the constraint, so a test that only checked the rows could not tell an
+    /// abandon from a validation.
+    /// </summary>
+    [Test]
+    public async Task AbandonedJobRemovesTheConstraint()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+        await RowConstraintValidationScenarios.CreateItems(executor, dbname, rows: 3);
+        string tableId = (await RowConstraintValidationScenarios.Table(executor, dbname)).Id;
+
+        await PersistJob(executor, database, tableId, "items_price_not_null", SchemaElementKind.NotNull, SchemaChangeCoordinator.MaxResumeAttempts);
+        await executor.Catalogs.ReplicateSetColumnNotNullAsync(database, "items", "price", notNull: true, "items_price_not_null");
+
+        bool readRan = false;
+        SchemaChangeCoordinator coordinator = new(executor.Catalogs)
+        {
+            RowConstraintValidationAsync = (db, table, kind, name) =>
+            {
+                readRan = true;
+                return executor.ValidateRowConstraintAsync(db, table, kind, name);
+            }
+        };
+
+        await coordinator.ResumeJobsAsync(database);
+
+        Assert.IsFalse(readRan, "An abandoned job reads no row");
+        TableColumnSchema column = (await RowConstraintValidationScenarios.Table(executor, dbname)).Columns!.Single(c => c.Name == "price");
+        Assert.IsFalse(column.NotNull);
+        Assert.IsNull(column.NotNullConstraintName);
+        Assert.IsEmpty(await executor.Catalogs.LoadCoordinatorJobsAsync(database));
+    }
+
     private static SchemaChangeCoordinator Coordinator(CommandExecutor executor) => new(executor.Catalogs)
     {
         RowConstraintValidationAsync = (db, table, kind, name) => executor.ValidateRowConstraintAsync(db, table, kind, name)
     };
 
-    private static Task PersistJob(CommandExecutor executor, DatabaseDescriptor database, string tableId, string name, SchemaElementKind kind) =>
+    private static Task PersistJob(CommandExecutor executor, DatabaseDescriptor database, string tableId, string name, SchemaElementKind kind, int attempts = 0) =>
         executor.Catalogs.PersistCoordinatorJobAsync(database, new PersistedCoordinatorJob
         {
             TableName = "items",
@@ -389,6 +500,7 @@ public sealed class TestRowConstraintValidationOrderCluster : SharedNodeBaseTest
             ElementName = name,
             TargetState = SchemaElementState.Public,
             ElementKind = kind,
+            Attempts = attempts,
         });
 
     private async Task Run(Func<CommandExecutor, string, Task> scenario)

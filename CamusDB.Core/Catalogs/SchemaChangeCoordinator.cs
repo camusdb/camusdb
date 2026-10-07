@@ -351,31 +351,90 @@ public sealed class SchemaChangeCoordinator
     /// so the read that follows sees each such row, and each later write was checked by its own
     /// statement. A read before the enforcement can miss a write that commits between the two.</para>
     ///
-    /// <para>On a violation it removes the constraint on every node, deletes the job and rethrows: a
-    /// resume would fail the same way. Any other failure, for example a lost leadership, leaves the job
-    /// for the next leader, and the constraint stays enforced until that leader validates it.</para>
+    /// <para><b>Any failure takes the constraint back</b>, not only a violation. The wait or the read can
+    /// also fail on a timeout or a lost leadership, and the statement then reports an error. A constraint
+    /// left in place would be enforced and shown as valid over rows nobody proved, and the same statement
+    /// could not run again, because its name would be taken. So the constraint is removed on every node
+    /// and the job is deleted (<see cref="TakeBackRowConstraintAsync"/>). Only when the removal itself
+    /// fails does the job stay, for the next leader. The original error is rethrown either way.</para>
+    ///
+    /// <para>After a read that passed, a failure to delete the job is logged, not thrown: the constraint
+    /// is proven, and a job left behind only makes the next leader read the rows again.</para>
     /// </summary>
     public async Task ValidateRowConstraintAsync(DatabaseDescriptor database, SchemaChangeJob job)
     {
-        if (RowConstraintValidationAsync is null)
-            throw new CamusDBException(
-                CamusDBErrorCodes.InvalidInternalOperation,
-                $"Constraint '{job.ElementName}' on table '{job.TableName}' cannot be validated: no row validation pass is wired");
-
-        await RequireEarlierWritersSettledAsync(database, job).ConfigureAwait(false);
-
         try
         {
+            if (RowConstraintValidationAsync is null)
+                throw new CamusDBException(
+                    CamusDBErrorCodes.InvalidInternalOperation,
+                    $"Constraint '{job.ElementName}' on table '{job.TableName}' cannot be validated: no row validation pass is wired");
+
+            await RequireEarlierWritersSettledAsync(database, job).ConfigureAwait(false);
+
             await RowConstraintValidationAsync(database, job.TableName, job.ElementKind, job.ElementName).ConfigureAwait(false);
         }
-        catch (CamusDBException ex) when (ex.Code is CamusDBErrorCodes.CheckConstraintViolation or CamusDBErrorCodes.NotNullViolation)
+        catch
         {
-            await RemoveRowConstraintAsync(database, job).ConfigureAwait(false);
-            await catalogs.DeleteCoordinatorJobAsync(database, job.TableId, job.ElementName).ConfigureAwait(false);
+            await TakeBackRowConstraintAsync(database, job).ConfigureAwait(false);
             throw;
         }
 
-        await catalogs.DeleteCoordinatorJobAsync(database, job.TableId, job.ElementName).ConfigureAwait(false);
+        try
+        {
+            await catalogs.DeleteCoordinatorJobAsync(database, job.TableId, job.ElementName).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            logger?.LogWarning(ex,
+                "Constraint {ElementName} on {TableName} was validated, but its job could not be deleted; the next leader validates it again",
+                job.ElementName, job.TableName);
+        }
+    }
+
+    /// <summary>
+    /// Removes a CHECK or NOT NULL constraint whose rows were not proven, then deletes its job. A
+    /// constraint that is already gone needs no removal. Never throws: every caller is already
+    /// failing or giving up, and its own error is the one to report.
+    ///
+    /// <para><b>The job is deleted only when the constraint is gone.</b> If the removal fails (for
+    /// example, the node lost the schema leadership), the constraint is still enforced and still
+    /// unproven, and the job is what makes the next leader finish it. A replication that committed
+    /// but failed on its acknowledgements still counts as gone, because the local schema shows the
+    /// removal.</para>
+    /// </summary>
+    internal async Task TakeBackRowConstraintAsync(DatabaseDescriptor database, SchemaChangeJob job)
+    {
+        try
+        {
+            await RemoveRowConstraintAsync(database, job).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            logger?.LogWarning(ex,
+                "Could not remove the unproven {ElementKind} constraint {ElementName} on {TableName}",
+                job.ElementKind, job.ElementName, job.TableName);
+        }
+
+        if (database.Schema.Tables.TryGetValue(job.TableName, out TableSchema? table)
+            && RowConstraintExists(table, job.ElementKind, job.ElementName))
+        {
+            logger?.LogError(
+                "The unproven {ElementKind} constraint {ElementName} on {TableName} is still enforced; its job stays for the next schema leader",
+                job.ElementKind, job.ElementName, job.TableName);
+            return;
+        }
+
+        try
+        {
+            await catalogs.DeleteCoordinatorJobAsync(database, job.TableId, job.ElementName).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            logger?.LogWarning(ex,
+                "Could not delete the job of constraint {ElementName} on {TableName}; the next leader finds no constraint and deletes it",
+                job.ElementName, job.TableName);
+        }
     }
 
     /// <summary>
@@ -523,6 +582,14 @@ public sealed class SchemaChangeCoordinator
             string liveTableName = liveTable.Name ?? persisted.TableName;
             SchemaChangeJob job = new(database.Name, liveTableName, persisted.TableId, persisted.ElementName, persisted.TargetState, persisted.ElementKind);
 
+            // A CHECK or NOT NULL job applies its own attempt limit: abandoning it must remove the
+            // constraint, not just delete the job.
+            if (persisted.ElementKind is SchemaElementKind.Check or SchemaElementKind.NotNull)
+            {
+                await ResumeRowConstraintJobAsync(database, persisted, liveTable, job).ConfigureAwait(false);
+                continue;
+            }
+
             // Abandon a job that keeps failing across leader changes rather than retry it on
             // every election forever. A terminal failure (unreachable invariant, persistent
             // validation error) burns one attempt per resume; once the budget is spent we
@@ -534,12 +601,6 @@ public sealed class SchemaChangeCoordinator
                     liveTableName, persisted.ElementName, persisted.TargetState, database.Name, persisted.Attempts);
                 try { await catalogs.DeleteCoordinatorJobAsync(database, persisted.TableId, persisted.ElementName).ConfigureAwait(false); }
                 catch (Exception ex) { logger?.LogWarning(ex, "Failed to delete abandoned coordinator job for database {DbName}", database.Name); }
-                continue;
-            }
-
-            if (persisted.ElementKind is SchemaElementKind.Check or SchemaElementKind.NotNull)
-            {
-                await ResumeRowConstraintJobAsync(database, persisted, liveTable, job).ConfigureAwait(false);
                 continue;
             }
 
@@ -598,6 +659,15 @@ public sealed class SchemaChangeCoordinator
     /// existing rows were not proven. A job whose constraint is gone is deleted. Otherwise the attempt
     /// is recorded first, as for every resumed job, and the rows are validated. A failure is logged,
     /// not thrown, so one job cannot stop the resume of the others.
+    ///
+    /// <para><b>An abandoned job removes its constraint.</b> Once <see cref="MaxResumeAttempts"/> is
+    /// spent, the rows are not read again, and the constraint is taken back
+    /// (<see cref="TakeBackRowConstraintAsync"/>). Deleting only the job, as an index or foreign-key
+    /// job does, would be wrong here: those elements stay in a non-public state that shows the
+    /// problem, but a CHECK or NOT NULL has no state, so it would stay enforced and shown as valid over
+    /// rows nobody proved. A job outlives a successful statement only when its delete failed after the
+    /// read passed; then each resume reads rows that already satisfy the constraint and finishes, so
+    /// in practice an abandoned job belongs to a statement that reported an error.</para>
     /// </summary>
     private async Task ResumeRowConstraintJobAsync(DatabaseDescriptor database, PersistedCoordinatorJob persisted, TableSchema liveTable, SchemaChangeJob job)
     {
@@ -606,6 +676,16 @@ public sealed class SchemaChangeCoordinator
             if (!RowConstraintExists(liveTable, persisted.ElementKind, persisted.ElementName))
             {
                 await catalogs.DeleteCoordinatorJobAsync(database, persisted.TableId, persisted.ElementName).ConfigureAwait(false);
+                return;
+            }
+
+            if (persisted.Attempts >= MaxResumeAttempts)
+            {
+                logger?.LogError(
+                    "Abandoning {ElementKind} constraint {TableName}.{ElementName} on database {DbName} after {Attempts} resume attempts; the constraint is removed",
+                    persisted.ElementKind, job.TableName, persisted.ElementName, database.Name, persisted.Attempts);
+
+                await TakeBackRowConstraintAsync(database, job).ConfigureAwait(false);
                 return;
             }
 
@@ -629,9 +709,10 @@ public sealed class SchemaChangeCoordinator
     /// Maximum number of leader-change resume attempts before a job is abandoned. A transient
     /// failure (leadership flap) normally completes within one or two resumes; exhausting this
     /// budget means the job is genuinely stuck, so it is deleted and logged rather than retried
-    /// on every future election.
+    /// on every future election. A CHECK or NOT NULL job also removes its constraint at this point
+    /// (<see cref="ResumeRowConstraintJobAsync"/>).
     /// </summary>
-    private const int MaxResumeAttempts = 5;
+    internal const int MaxResumeAttempts = 5;
 
     // ── Helpers ──────────────────────────────────────────────────────────────
 

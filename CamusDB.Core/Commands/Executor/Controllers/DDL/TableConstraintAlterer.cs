@@ -38,8 +38,10 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.DDL;
 /// <para><b>Cluster</b>: a coordinator job (<see cref="SchemaElementKind.Check"/> or
 /// <see cref="SchemaElementKind.NotNull"/>) is recorded before the constraint replicates, and
 /// <see cref="SchemaChangeCoordinator.ValidateRowConstraintAsync"/> waits for every live node, reads the
-/// rows and deletes the job. A new leader that finds the job validates again, so a constraint that is
-/// enforced but was never proven cannot stay after a crash.</para>
+/// rows and deletes the job. A statement that fails for any reason, not only a violation, removes the
+/// constraint again, so a failed ALTER leaves nothing enforced and can simply run again. A new leader
+/// that finds the job validates again, so a constraint that is enforced but was never proven cannot
+/// stay after a crash.</para>
 ///
 /// <para>Both run under <see cref="DatabaseDescriptor.SchemaDdlSemaphore"/>, as a foreign key ADD does,
 /// so two ALTERs of one database cannot interleave their checks and their replication.</para>
@@ -194,7 +196,7 @@ internal sealed class TableConstraintAlterer
     /// <summary>
     /// ADD CHECK in a cluster: record the job, replicate the constraint (every node enforces it from its
     /// apply on), then let the coordinator wait for every node, read the rows and delete the job, or
-    /// remove the constraint on a violation.
+    /// remove the constraint on any failure.
     /// </summary>
     private async Task AddCheckClusterAsync(
         CatalogsManager catalogs,
@@ -221,15 +223,7 @@ internal sealed class TableConstraintAlterer
         }
         catch
         {
-            // The entry can commit and the wait for the acks fail afterwards. Then the constraint is
-            // enforced and its job must stay for the next leader. Only a job whose constraint did not
-            // land is removed here.
-            bool landed = database.Schema.Tables.TryGetValue(tableName, out TableSchema? current)
-                && current.CheckConstraints?.Exists(c => string.Equals(c.Name, constraintName, StringComparison.OrdinalIgnoreCase)) == true;
-
-            if (!landed)
-                await DeleteJobAfterFailureAsync(catalogs, database, table.Id, constraintName).ConfigureAwait(false);
-
+            await TakeBackAfterReplicationFailureAsync(catalogs, database, table.Id, tableName, constraintName, SchemaElementKind.Check).ConfigureAwait(false);
             throw;
         }
 
@@ -518,7 +512,7 @@ internal sealed class TableConstraintAlterer
     /// SET NOT NULL in a cluster. A column that is already NOT NULL only takes the new name. Otherwise
     /// the job is recorded, the flag replicates (every node refuses a NULL from its apply on), and the
     /// coordinator waits for every node, reads the rows and deletes the job, or makes the column
-    /// nullable again on a violation.
+    /// nullable again on any failure.
     /// </summary>
     private async Task SetNotNullClusterAsync(
         CatalogsManager catalogs,
@@ -552,13 +546,7 @@ internal sealed class TableConstraintAlterer
         }
         catch
         {
-            bool landed = database.Schema.Tables.TryGetValue(tableName, out TableSchema? current)
-                && current.Columns is not null
-                && RowConstraintValidationPass.FindNotNullColumn(current, constraintName) is not null;
-
-            if (!landed)
-                await DeleteJobAfterFailureAsync(catalogs, database, table.Id, constraintName).ConfigureAwait(false);
-
+            await TakeBackAfterReplicationFailureAsync(catalogs, database, table.Id, tableName, constraintName, SchemaElementKind.NotNull).ConfigureAwait(false);
             throw;
         }
 
@@ -644,20 +632,23 @@ internal sealed class TableConstraintAlterer
     }
 
     /// <summary>
-    /// Best effort: the statement is already failing, and a job left behind is harmless, because a
-    /// resume finds no constraint and deletes it.
+    /// The replication of the constraint failed. The entry can still have committed, with only the wait
+    /// for the acknowledgements failing; then the constraint is enforced, and the statement reports an
+    /// error. Leaving it for the next leader would keep it enforced and shown as valid, maybe for a long
+    /// time, and a retry of the same statement would find its name taken. So the constraint is removed if
+    /// it landed, and the job is deleted (<see cref="SchemaChangeCoordinator.TakeBackRowConstraintAsync"/>,
+    /// which keeps the job only when the removal also fails).
     /// </summary>
-    private async Task DeleteJobAfterFailureAsync(CatalogsManager catalogs, DatabaseDescriptor database, string tableId, string constraintName)
-    {
-        try
-        {
-            await catalogs.DeleteCoordinatorJobAsync(database, tableId, constraintName).ConfigureAwait(false);
-        }
-        catch (Exception ex)
-        {
-            logger.LogWarning(ex, "Could not delete the job of constraint {Constraint} after its replication failed", constraintName);
-        }
-    }
+    private Task TakeBackAfterReplicationFailureAsync(
+        CatalogsManager catalogs,
+        DatabaseDescriptor database,
+        string tableId,
+        string tableName,
+        string constraintName,
+        SchemaElementKind kind) =>
+        new SchemaChangeCoordinator(catalogs, logger).TakeBackRowConstraintAsync(
+            database,
+            new SchemaChangeJob(database.Name, tableName, tableId, constraintName, SchemaElementState.Public, kind));
 
     private async Task<bool> DropNotNull(
         CatalogsManager catalogs,

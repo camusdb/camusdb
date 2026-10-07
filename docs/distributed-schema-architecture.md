@@ -931,7 +931,9 @@ schema leadership it runs `ResumeJobsAsync`:
   path from the *current* element state, bumps and persists `Attempts` **before** driving (so a
   crash mid-resume still counts against the budget), and re-drives to target.
 - A job that keeps failing is abandoned after `MaxResumeAttempts` (5): it is deleted and logged
-  loudly rather than retried on every future election — a poison job can't loop forever.
+  loudly rather than retried on every future election — a poison job can't loop forever. A CHECK or
+  NOT NULL job also removes its constraint when it is abandoned. Those constraints have no element
+  state, so a constraint kept after the job is gone would look valid over rows nobody proved.
 
 **Adds start in `DeleteOnly`.** Because the coordinator exists, `AddColumn`/`AddIndex` never
 land directly in `Public`. The cluster entry points
