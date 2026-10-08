@@ -623,6 +623,60 @@ effect in the reloaded schema and re-acks. What the reconciler deliberately does
 checkpoint that is itself behind the committed log (persist exhaustion, §10) — that remains the
 restart-replay path's job, because only the log knows more than the checkpoint.
 
+### 6.5 Replica placement — nodes outside a control partition's replica set
+
+With `kahuna.replication_factor` below the node count, Kommander hosts each partition on a replica
+set of that size only. Two consequences reach the control plane:
+
+- **Per-partition Raft calls answer only on a replica.** `IRaft.AmILeader`, `WaitForLeader` and
+  `ReplicateLogs` throw `PartitionNotHostedException` on a node outside the set. Kommander documents
+  this as a routing condition, not a fault: gate on `HostsPartition`, route through
+  `GetPartitionLeaderHint` or `GetPartitionReplicas`, and treat the typed exception as the
+  authoritative answer when the guard and the call race.
+- **Committed entries are delivered to replicas only.** A node outside the schema partition's
+  replica set never receives the database's schema deltas through `OnReplicationReceived`; the same
+  holds for the cluster-settings log.
+
+`EmbeddedKahuna` honors the first point everywhere: every leadership question
+(`AmISchemaLeaderAsync`, `AmILeaderForKeyAsync`, `AmIClusterSettingsLeaderAsync`) answers *false*
+on a node that does not host the partition, so a keyed singleton (snapshot-hold renewer, orphan
+reclaimer, TTL and auto-analyze schedulers) still runs on exactly one node, one of the replicas.
+Every leader resolution (`WaitForSchemaLeaderAsync`, `WaitForClusterSettingsLeaderAsync`) answers
+from Raft on a replica and from the placement view elsewhere: the gossiped hint, else the first
+voter of the committed replica set. That answer is a hint the target may refute with not-leader, so
+`DdlForwardingCoordinator` and `ClusterSettingsService` walk the replica set across their retries
+instead of repeating one refuted guess. `HostsSchemaLog` and `SchemaLogReplicaEndpoints` expose the
+placement facts to the command layer.
+
+For the second point the durable checkpoint is the delivery path, not a repair. The proposer
+persists `{db}/meta/*` after every committed delta and before it answers a forwarded DDL (§6.1,
+§5.3), so the checkpoint is where a change becomes visible to a node outside the set:
+
+- `SchemaFreshnessSweeper` runs a second, short cadence
+  (`unhosted_control_log_probe_interval_ms`, default 250 ms) that probes only the databases whose
+  schema partition this node does not host, through the same reconciler as §6.4. Each install
+  acknowledges the reached version to the schema leader, so the ack gate (§6.2) keeps waiting for
+  such a node and a staged change (§8) does not advance past it. The open path acknowledges the
+  loaded version for the same reason.
+- `DdlForwardingCoordinator.WaitForForwardedSchemaApplyAsync` reloads the checkpoint instead of
+  polling for a Raft delivery that cannot come, so the forwarding node still reads its own write.
+- `ClusterSettingsService` probes the settings generation stamp on the same cadence and re-scans
+  the per-key checkpoint when it moved; a forwarded change re-scans on return.
+
+The staleness bound of such a node is the probe interval plus one key-value round trip, where a
+replica's bound is the replication latency. A node that hosts every partition pays nothing beyond
+the hosted check. A node opened against a database logs which replicas carry its schema partition
+(`LogSchemaLogNotHosted`), so an operator can see where that database's DDL is routed.
+
+Known dependency: Kahuna's sequence forwarding. A table id is allocated from the store-wide
+sequence `_system/tableseq`. When the allocating node does not host the sequence's partition,
+Kahuna forwards to the gossiped leader hint, else to the first voter of the replica set, and a voter
+that is not the leader answers `MustRetry` without forwarding again. Until a hint has formed on
+that node (one gossip round that picks it, 5 s apart by default), a `CREATE TABLE` can spend its
+whole sequence retry budget on that answer. The key-value path does not have this gap: a hosting
+follower forwards a key-value operation to its leader within the hop budget. The fix belongs in
+Kahuna's sequence locator.
+
 ---
 
 ## 7. In-memory model, persistence layout, and positional rows

@@ -424,6 +424,23 @@ public sealed record CamusDBOptions
     public int SchemaFreshnessCheckIntervalMs { get; init; } = 10_000;
 
     /// <summary>
+    /// Interval, in milliseconds, at which a node probes the durable checkpoint of a control log whose
+    /// Raft partition it does not host: a database's schema log, or the cluster-settings log. Under
+    /// replica placement (<c>kahuna.replication_factor</c> below the node count) a partition lives on
+    /// its replica set only, and Raft delivers committed entries to replicas only. A node outside
+    /// the set therefore never receives the schema deltas or settings entries through Raft; it
+    /// follows the checkpoint the proposer persists after each commit instead, and acknowledges each
+    /// version it reaches so the schema leader's ack gate still waits for it. This interval bounds
+    /// how far such a node lags a committed change, so it is short by default. The cost is one small
+    /// KV read per tick per database whose schema partition is not hosted here, plus one for the
+    /// settings log; a node that hosts every partition pays nothing. A value <c>&lt;= 0</c> disables
+    /// the fast probe, leaving only <see cref="SchemaFreshnessCheckIntervalMs"/>. Ignored in standalone
+    /// mode. Default is 250 milliseconds.
+    /// </summary>
+    [ConfigSetting(ConfigMutability.Restart, ConfigScope.Node)]
+    public int UnhostedControlLogProbeIntervalMs { get; init; } = 250;
+
+    /// <summary>
     /// Lease duration, in milliseconds, of a database-registry drop-intent fence (the mutex taken by
     /// <c>DROP</c>/<c>RELINK</c>/the orphan GC per database id and per table). The fence's KV key carries
     /// this as a native expiry: a holder that crashes without releasing frees the fence once the lease

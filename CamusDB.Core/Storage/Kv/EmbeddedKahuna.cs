@@ -746,7 +746,7 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
     public async ValueTask<bool> AmISchemaLeaderAsync(string db, CancellationToken cancellationToken = default)
     {
         int partitionId = SchemaLogPartition(db);
-        return await Raft.AmILeader(partitionId, cancellationToken).ConfigureAwait(false);
+        return await AmILeaderOfPartitionAsync(partitionId, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -754,18 +754,174 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
     /// Used to elect a single node for process-wide singleton background work keyed on a stable KV key
     /// (e.g. the branch snapshot-hold renewer, elected on the database-registry key's partition), so
     /// the sweep runs on exactly one node and fails over with leadership. A standalone node leads every
-    /// partition and always returns true.
+    /// partition and always returns true. A node that does not host the partition under replica
+    /// placement answers false: it cannot lead a Raft group it is not a member of, and the leader is
+    /// one of the partition's replicas, so the singleton still runs on exactly one node.
     /// </summary>
     public async ValueTask<bool> AmILeaderForKeyAsync(string key, CancellationToken cancellationToken = default)
     {
         int partitionId = Raft.GetPrefixPartitionKey(key);
-        return await Raft.AmILeader(partitionId, cancellationToken).ConfigureAwait(false);
+        return await AmILeaderOfPartitionAsync(partitionId, cancellationToken).ConfigureAwait(false);
     }
 
+    /// <summary>
+    /// Resolves the endpoint that leads the schema-log partition of <paramref name="db"/>. On a node
+    /// that hosts the partition this is Raft's own answer; on a node that does not host it (replica
+    /// placement) it is the best placement-view answer, see <see cref="ResolvePartitionLeaderAsync"/>.
+    /// </summary>
     public async ValueTask<string> WaitForSchemaLeaderAsync(string db, CancellationToken cancellationToken = default)
     {
         int partitionId = SchemaLogPartition(db);
-        return await Raft.WaitForLeader(partitionId, cancellationToken).ConfigureAwait(false);
+        return await ResolvePartitionLeaderAsync(partitionId, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Whether this node hosts (is a replica of) the Raft partition that carries the schema log of
+    /// <paramref name="db"/>. Under legacy full replication and in standalone mode every node hosts
+    /// every partition. A node that does not host the partition never receives the committed schema
+    /// deltas through Raft; it follows the durable checkpoint instead (see
+    /// <c>SchemaFreshnessSweeper</c> and the architecture documentation).
+    /// </summary>
+    public bool HostsSchemaLog(string db) => !isClusterMode || Raft.HostsPartition(SchemaLogPartition(db));
+
+    /// <summary>
+    /// Whether this node hosts the Raft partition that carries the cluster-settings log. See
+    /// <see cref="HostsSchemaLog"/> for what hosting means.
+    /// </summary>
+    public bool HostsClusterSettingsLog() => !isClusterMode || Raft.HostsPartition(ClusterSettingsLogPartition());
+
+    /// <summary>
+    /// The endpoints of the committed replica set of the schema-log partition of
+    /// <paramref name="db"/>, excluding replicas being removed. Empty under legacy full replication,
+    /// where every roster voter hosts the partition. Used to name the nodes a caller can route to.
+    /// </summary>
+    public IReadOnlyList<string> SchemaLogReplicaEndpoints(string db) => ReplicaEndpoints(SchemaLogPartition(db));
+
+    /// <summary>
+    /// The endpoints of the committed replica set of the cluster-settings partition, excluding
+    /// replicas being removed; empty under legacy full replication. See <see cref="SchemaLogReplicaEndpoints"/>.
+    /// </summary>
+    public IReadOnlyList<string> ClusterSettingsLogReplicaEndpoints() => ReplicaEndpoints(ClusterSettingsLogPartition());
+
+    private IReadOnlyList<string> ReplicaEndpoints(int partitionId)
+    {
+        IReadOnlyList<Kommander.System.RaftReplica> replicas = Raft.GetPartitionReplicas(partitionId);
+        List<string> endpoints = new(replicas.Count);
+
+        foreach (Kommander.System.RaftReplica replica in replicas)
+        {
+            if (replica.Role != Kommander.System.RaftReplicaRole.Removing)
+                endpoints.Add(replica.Endpoint);
+        }
+
+        return endpoints;
+    }
+
+    /// <summary>
+    /// Leadership check that honors Kommander's replica-placement contract. A partition that is in the
+    /// committed map but not materialized on this node makes <see cref="IRaft.AmILeader"/> throw
+    /// <see cref="PartitionNotHostedException"/>; for a leadership question the authoritative answer
+    /// is then "not the leader", never an error. <see cref="IRaft.HostsPartition"/> is only a fast
+    /// path: the hosted set can change between the check and the call (a replica move), so the typed
+    /// exception is still caught as the final answer.
+    /// </summary>
+    private async ValueTask<bool> AmILeaderOfPartitionAsync(int partitionId, CancellationToken cancellationToken)
+    {
+        if (!Raft.HostsPartition(partitionId))
+            return false;
+
+        try
+        {
+            return await Raft.AmILeader(partitionId, cancellationToken).ConfigureAwait(false);
+        }
+        catch (PartitionNotHostedException)
+        {
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Resolves the leader endpoint of <paramref name="partitionId"/> from whichever view this node
+    /// has. A node that hosts the partition asks Raft, which waits for an election if needed. A node
+    /// that does not host it (replica placement) has no local Raft group to ask, so it takes the
+    /// gossiped leader hint, else the first voter of the committed replica set, else any roster peer.
+    /// Those fallbacks are best-effort by contract: the target re-checks leadership on every
+    /// forwarded operation and answers not-leader, after which the caller resolves again. The same
+    /// contract covers a node that hosted the partition a moment ago and lost it to a replica move,
+    /// which is why the typed exception is caught rather than gated away.
+    /// </summary>
+    private async ValueTask<string> ResolvePartitionLeaderAsync(int partitionId, CancellationToken cancellationToken)
+    {
+        if (Raft.HostsPartition(partitionId))
+        {
+            try
+            {
+                return await Raft.WaitForLeader(partitionId, cancellationToken).ConfigureAwait(false);
+            }
+            catch (PartitionNotHostedException)
+            {
+                // Lost the partition between the check and the wait; answer from the placement view.
+            }
+        }
+
+        return ResolveLeaderFromPlacement(partitionId)
+            ?? throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInternalOperation,
+                $"Partition {partitionId} is not hosted on this node and no replica of it is known yet");
+    }
+
+    /// <summary>
+    /// The placement-view answer for the leader of a partition this node does not host: the gossiped
+    /// hint when it names a current replica (or when the replica set is empty, meaning every voter
+    /// hosts the partition), else the first voter replica, else the first other replica, else the
+    /// first roster peer. Null only when nothing at all is known, which happens before the first
+    /// committed map and roster arrive.
+    /// </summary>
+    private string? ResolveLeaderFromPlacement(int partitionId)
+    {
+        IReadOnlyList<Kommander.System.RaftReplica> replicas = Raft.GetPartitionReplicas(partitionId);
+        string? hint = Raft.GetPartitionLeaderHint(partitionId);
+
+        if (!string.IsNullOrEmpty(hint))
+        {
+            if (replicas.Count == 0)
+                return hint;
+
+            foreach (Kommander.System.RaftReplica replica in replicas)
+            {
+                if (replica.Role != Kommander.System.RaftReplicaRole.Removing &&
+                    string.Equals(replica.Endpoint, hint, StringComparison.Ordinal))
+                    return hint;
+            }
+        }
+
+        // This node is never its own forward target here: it reached this point because it does not
+        // host the partition (or just lost it), so a replica entry naming it is stale.
+        string localEndpoint = Raft.GetLocalEndpoint();
+        string? other = null;
+
+        foreach (Kommander.System.RaftReplica replica in replicas)
+        {
+            if (string.Equals(replica.Endpoint, localEndpoint, StringComparison.Ordinal))
+                continue;
+
+            if (replica.Role == Kommander.System.RaftReplicaRole.Voter)
+                return replica.Endpoint;
+
+            if (other is null && replica.Role != Kommander.System.RaftReplicaRole.Removing)
+                other = replica.Endpoint;
+        }
+
+        if (other is not null)
+            return other;
+
+        foreach (RaftNode peer in Raft.GetNodes())
+        {
+            if (!string.Equals(peer.Endpoint, localEndpoint, StringComparison.Ordinal))
+                return peer.Endpoint;
+        }
+
+        return null;
     }
 
     /// <summary>
@@ -773,32 +929,50 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
     /// staying online as a follower. Companion to <see cref="AmILeaderForKeyAsync"/> for the same
     /// key-to-partition routing. Used to hand off ownership of a keyed responsibility (e.g. the
     /// registry-bucket key that gates background sweeps) without isolating the node's transport, so
-    /// its in-flight reads keep working while its leadership check flips to false.
+    /// its in-flight reads keep working while its leadership check flips to false. A no-op on a node
+    /// that does not host the partition: it holds no leadership to give up.
     /// </summary>
     public async Task StepDownForKeyAsync(string key, CancellationToken cancellationToken = default)
     {
         int partitionId = Raft.GetPrefixPartitionKey(key);
-        await Raft.StepDownAsync(partitionId, cancellationToken).ConfigureAwait(false);
+        await StepDownFromPartitionAsync(partitionId, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>
     /// Returns the current leader endpoint for <paramref name="partitionId"/>, waiting up to
-    /// the Raft election timeout if no leader is currently elected.
+    /// the Raft election timeout if no leader is currently elected. On a node that does not host the
+    /// partition the answer comes from the placement view, see <see cref="ResolvePartitionLeaderAsync"/>.
     /// </summary>
     public async ValueTask<string> GetPartitionLeaderAsync(int partitionId, CancellationToken cancellationToken = default)
     {
-        return await Raft.WaitForLeader(partitionId, cancellationToken).ConfigureAwait(false);
+        return await ResolvePartitionLeaderAsync(partitionId, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>
     /// Voluntarily steps down from schema-partition leadership for <paramref name="db"/>.
     /// The node remains online as a follower and can vote in the next election.
-    /// Called on persist exhaustion so a healthy peer can take over.
+    /// Called on persist exhaustion so a healthy peer can take over. A no-op on a node that does
+    /// not host the partition.
     /// </summary>
     public async Task StepDownSchemaPartitionAsync(string db, CancellationToken cancellationToken = default)
     {
         int partitionId = SchemaLogPartition(db);
-        await Raft.StepDownAsync(partitionId, cancellationToken).ConfigureAwait(false);
+        await StepDownFromPartitionAsync(partitionId, cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task StepDownFromPartitionAsync(int partitionId, CancellationToken cancellationToken)
+    {
+        if (!Raft.HostsPartition(partitionId))
+            return;
+
+        try
+        {
+            await Raft.StepDownAsync(partitionId, cancellationToken).ConfigureAwait(false);
+        }
+        catch (PartitionNotHostedException)
+        {
+            // Lost the partition between the check and the call: there is no leadership to give up.
+        }
     }
 
     /// <summary>
@@ -869,9 +1043,9 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
 
         for (int attempt = 0; attempt < 3; attempt++)
         {
-            string leader = await Raft.WaitForLeader(partitionId, cancellationToken).ConfigureAwait(false);
+            string leader = await ResolvePartitionLeaderAsync(partitionId, cancellationToken).ConfigureAwait(false);
 
-            if (await Raft.AmILeader(partitionId, cancellationToken).ConfigureAwait(false))
+            if (await AmILeaderOfPartitionAsync(partitionId, cancellationToken).ConfigureAwait(false))
                 return await ReplicateSchemaChangeAsLeaderAsync(db, partitionId, leader, entry, cancellationToken).ConfigureAwait(false);
 
             ISchemaReplicationForwarder? forwarder = schemaReplicationForwarder;
@@ -894,7 +1068,7 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
                 return forwarded;
         }
 
-        string lastLeader = await Raft.WaitForLeader(partitionId, cancellationToken).ConfigureAwait(false);
+        string lastLeader = await ResolvePartitionLeaderAsync(partitionId, cancellationToken).ConfigureAwait(false);
         return new(SchemaReplicationOutcome.NotLeader, partitionId, leader: lastLeader);
     }
 
@@ -960,7 +1134,11 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
             {
                 int partitionId = SchemaLogPartition(db);
                 using CancellationTokenSource cts = new(TimeSpan.FromSeconds(5));
-                string leader = await Raft.WaitForLeader(partitionId, cts.Token).ConfigureAwait(false);
+
+                // Placement-aware on purpose: a node that does not host the schema partition still
+                // acks (it reached the version through the durable checkpoint), and the only way it
+                // can name the leader is the placement view.
+                string leader = await ResolvePartitionLeaderAsync(partitionId, cts.Token).ConfigureAwait(false);
                 Diagnostics.SchemaDiag.Log(
                     $"ACK-SEND node={localEndpoint} db={db} ver={schemaVersion} attempt={attempt} part={partitionId} resolvedLeader={leader}");
 
@@ -970,7 +1148,7 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
                     // BUT this view can be transient/stale. If we are genuinely the leader the gate runs
                     // here and is satisfied locally; if our view is wrong, retry until it corrects and we
                     // send to the real leader. Stop re-checking once we are stably the leader.
-                    if (await Raft.AmILeader(partitionId, cts.Token).ConfigureAwait(false))
+                    if (await AmILeaderOfPartitionAsync(partitionId, cts.Token).ConfigureAwait(false))
                     {
                         Diagnostics.SchemaDiag.Log($"ACK-SELF node={localEndpoint} db={db} ver={schemaVersion} (we are the leader; local record suffices)");
                         return;
@@ -1338,11 +1516,14 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
     /// propose setting changes. Followers forward to the leader instead.
     /// </summary>
     public async Task<bool> AmIClusterSettingsLeaderAsync(CancellationToken cancellationToken = default)
-        => await Raft.AmILeader(ClusterSettingsLogPartition(), cancellationToken).ConfigureAwait(false);
+        => await AmILeaderOfPartitionAsync(ClusterSettingsLogPartition(), cancellationToken).ConfigureAwait(false);
 
-    /// <summary>Resolves the current leader endpoint of the cluster-settings partition.</summary>
+    /// <summary>
+    /// Resolves the current leader endpoint of the cluster-settings partition, from the placement
+    /// view on a node that does not host it (see <see cref="ResolvePartitionLeaderAsync"/>).
+    /// </summary>
     public async Task<string> WaitForClusterSettingsLeaderAsync(CancellationToken cancellationToken = default)
-        => await Raft.WaitForLeader(ClusterSettingsLogPartition(), cancellationToken).ConfigureAwait(false);
+        => await ResolvePartitionLeaderAsync(ClusterSettingsLogPartition(), cancellationToken).ConfigureAwait(false);
 
     /// <summary>
     /// Proposes one cluster-settings entry on the settings partition and applies it locally after
@@ -1357,17 +1538,26 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
     )
     {
         int partitionId = ClusterSettingsLogPartition();
-        string leader = await Raft.WaitForLeader(partitionId, cancellationToken).ConfigureAwait(false);
+        string leader = await ResolvePartitionLeaderAsync(partitionId, cancellationToken).ConfigureAwait(false);
 
-        if (!await Raft.AmILeader(partitionId, cancellationToken).ConfigureAwait(false))
+        if (!await AmILeaderOfPartitionAsync(partitionId, cancellationToken).ConfigureAwait(false))
             return new(SchemaReplicationOutcome.NotLeader, partitionId, leader: leader);
 
-        RaftReplicationResult proposal = await Raft.ReplicateLogs(
-            partitionId,
-            ClusterSettingsLogType,
-            entry,
-            autoCommit: false,
-            cancellationToken: cancellationToken).ConfigureAwait(false);
+        RaftReplicationResult proposal;
+        try
+        {
+            proposal = await Raft.ReplicateLogs(
+                partitionId,
+                ClusterSettingsLogType,
+                entry,
+                autoCommit: false,
+                cancellationToken: cancellationToken).ConfigureAwait(false);
+        }
+        catch (PartitionNotHostedException)
+        {
+            // A replica move took the partition away between the leadership check and the proposal.
+            return new(SchemaReplicationOutcome.NotLeader, partitionId, leader: leader);
+        }
 
         if (!proposal.Success)
             return new(ToOutcome(proposal.Status), partitionId, proposal.LogIndex, leader, proposal.Status.ToString());
@@ -1638,13 +1828,23 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
         CancellationToken cancellationToken
     )
     {
-        RaftReplicationResult proposal = await Raft.ReplicateLogs(
-            partitionId,
-            SchemaChangeLogType,
-            entry,
-            autoCommit: false,
-            cancellationToken: cancellationToken
-        ).ConfigureAwait(false);
+        RaftReplicationResult proposal;
+        try
+        {
+            proposal = await Raft.ReplicateLogs(
+                partitionId,
+                SchemaChangeLogType,
+                entry,
+                autoCommit: false,
+                cancellationToken: cancellationToken
+            ).ConfigureAwait(false);
+        }
+        catch (PartitionNotHostedException)
+        {
+            // A replica move took the partition away between the leadership check and the proposal;
+            // the caller re-resolves the leader and forwards, exactly as for any not-leader answer.
+            return new(SchemaReplicationOutcome.NotLeader, partitionId, leader: ResolveLeaderFromPlacement(partitionId) ?? leader);
+        }
 
         if (!proposal.Success)
             return new(ToOutcome(proposal.Status), partitionId, proposal.LogIndex, leader, proposal.Status.ToString());

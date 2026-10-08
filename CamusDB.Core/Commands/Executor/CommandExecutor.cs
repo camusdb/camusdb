@@ -426,7 +426,10 @@ public sealed class CommandExecutor : IAsyncDisposable
         // is unopened (or inside the open-time load-to-register gap) never reaches this node's
         // catalog. Cluster mode only: a standalone node applies its own deltas in-process and
         // cannot fall behind its own checkpoint.
-        schemaFreshnessSweeper = new(databaseDescriptors, catalogs, logger, options.SchemaFreshnessCheckIntervalMs);
+        schemaFreshnessSweeper = new(
+            databaseDescriptors, catalogs, logger,
+            options.SchemaFreshnessCheckIntervalMs,
+            options.UnhostedControlLogProbeIntervalMs);
         if (isClusterMode)
             schemaFreshnessSweeper.Start();
         databaseDroper = new(databaseDescriptors, logger, options);
@@ -531,7 +534,14 @@ public sealed class CommandExecutor : IAsyncDisposable
             databaseDescriptors,
             startupRecovery
         );
-        ddlForwarding = new Controllers.DDL.DdlForwardingCoordinator(schemaDdlForwarder, isClusterMode);
+        ddlForwarding = new Controllers.DDL.DdlForwardingCoordinator(
+            schemaDdlForwarder,
+            isClusterMode,
+            // The forwarding node's read-your-writes fallback when it does not host the schema
+            // partition: the committed delta never reaches it through Raft, so it reloads the
+            // checkpoint the leader persisted before answering. No cooldown: this probe runs once per
+            // forwarded statement, not per miss.
+            reconcileSchema: database => catalogs.ReconcileSchemaFreshnessAsync(database, cooldownMs: 0));
         sequenceDdl = new Controllers.DDL.SequenceDdlService(executorContext, catalogs, sequenceAllocator);
         schemaDdl = new Controllers.DDL.SchemaDdlService(
             executorContext,

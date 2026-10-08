@@ -128,9 +128,12 @@ public sealed class InProcessSchemaCluster : IAsyncDisposable
                     .WaitAsync(TimeSpan.FromSeconds(30))
                     .ConfigureAwait(false);
 
-                await WaitForAllPartitionLeadersAsync(kahunaNodes[0], partitions).ConfigureAwait(false);
+                await WaitForAllPartitionLeadersAsync(kahunaNodes, partitions).ConfigureAwait(false);
             }
-            catch (Exception ex) when (attempt < maxStartAttempts && ex is TimeoutException or AssertionException)
+            // A RaftException from StartAsync is the embedded node's own "leader not decided in time"
+            // during bring-up: the same transient election stall as the timeout, surfaced by Kahuna
+            // rather than by the harness wait, and more likely with more nodes and partitions.
+            catch (Exception ex) when (attempt < maxStartAttempts && ex is TimeoutException or AssertionException or RaftException)
             {
                 TestContext.Progress.WriteLine(
                     $"Cluster bring-up attempt {attempt} failed ({ex.GetType().Name}); disposing and retrying");
@@ -323,14 +326,18 @@ public sealed class InProcessSchemaCluster : IAsyncDisposable
     {
         string schemaKey = SchemaKeyFor(databaseName);
         int partitionId = Nodes[0].Kahuna.SchemaLogPartition(schemaKey);
-        await Nodes[0].Kahuna.Raft.WaitForLeader(partitionId, CancellationToken.None).ConfigureAwait(false);
+
+        // Raft answers per-partition questions only on a node that hosts the partition; under
+        // replica placement node 0 may not. Ask a replica instead.
+        Node hosting = NodeHosting(partitionId);
+        await hosting.Kahuna.Raft.WaitForLeader(partitionId, CancellationToken.None).ConfigureAwait(false);
 
         // Best-effort settle: let the schema-partition leader hold continuously before we resolve
         // it, so the caller does not race a still-churning election (the common cluster-load flake).
         // If it can't stabilise quickly, fall through to the polling loop rather than failing here.
         try
         {
-            await Nodes[0].Kahuna.Raft.WaitForLeaderStableAsync(partitionId, TimeSpan.FromMilliseconds(300), CancellationToken.None)
+            await hosting.Kahuna.Raft.WaitForLeaderStableAsync(partitionId, TimeSpan.FromMilliseconds(300), CancellationToken.None)
                 .AsTask()
                 .WaitAsync(TimeSpan.FromSeconds(5))
                 .ConfigureAwait(false);
@@ -747,7 +754,7 @@ public sealed class InProcessSchemaCluster : IAsyncDisposable
         );
     }
 
-    private static async Task WaitForAllPartitionLeadersAsync(EmbeddedKahuna node, int partitions)
+    private static async Task WaitForAllPartitionLeadersAsync(EmbeddedKahuna[] nodes, int partitions)
     {
         // Stable-leader settle window. WaitForLeaderAsync returns as soon as *an* election
         // produces a leader, but under accumulated in-process load that leader can immediately
@@ -763,11 +770,16 @@ public sealed class InProcessSchemaCluster : IAsyncDisposable
         for (int i = 0; seenPartitions.Count < partitions && i < 200; i++)
         {
             string key = $"{i}/warmup";
-            int partition = node.Raft.GetPartitionKey(key);
+            int partition = nodes[0].Raft.GetPartitionKey(key);
             if (!seenPartitions.Add(partition))
                 continue;
 
-            await node.WaitForLeaderAsync(key, CancellationToken.None)
+            // Per-partition Raft questions are answered only by a node that hosts the partition;
+            // under replica placement that is not every node, so pick a replica for each one.
+            EmbeddedKahuna node = await NodeHostingAsync(nodes, partition).ConfigureAwait(false);
+
+            await node.Raft.WaitForLeader(partition, CancellationToken.None)
+                .AsTask()
                 .WaitAsync(TimeSpan.FromSeconds(15))
                 .ConfigureAwait(false);
 
@@ -779,6 +791,44 @@ public sealed class InProcessSchemaCluster : IAsyncDisposable
 
         if (seenPartitions.Count < partitions)
             throw new AssertionException($"Failed to find all {partitions} partitions after 200 attempts");
+    }
+
+    /// <summary>
+    /// A node that hosts <paramref name="partitionId"/>. Under legacy full replication every node
+    /// does; under replica placement only the committed replica set does, and Raft refuses
+    /// per-partition questions elsewhere.
+    /// </summary>
+    private static async Task<EmbeddedKahuna> NodeHostingAsync(EmbeddedKahuna[] nodes, int partitionId)
+    {
+        // Under replica placement a node materializes its partitions when it applies the committed
+        // map, which can trail StartAsync by a moment; give the map a short window to land.
+        long deadline = Environment.TickCount64 + 15_000;
+
+        while (true)
+        {
+            foreach (EmbeddedKahuna node in nodes)
+            {
+                if (node.Raft.HostsPartition(partitionId))
+                    return node;
+            }
+
+            if (Environment.TickCount64 >= deadline)
+                throw new AssertionException($"No node hosts partition {partitionId}");
+
+            await Task.Delay(50).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>The first cluster node that hosts <paramref name="partitionId"/>; see the static overload.</summary>
+    public Node NodeHosting(int partitionId)
+    {
+        foreach (Node node in Nodes)
+        {
+            if (node.Kahuna.Raft.HostsPartition(partitionId))
+                return node;
+        }
+
+        throw new AssertionException($"No node hosts partition {partitionId}");
     }
 
     private void ValidateNodeIndex(int nodeIndex)
@@ -893,6 +943,31 @@ public sealed class InProcessSchemaCluster : IAsyncDisposable
             // or the caller would treat the partition as having committed the transition.
             if (IsBlocked(manager, node)) return Task.FromResult(new SetMemberRoleResponse(false, Status: RaftOperationStatus.Errored));
             return inner.SendSetMemberRole(manager, node, request, cancellationToken);
+        }
+
+        // Gossip and the SWIM probes are forwarded too. The interface defaults drop them, which
+        // leaves every peer "Suspect" and, more importantly, never delivers the load reports that
+        // feed Kommander's leader hints: under replica placement a node routes an operation on a
+        // partition it does not host by that hint, so without gossip the placement view the
+        // production transport has never forms here. A blocked link drops them like any other
+        // message, so a fault-injection test isolates a node completely.
+
+        public Task<Kommander.Gossip.GossipAck> SendGossip(RaftManager manager, RaftNode node, Kommander.Gossip.GossipMessage digest, CancellationToken cancellationToken = default)
+        {
+            if (IsBlocked(manager, node)) return Task.FromResult(new Kommander.Gossip.GossipAck(0, null));
+            return inner.SendGossip(manager, node, digest, cancellationToken);
+        }
+
+        public Task<Kommander.Gossip.PingResponse> SendPing(RaftManager manager, RaftNode node, Kommander.Gossip.PingRequest request, CancellationToken cancellationToken = default)
+        {
+            if (IsBlocked(manager, node)) return Task.FromResult(new Kommander.Gossip.PingResponse(false, 0));
+            return inner.SendPing(manager, node, request, cancellationToken);
+        }
+
+        public Task<Kommander.Gossip.PingReqResponse> SendPingReq(RaftManager manager, RaftNode node, Kommander.Gossip.PingReqRequest request, CancellationToken cancellationToken = default)
+        {
+            if (IsBlocked(manager, node)) return Task.FromResult(new Kommander.Gossip.PingReqResponse(false));
+            return inner.SendPingReq(manager, node, request, cancellationToken);
         }
     }
 }

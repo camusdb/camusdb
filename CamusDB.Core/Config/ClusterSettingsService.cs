@@ -106,6 +106,18 @@ public sealed class ClusterSettingsService : IAsyncDisposable
 
     private bool started;
 
+    /// <summary>
+    /// The settings generation this node last reconciled its overlay against: the value
+    /// <see cref="ReadGenerationAsync"/> answered at the end of boot, then whatever the unhosted
+    /// probe last saw. Compared, never interpreted: a different value means the overlay must be
+    /// re-scanned. Read and written by the probe loop only, after boot.
+    /// </summary>
+    private long reconciledGeneration;
+
+    private readonly CancellationTokenSource probeCts = new();
+
+    private Task? probeLoop;
+
     public ClusterSettingsService(
         EmbeddedKahuna sharedNode,
         CamusDBOptionsHolder holder,
@@ -185,7 +197,73 @@ public sealed class ClusterSettingsService : IAsyncDisposable
         }
 
         await RepublishAsync().ConfigureAwait(false);
+        reconciledGeneration = generationAfter;
         started = true;
+
+        // Under replica placement this node may not host the partition that carries the settings
+        // log, and then the subscription above never fires: Raft delivers committed entries to the
+        // partition's replicas only. The durable per-key checkpoint plus the generation stamp are
+        // the same catch-up path a restarting node uses, so the probe below follows them instead.
+        // It runs only in cluster mode and acts only while the partition is not hosted here, so a
+        // node that hosts it (or a cluster at full replication) pays nothing beyond the hosted check.
+        int probeIntervalMs = holder.Current.UnhostedControlLogProbeIntervalMs;
+        if (isClusterMode && probeIntervalMs > 0)
+            probeLoop = ProbeUnhostedSettingsLogAsync(probeIntervalMs, probeCts.Token);
+    }
+
+    /// <summary>
+    /// Fast catch-up for a node that does not host the settings-log partition: every tick it reads
+    /// the generation stamp (one small KV read) and, when the stamp moved, re-scans the per-key
+    /// checkpoint and republishes. Last-writer-wins by Raft commit order is what the checkpoint
+    /// already encodes, so a re-scan is an exact resync, not an approximation. A tick that fails
+    /// (a partition between leaders, a transport blip) is retried on the next one.
+    /// </summary>
+    private async Task ProbeUnhostedSettingsLogAsync(int intervalMs, CancellationToken cancellationToken)
+    {
+        while (!cancellationToken.IsCancellationRequested)
+        {
+            try
+            {
+                await Task.Delay(intervalMs, cancellationToken).ConfigureAwait(false);
+
+                if (sharedNode.HostsClusterSettingsLog())
+                    continue;
+
+                long generation = await ReadGenerationAsync(cancellationToken).ConfigureAwait(false);
+                if (generation == reconciledGeneration)
+                    continue;
+
+                await RescanAndRepublishAsync(cancellationToken).ConfigureAwait(false);
+                reconciledGeneration = generation;
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                break;
+            }
+            catch (Exception e)
+            {
+                if (logger.IsEnabled(LogLevel.Debug))
+                    logger.LogDebug("Cluster-settings checkpoint probe failed; retrying next tick: {Message}", e.Message);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Replaces the overlay with the persisted checkpoint and publishes the result. The resync a
+    /// node uses when the settings log itself cannot reach it (it does not host the partition).
+    /// </summary>
+    private async Task RescanAndRepublishAsync(CancellationToken cancellationToken)
+    {
+        await overlaySync.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            await ScanOverlayLockedAsync(cancellationToken).ConfigureAwait(false);
+            holder.Publish(ResolveLocked(overlay));
+        }
+        finally
+        {
+            overlaySync.Release();
+        }
     }
 
     /// <summary>
@@ -251,7 +329,15 @@ public sealed class ClusterSettingsService : IAsyncDisposable
         // that fails must never reach the log, because a committed-but-invalid change would apply
         // on every node and then fail identically on each of them. Standalone mode applies and
         // persists there directly, so the same statement works with no replication in the picture.
-        for (int attempt = 0; attempt < 3; attempt++)
+        // A node that does not host the settings partition resolves the leader from the placement
+        // view, which is a hint that the target may refute with not-leader. A refuted target is not
+        // tried again while an untried replica remains, so the attempts walk the committed replica
+        // set instead of repeating one stale guess; the set is small, so the walk is bounded.
+        HashSet<string>? refuted = null;
+        IReadOnlyList<string> replicas = sharedNode.ClusterSettingsLogReplicaEndpoints();
+        int attempts = Math.Max(3, replicas.Count + 1);
+
+        for (int attempt = 0; attempt < attempts; attempt++)
         {
             if (await TryApplyAsLeaderAsync(change, cancellationToken).ConfigureAwait(false))
                 return;
@@ -263,14 +349,34 @@ public sealed class ClusterSettingsService : IAsyncDisposable
                     CamusDBErrorCodes.InvalidInternalOperation,
                     $"This node does not lead the settings partition (leader: {leader}) and no forwarder is configured");
 
+            if (refuted is not null && refuted.Contains(leader))
+            {
+                foreach (string replica in replicas)
+                {
+                    if (!refuted.Contains(replica))
+                    {
+                        leader = replica;
+                        break;
+                    }
+                }
+            }
+
             bool? forwarded = await forwarder.ForwardChangeAsync(leader, change.Key, change.Value, cancellationToken)
                 .ConfigureAwait(false);
 
+            if (forwarded is null)
+                (refuted ??= new(StringComparer.Ordinal)).Add(leader);
+
             if (forwarded == true)
             {
-                // Read-your-writes on the submitting node: wait until the replicated entry has
-                // applied here, so the caller's next SHOW reflects the change it just made.
-                await WaitForLocalApplyAsync(change, cancellationToken).ConfigureAwait(false);
+                // Read-your-writes on the submitting node. A node that hosts the settings partition
+                // waits for the replicated entry to apply here. A node that does not host it never
+                // receives that entry; the leader wrote the durable checkpoint before it answered, so
+                // the checkpoint is re-scanned instead.
+                if (sharedNode.HostsClusterSettingsLog())
+                    await WaitForLocalApplyAsync(change, cancellationToken).ConfigureAwait(false);
+                else
+                    await RescanAndRepublishAsync(cancellationToken).ConfigureAwait(false);
                 return;
             }
 
@@ -578,11 +684,19 @@ public sealed class ClusterSettingsService : IAsyncDisposable
             "it will arrive via replication", change.Key);
     }
 
-    public ValueTask DisposeAsync()
+    public async ValueTask DisposeAsync()
     {
+        probeCts.Cancel();
+
+        if (probeLoop is not null)
+        {
+            try { await probeLoop.ConfigureAwait(false); }
+            catch (OperationCanceledException) { }
+        }
+
+        probeCts.Dispose();
         busSubscription?.Dispose();
         overlaySync.Dispose();
-        return ValueTask.CompletedTask;
     }
 
     /// <summary>True once <see cref="StartAsync"/> completed; used by hosts that gate the SQL surface.</summary>

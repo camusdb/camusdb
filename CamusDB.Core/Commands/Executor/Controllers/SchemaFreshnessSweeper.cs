@@ -26,6 +26,14 @@ namespace CamusDB.Core.CommandsExecutor.Controllers;
 /// <para><b>Cost.</b> One KV read of the version key per open database per tick when nothing is
 /// stale. The sweep runs only in cluster mode: a standalone node applies its own deltas in-process
 /// and cannot fall behind its own checkpoint.</para>
+///
+/// <para><b>Two cadences.</b> The full sweep above runs every <c>intervalMs</c>. A second, much
+/// shorter cadence (<c>unhostedIntervalMs</c>) probes only the databases whose schema-log partition
+/// this node does not host. Under replica placement such a node is never a Raft member of that
+/// partition, so the checkpoint is its <em>only</em> source of schema changes, not a repair of a
+/// rare delivery gap; the fast probe bounds how far it lags every committed DDL, and the ack the
+/// reconciler publishes on each install keeps the schema leader's ack gate waiting for it. The
+/// probe is skipped for a hosted database, so a node that hosts every partition pays nothing.</para>
 /// </summary>
 internal sealed class SchemaFreshnessSweeper : IAsyncDisposable
 {
@@ -37,6 +45,8 @@ internal sealed class SchemaFreshnessSweeper : IAsyncDisposable
 
     private readonly int intervalMs;
 
+    private readonly int unhostedIntervalMs;
+
     private readonly CancellationTokenSource cts = new();
 
     private Task? loop;
@@ -45,24 +55,26 @@ internal sealed class SchemaFreshnessSweeper : IAsyncDisposable
         DatabaseDescriptors databaseDescriptors,
         CatalogsManager catalogs,
         ILogger<ICamusDB> logger,
-        int intervalMs)
+        int intervalMs,
+        int unhostedIntervalMs = 0)
     {
         this.databaseDescriptors = databaseDescriptors;
         this.catalogs = catalogs;
         this.logger = logger;
         this.intervalMs = intervalMs;
+        this.unhostedIntervalMs = unhostedIntervalMs;
     }
 
     /// <summary>Number of stale schemas this sweeper has repaired, for diagnostics and tests.</summary>
     internal int ReconciledCount;
 
     /// <summary>
-    /// Starts the periodic probe loop. A no-op when the interval is non-positive, so a deployment
+    /// Starts the periodic probe loop. A no-op when both intervals are non-positive, so a deployment
     /// can disable the sweep entirely.
     /// </summary>
     public void Start()
     {
-        if (intervalMs <= 0)
+        if (intervalMs <= 0 && unhostedIntervalMs <= 0)
             return;
 
         // Serialize concurrent Start calls: an unsynchronized `loop ??=` is check-then-act, and two
@@ -78,12 +90,25 @@ internal sealed class SchemaFreshnessSweeper : IAsyncDisposable
         // try/catch INSIDE the loop: one failed sweep is logged and retried on the next tick, and
         // only cancellation ends the loop. The sweep is a repair mechanism — a sweep that throws
         // must never take the loop down and leave staleness permanent thereafter.
+        // One timer serves both cadences: it ticks at the shorter one and runs the full sweep once
+        // enough fast ticks add up to the full interval. A disabled cadence (<= 0) never fires.
+        int tickMs = unhostedIntervalMs > 0 && (intervalMs <= 0 || unhostedIntervalMs < intervalMs)
+            ? unhostedIntervalMs
+            : intervalMs;
+        long sinceFullSweepMs = 0;
+
         while (!ct.IsCancellationRequested)
         {
             try
             {
-                await Task.Delay(intervalMs, ct).ConfigureAwait(false);
-                await SweepOnceAsync().ConfigureAwait(false);
+                await Task.Delay(tickMs, ct).ConfigureAwait(false);
+                sinceFullSweepMs += tickMs;
+
+                bool fullSweep = intervalMs > 0 && sinceFullSweepMs >= intervalMs;
+                if (fullSweep)
+                    sinceFullSweepMs = 0;
+
+                await SweepOnceAsync(unhostedOnly: !fullSweep).ConfigureAwait(false);
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {
@@ -100,7 +125,14 @@ internal sealed class SchemaFreshnessSweeper : IAsyncDisposable
     /// Probes every open, fully loaded descriptor once and returns how many were repaired.
     /// Public surface for tests, which drive ticks directly instead of waiting out the timer.
     /// </summary>
-    internal async Task<int> SweepOnceAsync()
+    internal Task<int> SweepOnceAsync() => SweepOnceAsync(unhostedOnly: false);
+
+    /// <summary>
+    /// One sweep. With <paramref name="unhostedOnly"/> set, only the databases whose schema-log
+    /// partition this node does not host are probed (the fast cadence); otherwise every open database
+    /// is (the full sweep).
+    /// </summary>
+    private async Task<int> SweepOnceAsync(bool unhostedOnly)
     {
         int reconciled = 0;
 
@@ -118,6 +150,9 @@ internal sealed class SchemaFreshnessSweeper : IAsyncDisposable
 
             try
             {
+                if (unhostedOnly && descriptor.Kahuna.HostsSchemaLog(descriptor.Id))
+                    continue;
+
                 if (await catalogs.ReconcileSchemaFreshnessAsync(descriptor).ConfigureAwait(false))
                 {
                     reconciled++;

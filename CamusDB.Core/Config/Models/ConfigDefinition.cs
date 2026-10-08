@@ -385,6 +385,15 @@ public class ConfigDefinition
     public int SchemaFreshnessCheckIntervalMs { get; set; } = 10_000;
 
     /// <summary>
+    /// Interval at which a node probes the durable checkpoint of a control log (a database's schema
+    /// log, or the cluster-settings log) whose Raft partition it does not host under replica
+    /// placement, in milliseconds. <c>&lt;= 0</c> disables the fast probe. Maps to
+    /// <c>CamusDBOptions.UnhostedControlLogProbeIntervalMs</c>
+    /// (yml <c>unhosted_control_log_probe_interval_ms</c>). Default 250 milliseconds.
+    /// </summary>
+    public int UnhostedControlLogProbeIntervalMs { get; set; } = 250;
+
+    /// <summary>
     /// Enables cost-based access-path selection in the query planner.
     /// When <c>true</c> (default), the planner costs all viable index steps for ANALYZEd tables
     /// and picks the cheapest. When <c>false</c>, the rule-based (score-based) path is used

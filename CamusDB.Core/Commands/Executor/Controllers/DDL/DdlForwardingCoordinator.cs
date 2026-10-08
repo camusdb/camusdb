@@ -40,10 +40,24 @@ internal sealed class DdlForwardingCoordinator
 
     private readonly bool isClusterMode;
 
-    internal DdlForwardingCoordinator(ISchemaDdlForwarder? schemaDdlForwarder, bool isClusterMode)
+    /// <summary>
+    /// Reloads a database's schema from the durable checkpoint when it is ahead of memory, returning
+    /// true if it installed a newer version. Used by <see cref="WaitForForwardedSchemaApplyAsync"/>
+    /// on a node that does not host the schema-log partition (replica placement): Raft never delivers
+    /// the committed delta there, and the leader persists the checkpoint before it answers the
+    /// forward, so the checkpoint is where the change becomes visible to this node. Null disables
+    /// the fallback (tests that only exercise the hosted path).
+    /// </summary>
+    private readonly Func<DatabaseDescriptor, Task<bool>>? reconcileSchema;
+
+    internal DdlForwardingCoordinator(
+        ISchemaDdlForwarder? schemaDdlForwarder,
+        bool isClusterMode,
+        Func<DatabaseDescriptor, Task<bool>>? reconcileSchema = null)
     {
         this.schemaDdlForwarder = schemaDdlForwarder;
         this.isClusterMode = isClusterMode;
+        this.reconcileSchema = reconcileSchema;
     }
 
     internal Task<bool?> TryForwardCreateTableAsync(DatabaseDescriptor database, CreateTableTicket ticket)
@@ -167,9 +181,23 @@ internal sealed class DdlForwardingCoordinator
         {
             long fromVersion = database.Schema.SchemaVersion;
 
-            for (int attempt = 0; attempt < 3; attempt++)
+            // Each attempt resolves the leader afresh. On a node that hosts the schema partition the
+            // answer is Raft's own; on a node that does not host it (replica placement) the answer
+            // is a best-effort placement hint, which the target may refute with not-leader. A
+            // refuted target is skipped on later attempts so a stale hint cannot be retried three
+            // times in a row while a replica that does lead is never tried: the attempts then walk
+            // the committed replica set instead.
+            HashSet<string>? refuted = null;
+            IReadOnlyList<string> replicas = database.Kahuna.SchemaLogReplicaEndpoints(database.Id);
+            int attempts = Math.Max(3, replicas.Count + 1);
+
+            for (int attempt = 0; attempt < attempts; attempt++)
             {
-                string leader = await database.Kahuna.WaitForSchemaLeaderAsync(database.Id, CancellationToken.None).ConfigureAwait(false);
+                string? leader = await database.Kahuna.WaitForSchemaLeaderAsync(database.Id, CancellationToken.None).ConfigureAwait(false);
+
+                if (refuted is not null && refuted.Contains(leader))
+                    leader = NextUntriedReplica(replicas, refuted) ?? leader;
+
                 bool? result = await forward(leader, operationId, CancellationToken.None).ConfigureAwait(false);
                 if (result is not null)
                 {
@@ -178,6 +206,8 @@ internal sealed class DdlForwardingCoordinator
 
                     return result;
                 }
+
+                (refuted ??= new(StringComparer.Ordinal)).Add(leader);
             }
         }
         finally
@@ -191,18 +221,41 @@ internal sealed class DdlForwardingCoordinator
         );
     }
 
+    private static string? NextUntriedReplica(IReadOnlyList<string> replicas, HashSet<string> refuted)
+    {
+        foreach (string replica in replicas)
+        {
+            if (!refuted.Contains(replica))
+                return replica;
+        }
+
+        return null;
+    }
+
     /// <summary>
     /// Blocks until the leader's committed change has replicated into this node's in-memory schema.
     /// Both conditions are required: the version must move (so a predicate that was already true
     /// before the forward cannot report success) and the predicate must hold (so an unrelated
     /// concurrent DDL that moved the version cannot either).
+    ///
+    /// <para>On a node that does not host the schema-log partition no Raft delivery is coming: the
+    /// node is not a member of that Raft group. The leader persisted the durable checkpoint before
+    /// it answered the forward, so the wait reloads the checkpoint instead, through
+    /// <see cref="reconcileSchema"/>, which installs the newer snapshot and acks it. The reload is
+    /// a KV round trip, so it runs every few polls rather than on each one.</para>
     /// </summary>
-    private static async Task WaitForForwardedSchemaApplyAsync(DatabaseDescriptor database, long fromVersion, Func<bool> wasApplied)
+    private async Task WaitForForwardedSchemaApplyAsync(DatabaseDescriptor database, long fromVersion, Func<bool> wasApplied)
     {
         for (int attempt = 0; attempt < 200; attempt++)
         {
             if (database.Schema.SchemaVersion > fromVersion && wasApplied())
                 return;
+
+            if (reconcileSchema is not null && attempt % 4 == 0 && !database.Kahuna.HostsSchemaLog(database.Id))
+            {
+                await reconcileSchema(database).ConfigureAwait(false);
+                continue;
+            }
 
             await Task.Delay(25).ConfigureAwait(false);
         }

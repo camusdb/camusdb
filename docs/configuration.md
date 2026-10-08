@@ -49,6 +49,7 @@ Example: YAML `mode: cluster` with `--mode standalone` starts in standalone mode
 | `join_existing` | `--join-existing` | `false` |
 | `schema_ack_wait_timeout_ms` | `--schema-ack-wait-timeout-ms` | `30000` |
 | `schema_ack_live_node_lease_ms` | `--schema-ack-live-node-lease-ms` | `30000` |
+| `unhosted_control_log_probe_interval_ms` | — | `250` |
 | `http_port` | `--http-port` | `5095` |
 | `https_port` | `--https-port` | `7141` |
 | `https_certificate` | `--https-certificate` | `""` |

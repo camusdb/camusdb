@@ -70,6 +70,9 @@ internal static partial class Log
     [LoggerMessage(Level = LogLevel.Information, Message = "Database {DbName} opened")]
     public static partial void LogDatabaseOpened(ILogger logger, string dbName);
 
+    [LoggerMessage(Level = LogLevel.Information, Message = "Database {DbName}: this node does not host schema-log partition {PartitionId} (replicas: {Replicas}); DDL is forwarded to a replica and schema changes arrive through the durable checkpoint")]
+    public static partial void LogSchemaLogNotHosted(ILogger logger, string dbName, int partitionId, string replicas);
+
     // Table lifecycle
 
     [LoggerMessage(Level = LogLevel.Information, Message = "Registered table {TableName} in system space")]

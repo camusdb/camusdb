@@ -209,6 +209,23 @@ internal sealed class DatabaseOpener
         try
         {
             await catalogs.ReconcileSchemaFreshnessAsync(databaseDescriptor).ConfigureAwait(false);
+
+            // Under replica placement this node may not host the partition that carries the schema
+            // log, in which case the subscription registered above never fires: Raft delivers
+            // committed entries to the partition's replicas only. The database still works here,
+            // because every schema change reaches it through the durable checkpoint, probed on the
+            // fast unhosted cadence. Two things make that safe. The version loaded now is
+            // acknowledged to the schema leader, so its ack gate counts this node from the first DDL
+            // on and does not advance a staged change past it; and the log line names the replicas,
+            // so an operator can see which nodes the database's DDL is routed to.
+            if (isClusterMode && !sharedNode.HostsSchemaLog(id))
+            {
+                databaseDescriptor.PublishSchemaApplied(databaseDescriptor.Schema.SchemaVersion);
+
+                Log.LogSchemaLogNotHosted(
+                    logger, name, databaseDescriptor.SchemaLogPartition,
+                    string.Join(", ", sharedNode.SchemaLogReplicaEndpoints(id)));
+            }
         }
         catch (Exception ex)
         {
