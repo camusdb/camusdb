@@ -48,10 +48,12 @@ namespace CamusDB.Tests.Cluster;
 /// and what Kahuna itself answers for the raw row key at the snapshot timestamp right away and again
 /// 300 ms, 1.5 s and 4 s later. That raw probe separates a CamusDB read-path fault from a Kahuna one.</para>
 ///
-/// <para>The defect is in Kahuna's snapshot read path (the prepared-intent overlay answers before the
-/// safe-time wait, a later commit can be stamped at or below the snapshot, and the persisted-history
-/// fallback lags the flush). This test stays red until those fixes ship; the deferred-settlement arm
-/// fails about ten times more often than the inline arm because the overlay is the dominant cause.</para>
+/// <para>The first defects were in Kahuna's snapshot read path (the prepared-intent overlay answered before
+/// the safe-time wait, a later commit could be stamped at or below the snapshot, and the persisted-history
+/// fallback lagged the flush); the deferred-settlement arm failed about ten times more often than the inline
+/// arm because the overlay was the dominant cause. A later one was the clock fence itself: a snapshot more
+/// than five seconds ahead of the serving node's clock, which a forward wall-clock jump on one node mints,
+/// was served without the fence. The clock-jump arm and the deterministic test below cover that shape.</para>
 /// </summary>
 [TestFixture]
 [NonParallelizable]
@@ -72,9 +74,16 @@ public sealed class TestSnapshotRepeatedPointReadsCluster
     /// <param name="deferredSettlement">Kahuna's default (true) settles a committed durable intent off the
     /// commit path, so the previous append's intent is still in the intent store while the next append
     /// commits. False settles inline, which removes that overlap; comparing the two arms isolates it.</param>
-    [TestCase(true)]
-    [TestCase(false)]
-    public async Task Cluster_SerializableRO_RepeatedPointReads_AreStable_UnderConcurrentAppends(bool deferredSettlement)
+    /// <param name="forwardClockJumps">True moves one node's hybrid logical clock forward by six seconds
+    /// every second, each node in turn, the way a forward wall-clock jump on that node would. A snapshot
+    /// minted on the jumped node then leads every other node's clock by more than Kahuna's five-second
+    /// clock-fence bound until the next Raft message spreads the jump, and a read served inside that window
+    /// without the fence can be followed by a commit stamped inside its snapshot. The jumps are folded into
+    /// the clock directly because the wall clock of a test process cannot be moved.</param>
+    [TestCase(true, false)]
+    [TestCase(false, false)]
+    [TestCase(true, true)]
+    public async Task Cluster_SerializableRO_RepeatedPointReads_AreStable_UnderConcurrentAppends(bool deferredSettlement, bool forwardClockJumps)
     {
         await using InProcessSchemaCluster cluster =
             await InProcessSchemaCluster.StartAsync(nodeCount: 3, partitions: 3,
@@ -296,6 +305,25 @@ public sealed class TestSnapshotRepeatedPointReadsCluster
             }
         }
 
+        // Moves one node's clock forward by six seconds every second, each node in turn. Every jump leads the
+        // cluster's current clock by more than the fence bound, so each one opens a new window in which a
+        // snapshot minted on the jumped node is too far ahead of the other nodes to be fenced.
+        async Task ClockJumper()
+        {
+            int jumps = 0;
+            while (!ct.IsCancellationRequested)
+            {
+                try { await Task.Delay(1000, ct); }
+                catch (OperationCanceledException) { break; }
+
+                InProcessSchemaCluster.Node node = cluster.Nodes[jumps++ % cluster.Nodes.Length];
+                Kommander.IRaft raft = node.Kahuna.Raft;
+                HLCTimestamp now = raft.HybridLogicalClock.TrySendOrLocalEvent(raft.GetLocalNodeId());
+                raft.HybridLogicalClock.ReceiveEvent(raft.GetLocalNodeId(), now + 6_000);
+            }
+            TestContext.Out.WriteLine($"clock jumps applied: {jumps}");
+        }
+
         List<Task> tasks = [];
         for (int i = 0; i < writers; i++)
         {
@@ -307,6 +335,8 @@ public sealed class TestSnapshotRepeatedPointReadsCluster
             int readerId = i;
             tasks.Add(Task.Run(() => Reader(readerId)));
         }
+        if (forwardClockJumps)
+            tasks.Add(Task.Run(ClockJumper));
         await Task.WhenAll(tasks);
 
         Task[] pendingProbes;
@@ -328,6 +358,156 @@ public sealed class TestSnapshotRepeatedPointReadsCluster
         Assert.That(mismatches, Is.Empty,
             $"{mismatches.Count} repeated reads inside one Serializable read-only transaction returned different values; first: " +
             string.Join(" | ", mismatches.Take(5).Select(m => $"{m.Key}@node{m.Node} T={m.SnapshotT}: '{m.First}' -> '{m.Second}'")));
+    }
+
+    /// <summary>
+    /// The shape the Caraxes clock-jump scenario produced, made deterministic: a Serializable read-only
+    /// snapshot whose timestamp leads every node's clock by twenty seconds, which is what a snapshot minted
+    /// on a node whose wall clock jumped forward looks like to the rest of the cluster before the next Raft
+    /// message spreads the jump.
+    ///
+    /// <para>Kahuna must not serve such a read without its clock fence. Served unfenced, the first read
+    /// answers the current row while every clock still trails the snapshot, an append committed right after
+    /// it is stamped below the snapshot, and the second read at the same snapshot sees the append: two reads
+    /// of one key inside one snapshot disagree. The read is refused with MustRetry instead, which CamusDB's
+    /// read path retries; the read is served once the jump reaches the serving node, after which an append is
+    /// stamped above the snapshot. The invariant is the same either way: both reads return the same list.</para>
+    ///
+    /// <para>The snapshot is shifted on a copy of the transaction rather than minted on a jumped node, because
+    /// the wall clock of a test process cannot be moved; the jump reaching the other nodes is modeled by folding
+    /// the shifted timestamp into every node's clock, which is exactly what their next Raft message from a
+    /// jumped leader does.</para>
+    /// </summary>
+    [Test]
+    public async Task Cluster_SerializableRO_SnapshotAheadOfEveryClock_RepeatedPointReadAgreesAcrossConcurrentAppend()
+    {
+        await using InProcessSchemaCluster cluster =
+            await InProcessSchemaCluster.StartAsync(nodeCount: 3, partitions: 3,
+                loggerFactory: sharedLoggerFactory, logger: logger);
+
+        string db = cluster.NextSchemaLogDatabaseName();
+        await cluster.OpenDatabaseOnAllNodesAsync(db);
+
+        await cluster.RunOnSchemaLeaderAsync(db, leader => leader.Executor.CreateTable(new CreateTableTicket(
+            databaseName: db,
+            tableName: "lists",
+            columns:
+            [
+                new ColumnInfo("k", ColumnType.String, notNull: true),
+                new ColumnInfo("v", ColumnType.String, notNull: true),
+            ],
+            constraints:
+            [
+                new ConstraintInfo(ConstraintType.PrimaryKey, "~pk",
+                    [new ColumnIndexInfo("k", OrderType.Ascending)])
+            ],
+            ifNotExists: false
+        )).WaitAsync(TimeSpan.FromSeconds(20)));
+
+        await cluster.WaitForSchemaConvergenceAsync(db, version: 1);
+
+        InProcessSchemaCluster.Node readerNode = cluster.Nodes[0];
+        InProcessSchemaCluster.Node writerNode = cluster.Nodes[1];
+        const string key = "k";
+
+        await AppendAsync(writerNode, db, key, "a");
+
+        KvTransaction tx = await readerNode.Database!.Transactions.BeginAsync(CamusIsolationLevel.Serializable, CamusTransactionMode.ReadOnly);
+        try
+        {
+            const int leadMs = 20_000;
+            KvTransaction shifted = new(
+                transactionId:   tx.TransactionId,
+                uniqueId:        tx.UniqueId,
+                isReadOnly:      true,
+                isolationLevel:  CamusIsolationLevel.Serializable,
+                transactionMode: CamusTransactionMode.ReadOnly,
+                readTimestamp:   tx.ReadTimestamp + leadMs,
+                clientId:        tx.ClientId,
+                priority:        tx.Priority);
+
+            long start = Stopwatch.GetTimestamp();
+            Task<string?> firstRead = ReadListWithRetryAsync(readerNode.Executor, db, shifted, key, TimeSpan.FromSeconds(15));
+
+            // Give an unfenced read time to answer, then append while every clock still trails the snapshot.
+            await Task.WhenAny(firstRead, Task.Delay(150));
+            await AppendAsync(writerNode, db, key, "b");
+            double appendDoneMs = ElapsedMs(start);
+
+            // The jump reaches every node.
+            foreach (InProcessSchemaCluster.Node node in cluster.Nodes)
+            {
+                Kommander.IRaft raft = node.Kahuna.Raft;
+                raft.HybridLogicalClock.ReceiveEvent(raft.GetLocalNodeId(), shifted.ReadTimestamp);
+            }
+
+            string? first = await firstRead;
+            double firstDoneMs = ElapsedMs(start);
+            string? second = await ReadListWithRetryAsync(readerNode.Executor, db, shifted, key, TimeSpan.FromSeconds(15));
+
+            TestContext.Out.WriteLine(
+                $"T={tx.ReadTimestamp} shifted={shifted.ReadTimestamp}; append committed at {appendDoneMs:F0} ms; " +
+                $"first read answered at {firstDoneMs:F0} ms with '{first}'; second read '{second}'");
+
+            Assert.That(second, Is.EqualTo(first),
+                "two reads of one key inside one Serializable read-only snapshot returned different lists");
+        }
+        finally
+        {
+            await readerNode.Database!.Transactions.RollbackAsync(tx);
+        }
+    }
+
+    private static double ElapsedMs(long from) => (Stopwatch.GetTimestamp() - from) * 1000.0 / Stopwatch.Frequency;
+
+    /// <summary>Appends one element to a list (or creates it) in a committed Serializable read-write transaction.</summary>
+    private static async Task AppendAsync(InProcessSchemaCluster.Node node, string db, string key, string value)
+    {
+        DatabaseDescriptor database = node.Database!;
+        KvTransaction tx = await database.Transactions.BeginAsync(CamusIsolationLevel.Serializable, CamusTransactionMode.ReadWrite);
+        try
+        {
+            ExecuteNonSQLResult updated = await node.Executor.ExecuteNonSQLQuery(new ExecuteSQLTicket(
+                txnState: tx, database: db,
+                sql: "UPDATE lists SET v = concat(v, @x) WHERE k = @k",
+                parameters: new() { ["@x"] = new(ColumnType.String, "," + value), ["@k"] = new(ColumnType.String, key) }));
+
+            if (updated.ModifiedRows == 0)
+            {
+                await node.Executor.ExecuteNonSQLQuery(new ExecuteSQLTicket(
+                    txnState: tx, database: db,
+                    sql: "INSERT INTO lists (k, v) VALUES (@k, @x)",
+                    parameters: new() { ["@x"] = new(ColumnType.String, value), ["@k"] = new(ColumnType.String, key) }));
+            }
+
+            await database.Transactions.CommitAsync(tx);
+        }
+        catch
+        {
+            try { await database.Transactions.RollbackAsync(tx); } catch (CamusDBException) { }
+            throw;
+        }
+    }
+
+    /// <summary>
+    /// Reads one list, retrying a transient refusal (the read path's own retry budget is about a second and a
+    /// half, shorter than the window this test holds the snapshot ahead of the clocks) until the deadline.
+    /// </summary>
+    private static async Task<string?> ReadListWithRetryAsync(CommandExecutor executor, string db, KvTransaction tx, string key, TimeSpan deadline)
+    {
+        long start = Stopwatch.GetTimestamp();
+        while (true)
+        {
+            try
+            {
+                (string? value, _) = await ReadListAsync(executor, db, tx, key);
+                return value;
+            }
+            catch (CamusDBException e) when (e.Code == CamusDBErrorCodes.TransactionMustRetry && ElapsedMs(start) < deadline.TotalMilliseconds)
+            {
+                await Task.Delay(20);
+            }
+        }
     }
 
     /// <summary>

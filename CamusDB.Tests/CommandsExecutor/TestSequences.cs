@@ -393,6 +393,48 @@ internal sealed class TestSequences : SharedNodeBaseTest
         Assert.That(rows[1]["no"].LongValue, Is.EqualTo(2));
     }
 
+    /// <summary>
+    /// The PostgreSQL spelling <c>id BIGSERIAL PRIMARY KEY</c>: the serial word is followed by a
+    /// column constraint, so the identity default and the primary key land on the same int64
+    /// column. Rows inserted without the key get it from the owned sequence, and a supplied key
+    /// that collides with an issued one is refused by the primary key, not silently accepted.
+    /// </summary>
+    [Test]
+    [NonParallelizable]
+    public async Task TestBigSerialPrimaryKey()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupDatabase();
+
+        await ExecuteDdl(executor, dbname, "CREATE TABLE orders (id BIGSERIAL PRIMARY KEY, label string)");
+
+        TableSchema table = database.Schema.Tables["orders"];
+        TableColumnSchema idColumn = table.Columns!.Single(c => c.Name == "id");
+        Assert.That(idColumn.Type, Is.EqualTo(ColumnType.Integer64));
+        Assert.That(idColumn.IdentityAlways, Is.False);
+
+        Assert.That(database.Schema.Sequences.ContainsKey("orders_id_seq"), Is.True);
+        Assert.That(database.Schema.Sequences["orders_id_seq"].OwnedByTableId, Is.EqualTo(table.Id));
+
+        await ExecuteNonQuery(executor, dbname, "INSERT INTO orders (label) VALUES ('first'), ('second')");
+        await ExecuteNonQuery(executor, dbname, "INSERT INTO orders (label) VALUES ('third')");
+
+        List<Dictionary<string, ColumnValue>> rows = await Query(executor, dbname, "SELECT id, label FROM orders ORDER BY id");
+        Assert.That(rows.Count, Is.EqualTo(3));
+        Assert.That(rows.Select(r => r["id"].LongValue), Is.EqualTo(new long[] { 1, 2, 3 }));
+        Assert.That(rows.Select(r => r["label"].StrValue), Is.EqualTo(new[] { "first", "second", "third" }));
+
+        List<Dictionary<string, ColumnValue>> byKey = await Query(executor, dbname, "SELECT label FROM orders WHERE id = 2");
+        Assert.That(byKey.Count, Is.EqualTo(1));
+        Assert.That(byKey[0]["label"].StrValue, Is.EqualTo("second"));
+
+        CamusDBException? duplicate = Assert.ThrowsAsync<CamusDBException>(async () =>
+            await ExecuteNonQuery(executor, dbname, "INSERT INTO orders (id, label) VALUES (2, 'collides')"));
+        Assert.That(duplicate!.Code, Is.EqualTo(CamusDBErrorCodes.DuplicateUniqueKeyValue));
+
+        List<Dictionary<string, ColumnValue>> after = await Query(executor, dbname, "SELECT id FROM orders");
+        Assert.That(after.Count, Is.EqualTo(3));
+    }
+
     [Test]
     [NonParallelizable]
     public async Task TestGeneratedAlwaysRefusesASuppliedValue()
