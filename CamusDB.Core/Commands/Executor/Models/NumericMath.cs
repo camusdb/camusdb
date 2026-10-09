@@ -567,9 +567,9 @@ public static class NumericMath
         if (digits >= Scale)
             return unscaled;
 
-        long drop = Scale - digits;
-
-        if (drop > Precision)
+        // Compare before subtracting: Scale - digits wraps past long.MaxValue for a digits near
+        // long.MinValue, and a wrapped (negative) drop would index past PowersOfTen.
+        if (digits < Scale - Precision)
         {
             // The unit is past every value: the result is zero, or one unit away from zero, which is
             // past the range.
@@ -583,6 +583,7 @@ public static class NumericMath
             return awayFromZero ? throw OutOfRange(operation) : 0;
         }
 
+        long drop = Scale - digits;
         Int128 unit = PowersOfTen[drop];
         Int128 quotient = unscaled / unit;   // toward zero
         Int128 remainder = unscaled % unit;  // sign of the value

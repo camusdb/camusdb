@@ -13,8 +13,11 @@ namespace CamusDB.Core.CommandsExecutor.Models.Plans;
 /// <summary>
 /// One AVG that was decomposed for partial execution: fragments ship
 /// <see cref="SumName"/>/<see cref="CountName"/> partial columns, the merge re-sums both, and
-/// the finalizer emits <see cref="OutputName"/> = Float64(sum / count) (NULL when count is 0 —
-/// the aggregator's own empty-input semantics) and drops the internal pair. The division is a
+/// the finalizer emits <see cref="OutputName"/> = sum / count (NULL when count is 0 — the
+/// aggregator's own empty-input semantics) and drops the internal pair. The result is Float64 for
+/// a float or integer sum, and NUMERIC (rounded half away from zero) for a NUMERIC sum. The planner
+/// does not decompose an AVG whose argument can be NUMERIC, because a partial NUMERIC sum is
+/// range-checked, so the NUMERIC arm is reached only through a direct call. The division is a
 /// typed post-merge step, never a SQL expression: the engine's <c>/</c> integer-divides
 /// Integer64 operands, which would corrupt integer-column averages.
 /// </summary>

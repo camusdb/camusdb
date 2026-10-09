@@ -17,7 +17,9 @@ namespace CamusDB.Core.CommandsExecutor.Models;
 /// first consumer. Every <see cref="ColumnType"/> is covered; per-type payload fields keep
 /// frames compact: <c>{"t":type, "s"|"l"|"f"|"b"|"y"|"u"+"l"|"a"+"e": payload}</c>.
 /// Doubles round-trip exactly (System.Text.Json uses shortest round-trippable formatting) and
-/// bytes travel as base64. Arrays recurse.
+/// bytes travel as base64. Arrays recurse. A Uuid and a NUMERIC both travel as their two signed
+/// 64-bit halves (<c>"u"</c> high, <c>"l"</c> low); the type tag tells them apart, and the read
+/// path range-checks a NUMERIC, so a corrupt frame cannot carry a value past ±(10³⁸−1) unscaled.
 /// </summary>
 public static class ColumnValueWireCodec
 {
@@ -56,6 +58,7 @@ public static class ColumnValueWireCodec
                 break;
 
             case ColumnType.Uuid:
+            case ColumnType.Numeric:
                 writer.WriteNumber("u", value.UuidHigh);
                 writer.WriteNumber("l", value.LongValue);
                 break;
@@ -93,8 +96,8 @@ public static class ColumnValueWireCodec
                 new ColumnValue(type, element.GetProperty("s").GetString()!),
             ColumnType.Bytes =>
                 new ColumnValue(element.GetProperty("y").GetBytesFromBase64()),
-            ColumnType.Uuid =>
-                new ColumnValue(ColumnType.Uuid, element.GetProperty("u").GetInt64(), element.GetProperty("l").GetInt64()),
+            ColumnType.Uuid or ColumnType.Numeric =>
+                new ColumnValue(type, element.GetProperty("u").GetInt64(), element.GetProperty("l").GetInt64()),
             ColumnType.Array => ReadArray(element),
             _ => throw new CamusDBException(
                 CamusDBErrorCodes.InvalidInternalOperation,

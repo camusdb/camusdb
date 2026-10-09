@@ -209,7 +209,7 @@ public sealed class QueryPlanner
     /// Grouped shapes take full projection lists including AVG, which decomposes into
     /// internal SUM/COUNT pair columns finalized after the merge.
     /// </summary>
-    private static PartialAggregatePlan? TryBuildPartialAggregatePlan(QueryTicket ticket, PhysicalPlanNode input)
+    private static PartialAggregatePlan? TryBuildPartialAggregatePlan(QueryTicket ticket, TableDescriptor table, PhysicalPlanNode input)
     {
         // The residual filter rides between the aggregate and the gather as a FilterNode
         // (it contributes no operator of its own — fragments evaluate it), so unwrap it.
@@ -278,6 +278,15 @@ public sealed class QueryPlanner
                 && !FragmentFilterShippability.IsShippable(argument))
                 return null;
 
+            // A partial SUM is finalized per span into a range-checked NUMERIC cell, so a span total
+            // past the NUMERIC range fails the query although the exact total, or the average, is in
+            // range. The single-node accumulator keeps an exact total and checks only the result, so a
+            // SUM or AVG that can see a NUMERIC value runs above the gather instead.
+            if ((funcName.Equals("sum", StringComparison.OrdinalIgnoreCase) || funcName.Equals("avg", StringComparison.OrdinalIgnoreCase))
+                && funcCall.rightAst is { } summed
+                && MayProduceNumeric(summed, table, ticket))
+                return null;
+
             if (funcName.Equals("avg", StringComparison.OrdinalIgnoreCase))
             {
                 // AVG only decomposes on the grouped path (see the method summary for why the
@@ -313,6 +322,77 @@ public sealed class QueryPlanner
             MergeGroupBy = grouped ? groupCols!.Select(Identifier).ToArray() : null,
             AvgFinalizers = avgFinalizers,
         };
+    }
+
+    /// <summary>
+    /// True when <paramref name="argument"/> can evaluate to a NUMERIC value. A NUMERIC value can only
+    /// come from a NUMERIC column, a NUMERIC literal or cast (a <see cref="NodeType.TypeNumeric"/>
+    /// node), or a NUMERIC parameter, so the walk looks for those. An identifier that names no column
+    /// of <paramref name="table"/>, or a parameter with no value, counts as NUMERIC: the answer must
+    /// never be a false "no". The walk uses a stack, because an expression chain can be deep.
+    /// </summary>
+    private static bool MayProduceNumeric(NodeAst argument, TableDescriptor table, QueryTicket ticket)
+    {
+        Stack<NodeAst> pending = new();
+        pending.Push(argument);
+
+        while (pending.TryPop(out NodeAst? node))
+        {
+            switch (node.nodeType)
+            {
+                case NodeType.TypeNumeric:
+                    return true;
+
+                case NodeType.Identifier:
+                    if (ColumnTypeOf(table, node.yytext) is not { } type || type == ColumnType.Numeric)
+                        return true;
+                    continue;
+
+                case NodeType.Placeholder:
+                    if (ticket.Parameters is null
+                        || node.yytext is null
+                        || !ticket.Parameters.TryGetValue(node.yytext, out ColumnValue? parameter)
+                        || parameter.Type == ColumnType.Numeric)
+                        return true;
+                    continue;
+
+                case NodeType.ExprFuncCall:
+                    // leftAst is the function name, not a column.
+                    if (node.rightAst is not null)
+                        pending.Push(node.rightAst);
+                    continue;
+            }
+
+            if (node.leftAst is not null) pending.Push(node.leftAst);
+            if (node.rightAst is not null) pending.Push(node.rightAst);
+            if (node.extendedOne is not null) pending.Push(node.extendedOne);
+            if (node.extendedTwo is not null) pending.Push(node.extendedTwo);
+            if (node.extendedThree is not null) pending.Push(node.extendedThree);
+            if (node.extendedFour is not null) pending.Push(node.extendedFour);
+            if (node.extendedFive is not null) pending.Push(node.extendedFive);
+            if (node.extendedSix is not null) pending.Push(node.extendedSix);
+            if (node.extendedSeven is not null) pending.Push(node.extendedSeven);
+        }
+
+        return false;
+    }
+
+    /// <summary>The declared type of a bare or qualified column name in <paramref name="table"/>, or null.</summary>
+    private static ColumnType? ColumnTypeOf(TableDescriptor table, string? name)
+    {
+        if (name is null)
+            return null;
+
+        int dot = name.LastIndexOf('.');
+        string bare = dot >= 0 ? name[(dot + 1)..] : name;
+
+        foreach (TableColumnSchema column in table.Schema.Columns ?? [])
+        {
+            if (string.Equals(column.Name, bare, StringComparison.OrdinalIgnoreCase))
+                return column.Type;
+        }
+
+        return null;
     }
 
     public QueryPlan GetPlan(DatabaseDescriptor database, TableDescriptor table, QueryTicket ticket)
@@ -512,7 +592,7 @@ public sealed class QueryPlanner
         {
             root = new AggregateNode(root)
             {
-                PartialPlan = isStreamingGroupBy ? null : TryBuildPartialAggregatePlan(ticket, root),
+                PartialPlan = isStreamingGroupBy ? null : TryBuildPartialAggregatePlan(ticket, table, root),
                 GroupByExpressions = ticket.GroupBy,
                 AggregateProjections = ExtractAggregateProjections(ticket),
                 IsStreamingGroupBy = isStreamingGroupBy,
@@ -601,7 +681,7 @@ public sealed class QueryPlanner
                     {
                         root = new AggregateNode(root)
                         {
-                            PartialPlan = TryBuildPartialAggregatePlan(ticket, root),
+                            PartialPlan = TryBuildPartialAggregatePlan(ticket, table, root),
                             GroupByExpressions = ticket.GroupBy,
                             AggregateProjections = ExtractAggregateProjections(ticket),
                         };

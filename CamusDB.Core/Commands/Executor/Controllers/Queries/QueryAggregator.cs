@@ -1419,13 +1419,7 @@ internal sealed class QueryAggregator
             hash.Add(values.Length);
 
             foreach (ColumnValue value in values)
-            {
-                hash.Add(value.Type);
-                hash.Add(value.StrValue);
-                hash.Add(value.LongValue);
-                hash.Add(value.FloatValue);
-                hash.Add(value.BoolValue);
-            }
+                ColumnValueHash.Add(ref hash, value);
 
             return hash.ToHashCode();
         }

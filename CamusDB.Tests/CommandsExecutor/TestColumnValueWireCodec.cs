@@ -5,13 +5,17 @@
  * file that was distributed with this source code.
  */
 
+using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Text;
 using System.Text.Json;
 
 using NUnit.Framework;
 
+using CamusDB.Core;
 using CamusDB.Core.Catalogs.Models;
+using CamusDB.Core.CommandsExecutor.Controllers;
 using CamusDB.Core.CommandsExecutor.Models;
 
 namespace CamusDB.Tests.CommandsExecutor;
@@ -92,5 +96,55 @@ public sealed class TestColumnValueWireCodec
         Assert.AreEqual(0, array.ArrayValues![0].CompareTo(restoredArray.ArrayValues[0]));
         Assert.AreEqual(ColumnType.Null, restoredArray.ArrayValues[1].Type);
         Assert.AreEqual(0, array.ArrayValues[2].CompareTo(restoredArray.ArrayValues[2]));
+    }
+
+    [TestCase("12345678901234567890.123456789")]
+    [TestCase("99999999999999999999999999999.999999999")]
+    [TestCase("-99999999999999999999999999999.999999999")]
+    [TestCase("-0.000000001")]
+    [TestCase("18446744073709551616")]
+    [TestCase("0")]
+    public void Numeric_RoundTripsExactly(string text)
+    {
+        ColumnValue value = ColumnValue.FromNumericString(text);
+        ColumnValue restored = RoundTrip(value);
+
+        Assert.AreEqual(ColumnType.Numeric, restored.Type);
+        Assert.AreEqual(value.NumericUnscaled, restored.NumericUnscaled);
+        Assert.AreEqual(text, restored.NumericValue);
+    }
+
+    [Test]
+    public void Numeric_FramePastTheRange_IsRefused()
+    {
+        // A corrupt or hostile frame must not carry a NUMERIC past the range into the merge.
+        Int128 past = NumericMath.MaxUnscaled + 1;
+        long high = (long)(past >> 64);
+        long low = (long)(ulong)(past & ulong.MaxValue);
+
+        using JsonDocument doc = JsonDocument.Parse($"{{\"t\":{(int)ColumnType.Numeric},\"u\":{high},\"l\":{low}}}");
+
+        CamusDBException error = Assert.Throws<CamusDBException>(() => ColumnValueWireCodec.Read(doc.RootElement))!;
+        Assert.AreEqual(CamusDBErrorCodes.NumericValueOutOfRange, error.Code);
+    }
+
+    [Test]
+    public void Numeric_PartialAggregateCells_RoundTrip()
+    {
+        // Partial aggregate rows cross nodes as a cells object; a NUMERIC SUM and the AVG sum/count
+        // pair must arrive unchanged, so the merge and the AVG finalizer see the exact values.
+        Dictionary<string, ColumnValue> row = new(StringComparer.OrdinalIgnoreCase)
+        {
+            ["s"] = ColumnValue.FromNumericString("-12345678901234567890.123456789"),
+            ["c"] = new ColumnValue(ColumnType.Integer64, 3L),
+            ["m"] = ColumnValue.Null,
+        };
+
+        Dictionary<string, ColumnValue> back = QueryExecutor.ParseCells(QueryExecutor.EncodeCells(row));
+
+        Assert.AreEqual(ColumnType.Numeric, back["s"].Type);
+        Assert.AreEqual("-12345678901234567890.123456789", back["s"].NumericValue);
+        Assert.AreEqual(3L, back["c"].LongValue);
+        Assert.AreEqual(ColumnType.Null, back["m"].Type);
     }
 }

@@ -765,6 +765,8 @@ internal sealed class SchemaQuerier
                 ColumnType.String, new ColumnValue(bound.Type, bound.LongValue).IsoValue!),
             ColumnType.Uuid => new ColumnValue(
                 ColumnType.String, new ColumnValue(ColumnType.Uuid, bound.UuidHigh, bound.LongValue).UuidValue!),
+            ColumnType.Numeric => new ColumnValue(
+                ColumnType.String, new ColumnValue(ColumnType.Numeric, bound.UuidHigh, bound.LongValue).NumericValue!),
             _ => ColumnValue.Null,
         };
     }

@@ -404,25 +404,11 @@ internal sealed class QueryDistincter
 
     /// <summary>
     /// The per-value hash of the DISTINCT row comparers; it must agree with
-    /// <see cref="DistinctValuesEqual"/>. Internal so tests can check that a type's payload reaches the
-    /// hash: a type that falls to the type-only default arm still deduplicates correctly, but every
-    /// value lands in one bucket and DISTINCT degrades toward quadratic work.
+    /// <see cref="DistinctValuesEqual"/>, which treats NULL as equal to NULL and otherwise uses
+    /// <see cref="ColumnValue.CompareTo"/>. <see cref="ColumnValueHash"/> holds the arm for each type.
     /// </summary>
     internal static int DistinctValueHash(ColumnValue value)
-    {
-        if (value.Type == ColumnType.Null)
-            return 0;
-
-        return value.Type switch
-        {
-            ColumnType.Integer64 => HashCode.Combine(value.Type, value.LongValue),
-            ColumnType.Float64 => HashCode.Combine(value.Type, value.FloatValue),
-            ColumnType.Bool => HashCode.Combine(value.Type, value.BoolValue),
-            ColumnType.String or ColumnType.Id => HashCode.Combine(value.Type, value.StrValue, StringComparer.Ordinal),
-            ColumnType.Numeric => HashCode.Combine(value.Type, value.UuidHigh, value.LongValue),
-            _ => value.Type.GetHashCode(),
-        };
-    }
+        => value.Type == ColumnType.Null ? 0 : ColumnValueHash.Of(value);
 
     private static async IAsyncEnumerable<QueryResultRow> DistinctRows(
         IAsyncEnumerable<QueryResultRow> dataCursor)

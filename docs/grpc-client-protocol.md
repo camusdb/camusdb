@@ -35,7 +35,7 @@ insert/query/update/delete by column values and filters without building a SQL s
 
 ## 2. The value model — encoding every column type
 
-All row/parameter data crosses the wire as the `Value` message, a `oneof` over twelve cases. The
+All row/parameter data crosses the wire as the `Value` message, a `oneof` over thirteen cases. The
 enum tag numbers of `ColumnType` are **frozen** and mirror the engine's internal `ColumnType`
 integers exactly — never renumber or reuse them:
 
@@ -53,6 +53,7 @@ integers exactly — never renumber or reuse them:
 | `DATETIME`   | 9   | `datetime_value`    | **raw tick count**, `int64`, UTC |
 | `ARRAY`      | 10  | `array_value`       | `ArrayValue { element_type, repeated Value items }` |
 | `UUID`       | 11  | `uuid_value`        | **exactly 16 bytes, big-endian** (high 8 bytes ‖ low 8 bytes) |
+| `NUMERIC`    | 12  | `numeric_value`     | decimal text, for example `"-12.5"` (see below) |
 
 ### Encoding rules you MUST implement precisely
 
@@ -84,12 +85,26 @@ integers exactly — never renumber or reuse them:
    empty, so an empty array round-trips its element type. Items are nested `Value`s of that element
    type. Arrays may nest recursively via the same rule.
 
-6. **Float32 vs Float64 are separate cases.** Do not widen a `float32_value` into
+6. **NUMERIC is decimal text.** A NUMERIC holds 38 digits, 9 of them after the point, from
+   `-99999999999999999999999999999.999999999` to `99999999999999999999999999999.999999999`. The
+   server sends the canonical form: no exponent, no trailing zeros, and no point for a whole number
+   (`"1.5"`, `"-0.000000001"`, `"1200"`, `"0"`). Text keeps every digit in every language. A double
+   holds only about 17 digits, so do not decode the value through a float type.
+   - On input the server accepts any decimal spelling, with a sign, trailing zeros or an exponent
+     (`"+1.500"`, `"1.2e3"`). More than 9 fraction digits round half away from zero.
+   - Text that is not a number fails with `CADB0400` (invalid input). A value past the range fails
+     with `CADB0417`, which maps to the gRPC status `OUT_OF_RANGE`.
+   - `NUMERIC` (type 12) is distinct from `STRING`. A number sent in `string_value` is a STRING: it
+     converts when it is written into a NUMERIC column, but it does not compare with a NUMERIC column.
+   - A client built before this field existed reads a NUMERIC cell as an unset `oneof`, that is, as
+     NULL. Upgrade the client before a table gets a NUMERIC column.
+
+7. **Float32 vs Float64 are separate cases.** Do not widen a `float32_value` into
    `float64_value` on the wire; keep the type the column declares.
 
 > **Single mapping point.** Server-side, all of this lives in one converter
 > (`GrpcValueCodec`) so REST and gRPC can never drift. Your client should likewise centralize the
-> `Value` ⇄ native conversion in exactly one place and cover all twelve cases.
+> `Value` ⇄ native conversion in exactly one place and cover all thirteen cases.
 
 ---
 

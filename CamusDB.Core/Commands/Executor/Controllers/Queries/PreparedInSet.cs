@@ -19,8 +19,8 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 /// replaces O(n) linear scan with an O(1) hash lookup.
 ///
 /// Threshold: lists of 8 or fewer values use a linear scan over a small array (avoids
-/// hash overhead for the common tiny-IN case). Larger lists use a <see cref="HashSet{T}"/>
-/// with <see cref="SqlColumnValueComparer"/> (consistent with <see cref="ColumnValue.CompareTo"/>).
+/// hash overhead for the common tiny-IN case). Larger lists use hash sets, one for each comparison
+/// domain; see "Numeric domains" below.
 ///
 /// NULL semantics: NULL is never a member of any IN list. NULL values in the source list are
 /// dropped when the set is built, and <see cref="Contains"/> returns false for a NULL lhs. The SQL
@@ -47,6 +47,28 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 /// and <see cref="Contains"/> converts before it looks up: the string items into the probe's type
 /// for a Uuid/Id probe, or a String probe into the type of any Uuid/Id items.</para>
 ///
+/// <para><b>Numeric domains.</b> Mixed numeric equality is not transitive, so it cannot key one hash
+/// set. INT64 and NUMERIC compare exactly, but a FLOAT64 compares with either as a double:
+/// <c>NUMERIC '9007199254740992'</c> and <c>NUMERIC '9007199254740993'</c> are unequal, yet both equal
+/// <c>9007199254740992.0</c>. One set built with that equality drops the float item as a duplicate of
+/// the first NUMERIC item, and the second NUMERIC value then misses the float match, so adding
+/// unrelated items to a list changes its result. Each domain is transitive on its own, so the items go
+/// into one set per domain, and no item is ever dropped through the mixed rule:</para>
+/// <list type="bullet">
+/// <item>INT64 and NUMERIC items: their exact NUMERIC unscaled values, hashed at full width. A set of
+///   closely spaced large NUMERIC values does not share one bucket, as it does when it is hashed
+///   through a double.</item>
+/// <item>FLOAT64 and FLOAT32 items: their widened doubles (<see cref="MixedNumericComparison.ToDouble"/>).
+///   <see cref="double.Equals(double)"/> agrees with <see cref="ColumnValue.CompareTo"/> for the
+///   float types: NaN equals NaN, and 0 equals -0.</item>
+/// <item>Every other item: <see cref="MixedNumericComparison.EqualsWithoutStringCoercion"/>, which is
+///   same-type <see cref="ColumnValue.CompareTo"/> for them.</item>
+/// </list>
+/// <para>An INT64 or NUMERIC probe looks in its exact set, then looks for its double in the float set.
+/// A float probe looks for its double in the float set, then in the doubles of the exact items. That
+/// is the mixed rule for each pair of domains, so the result is the OR over every item, as on the
+/// reference path.</para>
+///
 /// <para>Thread safety: a set is shared by every worker of a parallel scan. The converted item sets
 /// are built on first use and published once; a race builds the same set twice and keeps one.</para>
 /// </summary>
@@ -55,8 +77,13 @@ public sealed class PreparedInSet
     private const int HashThreshold = 8;
 
     private readonly ColumnValue[] _values;
-    private readonly HashSet<ColumnValue>? _set;
     private readonly bool _containsNull;
+
+    // Built only for a list longer than HashThreshold; null otherwise. See "Numeric domains".
+    private readonly HashSet<ColumnValue>? _set;        // items that are not numeric
+    private readonly HashSet<Int128>? _exactItems;      // INT64 and NUMERIC items, NUMERIC unscaled
+    private readonly HashSet<double>? _floatItems;      // FLOAT64 and FLOAT32 items, widened
+    private HashSet<double>? _exactItemsAsDouble;       // the exact items widened, built on the first float probe
 
     // Item types that take part in the String-to-Uuid/Id rule; see the class summary.
     private readonly bool _hasStringItems;
@@ -99,15 +126,38 @@ public sealed class PreparedInSet
         }
 
         if (_values.Length > HashThreshold)
-            _set = new HashSet<ColumnValue>(_values, MembershipComparer.Instance);
+        {
+            _set = new HashSet<ColumnValue>(MembershipComparer.Instance);
+            _exactItems = [];
+            _floatItems = [];
+
+            foreach (ColumnValue value in _values)
+            {
+                switch (value.Type)
+                {
+                    case ColumnType.Integer64:
+                    case ColumnType.Numeric:
+                        _exactItems.Add(MixedNumericComparison.ToNumericUnscaled(value));
+                        break;
+
+                    case ColumnType.Float64:
+                    case ColumnType.Float32:
+                        _floatItems.Add(MixedNumericComparison.ToDouble(value));
+                        break;
+
+                    default:
+                        _set.Add(value);
+                        break;
+                }
+            }
+        }
     }
 
     /// <summary>
-    /// Hash comparer with the membership equality above, minus the String-to-Uuid/Id step (see
-    /// <see cref="MixedNumericComparison.EqualsWithoutStringCoercion"/>), so that equal values always
-    /// hash alike. Numeric values hash by their widened double regardless of type, so an Integer64
-    /// probe lands in the bucket of an equal Float64 member; every other type hashes as
-    /// <see cref="SqlColumnValueComparer"/> does.
+    /// Hash comparer for the items that are not numeric: the membership equality above, minus the
+    /// String-to-Uuid/Id step (see <see cref="MixedNumericComparison.EqualsWithoutStringCoercion"/>),
+    /// which for these types is same-type <see cref="ColumnValue.CompareTo"/>. Numeric items never go
+    /// in a set with this comparer; see "Numeric domains" in the class summary.
     /// </summary>
     private sealed class MembershipComparer : IEqualityComparer<ColumnValue>
     {
@@ -121,10 +171,7 @@ public sealed class PreparedInSet
             return MixedNumericComparison.EqualsWithoutStringCoercion(x, y);
         }
 
-        public int GetHashCode(ColumnValue obj) =>
-            MixedNumericComparison.IsNumeric(obj.Type)
-                ? MixedNumericComparison.ToDouble(obj).GetHashCode()
-                : SqlColumnValueComparer.Instance.GetHashCode(obj);
+        public int GetHashCode(ColumnValue obj) => SqlColumnValueComparer.Instance.GetHashCode(obj);
     }
 
     /// <summary>
@@ -169,6 +216,22 @@ public sealed class PreparedInSet
             return false;
         }
 
+        switch (lhs.Type)
+        {
+            case ColumnType.Integer64:
+            case ColumnType.Numeric:
+                return _exactItems!.Contains(MixedNumericComparison.ToNumericUnscaled(lhs))
+                    || _floatItems!.Contains(MixedNumericComparison.ToDouble(lhs));
+
+            case ColumnType.Float64:
+            case ColumnType.Float32:
+            {
+                double widened = MixedNumericComparison.ToDouble(lhs);
+                return _floatItems!.Contains(widened)
+                    || (_exactItems!.Count > 0 && (_exactItemsAsDouble ?? BuildExactItemsAsDouble()).Contains(widened));
+            }
+        }
+
         if (_set.Contains(lhs))
             return true;
 
@@ -191,6 +254,24 @@ public sealed class PreparedInSet
 
     private bool ContainsCoerced(ColumnValue lhs, ColumnType target) =>
         StringOperandCoercion.TryCoerce(lhs, target, out ColumnValue coerced) && _set!.Contains(coerced);
+
+    /// <summary>
+    /// Builds the doubles of the exact items, for a float probe, and publishes them once. Several
+    /// exact items can widen to one double; the set keeps one, which is correct here, because a float
+    /// probe equals every exact item with that double.
+    /// </summary>
+    private HashSet<double> BuildExactItemsAsDouble()
+    {
+        HashSet<double> widened = new(_exactItems!.Count);
+
+        foreach (ColumnValue value in _values)
+        {
+            if (value.Type is ColumnType.Integer64 or ColumnType.Numeric)
+                widened.Add(MixedNumericComparison.ToDouble(value));
+        }
+
+        return Interlocked.CompareExchange(ref _exactItemsAsDouble, widened, null) ?? widened;
+    }
 
     /// <summary>
     /// Builds the set of string items that parse as <paramref name="target"/>, converted into it, and

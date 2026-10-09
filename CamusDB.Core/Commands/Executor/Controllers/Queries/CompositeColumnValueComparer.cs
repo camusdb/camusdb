@@ -95,48 +95,7 @@ internal sealed class CompositeColumnValueComparer
         HashCode h = new();
 
         foreach (ColumnValue v in values)
-        {
-            h.Add((int)v.Type);
-
-            switch (v.Type)
-            {
-                case ColumnType.String:
-                case ColumnType.Id:
-                    h.Add(v.StrValue, StringComparer.Ordinal);
-                    break;
-
-                case ColumnType.Integer64:
-                case ColumnType.Date:
-                case ColumnType.DateTime:
-                    h.Add(v.LongValue);
-                    break;
-
-                case ColumnType.Float64:
-                    h.Add(v.FloatValue);
-                    break;
-
-                case ColumnType.Float32:
-                    h.Add((float)v.FloatValue);
-                    break;
-
-                case ColumnType.Bool:
-                    h.Add(v.BoolValue);
-                    break;
-
-                case ColumnType.Bytes:
-                    if (v.BytesValue is not null)
-                        foreach (byte b in v.BytesValue)
-                            h.Add(b);
-                    break;
-
-                case ColumnType.Uuid:
-                case ColumnType.Numeric:
-                    // Hash both halves; the low half alone would collide all values sharing it.
-                    h.Add(v.UuidHigh);
-                    h.Add(v.LongValue);
-                    break;
-            }
-        }
+            ColumnValueHash.Add(ref h, v);
 
         return h.ToHashCode();
     }

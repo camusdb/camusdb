@@ -49,6 +49,9 @@ public sealed class TestGrpcResultRowSlots
         yield return new ColumnValue(CoreColumnType.Date, 638000000000000000L);
         yield return new ColumnValue(CoreColumnType.DateTime, 638123456789012345L);
         yield return ColumnValue.FromUuid(Guid.Parse("550e8400-e29b-41d4-a716-446655440000"));
+        yield return ColumnValue.FromNumericString("12345678901234567890.123456789");
+        yield return ColumnValue.FromNumericString("-99999999999999999999999999999.999999999");
+        yield return ColumnValue.FromNumericString("0");
         yield return ColumnValue.FromArray(CoreColumnType.Integer64,
         [
             new ColumnValue(CoreColumnType.Integer64, 1L),

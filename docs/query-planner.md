@@ -362,7 +362,12 @@ bound it cannot compare. `NumericBoundNormalizer` moves each literal into the co
 | Integer64 | NaN, ±Infinity, outside the `long` range | residual only |
 | Float64 | Integer64 (`f = 1`) | `f = 1.0` (the evaluator widens the same way, even beyond 2^53) |
 | Float32 | any numeric | converted only if the value survives a `float` round trip; otherwise residual |
-| any | `IN (…)` items | each item converted; an item with no exact equivalent (`1.5` on INT) is dropped, because only equality applies to a list item |
+| Numeric | Integer64 (`p = 2`) | `p = NUMERIC '2'`, exact |
+| Numeric | `NUMERIC '…'` | same type, unchanged |
+| Numeric | Float64 / Float32 (`p < 9.99`) | residual only. The evaluator compares NUMERIC with a float as doubles, and near 10¹⁹ thousands of NUMERIC values widen to one double, so no exact key range matches. `p < NUMERIC '9.99'` uses the index |
+| Integer64 | `NUMERIC '…'`, whole (`n = NUMERIC '2'`) | `n = 2` |
+| Integer64 | `NUMERIC '…'`, fractional | as a fractional float above (`<` → floor, `>` → ceiling, `=` → residual), computed on the 128-bit value and never through a double, so `n = NUMERIC '9007199254740992'` never matches `9007199254740993` |
+| any | `IN (…)` items | each item converted; an item with no exact equivalent (`1.5` on INT) is dropped, because only equality applies to a list item. A float item on a NUMERIC column takes the whole list off the index |
 
 The same pass parses a bare string literal on a Uuid/Id column into that type. Every planner entry that
 feeds a table's predicates to a selector applies it — the single-table planner, the join-leaf builder,
@@ -459,6 +464,18 @@ in `SQLExecutorBaseCreator.EvalComparison`, `EvalAnd` and `EvalOr`, which every 
        smaller estimated side for an inner join; **always the right side for a left outer join**,
        so the preserved side is the probe and an unmatched probe row is padded in stream order); else…
      - No suitable right index → `HashJoinNode` for equi-joins, `NestedLoopJoinNode` otherwise.
+   - An equi-join key needs one declared type on both sides. The hash table, the merge order and an
+     index key all treat two types as unequal, but the evaluator compares `int64` with `numeric`
+     exactly and with `float64` by value. `JoinEquiJoinAnalyzer` therefore does not take a mixed pair
+     (`a.n = b.p` with `int64` and `numeric`) as a key; the conjunct stays in `ON`, and the nested
+     loop evaluates it. The semi-join rewrite of `x IN (SELECT …)` applies the same rule to its index
+     probe.
+   - The rule trusts declared types, so every cell of a key column must have its column's declared
+     type. A base-table column does, because storage enforces it. A derived-table column might not:
+     `COALESCE(p, 0)` is declared `numeric` but gives an `int64` zero for a NULL `p`. So
+     `DerivedTableExecutor` widens each numeric cell to the declared type of its column
+     (`NumericWidening`), and a `CASE` is declared as the widest numeric type of all its branches, so
+     the widening never has to narrow a value.
    - A `RIGHT JOIN` never reaches the planner: `SelectQueryCreator` rewrites it into a `LeftOuter`
      join with the operands swapped. A `CROSS JOIN` becomes the comma form (or an inner join on the
      literal `TRUE` when mixed with `ON` joins). See [`docs/joins.md`](./joins.md).

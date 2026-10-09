@@ -23,7 +23,7 @@ internal static class MathScalarFunctions
         RegisterUnary(registry, "sqrt", EvaluateSqrt, _ => ColumnType.Float64);
         RegisterBinary(registry, "pow", EvaluatePow, _ => ColumnType.Float64, aliases: ["power"]);
         RegisterBinary(registry, "mod", EvaluateMod, InferModReturnType);
-        RegisterUnary(registry, "sign", EvaluateSign, _ => ColumnType.Integer64);
+        RegisterUnary(registry, "sign", EvaluateSign, InferSignReturnType);
 
         registry.Register(new ScalarFunctionDescriptor
         {
@@ -340,8 +340,9 @@ internal static class MathScalarFunctions
             return new ColumnValue(ColumnType.Integer64, sign);
         }
 
+        // Spanner: SIGN of a NUMERIC is a NUMERIC, so SIGN(p) / 2 divides exactly instead of as integers.
         if (arguments[0].Type == ColumnType.Numeric)
-            return new ColumnValue(ColumnType.Integer64, (long)Int128.Sign(arguments[0].NumericUnscaled));
+            return ColumnValue.FromNumeric(NumericMath.FromInt64(Int128.Sign(arguments[0].NumericUnscaled)));
 
         double floatValue = arguments[0].FloatValue;
         long floatSign = floatValue == 0 ? 0 : floatValue > 0 ? 1 : -1;
@@ -381,6 +382,10 @@ internal static class MathScalarFunctions
         => argumentTypes.Count > 0 && argumentTypes[0] is ColumnType.Integer64 or ColumnType.Numeric
             ? argumentTypes[0]
             : ColumnType.Float64;
+
+    /// <summary>NUMERIC for a NUMERIC argument, as in Spanner; Integer64 for every other argument.</summary>
+    private static ColumnType InferSignReturnType(IReadOnlyList<ColumnType> argumentTypes)
+        => argumentTypes.Count > 0 && argumentTypes[0] == ColumnType.Numeric ? ColumnType.Numeric : ColumnType.Integer64;
 
     private static ColumnType InferCeilFloorReturnType(IReadOnlyList<ColumnType> argumentTypes)
         => argumentTypes.Count > 0 && argumentTypes[0] is ColumnType.Integer64 or ColumnType.Numeric

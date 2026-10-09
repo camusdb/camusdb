@@ -24,10 +24,16 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Functions;
 ///   3. Otherwise the first non-null type is kept as-is (e.g. Bool + Bool → Bool).
 /// When all argument types are Null the inferred type is ColumnType.Null.
 ///
-/// The evaluator coerces the returned value to the inferred type for numeric pairs so that the
-/// runtime ColumnValue.Type always matches the schema-declared type. For example,
-/// COALESCE(int_col, 3.5) declares Float64 and the returned Integer64 value is widened to Float64.
-/// This keeps the schema-declared type consistent with the actual value for derived-table column typing.
+/// The evaluator widens the returned value to the type inferred from the argument values
+/// (<see cref="NumericWidening.Widen"/>): COALESCE(int_col, 3.5) returns a Float64 even for a row
+/// where int_col is not NULL.
+///
+/// <para>That is not always the declared type of the call. A NULL argument value has the type Null,
+/// so the evaluator cannot see the declared type of a NULL column: COALESCE(p, 0) on a NUMERIC p is
+/// declared NUMERIC but returns an INT64 zero when p is NULL. A derived table widens its cells to the
+/// declared column types when it is filled (see <see cref="NumericWidening"/>), so a join over the
+/// derived column sees one type. A top-level result is not widened, so its metadata can name the
+/// declared type while a cell carries the narrower one.</para>
 /// </summary>
 internal static class NullScalarFunctions
 {
@@ -57,38 +63,17 @@ internal static class NullScalarFunctions
 
     private static ColumnValue EvaluateCoalesce(string calledName, IReadOnlyList<ColumnValue> arguments)
     {
-        // Compute the declared return type from all argument types so we can coerce the winning
-        // value to match — otherwise COALESCE(int_col, 3.5) would declare Float64 but hand back
-        // an Integer64, making the runtime type disagree with the schema-declared type.
+        // Widen the winning value to the supertype of the argument values, so that
+        // COALESCE(int_col, 3.5) returns a Float64 for every row, not only for a NULL int_col.
         ColumnType targetType = InferCoalesceReturnType(arguments.Select(a => a.Type).ToArray());
 
         foreach (ColumnValue arg in arguments)
         {
             if (arg.Type != ColumnType.Null)
-                return CoerceNumeric(arg, targetType);
+                return NumericWidening.Widen(arg, targetType);
         }
 
         return ColumnValue.Null;
-    }
-
-    /// <summary>
-    /// Widens a numeric value to <paramref name="targetType"/> when both sides are numeric.
-    /// Returns <paramref name="value"/> unchanged for non-numeric or already-matching types.
-    /// </summary>
-    private static ColumnValue CoerceNumeric(ColumnValue value, ColumnType targetType)
-    {
-        if (value.Type == targetType)
-            return value;
-
-        return (value.Type, targetType) switch
-        {
-            (ColumnType.Integer64, ColumnType.Float64) => new ColumnValue(ColumnType.Float64, (double)value.LongValue),
-            (ColumnType.Integer64, ColumnType.Float32) => new ColumnValue(ColumnType.Float32, (double)(float)value.LongValue),
-            (ColumnType.Float32,   ColumnType.Float64) => new ColumnValue(ColumnType.Float64, value.FloatValue),
-            (ColumnType.Integer64, ColumnType.Numeric) => ColumnValue.FromNumeric(NumericMath.FromInt64(value.LongValue)),
-            (ColumnType.Numeric,   ColumnType.Float64) => new ColumnValue(ColumnType.Float64, NumericMath.ToDouble(value.NumericUnscaled)),
-            _ => value,
-        };
     }
 
     private static ColumnType InferCoalesceReturnType(IReadOnlyList<ColumnType> argumentTypes)

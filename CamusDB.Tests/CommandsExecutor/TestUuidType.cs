@@ -446,6 +446,51 @@ internal sealed class TestUuidType : SharedNodeBaseTest
         Assert.AreEqual(2, rows.Select(r => r.Row["id"].StrValue).Distinct().Count());
     }
 
+    /// <summary>
+    /// With a spill threshold of 2 rows, a sort, a GROUP BY, a DISTINCT and a join write their rows to
+    /// disk through the spill codec, so each UUID cell crosses it. Two of the values share a low half
+    /// and one has the top bit set, so a codec or a hash that keeps only the low 64 bits, or orders
+    /// signed, gives wrong rows.
+    /// </summary>
+    [Test]
+    [NonParallelizable]
+    public async Task Queries_ThatSpill_CarryUuidCells()
+    {
+        (_, DatabaseDescriptor db, CommandExecutor executor) =
+            await CreateDatabase(Options with { SpillEnabled = true, ForceSpillThresholdRows = 2 });
+        await ExecDDL(executor, db, "CREATE TABLE t (id int64 PRIMARY KEY, u uuid)");
+        await ExecDDL(executor, db, "CREATE TABLE r (id int64 PRIMARY KEY, u uuid, tag string)");
+
+        const string A = "00000000-0000-0001-0000-000000000005";
+        const string B = "00000000-0000-0002-0000-000000000005";
+        const string C = "550e8400-e29b-41d4-a716-446655440000";
+        const string D = "ffffffff-ffff-ffff-0000-000000000005";
+
+        await ExecInsert(executor, db,
+            $"INSERT INTO t (id, u) VALUES (1, '{D}'), (2, '{B}'), (3, '{A}'), (4, '{C}'), (5, '{B}'), (6, NULL), (7, '{D}'), (8, '{A}')");
+        await ExecInsert(executor, db,
+            $"INSERT INTO r (id, u, tag) VALUES (1, '{A}', 'a'), (2, '{B}', 'b'), (3, '{D}', 'd'), (4, '{D}', 'd2')");
+
+        List<QueryResultRow> sorted = await ExecSelect(executor, db, "SELECT u FROM t ORDER BY u");
+        CollectionAssert.AreEqual(
+            new[] { null, A, A, B, B, C, D, D },
+            sorted.Select(r => r.Row["u"].UuidValue).ToArray(), "unsigned order, high half first");
+
+        List<QueryResultRow> distinct = await ExecSelect(executor, db, "SELECT DISTINCT u FROM t");
+        CollectionAssert.AreEquivalent(new[] { null, A, B, C, D }, distinct.Select(r => r.Row["u"].UuidValue).ToArray());
+
+        List<QueryResultRow> grouped = await ExecSelect(executor, db, "SELECT u, COUNT(*) AS c FROM t GROUP BY u");
+        Assert.AreEqual(5, grouped.Count);
+        foreach (string value in new[] { A, B, D })
+            Assert.AreEqual(2L, grouped.Single(g => g.Row["u"].UuidValue == value).Row["c"].LongValue, value);
+
+        List<QueryResultRow> joined = await ExecSelect(executor, db,
+            "SELECT t.id AS tid, r.tag AS tag FROM t JOIN r ON t.u = r.u ORDER BY tid, tag");
+        CollectionAssert.AreEqual(
+            new[] { "1:d", "1:d2", "2:b", "3:a", "5:b", "7:d", "7:d2", "8:a" },
+            joined.Select(j => j.Row["tid"].LongValue + ":" + j.Row["tag"].StrValue).ToArray());
+    }
+
     [Test]
     [NonParallelizable]
     public async Task ShowColumns_ReportsUuidType()

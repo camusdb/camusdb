@@ -40,7 +40,7 @@ internal static class ForeignKeyKeyText
 
     /// <summary>
     /// One value in the literal forms the rest of the engine displays: ISO-8601 for dates, an
-    /// <c>X'…'</c> literal for bytes, the canonical string for a uuid, and a string without quotes.
+    /// <c>X'…'</c> literal for bytes, the canonical string for a uuid and a NUMERIC, and a string without quotes.
     /// </summary>
     private static string RenderValue(ColumnValue value) => value.Type switch
     {
@@ -54,6 +54,7 @@ internal static class ForeignKeyKeyText
         ColumnType.Date or ColumnType.DateTime => value.IsoValue ?? "",
         ColumnType.Bytes => SqlStringLiteral.QuoteBytes(value.BytesValue ?? []),
         ColumnType.Uuid => value.UuidValue ?? "",
+        ColumnType.Numeric => value.NumericValue ?? "",
         _ => value.ToString() ?? "",
     };
 }

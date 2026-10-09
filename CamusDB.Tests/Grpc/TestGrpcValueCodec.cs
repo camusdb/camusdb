@@ -191,6 +191,76 @@ public sealed class TestGrpcValueCodec
         Assert.Throws<CamusDB.Core.CamusDBException>(() => GrpcValueCodec.FromProto(bad));
     }
 
+    [TestCase("12345678901234567890.123456789")]
+    [TestCase("99999999999999999999999999999.999999999")]
+    [TestCase("-99999999999999999999999999999.999999999")]
+    [TestCase("0.000000001")]
+    [TestCase("-1.5")]
+    [TestCase("0")]
+    public void Numeric_RoundTrips_AsCanonicalText(string text)
+    {
+        ColumnValue original = ColumnValue.FromNumericString(text);
+
+        ProtoValue proto = GrpcValueCodec.ToProto(original);
+        Assert.AreEqual(ProtoValue.KindOneofCase.NumericValue, proto.KindCase, "NUMERIC must use numeric_value");
+        Assert.AreEqual(text, proto.NumericValue);
+
+        ColumnValue back = GrpcValueCodec.FromProto(proto);
+        Assert.AreEqual(CoreColumnType.Numeric, back.Type);
+        Assert.AreEqual(original.NumericUnscaled, back.NumericUnscaled);
+    }
+
+    [Test]
+    public void Numeric_ClientText_IsParsedExactly_AndRoundsPastNineDigits()
+    {
+        // A client may send any decimal spelling: trailing zeros, a leading plus, an exponent.
+        Assert.AreEqual("1.5", GrpcValueCodec.FromProto(new ProtoValue { NumericValue = "+1.500" }).NumericValue);
+        Assert.AreEqual("1200", GrpcValueCodec.FromProto(new ProtoValue { NumericValue = "1.2e3" }).NumericValue);
+        Assert.AreEqual("0.000000001", GrpcValueCodec.FromProto(new ProtoValue { NumericValue = "0.0000000005" }).NumericValue,
+            "the tenth fraction digit rounds half away from zero");
+        Assert.AreEqual("-0.000000001", GrpcValueCodec.FromProto(new ProtoValue { NumericValue = "-0.0000000005" }).NumericValue);
+    }
+
+    [Test]
+    public void Numeric_InvalidOrOutOfRangeText_IsRefused()
+    {
+        CamusDB.Core.CamusDBException invalid = Assert.Throws<CamusDB.Core.CamusDBException>(
+            () => GrpcValueCodec.FromProto(new ProtoValue { NumericValue = "1.2.3" }))!;
+        Assert.AreEqual(CamusDB.Core.CamusDBErrorCodes.InvalidInput, invalid.Code);
+
+        CamusDB.Core.CamusDBException empty = Assert.Throws<CamusDB.Core.CamusDBException>(
+            () => GrpcValueCodec.FromProto(new ProtoValue { NumericValue = "" }))!;
+        Assert.AreEqual(CamusDB.Core.CamusDBErrorCodes.InvalidInput, empty.Code);
+
+        CamusDB.Core.CamusDBException range = Assert.Throws<CamusDB.Core.CamusDBException>(
+            () => GrpcValueCodec.FromProto(new ProtoValue { NumericValue = "100000000000000000000000000000" }))!;
+        Assert.AreEqual(CamusDB.Core.CamusDBErrorCodes.NumericValueOutOfRange, range.Code);
+    }
+
+    [Test]
+    public void Numeric_ArrayElement_RoundTrips()
+    {
+        ColumnValue original = ColumnValue.FromArray(CoreColumnType.Numeric,
+        [
+            ColumnValue.FromNumericString("1.25"),
+            ColumnValue.Null,
+            ColumnValue.FromNumericString("-7"),
+        ]);
+
+        ColumnValue back = RoundTrip(original);
+        Assert.AreEqual(CoreColumnType.Numeric, back.ArrayElementType);
+        Assert.AreEqual("1.25", back.ArrayValues![0].NumericValue);
+        Assert.AreEqual(CoreColumnType.Null, back.ArrayValues[1].Type);
+        Assert.AreEqual("-7", back.ArrayValues[2].NumericValue);
+    }
+
+    [Test]
+    public void ProtoColumnType_HasTheSameNumberAsTheEngine()
+    {
+        // The result schema casts the engine enum to the proto enum by number.
+        Assert.AreEqual((int)CoreColumnType.Numeric, (int)ProtoColType.Numeric);
+    }
+
     [Test]
     public void Array_RoundTrips_WithElementValues()
     {

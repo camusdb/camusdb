@@ -34,30 +34,10 @@ public sealed class SqlColumnValueComparer : IEqualityComparer<ColumnValue>
         catch (ArgumentException) { return false; }
     }
 
+    /// <summary>
+    /// <see cref="ColumnValueHash"/> of the value. A NULL hashes as 0; it never equals anything, so
+    /// its bucket does not matter.
+    /// </summary>
     public int GetHashCode(ColumnValue obj)
-    {
-        if (obj.Type == ColumnType.Null) return 0;
-        return obj.Type switch
-        {
-            ColumnType.Integer64 => HashCode.Combine(obj.Type, obj.LongValue),
-            ColumnType.Float64   => HashCode.Combine(obj.Type, obj.FloatValue),
-            ColumnType.Float32   => HashCode.Combine(obj.Type, (float)obj.FloatValue),
-            ColumnType.Bool      => HashCode.Combine(obj.Type, obj.BoolValue),
-            ColumnType.String    => HashCode.Combine(obj.Type, obj.StrValue),
-            ColumnType.Id        => HashCode.Combine(obj.Type, obj.StrValue),
-            ColumnType.Date      => HashCode.Combine(obj.Type, obj.LongValue),
-            ColumnType.DateTime  => HashCode.Combine(obj.Type, obj.LongValue),
-            ColumnType.Bytes     => BytesHashCode(obj.BytesValue),
-            // Both halves: a fixed scale gives every NUMERIC value one bit pattern, so this agrees with equality.
-            ColumnType.Numeric   => HashCode.Combine(obj.Type, obj.UuidHigh, obj.LongValue),
-            _                    => HashCode.Combine(obj.Type),
-        };
-    }
-
-    private static int BytesHashCode(byte[]? bytes)
-    {
-        HashCode h = new();
-        h.AddBytes(bytes ?? []);
-        return h.ToHashCode();
-    }
+        => obj.Type == ColumnType.Null ? 0 : ColumnValueHash.Of(obj);
 }

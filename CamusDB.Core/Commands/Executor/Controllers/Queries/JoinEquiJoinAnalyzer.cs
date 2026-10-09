@@ -17,6 +17,14 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 /// Detects equi-join patterns in join ON clauses for index-nested-loop and
 /// hash/merge join. <see cref="TryMatch"/> requires an index; <see cref="TryExtractEquiKeys"/>
 /// does not.
+///
+/// <para>Both sides of a key must have the same declared type. The hash table, the merge order and
+/// the index key all treat two values of different types as unequal, but the evaluator does not:
+/// INT64 equals NUMERIC exactly, INT64 equals FLOAT64 by value, and a STRING operand converts to a
+/// UUID or an object id. A mixed pair taken as a key would drop the matches the evaluator finds, so
+/// such a conjunct is not a key; the join keeps it in the ON predicate and the nested loop evaluates
+/// it. When a type cannot be resolved (a derived column typed NULL), the pair is kept as a key, as
+/// before.</para>
 /// </summary>
 internal static class JoinEquiJoinAnalyzer
 {
@@ -84,6 +92,9 @@ internal static class JoinEquiJoinAnalyzer
             return false;
 
         if (!TryResolveLeftLookupColumnByAlias(leftId, rightSource.Alias, bound, out string leftLookup))
+            return false;
+
+        if (!KeyTypesAgree(leftLookup, RightColumnType(rightSource, rightColumn), bound))
             return false;
 
         pair = new JoinEquiKeyPair(leftLookup, rightColumn);
@@ -198,6 +209,9 @@ internal static class JoinEquiJoinAnalyzer
         if (!TryResolveLeftLookupColumn(leftIdentifier, rightSource, bound, out string leftLookupColumn))
             return false;
 
+        if (!KeyTypesAgree(leftLookupColumn, TableColumnType(rightSource, rightColumnName), bound))
+            return false;
+
         if (!TryFindLeadingIndex(rightSource.Table, rightColumnName, out TableIndexSchema index))
             return false;
 
@@ -308,10 +322,9 @@ internal static class JoinEquiJoinAnalyzer
     /// Returns true when <paramref name="columnName"/> in <paramref name="table"/> has type
     /// <see cref="ColumnType.Array"/>.
     ///
-    /// Arrays are excluded from hash-join equi-keys because <see cref="CompositeColumnValue"/>
-    /// hashing has no per-element payload contribution for arrays — every distinct array would
-    /// hash to the same bucket (type-only hash), degrading the probe to O(n). The join then
-    /// falls back to nested-loop via the normal non-equi path.
+    /// Arrays are excluded from equi-keys: an array column cannot be indexed, so it has no index
+    /// strategy, and an array join key is rare enough that the nested loop is the simple, safe
+    /// choice. The join falls back to the nested loop through the normal non-equi path.
     /// </summary>
     private static bool IsArrayColumn(BoundTableSource tableSource, string columnName)
     {
@@ -322,6 +335,61 @@ internal static class JoinEquiJoinAnalyzer
         }
 
         return false;
+    }
+
+    /// <summary>
+    /// True unless both key columns have a known declared type and the two types differ. See the
+    /// class summary for why a mixed pair must not become a hash, merge or index key.
+    /// </summary>
+    private static bool KeyTypesAgree(string leftLookupColumn, ColumnType? rightType, BoundSelectQuery bound)
+    {
+        if (rightType is not { } right || right == ColumnType.Null)
+            return true;
+
+        if (LeftColumnType(leftLookupColumn, bound) is not { } left || left == ColumnType.Null)
+            return true;
+
+        return left == right;
+    }
+
+    /// <summary>The declared type of a left lookup key (<c>alias.column</c>), or null when it is unknown.</summary>
+    private static ColumnType? LeftColumnType(string leftLookupColumn, BoundSelectQuery bound)
+    {
+        if (!TrySplitQualified(leftLookupColumn, out string alias, out string columnName))
+            return null;
+
+        foreach (BoundTableSource source in bound.Sources)
+        {
+            if (string.Equals(source.Alias, alias, StringComparison.OrdinalIgnoreCase))
+                return TableColumnType(source, columnName);
+        }
+
+        foreach (BoundDerivedTableSource source in bound.DerivedSources)
+        {
+            if (string.Equals(source.Alias, alias, StringComparison.OrdinalIgnoreCase))
+                return source.HasColumn(columnName) ? source.GetColumnType(columnName) : null;
+        }
+
+        return null;
+    }
+
+    private static ColumnType? RightColumnType(BoundJoinRightSource rightSource, string columnName)
+    {
+        if (rightSource.Table is not null)
+            return TableColumnType(rightSource.Table, columnName);
+
+        return rightSource.Derived!.HasColumn(columnName) ? rightSource.Derived.GetColumnType(columnName) : null;
+    }
+
+    private static ColumnType? TableColumnType(BoundTableSource source, string columnName)
+    {
+        foreach (TableColumnSchema column in source.Table.Schema.Columns ?? [])
+        {
+            if (string.Equals(column.Name, columnName, StringComparison.OrdinalIgnoreCase) && SchemaElementStateRules.IsReadable(column))
+                return column.Type;
+        }
+
+        return null;
     }
 
     private static bool TrySplitQualified(string identifier, out string alias, out string columnName)

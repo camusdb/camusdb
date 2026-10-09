@@ -21,13 +21,20 @@ namespace CamusDB.App.Grpc;
 
 /// <summary>
 /// Single mapping point between <see cref="ColumnValue"/> and the Protobuf <c>Value</c> message.
-/// All twelve <see cref="CoreColumnType"/> values are covered here; no other code may perform the
+/// Every <see cref="CoreColumnType"/> value is covered here; no other code may perform the
 /// conversion so the REST and gRPC wire formats cannot drift.
 ///
 /// Encoding decisions (compact-raw, matching the REST positional codec):
 ///   Date / DateTime — raw <c>DateTime.Ticks</c> (UTC) as <c>int64</c>.
 ///   Uuid — 16 big-endian bytes (high-half || low-half), reconstructed from
 ///           <see cref="ColumnValue.UuidHigh"/> and <see cref="ColumnValue.LongValue"/>.
+///   Numeric — the canonical decimal text (<see cref="NumericMath.Format(Int128)"/>: no exponent,
+///             no trailing zeros, at most 9 fraction digits) in <c>numeric_value</c>, as Spanner sends
+///             NUMERIC. Text keeps all 38 digits for every client language, where a binary form would
+///             need a 128-bit integer type on the client. A client value is parsed exactly; more than
+///             9 fraction digits round half away from zero, and a value past the range is refused with
+///             <see cref="CamusDBErrorCodes.NumericValueOutOfRange"/>. An old client that does not know
+///             the field reads the cell as an unset oneof, that is, as NULL.
 ///   Id  — carried in <c>id_value</c>, not <c>string_value</c>, so <see cref="CoreColumnType.Id"/>
 ///          and <see cref="CoreColumnType.String"/> stay distinct across the wire.
 ///   Array — wraps an <c>ArrayValue</c> that carries the element type so an empty array still
@@ -59,6 +66,7 @@ public static class GrpcValueCodec
             CoreColumnType.DateTime => new ProtoValue { DatetimeValue = cv.LongValue },
             CoreColumnType.Array    => new ProtoValue { ArrayValue = ToProtoArray(cv) },
             CoreColumnType.Uuid     => new ProtoValue { UuidValue = UuidToBytes(cv.UuidHigh, cv.LongValue) },
+            CoreColumnType.Numeric  => new ProtoValue { NumericValue = NumericMath.Format(cv.NumericUnscaled) },
 
             _ => throw new CamusDBException(
                 CamusDBErrorCodes.InvalidInput,
@@ -89,6 +97,7 @@ public static class GrpcValueCodec
             CoreColumnType.DateTime => new ProtoValue { DatetimeValue = slot.AsLong },
             CoreColumnType.Array    => new ProtoValue { ArrayValue = ToProtoArray(in slot) },
             CoreColumnType.Uuid     => new ProtoValue { UuidValue = UuidToBytes(slot.UuidHigh, slot.UuidLow) },
+            CoreColumnType.Numeric  => new ProtoValue { NumericValue = NumericMath.Format(slot.NumericUnscaled) },
 
             _ => throw new CamusDBException(
                 CamusDBErrorCodes.InvalidInput,
@@ -115,6 +124,7 @@ public static class GrpcValueCodec
         ProtoValue.KindOneofCase.DatetimeValue => new ColumnValue(CoreColumnType.DateTime, v.DatetimeValue),
         ProtoValue.KindOneofCase.ArrayValue   => FromProtoArray(v.ArrayValue),
         ProtoValue.KindOneofCase.UuidValue    => UuidFromBytes(v.UuidValue),
+        ProtoValue.KindOneofCase.NumericValue => ColumnValue.FromNumericString(v.NumericValue),
         ProtoValue.KindOneofCase.None         => ColumnValue.Null,
 
         _ => throw new CamusDBException(

@@ -656,30 +656,63 @@ internal static class DerivedTableSchemaBuilder
     }
 
     /// <summary>
-    /// A CASE has no single static type — each branch is typed per row (the engine carries a
-    /// <see cref="ColumnType"/> on every value). For the one place a static type is required — the
-    /// derived-table / client column metadata — pick a representative type from the ELSE result, else
-    /// the first WHEN's result, falling back to <see cref="ColumnType.String"/> when neither yields a
-    /// known type. This never crashes and is only a declaration hint; heterogeneous per-row values
-    /// still encode correctly because each carries its own type.
+    /// The static type of a CASE, for derived-table and client column metadata.
+    ///
+    /// <para>When every result branch (each THEN, and the ELSE) has a numeric type, the type is their
+    /// arithmetic supertype (<see cref="MixedNumericComparison.ArithmeticResultType"/>), as in Spanner:
+    /// <c>CASE WHEN c THEN p ELSE 0 END</c> on a NUMERIC <c>p</c> is NUMERIC. A NULL branch does not
+    /// count. A derived table widens each cell to this type (<see cref="NumericWidening"/>), so the
+    /// type must be the widest branch type: a narrower one would let a join plan a hash key for a
+    /// column whose cells have two types.</para>
+    ///
+    /// <para>Otherwise the type is that of a representative branch: the ELSE result, else the first
+    /// WHEN's result, falling back to <see cref="ColumnType.String"/> when neither yields a known type.
+    /// Such a type is only a declaration hint; each value still carries its own type.</para>
     /// </summary>
     private static ColumnType InferCaseType(
         NodeAst caseNode,
         BoundSelectQuery innerBound,
         QueryRowNameResolver innerResolver)
     {
-        NodeAst? representative = caseNode.extendedOne; // ELSE result, if present
+        NodeAst? elseResult = caseNode.extendedOne;
+        NodeAst? firstThen = null;
+        ColumnType? numeric = null;
+        bool allNumeric = true;
 
-        if (representative is null && caseNode.rightAst is not null)
+        // InferArgType, not InferType: it types a literal branch (ELSE 0), which InferType leaves as String.
+        void Fold(NodeAst result)
+        {
+            ColumnType type = InferArgType(result, innerBound, innerResolver);
+            if (type == ColumnType.Null || !allNumeric)
+                return;
+
+            if (!MixedNumericComparison.IsNumeric(type))
+            {
+                allNumeric = false;
+                return;
+            }
+
+            numeric = numeric is { } current ? MixedNumericComparison.ArithmeticResultType(current, type) : type;
+        }
+
+        if (caseNode.rightAst is not null)
         {
             foreach (NodeAst clause in CamusDB.Core.CommandsExecutor.Controllers.DML.SQLExecutorBaseCreator
                          .EnumerateWhenClauses(caseNode.rightAst))
             {
-                representative = clause.rightAst; // first WHEN's THEN result
-                break;
+                firstThen ??= clause.rightAst;
+                if (clause.rightAst is not null)
+                    Fold(clause.rightAst);
             }
         }
 
+        if (elseResult is not null)
+            Fold(elseResult);
+
+        if (allNumeric && numeric is { } widest)
+            return widest;
+
+        NodeAst? representative = elseResult ?? firstThen;
         return representative is null
             ? ColumnType.String
             : InferType(representative, innerBound, innerResolver);

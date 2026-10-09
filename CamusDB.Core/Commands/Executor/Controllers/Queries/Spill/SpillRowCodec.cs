@@ -33,10 +33,15 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Queries.Spill;
 /// <item>Bool — 1 byte (0 or 1)</item>
 /// <item>String — [int32 utf8Len][utf8 bytes]</item>
 /// <item>Bytes — [int32 len][raw bytes]</item>
-/// <item>Numeric — 16 bytes: the high then the low half of the Int128 (little-endian int64 each)</item>
+/// <item>Uuid, Numeric — 16 bytes: <c>UuidHigh</c> then <c>LongValue</c> (little-endian int64 each)</item>
 /// <item>Array — [1-byte elementType][int32 count][element…] where each
 ///   element is [1-byte isNull flag: 0=null, 1=present][value bytes for elementType if present]</item>
 /// </list>
+///
+/// A top-level cell and an array element write the same value bytes through one scalar switch per
+/// operation (write, read, measure). A new <see cref="ColumnType"/> member must get an arm in each of
+/// the three, or a query that carries the type fails when it spills. <c>TestColumnTypeCoverage</c>
+/// round-trips every member, alone and as an array element, and fails on a member with no arm.
 ///
 /// Column ordering is preserved on decode (insertion order of the source dictionary is maintained).
 /// Callers that depend on positional column order must not rely on dictionary enumeration order from
@@ -189,7 +194,45 @@ public static class SpillRowCodec
             case ColumnType.Null:
                 break;
 
+            case ColumnType.Array:
+            {
+                buf[pos++] = (byte)cv.ArrayElementType;
+                IReadOnlyList<ColumnValue> elements = cv.ArrayValues ?? [];
+                WriteInt32(buf, elements.Count, ref pos);
+                foreach (ColumnValue el in elements)
+                    WriteArrayElement(buf, cv.ArrayElementType, el, ref pos);
+                break;
+            }
+
+            default:
+                WriteScalar(buf, cv.Type, cv, ref pos);
+                break;
+        }
+    }
+
+    private static void WriteArrayElement(Span<byte> buf, ColumnType elementType, ColumnValue el, ref int pos)
+    {
+        if (el.Type == ColumnType.Null)
+        {
+            buf[pos++] = 0; // isNull flag
+            return;
+        }
+
+        buf[pos++] = 1; // isNull flag (non-null)
+        WriteScalar(buf, elementType, el, ref pos);
+    }
+
+    /// <summary>
+    /// Writes the value bytes of one non-null scalar, with no tag. A top-level cell and an array
+    /// element share this switch, so a type is supported in both places or in neither.
+    /// <see cref="ReadScalar"/> and <see cref="MeasureScalar"/> hold the matching arms.
+    /// </summary>
+    private static void WriteScalar(Span<byte> buf, ColumnType type, ColumnValue cv, ref int pos)
+    {
+        switch (type)
+        {
             case ColumnType.Id:
+            case ColumnType.String:
                 WriteStringUtf8(buf, cv.StrValue!, ref pos);
                 break;
 
@@ -214,10 +257,6 @@ public static class SpillRowCodec
                 buf[pos++] = cv.BoolValue ? (byte)1 : (byte)0;
                 break;
 
-            case ColumnType.String:
-                WriteStringUtf8(buf, cv.StrValue!, ref pos);
-                break;
-
             case ColumnType.Bytes:
             {
                 byte[] bytes = cv.BytesValue ?? [];
@@ -227,79 +266,15 @@ public static class SpillRowCodec
                 break;
             }
 
+            case ColumnType.Uuid:
             case ColumnType.Numeric:
                 BinaryPrimitives.WriteInt64LittleEndian(buf[pos..], cv.UuidHigh);
                 BinaryPrimitives.WriteInt64LittleEndian(buf[(pos + 8)..], cv.LongValue);
                 pos += 16;
                 break;
 
-            case ColumnType.Array:
-            {
-                buf[pos++] = (byte)cv.ArrayElementType;
-                IReadOnlyList<ColumnValue> elements = cv.ArrayValues ?? [];
-                WriteInt32(buf, elements.Count, ref pos);
-                foreach (ColumnValue el in elements)
-                    WriteArrayElement(buf, cv.ArrayElementType, el, ref pos);
-                break;
-            }
-
             default:
-                throw new InvalidOperationException($"SpillRowCodec: unsupported ColumnType {cv.Type}");
-        }
-    }
-
-    private static void WriteArrayElement(Span<byte> buf, ColumnType elementType, ColumnValue el, ref int pos)
-    {
-        if (el.Type == ColumnType.Null)
-        {
-            buf[pos++] = 0; // isNull flag
-            return;
-        }
-
-        buf[pos++] = 1; // isNull flag (non-null)
-
-        switch (elementType)
-        {
-            case ColumnType.Id:
-                WriteStringUtf8(buf, el.StrValue!, ref pos);
-                break;
-
-            case ColumnType.Integer64:
-            case ColumnType.Date:
-            case ColumnType.DateTime:
-                BinaryPrimitives.WriteInt64LittleEndian(buf[pos..], el.LongValue);
-                pos += 8;
-                break;
-
-            case ColumnType.Float64:
-                BinaryPrimitives.WriteDoubleLittleEndian(buf[pos..], el.FloatValue);
-                pos += 8;
-                break;
-
-            case ColumnType.Float32:
-                BinaryPrimitives.WriteSingleLittleEndian(buf[pos..], (float)el.FloatValue);
-                pos += 4;
-                break;
-
-            case ColumnType.Bool:
-                buf[pos++] = el.BoolValue ? (byte)1 : (byte)0;
-                break;
-
-            case ColumnType.String:
-                WriteStringUtf8(buf, el.StrValue!, ref pos);
-                break;
-
-            case ColumnType.Bytes:
-            {
-                byte[] bytes = el.BytesValue ?? [];
-                WriteInt32(buf, bytes.Length, ref pos);
-                bytes.CopyTo(buf[pos..]);
-                pos += bytes.Length;
-                break;
-            }
-
-            default:
-                throw new InvalidOperationException($"SpillRowCodec: unsupported array element type {elementType}");
+                throw new InvalidOperationException($"SpillRowCodec: unsupported ColumnType {type}");
         }
     }
 
@@ -354,62 +329,6 @@ public static class SpillRowCodec
             case ColumnType.Null:
                 return ColumnValue.Null;
 
-            case ColumnType.Id:
-                return new ColumnValue(ColumnType.Id, ReadStringUtf8(data, ref pos));
-
-            case ColumnType.Integer64:
-            {
-                long v = BinaryPrimitives.ReadInt64LittleEndian(data[pos..]); pos += 8;
-                return new ColumnValue(ColumnType.Integer64, v);
-            }
-
-            case ColumnType.Date:
-            {
-                long v = BinaryPrimitives.ReadInt64LittleEndian(data[pos..]); pos += 8;
-                return new ColumnValue(ColumnType.Date, v);
-            }
-
-            case ColumnType.DateTime:
-            {
-                long v = BinaryPrimitives.ReadInt64LittleEndian(data[pos..]); pos += 8;
-                return new ColumnValue(ColumnType.DateTime, v);
-            }
-
-            case ColumnType.Float64:
-            {
-                double v = BinaryPrimitives.ReadDoubleLittleEndian(data[pos..]); pos += 8;
-                return new ColumnValue(ColumnType.Float64, v);
-            }
-
-            case ColumnType.Float32:
-            {
-                float v = BinaryPrimitives.ReadSingleLittleEndian(data[pos..]); pos += 4;
-                return new ColumnValue(ColumnType.Float32, (double)v);
-            }
-
-            case ColumnType.Bool:
-                return ColumnValue.FromBool(data[pos++] != 0);
-
-            case ColumnType.String:
-                return new ColumnValue(ColumnType.String, ReadStringUtf8(data, ref pos));
-
-            case ColumnType.Bytes:
-            {
-                int len = ReadInt32(data, ref pos);
-                byte[] bytes = new byte[len];
-                data.Slice(pos, len).CopyTo(bytes);
-                pos += len;
-                return new ColumnValue(bytes);
-            }
-
-            case ColumnType.Numeric:
-            {
-                long high = BinaryPrimitives.ReadInt64LittleEndian(data[pos..]);
-                long low = BinaryPrimitives.ReadInt64LittleEndian(data[(pos + 8)..]);
-                pos += 16;
-                return new ColumnValue(ColumnType.Numeric, high, low);
-            }
-
             case ColumnType.Array:
             {
                 ColumnType elementType = (ColumnType)data[pos++];
@@ -421,7 +340,7 @@ public static class SpillRowCodec
             }
 
             default:
-                throw new InvalidDataException($"SpillRowCodec: unknown ColumnType tag {(int)type}");
+                return ReadScalar(type, data, ref pos);
         }
     }
 
@@ -431,27 +350,27 @@ public static class SpillRowCodec
         if (isNonNull == 0)
             return ColumnValue.Null;
 
-        switch (elementType)
+        return ReadScalar(elementType, data, ref pos);
+    }
+
+    /// <summary>
+    /// Reads the value bytes of one non-null scalar written by <see cref="WriteScalar"/>. Strings and
+    /// byte arrays are copied out, so the value keeps no reference into <paramref name="data"/>.
+    /// </summary>
+    private static ColumnValue ReadScalar(ColumnType type, ReadOnlySpan<byte> data, ref int pos)
+    {
+        switch (type)
         {
             case ColumnType.Id:
-                return new ColumnValue(ColumnType.Id, ReadStringUtf8(data, ref pos));
+            case ColumnType.String:
+                return new ColumnValue(type, ReadStringUtf8(data, ref pos));
 
             case ColumnType.Integer64:
-            {
-                long v = BinaryPrimitives.ReadInt64LittleEndian(data[pos..]); pos += 8;
-                return new ColumnValue(ColumnType.Integer64, v);
-            }
-
             case ColumnType.Date:
-            {
-                long v = BinaryPrimitives.ReadInt64LittleEndian(data[pos..]); pos += 8;
-                return new ColumnValue(ColumnType.Date, v);
-            }
-
             case ColumnType.DateTime:
             {
                 long v = BinaryPrimitives.ReadInt64LittleEndian(data[pos..]); pos += 8;
-                return new ColumnValue(ColumnType.DateTime, v);
+                return new ColumnValue(type, v);
             }
 
             case ColumnType.Float64:
@@ -469,9 +388,6 @@ public static class SpillRowCodec
             case ColumnType.Bool:
                 return ColumnValue.FromBool(data[pos++] != 0);
 
-            case ColumnType.String:
-                return new ColumnValue(ColumnType.String, ReadStringUtf8(data, ref pos));
-
             case ColumnType.Bytes:
             {
                 int len = ReadInt32(data, ref pos);
@@ -481,8 +397,17 @@ public static class SpillRowCodec
                 return new ColumnValue(bytes);
             }
 
+            case ColumnType.Uuid:
+            case ColumnType.Numeric:
+            {
+                long high = BinaryPrimitives.ReadInt64LittleEndian(data[pos..]);
+                long low = BinaryPrimitives.ReadInt64LittleEndian(data[(pos + 8)..]);
+                pos += 16;
+                return new ColumnValue(type, high, low);
+            }
+
             default:
-                throw new InvalidDataException($"SpillRowCodec: unknown array element type {(int)elementType}");
+                throw new InvalidDataException($"SpillRowCodec: unknown ColumnType tag {(int)type}");
         }
     }
 
@@ -597,40 +522,6 @@ public static class SpillRowCodec
             case ColumnType.Null:
                 break;
 
-            case ColumnType.Id:
-                size += 4 + Encoding.UTF8.GetByteCount(cv.StrValue!);
-                break;
-
-            case ColumnType.Integer64:
-            case ColumnType.Date:
-            case ColumnType.DateTime:
-                size += 8;
-                break;
-
-            case ColumnType.Float64:
-                size += 8;
-                break;
-
-            case ColumnType.Float32:
-                size += 4;
-                break;
-
-            case ColumnType.Bool:
-                size += 1;
-                break;
-
-            case ColumnType.String:
-                size += 4 + Encoding.UTF8.GetByteCount(cv.StrValue!);
-                break;
-
-            case ColumnType.Bytes:
-                size += 4 + (cv.BytesValue?.Length ?? 0);
-                break;
-
-            case ColumnType.Numeric:
-                size += 16;
-                break;
-
             case ColumnType.Array:
             {
                 size += 1; // elementType
@@ -642,7 +533,8 @@ public static class SpillRowCodec
             }
 
             default:
-                throw new InvalidOperationException($"SpillRowCodec: unsupported ColumnType {cv.Type}");
+                size += MeasureScalar(cv.Type, cv);
+                break;
         }
 
         return size;
@@ -654,39 +546,21 @@ public static class SpillRowCodec
         if (el.Type == ColumnType.Null)
             return size;
 
-        switch (elementType)
+        return size + MeasureScalar(elementType, el);
+    }
+
+    /// <summary>The number of bytes <see cref="WriteScalar"/> writes for one non-null scalar.</summary>
+    private static int MeasureScalar(ColumnType type, ColumnValue cv)
+    {
+        return type switch
         {
-            case ColumnType.Id:
-                size += 4 + Encoding.UTF8.GetByteCount(el.StrValue!);
-                break;
-
-            case ColumnType.Integer64:
-            case ColumnType.Date:
-            case ColumnType.DateTime:
-            case ColumnType.Float64:
-                size += 8;
-                break;
-
-            case ColumnType.Float32:
-                size += 4;
-                break;
-
-            case ColumnType.Bool:
-                size += 1;
-                break;
-
-            case ColumnType.String:
-                size += 4 + Encoding.UTF8.GetByteCount(el.StrValue!);
-                break;
-
-            case ColumnType.Bytes:
-                size += 4 + (el.BytesValue?.Length ?? 0);
-                break;
-
-            default:
-                throw new InvalidOperationException($"SpillRowCodec: unsupported array element type {elementType}");
-        }
-
-        return size;
+            ColumnType.Id or ColumnType.String => 4 + Encoding.UTF8.GetByteCount(cv.StrValue!),
+            ColumnType.Integer64 or ColumnType.Date or ColumnType.DateTime or ColumnType.Float64 => 8,
+            ColumnType.Float32 => 4,
+            ColumnType.Bool => 1,
+            ColumnType.Bytes => 4 + (cv.BytesValue?.Length ?? 0),
+            ColumnType.Uuid or ColumnType.Numeric => 16,
+            _ => throw new InvalidOperationException($"SpillRowCodec: unsupported ColumnType {type}"),
+        };
     }
 }

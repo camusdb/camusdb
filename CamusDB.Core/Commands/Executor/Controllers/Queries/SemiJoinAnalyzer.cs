@@ -95,7 +95,7 @@ internal sealed class SemiJoinAnalyzer
         {
             if (pred.nodeType is NodeType.ExprInSubquery or NodeType.ExprNotInSubquery)
             {
-                SemiJoinSpec? spec = await TryExtractSpecAsync(database, pred, ticket).ConfigureAwait(false);
+                SemiJoinSpec? spec = await TryExtractSpecAsync(database, (TableSource)query.Source, pred, ticket).ConfigureAwait(false);
                 if (spec is not null)
                 {
                     specs.Add(spec);
@@ -115,6 +115,7 @@ internal sealed class SemiJoinAnalyzer
 
     private async Task<SemiJoinSpec?> TryExtractSpecAsync(
         DatabaseDescriptor database,
+        TableSource outerSource,
         NodeAst pred,
         ExecuteSQLTicket ticket)
     {
@@ -193,6 +194,12 @@ internal sealed class SemiJoinAnalyzer
         if (innerIndex is null)
             return null;
 
+        // The probe looks the outer value up in the inner index, so it finds only a value of the
+        // index's own type. IN compares an INT64 with a NUMERIC or a FLOAT64 by value, so a mixed
+        // pair must not take the probe: the materialized IN list evaluates it with that rule.
+        if (!await ColumnTypesAgreeAsync(database, outerSource, outerColumn, innerTable, innerColumn).ConfigureAwait(false))
+            return null;
+
         SemiJoinMode mode;
         if (negated)
         {
@@ -207,6 +214,47 @@ internal sealed class SemiJoinAnalyzer
         NodeAst? innerFilter = innerQuery.Where?.Expression;
 
         return new SemiJoinSpec(outerColumn, innerTable, innerColumn, innerIndex, innerFilter, mode);
+    }
+
+    /// <summary>
+    /// False when the outer and inner columns both have a known declared type and the two differ.
+    /// An outer column that cannot be resolved here keeps the probe, as before.
+    /// </summary>
+    private async ValueTask<bool> ColumnTypesAgreeAsync(
+        DatabaseDescriptor database,
+        TableSource outerSource,
+        string outerColumn,
+        TableDescriptor innerTable,
+        string innerColumn)
+    {
+        int dot = outerColumn.IndexOf('.');
+        string outerName = dot >= 0 ? outerColumn[(dot + 1)..] : outerColumn;
+
+        TableDescriptor outerTable;
+        try
+        {
+            outerTable = await tableOpener.Open(database, outerSource.TableName).ConfigureAwait(false);
+        }
+        catch
+        {
+            return true;
+        }
+
+        ColumnType? outerType = ColumnTypeOf(outerTable, outerName);
+        ColumnType? innerType = ColumnTypeOf(innerTable, innerColumn);
+
+        return outerType is null || innerType is null || outerType == innerType;
+    }
+
+    private static ColumnType? ColumnTypeOf(TableDescriptor table, string columnName)
+    {
+        foreach (TableColumnSchema col in table.Schema.Columns ?? [])
+        {
+            if (col.Name.Equals(columnName, StringComparison.OrdinalIgnoreCase))
+                return col.Type;
+        }
+
+        return null;
     }
 
     private static bool ContainsSubquery(NodeAst expr)

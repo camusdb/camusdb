@@ -180,18 +180,21 @@ public sealed class ColumnHistogram
         ScalarBound? lo = bucketIndex == 0 ? MinValue : Buckets[bucketIndex - 1].UpperBound;
         ScalarBound? hi = Buckets[bucketIndex].UpperBound;
 
-        if (lo is null || hi is null || lo.Type != hi.Type || value.Type != hi.Type)
+        if (lo is null || hi is null)
             return 0.5;
 
-        return value.Type switch
+        if (lo.Type == ColumnType.Integer64 && hi.Type == ColumnType.Integer64 && value.Type == ColumnType.Integer64)
         {
-            ColumnType.Integer64 when hi.LongValue != lo.LongValue =>
-                Math.Clamp((double)(value.LongValue - lo.LongValue) / (hi.LongValue - lo.LongValue), 0.0, 1.0),
+            return hi.LongValue != lo.LongValue
+                ? Math.Clamp((double)(value.LongValue - lo.LongValue) / (hi.LongValue - lo.LongValue), 0.0, 1.0)
+                : 0.5;
+        }
 
-            ColumnType.Float64 when hi.FloatValue != lo.FloatValue =>
-                Math.Clamp((value.FloatValue - lo.FloatValue) / (hi.FloatValue - lo.FloatValue), 0.0, 1.0),
+        // FLOAT64, FLOAT32 and NUMERIC buckets, and a numeric constant of another type (an INT64
+        // literal against a NUMERIC column), interpolate as doubles.
+        if (value.TryToDouble(out double v) && lo.TryToDouble(out double l) && hi.TryToDouble(out double h) && h != l)
+            return Math.Clamp((v - l) / (h - l), 0.0, 1.0);
 
-            _ => 0.5,
-        };
+        return 0.5;
     }
 }

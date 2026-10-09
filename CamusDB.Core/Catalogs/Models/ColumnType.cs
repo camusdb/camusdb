@@ -10,6 +10,10 @@ namespace CamusDB.Core.Catalogs.Models;
 
 // IMPORTANT: These integer values are persisted in schema JSON. Never renumber or reuse existing values.
 // New members must be appended with new, previously-unused integers.
+//
+// A new member also needs an arm in each value path that switches on the type, or a query that
+// carries the type fails when it spills or crosses nodes, or slows to quadratic work in a hash
+// operator. TestColumnTypeCoverage goes through every member and names each path it fails.
 public enum ColumnType
 {
     Null = 0,

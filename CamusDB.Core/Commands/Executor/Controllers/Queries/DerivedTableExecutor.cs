@@ -6,6 +6,7 @@
  * file that was distributed with this source code.
  */
 
+using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Controllers;
 using CamusDB.Core.CommandsExecutor.Controllers.DML;
 using CamusDB.Core.CommandsExecutor.Controllers.Queries.Spill;
@@ -73,10 +74,19 @@ internal sealed class DerivedTableExecutor
 
         SpillableRowList rows = new(QueryExecutionContext.For(database, outerTicket));
 
+        // A cell can carry a narrower numeric type than its column declares (COALESCE(p, 0) gives an
+        // INT64 zero for a NULL NUMERIC p). The outer join plans its key strategy from the declared
+        // types, so every cell is widened to that type here, before any consumer reads it.
+        (string RowKey, ColumnType Type)[] numericColumns = NumericWidening.NumericColumns(source.Columns);
+
         try
         {
-            await foreach (QueryResultRow row in cursor.ConfigureAwait(false))
+            await foreach (QueryResultRow scanned in cursor.ConfigureAwait(false))
             {
+                QueryResultRow row = numericColumns.Length == 0
+                    ? scanned
+                    : NumericWidening.WidenToDeclaredTypes(scanned, numericColumns);
+
                 if (executionFilter is not null)
                 {
                     IReadOnlyDictionary<string, ColumnValue> evalRow = outerTicket.RowNameResolver is { } resolver

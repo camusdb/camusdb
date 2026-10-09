@@ -897,6 +897,23 @@ internal static class CostEstimator
             return Math.Min(1.0, (hi - lo) / (max - min));
         }
 
+        // NUMERIC (and FLOAT32) interpolate as doubles; a bound of another numeric type converts.
+        if (colMin.TryToDouble(out double dMin) && colMax.TryToDouble(out double dMax))
+        {
+            if (dMax <= dMin) return null;
+
+            double lo = fromBound is not null && ScalarBound.FromColumnValue(fromBound).TryToDouble(out double f)
+                ? Math.Max(dMin, f)
+                : dMin;
+
+            double hi = toBound is not null && ScalarBound.FromColumnValue(toBound).TryToDouble(out double t)
+                ? Math.Min(dMax, t)
+                : dMax;
+
+            if (hi < lo) return 0.0;
+            return Math.Min(1.0, (hi - lo) / (dMax - dMin));
+        }
+
         return null; // strings, IDs, bools: fall back to fixed heuristics
     }
 }

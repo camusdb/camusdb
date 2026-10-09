@@ -36,7 +36,11 @@ public sealed class ScalarBound
     [JsonPropertyName("s")]
     public string? StrValue { get; set; }
 
-    /// <summary>High 64 bits of a <see cref="ColumnType.Uuid"/> bound; the low 64 live in <see cref="LongValue"/>.</summary>
+    /// <summary>
+    /// High 64 bits of a <see cref="ColumnType.Uuid"/> or <see cref="ColumnType.Numeric"/> bound; the
+    /// low 64 live in <see cref="LongValue"/>. For NUMERIC the two halves are the signed unscaled
+    /// <see cref="Int128"/> (value × 10⁹).
+    /// </summary>
     [JsonPropertyName("u")]
     public long UuidHigh { get; set; }
 
@@ -49,12 +53,16 @@ public sealed class ScalarBound
         UuidHigh = v.UuidHigh,
     };
 
-    // Signed comparison: negative = this < other, 0 = equal, positive = this > other.
-    // Only meaningful when both sides have the same type.
+    /// <summary>
+    /// Signed comparison: negative = this &lt; other, 0 = equal, positive = this &gt; other. Exact
+    /// for two bounds of one type. Two numeric bounds of different types (a predicate constant
+    /// <c>5</c> against a NUMERIC or FLOAT64 histogram) compare as doubles, which is close enough for
+    /// an estimate; any other mixed pair returns 0 and the caller must not rely on it.
+    /// </summary>
     public int CompareTo(ScalarBound other)
     {
         if (Type != other.Type)
-            return 0; // mixed types — caller must not compare
+            return TryToDouble(out double left) && other.TryToDouble(out double right) ? left.CompareTo(right) : 0;
 
         return Type switch
         {
@@ -68,7 +76,39 @@ public sealed class ScalarBound
             ColumnType.Uuid      => ((ulong)UuidHigh).CompareTo((ulong)other.UuidHigh) is int h and not 0
                                         ? h
                                         : ((ulong)LongValue).CompareTo((ulong)other.LongValue),
+            ColumnType.Numeric   => NumericUnscaled().CompareTo(other.NumericUnscaled()),
             _                    => 0,
         };
     }
+
+    /// <summary>
+    /// The bound as a double, for interpolation and for comparing numeric bounds of different types.
+    /// False for a type with no numeric value. A NUMERIC past 2⁵³ loses digits here, which only
+    /// blurs an estimate.
+    /// </summary>
+    public bool TryToDouble(out double value)
+    {
+        switch (Type)
+        {
+            case ColumnType.Integer64:
+                value = LongValue;
+                return true;
+
+            case ColumnType.Float64:
+            case ColumnType.Float32:
+                value = FloatValue;
+                return true;
+
+            case ColumnType.Numeric:
+                value = NumericMath.ToDouble(NumericUnscaled());
+                return true;
+
+            default:
+                value = 0;
+                return false;
+        }
+    }
+
+    /// <summary>The signed unscaled value of a NUMERIC bound. A method, so JSON does not persist it.</summary>
+    private Int128 NumericUnscaled() => ((Int128)UuidHigh << 64) | (ulong)LongValue;
 }

@@ -556,12 +556,13 @@ internal sealed class TableAnalyzer
         ColumnType.Id        => b.StrValue ?? "",
         ColumnType.Date      => b.LongValue.ToString(),
         ColumnType.DateTime  => b.LongValue.ToString(),
-        _                    => b.Type + ":" + b.LongValue,
+        // Both halves: a Uuid or a NUMERIC that differs only in UuidHigh is a distinct value.
+        _                    => b.Type + ":" + b.UuidHigh + ":" + b.LongValue,
     };
 
     private static bool IsOrderable(ColumnType t) => t is
         ColumnType.Integer64 or ColumnType.Float64 or ColumnType.Float32 or
-        ColumnType.String or ColumnType.Id or ColumnType.Date or ColumnType.DateTime;
+        ColumnType.String or ColumnType.Id or ColumnType.Date or ColumnType.DateTime or ColumnType.Numeric;
 
     private static string BuildTupleKey(Dictionary<string, ColumnValue> row, string[] keyCols)
     {

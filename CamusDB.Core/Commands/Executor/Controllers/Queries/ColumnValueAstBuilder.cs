@@ -84,6 +84,28 @@ internal static class ColumnValueAstBuilder
                 extendedFour: null,
                 extendedFive: null,
                 yytext: null),
+            // A NUMERIC is re-expressed as its typed literal, NUMERIC '<canonical>', which the parser
+            // builds as CAST('<canonical>' AS numeric). The text is exact, so the value comes back
+            // unchanged; a float literal would not, since it compares as a double.
+            ColumnType.Numeric => new NodeAst(
+                NodeType.ExprCast,
+                leftAst: new NodeAst(
+                    NodeType.String,
+                    leftAst: null,
+                    rightAst: null,
+                    extendedOne: null,
+                    extendedTwo: null,
+                    extendedThree: null,
+                    extendedFour: null,
+                    extendedFive: null,
+                    yytext: SqlStringLiteral.Quote(NumericMath.Format(value.NumericUnscaled))),
+                rightAst: NodeAst.TypeNumeric,
+                extendedOne: null,
+                extendedTwo: null,
+                extendedThree: null,
+                extendedFour: null,
+                extendedFive: null,
+                yytext: null),
             // A bytes value has a literal form, X'<hex>', and the comparison of two bytes values
             // orders them byte by byte. Without this arm a subquery that returns a bytes column
             // fails here, although the same comparison of two bytes literals succeeds.

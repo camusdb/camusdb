@@ -469,7 +469,7 @@ internal sealed class ShowRangesReader
 
     /// <summary>
     /// Renders one decoded key value using the literal conventions the rest of the engine displays:
-    /// ISO-8601 for dates, an <c>X'…'</c> literal for bytes, the canonical string form for uuids.
+    /// ISO-8601 for dates, an <c>X'…'</c> literal for bytes, the canonical string form for uuids and NUMERIC values.
     /// A bound is meant to be readable next to the data it bounds.
     /// </summary>
     private static string RenderValue(ColumnValue value)
@@ -486,6 +486,7 @@ internal sealed class ShowRangesReader
             ColumnType.Date or ColumnType.DateTime => value.IsoValue ?? "",
             ColumnType.Bytes => SqlStringLiteral.QuoteBytes(value.BytesValue ?? []),
             ColumnType.Uuid => value.UuidValue ?? "",
+            ColumnType.Numeric => value.NumericValue ?? "",
             _ => value.ToString() ?? "",
         };
     }

@@ -18,6 +18,7 @@ and reserved keywords.
 | `int64` | 64-bit signed integer | yes | |
 | `float64` | IEEE-754 double | yes | |
 | `float32` | IEEE-754 single | yes | Stored at single precision; comparisons and storage narrow to `float`. |
+| `numeric` | exact decimal: 38 digits, 9 after the point | yes | Fixed precision and scale, as Spanner's NUMERIC. See [NUMERIC](#numeric). |
 | `bool` | boolean | yes | |
 | `string` | UTF-16 text | yes | Length-bounded — see [String and bytes length](#string-and-bytes-length-bounds). |
 | `string(N)` | UTF-16 text, max `N` chars | yes | `N` is a positive integer count of characters. |
@@ -38,6 +39,7 @@ These spellings are accepted as synonyms:
 | `blob` | `bytes` |
 | `object_id` (SQL), `id` (HTTP) | `oid` |
 | `boolean` | `bool` |
+| `decimal` | `numeric` |
 
 > The ObjectId type is spelled `oid` or `object_id` in SQL and `id` in HTTP create-table requests. The
 > two paths do not currently accept each other's spelling.
@@ -58,6 +60,84 @@ CREATE TABLE events (
 ```
 
 (Here the column is *named* `id` — a plain identifier — and its *type* is `oid`.)
+
+---
+
+## NUMERIC
+
+`numeric` (alias `decimal`) stores an exact decimal number with the semantics of Spanner GoogleSQL
+NUMERIC. Use it for money and other values that a binary float cannot hold exactly.
+
+| Property | Value |
+|----------|-------|
+| Precision | 38 significant digits |
+| Scale | 9 digits after the decimal point, fixed |
+| Range | `-99999999999999999999999999999.999999999` to `99999999999999999999999999999.999999999` |
+| Rounding | Half away from zero, at the ninth fraction digit (`0.0000000005` → `0.000000001`) |
+| Out of range | `CADB0417` (`NumericValueOutOfRange`): HTTP 400, gRPC `OUT_OF_RANGE` |
+| Text form | Canonical: no exponent, no trailing zeros, no point for a whole number (`1.5`, `1200`, `0`) |
+
+`NUMERIC(P)` and `NUMERIC(P, S)` are refused with `FeatureNotSupported`: the precision and the scale are
+fixed, as in Spanner. `array(numeric)` is refused too.
+
+### Writing a NUMERIC value
+
+- The typed literal `NUMERIC '<text>'` is exact: `NUMERIC '12345678901234567890.123456789'`.
+- A decimal literal written into a NUMERIC column converts from its source text, so
+  `INSERT INTO t (p) VALUES (12345678901234567890.123456789)` stores every digit.
+- An integer literal must fit `int64`. Write a wider whole number as `NUMERIC '…'` or with a decimal
+  point.
+- An `int64`, `float64`, `float32` or `string` value converts when it is written into a NUMERIC column.
+  A computed `float64` converts from its exact binary value, so `123456789.123` computed as a double
+  stores `123456789.122999996`.
+- `CAST(x AS numeric)` accepts `int64`, `float64`, `float32` and `string`. `CAST(p AS int64)` rounds half
+  away from zero, and fails when the result does not fit. `CAST(p AS string)` gives the canonical text.
+
+### Expressions and result types
+
+| Operation | Result |
+|-----------|--------|
+| `numeric` with `numeric` or `int64` (`+ - * /`, `%`) | `numeric`, exact; `*` and `/` round to 9 digits |
+| `numeric` with `float64` or `float32` | `float64` |
+| A bare decimal literal in an expression (`p + 0.1`) | `float64`, because the literal is a float; write `p + NUMERIC '0.1'` |
+| `SUM(numeric)` | `numeric`, exact; only the final total is range-checked |
+| `AVG(numeric)` | `numeric`, the exact total divided by the count, rounded half away from zero |
+| `MIN`, `MAX`, `abs`, `ceil`, `floor`, `round(x[, n])`, `trunc(x[, n])`, `mod`, `sign` | `numeric` |
+| `sqrt`, `pow` | `float64` (Spanner returns NUMERIC here) |
+| `COALESCE`, `CASE` with `numeric` and `int64` branches | `numeric`; with a `float64` or `float32` branch, `float64` |
+
+Division by zero fails. An overflow anywhere fails with `CADB0417`.
+
+- `round(x, n)` and `trunc(x, n)` with `n` far left of the point (down to the minimum `int64`) give `0`.
+- In a cluster, a `SUM` or `AVG` that can see a NUMERIC value is not split into a partial aggregate for
+  each range. The node that runs the query adds the rows exactly, so a range total past the limit does
+  not fail a query whose final result is in range.
+- A derived table (a subquery in `FROM`) widens each NUMERIC column's cells to `numeric`, so that
+  `COALESCE(p, 0)` gives NUMERIC `0` for a NULL `p` there. A top-level `SELECT` does not widen: for a
+  NULL `p`, `SELECT COALESCE(p, 0)` returns the `int64` `0`, while the column metadata says `numeric`.
+
+### Comparing NUMERIC values
+
+- `numeric` against `numeric` or `int64` compares exactly: `9007199254740993` does not equal
+  `9007199254740992`, although the two are one double.
+- `numeric` against `float64` or `float32` compares as doubles. This rule is not transitive:
+  `NUMERIC '9007199254740992'` and `NUMERIC '9007199254740993'` differ, but both equal
+  `9007199254740992.0`. An `IN` list keeps every item, so `x IN (a, b, …)` is always `x = a OR x = b OR …`.
+- `numeric` against `string` has no comparison rule (see
+  [Comparing values of different types](#comparing-values-of-different-types)). Write the value as
+  `NUMERIC '1.5'`.
+- An index on a NUMERIC column is used for an `int64` or `NUMERIC '…'` constant. A float constant
+  (`p < 9.99`) uses no index, because many NUMERIC values widen to one double. Write
+  `p < NUMERIC '9.99'` to use the index.
+
+### On the wire
+
+A NUMERIC value is text on every transport, so no client rounds it through a double:
+
+- HTTP and JSON: a JSON string, `"12345678901234567890.123456789"`. A parameter is
+  `{"type": 12, "strValue": "…"}`.
+- gRPC: the `numeric_value` field, column type `COLUMN_TYPE_NUMERIC`. See
+  [grpc-client-protocol.md](grpc-client-protocol.md).
 
 ---
 
@@ -156,6 +236,7 @@ How a value is written depends on the path. **The SQL literal form and the JSON 
 |------|--------------|---------|
 | `int64` | integer | `42` |
 | `float64`, `float32` | decimal | `3.14` |
+| `numeric` | `NUMERIC '…'`, or a decimal written into a NUMERIC column | `NUMERIC '9.99'` |
 | `string` | quoted | `'hello'` or `"hello"` |
 | `bool` | `true` / `false` | `true` |
 | `oid` | quoted ObjectId string | `'652b...'` |
@@ -234,6 +315,7 @@ The HTTP API exchanges values as JSON:
 | Type | JSON form |
 |------|-----------|
 | `int64`, `float64`, `float32` | JSON number |
+| `numeric` | JSON string, canonical decimal text |
 | `string` | JSON string |
 | `bool` | JSON boolean |
 | `id` | JSON string (ObjectId) |
@@ -253,9 +335,10 @@ an object id has 12, so a GUID can never be an object id: send it as a `uuid` pa
 
 ### Comparing values of different types
 
-Some pairs of types have a conversion rule: two numbers of different types, and a `string` against a
-`uuid` or an `id` (the string is parsed). Other pairs have no rule, for example a `uuid` against an
-`id`, or an `int64` against a `uuid`. For such a pair:
+Some pairs of types have a conversion rule: two numbers of different types (`int64` against `numeric`
+exactly, any float as a double), and a `string` against a `uuid` or an `id` (the string is parsed).
+Other pairs have no rule, for example a `uuid` against an `id`, an `int64` against a `uuid`, or a
+`numeric` against a `string`. For such a pair:
 
 - `=`, `IN` and a simple `CASE` find no match. `<>` and `NOT IN` find a match.
 - `<`, `<=`, `>`, `>=` and `BETWEEN` fail with `CADB0400`, because the two types have no order.
@@ -316,7 +399,7 @@ in SQL. The reserved type words are:
 
 ```
 oid  object_id  int  int64  integer  string  bool  boolean  float32  float64  real
-date  datetime  timestamp  bytes  blob  array
+date  datetime  timestamp  bytes  blob  array  numeric  decimal
 ```
 
 Note that `id` is **not** a SQL type keyword and remains usable as an identifier (column/table name) —

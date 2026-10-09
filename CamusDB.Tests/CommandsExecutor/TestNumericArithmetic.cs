@@ -255,8 +255,10 @@ internal sealed class TestNumericArithmetic : SharedNodeBaseTest
         AssertNumeric("-1.2", await Eval(executor, db, "trunc(NUMERIC '-1.25', 1)"));
         AssertNumeric("1200", await Eval(executor, db, "trunc(NUMERIC '1299.99', -2)"));
         AssertNumeric("0.5", await Eval(executor, db, "mod(p, 2)"));
-        Assert.AreEqual(1L, (await Eval(executor, db, "sign(p)")).LongValue);
-        Assert.AreEqual(-1L, (await Eval(executor, db, "sign(-p)")).LongValue);
+        AssertNumeric("1", await Eval(executor, db, "sign(p)"), "Spanner: SIGN of a NUMERIC is a NUMERIC");
+        AssertNumeric("-1", await Eval(executor, db, "sign(-p)"));
+        AssertNumeric("0", await Eval(executor, db, "sign(NUMERIC '0')"));
+        AssertNumeric("0.5", await Eval(executor, db, "sign(p) / 2"), "a NUMERIC sign divides exactly, not as integers");
 
         ColumnValue sqrt = await Eval(executor, db, "sqrt(NUMERIC '6.25')");
         Assert.AreEqual(ColumnType.Float64, sqrt.Type);
@@ -264,6 +266,28 @@ internal sealed class TestNumericArithmetic : SharedNodeBaseTest
 
         CamusDBException ceilMax = Assert.ThrowsAsync<CamusDBException>(() => Eval(executor, db, $"ceil(NUMERIC '{MaxText}')"))!;
         Assert.AreEqual(CamusDBErrorCodes.NumericValueOutOfRange, ceilMax.Code);
+    }
+
+    /// <summary>
+    /// A precision far left of the point gives zero, also at <c>long.MinValue</c>, where the digit
+    /// count to drop does not fit in a long. -29 is the last precision whose unit (10²⁹) can still
+    /// round the maximum up, past the range; from -30 on every value rounds to zero.
+    /// </summary>
+    [Test, NonParallelizable]
+    public async Task RoundAndTrunc_FarLeftPrecision_GiveZero_UpToLongMinValue()
+    {
+        (DatabaseDescriptor db, CommandExecutor executor) = await Setup();
+
+        foreach (string function in new[] { "round", "trunc" })
+        {
+            AssertNumeric("0", await Eval(executor, db, $"{function}(NUMERIC '1.25', -9223372036854775808)"), function);
+            AssertNumeric("0", await Eval(executor, db, $"{function}(NUMERIC '-1.25', -9223372036854775807)"), function);
+            AssertNumeric("0", await Eval(executor, db, $"{function}(NUMERIC '{MaxText}', -30)"), function);
+        }
+
+        AssertNumeric("0", await Eval(executor, db, $"trunc(NUMERIC '{MaxText}', -29)"));
+        CamusDBException roundMax = Assert.ThrowsAsync<CamusDBException>(() => Eval(executor, db, $"round(NUMERIC '{MaxText}', -29)"))!;
+        Assert.AreEqual(CamusDBErrorCodes.NumericValueOutOfRange, roundMax.Code, "10^29 is past the range");
     }
 
     [Test, NonParallelizable]
@@ -320,5 +344,35 @@ internal sealed class TestNumericArithmetic : SharedNodeBaseTest
         Assert.AreEqual("FLOAT64", aggregateTypes["a"], "an integer average is a float");
         Assert.AreEqual("NUMERIC", aggregateTypes["ap"]);
         Assert.AreEqual("NUMERIC", aggregateTypes["sp"]);
+    }
+
+    /// <summary>
+    /// SIGN of a NUMERIC is NUMERIC. A CASE is typed as the widest numeric type of all its branches,
+    /// not of the ELSE alone, so a CTAS column holds every branch's value: an INT64 column could not
+    /// hold the NUMERIC 2.5 that the THEN branch returns.
+    /// </summary>
+    [Test, NonParallelizable]
+    public async Task Ctas_TypesSignAndCaseFromEveryBranch()
+    {
+        (DatabaseDescriptor db, CommandExecutor executor) = await Setup();
+
+        await Exec(executor, db,
+            "CREATE TABLE s AS SELECT id, SIGN(p) AS sg, CASE WHEN id = 1 THEN p ELSE 0 END AS cs, " +
+            "CASE WHEN id = 1 THEN p ELSE f END AS cf, CASE WHEN id = 1 THEN NULL ELSE n END AS cn FROM t",
+            ddl: true);
+
+        Dictionary<string, string> types = (await Select(executor, db, "SHOW COLUMNS FROM s"))
+            .ToDictionary(r => r.Row["Field"].StrValue!, r => r.Row["Type"].StrValue!);
+
+        Assert.AreEqual("NUMERIC", types["sg"]);
+        Assert.AreEqual("NUMERIC", types["cs"], "NUMERIC beside INT64");
+        Assert.AreEqual("FLOAT64", types["cf"], "NUMERIC beside FLOAT64");
+        Assert.AreEqual("INT64", types["cn"], "a NULL branch does not count");
+
+        Dictionary<long, QueryResultRow> rows = (await Select(executor, db, "SELECT id, sg, cs FROM s"))
+            .ToDictionary(r => r.Row["id"].LongValue);
+        AssertNumeric("2.5", rows[1].Row["cs"]);
+        AssertNumeric("0", rows[2].Row["cs"]);
+        AssertNumeric("-1", rows[2].Row["sg"]);
     }
 }

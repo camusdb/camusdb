@@ -51,9 +51,13 @@ foreach (ResultRow row in result.Rows)
 ```
 
 - `QueryResult` carries the ordered `Schema` (one `ColumnSchema { Name, Type }` per output column) and
-  the positional `Rows`. A `Value` is a `oneof` over the 12 column types — read the field matching the
+  the positional `Rows`. A `Value` is a `oneof` over the 13 column types — read the field matching the
   schema's `ColumnType` (`Int64Value`, `StringValue`, `IdValue`, `UuidValue`, `DateValue`, …). See the
   protocol doc §2 for the exact encoding (e.g. dates are raw UTC ticks, UUIDs are 16 big-endian bytes).
+- A NUMERIC cell is `NumericValue`, the exact decimal text. `CamusValue.TryGetDecimal(value, out decimal d)`
+  reads it as a `decimal` when a `decimal` holds it exactly. It returns false for a value with more
+  than 28 or 29 significant digits, for example `123456789012345678901.123456789`; keep the text for
+  such a value. A `decimal` parameter binds as NUMERIC with every digit, never through a double.
 - Autocommit calls run **concurrently** — fire many and `await Task.WhenAll` them; they pipeline over
   the pool.
 

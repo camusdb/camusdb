@@ -19,6 +19,7 @@ enum ColumnType {
   COLUMN_TYPE_DATETIME  = 9;
   COLUMN_TYPE_ARRAY     = 10;
   COLUMN_TYPE_UUID      = 11;
+  COLUMN_TYPE_NUMERIC   = 12;
 }
 
 enum IsolationLevel {
@@ -88,6 +89,7 @@ message Value {
     int64      datetime_value = 10;  // raw DateTime.Ticks, UTC
     ArrayValue array_value    = 11;  // nested Values + element type
     bytes      uuid_value     = 12;  // 16 bytes, big-endian high||low
+    string     numeric_value  = 13;  // NUMERIC: canonical decimal text, scale <= 9, e.g. "-12.5"
   }
 }
 

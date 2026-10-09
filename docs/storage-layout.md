@@ -255,3 +255,16 @@ in `CamusDB.Core/Storage/Kv/`.
 - **Resolution.** Store reads take a `LargeValueFetch`. The default resolves every marked cell, so any
   caller gets decodable bytes. A caller that decodes a known column set passes the same set, and the
   store resolves only those cells. A decoder that reads an unresolved cell raises `CADB0541`.
+
+### NUMERIC cells and keys
+
+A NUMERIC value is the signed `Int128` equal to the value × 10⁹. It is stored in a fixed-width form and
+never moves out of line.
+
+- **Compiled row cell.** 16 fixed bytes: the high 64 bits, then the low 64 bits, each a little-endian
+  `i64`. This is the layout of a `uuid` cell.
+- **Serializer tag.** `TypeNumeric = 27`, followed by the same two halves. A new tag needed no storage
+  revision: a row without NUMERIC cells is unchanged.
+- **Index key.** The `Int128` with its sign bit flipped, written as 19 fixed base-125 digits. The flip puts
+  every negative value below every non-negative one, so ordinal key order equals numeric order. A
+  descending index complements the 128 bits. The alphabet has no `/`.
