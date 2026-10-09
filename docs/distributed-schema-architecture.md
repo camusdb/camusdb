@@ -1230,7 +1230,7 @@ Client → Node B (a follower)
       → SchemaDdlForwardController on A: leader-check ✔, DdlOperationIdCache.TryGetOrReserve(G) ✔
       → A executes the DDL as leader (below); B awaits the result and returns it to the client
 
-Node A (schema leader): ExecuteClusterAddColumnAsync (holds SchemaDdlSemaphore)
+Node A (schema leader): AddColumnAsync (holds SchemaDdlSemaphore; a standalone node runs the same path)
   coordinator = new SchemaChangeCoordinator; coordinator.BackfillAsync = BackfillColumnDefaultsAsync
   RunJobAsync(job{ robots, age, kind=Column, target=Public }, columnDefinition=age INT DEFAULT 0)
     current = Absent;  path = [DeleteOnly, WriteOnly, Public]
@@ -1247,10 +1247,12 @@ Node A (schema leader): ExecuteClusterAddColumnAsync (holds SchemaDdlSemaphore)
       ReplicateElementStateAsync(age, WriteOnly, Column)     // SetElementState; v8 → v9, ack-gated
 
     ── backfill (current==WriteOnly, next==Public) ──
-      BackfillColumnDefaultsAsync: re-encode each row that does not hold `age` yet, so `age = 0`
-        is physically stored (committed in its own txn, before age becomes readable). A function
-        or sequence default is evaluated once per row. A failure, for example a NOT NULL column
-        that a row would hold NULL in, takes `age` back to Absent and deletes the job.
+      BackfillColumnDefaultsAsync: fill each row that needs `age` (no column in its layout, a
+        DeleteOnly placeholder, or a NULL under a NOT NULL / function / sequence default), in
+        256-row batches that lock, re-read, write and commit, before age becomes readable. A
+        function or sequence default is evaluated once per row. On a failure, for example a NOT
+        NULL column that a row would hold NULL in, the job is re-persisted with target Absent,
+        `age` goes back WriteOnly → DeleteOnly → Absent, and the job is deleted.
 
     ── step 3: WriteOnly → Public ──
       ReplicateElementStateAsync(age, Public, Column)        // v9 → v10, ack-gated

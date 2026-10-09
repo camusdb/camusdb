@@ -45,28 +45,44 @@ The check that the table is empty takes no lock. A row that another session inse
 is found while the existing rows are filled. The statement then fails with the same error, and the
 column is removed again.
 
-## Existing rows and concurrent writes
+## How the column is added
 
-The statement fills only the rows that were written before the column existed. A row that a
-concurrent statement writes after the column exists keeps the value its writer gave it, also an
-explicit NULL.
+On a standalone node and in a cluster, the column goes through `Absent → DeleteOnly → WriteOnly →
+Public` under a durable coordinator job. The column is readable only at `Public`, after every existing
+row holds its value. No statement can name the column before then. See
+`distributed-schema-architecture.md` §11.
 
-On a standalone node, the fill runs in the DDL transaction, after the commits that wrote the table
-before the change have finished. In a cluster, the column goes through `DeleteOnly → WriteOnly →
-Public`, and the fill runs at the `WriteOnly` step, after every live node has settled those commits.
-The column is readable only after the fill. See `distributed-schema-architecture.md` §11.
+The fill runs at the `WriteOnly` step, after the commits that wrote the table before the change have
+settled on every live node. It gives a value to each row that needs one:
+
+- a row written before the column existed;
+- a row written while the column was `DeleteOnly`, which holds a NULL placeholder;
+- a row that holds NULL where the column is NOT NULL or has a function or sequence default. An UPDATE
+  of an older row during `WriteOnly` stores NULL for such a column, because it cannot evaluate the
+  default.
+
+Any other row keeps its value. An INSERT during `WriteOnly` already evaluated the default.
+
+The fill works in batches of 256 rows. Each batch locks its rows, reads them again, writes them and
+commits. A concurrent UPDATE is not overwritten, and a concurrent DELETE is not undone. A batch that
+loses a lock race to a concurrent writer is retried. The statement holds the database's DDL gate until
+the column is `Public`.
 
 ## When the statement fails
 
 A failed `ADD COLUMN` leaves no column, and the same statement can run again.
 
-- **Standalone:** the schema change commits through the schema log, so a rollback of the DDL
-  transaction does not remove it. The column is removed after the rollback.
-- **Cluster:** the column is taken back through `WriteOnly → DeleteOnly → Absent`, and the
-  coordinator job is deleted. If that removal fails, the job stays, and the next schema leader
-  finishes it.
-- **Identity column:** the sequence that the statement created is dropped too, unless the column is
-  still in the schema and draws from it.
+1. The coordinator job is written again with the target `Absent`, before anything is removed.
+2. The column goes back through `WriteOnly → DeleteOnly → Absent`.
+3. The sequence of an identity column is dropped, unless a column still draws from it.
+4. The job is deleted.
 
-A concurrent statement can write into the new column while it exists. When the `ADD COLUMN` then
-fails, that value is lost with the column.
+If a step fails, the job stays. The next schema leader finishes the removal and never adds the column
+again. On a standalone node, a job that a crash left is finished when the database opens next, in the
+background. A cluster node resumes jobs when it becomes the schema leader.
+
+The column is never readable during these steps, so no statement can have written a value into it
+that the removal loses.
+
+The checks for a duplicate column name, a taken NOT NULL constraint name and
+`max_columns_per_table` run again under the DDL gate. Two concurrent statements cannot both pass them.

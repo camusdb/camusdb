@@ -10,6 +10,7 @@ using Nito.AsyncEx;
 using Kommander.Time;
 using CamusDB.Core.Cache;
 using CamusDB.Core.Catalogs;
+using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.Storage.Kv;
 using CamusDB.Core.Transactions;
 using CamusDB.Core.CommandsExecutor.Models;
@@ -105,6 +106,11 @@ internal sealed class DatabaseOpener
             // enforced but did not validate is validated, or removed, by the resumed job.
             RowConstraintValidationAsync = (db, tableName, kind, constraintName) =>
                 commandExecutor.ValidateRowConstraintAsync(db, tableName, kind, constraintName),
+
+            // Wire the sequence release: a resumed removal of a failed ADD COLUMN drops the sequence
+            // its identity column owned once the column is gone.
+            ReleaseOwnedSequenceAsync = (db, tableId, sequenceId) =>
+                commandExecutor.ReleaseOwnedSequenceAsync(db, tableId, sequenceId),
         };
         this.logger = logger;
         this.sharedNode = sharedNode ?? throw new ArgumentNullException(nameof(sharedNode), "A shared Kahuna node is required");
@@ -235,9 +241,48 @@ internal sealed class DatabaseOpener
                 name);
         }
 
+        if (!isClusterMode)
+            ResumeLeftoverJobsInBackground(databaseDescriptor);
+
         Log.LogDatabaseOpened(logger, name);
 
         return databaseDescriptor;
+    }
+
+    /// <summary>
+    /// Finishes, on a standalone node, the schema-change jobs that a previous process left: an ADD
+    /// COLUMN stopped by a crash, for example, whose column is unreadable until it is filled or removed.
+    ///
+    /// <para><b>Why at open.</b> A job is otherwise resumed when this node becomes the schema leader.
+    /// A standalone node becomes leader once, when it starts, before any database is open, so that
+    /// callback never reaches a database opened later.</para>
+    ///
+    /// <para><b>Why in the background.</b> A resumed fill can rewrite a whole table, and a database must
+    /// not wait for that to open. The resume reaches the database through this descriptor, after the
+    /// open has completed. The job list is read first, so a database with no job, which is every
+    /// database after a clean shutdown, starts no resume. A failure is logged; the job stays, and the
+    /// next open tries again.</para>
+    /// </summary>
+    private void ResumeLeftoverJobsInBackground(DatabaseDescriptor database)
+    {
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                if (!await sharedNode.AmISchemaLeaderAsync(database.Id).ConfigureAwait(false))
+                    return;
+
+                List<PersistedCoordinatorJob> jobs = await catalogs.LoadCoordinatorJobsAsync(database).ConfigureAwait(false);
+                if (jobs.Count == 0)
+                    return;
+
+                await coordinator.ResumeJobsAsync(database).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                logger.LogWarning(ex, "Could not resume the schema-change jobs of database '{Db}' at open", database.Name);
+            }
+        });
     }
 
     /// <summary>

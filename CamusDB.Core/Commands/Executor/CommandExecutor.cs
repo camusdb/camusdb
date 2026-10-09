@@ -1092,6 +1092,14 @@ public sealed class CommandExecutor : IAsyncDisposable
         => schemaDdl.BackfillColumnDefaultsAsync(database, tableName, column);
 
     /// <summary>
+    /// Drops the sequence an identity column owned after a failed ADD COLUMN removed that column.
+    /// Reachable here because <see cref="Controllers.DatabaseOpener"/> wires it into the resume
+    /// coordinator.
+    /// </summary>
+    internal Task ReleaseOwnedSequenceAsync(DatabaseDescriptor database, string tableId, string sequenceId)
+        => schemaDdl.ReleaseOwnedSequenceAsync(database, tableId, sequenceId);
+
+    /// <summary>
     /// Test-only hook fired after each backfill batch checkpoint, so a test can force a leader change
     /// between batches without depending on timing. Writes through to the service that owns the
     /// backfill loop; both test projects assign it directly on the executor.
@@ -1113,6 +1121,28 @@ public sealed class CommandExecutor : IAsyncDisposable
     {
         get => schemaDdl.TestInterceptAfterAddColumnPrecheck;
         set => schemaDdl.TestInterceptAfterAddColumnPrecheck = value;
+    }
+
+    /// <summary>
+    /// Test-only seam: runs inside <c>ALTER TABLE ... ADD COLUMN</c> after each staged step of the column
+    /// commits, with the state reached. Null in production; a test clears it after use.
+    /// </summary>
+    [System.ComponentModel.EditorBrowsable(System.ComponentModel.EditorBrowsableState.Never)]
+    internal Func<Catalogs.Models.SchemaElementState, Task>? TestInterceptAfterAddColumnStep
+    {
+        get => schemaDdl.TestInterceptAfterAddColumnStep;
+        set => schemaDdl.TestInterceptAfterAddColumnStep = value;
+    }
+
+    /// <summary>
+    /// Test-only seam: runs inside the fill of an added column, after a batch's row ids were scanned and
+    /// before the batch locks them. Null in production; a test clears it after use.
+    /// </summary>
+    [System.ComponentModel.EditorBrowsable(System.ComponentModel.EditorBrowsableState.Never)]
+    internal Func<Task>? TestInterceptBeforeFillBatchLock
+    {
+        get => tableColumnAlterer.TestInterceptBeforeFillBatchLock;
+        set => tableColumnAlterer.TestInterceptBeforeFillBatchLock = value;
     }
 
     /// <summary>

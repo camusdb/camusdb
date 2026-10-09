@@ -37,7 +37,10 @@ internal sealed class TableColumnAlterer
 
         return ticket.Operation switch
         {
-            AlterTableOperation.AddColumn => await AddColumn(database, table, ticket, tx).ConfigureAwait(false),
+            // ADD COLUMN is staged by the schema-change coordinator (SchemaDdlService.AddColumnAsync) and
+            // never runs inside one DDL transaction.
+            AlterTableOperation.AddColumn => throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInternalOperation, "ADD COLUMN does not run through the column alterer"),
             AlterTableOperation.DropColumn => await DropColumn(queryExecutor, database, table, ticket, tx).ConfigureAwait(false),
             AlterTableOperation.RenameColumn => await RenameColumn(database, table, ticket, tx).ConfigureAwait(false),
             _ => throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Invalid alter table operation"),
@@ -73,30 +76,22 @@ internal sealed class TableColumnAlterer
             $"column of table '{table.Name}'; run ALTER TABLE {table.Name} RESET (ttl) first");
     }
 
-    private async Task<bool> AddColumn(DatabaseDescriptor database, TableDescriptor table, AlterTableTicket ticket, KvTransaction tx)
+    /// <summary>Test-only: see <see cref="TableColumnAdder.TestInterceptBeforeBatchLock"/>.</summary>
+    internal Func<Task>? TestInterceptBeforeFillBatchLock
     {
-        AlterColumnTicket alterColumnTicket = new(
-            databaseName: database.Name,
-            tableName: table.Name,
-            column: ticket.Column,
-            operation: ticket.Operation
-        );
-
-        await tableColumnAdder.AddColumn(catalogs, tx, database, table, alterColumnTicket).ConfigureAwait(false);
-
-        return true;
+        get => tableColumnAdder.TestInterceptBeforeBatchLock;
+        set => tableColumnAdder.TestInterceptBeforeBatchLock = value;
     }
 
     /// <summary>
-    /// Fills a column the cluster path added, at its <c>WriteOnly</c> step. See
+    /// Fills a newly added column at its <c>WriteOnly</c> step. See
     /// <see cref="TableColumnAdder.FillAddedColumnAsync"/>.
     /// </summary>
     internal Task<int> FillAddedColumnAsync(
         DatabaseDescriptor database,
         TableDescriptor table,
-        string columnName,
-        KvTransaction tx
-    ) => tableColumnAdder.FillAddedColumnAsync(database, table, columnName, tx);
+        string columnName
+    ) => tableColumnAdder.FillAddedColumnAsync(database, table, columnName);
 
     private async Task<bool> RenameColumn(DatabaseDescriptor database, TableDescriptor table, AlterTableTicket ticket, KvTransaction tx)
     {

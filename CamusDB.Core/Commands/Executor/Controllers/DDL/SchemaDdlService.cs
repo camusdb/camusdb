@@ -32,9 +32,10 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.DDL;
 /// <see cref="ExecuteClusteredIndexDdlAsync"/> is the two-phase shape used whenever index <em>data</em>
 /// is written: phase 1 commits the backfill so the entries are durable and visible, and only then does
 /// phase 2 replicate the schema delta that makes the index public. The staged-coordinator shape
-/// (<see cref="ExecuteClusterAddColumnAsync"/>, <see cref="ExecuteClusterAddIndexAsync"/>) drives an
+/// (<see cref="AddColumnAsync"/> in both modes, <see cref="ExecuteClusterAddIndexAsync"/>) drives an
 /// element through <c>Absent → DeleteOnly → WriteOnly → Public</c> so the cluster is never in a state
-/// where one node writes an element another node cannot read.</para>
+/// where one node writes an element another node cannot read, and a column is never readable before
+/// its existing rows are filled.</para>
 ///
 /// <para><b>Every path holds <c>SchemaDdlSemaphore</c> and every path releases it in a
 /// <c>finally</c> that also fires the deferred step-down.</b> The semaphore is what makes
@@ -107,6 +108,14 @@ internal sealed partial class SchemaDdlService
     /// it after use.
     /// </summary>
     internal Func<Task>? TestInterceptAfterAddColumnPrecheck;
+
+    /// <summary>
+    /// Test-only hook: invoked by <c>ADD COLUMN</c> after each staged step of the column commits
+    /// (<c>DeleteOnly</c>, <c>WriteOnly</c>, <c>Public</c>), with the state reached. A test writes rows
+    /// in a given state, or throws to stop the statement there. Null in production; a test clears it
+    /// after use.
+    /// </summary>
+    internal Func<SchemaElementState, Task>? TestInterceptAfterAddColumnStep;
 
     internal SchemaDdlService(
         ExecutorContext context,
@@ -677,38 +686,38 @@ internal sealed partial class SchemaDdlService
     }
 
     /// <summary>
-    /// <c>ALTER TABLE … ADD COLUMN</c> on both kinds of node. Resolves the column's sequence, adds the
-    /// column, and fills every existing row from its default (see <see cref="TableColumnAdder"/>).
+    /// <c>ALTER TABLE … ADD COLUMN</c>, on a standalone node and in a cluster alike. The column goes
+    /// through <c>Absent → DeleteOnly → WriteOnly → [fill] → Public</c> under a durable coordinator job,
+    /// so it is readable only after every existing row holds its value (see <see cref="TableColumnAdder"/>).
     /// </summary>
     /// <remarks>
-    /// <para><b>A NOT NULL column with no value to fill is refused on a table that has a row</b>,
-    /// before anything changes, as PostgreSQL does. The check reads without a lock, so a row that
-    /// arrives after it is caught by the fill instead, and the column is then removed again.</para>
+    /// <para><b>Why a standalone node stages the column too.</b> Published in one step, the column is
+    /// readable before its rows are filled, and a function, sequence or NOT NULL column shows NULL until
+    /// the fill commits. A crash in that window leaves the column published and never filled: the schema
+    /// change is durable on its own, and nothing records that the fill is owed. The coordinator job is
+    /// that record, and a restart finishes or removes the column (<c>DatabaseOpener</c>).</para>
     ///
-    /// <para><b>An identity column's sequence is created first</b>, for the reason
-    /// <see cref="ResolveSequenceColumnsAsync"/> gives. When the statement fails, the sequence is
-    /// dropped again, unless the column still exists and draws from it: a failed removal of the
-    /// column must not leave the column pointing at a sequence that is gone.</para>
+    /// <para><b>Checks before the gate are fast refusals only.</b> The duplicate name, the constraint
+    /// name and the column limit are checked again under <see cref="DatabaseDescriptor.SchemaDdlSemaphore"/>,
+    /// on a table opened under it, because two statements can both pass the early checks. A NOT NULL
+    /// column with no value to fill is refused on a table that has a row, as PostgreSQL does. That check
+    /// reads without a lock: a row that arrives after it is caught by the fill, and the column is then
+    /// removed again.</para>
     ///
-    /// <para><b>A failed statement leaves no column.</b> A standalone node removes the column after
-    /// the DDL transaction rolls back (<see cref="AddColumnStandaloneAsync"/>). A cluster takes the
-    /// column back down its staged states (<see cref="SchemaChangeCoordinator"/>).</para>
+    /// <para><b>An identity column's sequence is created under the gate, before the job</b>, for the
+    /// reason <see cref="ResolveSequenceColumnsAsync"/> gives. A failure before the column exists drops
+    /// it here. A failure of the fill removes the column through the job, which drops the sequence after
+    /// the column is gone (<see cref="ReleaseOwnedSequenceAsync"/>).</para>
     /// </remarks>
     private async Task<bool> AddColumnAsync(DatabaseDescriptor database, TableDescriptor table, AlterTableTicket ticket)
     {
         ColumnInfo requested = ticket.Column;
 
-        // Checked before a sequence is created, so a statement that cannot succeed has nothing to
-        // undo. Each one is checked again under the schema gate by the path that adds the column.
-        if (FindColumn(table.Schema, requested.Name) is not null)
-            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Duplicate column '{requested.Name}'");
-
-        if (requested.NotNullConstraintName is { } constraintName)
-            ConstraintNameRules.RequireUnused(table.Schema, constraintName);
+        RequireColumnCanBeAdded(table, requested, options);
 
         if (requested.NotNull && !TableColumnAdder.HasFillValue(requested)
             && await TableHasAnyRowAsync(database, table).ConfigureAwait(false))
-            throw TableColumnAdder.ContainsNullValues(table, requested);
+            throw TableColumnAdder.ContainsNullValues(table.Name, requested.Name);
 
         if (TestInterceptAfterAddColumnPrecheck is { } intercept)
             await intercept().ConfigureAwait(false);
@@ -716,92 +725,79 @@ internal sealed partial class SchemaDdlService
         List<string> createdSequences = [];
         ColumnInfo? resolved = null;
 
+        await database.SchemaDdlSemaphore.WaitAsync().ConfigureAwait(false);
         try
         {
+            // Opened under the gate: another ADD COLUMN may have committed since the caller opened it.
+            TableDescriptor gated = await context.TableOpener.Open(database, ticket.TableName).ConfigureAwait(false);
+            RequireColumnCanBeAdded(gated, requested, options);
+
             resolved = await ResolveSequenceColumnAsync(
-                database, table.Name, table.Id, requested, createdSequences, CancellationToken.None).ConfigureAwait(false);
+                database, gated.Name, gated.Id, requested, createdSequences, CancellationToken.None).ConfigureAwait(false);
 
-            AlterTableTicket resolvedTicket = new(ticket.DatabaseName, ticket.TableName, AlterTableOperation.AddColumn, resolved);
+            SchemaChangeCoordinator coordinator = NewColumnCoordinator();
 
-            return context.IsClusterMode
-                ? await ExecuteClusterAddColumnAsync(database, table, resolvedTicket).ConfigureAwait(false)
-                : await AddColumnStandaloneAsync(database, table, resolvedTicket).ConfigureAwait(false);
+            await coordinator.RunJobAsync(
+                database,
+                new SchemaChangeJob(database.Name, gated.Name, gated.Id, resolved.Name, SchemaElementState.Public),
+                columnDefinition: resolved
+            ).ConfigureAwait(false);
+
+            database.Cache?.InvalidateByTableId(database.Id, gated.Id);
+
+            return true;
         }
         catch
         {
+            // A sequence that a removed column owned is already gone (the coordinator released it); one
+            // that a column still draws from stays.
             if (createdSequences.Count > 0
                 && !AnyColumnDrawsFrom(database, ticket.TableName, resolved?.DefaultSequenceId))
-                await DropSequencesAfterFailedCreateAsync(database, createdSequences).ConfigureAwait(false);
+                await DropSequencesAfterFailedCreateAsync(
+                    database, createdSequences.FindAll(name => database.Schema.Sequences.ContainsKey(name))).ConfigureAwait(false);
 
             throw;
         }
-    }
-
-    /// <summary>
-    /// The standalone ADD COLUMN, in one DDL transaction. When it fails after the schema change, the
-    /// column is removed again.
-    /// </summary>
-    /// <remarks>
-    /// The schema change commits through the schema log, not through the DDL transaction, so a rollback
-    /// of the transaction undoes the filled rows but not the column. Without the removal, a failed fill
-    /// would leave a column whose existing rows hold NULL, NOT NULL or not. Only a column this statement
-    /// added is removed: the column id is read under the schema gate before the change, so a column of
-    /// the same name that existed before, or that another statement added, is never touched.
-    /// </remarks>
-    private async Task<bool> AddColumnStandaloneAsync(DatabaseDescriptor database, TableDescriptor table, AlterTableTicket ticket)
-    {
-        string columnName = ticket.Column.Name;
-        bool gateHeld = false;
-        string? columnIdBefore = null;
-
-        return await ExecuteDdlInTransaction(database,
-            tx =>
-            {
-                gateHeld = true;
-                columnIdBefore = FindColumn(table.Schema, columnName)?.Id;
-                return tableColumnAlterer.Alter(queryExecutor, database, table, ticket, tx);
-            },
-            onAbort: () => gateHeld
-                ? RemoveColumnAddedByFailedStatementAsync(database, table, columnName, columnIdBefore)
-                : Task.CompletedTask,
-            postCommitInvalidate: () => database.Cache?.InvalidateByTableId(database.Id, table.Id)
-        ).ConfigureAwait(false);
-    }
-
-    /// <summary>
-    /// Removes the column <paramref name="columnName"/> when the failed statement added it, that is when
-    /// its id differs from <paramref name="columnIdBefore"/>. Runs under the schema gate, after the DDL
-    /// transaction rolled back. A failure is logged by the caller, and the column then stays.
-    /// </summary>
-    private async Task RemoveColumnAddedByFailedStatementAsync(
-        DatabaseDescriptor database, TableDescriptor table, string columnName, string? columnIdBefore)
-    {
-        TableColumnSchema? added = FindColumn(table.Schema, columnName);
-        if (added is null || string.Equals(added.Id, columnIdBefore, StringComparison.Ordinal))
-            return;
-
-        // The transaction gives the schema delta its timestamp; it writes no key.
-        KvTransaction tx = await database.Transactions.BeginAsync(
-            CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite
-        ).ConfigureAwait(false);
-        try
-        {
-            AlterColumnTicket drop = new(
-                databaseName: database.Name,
-                tableName: table.Name,
-                column: new ColumnInfo(added.Name, added.Type),
-                operation: AlterTableOperation.DropColumn
-            );
-
-            await catalogs.AlterTable(database, drop, tx).ConfigureAwait(false);
-        }
         finally
         {
-            await database.Transactions.RollbackIfNotCompletedAsync(tx).ConfigureAwait(false);
+            database.SchemaDdlSemaphore.Release();
+            await FireDeferredStepDownIfRequestedAsync(database).ConfigureAwait(false);
         }
-
-        database.Cache?.InvalidateByTableId(database.Id, table.Id);
     }
+
+    /// <summary>
+    /// Refuses a column that <paramref name="table"/> cannot take: a name that is taken in any state, a
+    /// NOT NULL constraint name that is taken, or one column more than
+    /// <see cref="CamusDBOptions.MaxColumnsPerTable"/>. Called before the gate as a fast refusal, and
+    /// under it as the check that counts.
+    /// </summary>
+    private static void RequireColumnCanBeAdded(TableDescriptor table, ColumnInfo column, CamusDBOptions options)
+    {
+        if (FindColumn(table.Schema, column.Name) is not null)
+            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Duplicate column '{column.Name}'");
+
+        if (column.NotNullConstraintName is { } constraintName)
+            ConstraintNameRules.RequireUnused(table.Schema, constraintName);
+
+        int maxColumns = options.MaxColumnsPerTable;
+        if (maxColumns > 0 && (table.Schema.Columns?.Count ?? 0) + 1 > maxColumns)
+            throw new CamusDBException(
+                CamusDBErrorCodes.SchemaLimitExceeded,
+                $"Table '{table.Name}' would exceed the maximum of {maxColumns} columns per table");
+    }
+
+    /// <summary>
+    /// The coordinator an ADD COLUMN runs under, with the fill and the release of an owned sequence
+    /// wired. The resume coordinator in <c>DatabaseOpener</c> wires the same two delegates.
+    /// </summary>
+    private SchemaChangeCoordinator NewColumnCoordinator() => new(catalogs, context.Logger)
+    {
+        BackfillAsync = BackfillColumnDefaultsAsync,
+        ReleaseOwnedSequenceAsync = ReleaseOwnedSequenceAsync,
+        OnStepCompleted = TestInterceptAfterAddColumnStep is { } intercept
+            ? (state, _) => intercept(state)
+            : null,
+    };
 
     private static TableColumnSchema? FindColumn(TableSchema schema, string columnName) =>
         schema.Columns?.Find(c => string.Equals(c.Name, columnName, StringComparison.OrdinalIgnoreCase));
@@ -894,76 +890,40 @@ internal sealed partial class SchemaDdlService
     }
 
     /// <summary>
-    /// Cluster path for ADD COLUMN: drives the column through the staged
-    /// Absent → DeleteOnly → WriteOnly → Public sequence via <see cref="SchemaChangeCoordinator"/>,
-    /// backfilling row defaults once the column reaches <c>WriteOnly</c> (the first state at
-    /// which <see cref="RowEncoder.Encode"/> includes the column in encoded bytes).
-    ///
-    /// The <c>SchemaDdlSemaphore</c> is held across the entire coordinator sequence so
-    /// concurrent DDL on this node cannot observe an intermediate schema version.
-    /// </summary>
-    internal async Task<bool> ExecuteClusterAddColumnAsync(
-        DatabaseDescriptor database,
-        TableDescriptor table,
-        AlterTableTicket ticket
-    )
-    {
-        ColumnInfo columnInfo = ticket.Column;
-
-        // Eagerly reject duplicates before acquiring the semaphore — the coordinator
-        // would silently no-op (already-at-Public = empty path) instead of throwing.
-        if (table.Schema.Columns?.Any(c => string.Equals(c.Name, columnInfo.Name, StringComparison.OrdinalIgnoreCase)) == true)
-            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Duplicate column '{columnInfo.Name}'");
-
-        await database.SchemaDdlSemaphore.WaitAsync().ConfigureAwait(false);
-        try
-        {
-            SchemaChangeCoordinator coordinator = new(catalogs, context.Logger);
-            coordinator.BackfillAsync = (db, tableName, column) => BackfillColumnDefaultsAsync(db, tableName, column);
-
-            await coordinator.RunJobAsync(
-                database,
-                new SchemaChangeJob(database.Name, ticket.TableName, table.Id, columnInfo.Name, SchemaElementState.Public),
-                columnDefinition: columnInfo
-            ).ConfigureAwait(false);
-
-            database.Cache?.InvalidateByTableId(database.Id, table.Id);
-
-            return true;
-        }
-        finally
-        {
-            database.SchemaDdlSemaphore.Release();
-            await FireDeferredStepDownIfRequestedAsync(database).ConfigureAwait(false);
-        }
-    }
-
-    /// <summary>
-    /// Re-encodes every existing row in <paramref name="tableName"/> so that the newly added
-    /// <paramref name="column"/> (in <c>WriteOnly</c> state) is stored with its default value.
-    /// Used by both the command-path coordinator and the leader-change resume coordinator so
-    /// backfill is always part of the resumable sequence.
+    /// Fills the newly added <paramref name="column"/> (in <c>WriteOnly</c>) in every row that does not
+    /// hold a value for it, in committed batches. Used by the command-path coordinator and by the resume
+    /// coordinator, so the fill is part of the resumable sequence. Only the column's name is used: the
+    /// definition comes from the live schema, which a resumed job's rebuilt <see cref="ColumnInfo"/> may
+    /// describe less completely.
     /// </summary>
     internal async Task BackfillColumnDefaultsAsync(DatabaseDescriptor database, string tableName, ColumnInfo column)
     {
         TableDescriptor table = await context.TableOpener.Open(database, tableName).ConfigureAwait(false);
 
-        KvTransaction tx = await database.Transactions.BeginAsync(
-            CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite,
-            mutationLimitOverride: 0
-        ).ConfigureAwait(false);
-        try
+        await tableColumnAlterer.FillAddedColumnAsync(database, table, column.Name).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Drops the sequence <paramref name="sequenceId"/> after the identity column that owned it was
+    /// removed by a failed ADD COLUMN. Does nothing when the sequence is gone, is not owned by
+    /// <paramref name="tableId"/>, or is still the default of a column: a shared sequence, or one a
+    /// column still points at, is not this removal's to drop.
+    /// </summary>
+    internal async Task ReleaseOwnedSequenceAsync(DatabaseDescriptor database, string tableId, string sequenceId)
+    {
+        SequenceSchema? sequence = database.Schema.FindSequenceById(sequenceId);
+
+        if (sequence?.Name is not { Length: > 0 } name
+            || !string.Equals(sequence.OwnedByTableId, tableId, StringComparison.Ordinal))
+            return;
+
+        foreach (TableSchema schema in database.Schema.Tables.Values)
         {
-            // By name only: the definition comes from the live schema, which a resumed job's
-            // reconstructed ColumnInfo may describe less completely.
-            await tableColumnAlterer.FillAddedColumnAsync(database, table, column.Name, tx).ConfigureAwait(false);
-            await database.Transactions.CommitAsync(tx).ConfigureAwait(false);
+            if (schema.Columns?.Exists(c => string.Equals(c.DefaultSequenceId, sequenceId, StringComparison.Ordinal)) == true)
+                return;
         }
-        catch
-        {
-            await database.Transactions.RollbackIfNotCompletedAsync(tx).ConfigureAwait(false);
-            throw;
-        }
+
+        await sequenceDdl.DropByNameAsync(database, name, CancellationToken.None).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -1205,7 +1165,7 @@ internal sealed partial class SchemaDdlService
 
     // Shared helper — delegates to DatabaseDescriptor.FireDeferredSchemaStepDownAsync,
     // adding the caller's logger for the step-down failure case. Called from the finally blocks
-    // of ExecuteDdlInTransaction, ExecuteClusterAddColumnAsync, ExecuteClusterAddIndexAsync, and
+    // of ExecuteDdlInTransaction, AddColumnAsync, ExecuteClusterAddIndexAsync, and
     // ExecuteClusteredIndexDdlAsync so all DDL paths release leadership on degradation.
     private async Task FireDeferredStepDownIfRequestedAsync(DatabaseDescriptor database)
     {

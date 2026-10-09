@@ -109,6 +109,15 @@ public sealed class SchemaChangeCoordinator
     /// </summary>
     public Func<DatabaseDescriptor, string, SchemaElementKind, string, Task>? RowConstraintValidationAsync { get; set; }
 
+    /// <summary>
+    /// Delegate that drops the sequence an added identity column owned, after that column was removed
+    /// again. Receives the database, the table id and the sequence id. It must drop the sequence only
+    /// when the table owns it and no column still draws from it. Set on the command-path coordinator and
+    /// on the resume coordinator in <c>DatabaseOpener</c>; without it the sequence stays, owned by the
+    /// table, and goes when the table goes.
+    /// </summary>
+    public Func<DatabaseDescriptor, string, string, Task>? ReleaseOwnedSequenceAsync { get; set; }
+
     public SchemaChangeCoordinator(CatalogsManager catalogs, ILogger<ICamusDB>? logger = null)
     {
         this.catalogs = catalogs;
@@ -185,7 +194,7 @@ public sealed class SchemaChangeCoordinator
                 {
                     if (job.ElementKind == SchemaElementKind.Column)
                     {
-                        await SettleAndFillColumnOrTakeBackAsync(database, job, columnDefinition).ConfigureAwait(false);
+                        await SettleAndFillColumnOrTakeBackAsync(database, job, columnDefinition, currentAttempts).ConfigureAwait(false);
                     }
                     else
                     {
@@ -318,7 +327,8 @@ public sealed class SchemaChangeCoordinator
     /// NULL fails on every retry. A fill that failed for a transient reason (a timeout, a lost
     /// leadership) can simply run again once the column is gone.</para>
     /// </summary>
-    private async Task SettleAndFillColumnOrTakeBackAsync(DatabaseDescriptor database, SchemaChangeJob job, ColumnInfo? columnDefinition)
+    private async Task SettleAndFillColumnOrTakeBackAsync(
+        DatabaseDescriptor database, SchemaChangeJob job, ColumnInfo? columnDefinition, int attempts)
     {
         try
         {
@@ -329,22 +339,65 @@ public sealed class SchemaChangeCoordinator
         }
         catch
         {
-            await TakeBackColumnAsync(database, job).ConfigureAwait(false);
+            await TakeBackColumnAsync(database, job, columnDefinition, attempts).ConfigureAwait(false);
             throw;
         }
     }
 
     /// <summary>
-    /// Removes a column whose existing rows were not filled, down its staged states
-    /// (<c>WriteOnly → DeleteOnly → Absent</c>), then deletes its job. Never throws: the caller is
-    /// already failing, and its own error is the one to report.
+    /// Removes a column whose existing rows were not filled. Never throws: the caller is already
+    /// failing, and its own error is the one to report.
     ///
-    /// <para><b>The job is deleted only when the column is gone.</b> If a step fails, the column stays
-    /// in a state no query reads, and the job is what lets the next leader finish or remove it. The
-    /// fill rolled back with its transaction, so no row holds a value from it.</para>
+    /// <para><b>The intent is durable before the removal starts.</b> The job is written again with the
+    /// target <c>Absent</c>. A leader that finds the job after a crash, a lost leadership or a failed
+    /// job delete then finishes the removal (<see cref="RemoveColumnAsync"/>). With the original target
+    /// <c>Public</c> still recorded, that leader would add the column again, which no statement asked
+    /// for. When the intent cannot be recorded, nothing is removed: the column stays in a state no query
+    /// reads, under a job that still describes it.</para>
     /// </summary>
-    internal async Task TakeBackColumnAsync(DatabaseDescriptor database, SchemaChangeJob job)
+    internal async Task TakeBackColumnAsync(DatabaseDescriptor database, SchemaChangeJob job, ColumnInfo? columnDefinition, int attempts)
     {
+        SchemaChangeJob removal = job with { TargetState = SchemaElementState.Absent };
+
+        try
+        {
+            await catalogs.PersistCoordinatorJobAsync(
+                database, BuildPersistedJob(removal, columnDefinition, indexBuildInfo: null, attempts)).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            logger?.LogError(ex,
+                "Could not record the removal of the unfilled column {ElementName} of {TableName}; it stays unreadable " +
+                "under its add job for the next schema leader",
+                job.ElementName, job.TableName);
+            return;
+        }
+
+        await RemoveColumnAsync(database, removal, columnDefinition?.DefaultSequenceId).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Drives a column down its staged states (<c>WriteOnly → DeleteOnly → Absent</c>), releases the
+    /// sequence an identity column owned, and deletes the job, whose target is already <c>Absent</c>.
+    /// Never throws. The job is deleted only when the column is gone; until then it is what lets the
+    /// next leader finish the removal. Safe to run again at every step.
+    /// </summary>
+    private async Task RemoveColumnAsync(DatabaseDescriptor database, SchemaChangeJob job, string? defaultSequenceId)
+    {
+        // A published column is never taken down by a removal job. The failed add never published it,
+        // so a Public column of that name belongs to a later statement, and the job is stale.
+        if (GetCurrentElementState(database.Schema, job.TableName, job.ElementName, SchemaElementKind.Column) == SchemaElementState.Public)
+        {
+            logger?.LogWarning(
+                "Column {ElementName} of {TableName} is published; its stale removal job is deleted and the column stays",
+                job.ElementName, job.TableName);
+
+            try { await catalogs.DeleteCoordinatorJobAsync(database, job.TableId, job.ElementName).ConfigureAwait(false); }
+            catch (Exception ex) { logger?.LogWarning(ex, "Could not delete the stale removal job of column {ElementName} of {TableName}", job.ElementName, job.TableName); }
+
+            return;
+        }
+
         try
         {
             SchemaElementState state = GetCurrentElementState(database.Schema, job.TableName, job.ElementName, SchemaElementKind.Column);
@@ -373,9 +426,26 @@ public sealed class SchemaChangeCoordinator
         if (GetCurrentElementState(database.Schema, job.TableName, job.ElementName, SchemaElementKind.Column) != SchemaElementState.Absent)
         {
             logger?.LogError(
-                "The unfilled column {ElementName} of {TableName} is still in the schema; its job stays for the next schema leader",
+                "The unfilled column {ElementName} of {TableName} is still in the schema; its removal job stays for the next schema leader",
                 job.ElementName, job.TableName);
             return;
+        }
+
+        if (defaultSequenceId is not null && ReleaseOwnedSequenceAsync is not null)
+        {
+            try
+            {
+                await ReleaseOwnedSequenceAsync(database, job.TableId, defaultSequenceId).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                // The job stays, so the next leader releases it. A sequence left behind is owned by the
+                // table and goes when the table goes.
+                logger?.LogWarning(ex,
+                    "Could not drop the sequence of the removed column {ElementName} of {TableName}",
+                    job.ElementName, job.TableName);
+                return;
+            }
         }
 
         try
@@ -384,8 +454,9 @@ public sealed class SchemaChangeCoordinator
         }
         catch (Exception ex)
         {
+            // The job targets Absent, so the next leader finds the column gone and only deletes it.
             logger?.LogWarning(ex,
-                "Could not delete the job of the removed column {ElementName} of {TableName}; the next leader would add the column again",
+                "Could not delete the removal job of column {ElementName} of {TableName}; the next schema leader deletes it",
                 job.ElementName, job.TableName);
         }
     }
@@ -693,6 +764,14 @@ public sealed class SchemaChangeCoordinator
                     liveTableName, persisted.ElementName, persisted.TargetState, database.Name, persisted.Attempts);
                 try { await catalogs.DeleteCoordinatorJobAsync(database, persisted.TableId, persisted.ElementName).ConfigureAwait(false); }
                 catch (Exception ex) { logger?.LogWarning(ex, "Failed to delete abandoned coordinator job for database {DbName}", database.Name); }
+                continue;
+            }
+
+            // A column job whose target is Absent records an ADD COLUMN that failed. It is finished by
+            // removing the column, never by adding it, and a removal is always safe to run again.
+            if (persisted.ElementKind == SchemaElementKind.Column && persisted.TargetState == SchemaElementState.Absent)
+            {
+                await RemoveColumnAsync(database, job, persisted.ColumnDefaultSequenceId).ConfigureAwait(false);
                 continue;
             }
 

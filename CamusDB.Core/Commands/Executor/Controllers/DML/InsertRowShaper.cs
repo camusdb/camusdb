@@ -94,6 +94,13 @@ internal sealed class InsertRowShaper
             if (!hasDefault || fields.Contains(col.Name))
                 continue;
 
+            // A column still DeleteOnly, part-way through ADD COLUMN, may not be written yet: the insert
+            // validation refuses a value for it, and the row stores a placeholder that the column's fill
+            // replaces. Defaulting it here failed every INSERT into the table during that step, and
+            // drew a sequence value nothing could keep.
+            if (!SchemaElementStateRules.IsWritable(col))
+                continue;
+
             extraDefaults.Add(col);
 
             if (col.DefaultSequenceId is { Length: > 0 } sequenceId)

@@ -5,44 +5,63 @@
  * file that was distributed with this source code.
  */
 
-using CamusDB.Core.Catalogs;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Controllers.Functions;
 using CamusDB.Core.CommandsExecutor.Models;
-using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.Storage.Kv;
 using CamusDB.Core.Util.ObjectIds;
 using CamusDB.Core.Transactions;
-using CamusDB.Core.Util.Diagnostics;
 using Microsoft.Extensions.Logging;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers.DDL;
 
 /// <summary>
-/// Adds a column to a table and fills it in every row that existed before the column did.
+/// Fills a newly added column in every row that does not hold a value for it yet. The schema-change
+/// coordinator calls it while the column is <c>WriteOnly</c>, before the column becomes readable, in
+/// both standalone and cluster mode.
 ///
-/// <para><b>Each existing row gets the value an INSERT would give it.</b> A constant default is
-/// copied, a function default (<c>now()</c>, <c>gen_uuid_v7()</c>) is evaluated once for each row,
-/// and a sequence default (<c>DEFAULT nextval('…')</c>, <c>SERIAL</c>, <c>GENERATED … AS
-/// IDENTITY</c>) draws one value for each row. A NOT NULL column whose fill is NULL fails the
-/// statement with <see cref="CamusDBErrorCodes.NotNullViolation"/>, so the catalog never states a
-/// constraint that a stored row breaks.</para>
+/// <para><b>Each such row gets the value an INSERT would give it.</b> A constant default is copied, a
+/// function default (<c>now()</c>, <c>gen_uuid_v7()</c>) is evaluated once for each row, and a sequence
+/// default (<c>DEFAULT nextval('…')</c>, <c>GENERATED … AS IDENTITY</c>) draws one value for each row.
+/// A NOT NULL column whose fill is NULL fails with <see cref="CamusDBErrorCodes.NotNullViolation"/>, so
+/// the column is never published over a NULL it forbids.</para>
 ///
-/// <para><b>Only a row that does not hold the column is filled.</b> The row's own schema version
-/// tells whether its bytes carry the column. A row written after the column existed holds the value
-/// its writer chose, which can be an explicit NULL, and a rewrite would replace that value with the
-/// default. The decoder cannot tell the two cases apart: it gives a row that lacks the column the
-/// column's constant default, which is NULL for a function or a sequence default.</para>
+/// <para><b>Which rows need a value.</b> The decision is made on the row's stored layout:</para>
+/// <list type="bullet">
+/// <item><description>The layout does not have the column: the row was written before the column existed.</description></item>
+/// <item><description>The layout has the column in <c>DeleteOnly</c>: the writer could not write it, and stored a NULL placeholder.</description></item>
+/// <item><description>The layout has the column writable, and it holds NULL where the column is NOT NULL or has a
+/// function or sequence default. No statement can name the column before it is readable, so that NULL
+/// was not chosen by a user. An UPDATE of an older row writes the decoder's injected default, which is
+/// NULL for those defaults.</description></item>
+/// </list>
+/// <para>Any other row keeps its value: an INSERT during <c>WriteOnly</c> already evaluated the default.</para>
 ///
-/// <para>Both modes use <see cref="FillAddedColumnAsync"/>. A standalone node calls it from
-/// <see cref="AddColumn"/>, inside the DDL transaction. A cluster calls it from the schema-change
-/// coordinator, at the <c>WriteOnly → Public</c> step, through
-/// <c>SchemaDdlService.BackfillColumnDefaultsAsync</c>. The column definition always comes from the
-/// live schema, not from the statement, so a leader that resumes the job fills the same values.</para>
+/// <para><b>Each batch locks its rows and reads them again before it writes.</b> The first read takes no
+/// lock, so a concurrent UPDATE or DELETE can commit between it and the write. Writing the image from
+/// the first read would lose that update, or bring a deleted row back. With the lock held, the read
+/// returns the latest committed row, and a row that a DELETE removed comes back null and is skipped
+/// (<see cref="KvTableStore.LockAndReadRowsForMutationAsync"/>).</para>
+///
+/// <para><b>Each batch commits on its own.</b> The work held by one transaction is bounded by the batch,
+/// not by the table, and a row lock is held for one batch only. The column is not readable until the
+/// fill completes, so a partly filled column is never visible. A run that stops part-way is safe to run
+/// again: a filled row no longer needs a value and is skipped. A batch that loses a lock race is retried;
+/// any other failure stops the fill, and the coordinator removes the column.</para>
 /// </summary>
 public sealed class TableColumnAdder
 {
+    /// <summary>Attempts for one batch that keeps losing lock races to concurrent writers.</summary>
+    private const int BatchAttempts = 8;
+
     private readonly ILogger<ICamusDB> logger;
+
+    /// <summary>
+    /// Test-only hook: invoked after a batch's row ids were scanned without a lock, and before the batch
+    /// locks and reads them. A test commits an UPDATE or a DELETE at that point. Null in production; a
+    /// test clears it after use.
+    /// </summary>
+    internal Func<Task>? TestInterceptBeforeBatchLock;
 
     private readonly SequenceStatementBinder sequenceBinder;
 
@@ -54,89 +73,16 @@ public sealed class TableColumnAdder
         this.sequenceBinder = sequenceBinder;
     }
 
-    private static void Validate(TableDescriptor table, AlterColumnTicket ticket, CamusDBOptions options)
-    {
-        bool hasColumn = false;
-
-        foreach (TableColumnSchema column in table.Schema.Columns!)
-        {
-            if (string.Equals(column.Name, ticket.Column.Name, StringComparison.OrdinalIgnoreCase))
-            {
-                hasColumn = true;
-                break;
-            }
-        }
-
-        if (hasColumn)
-            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Duplicate column '{ticket.Column.Name}'");
-
-        int maxCols = options.MaxColumnsPerTable;
-        if (maxCols > 0)
-        {
-            int currentCount = table.Schema.Columns!.Count;
-            if (currentCount + 1 > maxCols)
-                throw new CamusDBException(
-                    CamusDBErrorCodes.SchemaLimitExceeded,
-                    $"Table '{table.Name}' would exceed the maximum of {maxCols} columns per table");
-        }
-    }
-
     /// <summary>
-    /// The standalone ADD COLUMN: applies the schema change, waits for the commits that wrote the table
-    /// before it, then fills the existing rows inside <paramref name="tx"/>.
+    /// Fills the newly added column <paramref name="columnName"/> of <paramref name="table"/>, one
+    /// committed batch at a time. Returns the number of rows written. The column definition comes from
+    /// the live schema, so a leader that resumes the job fills the same values.
     /// </summary>
-    /// <remarks>
-    /// <para><b>The schema change commits on its own.</b> It goes through the schema log, not through
-    /// <paramref name="tx"/>, so a failed fill leaves the column in the schema. The caller removes it
-    /// again (<c>SchemaDdlService.AddColumnStandaloneAsync</c>).</para>
-    ///
-    /// <para><b>The fence comes before the fill.</b> A write planned under the earlier schema cannot
-    /// commit after the change, but one whose commit is already in flight can land after the fill has
-    /// read past its row. That row would then lack the column and decode to the constant default, which
-    /// is NULL for a function or sequence default and for a NOT NULL column without a default.</para>
-    /// </remarks>
-    internal async Task<int> AddColumn(
-        CatalogsManager catalogs,
-        KvTransaction tx,
-        DatabaseDescriptor database,
-        TableDescriptor table,
-        AlterColumnTicket ticket
-    )
-    {
-        Validate(table, ticket, database.Options);
-
-        ValueStopwatch timer = ValueStopwatch.StartNew();
-
-        await catalogs.AlterTable(database, ticket, tx).ConfigureAwait(false);
-
-        await database.FenceWritersAndWaitAsync(table.Schema, database.Kahuna.SchemaAckWaitTimeout).ConfigureAwait(false);
-
-        int modifiedRows = await FillAddedColumnAsync(database, table, ticket.Column.Name, tx).ConfigureAwait(false);
-
-        TimeSpan timeTaken = timer.GetElapsedTime();
-
-        Log.LogColumnAdded(logger, modifiedRows, timeTaken);
-
-        return modifiedRows;
-    }
-
-    /// <summary>
-    /// Writes the default of the newly added column <paramref name="columnName"/> into every row that
-    /// does not hold the column yet, inside <paramref name="tx"/>. Returns the number of rows written.
-    /// </summary>
-    /// <remarks>
-    /// <para>Safe to run again: a row that a previous run filled holds the column and is skipped. A
-    /// sequence draws values for the rows this run fills only.</para>
-    ///
-    /// <para>Throws <see cref="CamusDBErrorCodes.NotNullViolation"/> when the column is NOT NULL and a
-    /// row would get NULL. The rows already written in <paramref name="tx"/> are then rolled back with
-    /// it; removing the column is the caller's job.</para>
-    /// </remarks>
     internal async Task<int> FillAddedColumnAsync(
         DatabaseDescriptor database,
         TableDescriptor table,
         string columnName,
-        KvTransaction tx)
+        CancellationToken cancellationToken = default)
     {
         TableColumnSchema column = table.Schema.Columns?.Find(
             c => string.Equals(c.Name, columnName, StringComparison.OrdinalIgnoreCase))
@@ -144,48 +90,38 @@ public sealed class TableColumnAdder
                 CamusDBErrorCodes.UnknownColumn,
                 $"Column '{columnName}' does not exist in table '{table.Name}', so its rows cannot be filled");
 
-        string columnId = column.Id;
-        bool fillsNull = !HasFillValue(column);
+        // A nullable column with no default reads NULL in every row already: a row without the column
+        // decodes to NULL, and so does a DeleteOnly placeholder. Rewriting the table would change nothing.
+        if (!column.NotNull && column.DefaultSequenceId is null && column.DefaultFunction is null
+            && column.DefaultValue is null or { Type: ColumnType.Null })
+            return 0;
 
-        // Rows written under one schema version all hold, or all lack, the column.
-        Dictionary<int, bool> versionHoldsColumn = new();
-        RowEncoder.DictionaryDecodeState decodeState = new();
-        List<(ObjectIdValue, IReadOnlyDictionary<string, ColumnValue>)> pending = new(StoredRowRewriter.BatchRows);
-        Dictionary<string, ColumnValue>? sequenceRun = column.DefaultSequenceId is null ? null : new(4);
+        ColumnFill fill = new(column);
+        ObjectIdValue? afterRowId = null;
         int modifiedRows = 0;
 
-        await foreach ((ObjectIdValue rowId, ReadOnlyMemory<byte> data) in table.Store.ScanRows(tx, afterRowId: null).ConfigureAwait(false))
+        while (true)
         {
-            int storedVersion = RowEncoder.ReadStoredSchemaVersion(data.Span);
+            cancellationToken.ThrowIfCancellationRequested();
 
-            if (!versionHoldsColumn.TryGetValue(storedVersion, out bool holdsColumn))
-            {
-                TableSchemaHistory history = await table.Schema.GetSchemaHistoryAsync(tx.TransactionId, storedVersion).ConfigureAwait(false);
-                holdsColumn = history.Columns?.Exists(c => string.Equals(c.Id, columnId, StringComparison.Ordinal)) == true;
-                versionHoldsColumn[storedVersion] = holdsColumn;
-            }
+            List<ObjectIdValue> rowIds = await ScanRowIdsAsync(database, table, afterRowId, cancellationToken).ConfigureAwait(false);
+            if (rowIds.Count == 0)
+                break;
 
-            if (holdsColumn)
-                continue;
+            if (TestInterceptBeforeBatchLock is { } intercept)
+                await intercept().ConfigureAwait(false);
 
-            if (fillsNull && column.NotNull)
-                throw ContainsNullValues(table, column);
+            modifiedRows += await SerializableRetryHelper.ExecuteAutocommitAsync(
+                _ => FillBatchAsync(database, table, fill, rowIds, cancellationToken),
+                canRetry: static () => true,
+                maxAttempts: BatchAttempts,
+                cancellationToken: cancellationToken).ConfigureAwait(false);
 
-            Dictionary<string, ColumnValue> row = await RowEncoder.DecodeWritableAsync(
-                table.Schema, tx.TransactionId, rowId, data,
-                visibilitySchemaVersion: table.Schema.Version,
-                decodeState: decodeState).ConfigureAwait(false);
+            if (rowIds.Count < StoredRowRewriter.BatchRows)
+                break;
 
-            pending.Add((rowId, row));
-
-            if (pending.Count >= StoredRowRewriter.BatchRows)
-            {
-                modifiedRows += await FillBatchAsync(database, table, column, tx, pending, sequenceRun).ConfigureAwait(false);
-                pending.Clear();
-            }
+            afterRowId = rowIds[^1];
         }
-
-        modifiedRows += await FillBatchAsync(database, table, column, tx, pending, sequenceRun).ConfigureAwait(false);
 
         Log.LogColumnBackfillComplete(logger, modifiedRows, column.Name);
 
@@ -203,41 +139,116 @@ public sealed class TableColumnAdder
         || column.DefaultFunction is not null
         || column.Default is { Type: not ColumnType.Null };
 
-    private static bool HasFillValue(TableColumnSchema column) =>
-        column.DefaultSequenceId is not null
-        || column.DefaultFunction is not null
-        || column.DefaultValue is { Type: not ColumnType.Null };
-
     /// <summary>
     /// The error for a NOT NULL column that an existing row would hold NULL in. The same code and text
     /// as <c>ALTER COLUMN ... SET NOT NULL</c> over a NULL, plus the ways around it.
     /// </summary>
-    internal static CamusDBException ContainsNullValues(TableDescriptor table, ColumnInfo column) =>
-        ContainsNullValues(table.Name, column.Name);
-
-    private static CamusDBException ContainsNullValues(TableDescriptor table, TableColumnSchema column) =>
-        ContainsNullValues(table.Name, column.Name);
-
-    private static CamusDBException ContainsNullValues(string tableName, string columnName) =>
+    internal static CamusDBException ContainsNullValues(string tableName, string columnName) =>
         new(
             CamusDBErrorCodes.NotNullViolation,
             $"column \"{columnName}\" of table \"{tableName}\" contains null values: the table has rows, and " +
             "ADD COLUMN ... NOT NULL gives them no value. Declare a DEFAULT, or add the column without NOT NULL, " +
             $"fill it, then run ALTER TABLE {tableName} ALTER COLUMN {columnName} SET NOT NULL");
 
+    /// <summary>
+    /// The next ids in row-id order after <paramref name="afterRowId"/>, at most one batch. Read without a
+    /// lock: only the ids are kept, and the batch reads each row again under its lock.
+    /// </summary>
+    private static async Task<List<ObjectIdValue>> ScanRowIdsAsync(
+        DatabaseDescriptor database, TableDescriptor table, ObjectIdValue? afterRowId, CancellationToken cancellationToken)
+    {
+        List<ObjectIdValue> rowIds = new(StoredRowRewriter.BatchRows);
+
+        KvTransaction tx = await database.Transactions.BeginAsync(
+            CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadOnly
+        ).ConfigureAwait(false);
+        try
+        {
+            await foreach ((ObjectIdValue rowId, ReadOnlyMemory<byte> _) in table.Store.ScanRows(tx, afterRowId: afterRowId).ConfigureAwait(false))
+            {
+                rowIds.Add(rowId);
+                if (rowIds.Count >= StoredRowRewriter.BatchRows)
+                    break;
+
+                cancellationToken.ThrowIfCancellationRequested();
+            }
+        }
+        finally
+        {
+            await database.Transactions.RollbackIfNotCompletedAsync(tx).ConfigureAwait(false);
+        }
+
+        return rowIds;
+    }
+
+    /// <summary>
+    /// One batch in its own transaction: locks the rows, reads them, fills those that need a value, writes
+    /// them and commits. Returns the number of rows written.
+    /// </summary>
     private async Task<int> FillBatchAsync(
+        DatabaseDescriptor database,
+        TableDescriptor table,
+        ColumnFill fill,
+        List<ObjectIdValue> rowIds,
+        CancellationToken cancellationToken)
+    {
+        KvTransaction tx = await database.Transactions.BeginAsync(
+            CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite
+        ).ConfigureAwait(false);
+        try
+        {
+            ReadOnlyMemory<byte>?[] current = await table.Store.LockAndReadRowsForMutationAsync(tx, rowIds, cancellationToken).ConfigureAwait(false);
+
+            RowEncoder.DictionaryDecodeState decodeState = new();
+            List<(ObjectIdValue, IReadOnlyDictionary<string, ColumnValue>)> pending = new(rowIds.Count);
+
+            for (int i = 0; i < rowIds.Count; i++)
+            {
+                // Deleted after the scan read its id.
+                if (current[i] is not { } data)
+                    continue;
+
+                Dictionary<string, ColumnValue> row = await RowEncoder.DecodeWritableAsync(
+                    table.Schema, tx.TransactionId, rowIds[i], data,
+                    visibilitySchemaVersion: table.Schema.Version,
+                    decodeState: decodeState).ConfigureAwait(false);
+
+                if (!await fill.NeedsValueAsync(table.Schema, tx, data, row).ConfigureAwait(false))
+                    continue;
+
+                pending.Add((rowIds[i], row));
+            }
+
+            if (pending.Count > 0)
+            {
+                await AssignValuesAsync(database, table, fill.Column, tx, pending).ConfigureAwait(false);
+                await StoredRowRewriter.RewriteAsync(database, table, tx, pending).ConfigureAwait(false);
+            }
+
+            await database.Transactions.CommitAsync(tx).ConfigureAwait(false);
+
+            return pending.Count;
+        }
+        catch
+        {
+            await database.Transactions.RollbackIfNotCompletedAsync(tx).ConfigureAwait(false);
+            throw;
+        }
+    }
+
+    /// <summary>
+    /// Writes the column's value into each row of <paramref name="pending"/>. A sequence default draws
+    /// one reservation for the batch, sized to the rows that take a value.
+    /// </summary>
+    private async Task AssignValuesAsync(
         DatabaseDescriptor database,
         TableDescriptor table,
         TableColumnSchema column,
         KvTransaction tx,
-        List<(ObjectIdValue RowId, IReadOnlyDictionary<string, ColumnValue> Values)> pending,
-        Dictionary<string, ColumnValue>? sequenceRun)
+        List<(ObjectIdValue RowId, IReadOnlyDictionary<string, ColumnValue> Values)> pending)
     {
-        if (pending.Count == 0)
-            return 0;
+        Dictionary<string, ColumnValue>? sequenceRun = null;
 
-        // One reservation for the batch, sized to the rows that take a value, so the sequence skips
-        // nothing for the rows that already hold the column.
         if (column.DefaultSequenceId is { } sequenceId)
         {
             SequenceSchema sequence = database.Schema.FindSequenceById(sequenceId)
@@ -245,7 +256,8 @@ public sealed class TableColumnAdder
                     CamusDBErrorCodes.SequenceDoesntExist,
                     $"Column '{column.Name}' defaults from sequence '{sequenceId}', which no longer exists");
 
-            await sequenceBinder.ReserveIntoAsync(database, sequence, pending.Count, sequenceRun!, tx, CancellationToken.None)
+            sequenceRun = new(4);
+            await sequenceBinder.ReserveIntoAsync(database, sequence, pending.Count, sequenceRun, tx, CancellationToken.None)
                 .ConfigureAwait(false);
         }
 
@@ -258,14 +270,53 @@ public sealed class TableColumnAdder
                     : column.DefaultValue ?? ColumnValue.Null;
 
             if (column.NotNull && value.Type == ColumnType.Null)
-                throw ContainsNullValues(table, column);
+                throw ContainsNullValues(table.Name, column.Name);
 
-            // The decoded row is this method's own copy, so it is written in place.
+            // The decoded row is this batch's own copy, so it is written in place.
             ((Dictionary<string, ColumnValue>)pending[i].Values)[column.Name] = value;
         }
+    }
 
-        await StoredRowRewriter.RewriteAsync(database, table, tx, pending).ConfigureAwait(false);
+    /// <summary>
+    /// The per-run state of one fill: the column, and whether each stored layout version holds the column
+    /// writable. Rows written under one version all hold it, or all lack it.
+    /// </summary>
+    private sealed class ColumnFill
+    {
+        private readonly Dictionary<int, bool> layoutHoldsWritable = new();
 
-        return pending.Count;
+        /// <summary>
+        /// True when a NULL in a layout that holds the column writable still needs a value. See the class
+        /// summary for why such a NULL was not chosen by a user.
+        /// </summary>
+        private readonly bool nullNeedsValue;
+
+        internal TableColumnSchema Column { get; }
+
+        internal ColumnFill(TableColumnSchema column)
+        {
+            Column = column;
+            nullNeedsValue = column.NotNull || column.DefaultFunction is not null || column.DefaultSequenceId is not null;
+        }
+
+        internal async ValueTask<bool> NeedsValueAsync(
+            TableSchema schema, KvTransaction tx, ReadOnlyMemory<byte> data, Dictionary<string, ColumnValue> row)
+        {
+            int storedVersion = RowEncoder.ReadStoredSchemaVersion(data.Span);
+
+            if (!layoutHoldsWritable.TryGetValue(storedVersion, out bool holdsWritable))
+            {
+                TableSchemaHistory history = await schema.GetSchemaHistoryAsync(tx.TransactionId, storedVersion).ConfigureAwait(false);
+                TableColumnSchema? stored = history.Columns?.Find(c => string.Equals(c.Id, Column.Id, StringComparison.Ordinal));
+                holdsWritable = stored is not null && SchemaElementStateRules.IsWritable(stored);
+                layoutHoldsWritable[storedVersion] = holdsWritable;
+            }
+
+            if (!holdsWritable)
+                return true;
+
+            return nullNeedsValue
+                && (!row.TryGetValue(Column.Name, out ColumnValue? value) || value.Type == ColumnType.Null);
+        }
     }
 }
