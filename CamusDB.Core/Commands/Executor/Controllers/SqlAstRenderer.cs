@@ -342,6 +342,7 @@ internal class SqlAstRenderer
         NodeType.TypeDateTime  => "datetime",
         NodeType.TypeBytes or NodeType.TypeBytesSized => "bytes",
         NodeType.TypeUuid      => "uuid",
+        NodeType.TypeNumeric   => "numeric",
         _ => throw Unsupported(typeNode),
     };
 }

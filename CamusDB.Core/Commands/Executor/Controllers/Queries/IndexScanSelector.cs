@@ -787,6 +787,9 @@ internal static class IndexScanSelector
                 => ColumnValue.True,
             ColumnType.Uuid when TryNextUuid(value, out ColumnValue? nextUuid)
                 => nextUuid,
+            // The NUMERIC successor is one unit of the last fractional digit (10⁻⁹) higher.
+            ColumnType.Numeric when value.NumericUnscaled < NumericMath.MaxUnscaled
+                => ColumnValue.FromNumeric(value.NumericUnscaled + 1),
             _ => null,
         };
     }

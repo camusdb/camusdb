@@ -7,6 +7,7 @@
  */
 
 using System.IO;
+using System.Numerics;
 using System.Runtime.CompilerServices;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
@@ -810,40 +811,17 @@ internal sealed class QueryAggregator
         QueryTicket ticket,
         IAsyncEnumerable<QueryResultRow> dataCursor)
     {
-        double sum = 0;
-        long intSum = 0;
-        bool hasValue = false;
-        bool allInteger = true;
+        SumAccumulator sum = new();
 
         await foreach (QueryResultRow resultRow in dataCursor.ConfigureAwait(false))
         {
             if (!TryGetAggregationValue(funcCall, resultRow.Row, ticket, out ColumnValue? value) || value!.Type == ColumnType.Null)
                 continue;
 
-            hasValue = true;
-
-            switch (value.Type)
-            {
-                case ColumnType.Integer64:
-                    intSum += value.LongValue;
-                    sum += value.LongValue;
-                    break;
-
-                case ColumnType.Float64:
-                    allInteger = false;
-                    sum += value.FloatValue;
-                    break;
-
-                default:
-                    throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"SUM requires a numeric column, got {value.Type}");
-            }
+            sum.Add(value);
         }
 
-        ColumnValue result = !hasValue
-            ? ColumnValue.Null
-            : allInteger
-                ? new ColumnValue(ColumnType.Integer64, intSum)
-                : new ColumnValue(ColumnType.Float64, sum);
+        ColumnValue result = sum.Result();
 
         yield return new QueryResultRow(
             default(ObjectIdValue),
@@ -855,34 +833,17 @@ internal sealed class QueryAggregator
         QueryTicket ticket,
         IAsyncEnumerable<QueryResultRow> dataCursor)
     {
-        double sum = 0;
-        long count = 0;
+        AverageAccumulator average = new();
 
         await foreach (QueryResultRow resultRow in dataCursor.ConfigureAwait(false))
         {
             if (!TryGetAggregationValue(funcCall, resultRow.Row, ticket, out ColumnValue? value) || value!.Type == ColumnType.Null)
                 continue;
 
-            switch (value.Type)
-            {
-                case ColumnType.Integer64:
-                    sum += value.LongValue;
-                    count++;
-                    break;
-
-                case ColumnType.Float64:
-                    sum += value.FloatValue;
-                    count++;
-                    break;
-
-                default:
-                    throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"AVG requires a numeric column, got {value.Type}");
-            }
+            average.Add(value);
         }
 
-        ColumnValue result = count == 0
-            ? ColumnValue.Null
-            : new ColumnValue(ColumnType.Float64, sum / count);
+        ColumnValue result = average.Result();
 
         yield return new QueryResultRow(
             default(ObjectIdValue),
@@ -1118,18 +1079,211 @@ internal sealed class QueryAggregator
         }
     }
 
+    /// <summary>
+    /// The running state of one <c>SUM</c>, shared by the global and the grouped paths so both apply
+    /// one rule. The result type follows the values: any Float64 gives Float64; otherwise any NUMERIC
+    /// gives NUMERIC, exact, with Integer64 values scaled in; otherwise Integer64 (which wraps on
+    /// overflow, as it always has). A NUMERIC total past the range is
+    /// <see cref="CamusDBErrorCodes.NumericValueOutOfRange"/>, as Spanner reports it. Only the final
+    /// total is checked: the running total is an <see cref="ExactTotal"/>, which can pass the range on
+    /// the way and come back. A mutable struct: hold it in a field or a local and call it in place.
+    /// </summary>
+    private struct SumAccumulator
+    {
+        private long intSum;            // Integer64 values, wrapping (the Integer64 result)
+        private ExactTotal exactIntSum; // the same values, exact (scaled into a NUMERIC result)
+        private double floatSum;        // Integer64 and Float64 values as doubles (the Float64 result)
+        private ExactTotal numericSum;  // NUMERIC values, unscaled
+        private bool hasValue;
+        private bool hasFloat;
+        private bool hasNumeric;
+
+        public void Add(ColumnValue value)
+        {
+            hasValue = true;
+
+            switch (value.Type)
+            {
+                case ColumnType.Integer64:
+                    intSum += value.LongValue;
+                    exactIntSum.Add(value.LongValue);
+                    floatSum += value.LongValue;
+                    break;
+
+                case ColumnType.Float64:
+                    hasFloat = true;
+                    floatSum += value.FloatValue;
+                    break;
+
+                case ColumnType.Numeric:
+                    hasNumeric = true;
+                    numericSum.Add(value.NumericUnscaled);
+                    break;
+
+                default:
+                    throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"SUM requires a numeric column, got {value.Type}");
+            }
+        }
+
+        public readonly ColumnValue Result()
+        {
+            if (!hasValue)
+                return ColumnValue.Null;
+
+            if (hasFloat)
+                return new ColumnValue(ColumnType.Float64, hasNumeric ? floatSum + numericSum.ToDouble() : floatSum);
+
+            if (hasNumeric)
+                return ColumnValue.FromNumeric(ExactTotal.Combine(numericSum, exactIntSum).ToNumeric("SUM"));
+
+            return new ColumnValue(ColumnType.Integer64, intSum);
+        }
+    }
+
+    /// <summary>
+    /// The running state of one <c>AVG</c>, shared by the global and the grouped paths. An average of
+    /// NUMERIC values (with or without Integer64 ones) is NUMERIC: the exact total divided by the count,
+    /// rounded half away from zero. The total may pass the NUMERIC range while the average does not
+    /// (the average of two maximum values is the maximum), so only the average is range-checked. Any
+    /// Float64 value, or only Integer64 values, gives Float64, as before. A mutable struct: call it in
+    /// place.
+    /// </summary>
+    private struct AverageAccumulator
+    {
+        private double sum;             // Integer64 and Float64 values as doubles
+        private ExactTotal exactIntSum; // Integer64 values, exact
+        private ExactTotal numericSum;  // NUMERIC values, unscaled
+        private long count;
+        private bool hasFloat;
+        private bool hasNumeric;
+
+        public void Add(ColumnValue value)
+        {
+            switch (value.Type)
+            {
+                case ColumnType.Integer64:
+                    sum += value.LongValue;
+                    exactIntSum.Add(value.LongValue);
+                    break;
+
+                case ColumnType.Float64:
+                    hasFloat = true;
+                    sum += value.FloatValue;
+                    break;
+
+                case ColumnType.Numeric:
+                    hasNumeric = true;
+                    numericSum.Add(value.NumericUnscaled);
+                    break;
+
+                default:
+                    throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"AVG requires a numeric column, got {value.Type}");
+            }
+
+            count++;
+        }
+
+        public readonly ColumnValue Result()
+        {
+            if (count == 0)
+                return ColumnValue.Null;
+
+            if (hasNumeric && !hasFloat)
+                return ColumnValue.FromNumeric(ExactTotal.Combine(numericSum, exactIntSum).AverageToNumeric(count, "AVG"));
+
+            double total = hasNumeric ? sum + numericSum.ToDouble() : sum;
+            return new ColumnValue(ColumnType.Float64, total / count);
+        }
+    }
+
+    /// <summary>
+    /// An exact running total of Int128 values that never overflows: it stays an <see cref="Int128"/>
+    /// (no allocation) until a sum leaves that range, and only then moves to a
+    /// <see cref="BigInteger"/>. Used for NUMERIC unscaled totals and exact integer totals, where a
+    /// partial total may legitimately pass the NUMERIC range (or even 128 bits) before the final
+    /// result comes back inside it. A mutable struct: call it in place.
+    /// </summary>
+    private struct ExactTotal
+    {
+        private Int128 narrow;
+        private BigInteger? wide;
+
+        public void Add(Int128 value)
+        {
+            if (wide is { } current)
+            {
+                wide = current + (BigInteger)value;
+                return;
+            }
+
+            Int128 next = narrow + value;
+
+            // Signed overflow happened when both operands share a sign and the result does not.
+            if ((narrow >= 0) == (value >= 0) && (next >= 0) != (narrow >= 0))
+                wide = (BigInteger)narrow + (BigInteger)value;
+            else
+                narrow = next;
+        }
+
+        private readonly BigInteger AsBig => wide ?? (BigInteger)narrow;
+
+        /// <summary><paramref name="numeric"/> (unscaled) plus <paramref name="integers"/> scaled by 10⁹.</summary>
+        public static ExactTotal Combine(ExactTotal numeric, ExactTotal integers)
+        {
+            if (numeric.wide is null && integers.wide is null && integers.narrow == 0)
+                return numeric;
+
+            return new ExactTotal { wide = numeric.AsBig + integers.AsBig * NumericMath.ScaleFactor };
+        }
+
+        public readonly double ToDouble() =>
+            wide is { } big ? (double)big / NumericMath.ScaleFactor : NumericMath.ToDouble(narrow);
+
+        /// <summary>The total as an in-range unscaled NUMERIC; anything else is a NUMERIC overflow.</summary>
+        public readonly Int128 ToNumeric(string operation)
+        {
+            if (wide is null)
+                return NumericMath.IsInRange(narrow) ? narrow : throw NumericMath.OutOfRange(operation);
+
+            BigInteger big = wide.Value;
+            return big >= (BigInteger)NumericMath.MinUnscaled && big <= (BigInteger)NumericMath.MaxUnscaled
+                ? (Int128)big
+                : throw NumericMath.OutOfRange(operation);
+        }
+
+        /// <summary>The total divided by <paramref name="count"/>, rounded half away from zero, as an in-range unscaled NUMERIC.</summary>
+        public readonly Int128 AverageToNumeric(long count, string operation)
+        {
+            if (wide is null)
+            {
+                // The common case, with no allocation: |remainder| < count ≤ long.MaxValue, so doubling
+                // it cannot overflow Int128.
+                Int128 narrowQuotient = narrow / count;
+                Int128 narrowRemainder = narrow % count;
+
+                if (Int128.Abs(narrowRemainder) * 2 >= count)
+                    narrowQuotient += Int128.Sign(narrowRemainder);
+
+                return NumericMath.IsInRange(narrowQuotient) ? narrowQuotient : throw NumericMath.OutOfRange(operation);
+            }
+
+            BigInteger quotient = BigInteger.DivRem(AsBig, count, out BigInteger remainder);
+
+            if (BigInteger.Abs(remainder) * 2 >= count)
+                quotient += remainder.Sign;
+
+            return new ExactTotal { wide = quotient }.ToNumeric(operation);
+        }
+    }
+
     private sealed class AggregateMetricState
     {
         private readonly NodeAst funcCall;
         private readonly QueryAggregationType aggregationType;
         private long countAll;
         private long countNonNull;
-        private long intSum;
-        private double floatSum;
-        private bool hasSum;
-        private bool allInteger = true;
-        private double avgSum;
-        private long avgCount;
+        private SumAccumulator sum;
+        private AverageAccumulator average;
         private ColumnValue? min;
         private ColumnValue? max;
 
@@ -1162,46 +1316,14 @@ internal sealed class QueryAggregator
                     if (!TryGetAggregationValue(funcCall, row, ticket, out ColumnValue? sumValue) || sumValue!.Type == ColumnType.Null)
                         return;
 
-                    hasSum = true;
-
-                    switch (sumValue.Type)
-                    {
-                        case ColumnType.Integer64:
-                            intSum += sumValue.LongValue;
-                            floatSum += sumValue.LongValue;
-                            break;
-
-                        case ColumnType.Float64:
-                            allInteger = false;
-                            floatSum += sumValue.FloatValue;
-                            break;
-
-                        default:
-                            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"SUM requires a numeric column, got {sumValue.Type}");
-                    }
-
+                    sum.Add(sumValue);
                     return;
 
                 case QueryAggregationType.Average:
                     if (!TryGetAggregationValue(funcCall, row, ticket, out ColumnValue? avgValue) || avgValue!.Type == ColumnType.Null)
                         return;
 
-                    switch (avgValue.Type)
-                    {
-                        case ColumnType.Integer64:
-                            avgSum += avgValue.LongValue;
-                            avgCount++;
-                            break;
-
-                        case ColumnType.Float64:
-                            avgSum += avgValue.FloatValue;
-                            avgCount++;
-                            break;
-
-                        default:
-                            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"AVG requires a numeric column, got {avgValue.Type}");
-                    }
-
+                    average.Add(avgValue);
                     return;
 
                 case QueryAggregationType.Min:
@@ -1232,14 +1354,8 @@ internal sealed class QueryAggregator
                 QueryAggregationType.Count => new ColumnValue(
                     ColumnType.Integer64,
                     IsCountAll(funcCall) ? countAll : countNonNull),
-                QueryAggregationType.Sum => !hasSum
-                    ? ColumnValue.Null
-                    : allInteger
-                        ? new ColumnValue(ColumnType.Integer64, intSum)
-                        : new ColumnValue(ColumnType.Float64, floatSum),
-                QueryAggregationType.Average => avgCount == 0
-                    ? ColumnValue.Null
-                    : new ColumnValue(ColumnType.Float64, avgSum / avgCount),
+                QueryAggregationType.Sum => sum.Result(),
+                QueryAggregationType.Average => average.Result(),
                 QueryAggregationType.Min => min ?? ColumnValue.Null,
                 QueryAggregationType.Max => max ?? ColumnValue.Null,
                 _ => throw new CamusDBException(

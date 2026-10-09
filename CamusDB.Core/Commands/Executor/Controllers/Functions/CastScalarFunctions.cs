@@ -97,6 +97,7 @@ internal static class CastScalarFunctions
             ColumnType.DateTime  => CastToDateTime(castName, value),
             ColumnType.Bytes     => CastToBytes(castName, value),
             ColumnType.Uuid      => CastToUuid(castName, value),
+            ColumnType.Numeric   => CastToNumeric(castName, value),
             _ => throw UnknownTargetType(castName, targetType.ToString()),
         };
     }
@@ -167,6 +168,14 @@ internal static class CastScalarFunctions
             (ColumnType.String,    ColumnType.DateTime) => CastToDateTime("coerce", value),
             (ColumnType.String,    ColumnType.Bytes)    => CastToBytes("coerce", value),
             (ColumnType.String,    ColumnType.Uuid)     => CastToUuid("coerce", value),
+            // A NUMERIC column accepts an integer, a float (a literal converts from its source text)
+            // and a string such as an HTTP parameter, as CAST does; NUMERIC widens to a float column.
+            (ColumnType.Integer64, ColumnType.Numeric)  => CastToNumeric("coerce", value),
+            (ColumnType.Float64,   ColumnType.Numeric)  => CastToNumeric("coerce", value),
+            (ColumnType.Float32,   ColumnType.Numeric)  => CastToNumeric("coerce", value),
+            (ColumnType.String,    ColumnType.Numeric)  => CastToNumeric("coerce", value),
+            (ColumnType.Numeric,   ColumnType.Float64)  => CastToFloat64("coerce", value),
+            (ColumnType.Numeric,   ColumnType.Float32)  => CastToFloat32("coerce", value),
             _ => value,
         };
     }
@@ -185,6 +194,7 @@ internal static class CastScalarFunctions
             NodeType.TypeDateTime  => ColumnType.DateTime,
             NodeType.TypeBytes     => ColumnType.Bytes,
             NodeType.TypeUuid      => ColumnType.Uuid,
+            NodeType.TypeNumeric   => ColumnType.Numeric,
             NodeType.TypeStringSized => ColumnType.String,
             NodeType.TypeBytesSized  => ColumnType.Bytes,
             NodeType.Identifier    => ResolveIdentifierTargetType(castName, targetTypeAst.yytext!),
@@ -215,6 +225,7 @@ internal static class CastScalarFunctions
             ColumnType.Float64 => new ColumnValue(ColumnType.String, FormatFloat(value.FloatValue)),
             ColumnType.Bool => new ColumnValue(ColumnType.String, value.BoolValue ? "true" : "false"),
             ColumnType.Uuid => new ColumnValue(ColumnType.String, value.ToGuid().ToString("D")),
+            ColumnType.Numeric => new ColumnValue(ColumnType.String, value.NumericValue!),
             _ => throw InvalidConversion(castName, value.Type, ColumnType.String),
         };
     }
@@ -227,6 +238,7 @@ internal static class CastScalarFunctions
             ColumnType.Float64 => FromDoubleToInt64(castName, value.FloatValue),
             ColumnType.Bool => new ColumnValue(ColumnType.Integer64, value.BoolValue ? 1 : 0),
             ColumnType.String => FromStringToInt64(castName, value.StrValue!),
+            ColumnType.Numeric => FromNumericToInt64(castName, value),
             _ => throw InvalidConversion(castName, value.Type, ColumnType.Integer64),
         };
     }
@@ -239,6 +251,7 @@ internal static class CastScalarFunctions
             ColumnType.Integer64 => new ColumnValue(ColumnType.Float64, (double)value.LongValue),
             ColumnType.Bool => new ColumnValue(ColumnType.Float64, value.BoolValue ? 1.0 : 0.0),
             ColumnType.String => FromStringToFloat64(castName, value.StrValue!),
+            ColumnType.Numeric => new ColumnValue(ColumnType.Float64, NumericMath.ToDouble(value.NumericUnscaled)),
             _ => throw InvalidConversion(castName, value.Type, ColumnType.Float64),
         };
     }
@@ -273,6 +286,63 @@ internal static class CastScalarFunctions
         };
     }
 
+    /// <summary>
+    /// Converts to NUMERIC with the Spanner rules: an integer exactly; a string by parsing it exactly;
+    /// a float literal from its source text (<see cref="FloatLiteralText"/>); any other float from its
+    /// exact binary value. More than nine fractional digits round half away from zero. NaN and the
+    /// infinities are refused, and a value outside the range is a
+    /// <see cref="CamusDBErrorCodes.NumericValueOutOfRange"/> error.
+    /// </summary>
+    private static ColumnValue CastToNumeric(string castName, ColumnValue value)
+    {
+        switch (value.Type)
+        {
+            case ColumnType.Numeric:
+                return value;
+
+            case ColumnType.Integer64:
+                return ColumnValue.FromNumeric(NumericMath.FromInt64(value.LongValue));
+
+            case ColumnType.String:
+                return ToNumeric(castName, value.StrValue!,
+                    NumericMath.TryParse(value.StrValue, out Int128 parsed), parsed);
+
+            case ColumnType.Float64:
+            case ColumnType.Float32:
+            {
+                if (FloatLiteralText.TryGet(value, out string? text))
+                    return ToNumeric(castName, text!, NumericMath.TryParse(text, out Int128 fromText), fromText);
+
+                double number = value.Type == ColumnType.Float32 ? (float)value.FloatValue : value.FloatValue;
+                return ToNumeric(castName, number.ToString("R", CultureInfo.InvariantCulture),
+                    NumericMath.TryFromDouble(number, out Int128 fromDouble), fromDouble);
+            }
+
+            default:
+                throw InvalidConversion(castName, value.Type, ColumnType.Numeric);
+        }
+    }
+
+    private static ColumnValue ToNumeric(string castName, string source, NumericConversionStatus status, Int128 unscaled) => status switch
+    {
+        NumericConversionStatus.Ok => ColumnValue.FromNumeric(unscaled),
+        NumericConversionStatus.Overflow => throw new CamusDBException(
+            CamusDBErrorCodes.NumericValueOutOfRange,
+            $"Function '{castName}' NUMERIC overflow for value '{Truncate(source)}': the range is ±99999999999999999999999999999.999999999"),
+        _ => throw InvalidStringConversion(castName, source, ColumnType.Numeric, "a decimal number (e.g. 123.45)"),
+    };
+
+    /// <summary>Rounds half away from zero to an integer, the Spanner rule for CAST of NUMERIC to INT64.</summary>
+    private static ColumnValue FromNumericToInt64(string castName, ColumnValue value)
+    {
+        if (!NumericMath.TryToInt64(value.NumericUnscaled, out long result))
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInput,
+                $"Function '{castName}' integer overflow for value {value.NumericValue}");
+
+        return new ColumnValue(ColumnType.Integer64, result);
+    }
+
     private static ColumnValue FromStringToUuid(string castName, string value)
     {
         if (!Guid.TryParse(value, out Guid parsed))
@@ -290,6 +360,7 @@ internal static class CastScalarFunctions
             ColumnType.Float64   => new ColumnValue(ColumnType.Float32, (double)(float)value.FloatValue),
             ColumnType.Integer64 => new ColumnValue(ColumnType.Float32, (double)(float)value.LongValue),
             ColumnType.String    => FromStringToFloat32(castName, value.StrValue!),
+            ColumnType.Numeric   => new ColumnValue(ColumnType.Float32, (double)NumericMath.ToSingle(value.NumericUnscaled)),
             _ => throw InvalidConversion(castName, value.Type, ColumnType.Float32),
         };
     }

@@ -89,14 +89,19 @@ internal static class ScalarFunctionArguments
             $"Function '{functionName}' expects argument {argumentIndex + 1} of type {FormatTypes(allowedTypes)} but received {argument.Type}");
     }
 
+    /// <summary>
+    /// Accepts Integer64, Float64 and NUMERIC. A caller that branches on the type must handle NUMERIC
+    /// before any arm that reads <see cref="ColumnValue.FloatValue"/>, which is zero for a NUMERIC
+    /// value; a caller that only needs a double uses <see cref="ToDouble"/>, which converts it.
+    /// </summary>
     public static void RequireNumeric(string functionName, int argumentIndex, ColumnValue argument)
     {
-        if (argument.Type is ColumnType.Integer64 or ColumnType.Float64)
+        if (argument.Type is ColumnType.Integer64 or ColumnType.Float64 or ColumnType.Numeric)
             return;
 
         throw new CamusDBException(
             CamusDBErrorCodes.InvalidInput,
-            $"Function '{functionName}' expects argument {argumentIndex + 1} of type Integer64 or Float64 but received {argument.Type}");
+            $"Function '{functionName}' expects argument {argumentIndex + 1} of type Integer64, Float64 or Numeric but received {argument.Type}");
     }
 
     public static void RequireString(string functionName, int argumentIndex, ColumnValue argument)
@@ -120,6 +125,7 @@ internal static class ScalarFunctionArguments
         {
             ColumnType.Integer64 => argument.LongValue,
             ColumnType.Float64 => argument.FloatValue,
+            ColumnType.Numeric => NumericMath.ToDouble(argument.NumericUnscaled),
             _ => throw new CamusDBException(
                 CamusDBErrorCodes.InvalidInput,
                 $"Expected numeric argument but received {argument.Type}"),

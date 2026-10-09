@@ -96,6 +96,8 @@ TTypeTimestamp  (T|t)(I|i)(M|m)(E|e)(S|s)(T|t)(A|a)(M|m)(P|p)
 TTypeDate       (D|d)(A|a)(T|t)(E|e)
 TTypeUuid       (U|u)(U|u)(I|i)(D|d)
 TTypeGuid       (G|g)(U|u)(I|i)(D|d)
+TTypeNumeric    (N|n)(U|u)(M|m)(E|e)(R|r)(I|i)(C|c)
+TTypeDecimal    (D|d)(E|e)(C|c)(I|i)(M|m)(A|a)(L|l)
 TTypeArray      (A|a)(R|r)(R|r)(A|a)(Y|y)
 TCast           (C|c)(A|a)(S|s)(T|t)
 TCase           (C|c)(A|a)(S|s)(E|e)
@@ -424,6 +426,10 @@ TSequence       (S|s)(E|e)(Q|q)(U|u)(E|e)(N|n)(C|c)(E|e)
 {TTypeUuid} { return (int)Token.TTYPE_UUID; }
 
 {TTypeGuid} { return (int)Token.TTYPE_UUID; }
+
+{TTypeNumeric} { return (int)Token.TTYPE_NUMERIC; }
+
+{TTypeDecimal} { return (int)Token.TTYPE_NUMERIC; }
 
 {TTypeArray} { return (int)Token.TTYPE_ARRAY; }
 

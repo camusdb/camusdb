@@ -53,5 +53,9 @@ public static class SerializatorTypes
     public const int TypeDateTime = 24;
     public const int TypeBytes = 25;
     public const int TypeUuid = 26;
+
+    // A NUMERIC value: the signed Int128 (value times 10⁹) as two 64-bit halves, the 16-byte layout
+    // TypeUuid uses. A distinct tag so a reader can tell the two 128-bit types apart.
+    public const int TypeNumeric = 27;
 }
 

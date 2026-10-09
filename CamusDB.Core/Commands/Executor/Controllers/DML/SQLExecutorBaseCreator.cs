@@ -239,7 +239,6 @@ internal abstract class SQLExecutorBaseCreator
         _ => op.ToString(),
     };
 
-    private static bool IsNumeric(ColumnType type) => MixedNumericComparison.IsNumeric(type);
 
     /// <summary>
     /// Attempts the byte-native equality fast path for an <c>=</c>/<c>&lt;&gt;</c> node of the shape
@@ -284,6 +283,11 @@ internal abstract class SQLExecutorBaseCreator
     /// operand type wins, so <c>Integer64 op Integer64</c> is the only combination that stays integral
     /// (and division there truncates), any <see cref="ColumnType.Float64"/> operand promotes both sides
     /// to double, and a <see cref="ColumnType.Float32"/> operand mixed with Integer64 yields Float32.
+    /// A <see cref="ColumnType.Numeric"/> operand with an Integer64 or NUMERIC one computes exactly in
+    /// <see cref="NumericMath"/> (multiplication and division round half away from zero to nine digits,
+    /// a result past the range is <see cref="CamusDBErrorCodes.NumericValueOutOfRange"/>); with a float
+    /// it computes in double and gives Float64, as Spanner does. The result type always equals
+    /// <see cref="MixedNumericComparison.ArithmeticResultType"/>, which static typing uses too.
     /// Float32 results are rounded through <c>float</c> before being carried in the double-backed
     /// <see cref="ColumnValue.FloatValue"/>, so a Float32 expression never reports precision the type
     /// cannot hold. Non-numeric operands are rejected rather than silently coerced — mixed-type
@@ -299,11 +303,25 @@ internal abstract class SQLExecutorBaseCreator
         if (left.Type == ColumnType.Null || right.Type == ColumnType.Null)
             return ColumnValue.Null;
 
-        if (!IsNumeric(left.Type) || !IsNumeric(right.Type))
+        if (MixedNumericComparison.ArithmeticResultType(left.Type, right.Type) is not { } resultType)
             throw new CamusDBException(
                 CamusDBErrorCodes.InvalidInput,
                 $"No matching signature for operator {ArithmeticSymbol(op)} for argument types: {left.Type}, {right.Type}"
             );
+
+        if (resultType == ColumnType.Numeric)
+        {
+            Int128 l = MixedNumericComparison.ToNumericUnscaled(left);
+            Int128 r = MixedNumericComparison.ToNumericUnscaled(right);
+
+            return ColumnValue.FromNumeric(op switch
+            {
+                NodeType.ExprAdd => NumericMath.Add(l, r),
+                NodeType.ExprSub => NumericMath.Subtract(l, r),
+                NodeType.ExprMult => NumericMath.Multiply(l, r),
+                _ => NumericMath.Divide(l, r),
+            });
+        }
 
         if (left.Type == ColumnType.Integer64 && right.Type == ColumnType.Integer64)
         {
@@ -323,14 +341,10 @@ internal abstract class SQLExecutorBaseCreator
             return new ColumnValue(ColumnType.Integer64, integerResult);
         }
 
-        // A Float64 operand forces double precision; otherwise a Float32 operand (possibly against an
-        // Integer64) keeps the narrower single-precision result type.
-        ColumnType resultType = left.Type == ColumnType.Float64 || right.Type == ColumnType.Float64
-            ? ColumnType.Float64
-            : ColumnType.Float32;
-
-        double dl = left.Type == ColumnType.Integer64 ? left.LongValue : left.FloatValue;
-        double dr = right.Type == ColumnType.Integer64 ? right.LongValue : right.FloatValue;
+        // A Float64 operand (or a NUMERIC beside a float) forces double precision; otherwise a Float32
+        // operand (possibly against an Integer64) keeps the narrower single-precision result type.
+        double dl = left.Type == ColumnType.Float32 ? left.FloatValue : MixedNumericComparison.ToDouble(left);
+        double dr = right.Type == ColumnType.Float32 ? right.FloatValue : MixedNumericComparison.ToDouble(right);
 
         if (op == NodeType.ExprDiv && dr == 0.0)
             throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Division by zero");
@@ -371,6 +385,10 @@ internal abstract class SQLExecutorBaseCreator
 
             case ColumnType.Float32:
                 return new ColumnValue(ColumnType.Float32, (float)-value.FloatValue);
+
+            case ColumnType.Numeric:
+                // The range is symmetric, so a negated NUMERIC always fits.
+                return ColumnValue.FromNumeric(NumericMath.Negate(value.NumericUnscaled));
 
             default:
                 throw new CamusDBException(
@@ -640,7 +658,9 @@ internal abstract class SQLExecutorBaseCreator
         if (!double.TryParse(expr.yytext!, NumberStyles.Float, CultureInfo.InvariantCulture, out double doubleValue))
             throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Invalid Float64: " + expr.yytext!);
 
-        return CacheLiteralValue(expr, new ColumnValue(ColumnType.Float64, doubleValue));
+        // The text goes with the value, so a NUMERIC target converts the literal exactly (see FloatLiteralText).
+        ColumnValue literal = FloatLiteralText.Remember(new ColumnValue(ColumnType.Float64, doubleValue), expr.yytext!);
+        return CacheLiteralValue(expr, literal);
     }
 
     private static ColumnValue EvalStringLiteral(NodeAst expr)

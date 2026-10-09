@@ -118,6 +118,14 @@ public static class CamusDBErrorCodes
     /// </summary>
     public const string ForeignKeyCycle = "CADB0416";
 
+    /// <summary>
+    /// A NUMERIC value or result is outside the range of the type, ±99999999999999999999999999999.999999999
+    /// (precision 38, scale 9): a literal, a cast, a stored value or the result of arithmetic or SUM. The
+    /// value is never truncated or wrapped. A permanent caller mistake — maps to HTTP 400 and to gRPC
+    /// <c>OUT_OF_RANGE</c>, the status Spanner gives for the same overflow.
+    /// </summary>
+    public const string NumericValueOutOfRange = "CADB0417";
+
     public const string DuplicateUniqueKeyValue = "CADB0300";
     public const string NotNullViolation = "CADB0301";
     public const string ValueTooLong = "CADB0302";
@@ -728,6 +736,7 @@ public static class CamusDBErrorCodes
         ForeignKeyRestrictUpdate => 409,
         InvalidForeignKeyDefinition => 400,
         ForeignKeyCycle => 400,
+        NumericValueOutOfRange => 400,
         MalformedVector => 400,
         VectorDimensionMismatch => 400,
         InvalidVectorValue => 400,

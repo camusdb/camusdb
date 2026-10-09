@@ -101,6 +101,10 @@ public static class KeyEncoder
     // limbs, matching the 24-hex ordinal (unsigned) order that ColumnValue.CompareTo uses for Id.
     private const int IdKeyDigits = 14;
 
+    // A NUMERIC is a signed Int128 (the value times 10⁹). Flipping the sign bit maps it onto an
+    // unsigned value in the same order, which is written like a Uuid: 19 fixed base-125 digits.
+    private static readonly UInt128 Int128SignBit = UInt128.One << 127;
+
     // Low 96 bits set — used to complement an Id magnitude for descending order within its width.
     private static readonly UInt128 Id96BitMask = (UInt128.One << 96) - 1;
 
@@ -251,7 +255,7 @@ public static class KeyEncoder
             ColumnType.Integer64 or ColumnType.Float64 or ColumnType.Date or ColumnType.DateTime => 1 + 16,
             ColumnType.Float32 => 1 + 8,
             ColumnType.Bool => 1 + 1,
-            ColumnType.Uuid => 1 + UuidKeyDigits,
+            ColumnType.Uuid or ColumnType.Numeric => 1 + UuidKeyDigits,
             ColumnType.Id => 1 + IdKeyDigits,
             ColumnType.Bytes => 1 + 2 * (value.BytesValue?.Length ?? 0) + 2,            // 2 hex/byte + terminator
             ColumnType.String => 1 + MeasureString(value.StrValue ?? "") + 2,
@@ -316,6 +320,15 @@ public static class KeyEncoder
             {
                 UInt128 uuid = ((UInt128)(ulong)value.UuidHigh << 64) | (ulong)value.LongValue;
                 WriteBase125(dest, ref pos, descending ? ~uuid : uuid, UuidKeyDigits);
+                break;
+            }
+
+            case ColumnType.Numeric:
+            {
+                // Sign-bit flip: a negative value lands below every non-negative one, and within a
+                // sign unsigned order equals signed order. Descending complements the whole width.
+                UInt128 ordered = (UInt128)value.NumericUnscaled ^ Int128SignBit;
+                WriteBase125(dest, ref pos, descending ? ~ordered : ordered, UuidKeyDigits);
                 break;
             }
 
@@ -669,6 +682,15 @@ public static class KeyEncoder
                     long high = (long)(ulong)(value >> 64);
                     long low = (long)(ulong)value;
                     values[i] = new ColumnValue(ColumnType.Uuid, high, low);
+                    break;
+                }
+
+                case ColumnType.Numeric:
+                {
+                    UInt128 ordered = ReadBase125(key, ref pos, UuidKeyDigits, i);
+                    if (descending) ordered = ~ordered;
+
+                    values[i] = ColumnValue.FromNumeric((Int128)(ordered ^ Int128SignBit));
                     break;
                 }
 

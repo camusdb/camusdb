@@ -21,17 +21,62 @@ namespace CamusDB.Core.CommandsExecutor.Models;
 /// <para>A Float32 operand is widened at single precision (<c>(double)(float)value</c>), the same
 /// precision <see cref="ColumnValue.CompareTo"/> uses for two Float32 values, so a hash computed
 /// from the widened value is consistent with equality.</para>
+///
+/// <para><b>NUMERIC</b> follows Spanner. Against Integer64 the comparison is exact: the integer is
+/// scaled into the NUMERIC domain, so <c>9007199254740993</c> is not equal to its neighbour, as it
+/// would be after widening to double. Against Float64 or Float32 the NUMERIC value widens to double
+/// (<see cref="NumericMath.ToDouble"/>) and the pair compares as doubles. Hashing every numeric
+/// value by its widened double stays consistent with both rules: an exact NUMERIC/Integer64 match
+/// widens to the same double, so equal values always share a hash.</para>
 /// </summary>
 public static class MixedNumericComparison
 {
     public static bool IsNumeric(ColumnType type) =>
-        type is ColumnType.Integer64 or ColumnType.Float64 or ColumnType.Float32;
+        type is ColumnType.Integer64 or ColumnType.Float64 or ColumnType.Float32 or ColumnType.Numeric;
+
+    /// <summary>
+    /// The result type of <c>+ - * /</c> on two operand types, or null when either is not numeric.
+    /// The one rule for both evaluation (<c>SQLExecutorBaseCreator.EvalArithmetic</c>) and static
+    /// typing (<c>DerivedTableSchemaBuilder</c>), so a CTAS column or client metadata always has the
+    /// type the value will have:
+    /// <list type="bullet">
+    ///   <item>Integer64 with Integer64 stays Integer64.</item>
+    ///   <item>Any Float64 operand gives Float64.</item>
+    ///   <item>NUMERIC with Integer64 or NUMERIC gives NUMERIC; NUMERIC with Float32 gives Float64
+    ///   (Spanner: the supertype of NUMERIC and a float is FLOAT64).</item>
+    ///   <item>Float32 with Integer64 or Float32 gives Float32.</item>
+    /// </list>
+    /// </summary>
+    public static ColumnType? ArithmeticResultType(ColumnType left, ColumnType right)
+    {
+        if (!IsNumeric(left) || !IsNumeric(right))
+            return null;
+
+        if (left == ColumnType.Float64 || right == ColumnType.Float64)
+            return ColumnType.Float64;
+
+        if (left == ColumnType.Numeric || right == ColumnType.Numeric)
+            return left == ColumnType.Float32 || right == ColumnType.Float32 ? ColumnType.Float64 : ColumnType.Numeric;
+
+        if (left == ColumnType.Float32 || right == ColumnType.Float32)
+            return ColumnType.Float32;
+
+        return ColumnType.Integer64;
+    }
+
+    /// <summary>
+    /// The unscaled NUMERIC form of an Integer64 or NUMERIC value. The caller must have checked the
+    /// type; used where an operation promotes an integer operand into the NUMERIC domain.
+    /// </summary>
+    public static Int128 ToNumericUnscaled(ColumnValue value) =>
+        value.Type == ColumnType.Integer64 ? NumericMath.FromInt64(value.LongValue) : value.NumericUnscaled;
 
     /// <summary>Widens a numeric value to double. The caller must check <see cref="IsNumeric"/> first.</summary>
     public static double ToDouble(ColumnValue value) => value.Type switch
     {
         ColumnType.Integer64 => value.LongValue,
         ColumnType.Float32 => (double)(float)value.FloatValue,
+        ColumnType.Numeric => NumericMath.ToDouble(value.NumericUnscaled),
         _ => value.FloatValue,
     };
 
@@ -46,6 +91,19 @@ public static class MixedNumericComparison
 
         if (left.Type == right.Type || !IsNumeric(left.Type) || !IsNumeric(right.Type))
             return false;
+
+        // NUMERIC against an integer is exact: every long fits in the NUMERIC range.
+        if (left.Type == ColumnType.Numeric && right.Type == ColumnType.Integer64)
+        {
+            result = left.NumericUnscaled.CompareTo(NumericMath.FromInt64(right.LongValue));
+            return true;
+        }
+
+        if (left.Type == ColumnType.Integer64 && right.Type == ColumnType.Numeric)
+        {
+            result = NumericMath.FromInt64(left.LongValue).CompareTo(right.NumericUnscaled);
+            return true;
+        }
 
         result = ToDouble(left).CompareTo(ToDouble(right));
         return true;

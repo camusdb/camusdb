@@ -138,6 +138,22 @@ public sealed class TestCompiledRowCodec
     }
 
     [Test]
+    public void RoundTrip_Numeric_SignedExtremesAndNull()
+    {
+        CompiledRowCodec codec = CodecFor(0, Col("n", ColumnType.Numeric));
+
+        foreach (Int128 unscaled in new[] { NumericMath.MinUnscaled, -1, Int128.Zero, 1, (Int128)ulong.MaxValue + 1, NumericMath.MaxUnscaled })
+        {
+            ColumnValue value = ColumnValue.FromNumeric(unscaled);
+            ValueSlot slot = ValueSlot.FromColumnValue(value);
+            AssertRoundTrip(codec, slot);
+            Assert.AreEqual(unscaled, codec.DecodeToSlots(Enc(codec, slot))[0].NumericUnscaled);
+        }
+
+        AssertRoundTrip(codec, ValueSlot.Null);
+    }
+
+    [Test]
     public void RoundTrip_Bool_NullTrueFalse()
     {
         CompiledRowCodec codec = CodecFor(0, Col("a", ColumnType.Bool), Col("b", ColumnType.Bool), Col("c", ColumnType.Bool));

@@ -26,6 +26,21 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 /// equality can match no integer and is handed back to the evaluator, never rounded. Anything the
 /// integer domain cannot express (NaN, infinities, values outside the <c>long</c> range) is also
 /// handed back: the evaluator's answer is always right, only the index shortcut is lost.</para>
+///
+/// <para><b>NUMERIC.</b> The rewrite must reproduce <see cref="MixedNumericComparison"/>, which compares
+/// NUMERIC with Integer64 exactly and with a float as doubles:
+/// <list type="bullet">
+///   <item>An Integer64 constant on a NUMERIC column converts exactly
+///   (<see cref="NumericMath.FromInt64"/>).</item>
+///   <item>A NUMERIC constant on an Integer64 column moves to the nearest integer with the same row set,
+///   computed on the Int128 — never through a double, which merges neighbouring integers past 2⁵³.</item>
+///   <item>A float constant on a NUMERIC column is handed back to the evaluator. The evaluator widens
+///   each stored NUMERIC to double, and near 10¹⁹ thousands of distinct NUMERIC values widen to the
+///   same double, so no exact NUMERIC key range matches what the evaluator accepts. Write the bound as
+///   <c>NUMERIC '9.99'</c> to let an index serve it.</item>
+///   <item>A NUMERIC constant on a float column becomes its widened double, the value the evaluator
+///   compares — as an Integer64 constant does.</item>
+/// </list></para>
 /// </summary>
 internal static class NumericBoundNormalizer
 {
@@ -56,6 +71,12 @@ internal static class NumericBoundNormalizer
 
         /// <summary>The item can equal no value of the column and must be dropped from the list.</summary>
         Drop,
+
+        /// <summary>
+        /// No exact seek key exists for the item, yet it can match rows. The whole list must stop
+        /// driving an index seek and stay in the residual filter, where the evaluator decides.
+        /// </summary>
+        LeaveToEvaluator,
     }
 
     // 2^63 as a double: the smallest double the long range cannot hold. (double)long.MaxValue rounds
@@ -88,11 +109,20 @@ internal static class NumericBoundNormalizer
         {
             case ColumnType.Integer64:
             {
-                Outcome outcome = NormalizeToInteger(op, ToDouble(constant), out newOp, out newConstant);
+                Outcome outcome = constant.Type == ColumnType.Numeric
+                    ? NormalizeNumericToInteger(op, constant.NumericUnscaled, out newOp, out newConstant)
+                    : NormalizeToInteger(op, ToDouble(constant), out newOp, out newConstant);
                 if (outcome != Outcome.Converted)
                     newConstant = constant;
                 return outcome;
             }
+
+            case ColumnType.Numeric:
+                if (constant.Type != ColumnType.Integer64)
+                    return Outcome.LeaveToEvaluator;
+
+                newConstant = ColumnValue.FromNumeric(NumericMath.FromInt64(constant.LongValue));
+                return Outcome.Converted;
 
             case ColumnType.Float64:
                 // The evaluator widens the long to double before it compares, so the widened
@@ -128,9 +158,18 @@ internal static class NumericBoundNormalizer
         {
             case ColumnType.Integer64:
             {
-                Outcome outcome = NormalizeToInteger("=", ToDouble(item), out _, out newItem);
+                Outcome outcome = item.Type == ColumnType.Numeric
+                    ? NormalizeNumericToInteger("=", item.NumericUnscaled, out _, out newItem)
+                    : NormalizeToInteger("=", ToDouble(item), out _, out newItem);
                 return outcome == Outcome.Converted ? ItemOutcome.Converted : ItemOutcome.Drop;
             }
+
+            case ColumnType.Numeric:
+                if (item.Type != ColumnType.Integer64)
+                    return ItemOutcome.LeaveToEvaluator;
+
+                newItem = ColumnValue.FromNumeric(NumericMath.FromInt64(item.LongValue));
+                return ItemOutcome.Converted;
 
             case ColumnType.Float64:
                 newItem = new ColumnValue(ColumnType.Float64, ToDouble(item));
@@ -165,6 +204,70 @@ internal static class NumericBoundNormalizer
 
         newConstant = new ColumnValue(ColumnType.Float32, (double)narrowed);
         return true;
+    }
+
+    /// <summary>
+    /// The exact Integer64 counterpart of <see cref="NormalizeToInteger"/> for a NUMERIC constant: the
+    /// floor and ceiling come from the Int128, and a bound outside the <c>long</c> range is handed back.
+    /// </summary>
+    private static Outcome NormalizeNumericToInteger(string op, Int128 unscaled, out string newOp, out ColumnValue newConstant)
+    {
+        newOp = op;
+        newConstant = null!;
+
+        Int128 truncated = unscaled / NumericMath.ScaleFactor; // toward zero
+        bool integral = unscaled % NumericMath.ScaleFactor == 0;
+        Int128 floor = !integral && unscaled < 0 ? truncated - 1 : truncated;
+        Int128 ceiling = integral ? truncated : floor + 1;
+
+        bool TryLong(Int128 value, out long result)
+        {
+            result = 0;
+            if (value < long.MinValue || value > long.MaxValue)
+                return false;
+            result = (long)value;
+            return true;
+        }
+
+        switch (op)
+        {
+            case "=":
+            case "!=":
+            {
+                if (!integral || !TryLong(truncated, out long exact))
+                    return Outcome.LeaveToEvaluator;
+
+                newConstant = new ColumnValue(ColumnType.Integer64, exact);
+                return Outcome.Converted;
+            }
+
+            case "<":
+            case "<=":
+            {
+                // a < 1.5 ⇔ a <= 1 ; a < 2 stays a < 2 ; a <= 1.5 ⇔ a <= 1
+                if (!TryLong(floor, out long bound))
+                    return Outcome.LeaveToEvaluator;
+
+                newOp = op == "<" && !integral ? "<=" : op;
+                newConstant = new ColumnValue(ColumnType.Integer64, bound);
+                return Outcome.Converted;
+            }
+
+            case ">":
+            case ">=":
+            {
+                // a > 1.5 ⇔ a >= 2 ; a > 2 stays a > 2 ; a >= 1.5 ⇔ a >= 2
+                if (!TryLong(ceiling, out long bound))
+                    return Outcome.LeaveToEvaluator;
+
+                newOp = op == ">" && !integral ? ">=" : op;
+                newConstant = new ColumnValue(ColumnType.Integer64, bound);
+                return Outcome.Converted;
+            }
+
+            default:
+                return Outcome.LeaveToEvaluator;
+        }
     }
 
     private static Outcome NormalizeToInteger(string op, double value, out string newOp, out ColumnValue newConstant)

@@ -48,6 +48,8 @@ public sealed class SqlColumnValueComparer : IEqualityComparer<ColumnValue>
             ColumnType.Date      => HashCode.Combine(obj.Type, obj.LongValue),
             ColumnType.DateTime  => HashCode.Combine(obj.Type, obj.LongValue),
             ColumnType.Bytes     => BytesHashCode(obj.BytesValue),
+            // Both halves: a fixed scale gives every NUMERIC value one bit pattern, so this agrees with equality.
+            ColumnType.Numeric   => HashCode.Combine(obj.Type, obj.UuidHigh, obj.LongValue),
             _                    => HashCode.Combine(obj.Type),
         };
     }

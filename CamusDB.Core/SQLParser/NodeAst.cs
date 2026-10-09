@@ -164,6 +164,18 @@ public sealed class NodeAst
     public static readonly NodeAst TypeDate = Leaf(NodeType.TypeDate);
     public static readonly NodeAst TypeDateTime = Leaf(NodeType.TypeDateTime);
     public static readonly NodeAst TypeUuid = Leaf(NodeType.TypeUuid);
+    public static readonly NodeAst TypeNumeric = Leaf(NodeType.TypeNumeric);
+
+    /// <summary>
+    /// Called by the grammar for <c>NUMERIC(P)</c> and <c>NUMERIC(P,S)</c> (and the <c>DECIMAL</c> spellings).
+    /// The type has fixed precision 38 and scale 9, as Spanner GoogleSQL NUMERIC, which has no
+    /// parameterized form; accepting the syntax and ignoring the numbers would silently store values
+    /// the declaration says the column cannot hold.
+    /// </summary>
+    public static NodeAst RejectParameterizedNumeric() =>
+        throw new CamusDBException(
+            CamusDBErrorCodes.FeatureNotSupported,
+            "NUMERIC has a fixed precision of 38 and a fixed scale of 9; NUMERIC(P,S) and DECIMAL(P,S) are not supported. Declare the column as NUMERIC");
     // TypeArray, TypeStringSized and TypeBytesSized carry child data — construct them dynamically
     // (no shared sentinel).
 

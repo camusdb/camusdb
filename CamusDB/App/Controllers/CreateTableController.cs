@@ -54,6 +54,8 @@ public sealed class CreateTableController : CommandsController
             "blob"      => ColumnType.Bytes,
             "uuid"      => ColumnType.Uuid,
             "guid"      => ColumnType.Uuid,
+            "numeric"   => ColumnType.Numeric,
+            "decimal"   => ColumnType.Numeric,
             "array"     => ColumnType.Array,
             _           => throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Unknown type: " + name),
         };

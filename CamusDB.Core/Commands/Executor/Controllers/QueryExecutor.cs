@@ -1057,11 +1057,15 @@ internal sealed class QueryExecutor
     }
 
     /// <summary>
-    /// Replaces each AVG's internal sum/count pair with the final Float64 average (NULL when
-    /// the count is zero — the aggregator's own empty-input answer), leaving every other
-    /// column untouched.
+    /// Replaces each AVG's internal sum/count pair with the final average (NULL when the count is
+    /// zero — the aggregator's own empty-input answer), leaving every other column untouched. The
+    /// average has the type the sequential aggregator gives: NUMERIC when the merged sum is NUMERIC
+    /// (exact division, half away from zero), Float64 otherwise. A NUMERIC sum read as a double
+    /// would be zero (<see cref="ColumnValue.FloatValue"/> is unused for NUMERIC), so it must never
+    /// reach the Float64 arm. Internal so tests can drive it with a merged row: no standalone test
+    /// reaches the gather partial-aggregation path that calls it.
     /// </summary>
-    private static QueryResultRow FinalizeAverages(QueryResultRow merged, PartialAggregatePlan partialPlan)
+    internal static QueryResultRow FinalizeAverages(QueryResultRow merged, PartialAggregatePlan partialPlan)
     {
         Dictionary<string, ColumnValue> finalized = new(StringComparer.OrdinalIgnoreCase);
 
@@ -1080,9 +1084,11 @@ internal sealed class QueryExecutor
 
             finalized[finalizer.OutputName] = countValue == 0 || sum.Type == ColumnType.Null
                 ? ColumnValue.Null
-                : new ColumnValue(
-                    ColumnType.Float64,
-                    (sum.Type == ColumnType.Integer64 ? sum.LongValue : sum.FloatValue) / (double)countValue);
+                : sum.Type == ColumnType.Numeric
+                    ? ColumnValue.FromNumeric(NumericMath.Divide(sum.NumericUnscaled, NumericMath.FromInt64(countValue)))
+                    : new ColumnValue(
+                        ColumnType.Float64,
+                        (sum.Type == ColumnType.Integer64 ? sum.LongValue : sum.FloatValue) / (double)countValue);
         }
 
         return new QueryResultRow(merged.RowId, finalized);

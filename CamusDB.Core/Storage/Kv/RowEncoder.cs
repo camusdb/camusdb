@@ -416,6 +416,12 @@ public static class RowEncoder
                 Serializator.WriteUuid(buffer, columnValue.UuidHigh, columnValue.LongValue, ref pointer);
                 break;
 
+            case ColumnType.Numeric:
+                // Same 16-byte layout as a Uuid: the high and low halves of the Int128.
+                Serializator.WriteType(buffer, SerializatorTypes.TypeNumeric, ref pointer);
+                Serializator.WriteUuid(buffer, columnValue.UuidHigh, columnValue.LongValue, ref pointer);
+                break;
+
             case ColumnType.Array:
             {
                 IReadOnlyList<ColumnValue> elements = columnValue.ArrayValues ?? [];
@@ -463,7 +469,7 @@ public static class RowEncoder
         ColumnType.Bytes =>
             SerializatorTypeSizes.TypeInteger8 + SerializatorTypeSizes.TypeInteger32
             + (columnValue.BytesValue?.Length ?? 0),
-        ColumnType.Uuid =>
+        ColumnType.Uuid or ColumnType.Numeric =>
             SerializatorTypeSizes.TypeInteger8 + SerializatorTypeSizes.TypeUuid,
         ColumnType.Array =>
             SerializatorTypeSizes.TypeInteger8 + SerializatorTypeSizes.TypeInteger32 + 1  // type + count + element-type byte
@@ -1254,6 +1260,19 @@ public static class RowEncoder
                 throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, t.ToString());
             }
 
+            case ColumnType.Numeric:
+            {
+                int t = Serializator.ReadType(data, ref pointer);
+                if (t == SerializatorTypes.TypeNumeric)
+                {
+                    (long high, long low) = Serializator.ReadUuid(data, ref pointer);
+                    return new ColumnValue(ColumnType.Numeric, high, low);
+                }
+                if (t == SerializatorTypes.TypeNull)
+                    return ColumnValue.Null;
+                throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, t.ToString());
+            }
+
             case ColumnType.Array:
             {
                 int t = Serializator.ReadType(data, ref pointer);
@@ -1371,6 +1390,16 @@ public static class RowEncoder
             {
                 int t = Serializator.ReadType(data, ref pointer);
                 if (t == SerializatorTypes.TypeUuid)
+                    pointer += SerializatorTypeSizes.TypeUuid;
+                else if (t != SerializatorTypes.TypeNull)
+                    throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, t.ToString());
+                break;
+            }
+
+            case ColumnType.Numeric:
+            {
+                int t = Serializator.ReadType(data, ref pointer);
+                if (t == SerializatorTypes.TypeNumeric)
                     pointer += SerializatorTypeSizes.TypeUuid;
                 else if (t != SerializatorTypes.TypeNull)
                     throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, t.ToString());

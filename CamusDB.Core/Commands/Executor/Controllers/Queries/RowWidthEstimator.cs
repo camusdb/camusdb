@@ -69,6 +69,7 @@ internal static class RowWidthEstimator
                 ColumnType.String   => EstimateStringWidth(col.MaxLength),
                 ColumnType.Bytes    => EstimateBytesWidth(col.MaxLength),
                 ColumnType.Uuid     => UuidBytes,
+                ColumnType.Numeric  => UuidBytes,   // also a fixed 128-bit value
                 ColumnType.Array    => ArrayAvgBytes,
                 _                   => 0,
             };

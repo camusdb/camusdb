@@ -423,7 +423,7 @@ public class TestMathScalarFunctions : SharedNodeBaseTest
             "SELECT abs(\"not-a-number\") FROM robots");
 
         Assert.AreEqual(CamusDBErrorCodes.InvalidInput, ex.Code);
-        StringAssert.Contains("Function 'abs' expects argument 1 of type Integer64 or Float64 but received String", ex.Message);
+        StringAssert.Contains("Function 'abs' expects argument 1 of type Integer64, Float64 or Numeric but received String", ex.Message);
     }
 
     [Test]

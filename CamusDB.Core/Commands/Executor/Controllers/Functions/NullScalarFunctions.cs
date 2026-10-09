@@ -18,7 +18,8 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Functions;
 /// if every argument is null the function returns ColumnValue.Null.
 ///
 /// Return type is inferred from the non-null argument types using these rules in order:
-///   1. Numeric widening: Float64 beats Float32 beats Integer64 — always yields the broader type.
+///   1. Numeric widening, the arithmetic rule (MixedNumericComparison.ArithmeticResultType): Float64
+///      beats Float32 beats Integer64, NUMERIC beats Integer64, and NUMERIC beside a float gives Float64.
 ///   2. Incompatible mixes (e.g. numeric + String, Id + String) are rejected with InvalidInput.
 ///   3. Otherwise the first non-null type is kept as-is (e.g. Bool + Bool → Bool).
 /// When all argument types are Null the inferred type is ColumnType.Null.
@@ -84,6 +85,8 @@ internal static class NullScalarFunctions
             (ColumnType.Integer64, ColumnType.Float64) => new ColumnValue(ColumnType.Float64, (double)value.LongValue),
             (ColumnType.Integer64, ColumnType.Float32) => new ColumnValue(ColumnType.Float32, (double)(float)value.LongValue),
             (ColumnType.Float32,   ColumnType.Float64) => new ColumnValue(ColumnType.Float64, value.FloatValue),
+            (ColumnType.Integer64, ColumnType.Numeric) => ColumnValue.FromNumeric(NumericMath.FromInt64(value.LongValue)),
+            (ColumnType.Numeric,   ColumnType.Float64) => new ColumnValue(ColumnType.Float64, NumericMath.ToDouble(value.NumericUnscaled)),
             _ => value,
         };
     }
@@ -118,13 +121,10 @@ internal static class NullScalarFunctions
         if (a == b)
             return a;
 
-        // Numeric promotion: Float64 > Float32 > Integer64
-        if (IsNumeric(a) && IsNumeric(b))
-        {
-            if (a == ColumnType.Float64 || b == ColumnType.Float64) return ColumnType.Float64;
-            if (a == ColumnType.Float32 || b == ColumnType.Float32) return ColumnType.Float32;
-            return ColumnType.Integer64;
-        }
+        // Numeric promotion, the arithmetic rule: Float64 > Float32 > Integer64, NUMERIC above
+        // Integer64, and NUMERIC beside a float gives Float64.
+        if (MixedNumericComparison.ArithmeticResultType(a, b) is { } widened)
+            return widened;
 
         // String cannot be combined with any other type — reject explicitly rather than silently
         // inferring String and then returning a mismatched runtime value.
@@ -137,6 +137,4 @@ internal static class NullScalarFunctions
         return a;
     }
 
-    private static bool IsNumeric(ColumnType t)
-        => t is ColumnType.Integer64 or ColumnType.Float64 or ColumnType.Float32;
 }

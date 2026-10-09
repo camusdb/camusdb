@@ -139,6 +139,10 @@ public static class CompactRowJsonWriter
                 writer.WriteEndArray();
                 break;
 
+            case ColumnType.Numeric:
+                WriteNumericString(writer, value.NumericUnscaled);
+                break;
+
             case ColumnType.Array:
                 WriteArray(writer, value);
                 break;
@@ -168,6 +172,17 @@ public static class CompactRowJsonWriter
     /// here — it emits the base64 alphabet raw and would silently change the wire bytes.
     /// </para>
     /// </summary>
+    /// <summary>
+    /// Writes a NUMERIC cell as its canonical decimal text, formatted on the stack with no string
+    /// allocation. The text is plain ASCII digits, a minus sign and a point, so it needs no escaping.
+    /// </summary>
+    private static void WriteNumericString(Utf8JsonWriter writer, Int128 unscaled)
+    {
+        Span<char> text = stackalloc char[48];
+        int length = NumericMath.Format(unscaled, text);
+        writer.WriteStringValue(text[..length]);
+    }
+
     private static void WriteBase64String(Utf8JsonWriter writer, ReadOnlySpan<byte> bytes)
     {
         if (bytes.IsEmpty)
@@ -279,6 +294,10 @@ public static class CompactRowJsonWriter
                 writer.WriteNumberValue(slot.UuidHigh);
                 writer.WriteNumberValue(slot.UuidLow);
                 writer.WriteEndArray();
+                break;
+
+            case ColumnType.Numeric:
+                WriteNumericString(writer, slot.NumericUnscaled);
                 break;
 
             case ColumnType.Array:

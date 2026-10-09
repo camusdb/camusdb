@@ -867,4 +867,12 @@ public enum NodeType
 
     /// <summary>A list of <see cref="ForeignKeyOption"/> nodes in <c>leftAst</c> and <c>rightAst</c>, in source order.</summary>
     ForeignKeyOptionList,
+
+    /// <summary>
+    /// The <c>NUMERIC</c> (alias <c>DECIMAL</c>) column or cast type: fixed precision 38 and scale 9, as
+    /// Spanner. It has no parameterized form; the grammar refuses <c>NUMERIC(P,S)</c>. Appended here, not
+    /// beside the other type nodes, because <see cref="NodeAstWireCodec"/> sends the numeric value of a
+    /// node type between nodes, and a value in the middle would shift every later member.
+    /// </summary>
+    TypeNumeric,
 }

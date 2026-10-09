@@ -18,7 +18,8 @@ internal static class MathScalarFunctions
         RegisterUnary(registry, "abs", EvaluateAbs, InferAbsReturnType);
         RegisterUnary(registry, "ceil", EvaluateCeil, InferCeilFloorReturnType, aliases: ["ceiling"]);
         RegisterUnary(registry, "floor", EvaluateFloor, InferCeilFloorReturnType);
-        RegisterRound(registry);
+        RegisterRound(registry, "round", EvaluateRound);
+        RegisterRound(registry, "trunc", EvaluateTrunc);
         RegisterUnary(registry, "sqrt", EvaluateSqrt, _ => ColumnType.Float64);
         RegisterBinary(registry, "pow", EvaluatePow, _ => ColumnType.Float64, aliases: ["power"]);
         RegisterBinary(registry, "mod", EvaluateMod, InferModReturnType);
@@ -71,14 +72,14 @@ internal static class MathScalarFunctions
         });
     }
 
-    private static void RegisterRound(ScalarFunctionRegistry registry)
+    private static void RegisterRound(ScalarFunctionRegistry registry, string name, ScalarFunctionEvaluatorDelegate evaluator)
     {
         registry.Register(new ScalarFunctionDescriptor
         {
-            Name = "round",
+            Name = name,
             MinArity = 1,
             MaxArity = 2,
-            Evaluator = EvaluateRound,
+            Evaluator = evaluator,
             InferReturnType = InferRoundReturnType,
         });
     }
@@ -104,19 +105,24 @@ internal static class MathScalarFunctions
             return new ColumnValue(ColumnType.Integer64, Math.Abs(value));
         }
 
+        // The NUMERIC range is symmetric, so the absolute value always fits.
+        if (arguments[0].Type == ColumnType.Numeric)
+            return ColumnValue.FromNumeric(Int128.Abs(arguments[0].NumericUnscaled));
+
         return new ColumnValue(ColumnType.Float64, Math.Abs(arguments[0].FloatValue));
     }
 
     private static ColumnValue EvaluateCeil(string calledName, IReadOnlyList<ColumnValue> arguments)
-        => EvaluateCeilFloor(calledName, arguments, Math.Ceiling);
+        => EvaluateCeilFloor(calledName, arguments, Math.Ceiling, NumericRounding.Ceiling);
 
     private static ColumnValue EvaluateFloor(string calledName, IReadOnlyList<ColumnValue> arguments)
-        => EvaluateCeilFloor(calledName, arguments, Math.Floor);
+        => EvaluateCeilFloor(calledName, arguments, Math.Floor, NumericRounding.Floor);
 
     private static ColumnValue EvaluateCeilFloor(
         string calledName,
         IReadOnlyList<ColumnValue> arguments,
-        Func<double, double> transform)
+        Func<double, double> transform,
+        NumericRounding numericMode)
     {
         if (PropagateNull(arguments) is ColumnValue nullResult)
             return nullResult;
@@ -125,6 +131,10 @@ internal static class MathScalarFunctions
 
         if (arguments[0].Type == ColumnType.Integer64)
             return arguments[0];
+
+        // NUMERIC stays NUMERIC (Spanner); ceil of the maximum is past the range and throws.
+        if (arguments[0].Type == ColumnType.Numeric)
+            return ColumnValue.FromNumeric(NumericMath.Round(arguments[0].NumericUnscaled, 0, numericMode, calledName));
 
         return new ColumnValue(ColumnType.Float64, transform(arguments[0].FloatValue));
     }
@@ -135,6 +145,9 @@ internal static class MathScalarFunctions
             return nullResult;
 
         ScalarFunctionArguments.RequireNumeric(calledName, 0, arguments[0]);
+
+        if (arguments[0].Type == ColumnType.Numeric)
+            return RoundNumeric(calledName, arguments, NumericRounding.HalfAwayFromZero);
 
         if (arguments.Count == 1)
         {
@@ -150,6 +163,64 @@ internal static class MathScalarFunctions
 
         int scale = RequireInt32Scale(calledName, arguments[1].LongValue);
         return RoundWithScale(arguments[0], scale);
+    }
+
+    /// <summary>
+    /// <c>trunc(x[, n])</c>: drops the digits past <c>n</c> places after the decimal point (default 0;
+    /// a negative <c>n</c> drops digits left of it). Integer64 is already whole; Float64 truncates in
+    /// double; NUMERIC truncates exactly and stays NUMERIC, as Spanner's TRUNC.
+    /// </summary>
+    private static ColumnValue EvaluateTrunc(string calledName, IReadOnlyList<ColumnValue> arguments)
+    {
+        if (PropagateNull(arguments) is ColumnValue nullResult)
+            return nullResult;
+
+        ScalarFunctionArguments.RequireNumeric(calledName, 0, arguments[0]);
+
+        if (arguments[0].Type == ColumnType.Numeric)
+            return RoundNumeric(calledName, arguments, NumericRounding.TowardZero);
+
+        long digits = 0;
+        if (arguments.Count == 2)
+        {
+            ScalarFunctionArguments.RequireType(calledName, 1, arguments[1], ColumnType.Integer64);
+            digits = RequireInt32Scale(calledName, arguments[1].LongValue);
+        }
+
+        if (arguments[0].Type == ColumnType.Integer64)
+        {
+            if (digits >= 0)
+                return arguments[0];
+
+            // Integer arithmetic: a double division can land just below the multiple and lose one.
+            // 10^19 is past the long range, so dropping 19 or more digits leaves zero.
+            if (digits < -18)
+                return new ColumnValue(ColumnType.Integer64, 0);
+
+            long unit = (long)Math.Pow(10, -digits);
+            return new ColumnValue(ColumnType.Integer64, arguments[0].LongValue / unit * unit);
+        }
+
+        double number = arguments[0].FloatValue;
+        double factor = Math.Pow(10, digits);
+        return new ColumnValue(ColumnType.Float64, Math.Truncate(number * factor) / factor);
+    }
+
+    /// <summary>
+    /// The NUMERIC arm of <c>round</c> and <c>trunc</c>: exact, at <c>n</c> digits (default 0), and the
+    /// result stays NUMERIC. Rounding up past the maximum throws
+    /// <see cref="CamusDBErrorCodes.NumericValueOutOfRange"/>.
+    /// </summary>
+    private static ColumnValue RoundNumeric(string calledName, IReadOnlyList<ColumnValue> arguments, NumericRounding mode)
+    {
+        long digits = 0;
+        if (arguments.Count == 2)
+        {
+            ScalarFunctionArguments.RequireType(calledName, 1, arguments[1], ColumnType.Integer64);
+            digits = arguments[1].LongValue;
+        }
+
+        return ColumnValue.FromNumeric(NumericMath.Round(arguments[0].NumericUnscaled, digits, mode, calledName));
     }
 
     private static int RequireInt32Scale(string calledName, long scaleValue)
@@ -225,6 +296,22 @@ internal static class MathScalarFunctions
             return new ColumnValue(ColumnType.Integer64, dividend % divisor);
         }
 
+        // NUMERIC with NUMERIC or Integer64 stays exact; the result has the sign of the dividend.
+        if (MixedNumericComparison.ArithmeticResultType(arguments[0].Type, arguments[1].Type) == ColumnType.Numeric)
+        {
+            Int128 divisorUnscaled = MixedNumericComparison.ToNumericUnscaled(arguments[1]);
+
+            if (divisorUnscaled == 0)
+            {
+                throw new CamusDBException(
+                    CamusDBErrorCodes.InvalidInput,
+                    $"Function '{calledName}' division by zero");
+            }
+
+            return ColumnValue.FromNumeric(NumericMath.Remainder(
+                MixedNumericComparison.ToNumericUnscaled(arguments[0]), divisorUnscaled));
+        }
+
         double floatDivisor = ScalarFunctionArguments.ToDouble(arguments[1]);
 
         if (floatDivisor == 0)
@@ -252,6 +339,9 @@ internal static class MathScalarFunctions
             long sign = intValue == 0 ? 0 : intValue > 0 ? 1 : -1;
             return new ColumnValue(ColumnType.Integer64, sign);
         }
+
+        if (arguments[0].Type == ColumnType.Numeric)
+            return new ColumnValue(ColumnType.Integer64, (long)Int128.Sign(arguments[0].NumericUnscaled));
 
         double floatValue = arguments[0].FloatValue;
         long floatSign = floatValue == 0 ? 0 : floatValue > 0 ? 1 : -1;
@@ -288,24 +378,33 @@ internal static class MathScalarFunctions
         => ScalarFunctionArguments.PropagateNull(arguments);
 
     private static ColumnType InferAbsReturnType(IReadOnlyList<ColumnType> argumentTypes)
-        => argumentTypes.Count > 0 && argumentTypes[0] == ColumnType.Integer64
-            ? ColumnType.Integer64
+        => argumentTypes.Count > 0 && argumentTypes[0] is ColumnType.Integer64 or ColumnType.Numeric
+            ? argumentTypes[0]
             : ColumnType.Float64;
 
     private static ColumnType InferCeilFloorReturnType(IReadOnlyList<ColumnType> argumentTypes)
-        => argumentTypes.Count > 0 && argumentTypes[0] == ColumnType.Integer64
-            ? ColumnType.Integer64
+        => argumentTypes.Count > 0 && argumentTypes[0] is ColumnType.Integer64 or ColumnType.Numeric
+            ? argumentTypes[0]
             : ColumnType.Float64;
 
     private static ColumnType InferModReturnType(IReadOnlyList<ColumnType> argumentTypes)
-        => argumentTypes.Count >= 2
-           && argumentTypes[0] == ColumnType.Integer64
-           && argumentTypes[1] == ColumnType.Integer64
-            ? ColumnType.Integer64
+    {
+        if (argumentTypes.Count < 2)
+            return ColumnType.Float64;
+
+        if (argumentTypes[0] == ColumnType.Integer64 && argumentTypes[1] == ColumnType.Integer64)
+            return ColumnType.Integer64;
+
+        return MixedNumericComparison.ArithmeticResultType(argumentTypes[0], argumentTypes[1]) == ColumnType.Numeric
+            ? ColumnType.Numeric
             : ColumnType.Float64;
+    }
 
     private static ColumnType InferRoundReturnType(IReadOnlyList<ColumnType> argumentTypes)
     {
+        if (argumentTypes.Count > 0 && argumentTypes[0] == ColumnType.Numeric)
+            return ColumnType.Numeric;
+
         if (argumentTypes.Count == 1 && argumentTypes[0] == ColumnType.Integer64)
             return ColumnType.Integer64;
 

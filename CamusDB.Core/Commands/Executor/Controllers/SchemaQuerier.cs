@@ -526,6 +526,7 @@ internal sealed class SchemaQuerier
             // (A bare 0x… form would read back as an integer literal, not bytes.)
             ColumnType.Bytes => new ColumnValue(ColumnType.String, SqlStringLiteral.QuoteBytes(column.DefaultValue.BytesValue ?? [])),
             ColumnType.Uuid => new ColumnValue(ColumnType.String, column.DefaultValue.UuidValue!),
+            ColumnType.Numeric => new ColumnValue(ColumnType.String, column.DefaultValue.NumericValue!),
             _ => throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Unknown default type :" + column.DefaultValue.Type),
         };
     }
@@ -1555,6 +1556,7 @@ internal sealed class SchemaQuerier
             ColumnType.Date => "DATE",
             ColumnType.DateTime => "DATETIME",
             ColumnType.Uuid => "UUID",
+            ColumnType.Numeric => "NUMERIC",
             _ => throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Cannot render SQL type for: " + type),
         };
     }
@@ -1684,6 +1686,8 @@ internal sealed class SchemaQuerier
             ColumnType.Float32 => ((float)d.FloatValue).ToString(CultureInfo.InvariantCulture),
             ColumnType.Date or ColumnType.DateTime => "'" + d.IsoValue! + "'",
             ColumnType.Bytes => SqlStringLiteral.QuoteBytes(d.BytesValue ?? []),
+            // The typed literal, so the rendered DDL reads the default back exactly, never through a float.
+            ColumnType.Numeric => "NUMERIC '" + d.NumericValue! + "'",
             _ => throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Cannot render default for type: " + d.Type),
         };
         return $" DEFAULT({literal})";

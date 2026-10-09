@@ -39,7 +39,7 @@
 %token TEQUALS TNOTEQUALS TLESSTHAN TGREATERTHAN TLESSTHANEQUALS TGREATERTHANEQUALS TAND TOR TORDER TBY TASC TDESC
 %token TTRUE TFALSE TUPDATE TSET TDELETE TINSERT TINTO TVALUES TCREATE TTABLE TNOT TNULL
 %token TTYPE_STRING TTYPE_INT64 TTYPE_FLOAT64 TTYPE_OBJECT_ID TTYPE_BOOL TCAST TINTEGER TDOUBLE
-%token TTYPE_FLOAT32 TTYPE_BYTES TTYPE_DATE TTYPE_DATETIME TTYPE_UUID TTYPE_ARRAY
+%token TTYPE_FLOAT32 TTYPE_BYTES TTYPE_DATE TTYPE_DATETIME TTYPE_UUID TTYPE_ARRAY TTYPE_NUMERIC
 %token TPRIMARY TKEY TUNIQUE TINDEX TALTER TWADD TDROP TCOLUMN TESCAPED_IDENTIFIER TLIMIT TOFFSET TAS TGROUP TSHOW TCONSTRAINT TCHECK
 %token TCOLUMNS TTABLES TDESCRIBE TDATABASES TDATABASE TAT LBRACE RBRACE TINDEXES TLIKE TILIKE TDEFAULT TIF TEXISTS TON TIN TIS
 %token TREGEXMATCH TREGEXIMATCH TREGEXNOTMATCH TREGEXNOTIMATCH
@@ -1435,6 +1435,7 @@ default_expr : int { $$.n = $1.n; $$.s = $1.s; }
              | bool { $$.n = $1.n; $$.s = $1.s; }
              | null { $$.n = $1.n; $$.s = $1.s; }
              | fcall_expr { $$.n = $1.n; $$.s = $1.s; }
+             | numeric_literal { $$.n = $1.n; $$.s = $1.s; }
 			 ;
 
 field_type : TTYPE_OBJECT_ID { $$.n = NodeAst.TypeObjectId; }
@@ -1449,6 +1450,9 @@ field_type : TTYPE_OBJECT_ID { $$.n = NodeAst.TypeObjectId; }
            | TTYPE_DATE { $$.n = NodeAst.TypeDate; }
            | TTYPE_DATETIME { $$.n = NodeAst.TypeDateTime; }
            | TTYPE_UUID { $$.n = NodeAst.TypeUuid; }
+           | TTYPE_NUMERIC { $$.n = NodeAst.TypeNumeric; }
+           | TTYPE_NUMERIC LPAREN TDIGIT RPAREN { $$.n = NodeAst.RejectParameterizedNumeric(); }
+           | TTYPE_NUMERIC LPAREN TDIGIT TCOMMA TDIGIT RPAREN { $$.n = NodeAst.RejectParameterizedNumeric(); }
            | TTYPE_ARRAY LPAREN field_type RPAREN { $$.n = new(NodeType.TypeArray, $3.n, null, null, null, null, null, null, null); }
            ;
 
@@ -1770,7 +1774,13 @@ simple_expr : any_identifier { $$.n = $1.n; $$.s = $1.s; }
             | bool { $$.n = $1.n; $$.s = $1.s; }
             | null { $$.n = $1.n; $$.s = $1.s; }
             | placeholder { $$.n = $1.n; $$.s = $1.s; }
+            | numeric_literal { $$.n = $1.n; $$.s = $1.s; }
 			;
+
+/* NUMERIC '1.23' is the Spanner typed literal. It builds the ExprCast node that CAST('1.23' AS NUMERIC)
+   builds, so the string is parsed exactly by the cast and never passes through a float. */
+numeric_literal : TTYPE_NUMERIC string { $$.n = new(NodeType.ExprCast, $2.n, NodeAst.TypeNumeric, null, null, null, null, null, null); }
+                ;
 
 use_default_expr : TDEFAULT { $$.n = NodeAst.ExprDefault; }
                  ;

@@ -556,6 +556,7 @@ public sealed class QueryResultCache : IQueryResultCache, IDisposable
             ColumnType.DateTime  => 24,
             ColumnType.Id        => 48,  // 24-char hex + object overhead
             ColumnType.Uuid      => 32,  // two 64-bit halves + object overhead
+            ColumnType.Numeric   => 32,  // two 64-bit halves + object overhead
             ColumnType.String    => 16 + ((long)(v.StrValue?.Length ?? 0)) * 2,
             ColumnType.Bytes     => 32 + (long)(v.BytesValue?.Length ?? 0),
             ColumnType.Array     => 32 + (v.ArrayValues?.Count ?? 0) * 32,

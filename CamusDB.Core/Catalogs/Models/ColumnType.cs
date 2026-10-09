@@ -24,4 +24,11 @@ public enum ColumnType
     DateTime = 9,
     Array = 10,
     Uuid = 11,
+
+    /// <summary>
+    /// Exact fixed-point number with precision 38 and scale 9, the semantics of Spanner GoogleSQL
+    /// <c>NUMERIC</c>. Stored as an Int128 equal to the value times 10⁹; see
+    /// <see cref="CamusDB.Core.CommandsExecutor.Models.NumericMath"/> for every rule of the type.
+    /// </summary>
+    Numeric = 12,
 }

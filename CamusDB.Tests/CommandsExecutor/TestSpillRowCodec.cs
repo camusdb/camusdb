@@ -12,6 +12,7 @@ using NUnit.Framework;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Controllers.Queries.Spill;
+using CamusDB.Core.CommandsExecutor.Models.Queries;
 using CamusDB.Core.Util.ObjectIds;
 
 namespace CamusDB.Tests.CommandsExecutor;
@@ -61,6 +62,9 @@ public sealed class TestSpillRowCodec
                 break;
             case ColumnType.Bytes:
                 Assert.That(actual.BytesValue, Is.EqualTo(expected.BytesValue), $"{label}.BytesValue");
+                break;
+            case ColumnType.Numeric:
+                Assert.That(actual.NumericUnscaled, Is.EqualTo(expected.NumericUnscaled), $"{label}.NumericUnscaled");
                 break;
             case ColumnType.Array:
                 Assert.That(actual.ArrayElementType, Is.EqualTo(expected.ArrayElementType), $"{label}.ArrayElementType");
@@ -168,6 +172,36 @@ public sealed class TestSpillRowCodec
     {
         var row = MakeRow(ObjectIdValue.Empty, new Dictionary<string, ColumnValue>() { ["col"] = new(ColumnType.Integer64, long.MaxValue) });
         AssertRowEqual(row, RoundTrip(row));
+    }
+
+    [Test]
+    public void RoundTrip_Numeric_ExtremesAndSignedHalves()
+    {
+        var row = MakeRow(ObjectIdGenerator.Generate(), new Dictionary<string, ColumnValue>()
+        {
+            ["max"] = ColumnValue.FromNumeric(NumericMath.MaxUnscaled),
+            ["min"] = ColumnValue.FromNumeric(NumericMath.MinUnscaled),
+            ["unit"] = ColumnValue.FromNumericString("-0.000000001"),
+            ["wide"] = ColumnValue.FromNumericString("36893488147.419103231"),
+            ["null"] = ColumnValue.Null,
+        });
+        AssertRowEqual(row, RoundTrip(row));
+    }
+
+    [Test]
+    public void RoundTrip_Numeric_ValueOnlyFormat()
+    {
+        RowLayout layout = new(new[] { "a", "b" });
+        ColumnValue[] values = { ColumnValue.FromNumericString("12345678901234567890.123456789"), ColumnValue.FromNumeric(NumericMath.MinUnscaled) };
+        QueryRow row = new(ObjectIdGenerator.Generate(), layout, values);
+
+        using MemoryStream stream = new();
+        SpillRowCodec.EncodeValueOnlyToStream(stream, row);
+        byte[] frame = stream.ToArray();
+
+        QueryRow decoded = SpillRowCodec.DecodeValueOnlyPayload(frame.AsSpan(4), layout);
+        Assert.AreEqual(values[0].NumericUnscaled, decoded.Values[0].NumericUnscaled);
+        Assert.AreEqual(values[1].NumericUnscaled, decoded.Values[1].NumericUnscaled);
     }
 
     [Test]

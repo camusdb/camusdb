@@ -70,6 +70,9 @@ public static class GrpcErrorMapper
         CamusDBErrorCodes.InvalidForeignKeyDefinition => StatusCode.InvalidArgument,
         CamusDBErrorCodes.ForeignKeyCycle => StatusCode.InvalidArgument,
 
+        // A NUMERIC value outside the type's range, as Spanner reports it.
+        CamusDBErrorCodes.NumericValueOutOfRange => StatusCode.OutOfRange,
+
         // Not found
         CamusDBErrorCodes.DatabaseDoesntExist => StatusCode.NotFound,
         CamusDBErrorCodes.TableDoesntExist    => StatusCode.NotFound,

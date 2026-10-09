@@ -538,9 +538,21 @@ internal static class DerivedTableSchemaBuilder
             string funcName = target.leftAst!.yytext!.ToLowerInvariant();
 
             if (ScalarFunctionEvaluator.IsRegisteredScalarFunction(funcName))
-                return ScalarFunctionEvaluator.InferReturnType(funcName, []);
+                return InferScalarFunctionType(funcName, target.rightAst, innerBound, innerResolver);
 
             return ColumnType.String;
+        }
+
+        // Plain arithmetic: the rule the evaluator applies (MixedNumericComparison.ArithmeticResultType),
+        // so a CTAS column or client metadata has the type the value will have. An operand whose type
+        // is not statically known keeps the String fallback.
+        if (target.nodeType is NodeType.ExprAdd or NodeType.ExprSub or NodeType.ExprMult or NodeType.ExprDiv
+            && target.leftAst is not null && target.rightAst is not null)
+        {
+            return MixedNumericComparison.ArithmeticResultType(
+                       InferArgType(target.leftAst, innerBound, innerResolver),
+                       InferArgType(target.rightAst, innerBound, innerResolver))
+                   ?? ColumnType.String;
         }
 
         if (target.nodeType == NodeType.ExprCast)
@@ -557,6 +569,31 @@ internal static class DerivedTableSchemaBuilder
             return InferType(target.leftAst!, innerBound, innerResolver);
 
         return ColumnType.String;
+    }
+
+    /// <summary>
+    /// The return type of a scalar function call. The argument types decide it for a type-polymorphic
+    /// function: <c>abs(p)</c> is NUMERIC for a NUMERIC argument and Integer64 for an integer one.
+    /// <para>An argument this builder cannot type (a scalar subquery, for one) reads as String, and a
+    /// function whose inference refuses a type mix (COALESCE of String and Integer64) would then fail
+    /// the whole query while building metadata, although the row values are fine. Such a refusal falls
+    /// back to the argument-free inference, the declaration hint this builder gave before it passed
+    /// argument types; evaluation still reports a real type error for the row.</para>
+    /// </summary>
+    private static ColumnType InferScalarFunctionType(
+        string funcName,
+        NodeAst? argumentList,
+        BoundSelectQuery innerBound,
+        QueryRowNameResolver innerResolver)
+    {
+        try
+        {
+            return ScalarFunctionEvaluator.InferReturnType(funcName, InferArgListTypes(argumentList, innerBound, innerResolver));
+        }
+        catch (CamusDBException)
+        {
+            return ScalarFunctionEvaluator.InferReturnType(funcName, []);
+        }
     }
 
     /// <summary>
@@ -693,7 +730,12 @@ internal static class DerivedTableSchemaBuilder
         return funcName switch
         {
             "count" => ColumnType.Integer64,
-            "sum" or "avg" => InferAggregateArgumentType(funcCall, innerBound, innerResolver, fallback: ColumnType.Float64),
+            "sum" => InferAggregateArgumentType(funcCall, innerBound, innerResolver, fallback: ColumnType.Float64),
+            // AVG of NUMERIC stays NUMERIC (Spanner); every other average is Float64, as the
+            // aggregator computes it (an integer average is never an integer).
+            "avg" => InferAggregateArgumentType(funcCall, innerBound, innerResolver, fallback: ColumnType.Float64) == ColumnType.Numeric
+                ? ColumnType.Numeric
+                : ColumnType.Float64,
             "min" or "max" => InferAggregateArgumentType(funcCall, innerBound, innerResolver, fallback: ColumnType.String),
             _ => ColumnType.String,
         };
@@ -786,11 +828,13 @@ internal static class DerivedTableSchemaBuilder
     }
 
     /// <summary>
-    /// Returns the wider of two types for arithmetic inference: Float64 &gt; Float32 &gt;
-    /// Integer64. Falls back to String for non-numeric or mismatched operands.
+    /// Returns the wider of two types for arithmetic inference. Two numeric operands follow the
+    /// evaluator's rule (<see cref="MixedNumericComparison.ArithmeticResultType"/>); otherwise the
+    /// looser legacy order applies: Float64 &gt; Float32 &gt; Integer64, then String.
     /// </summary>
     private static ColumnType WiderNumericType(ColumnType a, ColumnType b)
     {
+        if (MixedNumericComparison.ArithmeticResultType(a, b) is { } exact) return exact;
         if (a == ColumnType.Float64 || b == ColumnType.Float64) return ColumnType.Float64;
         if (a == ColumnType.Float32 || b == ColumnType.Float32) return ColumnType.Float32;
         if (a == ColumnType.Integer64 || b == ColumnType.Integer64) return ColumnType.Integer64;

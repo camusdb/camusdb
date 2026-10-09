@@ -22,6 +22,8 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 /// scalar types, and a compact raw form for the rest — base64 for <see cref="ColumnType.Bytes"/>,
 /// raw <see cref="System.DateTime.Ticks"/> for <see cref="ColumnType.Date"/>/<see cref="ColumnType.DateTime"/>,
 /// and the two big-endian 64-bit halves <c>[high, low]</c> for <see cref="ColumnType.Uuid"/>. A
+/// <see cref="ColumnType.Numeric"/> is its canonical decimal text (<c>"1.1"</c>), the form Spanner
+/// sends: a JSON number would lose precision in any client that reads numbers as doubles. A
 /// null cell is always JSON null regardless of column type.
 /// </para>
 /// </summary>
@@ -70,6 +72,7 @@ public static class CompactRowEncoder
             ColumnType.Date      => value.LongValue,
             ColumnType.DateTime  => value.LongValue,
             ColumnType.Uuid      => new long[] { value.UuidHigh, value.LongValue },
+            ColumnType.Numeric   => value.NumericValue,
             ColumnType.Array     => EncodeArray(value),
             _                    => null,
         };

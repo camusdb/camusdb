@@ -29,6 +29,8 @@ namespace CamusDB.Core.CommandsExecutor.Models;
 ///   <see cref="BitConverter.DoubleToInt64Bits"/> in <c>_low</c> (Float32 keeps the widened double,
 ///   matching how <see cref="ColumnValue"/> stores it, and compares narrowed to float).</item>
 /// <item><see cref="ColumnType.Uuid"/> — low 64 bits in <c>_low</c>, high 64 bits in <c>_high</c>.</item>
+/// <item><see cref="ColumnType.Numeric"/> — the signed Int128 (value times 10⁹): low 64 bits in
+///   <c>_low</c>, high 64 bits in <c>_high</c>. Compared as a signed Int128, not as unsigned halves.</item>
 /// <item><see cref="ColumnType.String"/> / <see cref="ColumnType.Id"/> — the string in <c>_reference</c>.
 ///   Id is stored as its string form here so the boundary round-trips <b>any</b> Id value exactly
 ///   (including non-canonical literal text). Packing the 96-bit ObjectId inline is a decode-time
@@ -71,6 +73,7 @@ internal readonly struct ValueSlot
     public static ValueSlot FromId(string value) => new(ColumnType.Id, 0, 0, value);
     public static ValueSlot FromBytes(byte[]? value) => new(ColumnType.Bytes, 0, 0, value);
     public static ValueSlot FromUuid(long high, long low) => new(ColumnType.Uuid, low, high, null);
+    public static ValueSlot FromNumeric(long high, long low) => new(ColumnType.Numeric, low, high, null);
     public static ValueSlot FromArray(ColumnType elementType, ValueSlot[] elements) => new(ColumnType.Array, 0, (long)(int)elementType, elements);
 
     // ── Typed accessors ──
@@ -83,6 +86,7 @@ internal readonly struct ValueSlot
     public byte[]? AsBytes => (byte[]?)_reference;
     public long UuidHigh => _high;
     public long UuidLow => _low;
+    public Int128 NumericUnscaled => ((Int128)_high << 64) | (Int128)(ulong)_low;
     public ColumnType ArrayElementType => (ColumnType)(int)_high;
     public ValueSlot[] ArrayElements => (ValueSlot[])(_reference ?? System.Array.Empty<ValueSlot>());
 
@@ -120,6 +124,9 @@ internal readonly struct ValueSlot
             case ColumnType.Uuid:
                 return FromUuid(value.UuidHigh, value.LongValue);
 
+            case ColumnType.Numeric:
+                return FromNumeric(value.UuidHigh, value.LongValue);
+
             case ColumnType.Bytes:
                 return FromBytes(value.BytesValue);
 
@@ -156,6 +163,7 @@ internal readonly struct ValueSlot
             case ColumnType.String:    return new ColumnValue(ColumnType.String, AsString);
             case ColumnType.Id:        return new ColumnValue(ColumnType.Id, AsString);
             case ColumnType.Uuid:      return new ColumnValue(ColumnType.Uuid, _high, _low);
+            case ColumnType.Numeric:   return new ColumnValue(ColumnType.Numeric, _high, _low);
             case ColumnType.Bytes:     return AsBytes is null ? ColumnValue.Null : new ColumnValue(AsBytes);
 
             case ColumnType.Array:
@@ -219,6 +227,9 @@ internal readonly struct ValueSlot
                 int high = ((ulong)_high).CompareTo((ulong)other._high);
                 return high != 0 ? high : ((ulong)_low).CompareTo((ulong)other._low);
             }
+
+            case ColumnType.Numeric:
+                return NumericUnscaled.CompareTo(other.NumericUnscaled);
 
             case ColumnType.Bytes:
             {
@@ -291,7 +302,7 @@ internal readonly struct ValueSlot
             }
 
             default:
-                // Integer64/Date/DateTime/Bool/Float64/Uuid — payload lives in the integer fields.
+                // Integer64/Date/DateTime/Bool/Float64/Uuid/Numeric — payload lives in the integer fields.
                 return HashCode.Combine(_type, _low, _high);
         }
     }

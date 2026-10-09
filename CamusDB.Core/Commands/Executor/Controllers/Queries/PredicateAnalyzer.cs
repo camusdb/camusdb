@@ -358,7 +358,8 @@ public static class PredicateAnalyzer
     ///   builds a key that addresses no entry or a bound the scan cannot compare.</item>
     /// </list>
     /// A comparison with no exact rewrite (a fractional equality on an integer column, NaN, a value
-    /// outside the <c>long</c> range, a Uuid or Id constant on a String column, a Uuid or Id constant
+    /// outside the <c>long</c> range, a float constant on a NUMERIC column, a Uuid or Id constant on a
+    /// String column, a Uuid or Id constant
     /// the column's type cannot hold) stops driving index
     /// selection: it leaves
     /// <see cref="PredicateAnalysis.IndexableComparisons"/> and its conjunct joins
@@ -456,7 +457,9 @@ public static class PredicateAnalyzer
     /// <summary>
     /// Rewrites the items of an IN list into the column's type, as
     /// <see cref="CoerceConstantsForColumns"/> does for a single comparison. Returns null when the
-    /// list must not drive an index seek: a String column with a Uuid or Id item. The evaluator
+    /// list must not drive an index seek: a NUMERIC column with a float item, which the evaluator
+    /// compares as a double and so may match several stored values (see
+    /// <see cref="NumericBoundNormalizer"/>), or a String column with a Uuid or Id item. The evaluator
     /// parses the column's string into that type (<see cref="StringOperandCoercion"/>), so every
     /// spelling of the value matches, while a seek finds only one spelling of it. An item that can
     /// equal no value of the column's type is dropped (<see cref="IsUnmatchableIdentityConstant"/>,
@@ -484,6 +487,12 @@ public static class PredicateAnalyzer
         {
             ColumnValue original = inList.Values[i];
             ColumnValue? replacement = original;
+
+            // An item with no exact seek key that can still match rows (a float on a NUMERIC column)
+            // takes the whole list off the index; the filter evaluates it.
+            if (numericColumn
+                && NumericBoundNormalizer.NormalizeInListItem(original, column.Type, out _) == NumericBoundNormalizer.ItemOutcome.LeaveToEvaluator)
+                return null;
 
             if (IsUnmatchableIdentityConstant(original, column.Type))
             {

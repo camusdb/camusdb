@@ -108,6 +108,7 @@ internal sealed class SQLExecutorAlterTableCreator : SQLExecutorBaseCreator
             case NodeType.TypeDateTime:  return (ColumnType.DateTime,  null, null);
             case NodeType.TypeBytes:     return (ColumnType.Bytes,     null, null);
             case NodeType.TypeUuid:      return (ColumnType.Uuid,      null, null);
+            case NodeType.TypeNumeric:   return (ColumnType.Numeric,   null, null);
             case NodeType.TypeString:    return (ColumnType.String,    null, null);
 
             case NodeType.TypeStringSized:
@@ -130,6 +131,10 @@ internal sealed class SQLExecutorAlterTableCreator : SQLExecutorBaseCreator
                     throw new CamusDBException(CamusDBErrorCodes.InvalidInput,
                         "Nested arrays are not supported: array(array(...)) is invalid");
                 (ColumnType elemType, _, _) = GetColumnMeta(elemNode);
+                // The array row and key codecs have no NUMERIC element form yet.
+                if (elemType == ColumnType.Numeric)
+                    throw new CamusDBException(CamusDBErrorCodes.FeatureNotSupported,
+                        "array(numeric) is not supported");
                 return (ColumnType.Array, null, elemType);
             }
 

@@ -707,6 +707,8 @@ internal sealed class CompiledRowCodec
                 break;
             
             case ColumnType.Uuid:
+            case ColumnType.Numeric:
+                // A Numeric shares the Uuid layout: the high then the low half of its 128 bits.
                 BinaryPrimitives.WriteInt64LittleEndian(dest, slot.UuidHigh);
                 BinaryPrimitives.WriteInt64LittleEndian(dest[8..], slot.UuidLow);
                 break;
@@ -825,6 +827,11 @@ internal sealed class CompiledRowCodec
             {
                 (long high, long low) = GetUuid(payload, ordinal);
                 return ValueSlot.FromUuid(high, low);
+            }
+            case ColumnType.Numeric:
+            {
+                (long high, long low) = GetUuid(payload, ordinal);
+                return ValueSlot.FromNumeric(high, low);
             }
             case ColumnType.String: return ValueSlot.FromString(Encoding.UTF8.GetString(GetVariableSlice(payload, ordinal)));
             case ColumnType.Bytes: return ValueSlot.FromBytes(GetVariableSlice(payload, ordinal).ToArray());
@@ -1085,7 +1092,7 @@ internal sealed class CompiledRowCodec
         ColumnType.Integer64 or ColumnType.Float64 or ColumnType.Date or ColumnType.DateTime => 8,
         ColumnType.Float32 => 4,
         ColumnType.Id => 12,
-        ColumnType.Uuid => 16,
+        ColumnType.Uuid or ColumnType.Numeric => 16,
         _ => throw new CamusDBException(CamusDBErrorCodes.UnknownType, "Not a fixed-width type: " + type),
     };
 

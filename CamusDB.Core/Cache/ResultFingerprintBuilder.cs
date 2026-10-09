@@ -225,6 +225,12 @@ public static class ResultFingerprintBuilder
                 sb.Append("uu:").Append(((ulong)v.UuidHigh).ToString("x16", CultureInfo.InvariantCulture))
                   .Append(((ulong)v.LongValue).ToString("x16", CultureInfo.InvariantCulture));
                 break;
+            case ColumnType.Numeric:
+                // Both halves, for the reason Uuid needs them. The fixed scale gives each value one
+                // bit pattern, so equal values fingerprint equal.
+                sb.Append("nu:").Append(((ulong)v.UuidHigh).ToString("x16", CultureInfo.InvariantCulture))
+                  .Append(((ulong)v.LongValue).ToString("x16", CultureInfo.InvariantCulture));
+                break;
             case ColumnType.Array:
                 // Each element is recursively injection-safe; the element count removes the
                 // ambiguity that would otherwise arise from comma-separated variable-length elements.

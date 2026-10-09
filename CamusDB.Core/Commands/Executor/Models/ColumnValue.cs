@@ -31,6 +31,11 @@ namespace CamusDB.Core.CommandsExecutor.Models;
 ///               compare of (UuidHigh, LongValue), which equals big-endian byte order — the same
 ///               order as the canonical string. Never order Uuids with System.Guid.CompareTo /
 ///               SqlGuid; those use a mixed-endian field comparison that does not match this.
+///   Numeric   — an Int128 equal to the value times 10⁹ (fixed scale 9), split like Uuid: the high
+///               64 bits in UuidHigh and the low 64 bits in LongValue. Unlike Uuid the Int128 is
+///               signed, so ordering is a signed compare of <see cref="NumericUnscaled"/>. The fixed
+///               scale gives every value one bit pattern, so equality is bit equality. See
+///               <see cref="NumericMath"/>.
 /// </summary>
 public sealed class ColumnValue : IComparable<ColumnValue>
 {
@@ -45,8 +50,9 @@ public sealed class ColumnValue : IComparable<ColumnValue>
     public long LongValue { get; }
 
     /// <summary>
-    /// High 64 bits (big-endian RFC 4122 bytes 0..7) of a <see cref="ColumnType.Uuid"/> value; the
-    /// low 64 bits live in <see cref="LongValue"/>. Zero for all other types.
+    /// High 64 bits (big-endian RFC 4122 bytes 0..7) of a <see cref="ColumnType.Uuid"/> value, or the
+    /// high 64 bits of the Int128 of a <see cref="ColumnType.Numeric"/> value; the low 64 bits live in
+    /// <see cref="LongValue"/>. Zero for all other types.
     /// </summary>
     public long UuidHigh { get; }
 
@@ -81,6 +87,21 @@ public sealed class ColumnValue : IComparable<ColumnValue>
     /// </summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? UuidValue => Type == ColumnType.Uuid ? ToGuid().ToString("D") : null;
+
+    /// <summary>
+    /// Canonical text of a <see cref="ColumnType.Numeric"/> value (e.g. <c>"1.1"</c>, never an
+    /// exponent, no trailing fractional zeros); null for all other types. Written into JSON responses;
+    /// ignored during deserialization (the raw halves round-trip).
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? NumericValue => Type == ColumnType.Numeric ? NumericMath.Format(NumericUnscaled) : null;
+
+    /// <summary>
+    /// The Int128 of a <see cref="ColumnType.Numeric"/> value: the value times 10⁹. Meaningless for
+    /// all other types.
+    /// </summary>
+    [JsonIgnore]
+    public Int128 NumericUnscaled => ((Int128)UuidHigh << 64) | (Int128)(ulong)LongValue;
 
     // -------------------------------------------------------------------------
     // JsonConstructor — must round-trip all backing fields for schema DefaultValue
@@ -120,6 +141,21 @@ public sealed class ColumnValue : IComparable<ColumnValue>
                 UuidHigh = uuidHigh;
                 LongValue = longValue;
             }
+        }
+
+        if (type == ColumnType.Numeric)
+        {
+            // A supplied string form (ergonomic HTTP parameters) is parsed, and an empty one is
+            // refused like any other text that is not a number; only an absent string falls back to
+            // the raw halves, which round-trip a persisted schema default value. This constructor
+            // is reachable from HTTP request bodies, so the halves are range-checked too: a client
+            // must not be able to store a value the type cannot hold.
+            Int128 unscaled = strValue is not null
+                ? ParseNumeric(strValue)
+                : EnsureNumericInRange(((Int128)uuidHigh << 64) | (Int128)(ulong)longValue);
+
+            UuidHigh = (long)(unscaled >> 64);
+            LongValue = (long)(ulong)(unscaled & ulong.MaxValue);
         }
 
         if (type == ColumnType.Integer64)
@@ -195,16 +231,52 @@ public sealed class ColumnValue : IComparable<ColumnValue>
         BytesValue = value;
     }
 
-    /// <summary>Constructor for Uuid values from the two big-endian 64-bit halves.</summary>
+    /// <summary>
+    /// Constructor for the two 128-bit types from their 64-bit halves: a Uuid (big-endian halves) or a
+    /// Numeric (high and low halves of the signed Int128). A Numeric outside the type's range throws
+    /// <see cref="CamusDBErrorCodes.NumericValueOutOfRange"/>, so no construction path can produce a
+    /// value that breaks the range invariant <see cref="NumericMath"/> relies on.
+    /// </summary>
     public ColumnValue(ColumnType type, long uuidHigh, long uuidLow)
     {
-        if (type != ColumnType.Uuid && type != ColumnType.Null)
-            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Only type ColumnType.Uuid to uuid halves");
+        if (type != ColumnType.Uuid && type != ColumnType.Numeric && type != ColumnType.Null)
+            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Only type ColumnType.Uuid or ColumnType.Numeric to 128-bit halves");
+
+        if (type == ColumnType.Numeric)
+            EnsureNumericInRange(((Int128)uuidHigh << 64) | (Int128)(ulong)uuidLow);
 
         Type = type;
         UuidHigh = uuidHigh;
         LongValue = uuidLow;
     }
+
+    /// <summary>
+    /// Builds a <see cref="ColumnType.Numeric"/> value from its Int128 (the value times 10⁹). Throws
+    /// <see cref="CamusDBErrorCodes.NumericValueOutOfRange"/> for a value outside the type's range.
+    /// </summary>
+    public static ColumnValue FromNumeric(Int128 unscaled) =>
+        new(ColumnType.Numeric, (long)(unscaled >> 64), (long)(ulong)(unscaled & ulong.MaxValue));
+
+    /// <summary>
+    /// Builds a <see cref="ColumnType.Numeric"/> value from decimal text. More than nine fractional
+    /// digits round half away from zero. Throws <c>InvalidInput</c> for text that is not a number and
+    /// <c>NumericValueOutOfRange</c> for a number outside the range.
+    /// </summary>
+    public static ColumnValue FromNumericString(string value) => FromNumeric(ParseNumeric(value));
+
+    private static Int128 EnsureNumericInRange(Int128 unscaled) =>
+        NumericMath.IsInRange(unscaled)
+            ? unscaled
+            : throw new CamusDBException(CamusDBErrorCodes.NumericValueOutOfRange,
+                "NUMERIC value out of range: the range is ±99999999999999999999999999999.999999999");
+
+    private static Int128 ParseNumeric(string value) => NumericMath.TryParse(value, out Int128 unscaled) switch
+    {
+        NumericConversionStatus.Ok => unscaled,
+        NumericConversionStatus.Overflow => throw new CamusDBException(
+            CamusDBErrorCodes.NumericValueOutOfRange, $"NUMERIC value out of range: {value}"),
+        _ => throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Invalid NUMERIC value: {value}"),
+    };
 
     /// <summary>Builds a <see cref="ColumnType.Uuid"/> value from a <see cref="System.Guid"/>.</summary>
     public static ColumnValue FromUuid(Guid value)
@@ -334,6 +406,9 @@ public sealed class ColumnValue : IComparable<ColumnValue>
                 return high != 0 ? high : ((ulong)LongValue).CompareTo((ulong)other.LongValue);
             }
 
+            case ColumnType.Numeric:
+                return NumericUnscaled.CompareTo(other.NumericUnscaled);
+
             case ColumnType.Array:
             {
                 IReadOnlyList<ColumnValue> a = ArrayValues ?? [];
@@ -374,6 +449,7 @@ public sealed class ColumnValue : IComparable<ColumnValue>
             ColumnType.DateTime  => $"ColumnValue({Type}:{new DateTime(LongValue, DateTimeKind.Utc):o})",
             ColumnType.Bytes     => $"ColumnValue({Type}:len={BytesValue?.Length ?? 0})",
             ColumnType.Uuid      => $"ColumnValue({Type}:{ToGuid():D})",
+            ColumnType.Numeric   => $"ColumnValue({Type}:{NumericValue})",
             ColumnType.Array     => $"ColumnValue({Type}<{ArrayElementType}>:count={ArrayValues?.Count ?? 0})",
             _                    => $"ColumnValue({Type}:{StrValue})",
         };

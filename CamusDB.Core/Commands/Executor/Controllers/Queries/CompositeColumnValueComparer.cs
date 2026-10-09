@@ -130,7 +130,8 @@ internal sealed class CompositeColumnValueComparer
                     break;
 
                 case ColumnType.Uuid:
-                    // Hash both halves; the low half alone would collide all UUIDs sharing it.
+                case ColumnType.Numeric:
+                    // Hash both halves; the low half alone would collide all values sharing it.
                     h.Add(v.UuidHigh);
                     h.Add(v.LongValue);
                     break;

@@ -402,7 +402,13 @@ internal sealed class QueryDistincter
         return left.CompareTo(right) == 0;
     }
 
-    private static int DistinctValueHash(ColumnValue value)
+    /// <summary>
+    /// The per-value hash of the DISTINCT row comparers; it must agree with
+    /// <see cref="DistinctValuesEqual"/>. Internal so tests can check that a type's payload reaches the
+    /// hash: a type that falls to the type-only default arm still deduplicates correctly, but every
+    /// value lands in one bucket and DISTINCT degrades toward quadratic work.
+    /// </summary>
+    internal static int DistinctValueHash(ColumnValue value)
     {
         if (value.Type == ColumnType.Null)
             return 0;
@@ -413,6 +419,7 @@ internal sealed class QueryDistincter
             ColumnType.Float64 => HashCode.Combine(value.Type, value.FloatValue),
             ColumnType.Bool => HashCode.Combine(value.Type, value.BoolValue),
             ColumnType.String or ColumnType.Id => HashCode.Combine(value.Type, value.StrValue, StringComparer.Ordinal),
+            ColumnType.Numeric => HashCode.Combine(value.Type, value.UuidHigh, value.LongValue),
             _ => value.Type.GetHashCode(),
         };
     }

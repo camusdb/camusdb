@@ -33,6 +33,7 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Queries.Spill;
 /// <item>Bool — 1 byte (0 or 1)</item>
 /// <item>String — [int32 utf8Len][utf8 bytes]</item>
 /// <item>Bytes — [int32 len][raw bytes]</item>
+/// <item>Numeric — 16 bytes: the high then the low half of the Int128 (little-endian int64 each)</item>
 /// <item>Array — [1-byte elementType][int32 count][element…] where each
 ///   element is [1-byte isNull flag: 0=null, 1=present][value bytes for elementType if present]</item>
 /// </list>
@@ -226,6 +227,12 @@ public static class SpillRowCodec
                 break;
             }
 
+            case ColumnType.Numeric:
+                BinaryPrimitives.WriteInt64LittleEndian(buf[pos..], cv.UuidHigh);
+                BinaryPrimitives.WriteInt64LittleEndian(buf[(pos + 8)..], cv.LongValue);
+                pos += 16;
+                break;
+
             case ColumnType.Array:
             {
                 buf[pos++] = (byte)cv.ArrayElementType;
@@ -393,6 +400,14 @@ public static class SpillRowCodec
                 data.Slice(pos, len).CopyTo(bytes);
                 pos += len;
                 return new ColumnValue(bytes);
+            }
+
+            case ColumnType.Numeric:
+            {
+                long high = BinaryPrimitives.ReadInt64LittleEndian(data[pos..]);
+                long low = BinaryPrimitives.ReadInt64LittleEndian(data[(pos + 8)..]);
+                pos += 16;
+                return new ColumnValue(ColumnType.Numeric, high, low);
             }
 
             case ColumnType.Array:
@@ -610,6 +625,10 @@ public static class SpillRowCodec
 
             case ColumnType.Bytes:
                 size += 4 + (cv.BytesValue?.Length ?? 0);
+                break;
+
+            case ColumnType.Numeric:
+                size += 16;
                 break;
 
             case ColumnType.Array:
