@@ -110,6 +110,43 @@ public sealed class TestCoordinatorJobPersistence : SharedNodeBaseTest
         Assert.IsEmpty(await executor.Catalogs.LoadCoordinatorJobsAsync(database));
     }
 
+    /// <summary>
+    /// A resume that finds an added column still Absent re-creates it from the record, so every part
+    /// of the column definition must come back. A field that is lost here creates the column without,
+    /// for example, its sequence default, and its existing rows are then filled with NULL.
+    /// </summary>
+    [Test]
+    public async Task ColumnDefinitionRoundTrips()
+    {
+        (_, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+
+        PersistedCoordinatorJob written = Job();
+        written.ColumnType = ColumnType.Integer64;
+        written.ColumnNotNull = true;
+        written.ColumnMaxLength = 40;
+        written.ColumnArrayElementType = ColumnType.String;
+        written.ColumnDefaultFunction = "gen_uuid_v7";
+        written.ColumnDefaultSequenceId = "seq-1";
+        written.ColumnIdentityAlways = true;
+        written.ColumnNotNullConstraintName = "score_nn";
+        written.ColumnComment = "a comment";
+        written.ColumnStorage = ColumnStorageStrategy.External;
+
+        await executor.Catalogs.PersistCoordinatorJobAsync(database, written);
+
+        PersistedCoordinatorJob read = (await executor.Catalogs.LoadCoordinatorJobsAsync(database)).Single();
+        Assert.AreEqual(ColumnType.Integer64, read.ColumnType);
+        Assert.IsTrue(read.ColumnNotNull);
+        Assert.AreEqual(40, read.ColumnMaxLength);
+        Assert.AreEqual(ColumnType.String, read.ColumnArrayElementType);
+        Assert.AreEqual("gen_uuid_v7", read.ColumnDefaultFunction);
+        Assert.AreEqual("seq-1", read.ColumnDefaultSequenceId);
+        Assert.IsTrue(read.ColumnIdentityAlways);
+        Assert.AreEqual("score_nn", read.ColumnNotNullConstraintName);
+        Assert.AreEqual("a comment", read.ColumnComment);
+        Assert.AreEqual(ColumnStorageStrategy.External, read.ColumnStorage);
+    }
+
     [Test]
     public async Task PersistSurvivesAbortedCommits()
     {

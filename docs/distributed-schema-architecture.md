@@ -1247,8 +1247,10 @@ Node A (schema leader): ExecuteClusterAddColumnAsync (holds SchemaDdlSemaphore)
       ReplicateElementStateAsync(age, WriteOnly, Column)     // SetElementState; v8 → v9, ack-gated
 
     ── backfill (current==WriteOnly, next==Public) ──
-      BackfillColumnDefaultsAsync: re-encode existing rows so `age = 0` is physically stored
-        (committed in its own txn, before age becomes readable)
+      BackfillColumnDefaultsAsync: re-encode each row that does not hold `age` yet, so `age = 0`
+        is physically stored (committed in its own txn, before age becomes readable). A function
+        or sequence default is evaluated once per row. A failure, for example a NOT NULL column
+        that a row would hold NULL in, takes `age` back to Absent and deletes the job.
 
     ── step 3: WriteOnly → Public ──
       ReplicateElementStateAsync(age, Public, Column)        // v9 → v10, ack-gated

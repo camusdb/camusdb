@@ -484,6 +484,13 @@ public static class RowEncoder
     /// synchronous and span-based so async decoders can read the version before awaiting lazy
     /// schema-history loads without holding a span across the await.
     /// </summary>
+    /// <summary>
+    /// The schema version a stored row was written under. A caller that must know whether a row
+    /// physically holds a column, rather than receiving that column's default from the decoder,
+    /// looks the version up in the table's schema history.
+    /// </summary>
+    internal static int ReadStoredSchemaVersion(ReadOnlySpan<byte> data) => ReadRowHeader(data);
+
     private static int ReadRowHeader(ReadOnlySpan<byte> data)
     {
         // Guard the version read: a shorter-than-header payload must surface as a corruption error, not a

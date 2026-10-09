@@ -372,22 +372,6 @@ internal sealed class SQLExecutorCreateTableCreator : SQLExecutorBaseCreator
     }
 
     // Returns (ColumnType, MaxLength, ArrayElementType) from a field_type AST node.
-    /// <summary>
-    /// A column that draws from a sequence must be able to hold what the sequence issues, which is
-    /// a 64-bit integer. Checked at DDL time so the mismatch is reported where the author can fix
-    /// it, rather than as a coercion failure on the first insert.
-    /// </summary>
-    private static void RequireIdentityColumnIsInteger(ColumnType columnType, string columnName)
-    {
-        if (columnType == ColumnType.Integer64)
-            return;
-
-        throw new CamusDBException(
-            CamusDBErrorCodes.InvalidInput,
-            $"Column '{columnName}' is {columnType}, but a sequence issues int64 values. " +
-            "Declare the column int64, or use SERIAL.");
-    }
-
     private static (ColumnType type, int? maxLength, ColumnType? arrayElementType) GetColumnMeta(NodeAst nodeAst)
     {
         switch (nodeAst.nodeType)

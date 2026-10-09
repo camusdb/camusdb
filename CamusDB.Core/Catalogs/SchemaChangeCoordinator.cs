@@ -183,17 +183,18 @@ public sealed class SchemaChangeCoordinator
                 // on a leader-change resume that starts from WriteOnly.
                 if (current == SchemaElementState.WriteOnly && nextState == SchemaElementState.Public)
                 {
-                    await RequireEarlierWritersSettledAsync(database, job).ConfigureAwait(false);
-
-                    if (job.ElementKind == SchemaElementKind.Column &&
-                        BackfillAsync is not null &&
-                        columnDefinition is not null)
+                    if (job.ElementKind == SchemaElementKind.Column)
                     {
-                        await BackfillAsync(database, job.TableName, columnDefinition).ConfigureAwait(false);
+                        await SettleAndFillColumnOrTakeBackAsync(database, job, columnDefinition).ConfigureAwait(false);
                     }
-                    else if (job.ElementKind == SchemaElementKind.Index &&
-                             IndexBackfillAsync is not null &&
-                             indexBuildInfo is not null)
+                    else
+                    {
+                        await RequireEarlierWritersSettledAsync(database, job).ConfigureAwait(false);
+                    }
+
+                    if (job.ElementKind == SchemaElementKind.Index &&
+                        IndexBackfillAsync is not null &&
+                        indexBuildInfo is not null)
                     {
                         // Build a checkpoint callback: after each committed batch, persist the
                         // last processed rowId so a leader-change resume skips already-indexed rows.
@@ -304,6 +305,89 @@ public sealed class SchemaChangeCoordinator
             $"'{database.Name}' before {job.ElementKind.ToString().ToLowerInvariant()} '{job.ElementName}' existed " +
             $"(schema version {version}); a node has not applied the change, or a commit that began before it has no outcome yet"
         );
+    }
+
+    /// <summary>
+    /// Waits for the earlier writers, then fills the existing rows of a column that is in
+    /// <c>WriteOnly</c>. On any failure, takes the column back (<see cref="TakeBackColumnAsync"/>) and
+    /// rethrows.
+    ///
+    /// <para><b>Why any failure, and not only a violation.</b> A column left in <c>WriteOnly</c> is
+    /// invisible to queries, but its name is taken, so the same ADD COLUMN cannot run again, and a
+    /// resume would only retry it after a leader change. A NOT NULL column over a row that would hold
+    /// NULL fails on every retry. A fill that failed for a transient reason (a timeout, a lost
+    /// leadership) can simply run again once the column is gone.</para>
+    /// </summary>
+    private async Task SettleAndFillColumnOrTakeBackAsync(DatabaseDescriptor database, SchemaChangeJob job, ColumnInfo? columnDefinition)
+    {
+        try
+        {
+            await RequireEarlierWritersSettledAsync(database, job).ConfigureAwait(false);
+
+            if (BackfillAsync is not null && columnDefinition is not null)
+                await BackfillAsync(database, job.TableName, columnDefinition).ConfigureAwait(false);
+        }
+        catch
+        {
+            await TakeBackColumnAsync(database, job).ConfigureAwait(false);
+            throw;
+        }
+    }
+
+    /// <summary>
+    /// Removes a column whose existing rows were not filled, down its staged states
+    /// (<c>WriteOnly → DeleteOnly → Absent</c>), then deletes its job. Never throws: the caller is
+    /// already failing, and its own error is the one to report.
+    ///
+    /// <para><b>The job is deleted only when the column is gone.</b> If a step fails, the column stays
+    /// in a state no query reads, and the job is what lets the next leader finish or remove it. The
+    /// fill rolled back with its transaction, so no row holds a value from it.</para>
+    /// </summary>
+    internal async Task TakeBackColumnAsync(DatabaseDescriptor database, SchemaChangeJob job)
+    {
+        try
+        {
+            SchemaElementState state = GetCurrentElementState(database.Schema, job.TableName, job.ElementName, SchemaElementKind.Column);
+
+            if (state == SchemaElementState.WriteOnly)
+            {
+                await catalogs.ReplicateElementStateAsync(
+                    database, job.TableName, job.ElementName, SchemaElementState.DeleteOnly, SchemaElementKind.Column
+                ).ConfigureAwait(false);
+
+                state = SchemaElementState.DeleteOnly;
+            }
+
+            if (state == SchemaElementState.DeleteOnly)
+                await catalogs.ReplicateElementStateAsync(
+                    database, job.TableName, job.ElementName, SchemaElementState.Absent, SchemaElementKind.Column
+                ).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            logger?.LogWarning(ex,
+                "Could not remove the unfilled column {ElementName} of {TableName}",
+                job.ElementName, job.TableName);
+        }
+
+        if (GetCurrentElementState(database.Schema, job.TableName, job.ElementName, SchemaElementKind.Column) != SchemaElementState.Absent)
+        {
+            logger?.LogError(
+                "The unfilled column {ElementName} of {TableName} is still in the schema; its job stays for the next schema leader",
+                job.ElementName, job.TableName);
+            return;
+        }
+
+        try
+        {
+            await catalogs.DeleteCoordinatorJobAsync(database, job.TableId, job.ElementName).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            logger?.LogWarning(ex,
+                "Could not delete the job of the removed column {ElementName} of {TableName}; the next leader would add the column again",
+                job.ElementName, job.TableName);
+        }
     }
 
     /// <summary>
@@ -520,6 +604,14 @@ public sealed class SchemaChangeCoordinator
         ColumnType = columnDefinition?.Type,
         ColumnNotNull = columnDefinition?.NotNull ?? false,
         ColumnDefault = columnDefinition?.Default,
+        ColumnMaxLength = columnDefinition?.MaxLength,
+        ColumnArrayElementType = columnDefinition?.ArrayElementType,
+        ColumnDefaultFunction = columnDefinition?.DefaultFunction,
+        ColumnDefaultSequenceId = columnDefinition?.DefaultSequenceId,
+        ColumnIdentityAlways = columnDefinition?.IdentityAlways ?? false,
+        ColumnNotNullConstraintName = columnDefinition?.NotNullConstraintName,
+        ColumnComment = columnDefinition?.Comment,
+        ColumnStorage = columnDefinition?.Storage,
         IndexId = indexBuildInfo?.IndexId,
         IndexColumnIds = indexBuildInfo?.ColumnIds,
         IndexType = indexBuildInfo?.IndexType,
@@ -605,7 +697,19 @@ public sealed class SchemaChangeCoordinator
             }
 
             ColumnInfo? columnDefinition = persisted.ColumnType.HasValue
-                ? new ColumnInfo(persisted.ElementName, persisted.ColumnType.Value, persisted.ColumnNotNull, persisted.ColumnDefault)
+                ? new ColumnInfo(
+                    persisted.ElementName,
+                    persisted.ColumnType.Value,
+                    persisted.ColumnNotNull,
+                    persisted.ColumnDefault,
+                    maxLength: persisted.ColumnMaxLength,
+                    arrayElementType: persisted.ColumnArrayElementType,
+                    defaultFunction: persisted.ColumnDefaultFunction,
+                    notNullConstraintName: persisted.ColumnNotNullConstraintName,
+                    comment: persisted.ColumnComment,
+                    storage: persisted.ColumnStorage,
+                    defaultSequenceId: persisted.ColumnDefaultSequenceId,
+                    identityAlways: persisted.ColumnIdentityAlways)
                 : null;
 
             IndexBuildInfo? indexBuildInfo = null;

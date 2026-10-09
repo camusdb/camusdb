@@ -42,6 +42,13 @@ public sealed class ColumnInfoRequest
     /// </summary>
     public ColumnIdentityKind? Identity { get; set; }
 
+    /// <summary>
+    /// The sequence name written in <c>DEFAULT nextval('…')</c>, for a forwarded statement whose
+    /// default the leader has still to resolve to a sequence id. Null when the default is not a
+    /// sequence. Without it the leader would build the column with no default at all.
+    /// </summary>
+    public string? DefaultSequenceName { get; set; }
+
     /// <summary>Name of a <c>CONSTRAINT name NOT NULL</c> declared on the column; null for bare NOT NULL.</summary>
     public string? NotNullConstraintName { get; set; }
 

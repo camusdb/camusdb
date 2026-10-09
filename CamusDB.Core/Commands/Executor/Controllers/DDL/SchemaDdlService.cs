@@ -100,6 +100,14 @@ internal sealed partial class SchemaDdlService
     /// </summary>
     internal Func<Task>? TestInterceptAfterBackfillCheckpoint;
 
+    /// <summary>
+    /// Test-only hook: invoked by <c>ADD COLUMN</c> after the check that refuses NOT NULL without a
+    /// value on a table with rows, and before the column is added. A test inserts a row at that point
+    /// to reach the fill-time refusal and the removal of the column. Null in production; a test clears
+    /// it after use.
+    /// </summary>
+    internal Func<Task>? TestInterceptAfterAddColumnPrecheck;
+
     internal SchemaDdlService(
         ExecutorContext context,
         CamusDBOptions options,
@@ -457,72 +465,91 @@ internal sealed partial class SchemaDdlService
         CancellationToken cancellationToken)
     {
         for (int i = 0; i < ticket.Columns.Length; i++)
+            ticket.Columns[i] = await ResolveSequenceColumnAsync(
+                database, ticket.TableName, tableId, ticket.Columns[i], created, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Resolves one column declaration that draws from a sequence, for <c>CREATE TABLE</c> and for
+    /// <c>ALTER TABLE … ADD COLUMN</c>. An identity column gets a new sequence owned by
+    /// <paramref name="tableId"/>; <c>DEFAULT nextval('…')</c> is resolved to the existing sequence's
+    /// id. Returns the column with <see cref="ColumnInfo.DefaultSequenceId"/> set, or the column
+    /// unchanged when it draws from no sequence.
+    /// </summary>
+    /// <param name="created">
+    /// The caller's compensation list. The name of a sequence this call creates is appended before
+    /// the call returns, so the caller can drop it when a later step fails.
+    /// </param>
+    private async Task<ColumnInfo> ResolveSequenceColumnAsync(
+        DatabaseDescriptor database,
+        string tableName,
+        string tableId,
+        ColumnInfo column,
+        List<string> created,
+        CancellationToken cancellationToken)
+    {
+        if (column.Identity is null && column.DefaultSequenceName is null)
+            return column;
+
+        string sequenceId;
+
+        if (column.Identity is not null)
         {
-            ColumnInfo column = ticket.Columns[i];
+            string sequenceName = BuildOwnedSequenceName(database, tableName, column.Name);
 
-            if (column.Identity is null && column.DefaultSequenceName is null)
-                continue;
+            SequenceSchema owned = await sequenceDdl.CreateOwnedAsync(
+                database,
+                sequenceName,
+                startValue: 1,
+                increment: 1,
+                minValue: 1,
+                maxValue: null,
+                // The same cache a plain CREATE SEQUENCE gets, for the same reason: a serial
+                // column that skipped a thousand values on every restart while a hand-written
+                // sequence did not would be an exception nobody could predict.
+                cacheSize: 1,
+                ownedByTableId: tableId,
+                cancellationToken).ConfigureAwait(false);
 
-            string sequenceId;
-
-            if (column.Identity is not null)
-            {
-                string sequenceName = BuildOwnedSequenceName(database, ticket.TableName, column.Name);
-
-                SequenceSchema owned = await sequenceDdl.CreateOwnedAsync(
-                    database,
-                    sequenceName,
-                    startValue: 1,
-                    increment: 1,
-                    minValue: 1,
-                    maxValue: null,
-                    // The same cache a plain CREATE SEQUENCE gets, for the same reason: a serial
-                    // column that skipped a thousand values on every restart while a hand-written
-                    // sequence did not would be an exception nobody could predict.
-                    cacheSize: 1,
-                    ownedByTableId: tableId,
-                    cancellationToken).ConfigureAwait(false);
-
-                created.Add(sequenceName);
-                sequenceId = owned.Id!;
-            }
-            else
-            {
-                if (!database.Schema.Sequences.TryGetValue(column.DefaultSequenceName!, out SequenceSchema? existing))
-                    throw new CamusDBException(
-                        CamusDBErrorCodes.SequenceDoesntExist,
-                        $"Column '{column.Name}' defaults from sequence '{column.DefaultSequenceName}', which does not exist");
-
-                // An owned sequence belongs to its identity column and goes when that column goes,
-                // with no dependency check on the way out. A default in a second relation would
-                // therefore be left pointing at a counter that is gone the moment the owner is
-                // dropped — so the reference is refused here rather than allowed to dangle later.
-                if (existing.OwnedByTableId is { Length: > 0 } ownerTableId)
-                    throw new CamusDBException(
-                        CamusDBErrorCodes.SequenceInUse,
-                        $"Column '{column.Name}' cannot default from sequence '{existing.Name}': that sequence is " +
-                        $"owned by an identity column of another relation, and is dropped with it. " +
-                        "Create a free-standing sequence with CREATE SEQUENCE and default from that instead.");
-
-                sequenceId = existing.Id!;
-            }
-
-            ticket.Columns[i] = new ColumnInfo(
-                column.Name,
-                column.Type,
-                column.NotNull,
-                column.Default,
-                column.MaxLength,
-                column.ArrayElementType,
-                column.DefaultFunction,
-                column.NotNullConstraintName,
-                column.Comment,
-                column.Storage,
-                defaultSequenceId: sequenceId,
-                identityAlways: column.IdentityAlways,
-                identity: column.Identity,
-                defaultSequenceName: column.DefaultSequenceName);
+            created.Add(sequenceName);
+            sequenceId = owned.Id!;
         }
+        else
+        {
+            if (!database.Schema.Sequences.TryGetValue(column.DefaultSequenceName!, out SequenceSchema? existing))
+                throw new CamusDBException(
+                    CamusDBErrorCodes.SequenceDoesntExist,
+                    $"Column '{column.Name}' defaults from sequence '{column.DefaultSequenceName}', which does not exist");
+
+            // An owned sequence belongs to its identity column and goes when that column goes,
+            // with no dependency check on the way out. A default in a second column would
+            // therefore be left pointing at a counter that is gone the moment the owner is
+            // dropped — so the reference is refused here rather than allowed to dangle later.
+            if (existing.OwnedByTableId is { Length: > 0 })
+                throw new CamusDBException(
+                    CamusDBErrorCodes.SequenceInUse,
+                    $"Column '{column.Name}' cannot default from sequence '{existing.Name}': that sequence is " +
+                    $"owned by an identity column of another relation, and is dropped with it. " +
+                    "Create a free-standing sequence with CREATE SEQUENCE and default from that instead.");
+
+            sequenceId = existing.Id!;
+        }
+
+        return new ColumnInfo(
+            column.Name,
+            column.Type,
+            column.NotNull,
+            column.Default,
+            column.MaxLength,
+            column.ArrayElementType,
+            column.DefaultFunction,
+            column.NotNullConstraintName,
+            column.Comment,
+            column.Storage,
+            defaultSequenceId: sequenceId,
+            identityAlways: column.IdentityAlways,
+            identity: column.Identity,
+            defaultSequenceName: column.DefaultSequenceName);
     }
 
     /// <summary>
@@ -583,8 +610,8 @@ internal sealed partial class SchemaDdlService
             {
                 context.Logger.LogWarning(
                     cleanupEx,
-                    "CREATE TABLE failed and the sequence '{Sequence}' it had created for database {DatabaseName} " +
-                    "could not be removed; drop it by hand",
+                    "A CREATE TABLE or ADD COLUMN failed and the sequence '{Sequence}' it had created for database " +
+                    "{DatabaseName} could not be removed; drop it by hand",
                     sequenceName,
                     database.Name);
             }
@@ -609,9 +636,6 @@ internal sealed partial class SchemaDdlService
 
         TableDescriptor table = await context.TableOpener.Open(database, ticket.TableName).ConfigureAwait(false);
 
-        if (context.IsClusterMode && ticket.Operation == AlterTableOperation.AddColumn)
-            return await ExecuteClusterAddColumnAsync(database, table, ticket).ConfigureAwait(false);
-
         return await AlterColumnWithSequencesAsync(database, table, ticket).ConfigureAwait(false);
     }
 
@@ -632,6 +656,9 @@ internal sealed partial class SchemaDdlService
     internal async Task<bool> AlterColumnWithSequencesAsync(
         DatabaseDescriptor database, TableDescriptor table, AlterTableTicket ticket)
     {
+        if (ticket.Operation == AlterTableOperation.AddColumn)
+            return await AddColumnAsync(database, table, ticket).ConfigureAwait(false);
+
         // Resolved before the drop: afterwards the column is gone and nothing links the sequence to
         // it any more.
         List<string> orphanedSequences = ticket.Operation == AlterTableOperation.DropColumn
@@ -647,6 +674,164 @@ internal sealed partial class SchemaDdlService
             await DropOwnedSequencesAsync(database, orphanedSequences).ConfigureAwait(false);
 
         return altered;
+    }
+
+    /// <summary>
+    /// <c>ALTER TABLE … ADD COLUMN</c> on both kinds of node. Resolves the column's sequence, adds the
+    /// column, and fills every existing row from its default (see <see cref="TableColumnAdder"/>).
+    /// </summary>
+    /// <remarks>
+    /// <para><b>A NOT NULL column with no value to fill is refused on a table that has a row</b>,
+    /// before anything changes, as PostgreSQL does. The check reads without a lock, so a row that
+    /// arrives after it is caught by the fill instead, and the column is then removed again.</para>
+    ///
+    /// <para><b>An identity column's sequence is created first</b>, for the reason
+    /// <see cref="ResolveSequenceColumnsAsync"/> gives. When the statement fails, the sequence is
+    /// dropped again, unless the column still exists and draws from it: a failed removal of the
+    /// column must not leave the column pointing at a sequence that is gone.</para>
+    ///
+    /// <para><b>A failed statement leaves no column.</b> A standalone node removes the column after
+    /// the DDL transaction rolls back (<see cref="AddColumnStandaloneAsync"/>). A cluster takes the
+    /// column back down its staged states (<see cref="SchemaChangeCoordinator"/>).</para>
+    /// </remarks>
+    private async Task<bool> AddColumnAsync(DatabaseDescriptor database, TableDescriptor table, AlterTableTicket ticket)
+    {
+        ColumnInfo requested = ticket.Column;
+
+        // Checked before a sequence is created, so a statement that cannot succeed has nothing to
+        // undo. Each one is checked again under the schema gate by the path that adds the column.
+        if (FindColumn(table.Schema, requested.Name) is not null)
+            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Duplicate column '{requested.Name}'");
+
+        if (requested.NotNullConstraintName is { } constraintName)
+            ConstraintNameRules.RequireUnused(table.Schema, constraintName);
+
+        if (requested.NotNull && !TableColumnAdder.HasFillValue(requested)
+            && await TableHasAnyRowAsync(database, table).ConfigureAwait(false))
+            throw TableColumnAdder.ContainsNullValues(table, requested);
+
+        if (TestInterceptAfterAddColumnPrecheck is { } intercept)
+            await intercept().ConfigureAwait(false);
+
+        List<string> createdSequences = [];
+        ColumnInfo? resolved = null;
+
+        try
+        {
+            resolved = await ResolveSequenceColumnAsync(
+                database, table.Name, table.Id, requested, createdSequences, CancellationToken.None).ConfigureAwait(false);
+
+            AlterTableTicket resolvedTicket = new(ticket.DatabaseName, ticket.TableName, AlterTableOperation.AddColumn, resolved);
+
+            return context.IsClusterMode
+                ? await ExecuteClusterAddColumnAsync(database, table, resolvedTicket).ConfigureAwait(false)
+                : await AddColumnStandaloneAsync(database, table, resolvedTicket).ConfigureAwait(false);
+        }
+        catch
+        {
+            if (createdSequences.Count > 0
+                && !AnyColumnDrawsFrom(database, ticket.TableName, resolved?.DefaultSequenceId))
+                await DropSequencesAfterFailedCreateAsync(database, createdSequences).ConfigureAwait(false);
+
+            throw;
+        }
+    }
+
+    /// <summary>
+    /// The standalone ADD COLUMN, in one DDL transaction. When it fails after the schema change, the
+    /// column is removed again.
+    /// </summary>
+    /// <remarks>
+    /// The schema change commits through the schema log, not through the DDL transaction, so a rollback
+    /// of the transaction undoes the filled rows but not the column. Without the removal, a failed fill
+    /// would leave a column whose existing rows hold NULL, NOT NULL or not. Only a column this statement
+    /// added is removed: the column id is read under the schema gate before the change, so a column of
+    /// the same name that existed before, or that another statement added, is never touched.
+    /// </remarks>
+    private async Task<bool> AddColumnStandaloneAsync(DatabaseDescriptor database, TableDescriptor table, AlterTableTicket ticket)
+    {
+        string columnName = ticket.Column.Name;
+        bool gateHeld = false;
+        string? columnIdBefore = null;
+
+        return await ExecuteDdlInTransaction(database,
+            tx =>
+            {
+                gateHeld = true;
+                columnIdBefore = FindColumn(table.Schema, columnName)?.Id;
+                return tableColumnAlterer.Alter(queryExecutor, database, table, ticket, tx);
+            },
+            onAbort: () => gateHeld
+                ? RemoveColumnAddedByFailedStatementAsync(database, table, columnName, columnIdBefore)
+                : Task.CompletedTask,
+            postCommitInvalidate: () => database.Cache?.InvalidateByTableId(database.Id, table.Id)
+        ).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Removes the column <paramref name="columnName"/> when the failed statement added it, that is when
+    /// its id differs from <paramref name="columnIdBefore"/>. Runs under the schema gate, after the DDL
+    /// transaction rolled back. A failure is logged by the caller, and the column then stays.
+    /// </summary>
+    private async Task RemoveColumnAddedByFailedStatementAsync(
+        DatabaseDescriptor database, TableDescriptor table, string columnName, string? columnIdBefore)
+    {
+        TableColumnSchema? added = FindColumn(table.Schema, columnName);
+        if (added is null || string.Equals(added.Id, columnIdBefore, StringComparison.Ordinal))
+            return;
+
+        // The transaction gives the schema delta its timestamp; it writes no key.
+        KvTransaction tx = await database.Transactions.BeginAsync(
+            CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite
+        ).ConfigureAwait(false);
+        try
+        {
+            AlterColumnTicket drop = new(
+                databaseName: database.Name,
+                tableName: table.Name,
+                column: new ColumnInfo(added.Name, added.Type),
+                operation: AlterTableOperation.DropColumn
+            );
+
+            await catalogs.AlterTable(database, drop, tx).ConfigureAwait(false);
+        }
+        finally
+        {
+            await database.Transactions.RollbackIfNotCompletedAsync(tx).ConfigureAwait(false);
+        }
+
+        database.Cache?.InvalidateByTableId(database.Id, table.Id);
+    }
+
+    private static TableColumnSchema? FindColumn(TableSchema schema, string columnName) =>
+        schema.Columns?.Find(c => string.Equals(c.Name, columnName, StringComparison.OrdinalIgnoreCase));
+
+    /// <summary>True when a column of <paramref name="tableName"/> draws its default from the sequence.</summary>
+    private static bool AnyColumnDrawsFrom(DatabaseDescriptor database, string tableName, string? sequenceId) =>
+        sequenceId is not null
+        && database.Schema.Tables.TryGetValue(tableName, out TableSchema? schema)
+        && schema.Columns?.Exists(c => string.Equals(c.DefaultSequenceId, sequenceId, StringComparison.Ordinal)) == true;
+
+    /// <summary>
+    /// True when the table holds at least one row. Reads without a lock, so the answer can be stale by
+    /// the time the caller acts on it; a caller uses it only to refuse early.
+    /// </summary>
+    private static async Task<bool> TableHasAnyRowAsync(DatabaseDescriptor database, TableDescriptor table)
+    {
+        KvTransaction tx = await database.Transactions.BeginAsync(
+            CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadOnly
+        ).ConfigureAwait(false);
+        try
+        {
+            await foreach ((ObjectIdValue _, ReadOnlyMemory<byte> _) in table.Store.ScanRows(tx, afterRowId: null).ConfigureAwait(false))
+                return true;
+
+            return false;
+        }
+        finally
+        {
+            await database.Transactions.RollbackIfNotCompletedAsync(tx).ConfigureAwait(false);
+        }
     }
 
     /// <summary>
@@ -763,20 +948,15 @@ internal sealed partial class SchemaDdlService
     {
         TableDescriptor table = await context.TableOpener.Open(database, tableName).ConfigureAwait(false);
 
-        AlterColumnTicket alterTicket = new(
-            databaseName: database.Name,
-            tableName: tableName,
-            column: column,
-            operation: AlterTableOperation.AddColumn
-        );
-
         KvTransaction tx = await database.Transactions.BeginAsync(
             CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite,
             mutationLimitOverride: 0
         ).ConfigureAwait(false);
         try
         {
-            await tableColumnAlterer.BackfillColumnDefaultsAsync(queryExecutor, database, table, alterTicket, tx).ConfigureAwait(false);
+            // By name only: the definition comes from the live schema, which a resumed job's
+            // reconstructed ColumnInfo may describe less completely.
+            await tableColumnAlterer.FillAddedColumnAsync(database, table, column.Name, tx).ConfigureAwait(false);
             await database.Transactions.CommitAsync(tx).ConfigureAwait(false);
         }
         catch

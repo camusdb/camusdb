@@ -377,14 +377,9 @@ internal sealed class DdlStatementDispatcher
 
                     TableDescriptor table = await context.TableOpener.Open(database, alterTableTicket.TableName).ConfigureAwait(false);
 
-                    if (context.IsClusterMode && alterTableTicket.Operation == AlterTableOperation.AddColumn)
-                    {
-                        bool ok = await schemaDdl.ExecuteClusterAddColumnAsync(database, table, alterTableTicket).ConfigureAwait(false);
-                        return new ExecuteDDLSQLResult(database, ok);
-                    }
-
-                    // Shared with the ticket API's AlterTable so a dropped identity column takes
-                    // its sequence with it on both paths.
+                    // Shared with the ticket API's AlterTable, in both modes: a dropped identity column
+                    // takes its sequence with it, and an added column gets its sequence and its
+                    // existing rows filled, on both paths.
                     bool alteredColumn = await schemaDdl
                         .AlterColumnWithSequencesAsync(database, table, alterTableTicket).ConfigureAwait(false);
 

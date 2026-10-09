@@ -297,6 +297,7 @@ public sealed class HttpSchemaDdlForwarder : ISchemaDdlForwarder, ISchemaAckSend
         DefaultSequenceId = col.DefaultSequenceId,
         IdentityAlways = col.IdentityAlways,
         Identity = col.Identity,
+        DefaultSequenceName = col.DefaultSequenceName,
         NotNullConstraintName = col.NotNullConstraintName,
         Comment = col.Comment,
         Storage = col.Storage,

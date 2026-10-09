@@ -25,52 +25,7 @@ internal sealed class SQLExecutorAlterTableCreator : SQLExecutorBaseCreator
             throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Missing column name");
 
         if (ast.nodeType == NodeType.AlterTableAddColumn)
-        {
-            ColumnValue? defaultValue = null;
-            string? defaultFunction = null;
-            string? comment = null;
-            bool notNull = false;
-            List<(ColumnConstraintType type, ColumnValue? value)>? declaredConstraints = null;
-
-            if (ast.extendedTwo is not null)
-            {
-                List<(ColumnConstraintType type, ColumnValue? value)> constraintTypes = new();
-                declaredConstraints = constraintTypes;
-                GetColumnConstraintList(ast.extendedTwo, constraintTypes);
-
-                // Adding a column and a constraint over it are two schema changes with different
-                // rollouts, so they are two statements here.
-                if (constraintTypes.Any(x => x.type == ColumnConstraintType.ForeignKey))
-                    throw new CamusDBException(
-                        CamusDBErrorCodes.FeatureNotSupported,
-                        $"ALTER TABLE ... ADD COLUMN cannot declare a foreign key on '{ast.rightAst!.yytext}'. " +
-                        "Add the column first, then use ALTER TABLE ... ADD FOREIGN KEY.");
-
-                defaultValue = GetDefaultFromConstraints(constraintTypes);
-                defaultFunction = GetDefaultFunctionFromConstraints(constraintTypes);
-                comment = GetCommentFromConstraints(constraintTypes);
-                notNull = constraintTypes.Any(x => x.type == ColumnConstraintType.NotNull);
-            }
-
-            (ColumnType colType, int? maxLen, ColumnType? elemType) = GetColumnMeta(ast.extendedOne!);
-
-            if (defaultValue is not null)
-                defaultValue = CastScalarFunctions.CoerceToColumnType(defaultValue, colType);
-
-            if (defaultFunction is not null)
-                ValidateDefaultFunctionType(defaultFunction, colType, ast.rightAst!.yytext!);
-
-            ColumnStorageStrategy? storage = declaredConstraints is null
-                ? null
-                : GetStorageFromConstraints(declaredConstraints, colType, ast.rightAst!.yytext!);
-
-            return new(
-                ticket.DatabaseName,
-                tableName,
-                AlterTableOperation.AddColumn,
-                new ColumnInfo(ast.rightAst!.yytext!, colType, notNull, defaultValue, maxLen, elemType, defaultFunction: defaultFunction, comment: comment, storage: storage)
-            );
-        }
+            return CreateAddColumnTicket(ticket, tableName, ast);
 
         if (ast.nodeType == NodeType.AlterTableRenameColumn)
         {
@@ -92,6 +47,107 @@ internal sealed class SQLExecutorAlterTableCreator : SQLExecutorBaseCreator
             AlterTableOperation.DropColumn,
             new ColumnInfo(ast.rightAst!.yytext!, ColumnType.Null)
         );
+    }
+
+    /// <summary>
+    /// Builds the ticket for <c>ALTER TABLE … ADD COLUMN</c>. Every column constraint that
+    /// <c>CREATE TABLE</c> accepts is either carried onto the new <see cref="ColumnInfo"/> or refused
+    /// here. None is dropped without an error.
+    /// </summary>
+    /// <remarks>
+    /// <para><b>Carried:</b> a constant default, a function default, <c>DEFAULT nextval('…')</c>,
+    /// <c>GENERATED … AS IDENTITY</c>, <c>NOT NULL</c> (with its constraint name),
+    /// <c>COMMENT</c> and <c>STORAGE</c>. The DDL path fills each existing row from the column's
+    /// default, as <c>CREATE TABLE</c> fills each inserted row.</para>
+    ///
+    /// <para><b>Refused:</b> <c>PRIMARY KEY</c>, <c>UNIQUE</c>, <c>CHECK</c> and <c>REFERENCES</c>.
+    /// Each one is a second schema change with its own rollout over the existing rows: an index build,
+    /// or a validation pass. The statement that adds the column cannot also publish that change
+    /// atomically, so the user runs it as its own statement, and the error names that statement.</para>
+    /// </remarks>
+    private static AlterTableTicket CreateAddColumnTicket(ExecuteSQLTicket ticket, string tableName, NodeAst ast)
+    {
+        string columnName = ast.rightAst!.yytext!;
+        (ColumnType colType, int? maxLen, ColumnType? elemType) = GetColumnMeta(ast.extendedOne!);
+
+        if (ast.extendedTwo is null)
+            return new(
+                ticket.DatabaseName,
+                tableName,
+                AlterTableOperation.AddColumn,
+                new ColumnInfo(columnName, colType, maxLength: maxLen, arrayElementType: elemType));
+
+        List<(ColumnConstraintType type, ColumnValue? value)> constraintTypes = new();
+        GetColumnConstraintList(ast.extendedTwo, constraintTypes);
+
+        RefuseConstraintsAddColumnCannotApply(constraintTypes, tableName, columnName);
+
+        ColumnValue? defaultValue = GetDefaultFromConstraints(constraintTypes);
+        if (defaultValue is not null)
+            defaultValue = CastScalarFunctions.CoerceToColumnType(defaultValue, colType);
+
+        string? defaultFunction = GetDefaultFunctionFromConstraints(constraintTypes);
+        if (defaultFunction is not null)
+            ValidateDefaultFunctionType(defaultFunction, colType, columnName);
+
+        ColumnIdentityKind? identity = GetIdentityFromConstraints(constraintTypes);
+        string? defaultSequenceName = GetDefaultSequenceNameFromConstraints(constraintTypes);
+
+        if (identity is not null || defaultSequenceName is not null)
+            RequireIdentityColumnIsInteger(colType, columnName);
+
+        return new(
+            ticket.DatabaseName,
+            tableName,
+            AlterTableOperation.AddColumn,
+            new ColumnInfo(
+                name: columnName,
+                type: colType,
+                // An identity column is NOT NULL, as it is in CREATE TABLE: its counter never
+                // produces a NULL.
+                notNull: identity is not null || constraintTypes.Any(x => x.type == ColumnConstraintType.NotNull),
+                defaultValue: defaultValue,
+                maxLength: maxLen,
+                arrayElementType: elemType,
+                defaultFunction: defaultFunction,
+                notNullConstraintName: GetNotNullConstraintNameFromConstraints(constraintTypes),
+                comment: GetCommentFromConstraints(constraintTypes),
+                storage: GetStorageFromConstraints(constraintTypes, colType, columnName),
+                identityAlways: identity == ColumnIdentityKind.Always,
+                identity: identity,
+                defaultSequenceName: defaultSequenceName));
+    }
+
+    /// <summary>
+    /// Refuses a column constraint that needs its own rollout over the existing rows, with
+    /// <see cref="CamusDBErrorCodes.FeatureNotSupported"/> and the statement to run instead.
+    /// </summary>
+    private static void RefuseConstraintsAddColumnCannotApply(
+        List<(ColumnConstraintType type, ColumnValue? value)> constraintTypes, string tableName, string columnName)
+    {
+        foreach ((ColumnConstraintType type, _) in constraintTypes)
+        {
+            string? instead = type switch
+            {
+                ColumnConstraintType.PrimaryKey =>
+                    $"declare it as PRIMARY KEY. Add the column first, then change the key with ALTER TABLE {tableName} " +
+                    $"DROP PRIMARY KEY and ALTER TABLE {tableName} ADD PRIMARY KEY ({columnName})",
+                ColumnConstraintType.Unique =>
+                    $"declare it UNIQUE. Add the column first, then use CREATE UNIQUE INDEX <name> ON {tableName} ({columnName})",
+                ColumnConstraintType.Check =>
+                    $"declare a CHECK constraint on it. Add the column first, then use ALTER TABLE {tableName} " +
+                    "ADD CONSTRAINT <name> CHECK (...)",
+                ColumnConstraintType.ForeignKey =>
+                    $"declare a foreign key on it. Add the column first, then use ALTER TABLE {tableName} " +
+                    $"ADD FOREIGN KEY ({columnName}) REFERENCES ...",
+                _ => null
+            };
+
+            if (instead is not null)
+                throw new CamusDBException(
+                    CamusDBErrorCodes.FeatureNotSupported,
+                    $"ALTER TABLE ... ADD COLUMN '{columnName}' cannot {instead}.");
+        }
     }
 
     // Returns (ColumnType, MaxLength, ArrayElementType) from a field_type AST node.

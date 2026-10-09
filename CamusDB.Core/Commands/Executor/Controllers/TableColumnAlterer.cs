@@ -23,11 +23,11 @@ internal sealed class TableColumnAlterer
 
     private readonly TableColumnDropper tableColumnDropper;
 
-    public TableColumnAlterer(CatalogsManager catalogsManager, ILogger<ICamusDB> logger)
+    public TableColumnAlterer(CatalogsManager catalogsManager, ILogger<ICamusDB> logger, Functions.SequenceStatementBinder sequenceBinder)
     {
         catalogs = catalogsManager;
 
-        tableColumnAdder = new(logger);
+        tableColumnAdder = new(logger, sequenceBinder);
         tableColumnDropper = new(logger);
     }
 
@@ -37,7 +37,7 @@ internal sealed class TableColumnAlterer
 
         return ticket.Operation switch
         {
-            AlterTableOperation.AddColumn => await AddColumn(queryExecutor, database, table, ticket, tx).ConfigureAwait(false),
+            AlterTableOperation.AddColumn => await AddColumn(database, table, ticket, tx).ConfigureAwait(false),
             AlterTableOperation.DropColumn => await DropColumn(queryExecutor, database, table, ticket, tx).ConfigureAwait(false),
             AlterTableOperation.RenameColumn => await RenameColumn(database, table, ticket, tx).ConfigureAwait(false),
             _ => throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Invalid alter table operation"),
@@ -73,7 +73,7 @@ internal sealed class TableColumnAlterer
             $"column of table '{table.Name}'; run ALTER TABLE {table.Name} RESET (ttl) first");
     }
 
-    private async Task<bool> AddColumn(QueryExecutor queryExecutor, DatabaseDescriptor database, TableDescriptor table, AlterTableTicket ticket, KvTransaction tx)
+    private async Task<bool> AddColumn(DatabaseDescriptor database, TableDescriptor table, AlterTableTicket ticket, KvTransaction tx)
     {
         AlterColumnTicket alterColumnTicket = new(
             databaseName: database.Name,
@@ -82,18 +82,21 @@ internal sealed class TableColumnAlterer
             operation: ticket.Operation
         );
 
-        await tableColumnAdder.AddColumn(catalogs, tx, queryExecutor, database, table, alterColumnTicket).ConfigureAwait(false);
+        await tableColumnAdder.AddColumn(catalogs, tx, database, table, alterColumnTicket).ConfigureAwait(false);
 
         return true;
     }
 
-    internal Task<int> BackfillColumnDefaultsAsync(
-        QueryExecutor queryExecutor,
+    /// <summary>
+    /// Fills a column the cluster path added, at its <c>WriteOnly</c> step. See
+    /// <see cref="TableColumnAdder.FillAddedColumnAsync"/>.
+    /// </summary>
+    internal Task<int> FillAddedColumnAsync(
         DatabaseDescriptor database,
         TableDescriptor table,
-        AlterColumnTicket ticket,
+        string columnName,
         KvTransaction tx
-    ) => tableColumnAdder.BackfillColumnDefaultsAsync(queryExecutor, database, table, ticket, tx);
+    ) => tableColumnAdder.FillAddedColumnAsync(database, table, columnName, tx);
 
     private async Task<bool> RenameColumn(DatabaseDescriptor database, TableDescriptor table, AlterTableTicket ticket, KvTransaction tx)
     {

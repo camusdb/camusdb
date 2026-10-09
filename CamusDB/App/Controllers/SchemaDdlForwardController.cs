@@ -666,7 +666,7 @@ public sealed class SchemaDdlForwardController : CommandsController
     private static ColumnInfo MapColumn(ColumnInfoRequest r) =>
         new(r.Name, r.Type, r.NotNull, r.Default, r.MaxLength, r.ArrayElementType,
             r.DefaultFunction, r.NotNullConstraintName, r.Comment, r.Storage,
-            r.DefaultSequenceId, r.IdentityAlways, r.Identity);
+            r.DefaultSequenceId, r.IdentityAlways, r.Identity, r.DefaultSequenceName);
 
     private static ColumnInfo[] MapColumns(ColumnInfoRequest[] cols) =>
         cols.Select(MapColumn).ToArray();

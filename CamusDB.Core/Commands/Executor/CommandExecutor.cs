@@ -436,7 +436,6 @@ public sealed class CommandExecutor : IAsyncDisposable
         databaseCreator = new(logger);
         tableOpener = new(catalogs, logger);
         tableCreator = new(catalogs, logger, options);
-        tableColumnAlterer = new(catalogs, logger);
         tableIndexAlterer = new(catalogs, logger);
         tableConstraintAlterer = new(logger);
         rowInserter = new(logger, tableOpener);
@@ -449,6 +448,8 @@ public sealed class CommandExecutor : IAsyncDisposable
         // every component that captures them.
         sequenceAllocator = new Storage.Kv.SequenceAllocator(options);
         sequenceBinder = new Controllers.Functions.SequenceStatementBinder(sequenceAllocator);
+        // Built after the binder: an added column's sequence default draws one value per existing row.
+        tableColumnAlterer = new(catalogs, logger, sequenceBinder);
         sqlExecutor = new(sequenceBinder);
         schemaQuerier = new(catalogs, logger, options, sequenceAllocator);
         // The owner resolver is what turns a recorded owner into enforceable definer's rights. Null
@@ -1100,6 +1101,18 @@ public sealed class CommandExecutor : IAsyncDisposable
     {
         get => schemaDdl.TestInterceptAfterBackfillCheckpoint;
         set => schemaDdl.TestInterceptAfterBackfillCheckpoint = value;
+    }
+
+    /// <summary>
+    /// Test-only seam: runs inside <c>ALTER TABLE ... ADD COLUMN</c> after the empty-table check for a
+    /// NOT NULL column without a value, and before the column is added. Null in production; a test
+    /// clears it after use.
+    /// </summary>
+    [System.ComponentModel.EditorBrowsable(System.ComponentModel.EditorBrowsableState.Never)]
+    internal Func<Task>? TestInterceptAfterAddColumnPrecheck
+    {
+        get => schemaDdl.TestInterceptAfterAddColumnPrecheck;
+        set => schemaDdl.TestInterceptAfterAddColumnPrecheck = value;
     }
 
     /// <summary>

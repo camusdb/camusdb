@@ -43,6 +43,28 @@ public sealed class PersistedCoordinatorJob
 
     public ColumnValue? ColumnDefault { get; set; }
 
+    // The rest of the column definition. A resume that finds the column still Absent re-creates it
+    // from these fields, so each one the statement declared must be here: a field left out comes
+    // back as its default, and the column is then created without, for example, its sequence
+    // default, and its existing rows are filled with NULL. All are absent in records written before
+    // they existed, which read as "not declared".
+
+    public int? ColumnMaxLength { get; set; }
+
+    public ColumnType? ColumnArrayElementType { get; set; }
+
+    public string? ColumnDefaultFunction { get; set; }
+
+    public string? ColumnDefaultSequenceId { get; set; }
+
+    public bool ColumnIdentityAlways { get; set; }
+
+    public string? ColumnNotNullConstraintName { get; set; }
+
+    public string? ColumnComment { get; set; }
+
+    public ColumnStorageStrategy? ColumnStorage { get; set; }
+
     /// <summary>
     /// Identifies whether this job drives a column (default) or an index element.
     /// Absent in legacy persisted entries — deserialized as <see cref="SchemaElementKind.Column"/>.
