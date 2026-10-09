@@ -415,7 +415,7 @@ analyze  index-range-scan   index=year_idx, from>=2022, to<2023   ...           
 
 ## Verbose / distributed-properties mode
 
-`PlanRenderer.Render(plan, includeDistributedProperties: true)` appends distributed-ready
+`PlanRenderer.Render(plan, includeDistributedProperties: true)` appends distribution
 metadata to each node line:
 
 ```
@@ -430,6 +430,16 @@ table-scan(table=robots) order=[year ASC] decomposable=true dist=partitioned(id)
 
 This mode is used by internal tooling and tests; it is not exposed through the SQL `EXPLAIN`
 statement.
+
+When `distributed_query_execution` is enabled, ordinary `EXPLAIN` instead shows a `gather`
+node for an eligible multi-span primary-row scan and a `distribution` row with
+`distributed=yes`. If the scan does not qualify, the row says `distributed=no` and gives the
+reason. A gather can run eligible fragments on peer leaders; its presence alone does not mean
+every span was dispatched remotely. `EXPLAIN (ANALYZE)` adds a `gather-span` row per span to
+show which spans ran remotely, how many rows the peer scanned and shipped, and whether the span
+fell back to local execution. Partial aggregation is disabled under `ANALYZE`, so the reported
+plan is the row-gather path that actually ran. See [query planning](query-planner.md#part-iv--distributed-ready-plan-properties)
+for eligibility and operator limits.
 
 ---
 

@@ -3,7 +3,7 @@
 This document explains how CamusDB turns a SQL `SELECT` string into result rows. It is written to be
 read top to bottom by someone new to the project: **Part I** builds the mental model and vocabulary,
 **Part II** walks the pipeline stage by stage, **Parts III–IV** cover plan inspection and
-distributed-ready metadata, **Part V** is the cost-based optimizer (statistics → cardinality estimation →
+distributed execution, **Part V** is the cost-based optimizer (statistics → cardinality estimation →
 cost model → cost-based access-path and join-order search), and **Part VI** is an honest map of what is
 *not* built yet so you know where to contribute. Parts VII–IX are reference material (file map, extension
 checklist, glossary).
@@ -615,9 +615,11 @@ Design points worth knowing:
 
 # Part IV — Distributed-ready plan properties
 
-Even though execution is single-process today, plan nodes carry optional metadata so a future
-distributed executor (CockroachDB-style "do local work near data, merge at a coordinator") is not
-blocked. On `PhysicalPlanNode`:
+CamusDB gathers eligible key-range scans concurrently by span. A peer leader can execute a
+fragment when the plan has a shippable filter, partial aggregate, or eligible inner hash-join
+probe. These paths are opt-in through `distributed_query_execution` and require a multi-span
+cluster placement; other plan shapes keep their ordinary execution path. Plan nodes carry the
+following properties:
 
 | Property | Meaning | Status today |
 |----------|---------|--------------|
@@ -626,6 +628,10 @@ blocked. On `PhysicalPlanNode`:
 | `Cost` (`PlanCost?`) | Weighted cost estimate for the node | Populated by the `CostEstimator`; `null` if the plan was not costed. Carries a real `NetworkFactor` (see below) |
 | `Distribution` (`DataDistribution?`) | How the node's output rows are spread across the cluster | Set on scan leaves: `Gathered` (single-node/unsharded), `Partitioned(keyColumns)` (range-sharded by these columns), or `Replicated`. `null` on non-leaf nodes |
 | `CanDecomposeToLocalPlusMerge` | Whether the operator splits into per-partition local work + a merge | `true` for scan/filter/project; `AggregateNode` only for `COUNT`/`SUM`/`MIN`/`MAX` (not `AVG`); `false` for sort/limit/distinct/all join operators |
+
+`CanDecomposeToLocalPlusMerge` is plan metadata, not the complete eligibility rule for partial
+aggregates: a supported grouped `AVG` can be decomposed internally into per-span `SUM` and `COUNT`
+and finalized after the merge.
 
 `OutputOrdering` is set by the single-table `QueryPlanner` on index scans and sort nodes, and by
 `JoinQueryPlanner` on `MergeJoinNode` (ascending on the left key columns — a downstream `ORDER BY`
@@ -640,8 +646,15 @@ returns ≤1 row, pulled to the coordinator). With sharding off, everything is `
 schema-derived snapshot — it encodes *which columns* partition the data, not the live Kahuna range map
 (partition count, which node is remote). The network **cost** that consumes it lives in
 `PlanCost.NetworkFactor` (see [Part V — Network & distribution cost](#network--distribution-cost)).
-Distribution and `NetworkFactor` are the only distributed-execution scaffolding wired today; actual
-remote operator execution is future work.
+When a primary-row scan qualifies, the planner wraps it in a `GatherNode`. The gather runs a span
+on its leader through `IQueryFragmentTransport` when a shippable filter or another supported
+fragment shape can run there. Unfiltered spans can still run concurrently using Kahuna's locator
+routing. The peer evaluates the filter and streams survivors; a qualifying aggregate computes
+per-span partials that the coordinator merges. An eligible inner hash join broadcasts a bounded
+build side so peers can probe their local spans. See
+[key-range sharding](key-range-sharding.md#interaction-with-distributed-query-execution) for the
+wire path and `EXPLAIN` for the gather and eligibility reason. General remote execution of
+arbitrary plan subtrees remains outside this fragment model.
 
 ---
 
@@ -801,8 +814,9 @@ other side's row count. Multi-column join keys use `KeyNdv`; single-column keys 
 ## Network & distribution cost
 
 **Files:** `Controllers/Queries/PlacementReader.cs`, `RowWidthEstimator.cs`, `Models/Plans/DataDistribution.cs`.
-Tier-1 network cost is fully computable on today's pull-to-coordinator engine: a scan against a remote
-partition ships its result to the executing node, so the cost is *bytes shipped*.
+The network factor estimates scan-row transfer to the coordinator from placement and estimated row
+width. Actual traffic can be lower when a fragment filters or aggregates rows at the peer, so the
+factor is an approximation for distributed plans rather than a measurement of shipped bytes.
 
 - **`DataDistribution`** (set on scan leaves) records *which columns* partition the data — `Gathered`,
   `Partitioned(keyColumns)`, or `Replicated` (see [Part IV](#part-iv--distributed-ready-plan-properties)).
@@ -888,6 +902,8 @@ declared-first `events` outermost (paying a full `events` scan), while the DP dr
 | `plan_cache_enabled` | `PlanCacheEnabled` | `false` | Per-process LRU plan cache (see below) |
 | `plan_cache_max_entries` | `PlanCacheMaxEntries` | `512` | LRU capacity; 0 = effectively disabled |
 | `key_range_sharding` | `KeyRangeShardingEnabled` | `false` | Enables `Partitioned` distributions + non-zero `NetworkFactor` |
+| `distributed_query_execution` | `DistributedQueryExecutionEnabled` | `false` | Fragments eligible key-range scans across span leaders; can push filters, partial aggregates, and bounded inner-join probes |
+| `broadcast_join_max_build_rows` | `BroadcastJoinMaxBuildRows` | `10000` | Maximum broadcast hash-join build-side rows; 0 disables this path |
 | `initial_partitions` | `ClusterPartitionCount` | `1` standalone, `3` cluster | `N` in the `(N−1)/N` remote-fraction estimate |
 
 The two cost-based switches are **on by default**; the plan cache is off. The flags are additive.
@@ -991,8 +1007,9 @@ Explicitly deferred (by design): `FULL OUTER JOIN`, `NATURAL JOIN`, `USING`, joi
 across an outer join, outer-join simplification (a null-rejecting `WHERE` turning a left join into an
 inner join), window functions, CTEs, quantified predicates beyond
 `IN`/`NOT IN` (`ANY`/`ALL`/`SOME`), `COUNT(DISTINCT …)`, the optimized-plan cache, bushy join plans,
-"interesting orders" in the join DP, and distributed *execution* (the distribution property and network
-cost are modeled; remote operator execution is not).
+"interesting orders" in the join DP, and general remote execution of arbitrary plan subtrees.
+Distributed fragments currently cover eligible span scans, partial aggregates, and bounded
+broadcast probes for inner hash joins; see Part IV for their eligibility.
 
 ---
 

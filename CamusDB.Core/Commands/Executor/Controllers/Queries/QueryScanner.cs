@@ -419,13 +419,15 @@ internal sealed class QueryScanner
     /// <see cref="GatherNode"/>: one fetch-and-decode worker per placement span, each bounded
     /// to its span's row-id range, drained strictly in span order. Because the spans partition
     /// the keyspace contiguously and ascending, the concatenated stream is byte-identical to
-    /// the sequential unbounded scan; the win is that later spans fetch and decode — each from
-    /// its own partition leader — while earlier spans are being consumed.
+    /// the sequential unbounded scan; later spans fetch and decode while earlier spans are
+    /// being consumed. A remote leader can evaluate a shippable residual filter and send only
+    /// survivors; unfiltered or ineligible spans use Kahuna locator routing.
     ///
     /// The phantom-protection range lock covers the whole row keyspace and is acquired once
-    /// here, before any worker starts. Filtering, stats, and dependency bookkeeping stay on
-    /// the consumer thread (they are not thread-safe); workers never use borrowed decode
-    /// (rows cross channels and outlive the scan iteration).
+    /// here, before any worker starts. Local filtering, stats, and dependency bookkeeping stay
+    /// on the consumer thread (they are not thread-safe); a remotely filtered row is marked so
+    /// its filter is not re-evaluated. Workers never use borrowed decode because rows cross
+    /// channels and outlive the scan iteration.
     /// </summary>
     internal async IAsyncEnumerable<QueryResultRow> ScanTableSpansGather(
         QueryPlan plan,

@@ -11,6 +11,8 @@ using System.Threading;
 using System.Threading.Channels;
 using System.Threading.Tasks;
 
+using Grpc.Core;
+
 using NUnit.Framework;
 
 using CamusDB.Core;
@@ -102,8 +104,18 @@ internal sealed class TestGrpcBatchPrincipalRefresh : BaseTest
 
             server = Task.Run(async () =>
             {
-                try { await service.BatchExecute(requests, writer, context); }
-                finally { responses.Writer.TryComplete(); }
+                try
+                {
+                    await service.BatchExecute(requests, writer, context);
+                    responses.Writer.TryComplete();
+                }
+                catch (Exception ex)
+                {
+                    // Faulting the channel is what lets a test read the status the call ended with.
+                    // Completing it plainly reported every stream-level failure as "the stream ended",
+                    // which is the shape that hid an unmapped exception on this path.
+                    responses.Writer.TryComplete(ex);
+                }
             });
         }
 
@@ -241,7 +253,17 @@ internal sealed class TestGrpcBatchPrincipalRefresh : BaseTest
 
         // The stream's own token no longer names a session, so the re-resolve fails and the call ends
         // rather than serving another operation on authority that was revoked.
-        Assert.CatchAsync(async () => await stream.QueryAsync(database, "SELECT id FROM items"),
-            "a stream whose session was ended must stop working");
+        RpcException ended = Assert.CatchAsync<RpcException>(
+            async () => await stream.QueryAsync(database, "SELECT id FROM items"),
+            "a stream whose session was ended must stop working")!;
+
+        // And it must end saying so. This half is the second regression: the refusal used to escape the
+        // RPC boundary unmapped, so the client read Unknown / "Exception was thrown by handler" with no
+        // trailers — a status that names no cause and matches no entry in the retry taxonomy. A token
+        // that expires under a long-lived stream takes exactly this path, and a driver that would have
+        // re-authenticated and replayed on a fresh stream had nothing to branch on, so it surfaced an
+        // unclassifiable fault to the application instead.
+        Assert.AreEqual(StatusCode.Unauthenticated, ended.StatusCode);
+        Assert.AreEqual(CamusDBErrorCodes.AuthenticationFailed, ended.Trailers.GetValue("camus-error-code"));
     }
 }

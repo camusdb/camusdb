@@ -67,6 +67,8 @@ Example: YAML `mode: cluster` with `--mode standalone` starts in standalone mode
 | `lock_escalation_threshold` | — | `50` |
 | `lock_wait_deadline_ms` | — | `500` |
 | `key_range_sharding` | — (`CAMUS_KEY_RANGE_SHARDING` env) | `false` |
+| `distributed_query_execution` | — | `false`; fragments eligible key-range scans across cluster nodes (see [query planning](query-planner.md#part-iv--distributed-ready-plan-properties)) |
+| `broadcast_join_max_build_rows` | — | `10000`; maximum build-side rows for a remote inner-join probe; `0` disables broadcast probes |
 | `stats_flush_interval_ms` | — | `5000` |
 | `sql_parser_cache_ttl_seconds` | — | `300` |
 | `sql_parser_cache_max_entries` | — | `2048` |
