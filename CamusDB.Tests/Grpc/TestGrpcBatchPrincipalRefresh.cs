@@ -196,7 +196,8 @@ internal sealed class TestGrpcBatchPrincipalRefresh : BaseTest
 
         BatchExecuteResponse refused = await stream.QueryAsync(database, "SELECT id FROM items");
         Assert.IsNotNull(refused.Error, "the account holds no grant yet");
-        Assert.AreEqual(CamusDBErrorCodes.InsufficientPrivilege.ToString(), refused.Error.Code);
+        // With no grant at all on the database, the database is reported as non-existent.
+        Assert.AreEqual(CamusDBErrorCodes.DatabaseDoesntExist.ToString(), refused.Error.Code);
 
         await AsRootAsync(rootToken, $"GRANT SELECT ON {database}.* TO app");
 
@@ -227,7 +228,8 @@ internal sealed class TestGrpcBatchPrincipalRefresh : BaseTest
 
         BatchExecuteResponse refused = await stream.QueryAsync(database, "SELECT id FROM items");
         Assert.IsNotNull(refused.Error, "the revoke must reach the open stream's next operation");
-        Assert.AreEqual(CamusDBErrorCodes.InsufficientPrivilege.ToString(), refused.Error.Code);
+        // The revoke took the account's only grant on the database, so the database is now hidden.
+        Assert.AreEqual(CamusDBErrorCodes.DatabaseDoesntExist.ToString(), refused.Error.Code);
     }
 
     /// <summary>

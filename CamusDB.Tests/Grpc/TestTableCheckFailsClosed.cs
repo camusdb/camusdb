@@ -91,6 +91,12 @@ internal sealed class TestTableCheckFailsClosed : BaseTest
         await sqlService.ExecuteDdl(Req(db, "CREATE TABLE items (id int64 PRIMARY KEY NOT NULL, name string NOT NULL)"), Ctx(rootToken));
         await sqlService.ExecuteDdl(Req("", "CREATE USER noob IDENTIFIED BY 'noob-pw'"), Ctx(rootToken));
 
+        // noob holds a grant on another table only. It can see the database, so its refusals on
+        // items come from the per-table check; with no grant at all on the database, the database
+        // itself would be reported as non-existent first.
+        await sqlService.ExecuteDdl(Req(db, "CREATE TABLE lobby (id int64 PRIMARY KEY NOT NULL)"), Ctx(rootToken));
+        await sqlService.ExecuteDdl(Req("", $"GRANT SELECT ON {db}.lobby TO noob"), Ctx(rootToken));
+
         Principal root = await serviceExecutor.ResolvePrincipalAsync(rootToken);
         Principal noob = await serviceExecutor.ResolvePrincipalAsync((await serviceExecutor.LoginAsync("noob", "noob-pw")).Token);
         return (db, rootToken, root, noob);

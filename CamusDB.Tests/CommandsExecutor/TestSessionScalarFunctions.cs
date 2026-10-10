@@ -308,6 +308,9 @@ internal sealed class TestSessionScalarFunctionsWithAuth : BaseTest
     {
         (string db, CommandExecutor ex, Principal root) = await Setup();
         await ServerDdl(ex, "CREATE USER alice IDENTIFIED BY 'alice-pw'", root);
+        // Any grant on the database lets alice run a statement in it. With none, the database is
+        // reported to her as non-existent, even for a statement that reads no table.
+        await ServerDdl(ex, $"GRANT SELECT ON {db}.* TO alice", root);
         Principal alice = await Login(ex, "alice", "alice-pw");
 
         List<QueryResultRow> rootRows = await Query(ex, db, "SELECT current_user(), current_role()", root);

@@ -260,7 +260,8 @@ internal sealed class TestGrpcBatchStreamOutlivesToken : BaseTest
 
         BatchExecuteResponse? refused = await stream.QueryAsync(database, "SELECT id FROM items");
         Assert.IsNotNull(refused?.Error, "the revoke must reach a stream that outlived its token");
-        Assert.AreEqual(CamusDBErrorCodes.InsufficientPrivilege.ToString(), refused!.Error.Code);
+        // The revoke took the account's only grant on the database, so the database is now hidden.
+        Assert.AreEqual(CamusDBErrorCodes.DatabaseDoesntExist.ToString(), refused!.Error.Code);
 
         await AsRootAsync($"GRANT SELECT ON {database}.* TO app");
 

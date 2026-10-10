@@ -275,9 +275,11 @@ internal sealed class TestSqlAuthEnforcement : BaseTest
         await RunDdl(executor, "", $"REVOKE SELECT ON {dbname}.* FROM svc", root);
         Principal svc = await LoginAsync(executor, "svc", "svc-pw");
 
+        // The revoke took the account's only grant on the database, so the database is now hidden
+        // from it: it is reported as non-existent rather than refused, as for any grant-less caller.
         CamusDBException ex = Assert.ThrowsAsync<CamusDBException>(async () =>
             await RunQuery(executor, dbname, "SELECT id FROM items", svc))!;
-        Assert.AreEqual(CamusDBErrorCodes.InsufficientPrivilege, ex.Code);
+        Assert.AreEqual(CamusDBErrorCodes.DatabaseDoesntExist, ex.Code);
     }
 
     [Test]

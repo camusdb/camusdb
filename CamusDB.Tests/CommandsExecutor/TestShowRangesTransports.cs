@@ -313,9 +313,15 @@ internal sealed class TestShowRangesTransports : BaseTest
 
         await Ddl(database, executor, dbname,
             "CREATE TABLE robots (id int64 PRIMARY KEY NOT NULL, year int64 NULL)", root);
+        await Ddl(database, executor, dbname,
+            "CREATE TABLE lobby (id int64 PRIMARY KEY NOT NULL)", root);
         await ServerDdl(executor, "CREATE USER reader IDENTIFIED BY 'reader-pw'", root);
         await ServerDdl(executor, "CREATE USER outsider IDENTIFIED BY 'outsider-pw'", root);
         await ServerDdl(executor, $"GRANT SELECT ON {dbname}.robots TO reader", root);
+        // The outsider holds a grant on another table, so the database is visible to it and the
+        // refusal comes from the per-table check. With no grant at all on the database, the database
+        // itself would be reported as non-existent.
+        await ServerDdl(executor, $"GRANT SELECT ON {dbname}.lobby TO outsider", root);
 
         Principal reader = await executor.ResolvePrincipalAsync((await executor.LoginAsync("reader", "reader-pw")).Token);
         Principal outsider = await executor.ResolvePrincipalAsync((await executor.LoginAsync("outsider", "outsider-pw")).Token);

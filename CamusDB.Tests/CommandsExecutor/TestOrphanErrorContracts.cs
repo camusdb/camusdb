@@ -26,6 +26,10 @@ internal sealed class TestOrphanErrorContracts
         => Assert.AreEqual(404, CamusDBErrorCodes.GetHttpStatus(CamusDBErrorCodes.OrphanNotFound));
 
     [Test]
+    public void DatabaseDoesntExist_MapsTo404()
+        => Assert.AreEqual(404, CamusDBErrorCodes.GetHttpStatus(CamusDBErrorCodes.DatabaseDoesntExist));
+
+    [Test]
     public void AlreadyExists_MapTo409()
     {
         Assert.AreEqual(409, CamusDBErrorCodes.GetHttpStatus(CamusDBErrorCodes.DatabaseAlreadyExists));

@@ -281,10 +281,24 @@ With auth enabled, every statement is checked before it runs:
   `/v1/cluster/snapshot-status` require a superuser, because they name peer endpoints, partitions and
   leaders. `/v1/cluster/leave` and `/v1/cluster/replication-factor` require a superuser, and are
   loopback-only when authentication is off.
-- **Catalog visibility** — `SHOW TABLES`, `SHOW DATABASES`, `SHOW BRANCHES` and `SHOW ANCESTORS` are
-  *filtered*, not rejected: they list only the objects the caller can reach, so a name is never
-  disclosed to someone who holds no grant on it. A caller with no grants gets an empty result rather
-  than an error (erroring would itself confirm that an object exists).
+- **Database visibility** — a database you hold no grant on is reported as `DatabaseDoesntExist`
+  (`CADB0010`, HTTP 404, gRPC `NotFound`), with exactly the message an unregistered name gets. This applies to every statement
+  that runs in that database, `FROM`-less `SELECT` and `SHOW TABLES` included, and to every transport:
+  SQL over HTTP and gRPC, the typed rows API, and the batch stream. Any difference between the two
+  answers would let a caller test whether a database exists. A grant reaches into the database when
+  it is global, on the database, or on any single table inside it. With such a grant, a statement
+  that needs more than it gives is refused with `403 Insufficient privilege` as usual. Statements
+  that ignore the current database (`SHOW DATABASES`, `SHOW GRANTS`, `CREATE USER`, …) are not
+  affected by it.
+- **Database-level reads** — `SHOW DATABASE` (name and comment) and `SHOW ORPHAN TABLES` (the tables
+  dropped from the database) open no table, so they need `SELECT` at database scope: a `db.*` or `*.*`
+  grant, or superuser. A grant on one table makes the database visible but does not satisfy this.
+  `SHOW CREATE MATERIALIZED VIEW` needs `SELECT` on the materialized view, as reading it would.
+- **Catalog visibility** — `SHOW TABLES`, `SHOW DATABASES`, `SHOW BRANCHES`, `SHOW ANCESTORS` and
+  `SHOW ORPHAN DATABASES` are *filtered*, not rejected: they list only the objects the caller can
+  reach, so a name is never disclosed to someone who holds no grant on it. `SHOW DATABASES` and
+  `SHOW ORPHAN DATABASES` give a caller with no grants an empty result rather than an error. A
+  dropped database is listed by `SHOW ORPHAN DATABASES` under the same rule as a live one, by its id.
   - A **table** is listed when the caller holds *any* privilege on it — `INSERT`-only is enough to see
     the name. A `db.*` or `*.*` grant lists every table in scope; superuser lists everything.
   - A **database** is listed when the caller holds a grant reaching into it: global, on the database,
@@ -304,10 +318,8 @@ With auth enabled, every statement is checked before it runs:
 
 - An `UPDATE` / `DELETE` whose subquery reads another table currently requires the **write** privilege
   on that read table rather than `SELECT` — over-restrictive, never over-permissive.
-- `SHOW DATABASE` (the singular, current-database form), `SHOW ORPHAN DATABASES`,
-  `SHOW ORPHAN TABLES`, and a `FROM`-less `SELECT` open no table and are still allowed to any
-  authenticated caller, unfiltered (they expose only names/existence; `SHOW COLUMNS` /
-  `SHOW CREATE TABLE` still require `SELECT` on the specific table).
+- A `FROM`-less `SELECT` reads no table and needs no table grant, but it runs in the current
+  database, so its caller needs some grant in that database (see "Database visibility").
 - Delegated administration (`GRANT OPTION`-style) is not implemented — administration is superuser-only.
 
 ### Reporting the session in SQL
@@ -520,8 +532,12 @@ Expect these, so they do not read as breakage:
   principal to gate its panels on. With authentication on it moves to a session cookie on its own
   routes, so your access path to it changes. See `docs/operator-dashboard.md`.
 - **Catalog listings become filtered.** `SHOW TABLES`, `SHOW DATABASES`, `SHOW BRANCHES` and
-  `SHOW ANCESTORS` list only what the caller can reach. A caller with no grants gets an empty result,
-  not an error — an empty list after the migration means "no grants yet", not "no tables".
+  `SHOW ANCESTORS` list only what the caller can reach. `SHOW DATABASES` gives a caller with no
+  grants an empty result, not an error — an empty list after the migration means "no grants yet",
+  not "no databases".
+- **A database with no grant reads as missing.** Every statement in a database the caller holds no
+  grant on fails with `DatabaseDoesntExist`, the same error an unregistered name gets. After the
+  migration, that error for a database you know exists means "no grant on it yet".
 - **`current_user()` and `is_superuser()` stop returning `NULL`.** They return `NULL` only while
   authentication is off. SQL or a view that tests them for `NULL` changes behavior.
 - **gRPC clients need the same token**, in the `authorization` request metadata, obtained from the

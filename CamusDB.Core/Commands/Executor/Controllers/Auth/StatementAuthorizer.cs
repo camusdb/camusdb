@@ -32,8 +32,9 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Auth;
 /// check would silently see no scope at all.</para>
 ///
 /// <para>Catalog listings are <em>filtered</em> rather than refused: see
-/// <see cref="VisibilityPrincipal"/>. The branch statements additionally report a database the caller
-/// cannot see as non-existent, so the error itself cannot be used to probe for one.</para>
+/// <see cref="VisibilityPrincipal"/>. A database the caller cannot see is reported as non-existent by
+/// every statement that names one, so the error itself cannot be used to probe for one: see
+/// <see cref="DatabaseVisibility"/>.</para>
 /// </summary>
 internal sealed class StatementAuthorizer
 {
@@ -58,6 +59,8 @@ internal sealed class StatementAuthorizer
     /// Rejects an unauthenticated request and checks the parsed statement against the caller's
     /// privileges before any lock or mutation:
     /// <list type="bullet">
+    ///   <item>a statement that runs in its context database is refused with <c>CADB0010</c>, as if the
+    ///     database did not exist, when the caller holds no grant on that database;</item>
     ///   <item>user/grant administration and database lifecycle DDL require the superuser attribute;</item>
     ///   <item>server-level <c>SHOW</c> statements are allowed to any authenticated caller — the
     ///     catalog listings are not rejected but <em>filtered</em>, see <see cref="VisibilityPrincipal"/>;</item>
@@ -79,6 +82,19 @@ internal sealed class StatementAuthorizer
         if (principal is null)
             throw new CamusDBException(CamusDBErrorCodes.AuthenticationFailed, "Authentication required");
 
+        // A statement that runs in its context database first proves the caller may know that
+        // database exists. A caller with no grant on it is told it does not exist, with the error a
+        // name that is not registered gets, so no statement can be used to probe for a database.
+        //
+        // **This runs before every other arm, and that placement is the check.** The arms below
+        // answer CADB0517 for a database-scope refusal, and a CADB0517 confirms that the name is
+        // registered. The database opener applies the same rule, but it runs after this gate, and
+        // some statements here refuse before they reach it. Server-level statements are excluded:
+        // they ignore the context database, so a client's default database must not make them fail.
+        string? contextDatabaseId = null;
+        if (!principal.IsSuperuser && !StatementScope.AllowsEmptyContextDatabase(ast.nodeType))
+            contextDatabaseId = await ResolveVisibleContextDatabaseAsync(ticket, principal).ConfigureAwait(false);
+
         // Drawing from a sequence changes it, and the change is not undone by a rollback. A
         // statement that only reads what this transaction already drew needs no more than a read.
         //
@@ -89,7 +105,7 @@ internal sealed class StatementAuthorizer
         // the per-table chokepoint to see. Checking the statement's calls rather than its shape is
         // what makes one gate cover every carrier.
         if (SequenceCallPrivilege(ast) is { } callPrivilege)
-            await RequireDatabasePrivilegeAsync(ticket, principal, callPrivilege, "sequence").ConfigureAwait(false);
+            await RequireDatabasePrivilegeAsync(ticket, principal, callPrivilege, "sequence", contextDatabaseId).ConfigureAwait(false);
 
         // ALTER USER splits three ways. (Principal.UserName is normalized; normalize the AST target.)
         //
@@ -259,14 +275,8 @@ internal sealed class StatementAuthorizer
             or NodeType.CreateView or NodeType.CreateOrReplaceView
             or NodeType.CreateMaterializedView or NodeType.CreateMaterializedViewIfNotExists)
         {
-            DatabaseRegistry registry = await context.Registry.ConfigureAwait(false);
-            if (registry.TryResolveId(ticket.DatabaseName, out string createDbId)
-                && !principal.HasPrivilege(Privilege.CreateTable, createDbId, tableId: null))
-            {
-                throw new CamusDBException(
-                    CamusDBErrorCodes.InsufficientPrivilege,
-                    $"Missing CreateTable privilege on database '{ticket.DatabaseName}'");
-            }
+            await RequireDatabasePrivilegeAsync(
+                ticket, principal, Privilege.CreateTable, objectKind: null, contextDatabaseId).ConfigureAwait(false);
             return;
         }
 
@@ -275,7 +285,20 @@ internal sealed class StatementAuthorizer
         // never sees one and an unchecked statement would be an unchecked statement.
         if (MapSequenceStatementPrivilege(ast.nodeType) is { } sequencePrivilege)
         {
-            await RequireDatabasePrivilegeAsync(ticket, principal, sequencePrivilege, "sequence").ConfigureAwait(false);
+            await RequireDatabasePrivilegeAsync(ticket, principal, sequencePrivilege, "sequence", contextDatabaseId).ConfigureAwait(false);
+            return;
+        }
+
+        // SHOW DATABASE reads the database's own metadata (its name and comment), and SHOW ORPHAN
+        // TABLES lists the tables dropped from it. Neither opens a table, so the per-table chokepoint
+        // never runs for them: left to it, as both once were, they ran with no check at all. Both
+        // describe the whole database, so they need SELECT at database scope. A table-only grant
+        // makes the database visible, which the gate at the top already allowed, but it does not
+        // satisfy this check, which fails closed.
+        if (ast.nodeType is NodeType.ShowDatabase or NodeType.ShowOrphanTables)
+        {
+            await RequireDatabasePrivilegeAsync(
+                ticket, principal, Privilege.Select, objectKind: null, contextDatabaseId).ConfigureAwait(false);
             return;
         }
 
@@ -332,21 +355,64 @@ internal sealed class StatementAuthorizer
     }
 
     /// <summary>
-    /// Requires <paramref name="privilege"/> on the statement's database, for an object that is not
-    /// a table and so can never be a per-table grant target.
+    /// Requires <paramref name="privilege"/> on the statement's database, for a statement whose target
+    /// is not a table and so can never be a per-table grant target: an object that does not exist
+    /// yet, a sequence, or the database itself.
     /// </summary>
+    /// <param name="objectKind">Named in the refusal message, or null for a statement about the
+    /// database as a whole.</param>
+    /// <param name="knownDatabaseId">The id the visibility gate already resolved, or null to resolve it
+    /// here.</param>
+    /// <remarks>
+    /// The name is resolved through the registry's live-read fallback, never its cache alone. A
+    /// cache-only lookup misses a database another node created moments ago, and a miss here once
+    /// skipped the check: the statement then opened the database through the opener, which does read
+    /// through, and ran unchecked.
+    /// </remarks>
     private async Task RequireDatabasePrivilegeAsync(
-        ExecuteSQLTicket ticket, Principal principal, Privilege privilege, string objectKind)
+        ExecuteSQLTicket ticket, Principal principal, Privilege privilege, string? objectKind, string? knownDatabaseId)
     {
-        DatabaseRegistry registry = await context.Registry.ConfigureAwait(false);
+        if (principal.IsSuperuser)
+            return;
 
-        if (registry.TryResolveId(ticket.DatabaseName, out string databaseId)
-            && !principal.HasPrivilege(privilege, databaseId, tableId: null))
-        {
-            throw new CamusDBException(
-                CamusDBErrorCodes.InsufficientPrivilege,
-                $"Missing {privilege} privilege on database '{ticket.DatabaseName}' for a {objectKind} statement");
-        }
+        string? databaseId = knownDatabaseId
+            ?? await ResolveVisibleContextDatabaseAsync(ticket, principal).ConfigureAwait(false);
+
+        // No context database: the validator refuses the statement with its own error.
+        if (databaseId is null)
+            return;
+
+        if (principal.HasPrivilege(privilege, databaseId, tableId: null))
+            return;
+
+        throw new CamusDBException(
+            CamusDBErrorCodes.InsufficientPrivilege,
+            objectKind is null
+                ? $"Missing {privilege} privilege on database '{ticket.DatabaseName}'"
+                : $"Missing {privilege} privilege on database '{ticket.DatabaseName}' for a {objectKind} statement");
+    }
+
+    /// <summary>
+    /// Resolves the statement's context database and refuses it as non-existent when
+    /// <paramref name="principal"/> may not see it (see <see cref="DatabaseVisibility"/>). Returns the
+    /// database id, or null when the ticket names no database.
+    /// </summary>
+    /// <remarks>
+    /// A name that is not registered is refused here too, with the same error, rather than left to
+    /// the opener. Both answers then come from one place and cannot differ.
+    /// </remarks>
+    private async Task<string?> ResolveVisibleContextDatabaseAsync(ExecuteSQLTicket ticket, Principal principal)
+    {
+        if (string.IsNullOrEmpty(ticket.DatabaseName))
+            return null;
+
+        DatabaseRegistry registry = await context.Registry.ConfigureAwait(false);
+        DatabaseRegistryEntry? entry = await registry.TryResolveEntryAsync(ticket.DatabaseName).ConfigureAwait(false);
+
+        if (entry is null || DatabaseVisibility.IsHiddenFrom(principal, entry.Id))
+            throw DatabaseVisibility.DoesNotExist(ticket.DatabaseName);
+
+        return entry.Id;
     }
 
     /// <summary>

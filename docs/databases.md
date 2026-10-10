@@ -57,7 +57,7 @@ Guarantees:
 
 | Code | Constant | When thrown |
 |------|----------|-------------|
-| `CADB0010` | `DatabaseDoesntExist` | Open / query / DDL on an unregistered name |
+| `CADB0010` | `DatabaseDoesntExist` | Open / query / DDL on an unregistered name, or, with authentication on, on a database the caller holds no grant on. HTTP 404, gRPC `NotFound` |
 | `CADB0012` | `DatabaseAlreadyExists` | `CREATE DATABASE` or `RENAME … TO` when the target name is already registered |
 | `CADB0014` | `SystemSpaceCorrupt` | Database directory or `kv/` sub-directory is missing without a `creating.lock` sentinel |
 | `CADB0018` | `DatabaseNameReserved` | `CREATE DATABASE` or `RENAME … TO` a reserved name (`_system`, `information_schema`) |

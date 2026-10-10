@@ -738,10 +738,16 @@ public static class CamusDBErrorCodes
     /// <para><see cref="InvalidInput"/> is a caller mistake — a malformed request, a bad name, an
     /// unknown option — so it is a 400, as gRPC already reports it as <c>InvalidArgument</c>. A 500
     /// told the caller that the server failed and that a retry could help, and neither was true.</para>
+    ///
+    /// <para><see cref="DatabaseDoesntExist"/> is a 404 for the same reason, as gRPC reports it as
+    /// <c>NotFound</c>. It is also the answer for a database the caller holds no grant on, so the two
+    /// cases must keep one status: a different one would tell the caller that the name is
+    /// registered.</para>
     /// </summary>
     public static int GetHttpStatus(string code) => code switch
     {
         InvalidInput => 400,
+        DatabaseDoesntExist => 404,
         BackupNotConfigured => 503,
         BackupChainInvalid => 422,
         BackupNeedsFullBackup => 409,

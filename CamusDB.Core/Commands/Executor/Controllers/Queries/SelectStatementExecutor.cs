@@ -10,6 +10,7 @@ using System.Runtime.CompilerServices;
 using Kahuna;
 using CamusDB.Core.Cache;
 using CamusDB.Core.Config;
+using CamusDB.Core.CommandsExecutor.Controllers.Auth;
 using CamusDB.Core.CommandsExecutor.Controllers.DML;
 using CamusDB.Core.Catalogs;
 using CamusDB.Core.Catalogs.Models;
@@ -461,7 +462,7 @@ internal sealed class SelectStatementExecutor
             List<OrphanDatabaseRecord> orphans = await reg.Orphans.LoadDatabaseOrphansAsync().ConfigureAwait(false);
             if (schemaOut is not null)
                 schemaOut.Schema = DerivedTableSchemaBuilder.ShowOrphanDatabasesSchema;
-            return (null!, schemaQuerier.ShowOrphanDatabases(orphans));
+            return (null!, schemaQuerier.ShowOrphanDatabases(orphans, statementAuthorizer.VisibilityPrincipal(ticket)));
         }
 
         // SHOW BRANCHES and SHOW ANCESTORS operate on the registry directly.
@@ -476,10 +477,8 @@ internal sealed class SelectStatementExecutor
             // same error as a name that really is unregistered: an "insufficient privilege" here would
             // confirm the database exists, which is exactly what naming an arbitrary database in
             // SHOW BRANCHES / SHOW ANCESTORS would otherwise be used to probe for.
-            if (target is null || (branchPrincipal is not null && !branchPrincipal.CanSeeDatabase(target.Id)))
-                throw new CamusDBException(
-                    CamusDBErrorCodes.DatabaseDoesntExist,
-                    $"Database '{targetName}' does not exist");
+            if (target is null || DatabaseVisibility.IsHiddenFrom(branchPrincipal, target.Id))
+                throw DatabaseVisibility.DoesNotExist(targetName);
             IReadOnlyList<DatabaseRegistryEntry> allEntries = await reg.ScanAllEntriesAsync().ConfigureAwait(false);
             if (ast.nodeType == NodeType.ShowBranches)
             {
@@ -680,8 +679,14 @@ internal sealed class SelectStatementExecutor
 
             case NodeType.ShowCreateMaterializedView:
                 {
+                    string shownMatViewName = ast.leftAst!.yytext!;
                     TableSchema shownMatView = DDL.MaterializedViewRefresher
-                        .RequireMaterializedView(database, ast.leftAst!.yytext!);
+                        .RequireMaterializedView(database, shownMatViewName);
+
+                    // The definition is read from the schema, not from the relation, so the per-table
+                    // chokepoint never runs here. Without this check any caller who could see the
+                    // database could read the body of every materialized view in it.
+                    DDL.MaterializedViewRefresher.RequireTargetPrivilege(database, shownMatViewName, shownMatView);
 
                     if (schemaOut is not null)
                         schemaOut.Schema = DerivedTableSchemaBuilder.ShowCreateMaterializedViewSchema;

@@ -96,9 +96,13 @@ internal sealed class TestTableAccessRequiresPrivilege : BaseTest
     private sealed record Fixture(string Db, string Root, string Noob, string Reader);
 
     /// <summary>
-    /// A database with <c>items</c> (one row holding <see cref="Secret"/>) and <c>other</c>. Three
-    /// accounts: <c>root</c>, <c>noob</c> with no grant of any kind, and <c>reader</c> with SELECT on
-    /// <c>items</c> only.
+    /// A database with <c>items</c> (one row holding <see cref="Secret"/>), <c>other</c> and an empty
+    /// <c>lobby</c>. Three accounts: <c>root</c>, <c>noob</c> with SELECT on <c>lobby</c> only, and
+    /// <c>reader</c> with SELECT on <c>items</c> only.
+    ///
+    /// <para><c>noob</c> holds its one grant so that it can see the database. A caller with no grant
+    /// at all on a database is told the database does not exist, before any table is checked, and the
+    /// refusals here are about the per-table check.</para>
     /// </summary>
     private async Task<Fixture> SetupAsync()
     {
@@ -111,12 +115,14 @@ internal sealed class TestTableAccessRequiresPrivilege : BaseTest
 
         await sqlService.ExecuteDdl(Req(db, "CREATE TABLE items (id oid PRIMARY KEY, secret string NOT NULL)"), Ctx(root));
         await sqlService.ExecuteDdl(Req(db, "CREATE TABLE other (id int64 PRIMARY KEY NOT NULL, secret string NOT NULL)"), Ctx(root));
+        await sqlService.ExecuteDdl(Req(db, "CREATE TABLE lobby (id int64 PRIMARY KEY NOT NULL)"), Ctx(root));
         await sqlService.ExecuteNonQuery(Req(db, $"INSERT INTO items (id, secret) VALUES (str_id('{SecretRowId}'), '{Secret}')"), Ctx(root));
         await sqlService.ExecuteNonQuery(Req(db, $"INSERT INTO other (id, secret) VALUES (1, '{Secret}')"), Ctx(root));
 
         await sqlService.ExecuteDdl(Req("", "CREATE USER noob IDENTIFIED BY 'noob-pw'"), Ctx(root));
         await sqlService.ExecuteDdl(Req("", "CREATE USER reader IDENTIFIED BY 'reader-pw'"), Ctx(root));
         await sqlService.ExecuteDdl(Req("", $"GRANT SELECT ON {db}.items TO reader"), Ctx(root));
+        await sqlService.ExecuteDdl(Req("", $"GRANT SELECT ON {db}.lobby TO noob"), Ctx(root));
 
         string noob = (await serviceExecutor.LoginAsync("noob", "noob-pw")).Token;
         string reader = (await serviceExecutor.LoginAsync("reader", "reader-pw")).Token;
@@ -220,6 +226,10 @@ internal sealed class TestTableAccessRequiresPrivilege : BaseTest
         Assert.That(Dump(written), Does.Not.Contain(Secret));
     }
 
+    /// <summary>
+    /// A FROM-less statement reads no table, so it needs no table grant. Its caller still needs some
+    /// grant in the database to see the database at all, which <c>noob</c> holds on <c>lobby</c>.
+    /// </summary>
     [Test]
     public async Task ExplainFromlessSelect_NeedsNoGrant()
     {
@@ -267,6 +277,37 @@ internal sealed class TestTableAccessRequiresPrivilege : BaseTest
             JsonResult result = await controller.ExecuteSQLQuery();
             Assert.That(result.StatusCode, Is.EqualTo(403), sql);
             Assert.That(JsonSerializer.Serialize(result.Value), Does.Not.Contain(Secret), sql);
+        }
+    }
+
+    /// <summary>
+    /// Over REST, a database the caller holds no grant on and a name that is not registered give the
+    /// same answer: 404 with the same body. A 403 for the first would confirm the database exists.
+    /// </summary>
+    [Test]
+    public async Task RestQuery_NoGrantOnTheDatabase_IsTheSame404AsAMissingDatabase()
+    {
+        Fixture f = await SetupAsync();
+
+        await sqlService.ExecuteDdl(Req("", "CREATE USER stranger IDENTIFIED BY 'stranger-pw'"), Ctx(f.Root));
+        string stranger = (await serviceExecutor.LoginAsync("stranger", "stranger-pw")).Token;
+        string missing = "nosuchdb" + Guid.NewGuid().ToString("n");
+
+        foreach (string db in new[] { f.Db, missing })
+        {
+            ExecuteSQLController controller = new(
+                serviceExecutor, new HttpTransactionCoordinator(serviceExecutor),
+                new PreparedStatementRegistry(Options), logger, Options)
+            {
+                ControllerContext = RestContext(JsonSerializer.Serialize(new { databaseName = db, sql = "SELECT id FROM items" }), stranger),
+            };
+
+            JsonResult result = await controller.ExecuteSQLQuery();
+            CamusDB.App.Models.ExecuteSQLQueryResponse response = (CamusDB.App.Models.ExecuteSQLQueryResponse)result.Value!;
+
+            Assert.That(result.StatusCode, Is.EqualTo(404), db);
+            Assert.That(response.Code, Is.EqualTo(CamusDBErrorCodes.DatabaseDoesntExist), db);
+            Assert.That(response.Message, Is.EqualTo($"Database '{db}' does not exist"), db);
         }
     }
 
@@ -342,6 +383,46 @@ internal sealed class TestTableAccessRequiresPrivilege : BaseTest
         // must not receive it either.
         Assert.That(queryWriter.Written, Is.Empty, "a refused Query must write nothing, not even the schema");
         Assert.That(byIdWriter.Written, Is.Empty, "a refused QueryById must write nothing, not even the schema");
+
+        Assert.That(await ItemsAsRootAsync(f), Is.EqualTo(before), "a refused write must leave the table unchanged");
+    }
+
+    /// <summary>
+    /// A caller with no grant at all on the database is told, by every rows RPC, that the database does
+    /// not exist, with the status and detail a name that is not registered gets. A PermissionDenied
+    /// here would confirm the database exists.
+    /// </summary>
+    [Test]
+    public async Task EveryRowsRpcWithNoGrantOnTheDatabase_ReportsItMissing()
+    {
+        Fixture f = await SetupAsync();
+        string before = await ItemsAsRootAsync(f);
+
+        await sqlService.ExecuteDdl(Req("", "CREATE USER stranger IDENTIFIED BY 'stranger-pw'"), Ctx(f.Root));
+        string stranger = (await serviceExecutor.LoginAsync("stranger", "stranger-pw")).Token;
+        string missing = "nosuchdb" + Guid.NewGuid().ToString("n");
+
+        async Task AssertReportedMissing(Func<string, Task> call, string what)
+        {
+            foreach (string db in new[] { f.Db, missing })
+            {
+                RpcException ex = Assert.ThrowsAsync<RpcException>(async () => await call(db), what)!;
+                Assert.That(ex.StatusCode, Is.EqualTo(StatusCode.NotFound), $"{what} on {db}");
+                Assert.That(ex.Status.Detail, Is.EqualTo($"Database '{db}' does not exist"), $"{what} on {db}");
+            }
+
+            await Task.CompletedTask;
+        }
+
+        await AssertReportedMissing(db => rowsService.Query(
+            new RowQueryRequest { Database = db, Table = "items" }, new CapturingStreamWriter<QueryStreamMessage>(), Ctx(stranger)), "Query");
+        await AssertReportedMissing(db => rowsService.QueryById(
+            ById(db), new CapturingStreamWriter<QueryStreamMessage>(), Ctx(stranger)), "QueryById");
+        await AssertReportedMissing(db => rowsService.InsertRow(InsertReq(db), Ctx(stranger)), "InsertRow");
+        await AssertReportedMissing(db => rowsService.UpdateRows(UpdateRowsReq(db), Ctx(stranger)), "UpdateRows");
+        await AssertReportedMissing(db => rowsService.UpdateById(UpdateByIdReq(db), Ctx(stranger)), "UpdateById");
+        await AssertReportedMissing(db => rowsService.DeleteRows(DeleteRowsReq(db), Ctx(stranger)), "DeleteRows");
+        await AssertReportedMissing(db => rowsService.DeleteById(ById(db), Ctx(stranger)), "DeleteById");
 
         Assert.That(await ItemsAsRootAsync(f), Is.EqualTo(before), "a refused write must leave the table unchanged");
     }

@@ -800,16 +800,30 @@ internal sealed class MaterializedViewRefresher
     /// <summary>
     /// Checks the caller against the materialized view itself for the privilege the statement mapped
     /// to, mirroring what <c>TableOpener.Open</c> would have done had this path opened the relation.
+    /// For every statement that reaches a materialized view without opening it: a refresh, and
+    /// <c>SHOW CREATE MATERIALIZED VIEW</c>.
     /// </summary>
-    private static void RequireTargetPrivilege(DatabaseDescriptor database, string viewName, TableSchema view)
+    /// <remarks>
+    /// Fails closed as the table opener does: a user's request that declares no required privilege
+    /// comes from an entry point that forgot to publish one, and is refused rather than waved through.
+    /// </remarks>
+    internal static void RequireTargetPrivilege(DatabaseDescriptor database, string viewName, TableSchema view)
     {
         if (!database.Options.AuthenticationEnabled)
             return;
 
         AuthorizationScope scope = AuthorizationContext.Current;
 
-        if (scope.Principal is not null && scope.RequiredPrivilege is { } required
-            && !scope.Principal.HasPrivilege(required, database.Id, view.Id))
+        if (scope.Principal is null)
+            return;
+
+        if (scope.RequiredPrivilege is not { } required)
+            throw new CamusDBException(
+                CamusDBErrorCodes.InsufficientPrivilege,
+                $"Access to materialized view '{database.Name}.{viewName}' was refused: the request did not " +
+                "declare which privilege it needs, so it cannot be authorized");
+
+        if (!scope.Principal.HasPrivilege(required, database.Id, view.Id))
         {
             throw new CamusDBException(
                 CamusDBErrorCodes.InsufficientPrivilege,

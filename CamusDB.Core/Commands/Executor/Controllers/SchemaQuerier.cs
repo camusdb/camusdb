@@ -1209,13 +1209,23 @@ internal sealed class SchemaQuerier
     /// from the registry (scanned by the caller, since <see cref="SchemaQuerier"/> has no registry
     /// handle), mirroring <see cref="ShowDatabases"/>. Each row is the orphan's id (to feed
     /// <c>CREATE DATABASE ... RELINK TO</c>), its former name, drop time, and reclamation deadline.
+    /// A non-null <paramref name="principal"/> sees only the orphans of databases it holds a grant on.
     /// </summary>
-    internal async IAsyncEnumerable<QueryResultRow> ShowOrphanDatabases(IReadOnlyList<OrphanDatabaseRecord> orphans)
+    internal async IAsyncEnumerable<QueryResultRow> ShowOrphanDatabases(
+        IReadOnlyList<OrphanDatabaseRecord> orphans, Principal? principal)
     {
         await Task.CompletedTask;
 
         foreach (OrphanDatabaseRecord orphan in orphans)
+        {
+            // Filtered by the same test SHOW DATABASES uses, applied to the dropped database's id. A
+            // dropped database's name is as much a disclosure as a live one's, and an unfiltered list
+            // would name every database ever dropped to any authenticated caller.
+            if (principal is not null && !principal.CanSeeDatabase(orphan.Id))
+                continue;
+
             yield return OrphanRow(orphan.Id, kind: "", orphan.FormerName, orphan.DroppedAt);
+        }
     }
 
     /// <summary>

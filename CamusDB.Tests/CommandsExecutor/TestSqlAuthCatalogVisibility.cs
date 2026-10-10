@@ -132,8 +132,12 @@ internal sealed class TestSqlAuthCatalogVisibility : BaseTest
         await ServerDdl(ex, "CREATE USER u IDENTIFIED BY 'pw'", root);
         Principal u = await Login(ex, "u", "pw");
 
-        // A grant-less user must not learn that t1/t2/t3 exist — and must not get an error either.
-        Assert.IsEmpty(await ShowTables(ex, db, u));
+        // A grant-less user must not learn that t1/t2/t3 exist, nor that the database does. An empty
+        // listing would confirm the database (a missing one is an error), so the database is reported
+        // as non-existent, with the exact error a name that is not registered gets.
+        CamusDBException refused = Assert.ThrowsAsync<CamusDBException>(async () => await ShowTables(ex, db, u))!;
+        Assert.AreEqual(CamusDBErrorCodes.DatabaseDoesntExist, refused.Code);
+        Assert.AreEqual($"Database '{db}' does not exist", refused.Message);
     }
 
     [Test]
@@ -173,15 +177,17 @@ internal sealed class TestSqlAuthCatalogVisibility : BaseTest
         (string db, CommandExecutor ex, Principal root) = await Setup();
         await ServerDdl(ex, "CREATE USER u IDENTIFIED BY 'pw'", root);
         await ServerDdl(ex, $"GRANT SELECT ON {db}.t1 TO u", root);
+        // A second grant keeps the database visible after the revoke, so the listing still runs.
+        await ServerDdl(ex, $"GRANT SELECT ON {db}.t2 TO u", root);
         Principal u = await Login(ex, "u", "pw");
-        CollectionAssert.AreEquivalent(new[] { "t1" }, await ShowTables(ex, db, u));
+        CollectionAssert.AreEquivalent(new[] { "t1", "t2" }, await ShowTables(ex, db, u));
 
         await ServerDdl(ex, $"REVOKE SELECT ON {db}.t1 FROM u", root);
 
         // The principal is an immutable per-request snapshot, so a re-login is what picks the
         // revocation up — the same thing a new session would do.
         Principal after = await Login(ex, "u", "pw");
-        Assert.IsEmpty(await ShowTables(ex, db, after));
+        CollectionAssert.AreEquivalent(new[] { "t2" }, await ShowTables(ex, db, after));
     }
 
     [Test]

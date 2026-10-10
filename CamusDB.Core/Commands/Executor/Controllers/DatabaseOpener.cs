@@ -14,6 +14,7 @@ using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.Storage.Kv;
 using CamusDB.Core.Transactions;
 using CamusDB.Core.CommandsExecutor.Models;
+using CamusDB.Core.CommandsExecutor.Controllers.Auth;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using Microsoft.Extensions.Logging;
@@ -130,8 +131,16 @@ internal sealed class DatabaseOpener
         // providing both cross-node visibility and freedom from a TryResolveId→Get TOCTOU
         // window where a concurrent drop could evict the entry between the two lookups.
         DatabaseRegistryEntry? entry = await registry.TryResolveEntryAsync(name).ConfigureAwait(false);
-        if (entry is null)
-            throw new CamusDBException(CamusDBErrorCodes.DatabaseDoesntExist, $"Database '{name}' does not exist");
+
+        // A caller with no grant on the database is told it does not exist, with the same error a
+        // name that is not registered gets. This is the database-level chokepoint, as
+        // TableOpener.Open is the table-level one: every entry point that names a database opens it
+        // here — SQL, the row and DDL ticket APIs, a transaction begin under a REST request's scope —
+        // so a check placed only on some statements would leave the rest as an existence oracle.
+        // It runs before the descriptor is loaded, so a hidden database is never loaded for a caller
+        // who may not use it.
+        if (entry is null || IsHiddenFromCaller(entry.Id))
+            throw DatabaseVisibility.DoesNotExist(name);
 
         string id = entry.Id;
 
@@ -145,9 +154,7 @@ internal sealed class DatabaseOpener
         if (descriptor.IsDropped)
         {
             databaseDescriptors.Descriptors.TryRemove(id, out _);
-            throw new CamusDBException(
-                CamusDBErrorCodes.DatabaseDoesntExist,
-                $"Database '{name}' does not exist");
+            throw DatabaseVisibility.DoesNotExist(name);
         }
 
         // Stamp before handing the descriptor out, not after the caller takes a use-reference. This
@@ -157,6 +164,27 @@ internal sealed class DatabaseOpener
         descriptor.Touch();
 
         return descriptor;
+    }
+
+    /// <summary>
+    /// True when the request this open runs for may not know that <paramref name="databaseId"/>
+    /// exists. Reads the ambient <see cref="AuthorizationContext"/>, which carries the caller's
+    /// principal; a scope with no principal is engine work and sees every database.
+    /// </summary>
+    /// <remarks>
+    /// Only a caller who holds no grant at all on the database is refused here. Any grant that would
+    /// let the caller open a table inside it also makes it visible, so a request that passes the
+    /// per-table check never fails this one. A scope that suspends the table check is not checked
+    /// either: a suspension is only set inside a statement whose authority was already checked, and
+    /// it opens objects of the database that statement runs in.
+    /// </remarks>
+    private bool IsHiddenFromCaller(string databaseId)
+    {
+        if (!options.AuthenticationEnabled)
+            return false;
+
+        AuthorizationScope scope = AuthorizationContext.Current;
+        return !scope.TableCheckSuspended && DatabaseVisibility.IsHiddenFrom(scope.Principal, databaseId);
     }
 
     private async Task<DatabaseDescriptor> LoadDatabase(DatabaseRegistry registry, DatabaseRegistryEntry entry, string name)
