@@ -1337,6 +1337,95 @@ internal sealed class SchemaQuerier
     }
 
     /// <summary>
+    /// Renders the rows of <c>SHOW [CLUSTER] QUERIES</c>, optionally narrowed by a LIKE
+    /// <paramref name="pattern"/> on the statement text. The rows arrive already filtered to what the
+    /// caller may see and already redacted; see <see cref="QueryActivityService"/>.
+    ///
+    /// <para>An error row — a peer that did not answer — always passes the pattern, because hiding
+    /// it would make a partial answer look complete.</para>
+    /// </summary>
+    internal async IAsyncEnumerable<QueryResultRow> ShowQueries(IReadOnlyList<QueryActivityRow> rows, string? pattern)
+    {
+        await Task.CompletedTask;
+
+        foreach (QueryActivityRow row in rows)
+        {
+            if (row.Error is not null)
+            {
+                yield return new QueryResultRow(default, new Dictionary<string, ColumnValue>(StringComparer.OrdinalIgnoreCase)
+                {
+                    { "query_id", ColumnValue.Null }, { "node", new ColumnValue(ColumnType.String, row.Node) },
+                    { "connection_id", ColumnValue.Null }, { "client_address", ColumnValue.Null },
+                    { "transport", ColumnValue.Null }, { "user_name", ColumnValue.Null },
+                    { "database_name", ColumnValue.Null }, { "transaction_id", ColumnValue.Null },
+                    { "isolation", ColumnValue.Null }, { "kind", ColumnValue.Null }, { "phase", ColumnValue.Null },
+                    { "started_at", ColumnValue.Null }, { "elapsed_ms", ColumnValue.Null },
+                    { "rows_returned", ColumnValue.Null }, { "cancellable", ColumnValue.Null },
+                    { "cancel_requested", ColumnValue.Null }, { "sql", ColumnValue.Null },
+                    { "error", new ColumnValue(ColumnType.String, row.Error) },
+                });
+                continue;
+            }
+
+            if (pattern is not null && !LikeMatch(row.Sql, pattern))
+                continue;
+
+            yield return new QueryResultRow(default, new Dictionary<string, ColumnValue>(StringComparer.OrdinalIgnoreCase)
+            {
+                { "query_id",         new ColumnValue(ColumnType.String, row.QueryId) },
+                { "node",             new ColumnValue(ColumnType.String, row.Node) },
+                { "connection_id",    Text(row.ConnectionId) },
+                { "client_address",   Text(row.ClientAddress) },
+                { "transport",        new ColumnValue(ColumnType.String, row.Transport) },
+                { "user_name",        Text(row.UserName) },
+                { "database_name",    new ColumnValue(ColumnType.String, row.Database) },
+                { "transaction_id",   Text(row.TransactionId) },
+                { "isolation",        Text(row.Isolation) },
+                { "kind",             new ColumnValue(ColumnType.String, row.Kind) },
+                { "phase",            new ColumnValue(ColumnType.String, row.Phase) },
+                { "started_at",       new ColumnValue(ColumnType.String, row.StartedAt.ToString("yyyy-MM-ddTHH:mm:ss.fffZ", CultureInfo.InvariantCulture)) },
+                { "elapsed_ms",       new ColumnValue(ColumnType.Float64, row.ElapsedMs) },
+                { "rows_returned",    new ColumnValue(ColumnType.Integer64, row.RowsReturned) },
+                { "cancellable",      ColumnValue.FromBool(row.Cancellable) },
+                { "cancel_requested", ColumnValue.FromBool(row.CancelRequested) },
+                { "sql",              new ColumnValue(ColumnType.String, row.Sql) },
+                { "error",            ColumnValue.Null },
+            });
+        }
+    }
+
+    /// <summary>
+    /// Renders the rows of <c>SHOW [CLUSTER] CONNECTIONS</c>. The rows arrive already filtered to
+    /// what the caller may see.
+    /// </summary>
+    internal async IAsyncEnumerable<QueryResultRow> ShowConnections(IReadOnlyList<ConnectionActivityRow> rows)
+    {
+        await Task.CompletedTask;
+
+        foreach (ConnectionActivityRow row in rows)
+        {
+            bool error = row.Error is not null;
+
+            yield return new QueryResultRow(default, new Dictionary<string, ColumnValue>(StringComparer.OrdinalIgnoreCase)
+            {
+                { "connection_id",  error ? ColumnValue.Null : new ColumnValue(ColumnType.String, row.ConnectionId) },
+                { "node",           new ColumnValue(ColumnType.String, row.Node) },
+                { "client_address", Text(row.ClientAddress) },
+                { "protocol",       Text(row.Protocol) },
+                { "kind",           error ? ColumnValue.Null : new ColumnValue(ColumnType.String, row.Kind) },
+                { "user_name",      Text(row.UserName) },
+                { "opened_at",      error ? ColumnValue.Null : new ColumnValue(ColumnType.String, row.OpenedAt.ToString("yyyy-MM-ddTHH:mm:ss.fffZ", CultureInfo.InvariantCulture)) },
+                { "age_ms",         error ? ColumnValue.Null : new ColumnValue(ColumnType.Float64, row.AgeMs) },
+                { "idle_ms",        error ? ColumnValue.Null : new ColumnValue(ColumnType.Float64, row.IdleMs) },
+                { "requests",       error ? ColumnValue.Null : new ColumnValue(ColumnType.Integer64, row.Requests) },
+                { "active_queries", error ? ColumnValue.Null : new ColumnValue(ColumnType.Integer64, (long)row.ActiveQueries) },
+                { "open_streams",   error ? ColumnValue.Null : new ColumnValue(ColumnType.Integer64, (long)row.OpenStreams) },
+                { "error",          Text(row.Error) },
+            });
+        }
+    }
+
+    /// <summary>
     /// Reports the configuration this engine is running, optionally narrowed by a LIKE
     /// <paramref name="pattern"/> on the variable name.
     ///

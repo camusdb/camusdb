@@ -89,13 +89,21 @@ internal sealed class ServerLevelStatementDispatcher
     /// </summary>
     private readonly ClusterSettingsService? clusterSettings;
 
+    /// <summary>Cancels a running statement on this node or on the peer that owns it.</summary>
+    private readonly Diagnostics.QueryActivityService queryActivity;
+
+    /// <summary>Resolves whose statements the caller of a <c>CANCEL QUERY</c> may stop.</summary>
+    private readonly StatementAuthorizer statementAuthorizer;
+
     internal ServerLevelStatementDispatcher(
         ExecutorContext context,
         SqlExecutor sqlExecutor,
         DatabaseLifecycleService databaseLifecycle,
         SchemaDdlService schemaDdl,
         UserAdminService userAdmin,
-        ClusterSettingsService? clusterSettings
+        ClusterSettingsService? clusterSettings,
+        Diagnostics.QueryActivityService queryActivity,
+        StatementAuthorizer statementAuthorizer
     )
     {
         ArgumentNullException.ThrowIfNull(databaseLifecycle);
@@ -108,6 +116,8 @@ internal sealed class ServerLevelStatementDispatcher
         this.schemaDdl = schemaDdl;
         this.userAdmin = userAdmin;
         this.clusterSettings = clusterSettings;
+        this.queryActivity = queryActivity;
+        this.statementAuthorizer = statementAuthorizer;
     }
 
     /// <summary>
@@ -227,6 +237,15 @@ internal sealed class ServerLevelStatementDispatcher
 
             case NodeType.FlushSessions:
                 await userAdmin.FlushSessionsAsync().ConfigureAwait(false);
+                return ServerLevelOutcome.Succeeded();
+
+            // The cancel acts on this node's running-statement list, or on a peer's; it names no
+            // database. Ownership is checked where the statement is found, on the node that owns it,
+            // so a user can stop only their own statements unless they are a superuser.
+            case NodeType.CancelQuery:
+                await queryActivity
+                    .CancelAsync(SqlStringLiteral.Decode(ast.leftAst!.yytext!), statementAuthorizer.ActivityViewerFor(ticket))
+                    .ConfigureAwait(false);
                 return ServerLevelOutcome.Succeeded();
 
             // The change validates against the resulting configuration, replicates through the

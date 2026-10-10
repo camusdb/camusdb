@@ -823,6 +823,17 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
         if (int.TryParse(context.RequestHeaders.GetValue(BatchFrames.AcceptHeaderName), out int accepts) && accepts >= 1)
             state.Writer.MarkPeerReadsFrames();
 
+        // The ops of this stream run in this call's async flow, so setting the origin here labels every
+        // one of them as a stream op in SHOW QUERIES. The stream itself counts on its connection for
+        // as long as the call lasts.
+        CamusDB.Core.Diagnostics.ClientConnection? streamConnection = CamusDB.Core.Diagnostics.StatementOrigin.Current?.Connection;
+        if (streamConnection is not null)
+        {
+            CamusDB.Core.Diagnostics.StatementOrigin.Current =
+                streamConnection.OriginFor(CamusDB.App.Middleware.ClientActivityMiddleware.GrpcStreamTransport);
+            streamConnection.StreamStarted();
+        }
+
         try
         {
             await foreach (BatchExecuteRequest req in requestStream.ReadAllAsync(ct).ConfigureAwait(false))
@@ -867,6 +878,8 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
             await state.Writer.CompleteAsync().ConfigureAwait(false);
 
             await RollbackStartedSurvivorsAsync(startedHandles).ConfigureAwait(false);
+
+            streamConnection?.StreamEnded();
         }
     }
 

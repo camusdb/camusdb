@@ -187,12 +187,15 @@ internal sealed class NonQueryStatementDispatcher
     /// Execute a SQL statement that doesn't return rows
     /// </summary>
     /// <param name="ticket"></param>
+    /// <param name="activity">The statement's entry in the running-statement list, which the parse names; or null.</param>
     /// <returns>The number of inserted/modified/deleted rows</returns>
-    internal async Task<ExecuteNonSQLResult> ExecuteNonSQLQuery(CommandExecutor executor, ExecuteSQLTicket ticket)
+    internal async Task<ExecuteNonSQLResult> ExecuteNonSQLQuery(
+        CommandExecutor executor, ExecuteSQLTicket ticket, Diagnostics.QueryActivityEntry? activity = null)
     {
         context.Validator.Validate(ticket);
 
         NodeAst ast = SQLParserProcessor.Parse(ticket.Sql, sqlParserCache);
+        activity?.Describe(ast.nodeType);
 
         // Executor stage timing for the write path (parse+plan+stage, exclusive of transport/commit
         // transport). Covers every return path of this method; a no-op when diagnostics are disabled.
@@ -471,7 +474,7 @@ internal sealed class NonQueryStatementDispatcher
                 // support. Both accept it, with one implementation behind them.
                 if (StatementScope.IsSchemaDdl(ast.nodeType))
                 {
-                    ExecuteDDLSQLResult ddlResult = await ddlDispatcher.ExecuteDDLSQL(executor, ticket).ConfigureAwait(false);
+                    ExecuteDDLSQLResult ddlResult = await ddlDispatcher.ExecuteDDLSQL(executor, ticket, activity).ConfigureAwait(false);
 
                     // No descriptor: DDL returns no relation to the caller, and the row count is
                     // meaningful only for a CREATE that also populated one.

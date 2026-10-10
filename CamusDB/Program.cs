@@ -219,9 +219,15 @@ WebApplicationBuilder builder = WebApplication.CreateBuilder(new WebApplicationO
 
 builder.WebHost.ConfigureKestrel(kestrel =>
 {
-    kestrel.ListenAnyIP(config.HttpPort);
+    // The client-facing listeners track their connections for SHOW CONNECTIONS. The Raft listener
+    // does not: it serves peers only.
+    kestrel.ListenAnyIP(config.HttpPort, o => CamusDB.App.Middleware.ClientActivityMiddleware.UseClientConnectionTracking(o));
     if (!string.IsNullOrEmpty(config.HttpsCertificate))
-        kestrel.ListenAnyIP(config.HttpsPort, o => o.UseHttps(config.HttpsCertificate));
+        kestrel.ListenAnyIP(config.HttpsPort, o =>
+        {
+            CamusDB.App.Middleware.ClientActivityMiddleware.UseClientConnectionTracking(o);
+            o.UseHttps(config.HttpsCertificate);
+        });
     if (config.IsClusterMode)
     {
         kestrel.ListenAnyIP(config.RaftPort, o =>
@@ -245,6 +251,7 @@ builder.WebHost.ConfigureKestrel(kestrel =>
         kestrel.ListenAnyIP(config.GrpcPort, o =>
         {
             o.Protocols = HttpProtocols.Http2;
+            CamusDB.App.Middleware.ClientActivityMiddleware.UseClientConnectionTracking(o);
             if (!string.IsNullOrEmpty(grpcCertificate))
                 o.UseHttps(grpcCertificate);
         });
@@ -321,6 +328,14 @@ if (config.IsClusterMode)
             services.GetRequiredService<CamusDB.Core.Config.PeerEndpointResolver>(),
             camusOptions.NodeSecret));
 
+    // Activity channel: SHOW CLUSTER QUERIES / CONNECTIONS ask every peer for its own rows, and a
+    // CANCEL QUERY for a peer's statement goes to that peer.
+    builder.Services.AddSingleton<CamusDB.Core.Diagnostics.IClusterActivityTransport>(services =>
+        new CamusDB.Core.Diagnostics.HttpClusterActivityTransport(
+            new HttpClient(),
+            services.GetRequiredService<CamusDB.Core.Config.PeerEndpointResolver>(),
+            camusOptions.NodeSecret));
+
     builder.Services.AddSingleton<CommandExecutor>(services =>
         new CommandExecutor(
             services.GetRequiredService<CommandValidator>(),
@@ -333,7 +348,8 @@ if (config.IsClusterMode)
             cache: queryResultCache,
             optionsHolder: services.GetRequiredService<CamusDB.Core.Config.CamusDBOptionsHolder>(),
             clusterSettings: services.GetRequiredService<CamusDB.Core.Config.ClusterSettingsService>(),
-            fragmentTransport: services.GetRequiredService<IQueryFragmentTransport>()
+            fragmentTransport: services.GetRequiredService<IQueryFragmentTransport>(),
+            activityTransport: services.GetRequiredService<CamusDB.Core.Diagnostics.IClusterActivityTransport>()
         ));
 }
 else
@@ -552,6 +568,10 @@ app.UseStaticFiles();
 // Track in-flight data requests so auto-analyze can back off when the node is busy with foreground
 // SQL/API work (autocommit statements the explicit-transaction coordinator does not see).
 app.UseMiddleware<CamusDB.App.Services.ForegroundRequestGaugeMiddleware>();
+
+// Links each request to the client connection it arrived on, for SHOW CONNECTIONS and the origin
+// columns of SHOW QUERIES. Before authentication, so a refused request still counts on its connection.
+app.UseMiddleware<CamusDB.App.Middleware.ClientActivityMiddleware>();
 
 // Transport-wide authentication: rejects unauthenticated requests to every data/DDL/transaction route
 // (not just /execute-sql-*) when auth is enabled, and publishes the principal for per-table enforcement.

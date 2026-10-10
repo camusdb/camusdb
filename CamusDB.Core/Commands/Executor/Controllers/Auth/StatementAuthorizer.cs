@@ -234,6 +234,16 @@ internal sealed class StatementAuthorizer
             return;
         }
 
+        // The running-statement and connection lists, and the cancel that acts on them, are open to
+        // any authenticated caller and filtered instead: each user sees and cancels only their own
+        // statements, and a superuser sees and cancels all of them. A refusal here would leave a user
+        // with no way to find and stop their own runaway query. The filter is applied where the rows
+        // are built, through ActivityViewerFor, so no row of another user's SQL text is ever read
+        // into the result.
+        if (ast.nodeType is NodeType.ShowQueries or NodeType.ShowClusterQueries
+            or NodeType.ShowConnections or NodeType.ShowClusterConnections or NodeType.CancelQuery)
+            return;
+
         // Server-level introspection: any authenticated caller may run these.
         if (ast.nodeType is NodeType.ShowDatabases or NodeType.ShowBranches or NodeType.ShowAncestors
             or NodeType.ShowOrphanDatabases)
@@ -375,6 +385,14 @@ internal sealed class StatementAuthorizer
     /// </summary>
     internal Principal? VisibilityPrincipal(ExecuteSQLTicket ticket)
         => options.AuthenticationEnabled ? ticket.Principal : null;
+
+    /// <summary>
+    /// Who may see which rows of <c>SHOW QUERIES</c> and <c>SHOW CONNECTIONS</c>, and whose
+    /// statements <c>CANCEL QUERY</c> may stop, for the caller of <paramref name="ticket"/>. With
+    /// authentication off every caller sees everything, as with every other gate here.
+    /// </summary>
+    internal Diagnostics.ActivityViewer ActivityViewerFor(ExecuteSQLTicket ticket)
+        => Diagnostics.ActivityViewer.For(ticket.Principal, options.AuthenticationEnabled);
 
     /// <summary>
     /// Requires that the caller may change who owns <paramref name="view"/>: a superuser, or its

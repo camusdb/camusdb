@@ -164,11 +164,14 @@ internal sealed class DdlStatementDispatcher
         return authService;
     }
 
-    internal async Task<ExecuteDDLSQLResult> ExecuteDDLSQL(CommandExecutor executor, ExecuteSQLTicket ticket)
+    /// <param name="activity">The statement's entry in the running-statement list, which the parse names; or null.</param>
+    internal async Task<ExecuteDDLSQLResult> ExecuteDDLSQL(
+        CommandExecutor executor, ExecuteSQLTicket ticket, Diagnostics.QueryActivityEntry? activity = null)
     {
         context.Validator.Validate(ticket);
 
         NodeAst ast = SQLParserProcessor.Parse(ticket.Sql, sqlParserCache);
+        activity?.Describe(ast.nodeType);
 
         statementAuthorizer.SetAuthorizationScope(ticket, ast);
         ticket = SessionScalarFunctions.AttachSessionValues(ticket, ast);

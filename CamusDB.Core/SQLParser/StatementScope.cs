@@ -48,7 +48,10 @@ public static class StatementScope
         NodeType.FlushPrivileges or NodeType.FlushSessions or
         // Cluster settings are server-level: they name their key in the SQL, touch only the shared
         // _system/settings keyspace (via the replicated settings log), and return no descriptor.
-        NodeType.SetClusterSetting or NodeType.ResetClusterSetting;
+        NodeType.SetClusterSetting or NodeType.ResetClusterSetting or
+        // A cancel acts on this process's running-statement list, or on a peer's. It names no
+        // database, so a transport must open neither one nor a transaction for it.
+        NodeType.CancelQuery;
 
     /// <summary>
     /// True for schema DDL: statements that change what objects a database contains, run inside their
@@ -122,7 +125,10 @@ public static class StatementScope
         // This process's own slow query log; not read from any database either.
         NodeType.ShowSlowQueries or
         // The cluster-wide settings overlay; not read from any database either.
-        NodeType.ShowClusterSettings;
+        NodeType.ShowClusterSettings or
+        // The statements and connections this process, or the cluster, serves now.
+        NodeType.ShowQueries or NodeType.ShowClusterQueries or
+        NodeType.ShowConnections or NodeType.ShowClusterConnections;
 
     /// <summary>
     /// True for the statements that <c>CommandExecutor.ExecuteSQLQuery</c> answers with rows:

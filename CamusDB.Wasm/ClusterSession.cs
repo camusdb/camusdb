@@ -76,6 +76,8 @@ internal sealed class ClusterSession : IAsyncDisposable
 
     private readonly InProcessQueryFragmentTransport fragmentTransport;
 
+    private readonly InProcessClusterActivityTransport activityTransport;
+
     private readonly EmbeddedKahunaOptions[] nodeOptions;
 
     private readonly string[] endpoints;
@@ -93,6 +95,7 @@ internal sealed class ClusterSession : IAsyncDisposable
         members = new Member?[nodeOptions.Length];
         schemaTransport = new(registry);
         fragmentTransport = new(registry);
+        activityTransport = new(registry);
     }
 
     /// <summary>Members, running or stopped.</summary>
@@ -498,7 +501,8 @@ internal sealed class ClusterSession : IAsyncDisposable
             sharedNode: member.Node,
             schemaDdlForwarder: schemaTransport,
             isClusterMode: true,
-            fragmentTransport: fragmentTransport
+            fragmentTransport: fragmentTransport,
+            activityTransport: activityTransport
         );
 
         member.Attach(executor, new StatementRunner(executor, options));

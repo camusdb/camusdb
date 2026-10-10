@@ -226,6 +226,28 @@ public sealed class CommandExecutor : IAsyncDisposable
     /// </summary>
     public NodeAst ParseSql(string sql) => SQLParserProcessor.Parse(sql, sqlParserCache);
 
+    /// <summary>
+    /// The running statements and client connections of this node. The host feeds the connection
+    /// side, because only the web server sees a connection open and close; the engine feeds the
+    /// statement side.
+    /// </summary>
+    public Diagnostics.QueryActivityRegistry QueryActivity => queryActivity;
+
+    /// <summary>
+    /// The node-local side of the activity statements, for the host endpoint that answers a peer's
+    /// <c>SHOW CLUSTER QUERIES</c>, <c>SHOW CLUSTER CONNECTIONS</c> or forwarded cancel.
+    /// </summary>
+    public Diagnostics.QueryActivityService QueryActivityService => queryActivityService;
+
+    /// <summary>The Raft endpoints of the other members of the cluster this node belongs to.</summary>
+    private static List<string> PeerEndpoints(EmbeddedKahuna node)
+    {
+        List<string> endpoints = [];
+        foreach (Kommander.RaftNode peer in node.Raft.GetNodes())
+            endpoints.Add(peer.Endpoint);
+        return endpoints;
+    }
+
     private readonly SemiJoinAnalyzer semiJoinAnalyzer;
 
     private readonly ISchemaDdlForwarder? schemaDdlForwarder;
@@ -250,6 +272,16 @@ public sealed class CommandExecutor : IAsyncDisposable
     /// restart-class means in practice.</para>
     /// </summary>
     private readonly Diagnostics.SlowQueryRecorder? slowQueries;
+
+    /// <summary>
+    /// The statements that run on this node now, and the client connections the host reports. Always
+    /// built, so <see cref="CamusDBOptions.QueryActivityEnabled"/> can be turned on at runtime; the
+    /// flag only decides whether a statement registers.
+    /// </summary>
+    private readonly Diagnostics.QueryActivityRegistry queryActivity;
+
+    /// <summary>Answers the activity statements on this node and, through peers, on the cluster.</summary>
+    private readonly Diagnostics.QueryActivityService queryActivityService;
 
     // Number of rows indexed per Kahuna transaction during backfill.  Committing in bounded
     // batches keeps transaction size manageable and allows a leader-change resume to skip
@@ -369,7 +401,8 @@ public sealed class CommandExecutor : IAsyncDisposable
         IQueryResultCache? cache = null,
         CamusDBOptionsHolder? optionsHolder = null,
         ClusterSettingsService? clusterSettings = null,
-        IQueryFragmentTransport? fragmentTransport = null)
+        IQueryFragmentTransport? fragmentTransport = null,
+        Diagnostics.IClusterActivityTransport? activityTransport = null)
     {
         this.validator = validator;
         this.catalogs = catalogs;
@@ -492,6 +525,19 @@ public sealed class CommandExecutor : IAsyncDisposable
             options.SqlParserCacheSweepSeconds,
             options.SqlParserCacheMaxBytes);
 
+        // The statement kind comes from the statement's own parse, so reading the list parses nothing.
+        queryActivity = new Diagnostics.QueryActivityRegistry(
+            options,
+            () => sharedNode?.Raft.GetLocalEndpoint() ?? "");
+
+        // Standalone Raft lists quorum witnesses as nodes; they serve no statements, so a standalone
+        // engine has no peers to ask.
+        queryActivityService = new Diagnostics.QueryActivityService(
+            queryActivity,
+            activityTransport,
+            () => isClusterMode && sharedNode is not null ? PeerEndpoints(sharedNode) : [],
+            options);
+
         // Built here rather than earlier because it names the openers, and DatabaseOpener is itself
         // constructed with a back-reference to this half-built executor — so the collaborators it
         // carries only all exist by this point.
@@ -585,7 +631,8 @@ public sealed class CommandExecutor : IAsyncDisposable
             clusterSettings,
             engineMetrics,
             sequenceBinder,
-            slowQueries
+            slowQueries,
+            queryActivityService
         );
         ctasExecutor = new Controllers.DDL.CreateTableAsSelectExecutor(
             executorContext,
@@ -603,7 +650,8 @@ public sealed class CommandExecutor : IAsyncDisposable
         rowCommands = new Controllers.DML.RowCommandService(
             executorContext, rowInserter, rowUpdater, rowDeleter, queryExecutor);
         serverLevelDispatcher = new Controllers.ServerLevelStatementDispatcher(
-            executorContext, sqlExecutor, databaseLifecycle, schemaDdl, userAdmin, clusterSettings);
+            executorContext, sqlExecutor, databaseLifecycle, schemaDdl, userAdmin, clusterSettings,
+            queryActivityService, statementAuthorizer);
         ddlDispatcher = new Controllers.DDL.DdlStatementDispatcher(
             executorContext,
             catalogs,
@@ -712,6 +760,8 @@ public sealed class CommandExecutor : IAsyncDisposable
         userAdmin.ApplyOptions(next);
         selectExecutor.ApplyOptions(next);
         slowQueries?.ApplyOptions(next);
+        queryActivity.ApplyOptions(next);
+        queryActivityService.ApplyOptions(next);
         sequenceAllocator.ApplyOptions(next);
 
         backgroundSchedulers?.ApplyOptions(next);
@@ -947,17 +997,36 @@ public sealed class CommandExecutor : IAsyncDisposable
     /// </summary>
     public async Task<ExecuteDDLSQLResult> ExecuteDDLSQL(ExecuteSQLTicket ticket)
     {
+        // Listed for SHOW QUERIES, but not cancellable: schema DDL ignores the read token, so the
+        // ticket keeps the transport's own.
+        Diagnostics.QueryActivityEntry? activity = queryActivity.Begin(ticket, cancellable: false, executing: true);
+
+        if (activity is null)
+            return await ExecuteDDLSQLTimed(ticket, activity: null).ConfigureAwait(false);
+
+        try
+        {
+            return await ExecuteDDLSQLTimed(ticket, activity).ConfigureAwait(false);
+        }
+        finally
+        {
+            activity.End();
+        }
+    }
+
+    private async Task<ExecuteDDLSQLResult> ExecuteDDLSQLTimed(ExecuteSQLTicket ticket, Diagnostics.QueryActivityEntry? activity)
+    {
         Diagnostics.SlowQueryRecording? recording = slowQueries?.Begin(ticket.Sql, ticket.DatabaseName, ticket.Principal?.UserName);
 
         if (recording is null)
-            return await ddlDispatcher.ExecuteDDLSQL(this, ticket).ConfigureAwait(false);
+            return await ddlDispatcher.ExecuteDDLSQL(this, ticket, activity).ConfigureAwait(false);
 
         recording.Describe(SafeParseKind(ticket.Sql));
 
         try
         {
             ExecuteDDLSQLResult result = await ddlDispatcher
-                .ExecuteDDLSQL(this, ticket.WithProbe(recording.Probe)).ConfigureAwait(false);
+                .ExecuteDDLSQL(this, ticket.WithProbe(recording.Probe), activity).ConfigureAwait(false);
 
             recording.Finish(result.ModifiedRows, Diagnostics.SlowQueryOutcome.Completed);
             return result;
@@ -1002,11 +1071,30 @@ public sealed class CommandExecutor : IAsyncDisposable
     /// </summary>
     public async Task<ExecuteNonSQLResult> ExecuteNonSQLQuery(ExecuteSQLTicket ticket)
     {
+        // Listed for SHOW QUERIES, but not cancellable: a write ignores the read token once its first
+        // mutation lands, so the ticket keeps the transport's own.
+        Diagnostics.QueryActivityEntry? activity = queryActivity.Begin(ticket, cancellable: false, executing: true);
+
+        if (activity is null)
+            return await ExecuteNonSQLQueryTimed(ticket, activity: null).ConfigureAwait(false);
+
+        try
+        {
+            return await ExecuteNonSQLQueryTimed(ticket, activity).ConfigureAwait(false);
+        }
+        finally
+        {
+            activity.End();
+        }
+    }
+
+    private async Task<ExecuteNonSQLResult> ExecuteNonSQLQueryTimed(ExecuteSQLTicket ticket, Diagnostics.QueryActivityEntry? activity)
+    {
         Diagnostics.SlowQueryRecording? recording = slowQueries?.Begin(ticket.Sql, ticket.DatabaseName, ticket.Principal?.UserName);
 
         if (recording is null)
         {
-            ExecuteNonSQLResult plain = await nonQueryDispatcher.ExecuteNonSQLQuery(this, ticket).ConfigureAwait(false);
+            ExecuteNonSQLResult plain = await nonQueryDispatcher.ExecuteNonSQLQuery(this, ticket, activity).ConfigureAwait(false);
             if (ticket.RetryableAborts is not { HasAbort: true })
                 RecordRoutingForNonQuery(ticket, plain);
             return plain;
@@ -1017,7 +1105,7 @@ public sealed class CommandExecutor : IAsyncDisposable
         try
         {
             ExecuteNonSQLResult result = await nonQueryDispatcher
-                .ExecuteNonSQLQuery(this, ticket.WithProbe(recording.Probe)).ConfigureAwait(false);
+                .ExecuteNonSQLQuery(this, ticket.WithProbe(recording.Probe), activity).ConfigureAwait(false);
 
             // An abort carried as a value fails the statement exactly as the thrown one did.
             if (ticket.RetryableAborts is { Abort: { } abort })

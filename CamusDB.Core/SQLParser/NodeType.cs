@@ -875,4 +875,41 @@ public enum NodeType
     /// node type between nodes, and a value in the middle would shift every later member.
     /// </summary>
     TypeNumeric,
+
+    /// <summary>
+    /// <c>SHOW QUERIES [LIKE 'pattern']</c>. <c>leftAst</c> = the LIKE pattern node, matched against
+    /// the statement text, or null for no filter.
+    ///
+    /// <para>Lists the statements that run on this node now. Node-local and dispatched before any
+    /// database is opened. Each user sees only their own statements unless they are a superuser,
+    /// because a row carries the literal SQL text. The members from here to
+    /// <see cref="CancelQuery"/> are appended at the end for the reason <see cref="TypeNumeric"/>
+    /// gives.</para>
+    /// </summary>
+    ShowQueries,
+
+    /// <summary>
+    /// <c>SHOW CLUSTER QUERIES [LIKE 'pattern']</c>: <see cref="ShowQueries"/> gathered from every
+    /// cluster member. A member that does not answer gives one row with its error.
+    /// </summary>
+    ShowClusterQueries,
+
+    /// <summary>
+    /// <c>SHOW CONNECTIONS</c>. Lists the client connections this node holds open now, with the
+    /// number of statements each one runs.
+    /// </summary>
+    ShowConnections,
+
+    /// <summary>
+    /// <c>SHOW CLUSTER CONNECTIONS</c>: <see cref="ShowConnections"/> gathered from every cluster
+    /// member.
+    /// </summary>
+    ShowClusterConnections,
+
+    /// <summary>
+    /// <c>CANCEL QUERY 'id'</c>. <c>leftAst</c> = the string node that holds the query id. Cancels a
+    /// running read on whichever member owns the id. Server-level: it opens no database and no
+    /// transaction, and returns no rows.
+    /// </summary>
+    CancelQuery,
 }

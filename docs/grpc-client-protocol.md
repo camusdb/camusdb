@@ -590,9 +590,11 @@ Domain errors are surfaced two ways depending on the call shape:
 | gRPC `StatusCode` | Meaning | Example CamusDB codes |
 |-------------------|---------|-----------------------|
 | `INVALID_ARGUMENT` | Bad client input | invalid input, SQL syntax error, invalid AST, unknown column, unknown type, value too long, schema limit exceeded, statement too deeply nested (`CADB0413`), NOT NULL violation, CHECK constraint violation |
-| `NOT_FOUND` | Missing object | database/table/index doesn't exist, unknown key |
+| `NOT_FOUND` | Missing object | database/table/index doesn't exist, unknown key, no running query with the id given to `CANCEL QUERY` (`CADB0551`) |
 | `ALREADY_EXISTS` | Duplicate | duplicate unique key, duplicate primary key, database/table already exists |
-| `FAILED_PRECONDITION` | Non-retryable transaction/state precondition | transaction already completed, database has live descendants |
+| `FAILED_PRECONDITION` | Non-retryable transaction/state precondition | transaction already completed, database has live descendants, `CANCEL QUERY` of a write (`CADB0552`) |
+| `CANCELLED` | `CANCEL QUERY` stopped the statement | query cancelled (`CADB0554`) |
+| `UNAVAILABLE` | The node that may own a statement did not answer a cancel | query owner unreachable (`CADB0553`); the cancel can be sent again |
 | `ABORTED` | **Retryable** transaction family | transaction conflict (`CADB0502`), must-retry (`CADB0504`), lifetime exceeded (`CADB0505`), finalize unresolved (`CADB0509`) |
 | `RESOURCE_EXHAUSTED` | Permanent for this op | mutation limit exceeded, spill storage unavailable |
 | `INTERNAL` | Unexpected server error | `CADB0000` |

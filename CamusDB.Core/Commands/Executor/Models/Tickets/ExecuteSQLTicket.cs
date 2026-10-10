@@ -117,4 +117,13 @@ public readonly struct ExecuteSQLTicket
     /// </summary>
     public ExecuteSQLTicket WithProbe(Diagnostics.StatementProbe? probe)
         => new(TxnState, DatabaseName, Sql, Parameters, Principal, CancellationToken, probe, Routing, RetryableAborts, DiscardReturningRows);
+
+    /// <summary>
+    /// The same ticket carrying <paramref name="cancellationToken"/>. Used at the engine boundary,
+    /// where the running-statement list replaces the transport's token with one linked to it that
+    /// <c>CANCEL QUERY</c> can also fire. The rule of <see cref="CancellationToken"/> applies to the
+    /// new token unchanged: it bounds reads only.
+    /// </summary>
+    public ExecuteSQLTicket WithCancellationToken(CancellationToken cancellationToken)
+        => new(TxnState, DatabaseName, Sql, Parameters, Principal, cancellationToken, Probe, Routing, RetryableAborts, DiscardReturningRows);
 }

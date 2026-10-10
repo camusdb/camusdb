@@ -79,6 +79,7 @@ public static class GrpcErrorMapper
         CamusDBErrorCodes.IndexDoesntExist    => StatusCode.NotFound,
         CamusDBErrorCodes.UnknownKey          => StatusCode.NotFound,
         CamusDBErrorCodes.OrphanNotFound      => StatusCode.NotFound,
+        CamusDBErrorCodes.QueryNotFound       => StatusCode.NotFound,
 
         // Already exists
         CamusDBErrorCodes.DuplicateUniqueKeyValue => StatusCode.AlreadyExists,
@@ -92,6 +93,14 @@ public static class GrpcErrorMapper
         CamusDBErrorCodes.AnalyzeRequiresNoPendingWrites => StatusCode.FailedPrecondition,
         CamusDBErrorCodes.StatementNotAllowedInTransaction => StatusCode.FailedPrecondition,
         CamusDBErrorCodes.SnapshotPrecedesContentsGeneration => StatusCode.FailedPrecondition,
+        CamusDBErrorCodes.QueryNotCancellable => StatusCode.FailedPrecondition,
+
+        // CANCEL QUERY stopped the statement. CANCELLED is what gRPC names this, and the trailer code
+        // tells it apart from a call the client itself cancelled.
+        CamusDBErrorCodes.QueryCancelled => StatusCode.Cancelled,
+
+        // The node that may own the statement did not answer; the same cancel can be tried again.
+        CamusDBErrorCodes.QueryOwnerUnreachable => StatusCode.Unavailable,
 
         // Refused because of what the data or the schema holds right now, not because of the
         // statement text: the same statement succeeds once the dependent rows or objects are gone.

@@ -359,6 +359,40 @@ public sealed record CamusDBOptions
     public int SlowQueryLogMaxSqlLength { get; init; } = 4096;
 
     /// <summary>
+    /// Registers every running statement in the per-node list that <c>SHOW QUERIES</c> reads and
+    /// <c>CANCEL QUERY</c> acts on. On by default, because an operator needs the list most during an
+    /// incident, when it is too late to turn it on.
+    ///
+    /// <para>Runtime-mutable, and honestly so: each statement asks the current options snapshot
+    /// whether to register, and the registry itself is always built. Turning it off stops new
+    /// statements from appearing; a statement already listed stays until it ends. A statement that
+    /// is not listed cannot be cancelled with <c>CANCEL QUERY</c>.</para>
+    ///
+    /// <para>Node-scoped: each node lists the statements it serves.</para>
+    /// </summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Node)]
+    public bool QueryActivityEnabled { get; init; } = true;
+
+    /// <summary>
+    /// Maximum number of characters of SQL text one <c>SHOW QUERIES</c> row shows. The registry
+    /// holds the statement text by reference and truncates only when the list is read, so this bounds
+    /// the size of the result, not the memory of the node.
+    /// </summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Node)]
+    public int QueryActivityMaxSqlLength { get; init; } = 1024;
+
+    /// <summary>
+    /// How long, in milliseconds, <c>SHOW CLUSTER QUERIES</c>, <c>SHOW CLUSTER CONNECTIONS</c> and a
+    /// forwarded <c>CANCEL QUERY</c> wait for one peer. A peer that does not answer in time gives one
+    /// row with its error in the <c>error</c> column, and the statement still returns the rows of the
+    /// other nodes: a diagnostic that fails because one node is down fails exactly when it is needed.
+    ///
+    /// <para>Runtime-mutable: the fan-out reads the current snapshot on each statement.</para>
+    /// </summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Node)]
+    public int ClusterActivityPeerTimeoutMs { get; init; } = 2000;
+
+    /// <summary>
     /// Serves the browser operator dashboard on the HTTP port. When false the host maps neither the
     /// dashboard pages nor the <c>/v1/dashboard/</c> endpoints, and a browser at <c>/</c> gets a 404.
     ///

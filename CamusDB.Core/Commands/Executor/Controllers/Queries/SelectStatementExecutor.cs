@@ -100,6 +100,12 @@ internal sealed class SelectStatementExecutor
     /// <summary>Times statements into the slow query log, or null when the log is not built.</summary>
     internal readonly SlowQueryRecorder? slowQueries;
 
+    /// <summary>The running-statement list; never null, because the engine always builds it.</summary>
+    internal readonly QueryActivityRegistry queryActivity;
+
+    /// <summary>Answers SHOW [CLUSTER] QUERIES and SHOW [CLUSTER] CONNECTIONS.</summary>
+    internal readonly QueryActivityService queryActivityService;
+
     /// <summary>
     /// Reserves the sequence values a FROM-less SELECT will draw, and applies its <c>setval</c>
     /// calls, before the projections are evaluated.
@@ -135,7 +141,8 @@ internal sealed class SelectStatementExecutor
         ClusterSettingsService? clusterSettings,
         EngineMetricsCollector? engineMetrics,
         Functions.SequenceStatementBinder sequenceBinder,
-        SlowQueryRecorder? slowQueries = null
+        SlowQueryRecorder? slowQueries,
+        QueryActivityService queryActivityService
     )
     {
         this.context = context;
@@ -160,6 +167,8 @@ internal sealed class SelectStatementExecutor
         this.engineMetrics = engineMetrics;
         this.sequenceBinder = sequenceBinder;
         this.slowQueries = slowQueries;
+        this.queryActivityService = queryActivityService;
+        queryActivity = queryActivityService.Registry;
     }
 
     /// <summary>
@@ -240,15 +249,53 @@ internal sealed class SelectStatementExecutor
     /// </summary>
     public async Task<(DatabaseDescriptor database, IAsyncEnumerable<QueryResultRow> cursor)> ExecuteSQLQuery(ExecuteSQLTicket ticket, CacheMetadataHolder? metaOut = null, QuerySchemaHolder? schemaOut = null)
     {
+        // A read observes its ticket's token for its whole run, so CANCEL QUERY can stop it: the
+        // ticket from here on carries the entry's token, which is linked to the transport's. The
+        // entry accepts a cancel only after the parse shows a read, because this path also runs
+        // INSERT … RETURNING.
+        QueryActivityEntry? activity = queryActivity.BeginRowReturning(ticket);
+
+        if (activity is null)
+            return await ExecuteSQLQueryTimed(ticket, metaOut, schemaOut, activity: null).ConfigureAwait(false);
+
+        try
+        {
+            (DatabaseDescriptor database, IAsyncEnumerable<QueryResultRow> cursor) = await ExecuteSQLQueryTimed(
+                ticket.WithCancellationToken(activity.CancellationToken), metaOut, schemaOut, activity).ConfigureAwait(false);
+
+            // The entry ends when the cursor ends, never here: the cursor is lazy, and the read has
+            // not started yet.
+            return (database, activity.Wrap(cursor, activity.CancellationToken));
+        }
+        catch (OperationCanceledException) when (activity.CancelRequested)
+        {
+            // Cancelled while it planned: the client is still there and must learn why.
+            activity.End();
+            throw activity.Cancelled();
+        }
+        catch (Exception)
+        {
+            activity.End();
+            throw;
+        }
+    }
+
+    /// <param name="activity">
+    /// The statement's entry in the running-statement list, or null when the list is off. The parse
+    /// gives it the statement kind, and lets a cancel stop the statement when it is a read.
+    /// </param>
+    private async Task<(DatabaseDescriptor database, IAsyncEnumerable<QueryResultRow> cursor)> ExecuteSQLQueryTimed(
+        ExecuteSQLTicket ticket, CacheMetadataHolder? metaOut, QuerySchemaHolder? schemaOut, QueryActivityEntry? activity)
+    {
         SlowQueryRecording? recording = slowQueries?.Begin(ticket.Sql, ticket.DatabaseName, ticket.Principal?.UserName);
 
         if (recording is null)
-            return await ExecuteSQLQueryInternal(ticket, metaOut, schemaOut, recording: null).ConfigureAwait(false);
+            return await ExecuteSQLQueryInternal(ticket, metaOut, schemaOut, recording: null, activity).ConfigureAwait(false);
 
         try
         {
             (DatabaseDescriptor database, IAsyncEnumerable<QueryResultRow> cursor) =
-                await ExecuteSQLQueryInternal(ticket.WithProbe(recording.Probe), metaOut, schemaOut, recording)
+                await ExecuteSQLQueryInternal(ticket.WithProbe(recording.Probe), metaOut, schemaOut, recording, activity)
                     .ConfigureAwait(false);
 
             return (database, recording.Wrap(cursor, ticket.CancellationToken));
@@ -269,7 +316,8 @@ internal sealed class SelectStatementExecutor
     /// recording and on the probe already attached to <paramref name="ticket"/>.
     /// </param>
     private async Task<(DatabaseDescriptor database, IAsyncEnumerable<QueryResultRow> cursor)> ExecuteSQLQueryInternal(
-        ExecuteSQLTicket ticket, CacheMetadataHolder? metaOut, QuerySchemaHolder? schemaOut, SlowQueryRecording? recording)
+        ExecuteSQLTicket ticket, CacheMetadataHolder? metaOut, QuerySchemaHolder? schemaOut, SlowQueryRecording? recording,
+        QueryActivityEntry? activity)
     {
         context.Validator.Validate(ticket);
 
@@ -285,13 +333,23 @@ internal sealed class SelectStatementExecutor
             ast = SQLParserProcessor.Parse(ticket.Sql, sqlParserCache);
 
         recording?.Describe(ast.nodeType);
+        activity?.Describe(ast.nodeType);
 
         // INSERT … RETURNING is a write that returns rows. The no-rows dispatcher owns every write
         // statement, so it runs the statement and this path only exposes its buffered rows as a
         // cursor. The statement completes before the cursor exists, so draining the cursor does no
         // further work.
         if (InsertReturningPlan.HasReturning(ast))
+        {
+            // A write: once its first row lands it runs to its commit or rollback, whatever the token
+            // says, so the entry never accepts a cancel, and a cancel is refused rather than reported
+            // as done.
+            activity?.MarkExecuting();
             return await ExecuteInsertReturningAsync(ticket, schemaOut).ConfigureAwait(false);
+        }
+
+        // Every other statement on this path is a read, which observes its token for its whole run.
+        activity?.AllowCancel();
 
         // Reading the log must not change it. Recording this statement would make every read evict
         // an entry, so a dashboard polling the log every few seconds would erase the history it
@@ -339,6 +397,35 @@ internal sealed class SelectStatementExecutor
                 schemaOut.Schema = DerivedTableSchemaBuilder.ShowSlowQueriesSchema;
 
             return (null!, schemaQuerier.ShowSlowQueries(slowQueries?.Log, UnquoteLikePattern(ast.leftAst?.yytext)));
+        }
+
+        // SHOW [CLUSTER] QUERIES and SHOW [CLUSTER] CONNECTIONS report what this node, or every member,
+        // serves now. They open no database and no transaction. The rows are filtered to the caller
+        // where they are built — on each peer too — so another user's SQL text never enters the result.
+        if (ast.nodeType is NodeType.ShowQueries or NodeType.ShowClusterQueries)
+        {
+            if (schemaOut is not null)
+                schemaOut.Schema = DerivedTableSchemaBuilder.ShowQueriesSchema;
+
+            List<QueryActivityRow> rows = await queryActivityService.ListQueriesAsync(
+                ast.nodeType == NodeType.ShowClusterQueries,
+                statementAuthorizer.ActivityViewerFor(ticket),
+                ticket.CancellationToken).ConfigureAwait(false);
+
+            return (null!, schemaQuerier.ShowQueries(rows, UnquoteLikePattern(ast.leftAst?.yytext)));
+        }
+
+        if (ast.nodeType is NodeType.ShowConnections or NodeType.ShowClusterConnections)
+        {
+            if (schemaOut is not null)
+                schemaOut.Schema = DerivedTableSchemaBuilder.ShowConnectionsSchema;
+
+            List<ConnectionActivityRow> rows = await queryActivityService.ListConnectionsAsync(
+                ast.nodeType == NodeType.ShowClusterConnections,
+                statementAuthorizer.ActivityViewerFor(ticket),
+                ticket.CancellationToken).ConfigureAwait(false);
+
+            return (null!, schemaQuerier.ShowConnections(rows));
         }
 
         // SHOW VARIABLES reports the configuration this engine was constructed with. Node-local for the

@@ -350,6 +350,26 @@ public class ConfigDefinition
     public int SlowQueryLogMaxSqlLength { get; set; } = 4096;
 
     /// <summary>
+    /// Lists running statements for <c>SHOW QUERIES</c> and <c>CANCEL QUERY</c>.
+    /// Maps to <c>CamusDBOptions.QueryActivityEnabled</c> (yml <c>query_activity_enabled</c>). Default true.
+    /// </summary>
+    public bool QueryActivityEnabled { get; set; } = true;
+
+    /// <summary>
+    /// Characters of SQL text one <c>SHOW QUERIES</c> row shows. Must be &gt; 0.
+    /// Maps to <c>CamusDBOptions.QueryActivityMaxSqlLength</c> (yml
+    /// <c>query_activity_max_sql_length</c>). Default 1024.
+    /// </summary>
+    public int QueryActivityMaxSqlLength { get; set; } = 1024;
+
+    /// <summary>
+    /// Per-peer wait, in milliseconds, of the cluster activity statements. Must be &gt; 0.
+    /// Maps to <c>CamusDBOptions.ClusterActivityPeerTimeoutMs</c> (yml
+    /// <c>cluster_activity_peer_timeout_ms</c>). Default 2000.
+    /// </summary>
+    public int ClusterActivityPeerTimeoutMs { get; set; } = 2000;
+
+    /// <summary>
     /// Serves the browser operator dashboard on the HTTP port. Maps to
     /// <c>CamusDBOptions.DashboardEnabled</c> (yml <c>dashboard_enabled</c>). Default on.
     /// </summary>
@@ -1430,6 +1450,12 @@ public class ConfigDefinition
 
         if (SlowQueryLogMaxSqlLength < 1)
             throw Invalid($"'slow_query_log_max_sql_length' must be >= 1, got {SlowQueryLogMaxSqlLength}");
+
+        if (QueryActivityMaxSqlLength < 1)
+            throw Invalid($"'query_activity_max_sql_length' must be >= 1, got {QueryActivityMaxSqlLength}");
+
+        if (ClusterActivityPeerTimeoutMs < 1)
+            throw Invalid($"'cluster_activity_peer_timeout_ms' must be >= 1 ms, got {ClusterActivityPeerTimeoutMs}");
 
         // Each refreshed row costs one mutation per index plus the row itself, so a chunk size at
         // or near the mutation cap fails on any indexed materialized view — and it fails mid-

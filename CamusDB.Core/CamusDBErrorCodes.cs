@@ -599,6 +599,35 @@ public static class CamusDBErrorCodes
     /// </summary>
     public const string ReturningResultTooLarge = "CADB0550";
 
+    /// <summary>
+    /// <c>CANCEL QUERY</c> named an id that no running statement holds: the statement already
+    /// ended, the id is mistyped, or the statement belongs to another user and the caller is not a
+    /// superuser. The last case reports the same code on purpose, so the answer does not tell a user
+    /// which ids other users' statements hold. Maps to HTTP 404.
+    /// </summary>
+    public const string QueryNotFound = "CADB0551";
+
+    /// <summary>
+    /// <c>CANCEL QUERY</c> named a statement that a cancel cannot stop: a write, or schema DDL. A
+    /// write ignores the cancel token once its first mutation lands and runs to its commit or its
+    /// rollback, so reporting the cancel as done would be false. Maps to HTTP 409.
+    /// </summary>
+    public const string QueryNotCancellable = "CADB0552";
+
+    /// <summary>
+    /// <c>CANCEL QUERY</c> named a statement on a peer node that did not answer in time, so it is not
+    /// known whether the statement was cancelled. Maps to HTTP 503.
+    /// </summary>
+    public const string QueryOwnerUnreachable = "CADB0553";
+
+    /// <summary>
+    /// The statement stopped because <c>CANCEL QUERY</c> named it. The client is still connected, so
+    /// it receives this error instead of the bare cancellation a disconnect produces. Rows the client
+    /// read before the cancel were real; no write was undone, because only reads can be cancelled.
+    /// Maps to HTTP 409.
+    /// </summary>
+    public const string QueryCancelled = "CADB0554";
+
     public const string InvalidConfig = "CADB0600";
 
     /// <summary>
@@ -775,6 +804,10 @@ public static class CamusDBErrorCodes
         InsufficientDiskSpace => 507,
         SpillLimitExceeded => 507,
         ReturningResultTooLarge => 400,
+        QueryNotFound => 404,
+        QueryNotCancellable => 409,
+        QueryOwnerUnreachable => 503,
+        QueryCancelled => 409,
         SnapshotPrecedesContentsGeneration => 400,
         StatementNotAllowedInTransaction => 400,
         BranchSnapshotProtectionLost => 410,

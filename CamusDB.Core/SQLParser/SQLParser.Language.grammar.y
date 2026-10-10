@@ -109,6 +109,7 @@ stat    : select_stmt { $$.n = $1.n; }
         | analyze_stmt { $$.n = $1.n; }
         | evict_cache_stmt { $$.n = $1.n; }
         | flush_stmt { $$.n = $1.n; }
+        | cancel_stmt { $$.n = $1.n; }
         | comment_stmt { $$.n = $1.n; }
         | create_user_stmt { $$.n = $1.n; }
         | alter_user_stmt { $$.n = $1.n; }
@@ -916,9 +917,10 @@ show_stmt : TSHOW TCOLUMNS TFROM any_identifier { $$.n = new(NodeType.ShowColumn
                     "Expected: SHOW STATISTICS FOR [TABLE] <table>");
             $$.n = new(NodeType.ShowStatistics, $5.n, null, null, null, null, null, null, null);
           }
-          /* ENGINE STATS, CLUSTER SETTINGS and SLOW QUERIES are matched as plain identifiers, not
-             keywords, so all six words remain usable as column and table names. The three statements
-             share ONE two-identifier production dispatched on the words — a second production with
+          /* ENGINE STATS, CLUSTER SETTINGS, SLOW QUERIES, CLUSTER QUERIES and CLUSTER CONNECTIONS are
+             matched as plain identifiers, not keywords, so every one of those words remains usable as a
+             column and table name. The statements share ONE two-identifier production dispatched on
+             the words — a second production with
              the same token shape would be a reduce/reduce conflict, the same constraint SET
              TRANSACTION LOCKING/PRIORITY documents. */
           | TSHOW TIDENTIFIER TIDENTIFIER
@@ -932,10 +934,16 @@ show_stmt : TSHOW TCOLUMNS TFROM any_identifier { $$.n = new(NodeType.ShowColumn
             else if (string.Equals($2.s, "slow", System.StringComparison.OrdinalIgnoreCase) &&
                 string.Equals($3.s, "queries", System.StringComparison.OrdinalIgnoreCase))
                 $$.n = new(NodeType.ShowSlowQueries, null, null, null, null, null, null, null, null);
+            else if (string.Equals($2.s, "cluster", System.StringComparison.OrdinalIgnoreCase) &&
+                string.Equals($3.s, "queries", System.StringComparison.OrdinalIgnoreCase))
+                $$.n = new(NodeType.ShowClusterQueries, null, null, null, null, null, null, null, null);
+            else if (string.Equals($2.s, "cluster", System.StringComparison.OrdinalIgnoreCase) &&
+                string.Equals($3.s, "connections", System.StringComparison.OrdinalIgnoreCase))
+                $$.n = new(NodeType.ShowClusterConnections, null, null, null, null, null, null, null, null);
             else
                 throw new CamusDB.Core.CamusDBException(
                     CamusDB.Core.CamusDBErrorCodes.InvalidInput,
-                    "Expected: SHOW ENGINE STATS [LIKE '<pattern>'], SHOW CLUSTER SETTINGS [LIKE '<pattern>'] or SHOW SLOW QUERIES [LIKE '<pattern>']");
+                    "Expected: SHOW ENGINE STATS [LIKE '<pattern>'], SHOW CLUSTER SETTINGS [LIKE '<pattern>'], SHOW SLOW QUERIES [LIKE '<pattern>'], SHOW CLUSTER QUERIES [LIKE '<pattern>'] or SHOW CLUSTER CONNECTIONS");
           }
           | TSHOW TIDENTIFIER TIDENTIFIER TLIKE string
           {
@@ -948,13 +956,16 @@ show_stmt : TSHOW TCOLUMNS TFROM any_identifier { $$.n = new(NodeType.ShowColumn
             else if (string.Equals($2.s, "slow", System.StringComparison.OrdinalIgnoreCase) &&
                 string.Equals($3.s, "queries", System.StringComparison.OrdinalIgnoreCase))
                 $$.n = new(NodeType.ShowSlowQueries, $5.n, null, null, null, null, null, null, null);
+            else if (string.Equals($2.s, "cluster", System.StringComparison.OrdinalIgnoreCase) &&
+                string.Equals($3.s, "queries", System.StringComparison.OrdinalIgnoreCase))
+                $$.n = new(NodeType.ShowClusterQueries, $5.n, null, null, null, null, null, null, null);
             else
                 throw new CamusDB.Core.CamusDBException(
                     CamusDB.Core.CamusDBErrorCodes.InvalidInput,
-                    "Expected: SHOW ENGINE STATS [LIKE '<pattern>'], SHOW CLUSTER SETTINGS [LIKE '<pattern>'] or SHOW SLOW QUERIES [LIKE '<pattern>']");
+                    "Expected: SHOW ENGINE STATS [LIKE '<pattern>'], SHOW CLUSTER SETTINGS [LIKE '<pattern>'], SHOW SLOW QUERIES [LIKE '<pattern>'], SHOW CLUSTER QUERIES [LIKE '<pattern>'] or SHOW CLUSTER CONNECTIONS");
           }
-          /* VARIABLES and USERS are likewise plain identifiers rather than keywords, so both words
-             stay usable as column and table names. "users" in particular is a table name in most
+          /* VARIABLES, USERS, QUERIES and CONNECTIONS are likewise plain identifiers rather than
+             keywords, so all four words stay usable as column and table names. "users" in particular is a table name in most
              schemas, so reserving it would be a real regression. The two statements share ONE
              production per token shape and are dispatched on the word, because a second production
              with the same token shape would be a reduce/reduce conflict — the same constraint the
@@ -969,10 +980,14 @@ show_stmt : TSHOW TCOLUMNS TFROM any_identifier { $$.n = new(NodeType.ShowColumn
                 $$.n = new(NodeType.ShowVariables, null, null, null, null, null, null, null, null);
             else if (string.Equals($2.s, "users", System.StringComparison.OrdinalIgnoreCase))
                 $$.n = new(NodeType.ShowUsers, null, null, null, null, null, null, null, null);
+            else if (string.Equals($2.s, "queries", System.StringComparison.OrdinalIgnoreCase))
+                $$.n = new(NodeType.ShowQueries, null, null, null, null, null, null, null, null);
+            else if (string.Equals($2.s, "connections", System.StringComparison.OrdinalIgnoreCase))
+                $$.n = new(NodeType.ShowConnections, null, null, null, null, null, null, null, null);
             else
                 throw new CamusDB.Core.CamusDBException(
                     CamusDB.Core.CamusDBErrorCodes.InvalidInput,
-                    "Expected: SHOW VARIABLES [LIKE '<pattern>'] or SHOW USERS [LIKE '<pattern>']");
+                    "Expected: SHOW VARIABLES [LIKE '<pattern>'], SHOW USERS [LIKE '<pattern>'], SHOW QUERIES [LIKE '<pattern>'] or SHOW CONNECTIONS");
           }
           | TSHOW TIDENTIFIER TLIKE string
           {
@@ -980,10 +995,12 @@ show_stmt : TSHOW TCOLUMNS TFROM any_identifier { $$.n = new(NodeType.ShowColumn
                 $$.n = new(NodeType.ShowVariables, $4.n, null, null, null, null, null, null, null);
             else if (string.Equals($2.s, "users", System.StringComparison.OrdinalIgnoreCase))
                 $$.n = new(NodeType.ShowUsers, $4.n, null, null, null, null, null, null, null);
+            else if (string.Equals($2.s, "queries", System.StringComparison.OrdinalIgnoreCase))
+                $$.n = new(NodeType.ShowQueries, $4.n, null, null, null, null, null, null, null);
             else
                 throw new CamusDB.Core.CamusDBException(
                     CamusDB.Core.CamusDBErrorCodes.InvalidInput,
-                    "Expected: SHOW VARIABLES [LIKE '<pattern>'] or SHOW USERS [LIKE '<pattern>']");
+                    "Expected: SHOW VARIABLES [LIKE '<pattern>'], SHOW USERS [LIKE '<pattern>'], SHOW QUERIES [LIKE '<pattern>'] or SHOW CONNECTIONS");
           }
           /* RANGES, RANGE and ROW are matched as plain identifiers and validated in the action, so
              all three stay usable as table and column names — "range" and "rows" in particular are
@@ -1066,6 +1083,21 @@ flush_stmt : TIDENTIFIER TPRIVILEGES
              $$.n = new(NodeType.FlushSessions, null, null, null, null, null, null, null, null);
            }
            ;
+
+/* CANCEL QUERY '<id>'. "cancel" and "query" stay plain identifiers and are validated in the action,
+   as FLUSH does above, so neither word is reserved. It shares the TIDENTIFIER TIDENTIFIER prefix with
+   FLUSH SESSIONS; the trailing string is what tells the two apart, and one token of lookahead settles
+   that as a shift rather than a reduce, so the two cannot conflict. */
+cancel_stmt : TIDENTIFIER TIDENTIFIER string
+            {
+              if (!string.Equals($1.s, "cancel", System.StringComparison.OrdinalIgnoreCase) ||
+                  !string.Equals($2.s, "query", System.StringComparison.OrdinalIgnoreCase))
+                  throw new CamusDB.Core.CamusDBException(
+                      CamusDB.Core.CamusDBErrorCodes.InvalidInput,
+                      "Expected: CANCEL QUERY '<query_id>'");
+              $$.n = new(NodeType.CancelQuery, $3.n, null, null, null, null, null, null, null);
+            }
+            ;
 
 identifier_index_list : identifier_index_list TCOMMA identifier_index { $$.n = new(NodeType.IndexIdentifierList, $1.n, $3.n, null, null, null, null, null, null); }
                       | identifier_index { $$.n = $1.n; $$.s = $1.s; }

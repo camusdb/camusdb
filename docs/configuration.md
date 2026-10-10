@@ -92,6 +92,9 @@ Example: YAML `mode: cluster` with `--mode standalone` starts in standalone mode
 | `slow_query_log_threshold_ms` | — | `1000` |
 | `slow_query_log_max_entries` | — | `200` |
 | `slow_query_log_max_sql_length` | — | `4096` |
+| `query_activity_enabled` | — | `true` |
+| `query_activity_max_sql_length` | — | `1024` |
+| `cluster_activity_peer_timeout_ms` | — | `2000` |
 | `kahuna.*` | — | mode-specific baseline |
 
 The table covers every key with a CLI flag plus a selection of YAML-only keys. `config.yml` documents
@@ -105,6 +108,9 @@ not per-node startup flags). The result cache is **on by default** (opt-in per q
 The slow-query-log knobs are YAML-only too. The log is **off by default**; see
 [slow-query-log.md](slow-query-log.md) for sizing guidance and for which of the four take effect
 without a restart.
+
+The query-activity knobs are YAML-only as well, and all three take effect without a restart; see
+[query-activity.md](query-activity.md).
 
 ## Kahuna engine section
 

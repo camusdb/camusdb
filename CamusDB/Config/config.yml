@@ -470,6 +470,12 @@ initial_partitions: 1      # Raft partition count (>= 1). Unset, it is 1 in stan
 # slow_query_log_max_entries: 200         # ring size; the oldest entry is overwritten (>= 1)
 # slow_query_log_max_sql_length: 4096     # SQL characters kept per entry (>= 1)
 #
+# Running statements and client connections: SHOW [CLUSTER] QUERIES, SHOW [CLUSTER] CONNECTIONS and
+# CANCEL QUERY. See docs/query-activity.md.
+# query_activity_enabled: true            # list running statements (off: none listed, none cancellable)
+# query_activity_max_sql_length: 1024     # SQL characters shown per SHOW QUERIES row (>= 1)
+# cluster_activity_peer_timeout_ms: 2000  # per-peer wait of the CLUSTER forms and a forwarded cancel (>= 1)
+#
 # engine_metrics_enabled: true            # observe the Kahuna/Kommander meters for SHOW ENGINE STATS
 # query_tracing_enabled: false            # one log line per executed plan step
 # lock_tracing_enabled: false             # one debug log line per acquired lock

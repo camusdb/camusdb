@@ -295,6 +295,53 @@ internal static class DerivedTableSchemaBuilder
         new("sql",           ColumnType.String),
     ];
 
+    // SHOW [CLUSTER] QUERIES: one row per running statement, oldest first. `transaction_id` and
+    // `isolation` are NULL for a statement that runs with no transaction (a server-level statement).
+    // `rows_returned` counts the rows the client has read so far. `error` is NULL on every statement
+    // row; it is set only on the one row that stands in for a peer that did not answer, whose other
+    // columns except `node` are then NULL.
+    internal static readonly IReadOnlyList<DerivedColumnSchema> ShowQueriesSchema =
+    [
+        new("query_id",         ColumnType.String),
+        new("node",             ColumnType.String),
+        new("connection_id",    ColumnType.String),
+        new("client_address",   ColumnType.String),
+        new("transport",        ColumnType.String),
+        new("user_name",        ColumnType.String),
+        new("database_name",    ColumnType.String),
+        new("transaction_id",   ColumnType.String),
+        new("isolation",        ColumnType.String),
+        new("kind",             ColumnType.String),
+        new("phase",            ColumnType.String),
+        new("started_at",       ColumnType.String),
+        new("elapsed_ms",       ColumnType.Float64),
+        new("rows_returned",    ColumnType.Integer64),
+        new("cancellable",      ColumnType.Bool),
+        new("cancel_requested", ColumnType.Bool),
+        new("sql",              ColumnType.String),
+        new("error",            ColumnType.String),
+    ];
+
+    // SHOW [CLUSTER] CONNECTIONS: one row per open client connection, oldest first. `user_name` is the
+    // user of the last statement on the connection, NULL before the first one. `error` follows the
+    // rule of SHOW QUERIES.
+    internal static readonly IReadOnlyList<DerivedColumnSchema> ShowConnectionsSchema =
+    [
+        new("connection_id",  ColumnType.String),
+        new("node",           ColumnType.String),
+        new("client_address", ColumnType.String),
+        new("protocol",       ColumnType.String),
+        new("kind",           ColumnType.String),
+        new("user_name",      ColumnType.String),
+        new("opened_at",      ColumnType.String),
+        new("age_ms",         ColumnType.Float64),
+        new("idle_ms",        ColumnType.Float64),
+        new("requests",       ColumnType.Integer64),
+        new("active_queries", ColumnType.Integer64),
+        new("open_streams",   ColumnType.Integer64),
+        new("error",          ColumnType.String),
+    ];
+
     // SHOW VARIABLES: one row per configuration setting this node resolved at startup. `value` and
     // `default` are rendered as strings rather than typed columns because the settings are a mix of
     // bool/int/double/string/enum and a single result set has one type per column; `type` carries the
