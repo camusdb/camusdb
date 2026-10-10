@@ -25,11 +25,10 @@ namespace CamusDB.Core.CommandsExecutor.Models.Plans;
 /// every row is scanned exactly once; a split that happened after capture only costs routing
 /// hops inside Kahuna's locator.</para>
 ///
-/// <para>The gather runs span fetches concurrently (each span's pages stream from its
-/// partition leader), which is where the parallelism comes from. Until the remote fragment
-/// service exists, span execution stays in-process and remote pages arrive via locator
-/// routing; relocating fragment execution to the data-owning node changes the transport, not
-/// this operator's semantics. Runs normally under EXPLAIN ANALYZE — the gather's stats
+/// <para>The gather runs span fetches concurrently. Eligible fragments execute on the span's
+/// leader, which can apply a filter or partial aggregate before shipping rows; spans that do not
+/// qualify use Kahuna locator routing. Both paths preserve the same ordered gather semantics.
+/// Runs normally under EXPLAIN ANALYZE — the gather's stats
 /// bookkeeping is consumer-side and single-threaded — except in partial-aggregation mode,
 /// which ANALYZE disables (it replaces instrumented scanning, so ANALYZE reports the
 /// row-gather strategy it actually executed).</para>
