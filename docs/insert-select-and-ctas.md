@@ -179,4 +179,4 @@ database plus `Select` on every source.
 ## RETURNING
 
 An `INSERT … SELECT` can end with a `RETURNING` list that sends back values from the copied rows;
-see [insert-returning.md](insert-returning.md).
+see [returning.md](returning.md).

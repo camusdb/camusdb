@@ -110,7 +110,7 @@ public sealed class QueryActivityRegistry
     /// Registers a statement on the row-returning path, or returns null when the registry is
     /// disabled now.
     ///
-    /// <para>The text alone does not tell a read from a write: <c>INSERT … RETURNING</c> also
+    /// <para>The text alone does not tell a read from a write: an INSERT, UPDATE or DELETE with RETURNING also
     /// returns rows. So the entry gets its own token at once, because the ticket must carry it from
     /// the start, but a cancel is refused until the caller parses the statement and calls
     /// <see cref="QueryActivityEntry.AllowCancel"/> for a read. A write never gets that call, so no

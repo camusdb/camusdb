@@ -61,7 +61,7 @@ internal sealed class StatementRunner
             NodeAst ast = executor.ParseSql(sql);
             NodeType root = ast.nodeType;
 
-            // The AST form, not the root type: an INSERT … RETURNING returns rows too.
+            // The AST form, not the root type: an INSERT, UPDATE or DELETE with RETURNING returns rows too.
             if (StatementScope.ReturnsRows(ast))
                 await QueryAsync(sql, databaseName, root, writer).ConfigureAwait(false);
             else

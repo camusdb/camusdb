@@ -61,10 +61,11 @@ foreach (ResultRow row in result.Rows)
 - Autocommit calls run **concurrently** — fire many and `await Task.WhenAll` them; they pipeline over
   the pool.
 
-### `INSERT … RETURNING`
+### `RETURNING`
 
-`ExecuteNonQueryAsync` never fails because a statement returns rows. `NonQueryResult` carries the
-count as always, and the RETURNING rows beside it:
+`ExecuteNonQueryAsync` never fails because a statement returns rows. For an `INSERT`, `UPDATE` or
+`DELETE` with a `RETURNING` list, `NonQueryResult` carries the count as always, and the RETURNING rows
+beside it:
 
 ```csharp
 NonQueryResult inserted = await conn.ExecuteNonQueryAsync(
@@ -76,13 +77,13 @@ string id = inserted.ReturningRows![0].Values[0].IdValue;        // aligns to Re
 
 - `ReturningSchema` and `ReturningRows` use the same types as `QueryResult.Schema` and
   `QueryResult.Rows`. Both are null for a statement without RETURNING. `ReturningSchema` is not null,
-  with an empty `ReturningRows`, when the statement inserted no rows.
+  with an empty `ReturningRows`, when the statement wrote no rows.
 - `ExecuteQueryAsync` with the same statement returns an ordinary `QueryResult`.
 - To get the count only, use the overload with `discardReturningRows: true`. It exists on
   `CamusConnection`, `CamusTransactionSession` and `CamusPreparedStatement`. The server still checks
   the RETURNING list and the SELECT privilege.
 - All rows of a no-rows reply travel in one message. A result larger than 4 MiB fails with
-  `CADB0550` and stores nothing; use `ExecuteQueryAsync` or the count-only overload for it.
+  `CADB0550` and changes nothing; use `ExecuteQueryAsync` or the count-only overload for it.
 
 ## Prepared statements
 

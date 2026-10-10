@@ -156,21 +156,41 @@ public static class StatementScope
     /// <summary>
     /// The statement-level form of <see cref="ReturnsRows(NodeType)"/>: also true for a write that
     /// returns rows, which the root node type alone cannot show (see <see cref="IsWriteReturningRows"/>).
-    /// A host that chooses the entry point itself must use this form, or an
-    /// <c>INSERT … RETURNING</c> goes to the no-rows path and its rows reach no one.
+    /// A host that chooses the entry point itself must use this form, or an INSERT, UPDATE or DELETE
+    /// with a RETURNING list goes to the no-rows path and its rows reach no one.
     /// </summary>
     public static bool ReturnsRows(NodeAst ast) => ReturnsRows(ast.nodeType) || IsWriteReturningRows(ast);
 
     /// <summary>
-    /// True for an INSERT with a RETURNING list. Both entry points accept it: the row-returning one
-    /// answers with the rows, and the no-rows one answers with the count plus the rows. A transport
-    /// that answers it on the row-returning path must begin a writable transaction rather than the
-    /// read-only snapshot a query runs in, and must send no row before the commit.
-    ///
-    /// <para>The grammar puts the list in <see cref="NodeAst.extendedTwo"/> for all four INSERT forms.</para>
+    /// True for an INSERT, UPDATE or DELETE with a RETURNING list. Both entry points accept it: the
+    /// row-returning one answers with the rows, and the no-rows one answers with the count plus the
+    /// rows. A transport that answers it on the row-returning path must begin a writable transaction
+    /// rather than the read-only snapshot a query runs in, and must send no row before the commit.
     /// </summary>
-    public static bool IsWriteReturningRows(NodeAst ast) =>
-        ast.nodeType is NodeType.Insert or NodeType.InsertSelect && ast.extendedTwo is not null;
+    public static bool IsWriteReturningRows(NodeAst ast) => GetReturningList(ast) is not null;
+
+    /// <summary>
+    /// True for a root node type that can carry a RETURNING list. A transport that knows only the root
+    /// type of a statement (a prepared statement, a batch frame) uses this to decide that a statement
+    /// sent to a row-returning endpoint writes: a statement of these types reaches that endpoint only
+    /// with a RETURNING list, because the query executor refuses it without one.
+    /// </summary>
+    public static bool CanReturnWrittenRows(NodeType nodeType) =>
+        nodeType is NodeType.Insert or NodeType.InsertSelect or NodeType.Update or NodeType.Delete;
+
+    /// <summary>
+    /// The RETURNING list of a write statement, or null when the statement is not a write or has no
+    /// list. The slot differs by statement, so every reader goes through this method and never reads a
+    /// slot itself: all four INSERT forms and DELETE put the list in <see cref="NodeAst.extendedTwo"/>,
+    /// and UPDATE puts it in <see cref="NodeAst.extendedThree"/>, because its
+    /// <see cref="NodeAst.extendedTwo"/> holds the LIMIT.
+    /// </summary>
+    public static NodeAst? GetReturningList(NodeAst ast) => ast.nodeType switch
+    {
+        NodeType.Insert or NodeType.InsertSelect or NodeType.Delete => ast.extendedTwo,
+        NodeType.Update => ast.extendedThree,
+        _ => null
+    };
 
     /// <summary>
     /// True for statements that are valid without a context database — every database-scoped

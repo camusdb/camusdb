@@ -75,7 +75,7 @@ public readonly struct ExecuteSQLTicket
     public RetryableAbortSink? RetryableAborts { get; }
 
     /// <summary>
-    /// True when the caller wants only the row count of an <c>INSERT … RETURNING</c>, not its rows.
+    /// True when the caller wants only the row count of a write with a RETURNING list, not its rows.
     /// The statement still validates its RETURNING list and still demands the SELECT privilege the
     /// list needs, so the same statement fails the same way with and without the flag; only the
     /// buffer, the projection and the serialization of the rows are skipped.

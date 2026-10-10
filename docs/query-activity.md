@@ -96,7 +96,8 @@ runs to its commit or its rollback, because stopping it part way would leave its
 instead of releasing them. These statements show `cancellable = false`, and a cancel of one fails
 with `CADB0552` rather than report a success that did not happen.
 
-`INSERT … RETURNING` returns rows the way a read does, so only its parse shows that it is a write.
+An `INSERT`, `UPDATE` or `DELETE` with a `RETURNING` list returns rows the way a read does, so only
+its parse shows that it is a write.
 For that reason, a row-returning statement accepts a cancel only after its parse shows a read.
 Before that it shows `cancellable = false`, and a cancel fails with `CADB0552`. A parse usually ends
 in microseconds, so send the cancel again if this occurs for a read.

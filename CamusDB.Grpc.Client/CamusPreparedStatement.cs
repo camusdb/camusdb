@@ -141,7 +141,7 @@ public sealed class CamusPreparedStatement : IAsyncDisposable
     /// <summary>
     /// Executes the statement as an autocommit no-rows statement. With
     /// <paramref name="discardReturningRows"/> set, the server does not send the rows of an
-    /// <c>INSERT … RETURNING</c>; see
+    /// INSERT, UPDATE or DELETE with RETURNING; see
     /// <see cref="CamusConnection.ExecuteNonQueryAsync(string, string, bool, CancellationToken)"/>.
     /// </summary>
     public async Task<NonQueryResult> ExecuteNonQueryAsync(

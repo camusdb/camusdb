@@ -46,10 +46,10 @@ public sealed class ExecuteNonSQLQueryResponse
     public SqlRoutingMetadataDto? Routing { get; set; }
 
     /// <summary>
-    /// The output columns of an <c>INSERT … RETURNING</c>, in RETURNING-list order. Omitted from the
+    /// The output columns of an INSERT, UPDATE or DELETE with a RETURNING list, in RETURNING-list order. Omitted from the
     /// JSON for a statement without RETURNING and for a request that set
     /// <c>discardReturningRows</c>, so a client that never uses RETURNING sees its exact response
-    /// shape. Present with an empty <see cref="ReturningRows"/> when the statement inserted no rows.
+    /// shape. Present with an empty <see cref="ReturningRows"/> when the statement wrote no rows.
     /// </summary>
     [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
     public List<ColumnSchemaDto>? Columns { get; set; }

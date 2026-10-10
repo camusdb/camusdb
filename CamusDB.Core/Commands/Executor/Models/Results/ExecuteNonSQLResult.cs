@@ -43,16 +43,18 @@ public readonly struct ExecuteNonSQLResult
     public string? Warning { get; }
 
     /// <summary>
-    /// The output columns of an <c>INSERT … RETURNING</c>, in RETURNING-list order. Null when the
+    /// The output columns of an INSERT, UPDATE or DELETE with a RETURNING list, in RETURNING-list
+    /// order. Null when the
     /// statement has no RETURNING list, and also when the caller asked for the count only
     /// (<see cref="Tickets.ExecuteSQLTicket.DiscardReturningRows"/>). A transport therefore tests
     /// this member, not the statement text, to decide whether the response carries rows: a non-null
-    /// value with an empty <see cref="ReturningRows"/> means the statement inserted no rows.
+    /// value with an empty <see cref="ReturningRows"/> means the statement wrote no rows.
     /// </summary>
     public IReadOnlyList<DerivedColumnSchema>? ReturningColumns { get; }
 
     /// <summary>
-    /// The projected RETURNING rows, one for each inserted row, in insert order. Each row is keyed by
+    /// The projected RETURNING rows, one for each written row, in write order: the inserted row, the
+    /// new image of an updated row, or the deleted row. Each row is keyed by
     /// the <see cref="DerivedColumnSchema.RowKey"/> of its column in <see cref="ReturningColumns"/>.
     /// Null exactly when <see cref="ReturningColumns"/> is null. The rows are fully buffered: the
     /// statement completed before this result exists, so a transport may send them only after it

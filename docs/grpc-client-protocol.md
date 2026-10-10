@@ -237,7 +237,7 @@ locking fields on the request are **ignored** — the transaction's properties w
 | RPC | Shape | Notes |
 |-----|-------|-------|
 | `ExecuteQuery(SqlRequest) → stream QueryStreamMessage` | server-stream | Schema-first (§3). Use for `SELECT`. |
-| `ExecuteNonQuery(SqlRequest) → NonQueryReply` | unary | `INSERT`/`UPDATE`/`DELETE`. Reply carries `affected_rows` + causal token, plus `returning_schema` / `returning_rows` for an `INSERT … RETURNING` (see below). |
+| `ExecuteNonQuery(SqlRequest) → NonQueryReply` | unary | `INSERT`/`UPDATE`/`DELETE`. Reply carries `affected_rows` + causal token, plus `returning_schema` / `returning_rows` for a statement with a `RETURNING` list (see below). |
 | `ExecuteDdl(SqlRequest) → DdlReply` | unary | `CREATE`/`ALTER`/`DROP`, `CREATE DATABASE`, etc. Reply carries only a causal token. |
 | `BatchExecute(stream … → stream …)` | duplex | Pipelined batching (§7). |
 | `StartTransaction(StartTxnRequest) → TxnHandle` | unary | Begin explicit transaction. |
@@ -248,20 +248,21 @@ locking fields on the request are **ignored** — the transaction's properties w
 `SqlRequest.parameters` is a `map<string, Value>` for bound parameters — prefer it over string
 interpolation to avoid injection and to carry typed values (dates, uuids, bytes) losslessly.
 
-**`INSERT … RETURNING`.** Both `ExecuteQuery` and `ExecuteNonQuery` accept it (see
-[insert-returning.md](insert-returning.md)):
+**`RETURNING`.** Both `ExecuteQuery` and `ExecuteNonQuery` accept an `INSERT`, `UPDATE` or `DELETE`
+with a `RETURNING` list (see [returning.md](returning.md)). An `UPDATE` returns the new row:
 
 - On `ExecuteQuery` (and a `QUERY` batch op) the rows arrive as an ordinary query stream. An autocommit
-  statement runs in a writable transaction, and the schema is sent only after the commit.
+  statement runs in a writable transaction, and the schema is sent only after the commit. This is also
+  true for a prepared statement.
 - On `ExecuteNonQuery` (and a `NON_QUERY` batch op) the reply carries `returning_schema` (field 7) and
   `returning_rows` (field 8) beside `affected_rows`. `returning_schema` is a message field: unset means
-  "no RETURNING list, or the count only was asked for"; set with no rows means the statement inserted
+  "no RETURNING list, or the count only was asked for"; set with no rows means the statement wrote
   nothing. A client that ignores the two fields sees the same reply as before.
 - `SqlRequest.discard_returning_rows` (field 15) asks a no-rows call for the count only. The list and
   the SELECT privilege are still checked. `ExecuteQuery` refuses a request that sets it (`CADB0400`).
 - All rows of a no-rows reply travel in one message. A reply larger than a client receives by default
   (4 MiB) is refused with `CADB0550` (`RESOURCE_EXHAUSTED`) **before** the commit, so nothing is
-  stored. Use `ExecuteQuery` or `discard_returning_rows` for such a statement.
+  changed. Use `ExecuteQuery` or `discard_returning_rows` for such a statement.
 
 ---
 
@@ -434,9 +435,11 @@ have already emitted rows before conflicting, so silent server replay could corr
 matches the "retry only pre-first-write" contract on the unary streaming path — once output has been
 written, replay is the client's call.
 
-For a **transactional** op, a retryable failure kills the whole transaction: replay the entire unit
-of work — a fresh `START` (new handle) followed by all its statements and a new `COMMIT` — not just
-the one failed op. A `commit_reply` that fails with `CADB0509` (finalize unresolved) is the
+For a **transactional** op, any failure ends the whole transaction, retryable or not. The server
+rolls the transaction back when the op fails, as the unary path does, because the statement may have
+staged some of its changes before it failed. A later `COMMIT` on that handle fails, and a `ROLLBACK`
+succeeds as a no-op. To retry, replay the entire unit of work — a fresh `START` (new handle) followed
+by all its statements and a new `COMMIT` — not just the one failed op. A `commit_reply` that fails with `CADB0509` (finalize unresolved) is the
 exception: re-send the *same* `COMMIT` for the *same* handle (the finalize gate makes that safe).
 
 ### 7.6 Prepared statements — `PREPARE` / `CLOSE`

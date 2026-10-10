@@ -172,23 +172,23 @@ internal sealed class SelectStatementExecutor
     }
 
     /// <summary>
-    /// Runs an <c>INSERT … RETURNING</c> statement through the no-rows dispatcher. Set once by
+    /// Runs an INSERT, UPDATE or DELETE with a RETURNING list through the no-rows dispatcher. Set once by
     /// <see cref="CommandExecutor"/> after it builds the dispatcher: the dispatcher depends on this
     /// class, so it cannot be a constructor argument here.
     /// </summary>
-    internal Func<ExecuteSQLTicket, Task<Models.Results.ExecuteNonSQLResult>>? InsertReturningHandler { get; set; }
+    internal Func<ExecuteSQLTicket, Task<Models.Results.ExecuteNonSQLResult>>? WriteReturningHandler { get; set; }
 
     /// <summary>
-    /// Answers an <c>INSERT … RETURNING</c> on the row-returning entry point: runs the statement,
+    /// Answers a write with a RETURNING list on the row-returning entry point: runs the statement,
     /// publishes the RETURNING schema, and returns the buffered rows as a cursor.
     /// </summary>
-    private async Task<(DatabaseDescriptor database, IAsyncEnumerable<QueryResultRow> cursor)> ExecuteInsertReturningAsync(
+    private async Task<(DatabaseDescriptor database, IAsyncEnumerable<QueryResultRow> cursor)> ExecuteWriteReturningAsync(
         ExecuteSQLTicket ticket, QuerySchemaHolder? schemaOut)
     {
-        if (InsertReturningHandler is null)
-            throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "INSERT ... RETURNING is not wired on this executor");
+        if (WriteReturningHandler is null)
+            throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "A write with RETURNING is not wired on this executor");
 
-        Models.Results.ExecuteNonSQLResult result = await InsertReturningHandler(ticket).ConfigureAwait(false);
+        Models.Results.ExecuteNonSQLResult result = await WriteReturningHandler(ticket).ConfigureAwait(false);
 
         // A retryable abort recorded instead of thrown: the statement did not complete, and the
         // transport that owns the sink reports it. No rows are exposed.
@@ -252,7 +252,7 @@ internal sealed class SelectStatementExecutor
         // A read observes its ticket's token for its whole run, so CANCEL QUERY can stop it: the
         // ticket from here on carries the entry's token, which is linked to the transport's. The
         // entry accepts a cancel only after the parse shows a read, because this path also runs
-        // INSERT … RETURNING.
+        // writes with a RETURNING list.
         QueryActivityEntry? activity = queryActivity.BeginRowReturning(ticket);
 
         if (activity is null)
@@ -335,17 +335,17 @@ internal sealed class SelectStatementExecutor
         recording?.Describe(ast.nodeType);
         activity?.Describe(ast.nodeType);
 
-        // INSERT … RETURNING is a write that returns rows. The no-rows dispatcher owns every write
-        // statement, so it runs the statement and this path only exposes its buffered rows as a
-        // cursor. The statement completes before the cursor exists, so draining the cursor does no
-        // further work.
-        if (InsertReturningPlan.HasReturning(ast))
+        // An INSERT, UPDATE or DELETE with a RETURNING list is a write that returns rows. The no-rows
+        // dispatcher owns every write statement, so it runs the statement and this path only exposes
+        // its buffered rows as a cursor. The statement completes before the cursor exists, so draining
+        // the cursor does no further work.
+        if (StatementScope.IsWriteReturningRows(ast))
         {
             // A write: once its first row lands it runs to its commit or rollback, whatever the token
             // says, so the entry never accepts a cancel, and a cancel is refused rather than reported
             // as done.
             activity?.MarkExecuting();
-            return await ExecuteInsertReturningAsync(ticket, schemaOut).ConfigureAwait(false);
+            return await ExecuteWriteReturningAsync(ticket, schemaOut).ConfigureAwait(false);
         }
 
         // Every other statement on this path is a read, which observes its token for its whole run.

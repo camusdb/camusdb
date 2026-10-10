@@ -16,8 +16,8 @@ using CamusDB.Core.SQLParser;
 namespace CamusDB.Core.CommandsExecutor.Controllers.DML;
 
 /// <summary>
-/// The bound RETURNING list of one <c>INSERT … RETURNING</c> statement: its output schema and the
-/// query ticket that projects the inserted rows through the ordinary SELECT projector.
+/// The bound RETURNING list of one <c>INSERT</c>, <c>UPDATE</c> or <c>DELETE</c> statement: its output
+/// schema and the query ticket that projects the written rows through the ordinary SELECT projector.
 ///
 /// <para><b>Why a SELECT binding.</b> A RETURNING list is a select list over the target table — the
 /// same items, aliases, <c>*</c> and scalar expressions. Binding it as <c>SELECT &lt;list&gt; FROM
@@ -27,20 +27,26 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.DML;
 /// check demands SELECT on the target: the list reads stored values, defaults and sequence draws the
 /// caller could not otherwise see.</para>
 ///
-/// <para><b>What the list may not hold.</b> No aggregate (one output row belongs to one inserted row),
+/// <para><b>What the list may not hold.</b> No aggregate (one output row belongs to one written row),
 /// no subquery (the projector evaluates rows synchronously and the bind pipeline's subquery stages
 /// are not run here), and no sequence call (a draw would change a sequence for each returned row, and
 /// the statement's sequence reservation does not cover the list). Each is refused before anything is
 /// written: the first two with <see cref="CamusDBErrorCodes.InvalidInput"/>, a sequence call with
 /// <see cref="CamusDBErrorCodes.SequenceCallNotAllowedHere"/>.</para>
 ///
-/// <para><b>Input rows.</b> The inserter reports each row as the values dictionary it encoded. That
-/// dictionary holds only the columns the statement or a default supplied, so
-/// <see cref="ProjectAsync"/> widens each row to every readable column of the table, in schema order,
-/// with NULL for an absent one — the shape a scan of the table would produce, which is what
-/// <c>RETURNING *</c> and the schema builder's <c>*</c> expansion both assume.</para>
+/// <para><b>Input rows.</b> Each input row is a values dictionary: the row an INSERT encoded, the new
+/// image an UPDATE wrote, or the row a DELETE removed. An UPDATE returns the new image only. The
+/// dictionary can hold fewer columns than the table: an INSERT holds only the columns the statement or
+/// a default supplied, and an UPDATE or a DELETE decodes only the columns it needs. So
+/// <see cref="ProjectAsync"/> reshapes each row into the input layout of the projection, with NULL for
+/// an absent column. For <c>RETURNING *</c> that layout is every readable column of the table, in schema
+/// order — the shape a full scan produces, which the schema builder's <c>*</c> expansion assumes. For
+/// any other list it is only <see cref="RequiredColumns"/>, in schema order — the shape a narrowed
+/// SELECT scan produces — so a narrow list over a wide table copies a few cells per row, not one per
+/// table column. An UPDATE or a DELETE must decode <see cref="RequiredColumns"/>, or a column the list
+/// reads comes back NULL with no error.</para>
 /// </summary>
-internal sealed class InsertReturningPlan
+internal sealed class WriteReturningPlan
 {
     private static readonly QueryProjector Projector = new();
 
@@ -53,32 +59,35 @@ internal sealed class InsertReturningPlan
     /// <summary>The output columns, in RETURNING-list order, with <c>*</c> expanded.</summary>
     public IReadOnlyList<DerivedColumnSchema> Columns { get; }
 
-    private InsertReturningPlan(QueryTicket projectionTicket, IReadOnlyList<DerivedColumnSchema> columns, TableSchema schema)
+    /// <summary>
+    /// The schema-cased columns the list reads, or null when it reads every column (a <c>*</c>, or a
+    /// name that does not match a column of the current schema exactly). An UPDATE or a DELETE adds
+    /// these to the columns it decodes from each written row. Computed by the same analysis a SELECT
+    /// scan uses to narrow its decode, so a qualified name resolves as it does in a SELECT.
+    /// </summary>
+    public IReadOnlySet<string>? RequiredColumns { get; }
+
+    private WriteReturningPlan(QueryTicket projectionTicket, IReadOnlyList<DerivedColumnSchema> columns, TableSchema schema)
     {
         this.projectionTicket = projectionTicket;
         Columns = columns;
 
-        List<string> readable = new(schema.Columns?.Count ?? 0);
+        RequiredColumns = RequiredColumnAnalyzer.ComputeSingleTable(projectionTicket) is { } referenced
+            ? MutationRowRecheck.ToSchemaColumns(schema, referenced)
+            : null;
+
+        // The input layout: every readable column for a list that reads every column, otherwise only
+        // the columns the list reads. Both keep schema order, as a scan's layout does.
+        List<string> input = new(RequiredColumns?.Count ?? schema.Columns?.Count ?? 0);
         foreach (TableColumnSchema column in schema.Columns ?? [])
         {
-            if (SchemaElementStateRules.IsReadable(column))
-                readable.Add(column.Name);
+            if (SchemaElementStateRules.IsReadable(column) && (RequiredColumns is null || RequiredColumns.Contains(column.Name)))
+                input.Add(column.Name);
         }
 
-        inputColumns = readable.ToArray();
+        inputColumns = input.ToArray();
         inputLayout = RowLayout.ForColumns(inputColumns);
     }
-
-    /// <summary>
-    /// The RETURNING list of an INSERT statement, or null when the statement is not an INSERT or has
-    /// no RETURNING list. The grammar puts the list in <see cref="NodeAst.extendedTwo"/> for all four
-    /// INSERT forms.
-    /// </summary>
-    internal static NodeAst? GetReturningList(NodeAst ast) =>
-        StatementScope.IsWriteReturningRows(ast) ? ast.extendedTwo : null;
-
-    /// <summary>True when <paramref name="ast"/> is an INSERT that returns rows.</summary>
-    internal static bool HasReturning(NodeAst ast) => StatementScope.IsWriteReturningRows(ast);
 
     /// <summary>
     /// Refuses the items a RETURNING list may not hold (see the class summary). Runs on the AST
@@ -111,11 +120,11 @@ internal sealed class InsertReturningPlan
     }
 
     /// <summary>
-    /// Binds <paramref name="returningList"/> as a select list over the table the INSERT targets.
+    /// Binds <paramref name="returningList"/> as a select list over the table the statement writes.
     /// See the class summary for why this is a SELECT binding and why it demands SELECT.
     /// </summary>
-    /// <param name="targetAst">The INSERT's target table node, used as the FROM clause.</param>
-    internal static async Task<InsertReturningPlan> BindAsync(
+    /// <param name="targetAst">The statement's target table node, used as the FROM clause.</param>
+    internal static async Task<WriteReturningPlan> BindAsync(
         SelectQueryCreator selectQueryCreator,
         QueryBinder queryBinder,
         DatabaseDescriptor database,
@@ -132,38 +141,45 @@ internal sealed class InsertReturningPlan
         BoundSelectQuery bound;
 
         // The binder opens the target through the per-table chokepoint, which checks the ambient
-        // requirement. Narrowed here, it checks SELECT on the target instead of the statement's INSERT.
+        // requirement. Narrowed here, it checks SELECT on the target instead of the statement's own
+        // INSERT, UPDATE or DELETE privilege.
         using (AuthorizationContext.WithRequiredPrivilege(Privilege.Select))
             bound = await queryBinder.BindAsync(database, query).ConfigureAwait(false);
 
         QueryTicket projectionTicket = QueryTicketAdapter.ToQueryTicket(bound, ticket);
         IReadOnlyList<DerivedColumnSchema> columns = DerivedTableSchemaBuilder.Build(query, bound);
 
-        return new InsertReturningPlan(projectionTicket, columns, table.Schema);
+        return new WriteReturningPlan(projectionTicket, columns, table.Schema);
     }
 
     /// <summary>
-    /// Projects the inserted rows through the RETURNING list, in insert order. The rows are all in
+    /// Projects the written rows through the RETURNING list, in the given order. The rows are all in
     /// memory already, so the result is a list rather than a cursor: a transport sends it only after
     /// the statement and its transaction completed.
     /// </summary>
-    internal async Task<List<QueryResultRow>> ProjectAsync(List<QueryResultRow> insertedRows)
+    internal async Task<List<QueryResultRow>> ProjectAsync(List<QueryResultRow> writtenRows)
     {
-        List<QueryResultRow> output = new(insertedRows.Count);
+        List<QueryResultRow> output = new(writtenRows.Count);
+        await ProjectIntoAsync(writtenRows, output).ConfigureAwait(false);
+        return output;
+    }
 
-        if (insertedRows.Count == 0)
-            return output;
+    /// <summary>Projects <paramref name="writtenRows"/> and appends the output rows to <paramref name="output"/>.</summary>
+    private async Task ProjectIntoAsync(List<QueryResultRow> writtenRows, List<QueryResultRow> output)
+    {
+        if (writtenRows.Count == 0)
+            return;
 
-        List<QueryResultRow> inputRows = new(insertedRows.Count);
+        List<QueryResultRow> inputRows = new(writtenRows.Count);
 
-        foreach (QueryResultRow inserted in insertedRows)
+        foreach (QueryResultRow written in writtenRows)
         {
             ColumnValue[] values = new ColumnValue[inputColumns.Length];
 
             for (int i = 0; i < inputColumns.Length; i++)
-                values[i] = inserted.Row.TryGetValue(inputColumns[i], out ColumnValue? value) ? value : ColumnValue.Null;
+                values[i] = written.Row.TryGetValue(inputColumns[i], out ColumnValue? value) ? value : ColumnValue.Null;
 
-            inputRows.Add(new QueryResultRow(inserted.RowId, new QueryRow(inserted.RowId, inputLayout, values)));
+            inputRows.Add(new QueryResultRow(written.RowId, new QueryRow(written.RowId, inputLayout, values)));
         }
 
         await foreach (QueryResultRow projected in Projector
@@ -172,8 +188,39 @@ internal sealed class InsertReturningPlan
         {
             output.Add(projected);
         }
+    }
 
-        return output;
+    /// <summary>
+    /// Starts the output buffer of one UPDATE or DELETE attempt. See <see cref="ReturningRowCollector"/>.
+    /// </summary>
+    internal ReturningRowCollector CreateCollector() => new(this);
+
+    /// <summary>
+    /// The output buffer of one UPDATE or DELETE attempt. The write path hands it each chunk of rows
+    /// right after the chunk's batch write succeeded, and the collector projects the chunk at once:
+    /// the buffer then keeps only the output columns, not the decoded rows, so a statement that
+    /// returns one small column from wide rows holds that column alone until the commit.
+    ///
+    /// <para>One collector belongs to one attempt. A retried attempt gets a new one, so it never
+    /// returns a row from the attempt that failed. A chunk whose write recorded a retryable abort is
+    /// never handed over, and a statement that recorded one returns no rows at all.</para>
+    /// </summary>
+    internal sealed class ReturningRowCollector
+    {
+        private readonly WriteReturningPlan plan;
+
+        private readonly List<QueryResultRow> rows = new();
+
+        internal ReturningRowCollector(WriteReturningPlan plan) => this.plan = plan;
+
+        /// <summary>The columns the write path must decode from each written row; see <see cref="WriteReturningPlan.RequiredColumns"/>.</summary>
+        public IReadOnlySet<string>? RequiredColumns => plan.RequiredColumns;
+
+        /// <summary>The projected output rows, in write order.</summary>
+        public List<QueryResultRow> Rows => rows;
+
+        /// <summary>Projects one written chunk and appends its output rows.</summary>
+        public Task AddChunkAsync(List<QueryResultRow> writtenRows) => plan.ProjectIntoAsync(writtenRows, rows);
     }
 
     /// <summary>

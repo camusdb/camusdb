@@ -61,6 +61,11 @@ internal sealed class RowDeleter
     /// repeat work the purge did. The indexes themselves stay in the schema: the table's drop delta
     /// removes them, so a refused drop leaves them intact.
     /// </param>
+    /// <param name="returning">
+    /// The collector of a <c>DELETE … RETURNING</c>, or null. Each written chunk hands its deleted rows
+    /// to it after the chunk's batch delete succeeded, and the write phase also decodes the columns the
+    /// list reads; see <see cref="FlushDeleteChunk"/>.
+    /// </param>
     public async Task<int> Delete(
         QueryExecutor queryExecutor,
         DatabaseDescriptor database,
@@ -68,7 +73,8 @@ internal sealed class RowDeleter
         DeleteTicket ticket,
         bool allowMaterializedView = false,
         bool checkForeignKeys = true,
-        bool maintainIndexes = true)
+        bool maintainIndexes = true,
+        DML.WriteReturningPlan.ReturningRowCollector? returning = null)
     {
         if (!allowMaterializedView)
             MaterializedViewAccessGuard.RequireWritable(table);
@@ -87,7 +93,8 @@ internal sealed class RowDeleter
         )
         {
             ForeignKeys = foreignKeys,
-            MaintainIndexes = maintainIndexes
+            MaintainIndexes = maintainIndexes,
+            Returning = returning
         };
 
         FluxMachine<DeleteFluxSteps, DeleteFluxState> machine = new(state);
@@ -373,6 +380,12 @@ internal sealed class RowDeleter
     /// remove the stale entry and orphan the new one. The predicate is re-evaluated on the same read
     /// (<see cref="MutationRowRecheck"/>), so a row that a concurrent commit moved out of the WHERE is
     /// kept, and a row that a concurrent commit already deleted is skipped. Neither is counted.</para>
+    ///
+    /// <para>For a RETURNING list, the decode also covers the columns the list reads (every column when
+    /// the list holds <c>*</c>), and large values of those columns are fetched. Without that, a column
+    /// the list reads would reach the projection as NULL, with no error. The deleted rows go to the
+    /// collector only after the batch delete succeeded, so the returned rows are exactly the counted
+    /// rows.</para>
     /// </summary>
     private async Task FlushDeleteChunk(
         TableDescriptor table,
@@ -384,13 +397,14 @@ internal sealed class RowDeleter
         // Index writability is fixed for the statement, so filter once per chunk instead of per row;
         // the decode below is narrowed to the index key columns and the re-checked predicate's
         // columns — the only values this path consumes (the row bytes are deleted wholesale, never
-        // re-encoded). Values for those columns are identical to a full decode; other columns are
-        // simply never materialized. A predicate column that cannot be named exactly decodes all.
+        // re-encoded), plus the columns a RETURNING list reads. Values for those columns are identical
+        // to a full decode; other columns are simply never materialized. A predicate or RETURNING
+        // column that cannot be named exactly decodes all.
         List<TableIndexSchema> writableIndexes = state.MaintainIndexes
             ? SchemaElementStateRules.CollectWritableIndexes(table.Schema, table.Indexes)
             : [];
         HashSet<string>? requiredColumns = null;
-        if (recheck.Columns is not null)
+        if (recheck.Columns is not null && (state.Returning is null || state.Returning.RequiredColumns is not null))
         {
             requiredColumns = CollectIndexKeyColumns(writableIndexes);
             requiredColumns.UnionWith(recheck.Columns);
@@ -398,6 +412,9 @@ internal sealed class RowDeleter
             // The referenced columns are unique-index key columns, so they are here already; added
             // explicitly so that a later narrowing of the decode cannot drop them.
             state.ForeignKeys.CollectParentColumns(requiredColumns);
+
+            if (state.Returning?.RequiredColumns is { } returned)
+                requiredColumns.UnionWith(returned);
         }
         RowEncoder.DictionaryDecodeState decodeState = new();
 
@@ -408,7 +425,8 @@ internal sealed class RowDeleter
         (ReadOnlyMemory<byte>?[] rawRows, List<int>?[] outOfLine) = await ReadRowsForDeleteAsync(table, tx, chunk, requiredColumns, default).ConfigureAwait(false);
 
         List<KvTableStore.RowDelete> batch = new(chunk.Count);
-        
+        List<QueryResultRow>? returnedRows = state.Returning is not null ? new(chunk.Count) : null;
+
         for (int i = 0; i < chunk.Count; i++)
         {
             ObjectIdValue rowId = chunk[i];
@@ -438,6 +456,7 @@ internal sealed class RowDeleter
             });
 
             state.ForeignKeys.AddRemovedParentRow(writableRow);
+            returnedRows?.Add(new QueryResultRow(rowId, writableRow));
         }
 
         if (_stats is not null && batch.Count > _stats.DeleteBatchMaxChunkSeen)
@@ -445,6 +464,9 @@ internal sealed class RowDeleter
 
         await table.Store.DeleteRowsBatch(tx, batch).ConfigureAwait(false);
         state.DeletedRows += batch.Count;
+
+        if (returnedRows is not null)
+            await state.Returning!.AddChunkAsync(returnedRows).ConfigureAwait(false);
 
         foreach (KvTableStore.RowDelete row in batch)
             Log.LogRowDeleted(logger, row.RowId);

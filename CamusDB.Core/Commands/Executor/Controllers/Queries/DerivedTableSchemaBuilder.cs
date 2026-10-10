@@ -615,8 +615,35 @@ internal static class DerivedTableSchemaBuilder
         if (target.nodeType == NodeType.ExprNegate)
             return InferType(target.leftAst!, innerBound, innerResolver);
 
+        if (IsBooleanResult(target.nodeType))
+            return ColumnType.Bool;
+
         return ColumnType.String;
     }
+
+    /// <summary>
+    /// True for an expression whose value is always a Boolean or NULL: a comparison, a logical
+    /// operator, a truth test, a pattern match, a membership or quantified test, an <c>EXISTS</c>, and a
+    /// Boolean literal. The evaluator returns <see cref="ColumnType.Bool"/> for each of them, so the
+    /// declared type must be Bool too. Without this, <c>SELECT n &gt; 0 AS positive</c> (and the same
+    /// item in a RETURNING list) declared a String column that carried Bool cells, and a client that
+    /// reads values by the declared type got the wrong type, even for a result with no rows.
+    /// </summary>
+    private static bool IsBooleanResult(NodeType nodeType) => nodeType is
+        NodeType.Bool or
+        NodeType.ExprEquals or NodeType.ExprNotEquals or
+        NodeType.ExprLessThan or NodeType.ExprGreaterThan or
+        NodeType.ExprLessEqualsThan or NodeType.ExprGreaterEqualsThan or
+        NodeType.ExprBetween or
+        NodeType.ExprAnd or NodeType.ExprOr or NodeType.ExprNot or
+        NodeType.ExprIsNull or NodeType.ExprIsNotNull or
+        NodeType.ExprIsTrue or NodeType.ExprIsNotTrue or NodeType.ExprIsFalse or NodeType.ExprIsNotFalse or
+        NodeType.ExprLike or NodeType.ExprILike or
+        NodeType.ExprRegexMatch or NodeType.ExprRegexMatchCi or NodeType.ExprRegexNotMatch or NodeType.ExprRegexNotMatchCi or
+        NodeType.ExprInMembership or NodeType.ExprNotInMembership or
+        NodeType.ExprInSubquery or NodeType.ExprNotInSubquery or
+        NodeType.ExprExistsSubquery or NodeType.ExprExistsCorrelated or
+        NodeType.ExprQuantifiedComparison;
 
     /// <summary>
     /// The return type of a scalar function call. The argument types decide it for a type-polymorphic

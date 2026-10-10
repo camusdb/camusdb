@@ -234,6 +234,62 @@ public sealed class TestRetryableAbortsAsValues : SharedNodeBaseTest
         Assert.Fail($"Kahuna never aborted the lost update at the statement in {MaxAttempts} attempts");
     }
 
+    /// <summary>
+    /// An UPDATE … RETURNING that records a retryable abort in the write phase did not complete: the
+    /// result carries no RETURNING rows at all, so no transport can send a row of an attempt that will
+    /// not commit.
+    /// </summary>
+    [Test]
+    public async Task WritePhaseLoss_WithReturning_ReturnsNoRows()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupAccountsAsync();
+        RowUpdater updater = executor.RowUpdaterForTests;
+
+        for (int attempt = 1; attempt <= MaxAttempts; attempt++)
+        {
+            long winnerBalance = 1000 + attempt;
+
+            bool hookRan = false;
+            updater.TestBeforeWriteHook = async () =>
+            {
+                updater.TestBeforeWriteHook = null;
+                hookRan = true;
+                KvTransaction winner = await BeginOptimisticAsync(database);
+                await ExecIn(executor, dbname, winner, $"UPDATE accounts SET balance = {winnerBalance} WHERE id = \"a\"");
+                await database.Transactions.CommitAsync(winner);
+                await CommittedBalance(executor, database, dbname, "a"); // wait for the apply; see ReadThenLoseRowAAsync
+            };
+
+            await Task.Delay(5); // a fresh HLC millisecond; see MaxAttempts
+            KvTransaction loser = await BeginOptimisticAsync(database);
+            RetryableAbortSink aborts = new();
+            ExecuteNonSQLResult result;
+            try
+            {
+                result = await ExecIn(executor, dbname, loser,
+                    "UPDATE accounts SET balance = balance + 1 WHERE id = \"a\" RETURNING balance", aborts);
+            }
+            finally
+            {
+                updater.TestBeforeWriteHook = null;
+            }
+
+            Assert.That(hookRan, Is.True, "the competing commit never ran inside the write window");
+            await database.Transactions.RollbackIfNotCompletedAsync(loser);
+
+            if (!aborts.HasAbort)
+                continue;
+
+            Assert.That(result.ModifiedRows, Is.Zero);
+            Assert.That(result.ReturningColumns, Is.Null);
+            Assert.That(result.ReturningRows, Is.Null);
+            Assert.That(await CommittedBalance(executor, database, dbname, "a"), Is.EqualTo(winnerBalance));
+            return;
+        }
+
+        Assert.Fail($"Kahuna never aborted the lost update at the statement in {MaxAttempts} attempts");
+    }
+
     [Test]
     public async Task UncontendedUpdate_WithSink_CommitsAndRecordsNothing()
     {

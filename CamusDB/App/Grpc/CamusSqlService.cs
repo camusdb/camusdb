@@ -195,8 +195,9 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
             NodeAst ast = executor.ParseSql(sql);
             QueryStreamSink sink = new(responseStream);
 
-            // An INSERT … RETURNING writes: it needs a writable transaction, no row may reach the wire
-            // before its commit, and a Kahuna failure must not be reported as a retryable read failure.
+            // A write with a RETURNING list (INSERT, UPDATE or DELETE) needs a writable transaction, no
+            // row may reach the wire before its commit, and a Kahuna failure must not be reported as a
+            // retryable read failure.
             bool writesRows = StatementScope.IsWriteReturningRows(ast);
 
             // A server-level query needs no database context and no transaction.
@@ -274,7 +275,7 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
     /// therefore emit it after the last row, never before.</para>
     /// </summary>
     /// <param name="writesRows">
-    /// True for an <c>INSERT … RETURNING</c>. Its Kahuna failures keep the conservative mapping,
+    /// True for an INSERT, UPDATE or DELETE with a RETURNING list. Its Kahuna failures keep the conservative mapping,
     /// because a write is not known to be idempotent.
     /// </param>
     private async Task<DatabaseDescriptor?> StreamQueryAsync(
@@ -438,7 +439,7 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
     }
 
     /// <summary>
-    /// Runs an autocommit <c>INSERT … RETURNING</c> sent to <c>ExecuteQuery</c>: begins the same
+    /// Runs an autocommit write with a RETURNING list sent to <c>ExecuteQuery</c>: begins the same
     /// writable transaction <c>ExecuteNonQuery</c> begins, buffers every row, commits, and only then
     /// writes the schema and the rows. Nothing is on the wire before the commit, so a Serializable
     /// conflict replays from a fresh transaction, and a client never receives rows from an attempt
@@ -1348,10 +1349,10 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
         string sql = resolved.Sql;
         BatchQuerySink sink = new(writer, requestId);
 
-        // An INSERT reaches the query kind only with a RETURNING list (without one the executor
-        // refuses it). It writes, so its autocommit form takes a writable transaction and sends its
-        // rows only after the commit.
-        bool writesRows = resolved.RootType is NodeType.Insert or NodeType.InsertSelect;
+        // An INSERT, UPDATE or DELETE reaches the query kind only with a RETURNING list (without one
+        // the executor refuses it). It writes, so its autocommit form takes a writable transaction and
+        // sends its rows only after the commit.
+        bool writesRows = StatementScope.CanReturnWrittenRows(resolved.RootType);
         HLCTimestamp commitToken = default;
         CacheMetadataHolder cacheMeta = new();
         Core.Routing.StatementRoutingCollector? routingCollector = null;
@@ -1368,9 +1369,9 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
         }
         else if (request.TxnHandle is { TxnIdPt: > 0 } handle)
         {
-            // Explicit transaction — the client owns the lifecycle, so no commit and no auto-rollback.
-            // Advice is still collected: it describes the statement's table, and a client uses it to
-            // place the next transaction's START on that table's leader; it never moves this one.
+            // Explicit transaction — the client owns the commit. Advice is still collected: it
+            // describes the statement's table, and a client uses it to place the next transaction's
+            // START on that table's leader; it never moves this one.
             if (stageClock is not null)
                 stageClock.Path = QueryStageProfile.Paths.Txn;
             KvTransaction txnState = transactions.GetState(handle.TxnIdPt, (uint)handle.TxnIdCounter);
@@ -1380,11 +1381,23 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
                 parameters: resolved.Parameters, principal: principal,
                 cancellationToken: ct, routing: routingCollector,
                 discardReturningRows: request.DiscardReturningRows);
-            routingDb = await StreamQueryAsync(ticket, sink, ct, writesRows: writesRows).ConfigureAwait(false);
+            try
+            {
+                routingDb = await StreamQueryAsync(ticket, sink, ct, writesRows: writesRows).ConfigureAwait(false);
+            }
+            catch
+            {
+                // A failed statement ends the transaction, as on the unary path. A write with RETURNING
+                // can fail after some of its rows are staged (a RETURNING expression that fails on a
+                // later row, for example); the client is told the statement failed, so a later COMMIT
+                // must not store those rows. The client's ROLLBACK is then an idempotent no-op.
+                await transactions.RollbackIfNotCompletedAsync(txnState).ConfigureAwait(false);
+                throw;
+            }
         }
         else if (writesRows)
         {
-            // Autocommit INSERT … RETURNING: begin a writable transaction, buffer the rows, commit,
+            // Autocommit write with RETURNING: begin a writable transaction, buffer the rows, commit,
             // and only then hand the schema and rows to the sink. Not server-retried, like the read
             // below: a retryable conflict is reported as BatchError for the client to replay, and
             // nothing of this op is on the stream yet when it is.
@@ -1497,9 +1510,13 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
     /// <summary>
     /// Runs one non-query op and writes its reply. Returns the retryable abort the statement recorded
     /// instead of throwing (see <see cref="RetryableAbortSink"/>), which the caller answers as the op's
-    /// error, or null when a reply was written. An autocommit statement that recorded one is rolled back
-    /// here and never committed; an explicit transaction is left to its client, as a thrown abort leaves
-    /// it. Every other failure is still thrown.
+    /// error, or null when a reply was written. Every other failure is still thrown.
+    ///
+    /// <para>A statement that fails, by a recorded abort or a thrown error, is never committed. An
+    /// autocommit statement is rolled back here. An explicit transaction is rolled back too, as on the
+    /// unary path: the statement may have staged some of its rows before it failed (an UPDATE that
+    /// fails in a later chunk, a RETURNING expression that fails on a later row), and the client is
+    /// told it failed, so a later COMMIT must not store them. The client's ROLLBACK is then a no-op.</para>
     /// </summary>
     private async Task<CamusDBException?> RunBatchNonQueryAsync(
         int requestId,
@@ -1547,24 +1564,32 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
                 parameters: resolved.Parameters, principal: principal,
                 routing: routingCollector, retryableAborts: aborts,
                 discardReturningRows: request.DiscardReturningRows);
-            ExecuteNonSQLResult result = await executor.ExecuteNonSQLQuery(ticket).ConfigureAwait(false);
-            if (aborts.Abort is { } txnAbort)
-                return txnAbort;
-
-            reply = new NonQueryReply { AffectedRows = result.ModifiedRows, Warning = result.Warning ?? "" };
+            DatabaseDescriptor? resultDatabase;
             try
             {
+                ExecuteNonSQLResult result = await executor.ExecuteNonSQLQuery(ticket).ConfigureAwait(false);
+                resultDatabase = result.Database;
+                if (aborts.Abort is { } txnAbort)
+                {
+                    await transactions.RollbackIfNotCompletedAsync(txnState).ConfigureAwait(false);
+                    return txnAbort;
+                }
+
+                reply = new NonQueryReply { AffectedRows = result.ModifiedRows, Warning = result.Warning ?? "" };
+
+                // An oversized RETURNING reply is refused here, after the statement staged its rows; the
+                // catch below rolls the transaction back for it as for any other failure.
                 AttachReturning(reply, result);
             }
-            catch (CamusDBException)
+            catch
             {
-                // The statement's rows are staged in the client's transaction, but the client is told
-                // the statement failed. Rolling the transaction back makes its later COMMIT fail, so
-                // rows the client believes were refused can never be committed.
+                // The statement's rows may be staged in the client's transaction, but the client is told
+                // the statement failed. Rolling the transaction back makes its later COMMIT fail, so rows
+                // the client believes were refused can never be committed.
                 await transactions.RollbackIfNotCompletedAsync(txnState).ConfigureAwait(false);
                 throw;
             }
-            RoutingAdvice? advice = BuildRoutingAdvice(result.Database, routingCollector);
+            RoutingAdvice? advice = BuildRoutingAdvice(resultDatabase, routingCollector);
             if (advice is not null)
                 reply.Routing = advice;
         }

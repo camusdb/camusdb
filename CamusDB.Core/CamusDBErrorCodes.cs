@@ -588,12 +588,12 @@ public static class CamusDBErrorCodes
     public const string SpillLimitExceeded = "CADB0549";
 
     /// <summary>
-    /// The rows of an <c>INSERT … RETURNING</c> do not fit in one reply of a transport that sends
+    /// The RETURNING rows of an INSERT, UPDATE or DELETE do not fit in one reply of a transport that sends
     /// them all at once — the gRPC <c>ExecuteNonQuery</c> reply and a non-query batch op — because
     /// the reply would be larger than a client receives by default.
     ///
     /// <para>The check runs before the commit, so the statement is rolled back and nothing it
-    /// inserted is kept: a client is never told a committed write failed. Send the statement to
+    /// wrote is kept: a client is never told a committed write failed. Send the statement to
     /// <c>ExecuteQuery</c>, which streams the rows, or set <c>discard_returning_rows</c> to receive
     /// the count only. Maps to HTTP 400.</para>
     /// </summary>

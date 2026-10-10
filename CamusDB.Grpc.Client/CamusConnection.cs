@@ -327,7 +327,7 @@ public sealed class CamusConnection : IAsyncDisposable
 
     /// <summary>
     /// Executes a no-rows statement. With <paramref name="discardReturningRows"/> set, the server
-    /// does not send the rows of an <c>INSERT … RETURNING</c> and the result carries the count only;
+    /// does not send the RETURNING rows of an INSERT, UPDATE or DELETE and the result carries the count only;
     /// the statement still checks its RETURNING list and the SELECT privilege it needs. Use it when
     /// only the count matters, or when the rows would be larger than one reply can carry.
     /// </summary>

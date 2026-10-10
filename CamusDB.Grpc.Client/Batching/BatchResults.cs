@@ -52,7 +52,7 @@ public sealed class QueryResult
 
 /// <summary>
 /// Result of a batched NON_QUERY: affected-row count plus the trailing causal token, and the rows of
-/// an <c>INSERT … RETURNING</c>.
+/// an INSERT, UPDATE or DELETE with a RETURNING list.
 ///
 /// <para>A statement that returns rows never makes a no-rows call fail: the count is here as always,
 /// and the rows are available beside it. A client that wants only the count asks the server not to
@@ -68,9 +68,9 @@ public sealed class NonQueryResult
     public Routing.CamusRoutingAdvice? Routing { get; }
 
     /// <summary>
-    /// The output columns of an <c>INSERT … RETURNING</c>. Null for a statement without RETURNING and
+    /// The output columns of a RETURNING list. Null for a statement without RETURNING and
     /// for a call that asked for the count only. Not null with an empty <see cref="ReturningRows"/>
-    /// when the statement inserted no rows.
+    /// when the statement wrote no rows.
     /// </summary>
     public ResultSchema? ReturningSchema { get; }
 

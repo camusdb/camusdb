@@ -238,4 +238,42 @@ public class TestDerivedTableSchemaBuilder
         // "s.usersid" for the join — the case an originalIdentifier-based split would miss.
         Assert.AreEqual(ColumnType.Uuid, InferJoinColumnType(Ident("usersid")));
     }
+    /// <summary>
+    /// Every expression whose value is a Boolean or NULL declares a Bool column. Each projection is
+    /// parsed from SQL, so the test uses the node shapes the grammar really builds.
+    /// </summary>
+    [TestCase("amount > 0")]
+    [TestCase("amount = qty")]
+    [TestCase("amount <> qty")]
+    [TestCase("amount <= 3")]
+    [TestCase("amount BETWEEN 1 AND 5")]
+    [TestCase("amount > 0 AND qty > 0")]
+    [TestCase("amount > 0 OR qty > 0")]
+    [TestCase("NOT (amount > 0)")]
+    [TestCase("label IS NULL")]
+    [TestCase("label IS NOT NULL")]
+    [TestCase("(amount > 0) IS TRUE")]
+    [TestCase("label LIKE 'a%'")]
+    [TestCase("label ILIKE 'a%'")]
+    [TestCase("label ~ 'a'")]
+    [TestCase("amount IN (1, 2, 3)")]
+    [TestCase("amount NOT IN (1, 2, 3)")]
+    [TestCase("true")]
+    public void BooleanExpressionsDeclareBool(string expression)
+    {
+        NodeAst select = SQLParserProcessor.Parse($"SELECT {expression} AS v FROM sales");
+
+        Assert.AreEqual(ColumnType.Bool, InferDerivedColumnType(select.leftAst!), expression);
+    }
+
+    /// <summary>The Boolean rule does not reach expressions of other types.</summary>
+    [TestCase("amount + 1", ColumnType.Integer64)]
+    [TestCase("label", ColumnType.String)]
+    [TestCase("CASE WHEN amount > 0 THEN 'pos' ELSE 'neg' END", ColumnType.String)]
+    public void NonBooleanExpressionsKeepTheirType(string expression, ColumnType expected)
+    {
+        NodeAst select = SQLParserProcessor.Parse($"SELECT {expression} AS v FROM sales");
+
+        Assert.AreEqual(expected, InferDerivedColumnType(select.leftAst!), expression);
+    }
 }

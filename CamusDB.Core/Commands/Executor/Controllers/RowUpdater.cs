@@ -155,8 +155,18 @@ public sealed class RowUpdater
     /// of the write phase's lock, read or write is recorded there instead of thrown, the statement stops
     /// where it was, and the count returned is meaningless: the caller tests
     /// <see cref="RetryableAbortSink.HasAbort"/> first. See <see cref="RetryableAbortSink"/>.</para>
+    ///
+    /// <para>With <paramref name="returning"/>, each written chunk hands the new image of its rows to
+    /// the collector after the chunk's batch write succeeded. The write phase then also decodes the
+    /// columns the RETURNING list reads; see <see cref="FlushUpdateChunk"/>.</para>
     /// </summary>
-    internal async Task<int> Update(QueryExecutor queryExecutor, DatabaseDescriptor database, TableDescriptor table, UpdateTicket ticket, RetryableAbortSink? aborts = null)
+    internal async Task<int> Update(
+        QueryExecutor queryExecutor,
+        DatabaseDescriptor database,
+        TableDescriptor table,
+        UpdateTicket ticket,
+        RetryableAbortSink? aborts = null,
+        DML.WriteReturningPlan.ReturningRowCollector? returning = null)
     {
         MaterializedViewAccessGuard.RequireWritable(table);
         Validate(table, ticket);
@@ -174,7 +184,8 @@ public sealed class RowUpdater
             retryableAborts: aborts
         )
         {
-            ForeignKeys = foreignKeys
+            ForeignKeys = foreignKeys,
+            Returning = returning
         };
 
         FluxMachine<UpdateFluxSteps, UpdateFluxState> machine = new(state);
@@ -521,7 +532,7 @@ public sealed class RowUpdater
         // The predicate and every SET expression are evaluated against the locked read, so the columns
         // they reference must be decoded even on a row that carries its untouched large values.
         MutationRowRecheck recheck = MutationRowRecheck.Build(table.Schema, ticket.Where, ticket.Filters);
-        IReadOnlySet<string>? evaluatedColumns = CollectEvaluatedColumns(table.Schema, ticket, recheck);
+        IReadOnlySet<string>? evaluatedColumns = AddReturnedColumns(CollectEvaluatedColumns(table.Schema, ticket, recheck), state.Returning);
 
         // Drain the matched-row buffer in bounded chunks so the heap retains at most chunkSize
         // writable rows and their index mutation sets simultaneously. Mirrors the delete path.
@@ -586,6 +597,26 @@ public sealed class RowUpdater
     }
 
     /// <summary>
+    /// Adds the columns a RETURNING list reads to the columns the write phase decodes. A row that
+    /// carries its untouched large values decodes only the columns it needs, and a column the RETURNING
+    /// list reads but the update does not decode would reach the projection as NULL, with no error.
+    /// Decoding a carried column does not write its large value again: the stored cell is still
+    /// carried. Null (every column) when either side asks for every column.
+    /// </summary>
+    private static IReadOnlySet<string>? AddReturnedColumns(IReadOnlySet<string>? evaluatedColumns, DML.WriteReturningPlan.ReturningRowCollector? returning)
+    {
+        if (returning is null)
+            return evaluatedColumns;
+
+        if (evaluatedColumns is null || returning.RequiredColumns is not { } returned)
+            return null;
+
+        HashSet<string> combined = new(evaluatedColumns, StringComparer.OrdinalIgnoreCase);
+        combined.UnionWith(returned);
+        return combined;
+    }
+
+    /// <summary>
     /// Updates one chunk of located rows. The order is the fix for a lost update at Read Committed, and
     /// it must be kept: <b>lock, then read, then re-check, then compute, then write</b>.
     ///
@@ -598,6 +629,10 @@ public sealed class RowUpdater
     /// (<see cref="MutationRowRecheck"/>): a row that a concurrent commit moved out of the WHERE, or
     /// deleted, is skipped and not counted. The old index entries also come from that read, so a
     /// concurrent change of an indexed column cannot leave a stale entry behind.</para>
+    ///
+    /// <para>For a RETURNING list, the new image of each row in the batch goes to the collector only
+    /// after the batch write succeeded. A row the re-check skipped is not in the batch, so the returned
+    /// rows are exactly the counted rows, and each one shows the value computed from the locked read.</para>
     /// </summary>
     private async Task FlushUpdateChunk(
         TableDescriptor table,
@@ -639,6 +674,7 @@ public sealed class RowUpdater
             await ResolveRowsForUpdateAsync(table, tx, rowIds, rawRows, carry).ConfigureAwait(false);
 
         List<KvTableStore.RowUpdate> batch = new(chunkRows.Count);
+        List<QueryResultRow>? returnedRows = state.Returning is not null ? new(chunkRows.Count) : null;
 
         // Per-chunk decode-plan caches: every row at the same stored schema version shares one resolved
         // plan instead of re-running schema-history lookups and visibility resolution per row. A row that
@@ -696,6 +732,9 @@ public sealed class RowUpdater
                 LargeValues = encoded.OutOfLine,
                 LargeValueDeletes = UnreferencedLargeValues(oldOutOfLine[i], encoded, carried[i] ? carry.CarriedVariableOrdinals : null),
             });
+
+            // The coerced new row is the value the encoder stored, so RETURNING reports the stored value.
+            returnedRows?.Add(new QueryResultRow(rowId, newRow));
         }
 
         await table.Store.UpdateRowsBatch(tx, batch, default, state.RetryableAborts).ConfigureAwait(false);
@@ -703,6 +742,9 @@ public sealed class RowUpdater
             return;
 
         state.ModifiedRows += batch.Count;
+
+        if (returnedRows is not null)
+            await state.Returning!.AddChunkAsync(returnedRows).ConfigureAwait(false);
 
         foreach (KvTableStore.RowUpdate row in batch)
             Log.LogRowUpdated(logger, row.RowId);

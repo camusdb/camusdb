@@ -74,8 +74,8 @@
    grammar ambiguous. Every other word the clauses use (MATCH, SIMPLE, FULL, PARTIAL, RESTRICT,
    CASCADE, DEFERRED, IMMEDIATE) is a plain identifier validated in the parse action. */
 %token TREFERENCES TFOREIGN TDEFERRABLE TINITIALLY TNOACTION
-/* RETURNING is reserved, as it is in PostgreSQL: it ends an INSERT and starts the list of values the
-   statement sends back, so it cannot also be a bare table or column name there. */
+/* RETURNING is reserved, as it is in PostgreSQL: it ends an INSERT, an UPDATE or a DELETE and starts
+   the list of values the statement sends back, so it cannot also be a bare table or column name there. */
 %token TRETURNING
 /* One unquoted "table@index" pair, produced by a single scanner rule so the '@' never reaches the
    parser as a placeholder. Accepted only in the SHOW ... FROM INDEX productions and split there. */
@@ -228,12 +228,15 @@ insert_batch_list : insert_batch_list TCOMMA insert_values { $$.n = new(NodeType
 insert_values : LPAREN values_list RPAREN { $$.n = $2.n; $$.s = $2.s; }
              ;
 
-update_stmt : TUPDATE any_identifier TSET update_list TWHERE condition opt_limit
-            { $$.n = new(NodeType.Update, $2.n, $4.n, $6.n, $7.n, null, null, null, null); }
+/* The optional RETURNING list hangs off extendedThree, because extendedTwo already holds LIMIT.
+   StatementScope.GetReturningList knows the slot of each statement; read the list through it. */
+update_stmt : TUPDATE any_identifier TSET update_list TWHERE condition opt_limit opt_returning
+            { $$.n = new(NodeType.Update, $2.n, $4.n, $6.n, $7.n, $8.n, null, null, null); }
 		    ;
 
-delete_stmt : TDELETE TFROM any_identifier TWHERE condition opt_limit
-            { $$.n = new(NodeType.Delete, $3.n, $5.n, $6.n, null, null, null, null, null); }
+/* The optional RETURNING list hangs off extendedTwo, the first free slot after LIMIT. */
+delete_stmt : TDELETE TFROM any_identifier TWHERE condition opt_limit opt_returning
+            { $$.n = new(NodeType.Delete, $3.n, $5.n, $6.n, $7.n, null, null, null, null); }
 			;
 
 begin_stmt : TBEGIN { $$.n = NodeAst.Begin; }

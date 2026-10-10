@@ -45,6 +45,12 @@ internal sealed class UpdateFluxState
     internal ForeignKeyStatementChecker ForeignKeys { get; init; } = ForeignKeyStatementChecker.None;
 
     /// <summary>
+    /// Receives the new image of each updated row, one written chunk at a time, for a RETURNING list.
+    /// Null when the statement has no list or the caller asked for the count only.
+    /// </summary>
+    internal Controllers.DML.WriteReturningPlan.ReturningRowCollector? Returning { get; init; }
+
+    /// <summary>
     /// Where the statement's retryable Kahuna abort is recorded instead of thrown, or null to throw.
     /// Each step tests it after every call it passes it to and aborts the machine when it is set.
     /// See <see cref="Transactions.RetryableAbortSink"/>.

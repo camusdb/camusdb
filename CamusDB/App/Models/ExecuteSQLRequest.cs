@@ -66,7 +66,7 @@ public sealed class ExecuteSQLRequest
     /// Ignored when <c>TxnIdPT</c> resumes an existing transaction, and ignored for a read on the
     /// <c>/execute-sql-query</c> path (an autocommit <c>SELECT</c> runs as a read-only snapshot,
     /// which has no locking mode). Applies to the writable autocommit paths
-    /// (<c>/execute-sql-non-query</c>, <c>/execute-sql-ddl</c>, and an <c>INSERT … RETURNING</c>
+    /// (<c>/execute-sql-non-query</c>, <c>/execute-sql-ddl</c>, and an INSERT, UPDATE or DELETE with RETURNING
     /// sent to <c>/execute-sql-query</c>).
     /// </summary>
     public string? Locking { get; set; }
@@ -94,7 +94,7 @@ public sealed class ExecuteSQLRequest
     public int RoutingAcceptVersion { get; set; }
 
     /// <summary>
-    /// True to receive only the row count of an <c>INSERT … RETURNING</c> sent to
+    /// True to receive only the row count of an INSERT, UPDATE or DELETE with RETURNING sent to
     /// <c>/execute-sql-non-query</c>. The statement still checks its RETURNING list and the SELECT
     /// privilege it needs; the response then has no <c>columns</c> and no <c>returningRows</c>.
     /// No effect on a statement without RETURNING. <c>/execute-sql-query</c> and its stream refuse a

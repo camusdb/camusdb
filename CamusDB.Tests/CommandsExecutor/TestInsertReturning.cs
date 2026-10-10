@@ -203,6 +203,27 @@ public sealed class TestInsertReturning : SharedNodeBaseTest
         Assert.AreEqual("beta", Cell(result, 1, 2).StrValue);
     }
 
+    /// <summary>
+    /// A list without <c>*</c> projects from rows that hold only the columns it reads: a constant reads
+    /// none, and a column the statement left NULL still comes back NULL.
+    /// </summary>
+    [Test]
+    public async Task ANarrowListReturnsConstantsAndNulls()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupRobots();
+
+        ExecuteNonSQLResult result = await NonQueryCommitted(executor, database, dbname,
+            "INSERT INTO robots (name) VALUES ('alpha'), ('beta') RETURNING 1 AS one, note, year");
+
+        Assert.AreEqual(2, result.ReturningRows!.Count);
+        for (int i = 0; i < 2; i++)
+        {
+            Assert.AreEqual(1, Cell(result, i, 0).LongValue);
+            Assert.AreEqual(ColumnType.Null, Cell(result, i, 1).Type);
+            Assert.AreEqual(1999, Cell(result, i, 2).LongValue);
+        }
+    }
+
     [Test]
     public async Task QualifiedColumnNamesResolveAgainstTheTarget()
     {

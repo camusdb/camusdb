@@ -398,7 +398,7 @@ message SqlRequest {
   // clients keep their exact response shape. Today the only accepted value is 1.
   int32 routing_accept_version = 14;
 
-  // True to receive only the row count of an INSERT ... RETURNING sent to ExecuteNonQuery (or as a
+  // True to receive only the row count of an INSERT, UPDATE or DELETE ... RETURNING sent to ExecuteNonQuery (or as a
   // NON_QUERY batch op). The statement still checks its RETURNING list and the SELECT privilege it
   // needs; the reply then leaves returning_schema unset. No effect on a statement without RETURNING.
   // ExecuteQuery and QUERY batch ops refuse a request that sets it: a query that asks for no rows is a
@@ -421,13 +421,13 @@ message NonQueryReply {
   // the statement produced advice. Advisory — see RoutingAdvice.
   RoutingAdvice routing = 6;
 
-  // The output columns of an INSERT ... RETURNING. Unset for a statement without RETURNING and for a
+  // The output columns of an INSERT, UPDATE or DELETE ... RETURNING. Unset for a statement without RETURNING and for a
   // request that set discard_returning_rows, so a client that never uses RETURNING sees the same
-  // reply as before. Set with an empty returning_rows when the statement inserted no rows.
+  // reply as before. Set with an empty returning_rows when the statement wrote no rows.
   ResultSchema returning_schema = 7;
 
-  // The RETURNING rows, one per inserted row, in insert order; values[i] aligns to
-  // returning_schema.columns[i]. affected_rows equals their count. All rows travel in this one
+  // The RETURNING rows, one per written row, in write order (an UPDATE returns the new row);
+  // values[i] aligns to returning_schema.columns[i]. affected_rows equals their count. All rows travel in this one
   // reply, so a result larger than the gRPC message limit fails; ExecuteQuery streams the same rows.
   repeated ResultRow returning_rows = 8;
 }

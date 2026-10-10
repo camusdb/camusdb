@@ -145,7 +145,7 @@ public sealed class CamusTransactionSession
     /// <summary>
     /// Runs a prepared no-rows statement inside this transaction. With
     /// <paramref name="discardReturningRows"/> set, the server does not send the rows of an
-    /// <c>INSERT … RETURNING</c>; see
+    /// INSERT, UPDATE or DELETE with RETURNING; see
     /// <see cref="CamusConnection.ExecuteNonQueryAsync(string, string, bool, CancellationToken)"/>.
     /// </summary>
     public async Task<NonQueryResult> ExecuteNonQueryAsync(

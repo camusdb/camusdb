@@ -149,17 +149,18 @@ internal sealed class NonQueryStatementDispatcher
     }
 
     /// <summary>
-    /// Binds the RETURNING list of an INSERT against the table the current attempt opened. The bind
-    /// demands SELECT on the target; see <see cref="InsertReturningPlan"/>.
+    /// Binds the RETURNING list of an INSERT, UPDATE or DELETE against the table the current attempt
+    /// opened. All three statements hold their target table in <see cref="NodeAst.leftAst"/>. The bind
+    /// demands SELECT on the target; see <see cref="WriteReturningPlan"/>.
     /// </summary>
-    private Task<InsertReturningPlan> BindReturningAsync(
-        DatabaseDescriptor database, TableDescriptor table, NodeAst insertAst, NodeAst returningList, ExecuteSQLTicket ticket) =>
-        InsertReturningPlan.BindAsync(
+    private Task<WriteReturningPlan> BindReturningAsync(
+        DatabaseDescriptor database, TableDescriptor table, NodeAst writeAst, NodeAst returningList, ExecuteSQLTicket ticket) =>
+        WriteReturningPlan.BindAsync(
             selectExecutor.selectQueryCreator,
             selectExecutor.queryBinder,
             database,
             table,
-            insertAst.leftAst!,
+            writeAst.leftAst!,
             returningList,
             ticket);
 
@@ -173,7 +174,7 @@ internal sealed class NonQueryStatementDispatcher
         TableDescriptor table,
         int inserted,
         string? warning,
-        InsertReturningPlan? returning,
+        WriteReturningPlan? returning,
         List<QueryResultRow>? insertedRows)
     {
         if (returning is null || insertedRows is null)
@@ -181,6 +182,24 @@ internal sealed class NonQueryStatementDispatcher
 
         List<QueryResultRow> projected = await returning.ProjectAsync(insertedRows).ConfigureAwait(false);
         return new(database, table, inserted, warning, returning.Columns, projected);
+    }
+
+    /// <summary>
+    /// Builds the result of an UPDATE or a DELETE. The collector already holds the projected rows,
+    /// because the write path projects each chunk as soon as it is written. Without a collector (no
+    /// RETURNING list, or a count-only request) the result has the row count only.
+    /// </summary>
+    private static ExecuteNonSQLResult CompleteChangeResult(
+        DatabaseDescriptor database,
+        TableDescriptor table,
+        int changed,
+        WriteReturningPlan? returning,
+        WriteReturningPlan.ReturningRowCollector? collector)
+    {
+        if (returning is null || collector is null)
+            return new(database, table, changed);
+
+        return new(database, table, changed, warning: null, returning.Columns, collector.Rows);
     }
 
     /// <summary>
@@ -240,9 +259,9 @@ internal sealed class NonQueryStatementDispatcher
                 {
                     // A RETURNING list is checked on the AST before the ticket is built, so a refused
                     // list fails before the statement reserves any sequence value.
-                    NodeAst? returningList = InsertReturningPlan.GetReturningList(ast);
+                    NodeAst? returningList = StatementScope.GetReturningList(ast);
                     if (returningList is not null)
-                        InsertReturningPlan.Validate(returningList);
+                        WriteReturningPlan.Validate(returningList);
 
                     InsertTicket insertTicket = await sqlExecutor.CreateInsertTicket(executor, database, ticket, ast).ConfigureAwait(false);
 
@@ -259,7 +278,7 @@ internal sealed class NonQueryStatementDispatcher
                             // Bound inside the attempt, against the table this attempt opened, and before
                             // the first write. The buffer is new on each attempt, so a retried attempt
                             // never returns a row from the attempt that failed.
-                            InsertReturningPlan? returning = returningList is null
+                            WriteReturningPlan? returning = returningList is null
                                 ? null
                                 : await BindReturningAsync(database, table, ast, returningList, ticket).ConfigureAwait(false);
                             List<QueryResultRow>? insertedRows = returning is not null && !ticket.DiscardReturningRows
@@ -282,9 +301,9 @@ internal sealed class NonQueryStatementDispatcher
 
             case NodeType.InsertSelect:
                 {
-                    NodeAst? returningList = InsertReturningPlan.GetReturningList(ast);
+                    NodeAst? returningList = StatementScope.GetReturningList(ast);
                     if (returningList is not null)
-                        InsertReturningPlan.Validate(returningList);
+                        WriteReturningPlan.Validate(returningList);
 
                     InsertSelectTicket insertSelectTicket = sqlExecutor.CreateInsertSelectTicket(ticket, ast);
                     context.Validator.Validate(insertSelectTicket);
@@ -302,7 +321,7 @@ internal sealed class NonQueryStatementDispatcher
                             // Bound before the source query runs, so a refused list or a missing SELECT
                             // privilege fails before any row is read or written. See the VALUES arm for
                             // why the buffer is per attempt.
-                            InsertReturningPlan? returning = returningList is null
+                            WriteReturningPlan? returning = returningList is null
                                 ? null
                                 : await BindReturningAsync(database, table, ast, returningList, ticket).ConfigureAwait(false);
                             List<QueryResultRow>? insertedRows = returning is not null && !ticket.DiscardReturningRows
@@ -332,6 +351,11 @@ internal sealed class NonQueryStatementDispatcher
 
             case NodeType.Update:
                 {
+                    // Checked on the AST before any subquery in the statement runs; see the INSERT arm.
+                    NodeAst? returningList = StatementScope.GetReturningList(ast);
+                    if (returningList is not null)
+                        WriteReturningPlan.Validate(returningList);
+
                     UpdateTicket updateTicket = sqlExecutor.CreateUpdateTicket(ticket, ast);
                     updateTicket = await RewriteUpdateSubqueriesAsync(database, updateTicket, ticket).ConfigureAwait(false);
 
@@ -344,7 +368,19 @@ internal sealed class NonQueryStatementDispatcher
 
                             TableDescriptor table = await context.TableOpener.Open(database, updateTicket.TableName).ConfigureAwait(false);
                             SelectStatementExecutor.PinForWrite(database, table, ticket.TxnState, writeShapeEpoch);
-                            int updated = await rowUpdater.Update(queryExecutor, database, table, updateTicket, ticket.RetryableAborts).ConfigureAwait(false);
+
+                            // Bound inside the attempt and before the first write, as in the INSERT arm.
+                            // The collector is new on each attempt, so a retried attempt never returns a
+                            // row from the attempt that failed. A count-only request binds the list (same
+                            // errors, same privilege check) but collects nothing.
+                            WriteReturningPlan? returning = returningList is null
+                                ? null
+                                : await BindReturningAsync(database, table, ast, returningList, ticket).ConfigureAwait(false);
+                            WriteReturningPlan.ReturningRowCollector? collector = returning is not null && !ticket.DiscardReturningRows
+                                ? returning.CreateCollector()
+                                : null;
+
+                            int updated = await rowUpdater.Update(queryExecutor, database, table, updateTicket, ticket.RetryableAborts, collector).ConfigureAwait(false);
 
                             // A retryable abort recorded instead of thrown: the statement did not
                             // complete, and the transport that owns the sink reports it.
@@ -352,7 +388,7 @@ internal sealed class NonQueryStatementDispatcher
                                 return new(database, table, 0);
 
                             context.Statistics.TrackUpdate(database, table, updated, updateTicket.PlainValues);
-                            return new(database, table, updated);
+                            return CompleteChangeResult(database, table, updated, returning, collector);
                         }
                         catch (CamusDBException ex) when (ex.Code == CamusDBErrorCodes.SchemaCatchingUp && fenceAttempt < SelectStatementExecutor.MaxFenceRetries)
                         {
@@ -363,6 +399,11 @@ internal sealed class NonQueryStatementDispatcher
 
             case NodeType.Delete:
                 {
+                    // Checked on the AST before the WHERE subquery runs; see the INSERT arm.
+                    NodeAst? returningList = StatementScope.GetReturningList(ast);
+                    if (returningList is not null)
+                        WriteReturningPlan.Validate(returningList);
+
                     DeleteTicket deleteTicket = sqlExecutor.CreateDeleteTicket(ticket, ast);
 
                     // Resolve any scalar / IN / NOT IN subquery in the WHERE clause to a literal
@@ -396,9 +437,20 @@ internal sealed class NonQueryStatementDispatcher
 
                             TableDescriptor table = await context.TableOpener.Open(database, deleteTicket.TableName).ConfigureAwait(false);
                             SelectStatementExecutor.PinForWrite(database, table, ticket.TxnState, writeShapeEpoch);
-                            int deleted = await rowDeleter.Delete(queryExecutor, database, table, deleteTicket).ConfigureAwait(false);
+
+                            // Bound and collected per attempt, as in the UPDATE arm. The plan and the
+                            // collector go to the deleter as arguments, not on the ticket: the ticket is
+                            // rebuilt field by field after the WHERE subquery rewrite above.
+                            WriteReturningPlan? returning = returningList is null
+                                ? null
+                                : await BindReturningAsync(database, table, ast, returningList, ticket).ConfigureAwait(false);
+                            WriteReturningPlan.ReturningRowCollector? collector = returning is not null && !ticket.DiscardReturningRows
+                                ? returning.CreateCollector()
+                                : null;
+
+                            int deleted = await rowDeleter.Delete(queryExecutor, database, table, deleteTicket, returning: collector).ConfigureAwait(false);
                             context.Statistics.TrackDelete(database, table, deleted);
-                            return new(database, table, deleted);
+                            return CompleteChangeResult(database, table, deleted, returning, collector);
                         }
                         catch (CamusDBException ex) when (ex.Code == CamusDBErrorCodes.SchemaCatchingUp && fenceAttempt < SelectStatementExecutor.MaxFenceRetries)
                         {

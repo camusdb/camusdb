@@ -148,11 +148,11 @@ public sealed class ExecuteSQLController : CommandsController
     }
 
     /// <summary>
-    /// True for a statement the row-returning endpoints answer by writing: an INSERT, which reaches
-    /// those endpoints only with a RETURNING list. Its autocommit transaction must be a writable one,
-    /// not the read-only snapshot a SELECT runs in.
+    /// True for a statement the row-returning endpoints answer by writing: an INSERT, UPDATE or DELETE,
+    /// which reaches those endpoints only with a RETURNING list. Its autocommit transaction must be a
+    /// writable one, not the read-only snapshot a SELECT runs in.
     /// </summary>
-    private static bool WritesRows(NodeType rootType) => rootType is NodeType.Insert or NodeType.InsertSelect;
+    private static bool WritesRows(NodeType rootType) => StatementScope.CanReturnWrittenRows(rootType);
 
     private static List<ColumnSchemaDto> ToColumnDtos(IReadOnlyList<DerivedColumnSchema> schema)
     {
@@ -214,7 +214,7 @@ public sealed class ExecuteSQLController : CommandsController
         // cancelled commit or rollback abandons locks that only a lease expiry can reclaim.
         CancellationToken requestAborted = HttpContext.RequestAborted;
 
-        // Set once the statement is resolved. A write answered here (INSERT … RETURNING) must not
+        // Set once the statement is resolved. A write answered here (a RETURNING list) must not
         // have a Kahuna failure translated into a retryable code: unlike a read, it is not known to
         // be idempotent.
         bool writesRows = false;
@@ -309,7 +309,7 @@ public sealed class ExecuteSQLController : CommandsController
 
             async Task AutocommitBody(CancellationToken ct)
             {
-                // An INSERT … RETURNING writes, so it begins the same writable transaction the no-rows
+                // A write with RETURNING begins the same writable transaction the no-rows
                 // endpoint begins for it; every other statement here reads from a snapshot.
                 KvTransaction tx = writesRows
                     ? await transactions.StartAsync(
@@ -392,7 +392,7 @@ public sealed class ExecuteSQLController : CommandsController
             // currently serve — a scan page whose retry budget expired on an unresolved intent — is
             // safe to retry because a read is idempotent, and its message names the failed range.
             // The generic catch below would bury both under an internal error the caller cannot
-            // distinguish from corruption. The filter limits it to reads: an INSERT … RETURNING answered
+            // distinguish from corruption. The filter limits it to reads: a write with RETURNING answered
             // here keeps the conservative mapping, as the write and finalize surfaces do.
             LogCommandFailure(new CamusDBException(CamusDBErrorCodes.TransactionMustRetry, e.Message));
 
@@ -501,7 +501,7 @@ public sealed class ExecuteSQLController : CommandsController
                     throw;
                 }
             }
-            // Autocommit INSERT … RETURNING: a write, so no byte may reach the wire before its
+            // Autocommit write with RETURNING: no byte may reach the wire before its
             // commit. It runs fully buffered — the same begin, retry and commit as the buffered
             // endpoint — and its rows are streamed only after the commit.
             else if (WritesRows(resolved.RootType))
@@ -600,7 +600,7 @@ public sealed class ExecuteSQLController : CommandsController
     }
 
     /// <summary>
-    /// Runs an autocommit <c>INSERT … RETURNING</c> for the stream endpoint and returns its schema, its
+    /// Runs an autocommit write with a RETURNING list for the stream endpoint and returns its schema, its
     /// rows and the commit's causal token. Every row is buffered and the transaction is committed
     /// before this returns, so a Serializable conflict can be retried from a fresh transaction with
     /// nothing on the wire. The rows come from the attempt that committed.

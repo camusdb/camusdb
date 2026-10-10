@@ -703,7 +703,7 @@ public sealed class CommandExecutor : IAsyncDisposable
         // The query entry point times the statement itself, so this calls the dispatcher directly
         // rather than ExecuteNonSQLQuery, which would record it in the slow query log a second time.
         // Routing advice is still recorded, as ExecuteNonSQLQuery records it.
-        selectExecutor.InsertReturningHandler = async ticket =>
+        selectExecutor.WriteReturningHandler = async ticket =>
         {
             ExecuteNonSQLResult result = await nonQueryDispatcher.ExecuteNonSQLQuery(this, ticket).ConfigureAwait(false);
             if (ticket.RetryableAborts is not { HasAbort: true })
