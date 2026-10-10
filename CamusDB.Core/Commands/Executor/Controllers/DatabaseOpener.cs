@@ -228,9 +228,12 @@ internal sealed class DatabaseOpener
             {
                 databaseDescriptor.PublishSchemaApplied(databaseDescriptor.Schema.SchemaVersion);
 
-                Log.LogSchemaLogNotHosted(
-                    logger, name, databaseDescriptor.SchemaLogPartition,
-                    string.Join(", ", sharedNode.SchemaLogReplicaEndpoints(id)));
+                if (logger.IsEnabled(LogLevel.Information))
+                {
+                    string replicas = string.Join(", ", sharedNode.SchemaLogReplicaEndpoints(id));
+
+                    Log.LogSchemaLogNotHosted(logger, name, databaseDescriptor.SchemaLogPartition, replicas);
+                }
             }
         }
         catch (Exception ex)
