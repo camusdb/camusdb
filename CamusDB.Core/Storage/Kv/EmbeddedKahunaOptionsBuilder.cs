@@ -445,6 +445,12 @@ public static class EmbeddedKahunaOptionsBuilder
         if (kahuna.KeyValueWritePostCompletionHoldMs is int hold)
             baseline.KeyValueWritePostCompletionHoldMs = hold;
 
+        if (kahuna.KeyValueWritePreciseWake is bool preciseWake)
+            baseline.KeyValueWritePreciseWake = preciseWake;
+
+        if (kahuna.KeyValueWriteFillTargetTrigger is bool fillTargetTrigger)
+            baseline.KeyValueWriteFillTargetTrigger = fillTargetTrigger;
+
         if (kahuna.KeyValueWriteMaxBatchItems is int maxBatchItems)
             baseline.KeyValueWriteMaxBatchItems = maxBatchItems;
 

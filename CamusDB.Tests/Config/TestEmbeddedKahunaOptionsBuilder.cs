@@ -635,6 +635,20 @@ public sealed class TestEmbeddedKahunaOptionsBuilder
         Assert.That(defaults.KeyValueWritePostCompletionHoldMs, Is.EqualTo(EmbeddedKahunaOptionsBuilder.DefaultKeyValueWritePostCompletionHoldMs));
     }
 
+    [Test]
+    public void WriteWakeSwitches_Override_FlowThrough()
+    {
+        // Both switches are off in Kahuna and stay off unless the config says otherwise.
+        EmbeddedKahunaOptions defaults = EmbeddedKahunaOptionsBuilder.BuildStandaloneRocksDb("/tmp/wake-unset", new KahunaOptionsConfig(), CamusDBOptions.Default);
+        Assert.That(defaults.KeyValueWritePreciseWake, Is.False);
+        Assert.That(defaults.KeyValueWriteFillTargetTrigger, Is.False);
+
+        KahunaOptionsConfig set = new() { KeyValueWritePreciseWake = true, KeyValueWriteFillTargetTrigger = true };
+        EmbeddedKahunaOptions built = EmbeddedKahunaOptionsBuilder.BuildStandaloneRocksDb("/tmp/wake-set", set, CamusDBOptions.Default);
+        Assert.That(built.KeyValueWritePreciseWake, Is.True);
+        Assert.That(built.KeyValueWriteFillTargetTrigger, Is.True);
+    }
+
     // ── Post-completion hold ─────────────────────────────────────────────────
 
     [Test]

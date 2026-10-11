@@ -71,6 +71,8 @@ public sealed class KahunaOptionsConfig
         "key_value_write_max_in_flight_batches_per_partition",
         "key_value_write_linger_ms",
         "key_value_write_post_completion_hold_ms",
+        "key_value_write_precise_wake",
+        "key_value_write_fill_target_trigger",
         "key_value_write_max_batch_items",
         "backup_dir",
         "pitr_window_seconds",
@@ -493,6 +495,23 @@ public sealed class KahunaOptionsConfig
     /// Maps to <see cref="Kahuna.EmbeddedKahunaOptions.KeyValueWritePostCompletionHoldMs"/>.
     /// </summary>
     public int? KeyValueWritePostCompletionHoldMs { get; set; }
+
+    /// <summary>
+    /// Fire the write aggregator's wakes (hold, linger, queue age) from one dedicated timer thread per
+    /// node instead of the timer queue (Kahuna 1.11.6, default false). The timer queue's granularity and
+    /// thread-pool hop make a millisecond-scale hold fire 1-3 ms late on every cycle; the dedicated thread
+    /// sleeps whole milliseconds in a kernel wait and spins only the sub-millisecond remainder, so the hold
+    /// is honoured to its deadline. Maps to <see cref="Kahuna.EmbeddedKahunaOptions.KeyValueWritePreciseWake"/>.
+    /// </summary>
+    public bool? KeyValueWritePreciseWake { get; set; }
+
+    /// <summary>
+    /// Fill-or-time dispatch (Kahuna 1.11.6, default false): a held or lingering partition buffer is
+    /// dispatched as soon as it reaches the learned fill target, the upper median of its recent
+    /// timer-dispatched batch sizes, instead of waiting out the hold. Probe cycles keep the target
+    /// following the load. Maps to <see cref="Kahuna.EmbeddedKahunaOptions.KeyValueWriteFillTargetTrigger"/>.
+    /// </summary>
+    public bool? KeyValueWriteFillTargetTrigger { get; set; }
 
     /// <summary>Upper bound on items per write-aggregator batch (Kahuna default 512). Maps to
     /// <see cref="Kahuna.EmbeddedKahunaOptions.KeyValueWriteMaxBatchItems"/>.</summary>

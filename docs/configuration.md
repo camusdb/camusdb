@@ -380,6 +380,18 @@ the closed loop loses. An idle aggregator still dispatches on arrival, so low-lo
 Set `0` to restore Kahuna's dispatch-at-once behaviour; an explicit value always wins over the shipped
 default.
 
+`kahuna.key_value_write_precise_wake` (default **false**, Kahuna 1.11.6) fires the aggregator's hold,
+linger and queue-age wakes from one dedicated timer thread per node instead of the timer queue. The
+~1 ms lateness described above is the timer queue's granularity plus a thread-pool hop; the dedicated
+thread sleeps whole milliseconds in a kernel wait and spins only the sub-millisecond remainder, so the
+hold ends within 0.1-0.25 ms of its deadline at no extra CPU per transaction.
+`kahuna.key_value_write_fill_target_trigger` (default **false**, Kahuna 1.11.6) adds fill-or-time
+dispatch on top of the hold: a held or lingering partition buffer is dispatched as soon as it reaches
+the learned fill target, the upper median of its last 16 timer-dispatched batch sizes, instead of
+waiting out the hold. Every eighth fill-triggered dispatch waits for the timer as a probe, so the target
+keeps following the load; the learned target is exported as the `kahuna.kv.write.fill_target` histogram.
+Both are off until a soak shows the gain for your shape.
+
 `kahuna.rocksdb_direct_reads` (default **off** in CamusDB; Kahuna's own default is on) selects how the
 RocksDB key/value backend reads SST files. With direct I/O the block cache is the only in-RAM read
 cache and every miss is a physical device read. On a node whose disk is already carrying the Raft

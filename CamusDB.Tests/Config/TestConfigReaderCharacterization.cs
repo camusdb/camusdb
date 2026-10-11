@@ -230,6 +230,9 @@ public sealed class TestConfigReaderCharacterization
         Assert.Throws<CamusDBException>(() => new ConfigReader().Read("kahuna:\n  key_value_write_linger_ms: -1"));
         Assert.That(new ConfigReader().Read("kahuna:\n  key_value_write_post_completion_hold_ms: 2").Kahuna.KeyValueWritePostCompletionHoldMs, Is.EqualTo(2));
         Assert.Throws<CamusDBException>(() => new ConfigReader().Read("kahuna:\n  key_value_write_post_completion_hold_ms: -1"));
+        Assert.That(new ConfigReader().Read("kahuna:\n  key_value_write_precise_wake: true").Kahuna.KeyValueWritePreciseWake, Is.True);
+        Assert.That(new ConfigReader().Read("kahuna:\n  key_value_write_fill_target_trigger: true").Kahuna.KeyValueWriteFillTargetTrigger, Is.True);
+        Assert.That(new ConfigReader().Read("kahuna:\n  key_value_write_linger_ms: 4").Kahuna.KeyValueWriteFillTargetTrigger, Is.Null);
         Assert.Throws<CamusDBException>(() => new ConfigReader().Read("kahuna:\n  key_value_write_max_batch_items: 0"));
     }
 
