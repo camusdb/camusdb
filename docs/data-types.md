@@ -308,6 +308,35 @@ column's declared element type the same way scalars do, so `ARRAY[1, 2]` is acce
 `CAST('0xFF00' AS bytes)`. The PostgreSQL shorthand `x::type` is the same as `CAST(x AS type)`; see
 [PostgreSQL expression syntax](sql-expression-syntax.md#the--cast).
 
+#### Text form of each type
+
+Every scalar type has one text form. `CAST(x AS string)`, `x::string`, `to_string(x)` and
+`concat(…)` all use it, so they always give the same text:
+
+| Type | Text form | Example |
+|------|-----------|---------|
+| `string` | the value | `hello` |
+| `oid` | the ObjectId | `652b1f0e3c9d4a2b1c0d9e8f` |
+| `int64` | decimal digits | `-7` |
+| `float64` | shortest text that reads back as the same `float64` | `0.1` |
+| `float32` | shortest text that reads back as the same `float32` | `1.1` |
+| `numeric` | canonical decimal, no exponent, no trailing zeros | `12.5` |
+| `bool` | `true` / `false` | `true` |
+| `uuid` | lowercase, with hyphens | `550e8400-e29b-41d4-a716-446655440000` |
+| `date` | `yyyy-MM-dd` | `2026-03-15` |
+| `datetime` | ISO-8601 in UTC, seven fractional digits | `2026-03-15T08:30:00.1230000Z` |
+| `bytes` | `\x` and lowercase hex (PostgreSQL `bytea_output = hex`) | `\xdeadbeef` |
+| `array(T)` | none: the cast and `concat` raise `InvalidInput` | |
+
+The text form uses the invariant culture and depends on the value only, so it is safe in a column
+`DEFAULT` and a stored `CHECK`. `concat` skips a NULL argument and returns NULL when every argument is
+NULL.
+
+The string cast reads each text form back, so `CAST(CAST(x AS string) AS T)` returns `x` for `date`,
+`datetime`, `bytes`, `float32`, `float64`, `uuid` and `numeric`. A string cast to `bytes` accepts the
+hex after either a `\x` or a `0x` prefix. Write `'\xdeadbeef'` as a plain string literal: a plain
+literal does no escape processing, so the backslash stays in the text.
+
 ### Over HTTP / JSON
 
 The HTTP API exchanges values as JSON:

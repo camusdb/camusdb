@@ -20,10 +20,15 @@ internal static class CastScalarFunctions
     // Date formats accepted by CamusDB for date literals (yyyy-MM-dd).
     private const string DateFormat = "yyyy-MM-dd";
 
-    // DateTime formats accepted by CamusDB for datetime literals (UTC only).
+    // DateTime formats accepted by CamusDB for datetime literals (UTC only). The seven-digit form is
+    // the text form a datetime casts to (ScalarTextForm), so a datetime round-trips through text.
     private static readonly string[] DateTimeFormats =
     [
         "yyyy-MM-ddTHH:mm:ssZ",
+        "yyyy-MM-ddTHH:mm:ss.fffffffZ",
+        "yyyy-MM-ddTHH:mm:ss.ffffffZ",
+        "yyyy-MM-ddTHH:mm:ss.fffffZ",
+        "yyyy-MM-ddTHH:mm:ss.ffffZ",
         "yyyy-MM-ddTHH:mm:ss.fffZ",
         "yyyy-MM-ddTHH:mm:ss.ffZ",
         "yyyy-MM-ddTHH:mm:ss.fZ",
@@ -217,17 +222,13 @@ internal static class CastScalarFunctions
 
     private static ColumnValue CastToString(string castName, ColumnValue value)
     {
-        return value.Type switch
-        {
-            ColumnType.String => value,
-            ColumnType.Id => new ColumnValue(ColumnType.String, value.StrValue!),
-            ColumnType.Integer64 => new ColumnValue(ColumnType.String, value.LongValue.ToString(CultureInfo.InvariantCulture)),
-            ColumnType.Float64 => new ColumnValue(ColumnType.String, FormatFloat(value.FloatValue)),
-            ColumnType.Bool => new ColumnValue(ColumnType.String, value.BoolValue ? "true" : "false"),
-            ColumnType.Uuid => new ColumnValue(ColumnType.String, value.ToGuid().ToString("D")),
-            ColumnType.Numeric => new ColumnValue(ColumnType.String, value.NumericValue!),
-            _ => throw InvalidConversion(castName, value.Type, ColumnType.String),
-        };
+        if (value.Type == ColumnType.String)
+            return value;
+
+        if (!ScalarTextForm.TryFormat(value, out string text))
+            throw InvalidConversion(castName, value.Type, ColumnType.String);
+
+        return new ColumnValue(ColumnType.String, text);
     }
 
     private static ColumnValue CastToInt64(string castName, ColumnValue value)
@@ -431,15 +432,17 @@ internal static class CastScalarFunctions
         return new ColumnValue(ColumnType.DateTime, dto.UtcTicks);
     }
 
-    // Bytes literals use 0x-prefixed hex: '0xABCD01'. Base-64 is NOT accepted.
+    // Bytes text is hex behind a 0x prefix ('0xABCD01') or the PostgreSQL \x prefix ('\xabcd01').
+    // The \x form is what a bytes value casts to (ScalarTextForm), so bytes round-trip through text.
+    // Base-64 is NOT accepted.
     private static ColumnValue FromStringToBytes(string castName, string text)
     {
         ReadOnlySpan<char> span = text.AsSpan();
 
-        if (span.Length < 2 || span[0] != '0' || (span[1] != 'x' && span[1] != 'X'))
+        if (span.Length < 2 || (span[0] != '0' && span[0] != '\\') || (span[1] != 'x' && span[1] != 'X'))
             throw new CamusDBException(
                 CamusDBErrorCodes.InvalidInput,
-                $"Function '{castName}' expects a 0x-prefixed hex literal for bytes, got '{text}'");
+                $"Function '{castName}' expects a 0x- or \\x-prefixed hex literal for bytes, got '{Truncate(text)}'");
 
         span = span[2..];
 
@@ -455,7 +458,7 @@ internal static class CastScalarFunctions
             if (!TryParseHexByte(span[i * 2], span[i * 2 + 1], out byte b))
                 throw new CamusDBException(
                     CamusDBErrorCodes.InvalidInput,
-                    $"Function '{castName}' invalid hex character in bytes literal '{text}'");
+                    $"Function '{castName}' invalid hex character in bytes literal '{Truncate(text)}'");
             bytes[i] = b;
         }
 
@@ -585,9 +588,6 @@ internal static class CastScalarFunctions
 
         return true;
     }
-
-    private static string FormatFloat(double value)
-        => value.ToString(CultureInfo.InvariantCulture);
 
     private static CamusDBException UnknownTargetType(string castName, string targetType)
     {

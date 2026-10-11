@@ -8,6 +8,7 @@
 
 using CamusDB.Core.Catalogs.Models;
 using System.Buffers.Binary;
+using System.Globalization;
 using System.Text.Json.Serialization;
 
 namespace CamusDB.Core.CommandsExecutor.Models;
@@ -70,13 +71,15 @@ public sealed class ColumnValue : IComparable<ColumnValue>
 
     /// <summary>
     /// ISO-8601 string representation for Date ("yyyy-MM-dd") and DateTime ("o" round-trip format).
-    /// Null for all other types. Included in JSON responses; ignored during deserialization.
+    /// Null for all other types. Included in JSON responses; ignored during deserialization. This is
+    /// also the SQL text form of the two types (<c>CAST(d AS string)</c>), so it uses the invariant
+    /// culture: under a culture with another calendar, "yyyy" would print a different year.
     /// </summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? IsoValue => Type switch
     {
-        ColumnType.Date     => new DateTime(LongValue, DateTimeKind.Utc).ToString("yyyy-MM-dd"),
-        ColumnType.DateTime => new DateTime(LongValue, DateTimeKind.Utc).ToString("o"),
+        ColumnType.Date     => new DateTime(LongValue, DateTimeKind.Utc).ToString("yyyy-MM-dd", CultureInfo.InvariantCulture),
+        ColumnType.DateTime => new DateTime(LongValue, DateTimeKind.Utc).ToString("o", CultureInfo.InvariantCulture),
         _ => null,
     };
 

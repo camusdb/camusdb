@@ -6,7 +6,6 @@
  * file that was distributed with this source code.
  */
 
-using System.Globalization;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
 
@@ -246,17 +245,12 @@ internal static class StringScalarFunctions
 
     private static string ToSqlString(string calledName, ColumnValue value)
     {
-        return value.Type switch
-        {
-            ColumnType.String or ColumnType.Id => value.StrValue ?? "",
-            ColumnType.Integer64 => value.LongValue.ToString(CultureInfo.InvariantCulture),
-            ColumnType.Float64 => value.FloatValue.ToString(CultureInfo.InvariantCulture),
-            ColumnType.Bool => value.BoolValue ? "true" : "false",
-            ColumnType.Null => "",
-            _ => throw new CamusDBException(
+        if (!ScalarTextForm.TryFormat(value, out string text))
+            throw new CamusDBException(
                 CamusDBErrorCodes.InvalidInput,
-                $"Function '{calledName}' cannot convert argument of type {value.Type} to string"),
-        };
+                $"Function '{calledName}' cannot convert argument of type {value.Type} to string");
+
+        return text;
     }
 
     private static void RequireString(string calledName, int argumentIndex, ColumnValue argument)
