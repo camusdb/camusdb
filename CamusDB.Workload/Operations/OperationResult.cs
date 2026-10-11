@@ -45,6 +45,9 @@ public enum OperationStatus
 /// (or a short synthetic class) — never a raw message — so error aggregation stays bounded;
 /// <see cref="ErrorMessage"/> is the sanitized, truncated text kept only for the handful of samples
 /// the error artifact retains per code, so a run can say <i>which</i> CADB0000 it saw.
+/// <see cref="Exchanges"/> is how many client round trips the operation cost — six for a transfer
+/// that awaits every statement, two for one sent as two pipelined frames — which is the number the
+/// pipelined mode exists to lower and so must be measured, not assumed from the mode.
 /// </summary>
 public readonly record struct OperationResult(
     OperationKind Kind,
@@ -54,7 +57,8 @@ public readonly record struct OperationResult(
     double ReadMs,
     double UpdateMs,
     double CommitMs,
-    string? ErrorMessage = null)
+    string? ErrorMessage = null,
+    int Exchanges = 0)
 {
     public bool IsSuccess => Status == OperationStatus.Ok;
 

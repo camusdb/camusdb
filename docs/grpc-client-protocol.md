@@ -508,8 +508,9 @@ which field the server reads: on a `FRAME` only `items`, on every other kind onl
 **Negotiation — announced, never probed.** A server built before frames does not reject an unknown
 `kind`; it runs it as a `NON_QUERY`. A frame sent to such a server would be executed as SQL. So:
 
-- The server writes the response header `camusdb-batch-frames: 1` (the contract version) when the
-  stream opens, before it reads the first request.
+- The server writes the response header `camusdb-batch-frames: 2` (the contract version) when the
+  stream opens, before it reads the first request. Version 1 is frames; version 2 adds the two items
+  of §7.9, which a client sends only to a server that announced 2 or higher.
 - A client sends a request frame on a stream **only after it saw that header on that same stream**.
   It must not wait for the header on the operation path; until the header arrives, and for ever
   against an older server, ops travel one per message.
@@ -534,8 +535,10 @@ so a quiet stream is byte-identical to a stream without frames.
 **What the server does with a request frame.**
 
 - Items are admitted in item order, and frames in stream order, so the per-handle chain (§7.4) sees
-  the same sequence as it would for separate messages. `START` still has to be answered before its
-  handle can be used, and `PREPARE` before its id can be used (§7.6) — a frame does not change that.
+  the same sequence as it would for separate messages. `PREPARE` has to be answered before its id
+  can be used (§7.6) — a frame does not change that. `START` has to be answered before its *handle*
+  can be used, but an item of the same frame may name the `START` itself instead of the handle
+  (§7.9).
 - Flow control and authorization stay per item: one read-buffer slot and one principal resolution
   for each item, taken one at a time. A frame larger than the free slots makes progress; it never
   reserves its slots up front.
@@ -564,6 +567,8 @@ so a quiet stream is byte-identical to a stream without frames.
 8. Keep the two copies of `camus_sql.proto` identical: `CamusDB.Grpc.Contracts/Protos/` in this
    repository and `CamusDB.Client/Protos/` in the `camusdb-dotnet` repository. The frame constants
    have the same two homes (`BatchFrames` in both).
+9. Never write `txn_start_ref` or `COMMIT_IF_OK` to a stream whose server announced a version below
+   2 (§7.9).
 
 The in-repo client `CamusDB.Grpc.Client` does not send frames. It therefore never receives one, and
 it keeps working unchanged against a server that supports them.
@@ -572,6 +577,68 @@ No CamusDB measurement of frames exists yet. The same change in Kahuna's key/val
 measured on one machine at roughly 2–4× throughput for cheap requests at concurrency 64, with no
 change at concurrency 1; a SQL statement does far more work per request, so expect a smaller share,
 largest on point reads and small multi-row reads.
+
+### 7.9 A transaction in one frame — `txn_start_ref` and `COMMIT_IF_OK` (contract version 2)
+
+A short transaction costs one exchange per op when the client awaits each answer: six for a bank
+transfer (`START`, two reads, two writes, `COMMIT`). The exchanges, not the statements, dominate its
+latency at high concurrency. Two additions let a client send a whole transaction, or each dependent
+half of one, as a single frame. Neither changes what a frame is: items still get no atomicity from
+the frame, every op still answers by its own `request_id`, and a failed statement still ends its
+transaction (§7.5).
+
+```
+BatchExecuteRequest { …, int32 txn_start_ref = 5 }      // items of a frame only
+BatchStatementKind.BATCH_STATEMENT_KIND_COMMIT_IF_OK = 9
+```
+
+**Naming the `START` of the same frame.** An item may set `txn_start_ref` to the `request_id` of a
+`START` *earlier in the same frame* instead of a `txn_handle` it cannot know yet. The server admits
+the `START` as the head of a chain and every item that names it behind it, in item order, so the
+statements run after the `START` on the handle it minted — the same chain the handle's own ops join
+later. The `START` answers its `start_reply` as always, and the client uses that handle for every
+later frame of the transaction. Rules, each refused with `CADB0400` without running the op:
+
+- the reference must point backwards, at a `START` of the same frame — not forwards, not at another
+  op kind, not at a `START` of an earlier frame;
+- it may not be combined with `request.txn_handle`;
+- a `START`, `PREPARE` or `CLOSE` may not carry one;
+- outside a frame the field must be 0.
+
+A refused reference never runs because the alternative — running it as an autocommit statement —
+would be a silent write outside the transaction the client meant. When the `START` itself fails,
+every item that names it is answered with the `START`'s own code and message and runs nothing; the
+client sees the same failure on `START` and on every statement, as it would on a deferred `BEGIN`.
+
+**Conditional commit.** `COMMIT_IF_OK` carries a handle or a `txn_start_ref` like `COMMIT`, and is
+chained after the transaction's earlier ops like `COMMIT`. If no earlier op of that transaction on
+this stream failed, it commits and answers `commit_reply`. If one did, it does not try to commit: it
+makes sure the transaction is rolled back (the failed statement already did that; the rollback here
+is the idempotent backstop) and answers an `error` that carries the **first** failure's code and
+message. "Earlier" means earlier on the transaction, not only in this frame: a `COMMIT_IF_OK` sent
+alone after a failed statement answers that failure too. The echo is deliberate — a client that
+awaits only its commit learns the cause, and a conflict code stays a conflict for its retry
+taxonomy. An op that was *refused* (past the item limit, §7.8) never ran, so it is not a failure of
+the transaction; the client decides what to do with a transaction it left open that way.
+
+**A transfer in two frames, or one.** A client that needs the values it reads sends
+`[START, SELECT a (ref), SELECT b (ref)]`, then `[UPDATE a, UPDATE b, COMMIT_IF_OK]` by handle: two
+exchanges. A client whose writes do not depend on a read (`SET balance = balance + @d`) sends
+`[START, UPDATE a (ref), UPDATE b (ref), COMMIT_IF_OK (ref)]`: one exchange. On either shape each
+statement's own answer arrives as before, and the commit's answer says whether the transaction
+stored them.
+
+**Negotiation.** Both items are contract version 2. A version 1 server ignores `txn_start_ref` —
+and runs the op as an autocommit statement — and runs `COMMIT_IF_OK` as a `NON_QUERY`, leaving the
+transaction open. So a client writes either one only on a stream whose header announced `2` or
+higher, and falls back to one exchange per step otherwise (`START` awaited, statements, then
+`COMMIT`), which is exactly the pre-version-2 behavior. The in-repo client `CamusDB.Grpc.Client`
+sends neither.
+
+**Metrics.** Each op inside a frame is still one request in `camus_request_count_total`, so that
+counter cannot show the gain. `camus_batch_request_frames_total` counts the request frames a
+stream read and `camus_batch_request_frame_items` is the histogram of ops per frame; a pipelined
+transfer is two frames of three ops.
 
 ---
 

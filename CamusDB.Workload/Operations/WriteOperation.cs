@@ -23,6 +23,11 @@ namespace CamusDB.Workload.Operations;
 /// timed separately so the report can attribute where a write spends time (the prior investigation
 /// found commit — durable WAL — dominates). A conflict here is not retried into a better number; it is
 /// classified and surfaced so the run can be invalidated per the non-conflicting contract.
+///
+/// <para>With <c>--pipeline</c> the same transaction is two <see cref="CamusPipeline"/> exchanges —
+/// <c>[BEGIN, every read]</c> then <c>[every update, COMMIT]</c> — whatever the row count, instead of
+/// <c>2 + 2 × rows</c> round trips. The read stage then times the first exchange and the commit stage
+/// the second; begin and update read as zero.</para>
 /// </summary>
 public sealed class WriteOperation : IWriteOperation
 {
@@ -30,22 +35,26 @@ public sealed class WriteOperation : IWriteOperation
     private readonly ConnectionSet _connections;
     private readonly Dataset _dataset;
     private readonly int _writesPerTransaction;
+    private readonly bool _pipeline;
     private long _committedRows;
     private long _indeterminateTxns;
 
     public WriteOperation(
         ConnectionSet connections, Dataset dataset, int writesPerTransaction,
         CamusLocking locking = CamusLocking.Optimistic,
-        CamusIsolationLevel isolationLevel = CamusIsolationLevel.ReadCommitted)
+        CamusIsolationLevel isolationLevel = CamusIsolationLevel.ReadCommitted,
+        bool pipeline = false)
     {
         _connections = connections;
         _dataset = dataset;
         _writesPerTransaction = Math.Max(1, writesPerTransaction);
+        _pipeline = pipeline;
         _options = new CamusTransactionOptions
         {
             IsolationLevel = isolationLevel,
             Mode = CamusTransactionMode.ReadWrite,
             Locking = locking,
+            DeferBegin = pipeline,
         };
     }
 
@@ -92,6 +101,9 @@ public sealed class WriteOperation : IWriteOperation
         }
 
         CamusConnection conn = _connections.NextWrite();
+
+        if (_pipeline)
+            return await ExecutePipelinedAsync(conn, rowIndexes, ct).ConfigureAwait(false);
 
         double beginMs = 0, readMs = 0, updateMs = 0, commitMs = 0;
         long ts = Stopwatch.GetTimestamp();
@@ -149,31 +161,94 @@ public sealed class WriteOperation : IWriteOperation
             await tx.CommitAsync(ct).ConfigureAwait(false);
             commitMs = Elapsed(ref ts);
             System.Threading.Interlocked.Add(ref _committedRows, count);
-            return new OperationResult(OperationKind.Write, OperationStatus.Ok, null, beginMs, readMs, updateMs, commitMs);
+            return new OperationResult(
+                OperationKind.Write, OperationStatus.Ok, null, beginMs, readMs, updateMs, commitMs, Exchanges: 2 + 2 * count);
         }
         catch (Exception ex)
         {
-            (OperationStatus status, string code) = ErrorClassifier.Classify(ex, commitSubmitted);
-            if (status == OperationStatus.Indeterminate)
+            return await FailedAsync(tx, ex, commitSubmitted, ct).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>The same transaction as two pipelined exchanges: BEGIN with every read, then every update with the commit.</summary>
+    private async Task<OperationResult> ExecutePipelinedAsync(CamusConnection conn, long[] rowIndexes, CancellationToken ct)
+    {
+        long ts = Stopwatch.GetTimestamp();
+
+        // No BEGIN is sent here: the options defer it into the first pipeline send.
+        CamusTransaction tx = await conn.BeginTransactionAsync(_options, ct).ConfigureAwait(false);
+        CamusPipeline pipeline = tx.CreatePipeline();
+
+        bool commitSubmitted = false;
+        try
+        {
+            string[] ids = new string[rowIndexes.Length];
+            string[] tables = new string[rowIndexes.Length];
+            Task<CamusDataReader>[] reads = new Task<CamusDataReader>[rowIndexes.Length];
+            for (int k = 0; k < rowIndexes.Length; k++)
             {
-                // The commit may already have durably applied; a rollback attempt would either be
-                // rejected or race the in-flight commit, so the transaction is left for the server's
-                // reaper/finalizer and the ambiguity is carried into reconciliation instead.
-                System.Threading.Interlocked.Increment(ref _indeterminateTxns);
-                return OperationResult.Failure(OperationKind.Write, status, code, ErrorClassifier.MessageOf(ex));
+                (ids[k], _, _, _) = _dataset.RowFor(rowIndexes[k]);
+                tables[k] = _dataset.TableOf(rowIndexes[k]);
+
+                CamusCommand read = conn.CreateSelectCommand($"SELECT balance, version FROM {tables[k]} WHERE id = @id");
+                read.Parameters.Add("@id", ColumnType.Id, ids[k]);
+                reads[k] = pipeline.QueueReader(read);
             }
 
-            try
+            await pipeline.SendAsync(ct).ConfigureAwait(false);
+            double readMs = Elapsed(ref ts);
+
+            for (int k = 0; k < rowIndexes.Length; k++)
             {
-                await tx.RollbackAsync(ct).ConfigureAwait(false);
+                long balance;
+                using (CamusDataReader reader = await reads[k].ConfigureAwait(false))
+                {
+                    if (!await reader.ReadAsync(ct).ConfigureAwait(false))
+                        throw new InvalidOperationException("write target row missing: " + ids[k]);
+                    balance = reader.GetInt64(0);
+                }
+
+                CamusCommand update = conn.CreateCamusCommand($"UPDATE {tables[k]} SET balance = @b, version = version + 1 WHERE id = @id");
+                update.Parameters.Add("@b", ColumnType.Integer64, balance + BoundedDelta(rowIndexes[k]));
+                update.Parameters.Add("@id", ColumnType.Id, ids[k]);
+                _ = pipeline.QueueNonQuery(update);
             }
-            catch
-            {
-                // A rollback failure does not change the operation's classification; the transaction
-                // is abandoned and the server's reaper/finalizer resolves it.
-            }
+
+            commitSubmitted = true;
+            await pipeline.CommitAsync(ct).ConfigureAwait(false);
+            double commitMs = Elapsed(ref ts);
+            System.Threading.Interlocked.Add(ref _committedRows, rowIndexes.Length);
+            return new OperationResult(OperationKind.Write, OperationStatus.Ok, null, 0, readMs, 0, commitMs, Exchanges: pipeline.Exchanges);
+        }
+        catch (Exception ex)
+        {
+            return await FailedAsync(tx, ex, commitSubmitted, ct).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>Classifies a failed transaction and rolls it back when the outcome is definite; shared by both wire shapes.</summary>
+    private async Task<OperationResult> FailedAsync(CamusTransaction tx, Exception ex, bool commitSubmitted, CancellationToken ct)
+    {
+        (OperationStatus status, string code) = ErrorClassifier.Classify(ex, commitSubmitted);
+        if (status == OperationStatus.Indeterminate)
+        {
+            // The commit may already have durably applied; a rollback attempt would either be
+            // rejected or race the in-flight commit, so the transaction is left for the server's
+            // reaper/finalizer and the ambiguity is carried into reconciliation instead.
+            System.Threading.Interlocked.Increment(ref _indeterminateTxns);
             return OperationResult.Failure(OperationKind.Write, status, code, ErrorClassifier.MessageOf(ex));
         }
+
+        try
+        {
+            await tx.RollbackAsync(ct).ConfigureAwait(false);
+        }
+        catch
+        {
+            // A rollback failure does not change the operation's classification; the transaction
+            // is abandoned and the server's reaper/finalizer resolves it.
+        }
+        return OperationResult.Failure(OperationKind.Write, status, code, ErrorClassifier.MessageOf(ex));
     }
 
     /// <summary>A deterministic, bounded balance change that keeps balances from drifting unboundedly.</summary>

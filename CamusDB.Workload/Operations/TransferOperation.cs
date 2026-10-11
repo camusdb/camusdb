@@ -31,6 +31,15 @@ namespace CamusDB.Workload.Operations;
 /// is therefore direct evidence of an atomicity violation, a far stronger signal than the version
 /// accounting alone. The two rows are always touched in ascending-index order so concurrent transfers
 /// acquire locks in a canonical order and cannot deadlock in a cycle.</para>
+///
+/// <para><b>Two wire shapes.</b> The sequential transfer awaits each statement: six client round trips
+/// (<c>BEGIN</c>, two reads, two updates, <c>COMMIT</c>). The pipelined transfer (<c>--pipeline</c>)
+/// sends the same six statements as two <see cref="CamusPipeline"/> exchanges — <c>[BEGIN, SELECT,
+/// SELECT]</c>, then <c>[UPDATE, UPDATE, COMMIT]</c> — because the updates depend on the values read.
+/// The ledger semantics are identical; what changes is where a failure is seen. An update that matched
+/// no row is a tripwire for a lost-row bug class: the sequential path refuses to commit on it, while
+/// the pipelined path can only see it after the conditional commit has committed, and then reports the
+/// transfer as an error so reconciliation and the operator both learn of it.</para>
 /// </summary>
 public sealed class TransferOperation : IWriteOperation
 {
@@ -44,6 +53,7 @@ public sealed class TransferOperation : IWriteOperation
     private readonly Dataset _dataset;
     private readonly long _rows;
     private readonly bool _crossTable;
+    private readonly bool _pipeline;
     private readonly int _maxRetries;
     private readonly Metrics.TransferLedger? _ledger;
     private long _committedRows;
@@ -58,7 +68,8 @@ public sealed class TransferOperation : IWriteOperation
         CamusIsolationLevel isolationLevel = CamusIsolationLevel.ReadCommitted,
         int maxRetries = 10,
         Metrics.TransferLedger? ledger = null,
-        bool crossTable = false)
+        bool crossTable = false,
+        bool pipeline = false)
     {
         _connections = connections;
         _dataset = dataset;
@@ -68,13 +79,19 @@ public sealed class TransferOperation : IWriteOperation
         _crossTable = crossTable && dataset.Tables > 1;
         _maxRetries = Math.Max(1, maxRetries);
         _ledger = ledger;
+        _pipeline = pipeline;
         _options = new CamusTransactionOptions
         {
             IsolationLevel = isolationLevel,
             Mode = CamusTransactionMode.ReadWrite,
             Locking = locking,
+            // The pipelined transfer puts BEGIN inside its first frame instead of spending a round trip on it.
+            DeferBegin = pipeline,
         };
     }
+
+    /// <summary>Round trips the sequential transfer costs: BEGIN, two reads, two updates, COMMIT.</summary>
+    private const int SequentialExchanges = 6;
 
     public long CommittedRows => System.Threading.Interlocked.Read(ref _committedRows);
 
@@ -124,7 +141,13 @@ public sealed class TransferOperation : IWriteOperation
         return lastConflict;
     }
 
-    private async Task<(bool Done, OperationResult Result)> TryOnceAsync(
+    private Task<(bool Done, OperationResult Result)> TryOnceAsync(
+        long lowIndex, long highIndex, long lowDelta, long highDelta, int attempt, CancellationToken ct)
+        => _pipeline
+            ? TryOncePipelinedAsync(lowIndex, highIndex, lowDelta, highDelta, attempt, ct)
+            : TryOnceSequentialAsync(lowIndex, highIndex, lowDelta, highDelta, attempt, ct);
+
+    private async Task<(bool Done, OperationResult Result)> TryOnceSequentialAsync(
         long lowIndex, long highIndex, long lowDelta, long highDelta, int attempt, CancellationToken ct)
     {
         CamusConnection conn = _connections.NextWrite();
@@ -158,32 +181,139 @@ public sealed class TransferOperation : IWriteOperation
 
             System.Threading.Interlocked.Add(ref _committedRows, RowsPerTransfer);
             _ledger?.Record(lowIndex, highIndex, lowDelta, attempt, Metrics.TransferOutcome.Committed, null);
-            return (true, new OperationResult(OperationKind.Write, OperationStatus.Ok, null, beginMs, t.ReadMs, t.UpdateMs, commitMs));
+            return (true, new OperationResult(
+                OperationKind.Write, OperationStatus.Ok, null, beginMs, t.ReadMs, t.UpdateMs, commitMs, Exchanges: SequentialExchanges));
         }
         catch (Exception ex)
         {
-            (OperationStatus status, string code) = ErrorClassifier.Classify(ex, commitSubmitted);
+            return await FailedAttemptAsync(tx, ex, commitSubmitted, lowIndex, highIndex, lowDelta, attempt, ct).ConfigureAwait(false);
+        }
+    }
 
-            if (status == OperationStatus.Indeterminate)
+    /// <summary>
+    /// The transfer as two pipelined exchanges. The first carries <c>BEGIN</c> and both reads, so the
+    /// transaction begins and reads in one round trip; the second carries both updates and a commit
+    /// that happens only if both updates succeeded. Stage timings are per frame: the read stage is the
+    /// first exchange, the commit stage the second; begin and update, which have no exchange of their
+    /// own here, read as zero.
+    /// </summary>
+    private async Task<(bool Done, OperationResult Result)> TryOncePipelinedAsync(
+        long lowIndex, long highIndex, long lowDelta, long highDelta, int attempt, CancellationToken ct)
+    {
+        CamusConnection conn = _connections.NextWrite();
+        Timing t = new() { Ts = Stopwatch.GetTimestamp() };
+
+        // No BEGIN is sent here: the options defer it into the first pipeline send.
+        CamusTransaction tx = await conn.BeginTransactionAsync(_options, ct).ConfigureAwait(false);
+        CamusPipeline pipeline = tx.CreatePipeline();
+
+        bool commitSubmitted = false;
+        try
+        {
+            (string lowId, string lowTable) = Target(lowIndex);
+            (string highId, string highTable) = Target(highIndex);
+
+            Task<CamusDataReader> readLow = pipeline.QueueReader(ReadCommand(conn, lowTable, lowId));
+            Task<CamusDataReader> readHigh = pipeline.QueueReader(ReadCommand(conn, highTable, highId));
+            await pipeline.SendAsync(ct).ConfigureAwait(false);
+            t.ReadMs += t.Tick();
+
+            long lowBalance = await BalanceOfAsync(readLow, lowId, ct).ConfigureAwait(false);
+            long highBalance = await BalanceOfAsync(readHigh, highId, ct).ConfigureAwait(false);
+
+            Task<int> updateLow = pipeline.QueueNonQuery(UpdateCommand(conn, lowTable, lowId, lowBalance + lowDelta));
+            Task<int> updateHigh = pipeline.QueueNonQuery(UpdateCommand(conn, highTable, highId, highBalance + highDelta));
+
+            commitSubmitted = true;
+            await pipeline.CommitAsync(ct).ConfigureAwait(false);
+            double commitMs = t.Tick();
+
+            System.Threading.Interlocked.Add(ref _committedRows, RowsPerTransfer);
+            int modifiedLow = await updateLow.ConfigureAwait(false);
+            int modifiedHigh = await updateHigh.ConfigureAwait(false);
+
+            // The tripwire, seen after the fact: the reads proved both rows exist, so an update that
+            // matched none means the engine lost a row inside the transaction. The commit has already
+            // happened, so the transfer is reported as an error rather than a success; reconciliation
+            // will show the drift it caused, and this says which transfer caused it.
+            if (modifiedLow != 1 || modifiedHigh != 1)
             {
-                // The atomic commit may already have applied both legs or neither; either keeps the sum
-                // conserved. Leave it for the server's reaper and carry the ambiguity into reconciliation.
-                System.Threading.Interlocked.Increment(ref _indeterminateTxns);
-                _ledger?.Record(lowIndex, highIndex, lowDelta, attempt, Metrics.TransferOutcome.Indeterminate, code);
-                return (true, OperationResult.Failure(OperationKind.Write, status, code, ErrorClassifier.MessageOf(ex)));
+                _ledger?.Record(lowIndex, highIndex, lowDelta, attempt, Metrics.TransferOutcome.Error, "PARTIAL_TRANSFER");
+                return (true, OperationResult.Failure(OperationKind.Write, OperationStatus.InternalError, "PARTIAL_TRANSFER",
+                    $"pipelined transfer committed with UPDATE matches {modifiedLow}/{modifiedHigh} for existing ids {lowId}/{highId}"));
             }
 
-            try { await tx.RollbackAsync(ct).ConfigureAwait(false); }
-            catch { /* abandoned; the server reaper resolves it */ }
-
-            // A conflict is retried by the caller; any other definite abort is surfaced now.
-            _ledger?.Record(lowIndex, highIndex, lowDelta, attempt,
-                status == OperationStatus.Conflict ? Metrics.TransferOutcome.ConflictRetry : Metrics.TransferOutcome.Error,
-                code);
-            return status == OperationStatus.Conflict
-                ? (false, OperationResult.Failure(OperationKind.Write, status, code, ErrorClassifier.MessageOf(ex)))
-                : (true, OperationResult.Failure(OperationKind.Write, status, code, ErrorClassifier.MessageOf(ex)));
+            _ledger?.Record(lowIndex, highIndex, lowDelta, attempt, Metrics.TransferOutcome.Committed, null);
+            return (true, new OperationResult(
+                OperationKind.Write, OperationStatus.Ok, null, 0, t.ReadMs, 0, commitMs, Exchanges: pipeline.Exchanges));
         }
+        catch (Exception ex)
+        {
+            // A BEGIN that failed inside the first frame never touched a row and is retried if it was
+            // a conflict, as the sequential path retries a failed BeginTransaction.
+            return await FailedAttemptAsync(tx, ex, commitSubmitted, lowIndex, highIndex, lowDelta, attempt, ct).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
+    /// Classifies a failed attempt, rolls the transaction back when the outcome is definite, and
+    /// records it: indeterminate commits are carried into reconciliation, conflicts are retried by the
+    /// caller, anything else is surfaced. Shared by both wire shapes, whose failure semantics are the same.
+    /// </summary>
+    private async Task<(bool Done, OperationResult Result)> FailedAttemptAsync(
+        CamusTransaction tx, Exception ex, bool commitSubmitted,
+        long lowIndex, long highIndex, long lowDelta, int attempt, CancellationToken ct)
+    {
+        (OperationStatus status, string code) = ErrorClassifier.Classify(ex, commitSubmitted);
+
+        if (status == OperationStatus.Indeterminate)
+        {
+            // The atomic commit may already have applied both legs or neither; either keeps the sum
+            // conserved. Leave it for the server's reaper and carry the ambiguity into reconciliation.
+            System.Threading.Interlocked.Increment(ref _indeterminateTxns);
+            _ledger?.Record(lowIndex, highIndex, lowDelta, attempt, Metrics.TransferOutcome.Indeterminate, code);
+            return (true, OperationResult.Failure(OperationKind.Write, status, code, ErrorClassifier.MessageOf(ex)));
+        }
+
+        try { await tx.RollbackAsync(ct).ConfigureAwait(false); }
+        catch { /* abandoned; the server reaper resolves it */ }
+
+        // A conflict is retried by the caller; any other definite abort is surfaced now.
+        _ledger?.Record(lowIndex, highIndex, lowDelta, attempt,
+            status == OperationStatus.Conflict ? Metrics.TransferOutcome.ConflictRetry : Metrics.TransferOutcome.Error,
+            code);
+        return status == OperationStatus.Conflict
+            ? (false, OperationResult.Failure(OperationKind.Write, status, code, ErrorClassifier.MessageOf(ex)))
+            : (true, OperationResult.Failure(OperationKind.Write, status, code, ErrorClassifier.MessageOf(ex)));
+    }
+
+    private (string Id, string Table) Target(long rowIndex)
+    {
+        (string id, _, _, _) = _dataset.RowFor(rowIndex);
+        return (id, _dataset.TableOf(rowIndex));
+    }
+
+    private static CamusCommand ReadCommand(CamusConnection conn, string table, string id)
+    {
+        CamusCommand read = conn.CreateSelectCommand($"SELECT balance, version FROM {table} WHERE id = @id");
+        read.Parameters.Add("@id", ColumnType.Id, id);
+        return read;
+    }
+
+    private static CamusCommand UpdateCommand(CamusConnection conn, string table, string id, long balance)
+    {
+        CamusCommand update = conn.CreateCamusCommand($"UPDATE {table} SET balance = @b, version = version + 1 WHERE id = @id");
+        update.Parameters.Add("@b", ColumnType.Integer64, balance);
+        update.Parameters.Add("@id", ColumnType.Id, id);
+        return update;
+    }
+
+    private static async Task<long> BalanceOfAsync(Task<CamusDataReader> read, string id, CancellationToken ct)
+    {
+        using CamusDataReader reader = await read.ConfigureAwait(false);
+        if (!await reader.ReadAsync(ct).ConfigureAwait(false))
+            throw new InvalidOperationException("transfer target row missing: " + id);
+        return reader.GetInt64(0);
     }
 
     private async Task ApplyLegAsync(

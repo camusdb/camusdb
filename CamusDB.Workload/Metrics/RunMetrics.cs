@@ -36,6 +36,7 @@ public sealed class RunMetrics
     private long _inFlight;
     private long _rowsRead;
     private long _writeRowsCommitted;
+    private long _writeExchanges;
 
     public readonly LatencyHistogram ReadLatency = new();
     public readonly LatencyHistogram WriteLatency = new();
@@ -77,6 +78,10 @@ public sealed class RunMetrics
     public long CompletedRead => Interlocked.Read(ref _completedRead);
     public long CompletedWrite => Interlocked.Read(ref _completedWrite);
     public long Completed => CompletedRead + CompletedWrite;
+
+    /// <summary>Client round trips spent by the committed writes, summed, so the summary can report
+    /// exchanges per write transaction as measured rather than as the mode implies.</summary>
+    public long WriteExchanges => Interlocked.Read(ref _writeExchanges);
     public long Failed => Interlocked.Read(ref _failed);
     public long Conflicts => Interlocked.Read(ref _conflicts);
     public long Transient => Interlocked.Read(ref _transient);
@@ -111,6 +116,7 @@ public sealed class RunMetrics
             {
                 Interlocked.Increment(ref _completedWrite);
                 Interlocked.Add(ref _writeRowsCommitted, _writesPerTransaction);
+                Interlocked.Add(ref _writeExchanges, result.Exchanges);
                 WriteLatency.Record(totalLatencyMs);
                 BeginLatency.Record(result.BeginMs);
                 WriteReadLatency.Record(result.ReadMs);

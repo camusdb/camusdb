@@ -25,6 +25,13 @@ public sealed record LatencySummary(double P50, double P90, double P95, double P
 /// shortfalls are expected collateral, so they downgrade to warnings — but the flag itself is recorded
 /// (<see cref="ExpectFaults"/>) so a reader knows the waivers were active and never compares such a
 /// run against a strict baseline.
+///
+/// <para>The four write stages are reported as the operation timed them. A write that awaits each
+/// statement reports begin, reads, updates and commit; a pipelined write reports its two exchanges
+/// as <see cref="WriteRead"/> (<c>BEGIN</c> plus the reads, one frame) and <see cref="WriteCommit"/>
+/// (the updates plus the commit, one frame), with the other two at zero. <see cref="ExchangesPerWriteTxn"/>
+/// says which shape a run had, as measured: six for the sequential write, two for the pipelined one
+/// over gRPC, more when the server or the protocol could not take the frame.</para>
 /// </summary>
 public sealed record RunSummary(
     double MeasuredSeconds,
@@ -60,7 +67,8 @@ public sealed record RunSummary(
     long RetryAttempts,
     long RetriedTxns,
     long MaxAttemptsUsed,
-    double RetriesPerWriteTxn)
+    double RetriesPerWriteTxn,
+    double ExchangesPerWriteTxn = 0)
 {
     public static RunSummary Build(
         RunMetrics m, string mode, int targetOps, double measuredSeconds, bool expectFaults = false,
@@ -133,6 +141,7 @@ public sealed record RunSummary(
             LatencySummary.From(m.ScheduleDelay),
             expectFaults, valid, warnings,
             retryAttempts, retriedTxns, maxAttemptsUsed,
-            m.CompletedWrite == 0 ? 0 : (double)retryAttempts / m.CompletedWrite);
+            m.CompletedWrite == 0 ? 0 : (double)retryAttempts / m.CompletedWrite,
+            m.CompletedWrite == 0 ? 0 : (double)m.WriteExchanges / m.CompletedWrite);
     }
 }

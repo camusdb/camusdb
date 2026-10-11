@@ -132,6 +132,7 @@ public static class RunComparison
         // same experiment, because the map is what decides whether the mode does anything.
         Check("routing-mode", m1.RoutingMode, m2.RoutingMode, blocking: false);
         Check("connection-options", m1.ConnectionOptions, m2.ConnectionOptions, blocking: false);
+        Check("pipeline", m1.Pipeline, m2.Pipeline, blocking: false);
         Check("routing-nodes", m1.RoutingNodes, m2.RoutingNodes, blocking: false);
         Check("measured-seconds", baseline.Summary.MeasuredSeconds, candidate.Summary.MeasuredSeconds, blocking: false);
 

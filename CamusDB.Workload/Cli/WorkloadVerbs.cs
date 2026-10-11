@@ -158,6 +158,9 @@ public sealed class RunOptions : CommonOptions
         return clone;
     }
 
+    [Option("pipeline", Default = false, HelpText = "Send each write transaction as pipelined frames instead of one round trip per statement: [BEGIN, reads] then [updates, conditional COMMIT] — two exchanges per transaction instead of six on the bank shape. Applies to the accounts, bank and fanout shapes over gRPC against a server that reads the pipeline contract; elsewhere the client falls back to one exchange per step and summary.json's exchangesPerWriteTxn shows it. Recorded in manifest.json; runs that differ here are different clients.")]
+    public bool Pipeline { get; set; }
+
     [Option("workload", Default = "accounts", HelpText = "Write shape: accounts (shard-disjoint read-modify-write, conflict-free), bank (contended transfers within the dataset with a conserved SUM(balance) invariant), fanout (bank transfers whose two legs always land in different tables; needs --tables >= 2), or append (Elle list-append transactions on a separate table, recorded to history.edn for an Elle check; reads become read-only list-append transactions).")]
     public string Workload { get; set; } = "accounts";
 

@@ -430,9 +430,9 @@ public static class Program
             writeOperation = appendOperation;
         else if (transfers)
             writeOperation = new TransferOperation(
-                connections, dataset, o.Rows, locking, isolation, ledger: transferLedger, crossTable: crossTable);
+                connections, dataset, o.Rows, locking, isolation, ledger: transferLedger, crossTable: crossTable, pipeline: o.Pipeline);
         else
-            writeOperation = new WriteOperation(connections, dataset, o.WritesPerTransaction, locking, isolation);
+            writeOperation = new WriteOperation(connections, dataset, o.WritesPerTransaction, locking, isolation, pipeline: o.Pipeline);
 
         IReadOperation readOperation = appendOperation is not null
             ? appendOperation
@@ -445,7 +445,8 @@ public static class Program
 
         Console.WriteLine($"Running {o.Mode}-loop {o.Workload} workload: {o.ReadPercent}/{o.WritePercent} read/write, " +
                           $"{o.Workers} workers over {o.Connections} connections, {o.Rows} rows over " +
-                          $"{dataset.Tables} table(s), warmup {warmup}, measure {measure}.");
+                          $"{dataset.Tables} table(s), warmup {warmup}, measure {measure}" +
+                          (o.Pipeline ? ", pipelined writes." : "."));
 
         RunMetrics metrics;
         IReadOnlyList<IntervalRow> intervals;
@@ -975,6 +976,7 @@ public static class Program
         RoutingMode: o.RoutingMode,
         RoutingNodes: o.RoutingNodes,
         ConnectionOptions: o.ConnectionOptions,
+        Pipeline: o.Pipeline,
         ExpectFaults: o.ExpectFaults,
         SchemaFingerprint: dataset.Fingerprint(),
         StartedAtUtc: DateTime.UtcNow.ToString("O"),

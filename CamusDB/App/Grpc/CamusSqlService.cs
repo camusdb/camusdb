@@ -739,6 +739,16 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
     /// <see cref="BatchResponseWriter"/>. Support is announced on the response headers, and a response
     /// frame goes only to a peer that proved it reads them (an accept request header, or a request
     /// frame) — see <see cref="BatchFrames"/> for why support can never be probed.</para>
+    ///
+    /// <para><b>A transaction in one frame.</b> Two additions (contract version 2) let a short
+    /// transaction cost one or two exchanges instead of one per op. An item may name the START
+    /// earlier in its frame instead of a handle that does not exist yet; the server chains it behind
+    /// that START and runs it on the handle the START minted (<see cref="FrameStart"/>). And a
+    /// <see cref="BatchStatementKind.CommitIfOk"/> item commits only when no earlier op of its
+    /// transaction failed, answering the first failure otherwise
+    /// (<see cref="RunBatchCommitIfOkAsync"/>). Neither changes what a frame is: items still get no
+    /// atomicity from the frame, every op still answers by its own id, and a failed statement still
+    /// ends its transaction as it always did.</para>
     /// </summary>
     public override Task BatchExecute(
         IAsyncStreamReader<BatchExecuteRequest> requestStream,
@@ -841,6 +851,9 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
             {
                 if (req.Kind == BatchStatementKind.Frame)
                     await AdmitBatchFrameAsync(state, req).ConfigureAwait(false);
+                else if (req.TxnStartRef != 0)
+                    await RefuseBatchOpAsync(state, req, CamusDBErrorCodes.InvalidInput,
+                        "txn_start_ref is only valid on an item of a frame").ConfigureAwait(false);
                 else
                     await AdmitBatchOpAsync(state, req).ConfigureAwait(false);
             }
@@ -947,6 +960,56 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
 
         /// <summary>Set by the read loop only. Keeps the nested-frame warning to one per stream.</summary>
         public bool NestedFrameLogged { get; set; }
+
+        /// <summary>
+        /// The chain key of every open transaction whose START was named by items of its own frame,
+        /// by the handle that START minted. Those items were chained under a stream-local alias key
+        /// before the handle existed, and every later op that arrives with the real handle must join
+        /// that same chain, so admission looks a handle up here before it uses the handle as the key.
+        /// Written by the START op before it answers — the client cannot send the handle before it
+        /// has read the reply — and removed when the transaction's COMMIT, COMMIT_IF_OK or ROLLBACK
+        /// op completes. Concurrent because the ops write and the read loop reads.
+        /// </summary>
+        public ConcurrentDictionary<(long Pt, uint Counter), (long Pt, uint Counter)> HandleAliases { get; } = new();
+
+        /// <summary>
+        /// The first failure answered on each transaction chain, by chain key, which is what a
+        /// COMMIT_IF_OK answers instead of committing. Written by the chain's own ops, which run one
+        /// at a time, and removed when the transaction's finalize op completes. Concurrent because
+        /// different chains write at the same time.
+        /// </summary>
+        public ConcurrentDictionary<(long Pt, uint Counter), BatchOpFailure> ChainFailures { get; } = new();
+
+        private uint aliasSeq;
+
+        /// <summary>
+        /// A chain key for a transaction whose handle does not exist yet. A real handle always has
+        /// a positive <c>TxnIdPt</c> (see <see cref="HandleKey"/>), so a key whose first half is zero
+        /// can never collide with one, and the counter is unique for the life of the stream.
+        /// Read-loop only.
+        /// </summary>
+        public (long Pt, uint Counter) NewAliasKey() => (0, ++aliasSeq);
+    }
+
+    /// <summary>A terminal failure one batch op answered with: its domain code and message.</summary>
+    private sealed record BatchOpFailure(string Code, string Message);
+
+    /// <summary>
+    /// A START inside a request frame that later items of the same frame name by its request id
+    /// (<c>txn_start_ref</c>). Those items are admitted before the START has answered, so they are
+    /// chained behind it under a stream-local alias key and read its outcome here once their
+    /// predecessor completed: the handle the START minted, which each of them then runs on, or the
+    /// failure it answered with, which each of them then answers too. The START op writes one of the
+    /// two before its task completes and the frame-mates read after awaiting that task, so the
+    /// task's completion is the only synchronization needed.
+    /// </summary>
+    private sealed class FrameStart((long Pt, uint Counter) aliasKey)
+    {
+        public (long Pt, uint Counter) AliasKey { get; } = aliasKey;
+
+        public TxnHandle? Handle { get; set; }
+
+        public BatchOpFailure? Failure { get; set; }
     }
 
     /// <summary>
@@ -958,6 +1021,15 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
     /// <para><b>Flow control stays per item.</b> Each item awaits its own read-buffer slot before the
     /// next item is looked at. Never reserve the slots of a frame up front: a frame larger than the
     /// free slots would block the read loop against ops that cannot complete until it reads on.</para>
+    ///
+    /// <para><b>A whole transaction may ride one frame.</b> An item may name a START earlier in the
+    /// frame (<c>txn_start_ref</c>) instead of a handle that does not exist yet. Such a START is
+    /// admitted as the head of an alias chain (<see cref="FrameStart"/>) and every item that names
+    /// it is chained behind it, so the statements run after the START in item order and resolve the
+    /// handle from the START's outcome. The reference must point backwards, at a START of this
+    /// frame; anything else is refused with <see cref="CamusDBErrorCodes.InvalidInput"/> and runs
+    /// nothing, because a wrong reference run as an autocommit statement would be a silent write
+    /// outside the transaction the client meant.</para>
     ///
     /// <para>The byte size of a frame cannot be checked here. The transport rejects a message over
     /// its limit before it is parsed and resets the stream, so the byte budget is the sender's duty.
@@ -976,6 +1048,20 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
         state.Writer.MarkPeerReadsFrames();
 
         Google.Protobuf.Collections.RepeatedField<BatchExecuteRequest> items = frame.Items;
+        ServerDiagnostics.RecordRequestFrame(items.Count);
+
+        // The request ids this frame's items name as their START, found in one pass before anything
+        // is admitted, so that a START knows on admission whether it heads an alias chain. Null for
+        // the common frame that names none, which then pays nothing for the feature.
+        HashSet<int>? referenced = null;
+        for (int i = 0; i < items.Count; i++)
+        {
+            if (items[i].TxnStartRef != 0)
+                (referenced ??= new HashSet<int>()).Add(items[i].TxnStartRef);
+        }
+
+        // The named STARTs admitted so far, by request id: a reference resolves only backwards.
+        Dictionary<int, FrameStart>? starts = null;
 
         for (int i = 0; i < items.Count; i++)
         {
@@ -1006,6 +1092,35 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
                 continue;
             }
 
+            if (item.TxnStartRef != 0)
+            {
+                if (starts is null || !starts.TryGetValue(item.TxnStartRef, out FrameStart? start))
+                {
+                    await RefuseBatchOpAsync(state, item, CamusDBErrorCodes.InvalidInput,
+                        "txn_start_ref must name a START earlier in the same frame").ConfigureAwait(false);
+                    continue;
+                }
+
+                if (item.Kind is BatchStatementKind.Start or BatchStatementKind.Prepare or BatchStatementKind.Close
+                    || item.Request?.TxnHandle is { TxnIdPt: > 0 })
+                {
+                    await RefuseBatchOpAsync(state, item, CamusDBErrorCodes.InvalidInput,
+                        "txn_start_ref is only valid on a statement, COMMIT, COMMIT_IF_OK or ROLLBACK that carries no txn_handle").ConfigureAwait(false);
+                    continue;
+                }
+
+                await AdmitBatchOpAsync(state, item, startRef: start).ConfigureAwait(false);
+                continue;
+            }
+
+            if (item.Kind == BatchStatementKind.Start && referenced is not null && referenced.Contains(item.RequestId))
+            {
+                FrameStart start = new(state.NewAliasKey());
+                (starts ??= new Dictionary<int, FrameStart>())[item.RequestId] = start;
+                await AdmitBatchOpAsync(state, item, frameStart: start).ConfigureAwait(false);
+                continue;
+            }
+
             await AdmitBatchOpAsync(state, item).ConfigureAwait(false);
         }
     }
@@ -1019,12 +1134,20 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
         }, state.Ct);
 
     /// <summary>
-    /// Admits one op: resolves its principal, takes one read-buffer slot, and starts it — chained after
-    /// the previous op of the same transaction handle, or gated by the execution limit alone. Called
-    /// only from the read loop, one op at a time, which is what makes "arrival order" well defined for
-    /// the per-handle chain. It returns when the op is started, not when it completes.
+    /// Admits one op: resolves its principal, takes one read-buffer slot, and starts it — chained
+    /// after the previous op of its chain, or gated by the execution limit alone. Called only from
+    /// the read loop, one op at a time, which is what makes "arrival order" well defined for the
+    /// per-handle chain. It returns when the op is started, not when it completes.
+    ///
+    /// <para><b>Which chain.</b> An op that names a START in its frame (<paramref name="startRef"/>)
+    /// joins that START's alias chain. An op that carries a handle joins the handle's chain, which
+    /// is an alias chain when the transaction began inside a frame
+    /// (<see cref="BatchStreamState.HandleAliases"/>) and the handle's own key otherwise. A START
+    /// that its frame-mates name (<paramref name="frameStart"/>) is chained as the head of its alias
+    /// chain, so that they run after it; every other START, and every autocommit op, is unchained.</para>
     /// </summary>
-    private async Task AdmitBatchOpAsync(BatchStreamState state, BatchExecuteRequest req)
+    private async Task AdmitBatchOpAsync(
+        BatchStreamState state, BatchExecuteRequest req, FrameStart? startRef = null, FrameStart? frameStart = null)
     {
         CancellationToken ct = state.Ct;
 
@@ -1050,6 +1173,8 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
             // this one op and not the stream — and every transaction pinned to it.
             CommandFailureLog.LogFailure(logger, ex);
             await RefuseBatchOpAsync(state, req, ex.Code, ex.Message).ConfigureAwait(false);
+            if (frameStart is not null)
+                frameStart.Failure = new BatchOpFailure(ex.Code, ex.Message);
             return;
         }
 
@@ -1059,7 +1184,15 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
         await state.ReadBuffer.WaitAsync(ct).ConfigureAwait(false);
 
         BatchStreamTracker tracker = state.Tracker;
-        (long Pt, uint Counter)? handleKey = HandleKey(req.Request?.TxnHandle);
+        (long Pt, uint Counter)? chainKey;
+        if (startRef is not null)
+            chainKey = startRef.AliasKey;
+        else if (frameStart is not null)
+            chainKey = frameStart.AliasKey;
+        else if (HandleKey(req.Request?.TxnHandle) is { } handle)
+            chainKey = state.HandleAliases.TryGetValue(handle, out (long Pt, uint Counter) alias) ? alias : handle;
+        else
+            chainKey = null;
         stageClock?.AddElapsed(QueryStage.Admit, admitStart);
 
         // Reserve the outstanding-op reference before the op exists: an op can finish before
@@ -1068,23 +1201,21 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
         tracker.Enter();
 
         Task op;
-        (long Pt, uint Counter)? tail = null;
-        if (handleKey is { } hk)
+        if (chainKey is { } key)
         {
-            Task prev = tracker.PredecessorFor(hk);
-            op = RunBatchOpAfterAsync(prev, state.InFlight, req, state.Writer, state.StartedHandles, state.Prepared, opPrincipal, ct);
-            tail = hk;
+            Task prev = tracker.PredecessorFor(key);
+            op = RunBatchOpAfterAsync(prev, state, req, opPrincipal, key, startRef, frameStart);
         }
         else
         {
-            op = RunBatchOpGatedAsync(state.InFlight, req, state.Writer, state.StartedHandles, state.Prepared, opPrincipal, ct);
+            op = RunBatchOpGatedAsync(state, req, opPrincipal, chainKey: null, frameStart: null);
         }
 
         // Attach the completion callback before anything else can fail: without it the
         // reserved reference above would never come back and teardown would wait forever.
         _ = op.ContinueWith(state.OnOpCompleted, TaskScheduler.Default);
 
-        if (tail is { } recorded)
+        if (chainKey is { } recorded)
             tracker.RecordTail(recorded, op);
     }
 
@@ -1142,16 +1273,22 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
     private static (long Pt, uint Counter)? HandleKey(TxnHandle? handle)
         => handle is { TxnIdPt: > 0 } h ? (h.TxnIdPt, h.TxnIdCounter) : null;
 
-    /// <summary>Chains a batch op after the previous op for the same handle so they run in order.</summary>
+    /// <summary>
+    /// Chains a batch op after the previous op of its chain so the two run in order, then records
+    /// the op's failure, if any, as the chain's first failure for a later <c>COMMIT_IF_OK</c>. An op
+    /// that names a START in its frame (<paramref name="startRef"/>) is also where that START's
+    /// outcome is read: its predecessor is the START (or a frame-mate chained behind it), so by the
+    /// time it runs the START has either minted the handle, which is put on the op before it runs,
+    /// or failed, in which case the op is answered with the START's failure and never runs.
+    /// </summary>
     private async Task RunBatchOpAfterAsync(
         Task prev,
-        SemaphoreSlim inFlight,
+        BatchStreamState state,
         BatchExecuteRequest req,
-        BatchResponseWriter writer,
-        ConcurrentDictionary<(long Pt, uint Counter), bool> startedHandles,
-        StreamPreparedStatements prepared,
         Principal? principal,
-        CancellationToken ct)
+        (long Pt, uint Counter) chainKey,
+        FrameStart? startRef,
+        FrameStart? frameStart)
     {
         // RunBatchOpAsync never throws, so the previous op cannot fault the chain — but await it
         // defensively so a same-handle op only starts once its predecessor has fully completed.
@@ -1161,53 +1298,106 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
         {
             try { await prev.ConfigureAwait(false); } catch { /* predecessor reported its own outcome */ }
         }
-        await RunBatchOpGatedAsync(inFlight, req, writer, startedHandles, prepared, principal, ct).ConfigureAwait(false);
+
+        if (startRef is not null && !TryResolveStartRef(req, startRef, out BatchOpFailure? startFailure))
+        {
+            // There is no transaction to run this op on. It takes no execution slot, and its answer
+            // is not recorded on the chain: a COMMIT_IF_OK that names the same START reads the
+            // START's failure itself, and no op can ever arrive with a handle that was never minted.
+            await RefuseBatchOpAsync(state, req, startFailure!.Code, startFailure.Message).ConfigureAwait(false);
+            return;
+        }
+
+        BatchOpFailure? failure = await RunBatchOpGatedAsync(state, req, principal, chainKey, frameStart).ConfigureAwait(false);
+
+        // First failure wins: it is the one that ended the transaction, and the one a client that
+        // awaits only its conditional commit needs to see. A START that failed is not recorded: its
+        // frame-mates answer its failure directly (above) and nothing else can join its chain.
+        if (failure is not null && frameStart is null)
+            state.ChainFailures.TryAdd(chainKey, failure);
+    }
+
+    /// <summary>
+    /// Puts the handle a frame START minted on the op that named it, or reports the START's
+    /// failure. Called only after the START's task completed, which is what publishes the outcome.
+    /// </summary>
+    private static bool TryResolveStartRef(BatchExecuteRequest req, FrameStart startRef, out BatchOpFailure? failure)
+    {
+        if (startRef.Handle is { } handle)
+        {
+            // Each op gets its own copy: the reply message and every op's request are serialized
+            // and read independently, and a shared instance would tie their lifetimes together.
+            // An op with no request at all fails for that on its own once it runs.
+            if (req.Request is not null)
+                req.Request.TxnHandle = handle.Clone();
+
+            failure = null;
+            return true;
+        }
+
+        failure = startRef.Failure ?? new BatchOpFailure("CADB0000", "The START this op names did not answer");
+        return false;
     }
 
     /// <summary>Acquires an execution slot, runs the op, releases the slot. The slot bounds concurrently
-    /// EXECUTING ops only; buffering is bounded separately by the read loop's memory guard.</summary>
-    private async Task RunBatchOpGatedAsync(
-        SemaphoreSlim inFlight,
+    /// EXECUTING ops only; buffering is bounded separately by the read loop's memory guard. Returns the
+    /// failure the op answered with, or null when it answered a success — or nothing, because the stream
+    /// ended before it could start.</summary>
+    private async Task<BatchOpFailure?> RunBatchOpGatedAsync(
+        BatchStreamState state,
         BatchExecuteRequest req,
-        BatchResponseWriter writer,
-        ConcurrentDictionary<(long Pt, uint Counter), bool> startedHandles,
-        StreamPreparedStatements prepared,
         Principal? principal,
-        CancellationToken ct)
+        (long Pt, uint Counter)? chainKey,
+        FrameStart? frameStart)
     {
+        CancellationToken ct = state.Ct;
+
         try
         {
             using QueryStageProfile.StageScope slotWait = QueryStageProfile.Measure(QueryStage.SlotWait);
-            await inFlight.WaitAsync(ct).ConfigureAwait(false);
+            await state.InFlight.WaitAsync(ct).ConfigureAwait(false);
         }
         catch (OperationCanceledException)
         {
             // Stream tearing down before this op could start; nothing was executed, nothing to report.
-            return;
+            if (frameStart is not null)
+                frameStart.Failure = new BatchOpFailure("CADB0000", "The stream ended before the START could run");
+            return null;
         }
 
         try
         {
-            await RunBatchOpAsync(req, writer, startedHandles, prepared, principal, ct).ConfigureAwait(false);
+            return await RunBatchOpAsync(state, req, principal, chainKey, frameStart).ConfigureAwait(false);
         }
         finally
         {
-            inFlight.Release();
+            state.InFlight.Release();
         }
     }
 
     /// <summary>
     /// Executes one batched op and reports its outcome in-band. Never throws — a domain error becomes
-    /// a terminal <c>BatchError</c> for this op's <c>request_id</c>, leaving other ops untouched.
+    /// a terminal <c>BatchError</c> for this op's <c>request_id</c>, leaving other ops untouched — and
+    /// returns that failure (code and message) so the chain can remember it, or null on success.
+    ///
+    /// <para>Two pieces of transaction bookkeeping live here because every finalize path passes
+    /// through this method: a START named by its frame-mates publishes its outcome to them
+    /// (<paramref name="frameStart"/>) before this task completes, and a COMMIT, COMMIT_IF_OK or
+    /// ROLLBACK, whatever its outcome, closes its transaction's chain records
+    /// (<see cref="BatchStreamState.HandleAliases"/>, <see cref="BatchStreamState.ChainFailures"/>)
+    /// once it has answered: after a finalize the transaction is over on the server, and any later
+    /// op on its handle is answered as unknown either way.</para>
     /// </summary>
-    private async Task RunBatchOpAsync(
+    private async Task<BatchOpFailure?> RunBatchOpAsync(
+        BatchStreamState state,
         BatchExecuteRequest req,
-        BatchResponseWriter writer,
-        ConcurrentDictionary<(long Pt, uint Counter), bool> startedHandles,
-        StreamPreparedStatements prepared,
         Principal? principal,
-        CancellationToken ct)
+        (long Pt, uint Counter)? chainKey,
+        FrameStart? frameStart)
     {
+        BatchResponseWriter writer = state.Writer;
+        CancellationToken ct = state.Ct;
+
         // Count each batched op individually (not the long-lived duplex stream) toward the foreground
         // load signal, so a node saturated purely over BatchExecute still backs off auto-analyze.
         loadGauge.Increment();
@@ -1216,6 +1406,7 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
         // one-logical-operation boundary, not the duplex stream's lifetime.
         string operation = MapBatchOperation(req.Kind);
         string outcome = ServerDiagnostics.Tags.Outcome.Ok;
+        BatchOpFailure? failure = null;
         long requestStart = Stopwatch.GetTimestamp();
         ServerDiagnostics.AddRequestInFlight(ServerDiagnostics.Tags.Transport.GrpcBatch, 1);
 
@@ -1232,31 +1423,37 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
             switch (req.Kind)
             {
                 case BatchStatementKind.Query:
-                    await RunBatchQueryAsync(req.RequestId, request, writer, prepared, principal, ct).ConfigureAwait(false);
+                    await RunBatchQueryAsync(req.RequestId, request, writer, state.Prepared, principal, ct).ConfigureAwait(false);
                     break;
                 case BatchStatementKind.Prepare:
-                    await RunBatchPrepareAsync(req.RequestId, request, writer, prepared, ct).ConfigureAwait(false);
+                    await RunBatchPrepareAsync(req.RequestId, request, writer, state.Prepared, ct).ConfigureAwait(false);
                     break;
                 case BatchStatementKind.Close:
-                    await RunBatchCloseAsync(req.RequestId, request, writer, prepared, ct).ConfigureAwait(false);
+                    await RunBatchCloseAsync(req.RequestId, request, writer, state.Prepared, ct).ConfigureAwait(false);
                     break;
                 case BatchStatementKind.Start:
-                    await RunBatchStartAsync(req.RequestId, request, writer, startedHandles, ct).ConfigureAwait(false);
+                    await RunBatchStartAsync(req.RequestId, request, state, frameStart, ct).ConfigureAwait(false);
                     break;
                 case BatchStatementKind.Commit:
-                    await RunBatchCommitAsync(req.RequestId, request, writer, startedHandles, ct).ConfigureAwait(false);
+                    await RunBatchCommitAsync(req.RequestId, request, writer, state.StartedHandles, ct).ConfigureAwait(false);
+                    break;
+                case BatchStatementKind.CommitIfOk:
+                    failure = await RunBatchCommitIfOkAsync(req.RequestId, request, state, chainKey, ct).ConfigureAwait(false);
+                    if (failure is not null)
+                        outcome = ClassifyOutcome(failure.Code);
                     break;
                 case BatchStatementKind.Rollback:
-                    await RunBatchRollbackAsync(req.RequestId, request, writer, startedHandles, ct).ConfigureAwait(false);
+                    await RunBatchRollbackAsync(req.RequestId, request, writer, state.StartedHandles, ct).ConfigureAwait(false);
                     break;
                 case BatchStatementKind.NonQuery:
                 case BatchStatementKind.Unspecified:
                 default:
                     // A retryable abort comes back as a value and is answered exactly as the thrown one is.
-                    CamusDBException? abort = await RunBatchNonQueryAsync(req.RequestId, request, writer, prepared, principal, ct).ConfigureAwait(false);
+                    CamusDBException? abort = await RunBatchNonQueryAsync(req.RequestId, request, writer, state.Prepared, principal, ct).ConfigureAwait(false);
                     if (abort is not null)
                     {
                         outcome = ClassifyOutcome(abort.Code);
+                        failure = new BatchOpFailure(abort.Code, abort.Message);
                         await WriteBatchFailureAsync(req.RequestId, abort, writer, ct).ConfigureAwait(false);
                     }
                     break;
@@ -1270,6 +1467,7 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
         catch (CamusDBException ex)
         {
             outcome = ClassifyOutcome(ex.Code);
+            failure = new BatchOpFailure(ex.Code, ex.Message);
             await WriteBatchFailureAsync(req.RequestId, ex, writer, ct).ConfigureAwait(false);
         }
         catch (RpcException ex) when (KahunaRetryPolicy.IsTransientTransportFailure(ex, ct))
@@ -1280,6 +1478,7 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
             // client's endpoint health exactly the wrong lesson.
             CamusDBException mapped = KahunaRetryPolicy.ToMustRetry(ex, "statement");
             outcome = ClassifyOutcome(mapped.Code);
+            failure = new BatchOpFailure(mapped.Code, mapped.Message);
             CommandFailureLog.LogFailure(logger, mapped);
             await writer.TryWriteAsync(new BatchExecuteResponse
             {
@@ -1290,6 +1489,7 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
         catch (Exception ex)
         {
             outcome = ServerDiagnostics.Tags.Outcome.InternalError;
+            failure = new BatchOpFailure("CADB0000", "Internal server error");
             logger.LogError("{Name}: {Message}", ex.GetType().Name, ex.Message);
             await writer.TryWriteAsync(new BatchExecuteResponse
             {
@@ -1299,6 +1499,19 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
         }
         finally
         {
+            // A START named by its frame-mates publishes its outcome before this task completes,
+            // which is what they await. A START that minted its handle published it already; any
+            // other end — a failure, or a cancel that wrote nothing — is a failure to them.
+            if (frameStart is not null && frameStart.Handle is null)
+                frameStart.Failure = failure ?? new BatchOpFailure("CADB0000", "The START this op names did not answer");
+
+            if (chainKey is { } key && req.Kind is BatchStatementKind.Commit or BatchStatementKind.CommitIfOk or BatchStatementKind.Rollback)
+            {
+                state.ChainFailures.TryRemove(key, out _);
+                if (HandleKey(req.Request?.TxnHandle) is { } handle)
+                    state.HandleAliases.TryRemove(handle, out _);
+            }
+
             loadGauge.Decrement();
             ServerDiagnostics.AddRequestInFlight(ServerDiagnostics.Tags.Transport.GrpcBatch, -1);
             ServerDiagnostics.RecordRequest(
@@ -1313,6 +1526,8 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
             if (outcome != ServerDiagnostics.Tags.Outcome.Ok)
                 requestSpan?.SetStatus(System.Diagnostics.ActivityStatusCode.Error);
         }
+
+        return failure;
     }
 
     /// <summary>Maps a batch statement kind to the bounded <c>operation</c> metric tag.</summary>
@@ -1321,6 +1536,7 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
         BatchStatementKind.Query => ServerDiagnostics.Tags.Operation.Query,
         BatchStatementKind.Start => ServerDiagnostics.Tags.Operation.Begin,
         BatchStatementKind.Commit => ServerDiagnostics.Tags.Operation.Commit,
+        BatchStatementKind.CommitIfOk => ServerDiagnostics.Tags.Operation.Commit,
         BatchStatementKind.Rollback => ServerDiagnostics.Tags.Operation.Rollback,
         BatchStatementKind.Prepare => ServerDiagnostics.Tags.Operation.Prepare,
         BatchStatementKind.Close => ServerDiagnostics.Tags.Operation.Close,
@@ -1658,17 +1874,24 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
 
     /// <summary>
     /// Begins a transaction from a batched START op and returns its server-minted handle in-band. The
-    /// handle is recorded in <paramref name="startedHandles"/> so a stream that ends without a matching
-    /// COMMIT/ROLLBACK rolls it back on teardown. START carries no handle, so it is never chained — the
-    /// client awaits this reply before sending the transaction's statements, so it never races them.
+    /// handle is recorded in <see cref="BatchStreamState.StartedHandles"/> so a stream that ends
+    /// without a matching COMMIT/ROLLBACK rolls it back on teardown.
+    ///
+    /// <para>A START that no item of its frame names carries no handle and is never chained: the
+    /// client awaits this reply before sending the transaction's statements. A START that its
+    /// frame-mates name (<paramref name="frameStart"/>) is the head of their chain instead, and
+    /// publishes the handle to them here — and registers the alias the real handle maps to — before
+    /// the reply leaves, so that an op arriving with the handle always finds the chain.</para>
     /// </summary>
     private async Task RunBatchStartAsync(
         int requestId,
         SqlRequest request,
-        BatchResponseWriter writer,
-        ConcurrentDictionary<(long Pt, uint Counter), bool> startedHandles,
+        BatchStreamState state,
+        FrameStart? frameStart,
         CancellationToken ct)
     {
+        ConcurrentDictionary<(long Pt, uint Counter), bool> startedHandles = state.StartedHandles;
+        BatchResponseWriter writer = state.Writer;
         (CamusIsolationLevel? level, CamusTransactionMode? mode, KeyValueTransactionLocking? locking, Kahuna.Shared.KeyValue.TransactionPriority? priority) =
             ParseLevelMode(request);
 
@@ -1682,6 +1905,12 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
             TxnIdCounter = (uint)tx.ClientId.C,
         };
         startedHandles[(handle.TxnIdPt, handle.TxnIdCounter)] = true;
+
+        if (frameStart is not null)
+        {
+            state.HandleAliases[(handle.TxnIdPt, handle.TxnIdCounter)] = frameStart.AliasKey;
+            frameStart.Handle = handle;
+        }
 
         await writer.TryWriteAsync(new BatchExecuteResponse
         {
@@ -1719,6 +1948,59 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
             RequestId   = requestId,
             CommitReply = reply,
         }, ct).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Commits the transaction named by a batched COMMIT_IF_OK op only when no earlier op of that
+    /// transaction on this stream failed; otherwise it answers with the first failure instead and
+    /// makes sure the transaction is rolled back. A frame gives its items no atomicity, so this is
+    /// what lets a client put the commit in the same frame as the statements: the statements' own
+    /// answers still arrive, and the commit's answer says whether the transaction stored them.
+    ///
+    /// <para>The failed statement already rolled the transaction back (every transactional
+    /// statement does on failure), so the rollback here is the idempotent backstop, and the handle
+    /// is dropped from teardown either way. The answer echoes the first failure's code and message
+    /// rather than a code of its own, so a client that awaits only the commit sees the cause and
+    /// applies its ordinary retry taxonomy to it (a conflict stays a conflict). Chained after the
+    /// transaction's statements, which is what makes "earlier" well defined. Returns the failure it
+    /// answered with, or null when it committed.</para>
+    /// </summary>
+    private async Task<BatchOpFailure?> RunBatchCommitIfOkAsync(
+        int requestId,
+        SqlRequest request,
+        BatchStreamState state,
+        (long Pt, uint Counter)? chainKey,
+        CancellationToken ct)
+    {
+        if (request.TxnHandle is not { TxnIdPt: > 0 } handle)
+            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "COMMIT_IF_OK batch op requires a txn_handle or a txn_start_ref");
+
+        if (chainKey is not { } key || !state.ChainFailures.TryGetValue(key, out BatchOpFailure? earlier))
+        {
+            await RunBatchCommitAsync(requestId, request, state.Writer, state.StartedHandles, ct).ConfigureAwait(false);
+            return null;
+        }
+
+        try
+        {
+            await transactions.RollbackByIdAsync(handle.TxnIdPt, (uint)handle.TxnIdCounter, ct).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            // The statement that failed rolled the transaction back already; a rollback that fails
+            // here is answered by teardown or the reaper, and the client is told the real cause.
+            logger.LogWarning("BatchExecute: COMMIT_IF_OK could not roll back {Pt}:{Counter}: {Message}",
+                handle.TxnIdPt, handle.TxnIdCounter, ex.Message);
+        }
+        state.StartedHandles.TryRemove((handle.TxnIdPt, handle.TxnIdCounter), out _);
+
+        await state.Writer.TryWriteAsync(new BatchExecuteResponse
+        {
+            RequestId = requestId,
+            Error = new BatchError { Code = earlier.Code, Message = earlier.Message },
+        }, ct).ConfigureAwait(false);
+
+        return earlier;
     }
 
     /// <summary>

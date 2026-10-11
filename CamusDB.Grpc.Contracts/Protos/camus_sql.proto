@@ -234,6 +234,14 @@ enum BatchStatementKind {
   // support on this stream's response headers: a server built before frames runs an unknown kind
   // as a NON_QUERY, so a probe would be executed as SQL.
   BATCH_STATEMENT_KIND_FRAME       = 8;
+  // A conditional COMMIT: commits request.txn_handle (or the transaction named by txn_start_ref)
+  // only when every earlier op of that transaction on this stream succeeded; otherwise it rolls the
+  // transaction back (a no-op when the failed statement already did) and answers with the FIRST
+  // failure's code and message instead of a commit_reply. It is what lets a client put the commit
+  // in the same frame as the statements it depends on, since a frame itself gives no atomicity.
+  // Contract version 2: NEVER sent to a server that announced a lower version, which would run it
+  // as a NON_QUERY and leave the transaction open.
+  BATCH_STATEMENT_KIND_COMMIT_IF_OK = 9;
 }
 
 // PREPARE terminator. The client MUST await this reply before sending any op that references the
@@ -278,6 +286,17 @@ message BatchExecuteRequest {
   // `items` is read, on every other kind only `request` is read. A message that sets `items` with a
   // kind other than FRAME, or sets `request` on a FRAME, is invalid.
   repeated BatchExecuteRequest items = 4;
+  // Items of a FRAME only (contract version 2): the request_id of a START item EARLIER in the same
+  // frame whose transaction this op belongs to. The handle does not exist when the frame is sent,
+  // so the op names the START instead of a txn_handle; the server resolves it once the START has
+  // answered and runs the op on that transaction, chained behind the START and the earlier ops that
+  // name it. Rules: it must be unset (0) on a message outside a frame; it must name a START that
+  // precedes this item in the same frame; it may not be combined with request.txn_handle; a START,
+  // PREPARE or CLOSE may not carry one. A violation refuses the op with CADB0400 and runs nothing.
+  // When the START itself fails, every op that names it is answered with the START's error and
+  // runs nothing. NEVER sent to a server that announced a lower version: it would ignore the field
+  // and run the op as an autocommit statement.
+  int32 txn_start_ref = 5;
 }
 
 // Response-side frame. A wrapper message because a oneof cannot hold a repeated field.

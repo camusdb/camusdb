@@ -73,4 +73,10 @@ public sealed record RunManifest(
     /// <summary>Extra connection-string pairs appended verbatim to every client connection (e.g.
     /// <c>CoalescingDelay=0</c>), or null when none were passed. A client with different batching is a
     /// different client: the latency it measures is not comparable across values.</summary>
-    string? ConnectionOptions = null);
+    string? ConnectionOptions = null,
+
+    /// <summary>True when the write shapes sent each transaction as pipelined frames (<c>--pipeline</c>)
+    /// instead of one round trip per statement. Recorded because the two are different clients: the
+    /// write latency of one is not comparable to the other's, and the summary's
+    /// <c>ExchangesPerWriteTxn</c> says what the mode actually achieved against the server it met.</summary>
+    bool Pipeline = false);

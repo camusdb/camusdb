@@ -45,8 +45,19 @@ public static class BatchFrames
     /// </summary>
     public const string AcceptHeaderName = "camusdb-batch-frames-accept";
 
-    /// <summary>The contract version this build reads and writes.</summary>
-    public const int Version = 1;
+    /// <summary>
+    /// The contract version this build reads and writes. Version 1 is frames. Version 2 adds the
+    /// two things that let a whole transaction travel in one frame: an item may name the START
+    /// earlier in its frame (<c>txn_start_ref</c>) instead of a handle that does not exist yet, and a
+    /// <c>COMMIT_IF_OK</c> item commits only when every earlier op of its transaction succeeded. A
+    /// client sends either one only to a server that announced version 2 or higher: a version 1
+    /// server would ignore the reference and run the op as an autocommit statement, and would run
+    /// the conditional commit as a NON_QUERY and leave the transaction open.
+    /// </summary>
+    public const int Version = 2;
+
+    /// <summary>The lowest version whose server reads <c>txn_start_ref</c> and <c>COMMIT_IF_OK</c>.</summary>
+    public const int PipelineVersion = 2;
 
     /// <summary>Most items one frame may carry. A server refuses the items past it.</summary>
     public const int MaxItems = 256;

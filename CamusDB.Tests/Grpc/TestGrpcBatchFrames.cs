@@ -73,19 +73,31 @@ public class TestGrpcBatchFrames : BaseTest
         return db;
     }
 
-    private static BatchExecuteRequest Op(BatchStatementKind kind, int id, string db, string sql = "", TxnHandle? handle = null)
+    private static BatchExecuteRequest Op(BatchStatementKind kind, int id, string db, string sql = "", TxnHandle? handle = null, int startRef = 0)
     {
         SqlRequest request = new() { Database = db, Sql = sql };
         if (handle is not null)
             request.TxnHandle = handle;
-        return new BatchExecuteRequest { RequestId = id, Kind = kind, Request = request };
+        return new BatchExecuteRequest { RequestId = id, Kind = kind, Request = request, TxnStartRef = startRef };
     }
 
-    private static BatchExecuteRequest Query(int id, string db, string sql, TxnHandle? handle = null)
-        => Op(BatchStatementKind.Query, id, db, sql, handle);
+    private static BatchExecuteRequest Start(int id, string db) => Op(BatchStatementKind.Start, id, db);
 
-    private static BatchExecuteRequest NonQuery(int id, string db, string sql, TxnHandle? handle = null)
-        => Op(BatchStatementKind.NonQuery, id, db, sql, handle);
+    /// <summary>A conditional commit that names the START earlier in its frame, or carries the handle.</summary>
+    private static BatchExecuteRequest CommitIfOk(int id, string db, int startRef = 0, TxnHandle? handle = null)
+        => Op(BatchStatementKind.CommitIfOk, id, db, handle: handle, startRef: startRef);
+
+    private static bool IsError(BatchExecuteResponse message)
+        => message.PayloadCase == BatchExecuteResponse.PayloadOneofCase.Error;
+
+    private static bool IsRow(BatchExecuteResponse message)
+        => message.PayloadCase == BatchExecuteResponse.PayloadOneofCase.Row;
+
+    private static BatchExecuteRequest Query(int id, string db, string sql, TxnHandle? handle = null, int startRef = 0)
+        => Op(BatchStatementKind.Query, id, db, sql, handle, startRef);
+
+    private static BatchExecuteRequest NonQuery(int id, string db, string sql, TxnHandle? handle = null, int startRef = 0)
+        => Op(BatchStatementKind.NonQuery, id, db, sql, handle, startRef);
 
     private static BatchExecuteRequest Frame(params BatchExecuteRequest[] items)
     {
@@ -166,7 +178,9 @@ public class TestGrpcBatchFrames : BaseTest
             new GatedStreamWriter<BatchExecuteResponse>(), context).WaitAsync(Patience);
 
         Assert.IsNotNull(context.ResponseHeaders, "the header must be written even on a stream that carries no op");
-        Assert.AreEqual("1", context.ResponseHeaders!.GetValue(BatchFrames.HeaderName));
+        Assert.AreEqual("2", context.ResponseHeaders!.GetValue(BatchFrames.HeaderName),
+            "version 2 is what tells a client it may name a START inside a frame and send COMMIT_IF_OK");
+        Assert.AreEqual(BatchFrames.Version.ToString(), context.ResponseHeaders!.GetValue(BatchFrames.HeaderName));
     }
 
     // ─── Request frames ───────────────────────────────────────────────────────
@@ -517,6 +531,308 @@ public class TestGrpcBatchFrames : BaseTest
 
         Assert.IsFalse(written.Any(IsFrame), "a client built before frames does not know the frame payload");
         Assert.AreEqual(12, written.Count(m => m.RequestId == 60));
+    }
+
+    // ─── A transaction in one frame: txn_start_ref and COMMIT_IF_OK ───────────
+
+    [Test]
+    public async Task AWholeTransactionRidesOneFrameByNamingItsStart()
+    {
+        string db = await CreateDatabaseWithTableAsync();
+
+        // Every item after the START names it instead of a handle, and each depends on the one
+        // before it, so any order other than item order fails: the update finds no row, the read sees
+        // the wrong name, or the commit runs too early.
+        List<BatchExecuteResponse> flat = await RunAsync(service,
+            Frame(
+                Start(1, db),
+                NonQuery(2, db, "INSERT INTO items (id, name) VALUES (1, 'first')", startRef: 1),
+                NonQuery(3, db, "UPDATE items SET name = 'second' WHERE id = 1", startRef: 1),
+                Query(4, db, "SELECT name FROM items WHERE id = 1", startRef: 1),
+                CommitIfOk(5, db, startRef: 1)));
+
+        TxnHandle handle = ForId(flat, 1).Single().StartReply;
+        Assert.Greater(handle.TxnIdPt, 0, "the START still answers with the handle it minted");
+        Assert.AreEqual(1, ForId(flat, 2).Single().NonQuery.AffectedRows);
+        Assert.AreEqual(1, ForId(flat, 3).Single().NonQuery.AffectedRows, "the update ran after the insert");
+        Assert.AreEqual("second", ForId(flat, 4).Single(IsRow).Row.Values[0].StringValue);
+        Assert.AreEqual(BatchExecuteResponse.PayloadOneofCase.CommitReply, ForId(flat, 5).Single().PayloadCase);
+
+        List<BatchExecuteResponse> after = await RunAsync(service, Query(9, db, "SELECT name FROM items WHERE id = 1"));
+        Assert.AreEqual("second", after.Single(IsRow).Row.Values[0].StringValue, "the conditional commit stored the row");
+    }
+
+    [Test]
+    public async Task ATransactionNamedInOneFrameContinuesByHandleInTheNext()
+    {
+        // The bank-transfer shape: [START, reads] then [writes, COMMIT_IF_OK] by handle. The second
+        // frame is pushed as soon as the handle is known, while the first frame's statement may still
+        // be running, so it proves the handle joins the chain the first frame's items are on.
+        string db = await CreateDatabaseWithTableAsync();
+
+        ChannelAsyncStreamReader<BatchExecuteRequest> requests = new();
+        GatedStreamWriter<BatchExecuteResponse> transport = new();
+        Task server = service.BatchExecute(requests, transport, new TestServerCallContext());
+
+        requests.Push(Frame(
+            Start(1, db),
+            NonQuery(2, db, "INSERT INTO items (id, name) VALUES (1, 'first')", startRef: 1),
+            Query(3, db, "SELECT name FROM items WHERE id = 1", startRef: 1)));
+        TxnHandle handle = (await AnswerToAsync(transport, 1)).StartReply;
+
+        requests.Push(Frame(
+            NonQuery(4, db, "UPDATE items SET name = 'second' WHERE id = 1", handle),
+            NonQuery(5, db, "UPDATE items SET name = 'third' WHERE id = 1", handle),
+            CommitIfOk(6, db, handle: handle)));
+        requests.Complete();
+        await server.WaitAsync(Patience);
+
+        List<BatchExecuteResponse> flat = Flatten(transport.Written);
+        Assert.AreEqual(1, ForId(flat, 2).Single().NonQuery.AffectedRows);
+        Assert.AreEqual("first", ForId(flat, 3).Single(IsRow).Row.Values[0].StringValue);
+        Assert.AreEqual(1, ForId(flat, 4).Single().NonQuery.AffectedRows, "the second frame's update ran after the first frame's insert");
+        Assert.AreEqual(1, ForId(flat, 5).Single().NonQuery.AffectedRows);
+        Assert.AreEqual(BatchExecuteResponse.PayloadOneofCase.CommitReply, ForId(flat, 6).Single().PayloadCase);
+
+        List<BatchExecuteResponse> after = await RunAsync(service, Query(9, db, "SELECT name FROM items WHERE id = 1"));
+        Assert.AreEqual("third", after.Single(IsRow).Row.Values[0].StringValue);
+    }
+
+    [Test]
+    public async Task AConditionalCommitAnswersTheFirstFailureAndStoresNothing()
+    {
+        string db = await CreateDatabaseWithTableAsync();
+
+        ChannelAsyncStreamReader<BatchExecuteRequest> requests = new();
+        GatedStreamWriter<BatchExecuteResponse> transport = new();
+        Task server = service.BatchExecute(requests, transport, new TestServerCallContext());
+
+        // The read in the middle fails. The insert after it meets a transaction the failure already
+        // ended, and the commit must answer the read's failure — the first one — not the insert's.
+        requests.Push(Frame(
+            Start(1, db),
+            NonQuery(2, db, "INSERT INTO items (id, name) VALUES (1, 'one')", startRef: 1),
+            Query(3, db, "SELECT nope FROM missing_table", startRef: 1),
+            NonQuery(4, db, "INSERT INTO items (id, name) VALUES (2, 'two')", startRef: 1),
+            CommitIfOk(5, db, startRef: 1)));
+        TxnHandle handle = (await AnswerToAsync(transport, 1)).StartReply;
+        BatchExecuteResponse commit = await AnswerToAsync(transport, 5);
+
+        // What a client does next: roll back by handle. It must succeed as a no-op.
+        requests.Push(Op(BatchStatementKind.Rollback, 6, db, handle: handle));
+        requests.Complete();
+        await server.WaitAsync(Patience);
+
+        List<BatchExecuteResponse> flat = Flatten(transport.Written);
+        Assert.AreEqual(1, ForId(flat, 2).Single().NonQuery.AffectedRows, "the insert before the failure ran");
+        BatchExecuteResponse read = ForId(flat, 3).Single();
+        Assert.IsTrue(IsError(read));
+        Assert.IsTrue(IsError(ForId(flat, 4).Single()), "a statement after the failure meets an ended transaction");
+        Assert.IsTrue(IsError(commit), "the conditional commit did not commit");
+        Assert.AreEqual(read.Error.Code, commit.Error.Code, "the commit answers the first failure's code");
+        Assert.AreEqual(read.Error.Message, commit.Error.Message, "and its message");
+        Assert.AreEqual(BatchExecuteResponse.PayloadOneofCase.RollbackReply, ForId(flat, 6).Single().PayloadCase);
+
+        List<BatchExecuteResponse> after = await RunAsync(service, Query(9, db, "SELECT COUNT(*) FROM items"));
+        Assert.AreEqual(0, after.Single(IsRow).Row.Values[0].Int64Value, "nothing of the transaction was stored");
+    }
+
+    [Test]
+    public async Task AConditionalCommitRemembersAFailureFromAnEarlierFrame()
+    {
+        // "Earlier" means earlier on the transaction, not earlier in the frame: a commit that is sent
+        // alone after a failed statement answers that failure as well.
+        string db = await CreateDatabaseWithTableAsync();
+
+        ChannelAsyncStreamReader<BatchExecuteRequest> requests = new();
+        GatedStreamWriter<BatchExecuteResponse> transport = new();
+        Task server = service.BatchExecute(requests, transport, new TestServerCallContext());
+
+        requests.Push(Frame(Start(1, db)));
+        TxnHandle handle = (await AnswerToAsync(transport, 1)).StartReply;
+        requests.Push(Frame(
+            NonQuery(2, db, "INSERT INTO items (id, name) VALUES (1, 'one')", handle),
+            Query(3, db, "SELECT nope FROM missing_table", handle)));
+        BatchExecuteResponse read = await AnswerToAsync(transport, 3);
+        requests.Push(CommitIfOk(4, db, handle: handle));
+        requests.Complete();
+        await server.WaitAsync(Patience);
+
+        BatchExecuteResponse commit = ForId(Flatten(transport.Written), 4).Single();
+        Assert.IsTrue(IsError(read));
+        Assert.IsTrue(IsError(commit));
+        Assert.AreEqual(read.Error.Code, commit.Error.Code);
+    }
+
+    [Test]
+    public async Task AConditionalCommitWithNoEarlierFailureIsAPlainCommit()
+    {
+        string db = await CreateDatabaseWithTableAsync();
+
+        ChannelAsyncStreamReader<BatchExecuteRequest> requests = new();
+        GatedStreamWriter<BatchExecuteResponse> transport = new();
+        Task server = service.BatchExecute(requests, transport, new TestServerCallContext());
+
+        // Outside any frame, by handle, with nothing failed before it.
+        requests.Push(Start(1, db));
+        TxnHandle handle = (await AnswerToAsync(transport, 1)).StartReply;
+        requests.Push(NonQuery(2, db, "INSERT INTO items (id, name) VALUES (1, 'one')", handle));
+        requests.Push(CommitIfOk(3, db, handle: handle));
+        requests.Complete();
+        await server.WaitAsync(Patience);
+
+        List<BatchExecuteResponse> flat = Flatten(transport.Written);
+        Assert.AreEqual(BatchExecuteResponse.PayloadOneofCase.CommitReply, ForId(flat, 3).Single().PayloadCase);
+
+        List<BatchExecuteResponse> after = await RunAsync(service, Query(9, db, "SELECT COUNT(*) FROM items"));
+        Assert.AreEqual(1, after.Single(IsRow).Row.Values[0].Int64Value);
+
+        // Without a transaction to name, it fails alone, as COMMIT does.
+        List<BatchExecuteResponse> bare = await RunAsync(service, CommitIfOk(11, db));
+        Assert.AreEqual(CamusDBErrorCodes.InvalidInput, bare.Single().Error.Code);
+    }
+
+    [Test]
+    public async Task AFailedStartFailsEveryItemThatNamesItAndRunsNone()
+    {
+        string db = await CreateDatabaseWithTableAsync();
+        string missing = "nosuchdb" + Guid.NewGuid().ToString("n");
+
+        List<BatchExecuteResponse> flat = await RunAsync(service,
+            Frame(
+                Start(1, missing),
+                NonQuery(2, missing, "INSERT INTO items (id, name) VALUES (1, 'one')", startRef: 1),
+                CommitIfOk(3, missing, startRef: 1),
+                // A neighbour that names nothing is untouched.
+                NonQuery(4, db, "INSERT INTO items (id, name) VALUES (4, 'four')")));
+
+        BatchExecuteResponse start = ForId(flat, 1).Single();
+        Assert.IsTrue(IsError(start), "the START on a missing database fails");
+        foreach (int id in new[] { 2, 3 })
+        {
+            BatchExecuteResponse answer = ForId(flat, id).Single();
+            Assert.IsTrue(IsError(answer), $"op {id} is answered, and with an error");
+            Assert.AreEqual(start.Error.Code, answer.Error.Code, $"op {id} answers the START's failure");
+            Assert.AreEqual(start.Error.Message, answer.Error.Message);
+        }
+        Assert.AreEqual(1, ForId(flat, 4).Single().NonQuery.AffectedRows);
+    }
+
+    [Test]
+    public async Task AStartReferenceMustPointBackAtAStartOfTheSameFrame()
+    {
+        string db = await CreateDatabaseWithTableAsync();
+
+        // Outside a frame there is nothing to name.
+        List<BatchExecuteResponse> lone = await RunAsync(service,
+            NonQuery(1, db, "INSERT INTO items (id, name) VALUES (1, 'lone')", startRef: 1));
+        Assert.AreEqual(CamusDBErrorCodes.InvalidInput, lone.Single().Error.Code);
+
+        List<BatchExecuteResponse> flat = await RunAsync(service,
+            Frame(
+                // Forward: the START comes later in the frame.
+                NonQuery(10, db, "INSERT INTO items (id, name) VALUES (10, 'forward')", startRef: 11),
+                Start(11, db),
+                // Names an op that is not a START.
+                NonQuery(12, db, "INSERT INTO items (id, name) VALUES (12, 'plain')"),
+                NonQuery(13, db, "INSERT INTO items (id, name) VALUES (13, 'notastart')", startRef: 12),
+                // A START, a PREPARE and a CLOSE may not name a START.
+                Start(14, db),
+                Op(BatchStatementKind.Start, 15, db, startRef: 14),
+                Op(BatchStatementKind.Prepare, 16, db, "SELECT id FROM items", startRef: 14),
+                // A reference and a handle together are ambiguous.
+                NonQuery(17, db, "INSERT INTO items (id, name) VALUES (17, 'both')", new TxnHandle { TxnIdPt = 1, TxnIdCounter = 1 }, startRef: 14),
+                // Names a START of another frame (by its id), which this frame cannot see.
+                CommitIfOk(18, db, startRef: 1)),
+            // A later frame cannot name the earlier frame's START either.
+            Frame(NonQuery(19, db, "INSERT INTO items (id, name) VALUES (19, 'late')", startRef: 11)));
+
+        foreach (int id in new[] { 10, 13, 15, 16, 17, 18, 19 })
+            Assert.AreEqual(CamusDBErrorCodes.InvalidInput, ForId(flat, id).Single().Error.Code, $"op {id} is refused");
+        Assert.AreEqual(BatchExecuteResponse.PayloadOneofCase.StartReply, ForId(flat, 11).Single().PayloadCase, "the START itself is fine");
+        Assert.AreEqual(BatchExecuteResponse.PayloadOneofCase.StartReply, ForId(flat, 14).Single().PayloadCase);
+        Assert.AreEqual(1, ForId(flat, 12).Single().NonQuery.AffectedRows, "the plain insert ran");
+
+        List<BatchExecuteResponse> after = await RunAsync(service, Query(9, db, "SELECT id FROM items ORDER BY id"));
+        CollectionAssert.AreEqual(new[] { 12L }, after.Where(IsRow).Select(m => m.Row.Values[0].Int64Value),
+            "a refused reference never ran, in or out of a transaction");
+    }
+
+    [Test]
+    public async Task AConditionalCommitPastTheItemLimitIsRefusedAndTheTransactionStaysOpen()
+    {
+        string db = await CreateDatabaseWithTableAsync();
+
+        ChannelAsyncStreamReader<BatchExecuteRequest> requests = new();
+        GatedStreamWriter<BatchExecuteResponse> transport = new();
+        Task server = service.BatchExecute(requests, transport, new TestServerCallContext());
+
+        // START + 255 inserts fill the limit; the 256th insert and the commit behind it are past it.
+        List<BatchExecuteRequest> items = new() { Start(1, db) };
+        for (int i = 1; i <= BatchFrames.MaxItems; i++)
+            items.Add(NonQuery(1 + i, db, $"INSERT INTO items (id, name) VALUES ({i}, 'n')", startRef: 1));
+        int commitId = 2 + BatchFrames.MaxItems;
+        items.Add(CommitIfOk(commitId, db, startRef: 1));
+        requests.Push(Frame(items.ToArray()));
+
+        TxnHandle handle = (await AnswerToAsync(transport, 1)).StartReply;
+        BatchExecuteResponse refusedInsert = await AnswerToAsync(transport, 1 + BatchFrames.MaxItems);
+        BatchExecuteResponse refusedCommit = await AnswerToAsync(transport, commitId);
+        Assert.AreEqual(CamusDBErrorCodes.TransactionMustRetry, refusedInsert.Error.Code, "the insert past the limit was not run");
+        Assert.AreEqual(CamusDBErrorCodes.TransactionMustRetry, refusedCommit.Error.Code, "nor was the commit");
+
+        // The transaction is still open: a refused op never ran, so it is no failure of the
+        // transaction, and the client decides — here it commits what did run.
+        requests.Push(CommitIfOk(9000, db, handle: handle));
+        requests.Complete();
+        await server.WaitAsync(Patience);
+
+        Assert.AreEqual(BatchExecuteResponse.PayloadOneofCase.CommitReply, ForId(Flatten(transport.Written), 9000).Single().PayloadCase);
+        List<BatchExecuteResponse> after = await RunAsync(service, Query(9, db, "SELECT COUNT(*) FROM items"));
+        Assert.AreEqual(BatchFrames.MaxItems - 1, after.Single(IsRow).Row.Values[0].Int64Value);
+    }
+
+    [Test]
+    public async Task AStreamThatEndsRollsBackATransactionStartedInsideAFrame()
+    {
+        string db = await CreateDatabaseWithTableAsync();
+
+        // No commit of any kind: teardown must roll the frame-started transaction back like any other.
+        List<BatchExecuteResponse> flat = await RunAsync(service,
+            Frame(
+                Start(1, db),
+                NonQuery(2, db, "INSERT INTO items (id, name) VALUES (1, 'open')", startRef: 1)));
+        Assert.AreEqual(1, ForId(flat, 2).Single().NonQuery.AffectedRows);
+
+        List<BatchExecuteResponse> after = await RunAsync(service, Query(9, db, "SELECT COUNT(*) FROM items"));
+        Assert.AreEqual(0, after.Single(IsRow).Row.Values[0].Int64Value);
+    }
+
+    [Test]
+    public async Task TwoTransactionsStartedInOneFrameKeepTheirOwnChainsAndOutcomes()
+    {
+        string db = await CreateDatabaseWithTableAsync();
+
+        // Transaction A succeeds; transaction B fails on its second statement. Their items are
+        // interleaved, and B's failure must not touch A's commit.
+        List<BatchExecuteResponse> flat = await RunAsync(service,
+            Frame(
+                Start(1, db),
+                Start(2, db),
+                NonQuery(10, db, "INSERT INTO items (id, name) VALUES (1, 'a0')", startRef: 1),
+                NonQuery(20, db, "INSERT INTO items (id, name) VALUES (2, 'b0')", startRef: 2),
+                NonQuery(11, db, "UPDATE items SET name = 'a1' WHERE id = 1", startRef: 1),
+                Query(21, db, "SELECT nope FROM missing_table", startRef: 2),
+                CommitIfOk(22, db, startRef: 2),
+                CommitIfOk(12, db, startRef: 1)));
+
+        Assert.AreEqual(1, ForId(flat, 11).Single().NonQuery.AffectedRows, "A's update found A's row");
+        Assert.AreEqual(BatchExecuteResponse.PayloadOneofCase.CommitReply, ForId(flat, 12).Single().PayloadCase);
+        Assert.IsTrue(IsError(ForId(flat, 22).Single()));
+        Assert.AreEqual(ForId(flat, 21).Single().Error.Code, ForId(flat, 22).Single().Error.Code);
+
+        List<BatchExecuteResponse> after = await RunAsync(service, Query(9, db, "SELECT name FROM items ORDER BY id"));
+        CollectionAssert.AreEqual(new[] { "a1" }, after.Where(IsRow).Select(m => m.Row.Values[0].StringValue));
     }
 
     /// <summary>

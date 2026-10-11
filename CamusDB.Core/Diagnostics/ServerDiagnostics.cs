@@ -44,6 +44,15 @@ public static class ServerDiagnostics
     private static readonly UpDownCounter<long> RequestInFlight =
         Meter.CreateUpDownCounter<long>("camus.request.in_flight", unit: "{request}", description: "Requests currently being handled.");
 
+    // A request frame is one stream message that carries several batch ops. Each op inside it is
+    // still one request above, so the request count alone cannot say how many stream messages the
+    // gateway read; this pair does. Items per frame is what a pipelined client is expected to raise.
+    private static readonly Counter<long> BatchRequestFrames =
+        Meter.CreateCounter<long>("camus.batch.request_frames", unit: "{frame}", description: "Request frames read on BatchExecute streams.");
+
+    private static readonly Histogram<long> BatchRequestFrameItems =
+        Meter.CreateHistogram<long>("camus.batch.request_frame_items", unit: "{op}", description: "Ops carried by one request frame.");
+
     // ── KV retry waits ─────────────────────────────────────────────────────────
     // One count per backoff sleep inside a KvTableStore retry loop, tagged by call site. Localizes
     // which retry loop a latency tail is spending its time in — added while chasing the back-to-back
@@ -215,6 +224,15 @@ public static class ServerDiagnostics
         TagList tags = new() { { "operation", operation }, { "transport", transport }, { "outcome", outcome } };
         RequestCount.Add(1, tags);
         RequestDuration.Record(milliseconds, tags);
+    }
+
+    /// <summary>Counts one request frame of <paramref name="items"/> ops read on a batch stream.</summary>
+    public static void RecordRequestFrame(int items)
+    {
+        if (!Enabled)
+            return;
+        BatchRequestFrames.Add(1);
+        BatchRequestFrameItems.Record(items);
     }
 
     public static void AddRequestInFlight(string transport, long delta)
