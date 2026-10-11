@@ -775,6 +775,41 @@ internal static class IndexScanSelector
         return columnType is not (ColumnType.String or ColumnType.Id);
     }
 
+    /// <summary>
+    /// Returns the end bound of an executor seek for one key value: <paramref name="lookupKey"/> holds
+    /// the leading key columns of <paramref name="index"/>, and the scan starts inclusive at that key.
+    /// Every executor path that seeks a single value (IN-list seeks, join-leaf IN lists, semi-join
+    /// probes, non-unique lookups) must take its range from here.
+    /// <para>The exclusive successor bound <c>[v, next(v))</c> is used only when the last bound column
+    /// is ascending and its type has a successor. <see cref="KvIndexAccessor.ScanIndex"/> encodes the
+    /// bounds in the index's own direction, so on a descending column <c>next(v)</c> encodes
+    /// <em>before</em> <c>v</c> and that range is empty: the seek silently returns no rows. Every
+    /// other case (a descending column, a type with no successor such as String or Id, or a value at
+    /// its type's maximum) gets the inclusive <c>[v, v]</c>. That range is complete: ScanIndex appends
+    /// the index sentinel to a non-unique or prefix end bound, which covers every row-id suffix and
+    /// every trailing key column, and its decoded-key filter trims the result to the key in either
+    /// direction.</para>
+    /// </summary>
+    internal static (CompositeColumnValue ToBound, bool ToInclusive) EqualitySeekUpperBound(
+        TableDescriptor table,
+        TableIndexSchema index,
+        CompositeColumnValue lookupKey)
+    {
+        int prefixLength = lookupKey.Values.Length;
+        if (prefixLength == 0 || !IsAscending(index, prefixLength - 1))
+            return (lookupKey, true);
+
+        ColumnType columnType = GetColumnType(table, index.Columns[prefixLength - 1]);
+        ColumnValue? nextValue = NextSortValue(columnType, lookupKey.Values[prefixLength - 1]);
+        if (nextValue is null)
+            return (lookupKey, true);
+
+        ColumnValue[] upperValues = new ColumnValue[prefixLength];
+        Array.Copy(lookupKey.Values, upperValues, prefixLength - 1);
+        upperValues[prefixLength - 1] = nextValue;
+        return (new CompositeColumnValue(upperValues), false);
+    }
+
     internal static ColumnValue? NextSortValue(ColumnType columnType, ColumnValue value)
     {
         return columnType switch

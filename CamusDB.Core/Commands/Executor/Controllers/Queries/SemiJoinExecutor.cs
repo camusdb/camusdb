@@ -142,19 +142,15 @@ internal sealed class SemiJoinExecutor
             return EvalFilter(node.InnerFilter, innerRow, parameters);
         }
 
-        // Non-unique: equality range scan using NextSortValue upper bound (exclusive),
-        // matching the pattern used by QueryExecutor for non-unique index equality lookups.
+        // Non-unique: equality range scan over the probe value, with the same direction-aware
+        // bounds as every other single-value index seek.
         ColumnType keyType = GetColumnType(inner, index.Columns[0]);
-
-        ColumnValue? nextValue = IndexScanSelector.NextSortValue(keyType, probeValue);
-        CompositeColumnValue? upperBound = nextValue is not null
-            ? new CompositeColumnValue(new[] { nextValue })
-            : null;
+        (CompositeColumnValue upperBound, bool toInclusive) = IndexScanSelector.EqualitySeekUpperBound(inner, index, key);
 
         await foreach ((CompositeColumnValue _, ObjectIdValue rowId, ReadOnlyMemory<byte> _) in inner.Store.ScanIndex(
             outerTicket.TxnState, index.KvId, new[] { keyType },
             key, upperBound,
-            false, true, false,
+            unique: false, fromInclusive: true, toInclusive: toInclusive,
             maxRows: null, cancellationToken: outerTicket.CancellationToken))
         {
             ReadOnlyMemory<byte>? data = await inner.Store.GetRow(outerTicket.TxnState, rowId, outerTicket.CancellationToken).ConfigureAwait(false);
@@ -164,8 +160,8 @@ internal sealed class SemiJoinExecutor
             Dictionary<string, ColumnValue> innerRow = await RowEncoder.DecodeAsync(
                 inner.Schema, txId, rowId, data.Value, required, inner.Schema.Version).ConfigureAwait(false);
 
-            // For types where NextSortValue returns null (String, Id), upperBound is null and the
-            // scan may run past the equality range. Always verify the actual key matches.
+            // The decoded-key filter already trims the scan to the probe value; the comparison here
+            // is a second guard that keeps the existence answer exact.
             ColumnValue? innerVal = ResolveColumnValue(innerRow, node.InnerColumn);
             if (!ColumnValuesEqual(innerVal, probeValue))
                 continue;

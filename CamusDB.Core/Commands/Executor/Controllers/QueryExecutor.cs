@@ -1123,43 +1123,9 @@ internal sealed class QueryExecutor
         if (index.Type == IndexType.Unique)
             return QueryUsingUniqueIndex(plan, index, key);
 
-        if (!IndexScanSelector.SupportsExactEqualityPrefixUpperBound(plan.Table, index.Columns, key.Values.Length))
-            throw new CamusDBException(
-                CamusDBErrorCodes.InvalidInternalOperation,
-                "Non-unique index lookup requires a bounded scan plan");
+        (CompositeColumnValue upperBound, bool toInclusive) = IndexScanSelector.EqualitySeekUpperBound(plan.Table, index, key);
 
-        CompositeColumnValue? upperBound = BuildPrefixScanUpperBound(plan.Table, index, key);
-
-        return QueryUsingRangeIndex(plan, index, key, fromInclusive: true, upperBound, toInclusive: false);
-    }
-
-    private static CompositeColumnValue? BuildPrefixScanUpperBound(
-        TableDescriptor table,
-        TableIndexSchema index,
-        CompositeColumnValue lookupKey)
-    {
-        if (lookupKey.Values.Length == 0)
-            return null;
-
-        ColumnValue[] upperValues = new ColumnValue[lookupKey.Values.Length];
-        Array.Copy(lookupKey.Values, upperValues, lookupKey.Values.Length - 1);
-
-        string lastColumn = index.Columns[lookupKey.Values.Length - 1];
-        TableColumnSchema? column = table.Schema.Columns?.Find(c => string.Equals(c.Name, lastColumn, StringComparison.OrdinalIgnoreCase));
-        ColumnType columnType = column?.Type ?? ColumnType.String;
-        ColumnValue lastValue = lookupKey.Values[^1];
-        ColumnValue? nextValue = NextSortValue(columnType, lastValue);
-
-        if (nextValue is null)
-            return null;
-
-        upperValues[^1] = nextValue;
-        return new CompositeColumnValue(upperValues);
-    }
-
-    private static ColumnValue? NextSortValue(ColumnType columnType, ColumnValue value)
-    {
-        return IndexScanSelector.NextSortValue(columnType, value);
+        return QueryUsingRangeIndex(plan, index, key, fromInclusive: true, upperBound, toInclusive);
     }
 
     private async IAsyncEnumerable<QueryResultRow> QueryUsingUniqueIndex(
@@ -1445,7 +1411,9 @@ internal sealed class QueryExecutor
 
         // For a non-unique IN-list scan, acquire a range lock covering [min, max] of the IN values.
         // Shared for SELECT; Exclusive for UPDATE/DELETE. Unique IN-list uses per-key point
-        // lookups (LookupUnique), so no range lock is needed.
+        // lookups (LookupUnique), so no range lock is needed. The lock bounds are encoded in the
+        // index's key order: on a descending leading column the largest value encodes first, so
+        // it must be the start bound or the lock covers an inverted, empty range.
         if (!isUnique)
         {
             CompositeColumnValue? minVal = null, maxVal = null;
@@ -1455,9 +1423,11 @@ internal sealed class QueryExecutor
                 if (minVal is null || cv.CompareTo(minVal) < 0) minVal = cv;
                 if (maxVal is null || cv.CompareTo(maxVal) > 0) maxVal = cv;
             }
+            bool leadingDescending = index.DirectionAt(0) == OrderType.Descending;
             await table.Store.AcquireBoundedIndexRangeLockAsync(
                 ticket.TxnState, index.KvId,
-                minVal, true, maxVal, true,
+                leadingDescending ? maxVal : minVal, true,
+                leadingDescending ? minVal : maxVal, true,
                 unique: false, exclusive: plan.Ticket.ExclusivePredicateLocks,
                 cancellationToken: cancellationToken).ConfigureAwait(false);
         }
@@ -1500,15 +1470,9 @@ internal sealed class QueryExecutor
             }
             else
             {
-                // Non-unique equality scan.
-                // Types with a computable successor (Integer64, Float64, Bool): [v, successor(v)) exclusive.
-                // String/Id: no total successor — use exact-match [v, v] inclusive instead.
-                // ScanIndex appends a high sentinel ("￿") to endKey for non-unique, so
-                // all "{encodedKey}{rowIdHex}" entries for key==v are captured by the raw scan,
-                // and the decoded-key bounds filter trims to exactly key==v.
-                CompositeColumnValue? upperBound = BuildPrefixScanUpperBound(table, index, lookupKey);
-                CompositeColumnValue toBound = upperBound ?? lookupKey;
-                bool toInclusive = upperBound is null; // inclusive only for exact-match (no successor)
+                // Non-unique equality scan over one IN value. The helper picks a range that is
+                // non-empty in the index's own key order, which a descending column reverses.
+                (CompositeColumnValue toBound, bool toInclusive) = IndexScanSelector.EqualitySeekUpperBound(table, index, lookupKey);
 
                 await foreach ((CompositeColumnValue _, ObjectIdValue rowId, ReadOnlyMemory<byte> _) in table.Store.ScanIndex(
                     ticket.TxnState, index.KvId, keyTypes,

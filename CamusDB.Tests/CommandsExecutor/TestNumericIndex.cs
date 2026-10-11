@@ -111,11 +111,6 @@ internal sealed class TestNumericIndex : SharedNodeBaseTest
         string[] parts = testCase.Split('|');
         long[] ids = parts[1].Length == 0 ? [] : parts[1].Split(',').Select(long.Parse).ToArray();
 
-        if (index == 1 && parts[0].Contains(" IN (", StringComparison.Ordinal))
-            Assert.Ignore("An IN-list seek on a descending index returns no rows for every column type: the " +
-                          "seek bounds each value with its ascending successor, which is an empty range in " +
-                          "descending key order. The defect is outside NUMERIC; this case runs again once the seek is fixed.");
-
         await RunDifferential(parts[0], NumericIndexes[index], Ids(ids), expectIndex: index == 1 ? null : true);
     }
 

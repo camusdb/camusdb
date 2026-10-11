@@ -294,11 +294,9 @@ internal sealed class JoinLeafScanner
             }
             else
             {
-                // Non-unique equality scan: use successor as exclusive upper bound when available,
-                // else inclusive exact-match [v, v].
-                CompositeColumnValue? upperBound = BuildInListScanUpperBound(table, inListNode.Index, lookupKey);
-                CompositeColumnValue toBound = upperBound ?? lookupKey;
-                bool toInclusive = upperBound is null;
+                // Non-unique equality scan over one IN value. The helper picks a range that is
+                // non-empty in the index's own key order, which a descending column reverses.
+                (CompositeColumnValue toBound, bool toInclusive) = IndexScanSelector.EqualitySeekUpperBound(table, inListNode.Index, lookupKey);
 
                 await foreach ((CompositeColumnValue _, ObjectIdValue rowId, ReadOnlyMemory<byte> _) in table.Store.ScanIndex(
                     plan.Ticket.TxnState, inListNode.Index.KvId, keyTypes,
@@ -329,30 +327,6 @@ internal sealed class JoinLeafScanner
             await foreach (QueryResultRow row in page.FlushAsync(scanToken).ConfigureAwait(false))
                 yield return row;
         }
-    }
-
-    private static CompositeColumnValue? BuildInListScanUpperBound(
-        TableDescriptor table,
-        TableIndexSchema index,
-        CompositeColumnValue lookupKey)
-    {
-        if (lookupKey.Values.Length == 0)
-            return null;
-
-        ColumnValue[] upperValues = new ColumnValue[lookupKey.Values.Length];
-        Array.Copy(lookupKey.Values, upperValues, lookupKey.Values.Length - 1);
-
-        string lastColumn = index.Columns[lookupKey.Values.Length - 1];
-        TableColumnSchema? column = table.Schema.Columns?.Find(c => string.Equals(c.Name, lastColumn, StringComparison.OrdinalIgnoreCase));
-        ColumnType columnType = column?.Type ?? ColumnType.String;
-        ColumnValue lastValue = lookupKey.Values[^1];
-        ColumnValue? nextValue = IndexScanSelector.NextSortValue(columnType, lastValue);
-
-        if (nextValue is null)
-            return null;
-
-        upperValues[^1] = nextValue;
-        return new CompositeColumnValue(upperValues);
     }
 
     internal async IAsyncEnumerable<QueryResultRow> ScanDerivedTable(
