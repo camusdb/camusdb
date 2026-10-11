@@ -1464,32 +1464,11 @@ public sealed class DatabaseRegistry : IAsyncDisposable
     /// </summary>
     private async Task<RegistryRetraction> DeleteRegistryKeyIfIdAsync(KvTransaction tx, string key, string expectedId)
     {
-        KeyValueResponseType lockType;
-        int lockRetries = 0;
-
-        // Stable per-operation ids reused across the retry loop (see WriteRegistryKey) so the delete
-        // and its lock fold once into the coordinator working set.
-        TransactionOperationId lockOperationId = TransactionOperationId.NewRandom();
+        // A stable operation id reused across the retry loop (see WriteRegistryKey) so the delete
+        // folds once into the coordinator working set.
         TransactionOperationId deleteOperationId = TransactionOperationId.NewRandom();
 
-        do
-        {
-            if (lockRetries > 0)
-                await Task.Delay(lockRetries * 10).ConfigureAwait(false);
-
-            (lockType, _, _, _) = await kahuna.LocateAndTryAcquireExclusiveLock(
-                tx.TransactionId, key, 0,
-                KeyValueDurability.Persistent, CancellationToken.None,
-                coordinatorKey: tx.CoordinatorKey, operationId: lockOperationId
-            ).ConfigureAwait(false);
-        }
-        while (lockType is KeyValueResponseType.AlreadyLocked or KeyValueResponseType.MustRetry
-               && ++lockRetries < MaxRetries);
-
-        if (lockType != KeyValueResponseType.Locked)
-            throw new CamusDBException(
-                CamusDBErrorCodes.SystemSpaceCorrupt,
-                $"Failed to lock registry key '{key}': {lockType}");
+        await AcquireRegistryKeyLockAsync(tx, key).ConfigureAwait(false);
 
         (KeyValueResponseType getType, ReadOnlyKeyValueEntry? current) = await kahuna.LocateAndTryGetValue(
             tx.TransactionId, key, -1,
@@ -1995,33 +1974,12 @@ public sealed class DatabaseRegistry : IAsyncDisposable
                 CamusDBErrorCodes.InvalidInternalOperation,
                 "WriteRegistryKey cannot both require absence and require a matching id");
 
-        KeyValueResponseType lockType;
-        int lockRetries = 0;
-
-        // Stable per-operation ids reused across the retry loop so a replayed call folds once into the
-        // coordinator working set; the write and its lock must fold, or the commit-from-working-set would
-        // not persist this registry key.
-        TransactionOperationId lockOperationId = TransactionOperationId.NewRandom();
+        // A stable operation id reused across the retry loop so a replayed call folds once into the
+        // coordinator working set; the write must fold, or the commit-from-working-set would not persist
+        // this registry key. The lock's ids are handled by AcquireRegistryKeyLockAsync.
         TransactionOperationId setOperationId = TransactionOperationId.NewRandom();
 
-        do
-        {
-            if (lockRetries > 0)
-                await Task.Delay(lockRetries * 10).ConfigureAwait(false);
-
-            (lockType, _, _, _) = await kahuna.LocateAndTryAcquireExclusiveLock(
-                tx.TransactionId, key, 0,
-                KeyValueDurability.Persistent, CancellationToken.None,
-                coordinatorKey: tx.CoordinatorKey, operationId: lockOperationId
-            ).ConfigureAwait(false);
-        }
-        while (lockType is KeyValueResponseType.AlreadyLocked or KeyValueResponseType.MustRetry
-               && ++lockRetries < MaxRetries);
-
-        if (lockType != KeyValueResponseType.Locked)
-            throw new CamusDBException(
-                CamusDBErrorCodes.SystemSpaceCorrupt,
-                $"Failed to lock registry key '{key}': {lockType}");
+        await AcquireRegistryKeyLockAsync(tx, key).ConfigureAwait(false);
 
         // Read-and-verify happens after the lock is held, so nothing can slip between the check and
         // the set: the key is pinned for the rest of this transaction.
@@ -2075,15 +2033,29 @@ public sealed class DatabaseRegistry : IAsyncDisposable
         return true;
     }
 
-    private async Task DeleteRegistryKey(KvTransaction tx, string key)
+    /// <summary>
+    /// Takes the exclusive lock on registry key <paramref name="key"/> inside <paramref name="tx"/>,
+    /// with a short bounded retry.
+    ///
+    /// <para>The lock is registered with the transaction coordinator under an operation id, and Kahuna
+    /// answers a repeated id with the outcome it cached for that id. That is what a retry wants after
+    /// <c>MustRetry</c>: the first attempt may still be pending, and the replay folds it once. It is not
+    /// what a retry wants after <c>AlreadyLocked</c>: that attempt is finished, so the same id only replays
+    /// the denial, and the retry never sees the holder commit and leave. A fresh id is minted for the next
+    /// attempt after every <c>AlreadyLocked</c>. Two creates of one name on different nodes depend on
+    /// this: the loser must get the lock after the winner commits, read the winner's entry and report
+    /// <c>DatabaseAlreadyExists</c>.</para>
+    ///
+    /// <para>A lock still contended when the budget runs out is reported as
+    /// <see cref="CamusDBErrorCodes.TransactionMustRetry"/>, because another writer holds it and nothing is
+    /// wrong with the store. Any other refusal is unexpected for a registry key and keeps
+    /// <see cref="CamusDBErrorCodes.SystemSpaceCorrupt"/>. Both are thrown before a commit request.</para>
+    /// </summary>
+    private async Task AcquireRegistryKeyLockAsync(KvTransaction tx, string key)
     {
         KeyValueResponseType lockType;
         int lockRetries = 0;
-
-        // Stable per-operation ids reused across the retry loop (see WriteRegistryKey) so the delete and its
-        // lock fold once into the coordinator working set and the commit persists the removal.
         TransactionOperationId lockOperationId = TransactionOperationId.NewRandom();
-        TransactionOperationId deleteOperationId = TransactionOperationId.NewRandom();
 
         do
         {
@@ -2095,14 +2067,33 @@ public sealed class DatabaseRegistry : IAsyncDisposable
                 KeyValueDurability.Persistent, CancellationToken.None,
                 coordinatorKey: tx.CoordinatorKey, operationId: lockOperationId
             ).ConfigureAwait(false);
+
+            if (lockType == KeyValueResponseType.AlreadyLocked)
+                lockOperationId = TransactionOperationId.NewRandom();
         }
         while (lockType is KeyValueResponseType.AlreadyLocked or KeyValueResponseType.MustRetry
                && ++lockRetries < MaxRetries);
 
-        if (lockType != KeyValueResponseType.Locked)
+        if (lockType == KeyValueResponseType.Locked)
+            return;
+
+        if (lockType is KeyValueResponseType.AlreadyLocked or KeyValueResponseType.MustRetry)
             throw new CamusDBException(
-                CamusDBErrorCodes.SystemSpaceCorrupt,
-                $"Failed to lock registry key '{key}': {lockType}");
+                CamusDBErrorCodes.TransactionMustRetry,
+                $"Registry key '{key}' is still locked by another transaction after {MaxRetries} attempts ({lockType}); retry the statement");
+
+        throw new CamusDBException(
+            CamusDBErrorCodes.SystemSpaceCorrupt,
+            $"Failed to lock registry key '{key}': {lockType}");
+    }
+
+    private async Task DeleteRegistryKey(KvTransaction tx, string key)
+    {
+        // A stable operation id reused across the retry loop (see WriteRegistryKey) so the delete folds
+        // once into the coordinator working set and the commit persists the removal.
+        TransactionOperationId deleteOperationId = TransactionOperationId.NewRandom();
+
+        await AcquireRegistryKeyLockAsync(tx, key).ConfigureAwait(false);
 
         KeyValueResponseType deleteType;
         int deleteRetries = 0;

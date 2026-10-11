@@ -1245,6 +1245,18 @@ public sealed class CommandExecutor : IAsyncDisposable
         set => schemaDdl.TestInterceptBeforeForeignKeyValidation = value;
     }
 
+    /// <summary>
+    /// Test-only seam: runs inside <c>CREATE DATABASE</c> after the existence check and before the
+    /// registration, so a test can make several creates of one name pass the check before any of them
+    /// registers. Null in production; a test clears it after use.
+    /// </summary>
+    [System.ComponentModel.EditorBrowsable(System.ComponentModel.EditorBrowsableState.Never)]
+    internal Func<Task>? TestInterceptAfterDatabaseExistenceCheck
+    {
+        get => databaseLifecycle.TestInterceptAfterExistenceCheck;
+        set => databaseLifecycle.TestInterceptAfterExistenceCheck = value;
+    }
+
     [System.ComponentModel.EditorBrowsable(System.ComponentModel.EditorBrowsableState.Never)]
     internal CatalogsManager Catalogs => catalogs;
 

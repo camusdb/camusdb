@@ -108,12 +108,50 @@ internal sealed class DatabaseLifecycleService
                 $"Database '{name}' already exists");
         }
 
+        if (TestInterceptAfterExistenceCheck is { } afterExistenceCheck)
+            await afterExistenceCheck().ConfigureAwait(false);
+
+        // The existence check above and the registration below are not atomic: a concurrent create of
+        // the same name (on this node or another) can pass the check too and register first. The
+        // registry's name-key write is the arbiter, and the loser gets DatabaseAlreadyExists from it.
+        // For IF NOT EXISTS that is not an error — the database exists, which is all the statement
+        // asked for — so the loser answers exactly as if it had arrived after the winner.
         if (ticket.BranchFrom is not null)
-            return await CreateBranchDatabaseAsync(ticket, registry, name).ConfigureAwait(false);
+        {
+            try
+            {
+                return await CreateBranchDatabaseAsync(ticket, registry, name).ConfigureAwait(false);
+            }
+            catch (CamusDBException ex) when (ticket.IfNotExists && ex.Code == CamusDBErrorCodes.DatabaseAlreadyExists)
+            {
+                // CreateBranchDatabaseAsync rethrows the registration failure only after its own
+                // compensation ran: the snapshot hold is released, the copied metadata is purged and
+                // the identity-checked retraction left the winner's entry alone.
+                DatabaseDescriptor? winner = await TryOpenConcurrentWinnerAsync(registry, name).ConfigureAwait(false);
+                if (winner is null)
+                    throw;
+
+                return winner;
+            }
+        }
 
         string id = await registry.AllocateIdAsync().ConfigureAwait(false);
 
-        await registry.RegisterAsync(name, id).ConfigureAwait(false);
+        try
+        {
+            await registry.RegisterAsync(name, id).ConfigureAwait(false);
+        }
+        catch (CamusDBException ex) when (ticket.IfNotExists && ex.Code == CamusDBErrorCodes.DatabaseAlreadyExists)
+        {
+            // RegisterAsync throws DatabaseAlreadyExists before its commit request, so nothing was
+            // published under the allocated id. The id itself is only a step of the monotonic counter
+            // and owns no keys, so dropping it on the floor needs no compensation.
+            DatabaseDescriptor? winner = await TryOpenConcurrentWinnerAsync(registry, name).ConfigureAwait(false);
+            if (winner is null)
+                throw;
+
+            return winner;
+        }
 
         try
         {
@@ -141,6 +179,34 @@ internal sealed class DatabaseLifecycleService
             throw; // unreachable
         }
     }
+
+    /// <summary>
+    /// Opens the database that won a concurrent registration of <paramref name="name"/>, for a
+    /// <c>CREATE DATABASE … IF NOT EXISTS</c> whose own registration lost the race. Returns null when
+    /// the name no longer resolves, and the caller then rethrows its original error.
+    ///
+    /// <para>The name is resolved through the persistent registry, not the local cache alone: when the
+    /// winner registered on another node, only the name-key write told this node about it. A null
+    /// answer also covers the other <c>DatabaseAlreadyExists</c> condition of
+    /// <see cref="DatabaseRegistry.RegisterAsync"/> — an id already live under a different name —
+    /// which a name that is still free cannot explain away.</para>
+    /// </summary>
+    private async Task<DatabaseDescriptor?> TryOpenConcurrentWinnerAsync(DatabaseRegistry registry, string name)
+    {
+        DatabaseRegistryEntry? winner = await registry.TryResolveEntryAsync(name).ConfigureAwait(false);
+        if (winner is null)
+            return null;
+
+        return await context.DatabaseOpener.Open(name).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Test-only seam: runs inside <c>CREATE DATABASE</c> after the existence check found no database
+    /// under the name, and before the create allocates an id and registers it. A test parks several
+    /// creates here so that every one of them passes the check before any of them registers. Null in
+    /// production; a test clears it after use.
+    /// </summary>
+    internal Func<Task>? TestInterceptAfterExistenceCheck { get; set; }
 
     /// <summary>
     /// Creates a branch database from <paramref name="ticket"/>.<see cref="CreateDatabaseTicket.BranchFrom"/>.
