@@ -504,7 +504,7 @@ public class TestDateTimeScalarFunctions : SharedNodeBaseTest
             executor,
             database,
             dbname,
-            "SELECT date_part(\"week\", \"2024-06-15\") FROM robots LIMIT 1");
+            "SELECT date_part(\"fortnight\", \"2024-06-15\") FROM robots LIMIT 1");
 
         Assert.AreEqual(CamusDBErrorCodes.InvalidInput, ex.Code);
         StringAssert.Contains("Function 'date_part' expects a supported date/time unit", ex.Message);

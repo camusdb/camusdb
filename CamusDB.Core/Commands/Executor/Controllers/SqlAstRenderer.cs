@@ -212,6 +212,21 @@ internal class SqlAstRenderer
 
             // ── function call ───────────────────────────────────────────────────
             case NodeType.ExprFuncCall:
+                // extract('year', x) prints in the standard EXTRACT(year FROM x) form; both re-parse
+                // to this same node.
+                if (ExtractCall.TryDeconstruct(expr, out string extractField, out NodeAst extractSource))
+                {
+                    sb.Append("EXTRACT(");
+                    if (ExtractCall.IsBareWord(extractField))
+                        sb.Append(extractField);
+                    else
+                        sb.Append(SqlStringLiteral.Quote(extractField));
+                    sb.Append(" FROM ");
+                    RenderNode(sb, extractSource);
+                    sb.Append(')');
+                    return;
+                }
+
                 sb.Append(expr.leftAst?.yytext ?? throw Unsupported(expr)).Append('(');
                 if (expr.rightAst is not null)
                 {

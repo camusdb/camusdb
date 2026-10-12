@@ -388,6 +388,9 @@ public static class PlanRenderer
 
             // Function names are case-insensitive; render them in a canonical lower-case form so the
             // EXPLAIN output is stable regardless of the case the function was written in.
+            NodeType.ExprFuncCall when ExtractCall.TryDeconstruct(expr, out string extractField, out NodeAst extractSource) =>
+                $"EXTRACT({extractField} FROM {RenderExpr(extractSource)})",
+
             NodeType.ExprFuncCall =>
                 $"{expr.leftAst?.yytext?.ToLowerInvariant() ?? "?"}({(expr.rightAst is null || expr.rightAst.nodeType == NodeType.ExprAllFields ? "*" : RenderExpr(expr.rightAst))})",
 

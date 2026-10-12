@@ -393,7 +393,53 @@ work with function results.
 | `FROM_UNIXTIME(seconds)` | `datetime` | Unix epoch seconds → UTC datetime |
 | `DATE_DIFF(a, b, unit)` | `int64` | Difference in `unit` units (unchanged) |
 | `DATE_PART(unit, temporal)` | `int64` | Extracts calendar component (unchanged) |
+| `EXTRACT(unit FROM temporal)` | `int64` | SQL-standard form of `DATE_PART(unit, temporal)` |
 | `UNIX_TIMESTAMP([temporal])` | `int64` | UTC seconds since epoch (unchanged) |
+| `YEAR`, `MONTH`, `DAY` / `DAYOFMONTH`, `HOUR`, `MINUTE`, `SECOND`, `QUARTER`, `DAYOFYEAR` `(temporal)` | `int64` | MySQL shortcuts: the same value as `DATE_PART` with that unit |
+| `DAYOFWEEK(temporal)` | `int64` | MySQL rule: 1 = Sunday ... 7 = Saturday |
+| `WEEKDAY(temporal)` | `int64` | MySQL rule: 0 = Monday ... 6 = Sunday |
+| `WEEK(temporal [, mode])` | `int64` | Mode 0 (default): weeks start on Sunday, 0-53, the days before the first Sunday are week 0. Mode 3: ISO-8601 week, 1-53. Other modes are rejected |
+| `DAYNAME(temporal)`, `MONTHNAME(temporal)` | `string` | English names (`Sunday`, `February`), independent of server locale |
+
+### Date units
+
+Every unit is computed on the UTC value. The unit is a string (`'week'`), or a bare word in
+`EXTRACT(week FROM x)`. A unit that has no meaning in a function is rejected with the same
+`InvalidInput` error as an unknown unit.
+
+| Unit (aliases) | `DATE_PART` / `EXTRACT` | `DATE_TRUNC` | `DATE_ADD` / `DATE_DIFF` |
+|----------------|-------------------------|--------------|--------------------------|
+| `year` (`years`) | calendar year | January 1 | years |
+| `quarter` (`quarters`) | 1-4 | first day of the quarter | 3 months |
+| `month` (`months`) | 1-12 | first day of the month | months |
+| `week` (`weeks`) | ISO-8601 week, 1-53 | Monday 00:00 | 7 days |
+| `day` (`days`) | 1-31 | 00:00 | days |
+| `hour`, `minute`, `second` (plurals) | 0-23, 0-59, 0-59 | start of the unit | the unit |
+| `millisecond` (`milliseconds`) | fraction of the second, 0-999 | yes | yes |
+| `microsecond` (`microseconds`, `us`) | fraction of the second, 0-999999 | yes | yes |
+| `dow` | 0 = Sunday ... 6 = Saturday | no | no |
+| `isodow` | 1 = Monday ... 7 = Sunday | no | no |
+| `doy` | day of the year, 1-366 | no | no |
+| `isoyear` | ISO-8601 year that owns the ISO week | no | no |
+| `epoch` | whole seconds since 1970-01-01 UTC | no | no |
+| `decade` (`decades`) | year / 10 | January 1 of a year that ends in 0 | 10 years |
+| `century` (`centuries`) | 2000 is century 20, 2001 is century 21 | January 1 of a year that ends in 01 | 100 years |
+| `millennium` (`millennia`, `millenniums`) | 2000 is millennium 2, 2001 is millennium 3 | January 1 of a year that ends in 001 | 1000 years |
+
+The ISO week and the ISO year can differ from the calendar: 2021-01-01 is in week 53 of ISO year 2020,
+and 2024-12-30 is in week 1 of ISO year 2025.
+
+**Differences from PostgreSQL.** A part is always `int64`, because the result type cannot depend on
+the unit literal. PostgreSQL returns `numeric` and keeps fractions, so two units differ:
+
+- `epoch` is whole seconds, rounded down. Half a second before 1970-01-01 gives `-1`.
+- `millisecond` and `microsecond` are the fraction of the current second only, as MySQL's
+  `MICROSECOND()`. For `12.345` seconds CamusDB returns `345` milliseconds; PostgreSQL returns `12345`.
+
+`DATE_DIFF` truncates toward zero. `day` and `week` count calendar days and ignore the time of day;
+`month`, `quarter` and the year-based units count complete anniversaries.
+
+`DATE(x)` is not a function, because `date` is a reserved type keyword. Use `CAST(x AS date)`.
 
 **DATE_ADD promotion rule:** the return type is always `datetime`. The evaluator promotes any `date`
 input to `datetime` before applying the arithmetic, consistent with Postgres `date + interval`
@@ -417,6 +463,12 @@ SELECT * FROM events WHERE created < NOW()
 
 -- Typed column through DATE_ADD
 SELECT DATE_ADD(created, 7, 'day') FROM events
+
+-- Weekly report: weeks start on Monday
+SELECT DATE_TRUNC('week', created) AS week, count(*) FROM events GROUP BY DATE_TRUNC('week', created)
+
+-- SQL-standard and MySQL spellings of one part
+SELECT EXTRACT(dow FROM created), DAYOFWEEK(created) FROM events
 ```
 
 ---

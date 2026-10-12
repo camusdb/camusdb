@@ -13,6 +13,23 @@ using CamusDB.Core.CommandsExecutor.Models;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers.Functions;
 
+/// <summary>
+/// The date and time scalar functions: <c>date_part</c> (and <c>EXTRACT</c>, which the parser turns
+/// into a call to it), <c>date_trunc</c>, <c>date_add</c>, <c>date_diff</c>, the MySQL one-argument
+/// shortcuts (<c>year(x)</c>, <c>dayofweek(x)</c>, ...), and the clock and unix-time functions.
+/// </summary>
+/// <remarks>
+/// <para>Every unit is computed on the UTC value. A string argument must carry an explicit offset,
+/// so a part never depends on the server time zone.</para>
+/// <para>A part is always <c>Integer64</c>, because return-type inference sees the argument types and
+/// not the unit literal. PostgreSQL returns <c>numeric</c> instead, so two of its units differ here:
+/// <c>epoch</c> is whole seconds (rounded down, also before 1970), and <c>millisecond</c> /
+/// <c>microsecond</c> are the fraction of the current second only (0-999 and 0-999999, as MySQL's
+/// <c>MICROSECOND()</c>), where PostgreSQL also counts the whole seconds.</para>
+/// <para>Each unit is valid only in the functions where it has a meaning. <c>dow</c>, <c>isodow</c>,
+/// <c>doy</c>, <c>isoyear</c> and <c>epoch</c> name a position, not a length, so <c>date_trunc</c>,
+/// <c>date_add</c> and <c>date_diff</c> reject them with the same error as an unknown unit.</para>
+/// </remarks>
 internal static class DateTimeScalarFunctions
 {
     private const string DateOnlyFormat = "yyyy-MM-dd";
@@ -61,7 +78,18 @@ internal static class DateTimeScalarFunctions
         // (it only sees argument types). Widening to DateTime keeps Evaluator and InferReturnType in agreement.
         RegisterTernary(registry, "date_add", EvaluateDateAdd, _ => ColumnType.DateTime);
         RegisterTernary(registry, "date_diff", EvaluateDateDiff, _ => ColumnType.Integer64);
-        RegisterBinary(registry, "date_part", EvaluateDatePart, _ => ColumnType.Integer64);
+        // EXTRACT(field FROM x) parses to a call named "extract" whose arguments are (field, x), the
+        // same order as date_part, so one evaluator serves both spellings.
+        registry.Register(new ScalarFunctionDescriptor
+        {
+            Name = "date_part",
+            Aliases = ["extract"],
+            MinArity = 2,
+            MaxArity = 2,
+            Evaluator = EvaluateDatePart,
+            InferReturnType = _ => ColumnType.Integer64,
+        });
+
         RegisterBinary(registry, "date_trunc", EvaluateDateTrunc, _ => ColumnType.DateTime);
 
         registry.Register(new ScalarFunctionDescriptor
@@ -75,6 +103,68 @@ internal static class DateTimeScalarFunctions
         });
 
         RegisterUnary(registry, "from_unixtime", EvaluateFromUnixtime, _ => ColumnType.DateTime);
+
+        RegisterMySqlShortcuts(registry);
+    }
+
+    /// <summary>
+    /// The MySQL one-argument date-part functions. Each one reads one part of the UTC value, with the
+    /// MySQL numbering where it differs from <c>date_part</c>: <c>dayofweek</c> counts 1 = Sunday and
+    /// <c>weekday</c> counts 0 = Monday, while <c>date_part('dow', x)</c> counts 0 = Sunday.
+    /// <c>DATE(x)</c> is not here, because <c>date</c> is a reserved type keyword; <c>CAST(x AS date)</c>
+    /// does the same thing.
+    /// </summary>
+    private static void RegisterMySqlShortcuts(ScalarFunctionRegistry registry)
+    {
+        RegisterPartShortcut(registry, "year", [], DateTimeUnit.Year);
+        RegisterPartShortcut(registry, "month", [], DateTimeUnit.Month);
+        RegisterPartShortcut(registry, "day", ["dayofmonth"], DateTimeUnit.Day);
+        RegisterPartShortcut(registry, "hour", [], DateTimeUnit.Hour);
+        RegisterPartShortcut(registry, "minute", [], DateTimeUnit.Minute);
+        RegisterPartShortcut(registry, "second", [], DateTimeUnit.Second);
+        RegisterPartShortcut(registry, "quarter", [], DateTimeUnit.Quarter);
+        RegisterPartShortcut(registry, "dayofyear", [], DateTimeUnit.DayOfYear);
+
+        RegisterUnary(
+            registry,
+            "dayofweek",
+            (calledName, arguments) => EvaluateShortcut(calledName, arguments, static utc => (long)utc.DayOfWeek + 1),
+            _ => ColumnType.Integer64);
+
+        RegisterUnary(
+            registry,
+            "weekday",
+            (calledName, arguments) => EvaluateShortcut(calledName, arguments, static utc => ((long)utc.DayOfWeek + 6) % 7),
+            _ => ColumnType.Integer64);
+
+        RegisterUnary(registry, "dayname", EvaluateDayName, _ => ColumnType.String);
+        RegisterUnary(registry, "monthname", EvaluateMonthName, _ => ColumnType.String);
+
+        registry.Register(new ScalarFunctionDescriptor
+        {
+            Name = "week",
+            MinArity = 1,
+            MaxArity = 2,
+            Evaluator = EvaluateMySqlWeek,
+            InferReturnType = _ => ColumnType.Integer64,
+        });
+    }
+
+    private static void RegisterPartShortcut(
+        ScalarFunctionRegistry registry,
+        string name,
+        IReadOnlyList<string> aliases,
+        DateTimeUnit unit)
+    {
+        registry.Register(new ScalarFunctionDescriptor
+        {
+            Name = name,
+            Aliases = aliases,
+            MinArity = 1,
+            MaxArity = 1,
+            Evaluator = (calledName, arguments) => EvaluateShortcut(calledName, arguments, utc => ExtractPart(utc, unit)),
+            InferReturnType = _ => ColumnType.Integer64,
+        });
     }
 
     private static void RegisterUnary(
@@ -147,7 +237,7 @@ internal static class DateTimeScalarFunctions
         long amount = arguments[1].LongValue;
         DateTimeUnit unit = ParseUnit(calledName, arguments[2].StrValue!);
 
-        DateTimeOffset result = ApplyDateAdd(calledName, value, amount, unit);
+        DateTimeOffset result = ApplyDateAdd(calledName, arguments[2].StrValue!, value, amount, unit);
         return MakeDateTime(result);
     }
 
@@ -162,7 +252,7 @@ internal static class DateTimeScalarFunctions
         DateTimeOffset end = ReadTemporal(calledName, 1, arguments[1]);
         DateTimeUnit unit = ParseUnit(calledName, arguments[2].StrValue!);
 
-        long difference = ComputeDateDiff(start, end, unit);
+        long difference = ComputeDateDiff(calledName, arguments[2].StrValue!, start, end, unit);
         return new ColumnValue(ColumnType.Integer64, difference);
     }
 
@@ -175,9 +265,19 @@ internal static class DateTimeScalarFunctions
 
         DateTimeUnit unit = ParseUnit(calledName, arguments[0].StrValue!);
         DateTimeOffset value = ReadTemporal(calledName, 1, arguments[1]);
-        DateTimeOffset utc = value.ToUniversalTime();
 
-        long part = unit switch
+        return new ColumnValue(ColumnType.Integer64, ExtractPart(value.ToUniversalTime(), unit));
+    }
+
+    /// <summary>
+    /// One part of a UTC value. Every unit has a part, so this never rejects a unit. The ISO week and
+    /// ISO year use the ISO-8601 rule: week 1 is the week that holds the first Thursday of the year,
+    /// so 2021-01-01 is in week 53 of ISO year 2020. Decade, century and millennium follow PostgreSQL:
+    /// the year 2000 is in century 20 and the year 2001 starts century 21.
+    /// </summary>
+    private static long ExtractPart(DateTimeOffset utc, DateTimeUnit unit)
+    {
+        return unit switch
         {
             DateTimeUnit.Year => utc.Year,
             DateTimeUnit.Month => utc.Month,
@@ -186,10 +286,89 @@ internal static class DateTimeScalarFunctions
             DateTimeUnit.Minute => utc.Minute,
             DateTimeUnit.Second => utc.Second,
             DateTimeUnit.Millisecond => utc.Millisecond,
-            _ => throw InvalidUnit(calledName, arguments[0].StrValue!),
+            DateTimeUnit.Microsecond => utc.Ticks % TimeSpan.TicksPerSecond / TimeSpan.TicksPerMicrosecond,
+            DateTimeUnit.Week => ISOWeek.GetWeekOfYear(utc.UtcDateTime),
+            DateTimeUnit.Quarter => (utc.Month - 1) / 3 + 1,
+            DateTimeUnit.DayOfWeek => (long)utc.DayOfWeek,
+            DateTimeUnit.IsoDayOfWeek => utc.DayOfWeek == DayOfWeek.Sunday ? 7 : (long)utc.DayOfWeek,
+            DateTimeUnit.DayOfYear => utc.DayOfYear,
+            DateTimeUnit.IsoYear => ISOWeek.GetYear(utc.UtcDateTime),
+            DateTimeUnit.Epoch => utc.ToUnixTimeSeconds(),
+            DateTimeUnit.Decade => utc.Year / 10,
+            DateTimeUnit.Century => (utc.Year + 99) / 100,
+            DateTimeUnit.Millennium => (utc.Year + 999) / 1000,
+            _ => throw new ArgumentOutOfRangeException(nameof(unit), unit, null),
+        };
+    }
+
+    private static ColumnValue EvaluateShortcut(
+        string calledName,
+        IReadOnlyList<ColumnValue> arguments,
+        Func<DateTimeOffset, long> part)
+    {
+        if (PropagateNull(arguments) is ColumnValue nullResult)
+            return nullResult;
+
+        DateTimeOffset value = ReadTemporal(calledName, 0, arguments[0]);
+        return new ColumnValue(ColumnType.Integer64, part(value.ToUniversalTime()));
+    }
+
+    private static ColumnValue EvaluateDayName(string calledName, IReadOnlyList<ColumnValue> arguments)
+    {
+        if (PropagateNull(arguments) is ColumnValue nullResult)
+            return nullResult;
+
+        DateTimeOffset utc = ReadTemporal(calledName, 0, arguments[0]).ToUniversalTime();
+        return new ColumnValue(ColumnType.String, CultureInfo.InvariantCulture.DateTimeFormat.GetDayName(utc.DayOfWeek));
+    }
+
+    private static ColumnValue EvaluateMonthName(string calledName, IReadOnlyList<ColumnValue> arguments)
+    {
+        if (PropagateNull(arguments) is ColumnValue nullResult)
+            return nullResult;
+
+        DateTimeOffset utc = ReadTemporal(calledName, 0, arguments[0]).ToUniversalTime();
+        return new ColumnValue(ColumnType.String, CultureInfo.InvariantCulture.DateTimeFormat.GetMonthName(utc.Month));
+    }
+
+    /// <summary>
+    /// MySQL <c>WEEK(x [, mode])</c> for the two modes that have a clear rule. Mode 0, the MySQL
+    /// default, starts a week on Sunday and counts 0-53: the days before the first Sunday of the
+    /// year are week 0. Mode 3 is the ISO-8601 week, 1-53, the same as <c>date_part('week', x)</c>.
+    /// Any other mode is rejected rather than answered with a rule the caller did not ask for.
+    /// </summary>
+    private static ColumnValue EvaluateMySqlWeek(string calledName, IReadOnlyList<ColumnValue> arguments)
+    {
+        if (PropagateNull(arguments) is ColumnValue nullResult)
+            return nullResult;
+
+        long mode = 0;
+        if (arguments.Count == 2)
+        {
+            RequireInteger(calledName, 1, arguments[1]);
+            mode = arguments[1].LongValue;
+        }
+
+        DateTimeOffset utc = ReadTemporal(calledName, 0, arguments[0]).ToUniversalTime();
+
+        long week = mode switch
+        {
+            0 => SundayWeekOfYear(utc),
+            3 => ISOWeek.GetWeekOfYear(utc.UtcDateTime),
+            _ => throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInput,
+                $"Function '{calledName}' supports mode 0 (Sunday start, 0-53) and mode 3 (ISO-8601) only, but received mode {mode.ToString(CultureInfo.InvariantCulture)}"),
         };
 
-        return new ColumnValue(ColumnType.Integer64, part);
+        return new ColumnValue(ColumnType.Integer64, week);
+    }
+
+    private static long SundayWeekOfYear(DateTimeOffset utc)
+    {
+        int firstDayOfYearDow = (int)new DateTime(utc.Year, 1, 1).DayOfWeek;
+        int firstSundayDayOfYear = 1 + (7 - firstDayOfYearDow) % 7;
+
+        return utc.DayOfYear < firstSundayDayOfYear ? 0 : (utc.DayOfYear - firstSundayDayOfYear) / 7 + 1;
     }
 
     private static ColumnValue EvaluateDateTrunc(string calledName, IReadOnlyList<ColumnValue> arguments)
@@ -201,7 +380,7 @@ internal static class DateTimeScalarFunctions
 
         DateTimeUnit unit = ParseUnit(calledName, arguments[0].StrValue!);
         DateTimeOffset value = ReadTemporal(calledName, 1, arguments[1]);
-        DateTimeOffset truncated = TruncateUtc(value, unit);
+        DateTimeOffset truncated = TruncateUtc(calledName, arguments[0].StrValue!, value, unit);
 
         return MakeDateTime(truncated);
     }
@@ -256,7 +435,12 @@ internal static class DateTimeScalarFunctions
     private static ColumnValue MakeDate(DateTimeOffset value)
         => new(ColumnType.Date, value.ToUniversalTime().Date.Ticks);
 
-    private static DateTimeOffset ApplyDateAdd(string calledName, DateTimeOffset value, long amount, DateTimeUnit unit)
+    private static DateTimeOffset ApplyDateAdd(
+        string calledName,
+        string unitText,
+        DateTimeOffset value,
+        long amount,
+        DateTimeUnit unit)
     {
         try
         {
@@ -269,7 +453,13 @@ internal static class DateTimeScalarFunctions
                 DateTimeUnit.Minute => value.AddMinutes(amount),
                 DateTimeUnit.Second => value.AddSeconds(amount),
                 DateTimeUnit.Millisecond => value.AddMilliseconds(amount),
-                _ => throw InvalidUnit(calledName, unit.ToString()),
+                DateTimeUnit.Microsecond => value.AddTicks(checked(amount * TimeSpan.TicksPerMicrosecond)),
+                DateTimeUnit.Week => value.AddDays(checked(amount * 7)),
+                DateTimeUnit.Quarter => value.AddMonths(checked((int)(amount * 3))),
+                DateTimeUnit.Decade => value.AddYears(checked((int)(amount * 10))),
+                DateTimeUnit.Century => value.AddYears(checked((int)(amount * 100))),
+                DateTimeUnit.Millennium => value.AddYears(checked((int)(amount * 1000))),
+                _ => throw InvalidUnit(calledName, unitText),
             };
         }
         catch (OverflowException)
@@ -286,13 +476,29 @@ internal static class DateTimeScalarFunctions
         }
     }
 
-    private static long ComputeDateDiff(DateTimeOffset start, DateTimeOffset end, DateTimeUnit unit)
+    /// <summary>
+    /// The number of whole units from <paramref name="start"/> to <paramref name="end"/>, truncated
+    /// toward zero. Day and week count calendar days and ignore the time of day; month, quarter and
+    /// the year-based units count complete anniversaries; the sub-day units count elapsed time.
+    /// </summary>
+    private static long ComputeDateDiff(
+        string calledName,
+        string unitText,
+        DateTimeOffset start,
+        DateTimeOffset end,
+        DateTimeUnit unit)
     {
         DateTimeOffset startUtc = start.ToUniversalTime();
         DateTimeOffset endUtc = end.ToUniversalTime();
 
         return unit switch
         {
+            DateTimeUnit.Millennium => DiffYears(startUtc, endUtc) / 1000,
+            DateTimeUnit.Century => DiffYears(startUtc, endUtc) / 100,
+            DateTimeUnit.Decade => DiffYears(startUtc, endUtc) / 10,
+            DateTimeUnit.Quarter => DiffMonths(startUtc, endUtc) / 3,
+            DateTimeUnit.Week => (endUtc.UtcDateTime.Date - startUtc.UtcDateTime.Date).Days / 7,
+            DateTimeUnit.Microsecond => (endUtc.UtcTicks - startUtc.UtcTicks) / TimeSpan.TicksPerMicrosecond,
             DateTimeUnit.Year => DiffYears(startUtc, endUtc),
             DateTimeUnit.Month => DiffMonths(startUtc, endUtc),
             DateTimeUnit.Day => (endUtc.UtcDateTime.Date - startUtc.UtcDateTime.Date).Days,
@@ -300,7 +506,7 @@ internal static class DateTimeScalarFunctions
             DateTimeUnit.Minute => (long)(endUtc - startUtc).TotalMinutes,
             DateTimeUnit.Second => (long)(endUtc - startUtc).TotalSeconds,
             DateTimeUnit.Millisecond => (endUtc.ToUnixTimeMilliseconds() - startUtc.ToUnixTimeMilliseconds()),
-            _ => throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Unsupported date/time unit '{unit}'"),
+            _ => throw InvalidUnit(calledName, unitText),
         };
     }
 
@@ -336,12 +542,23 @@ internal static class DateTimeScalarFunctions
         => value.Month > anniversary.Month
            || (value.Month == anniversary.Month && value.Day > anniversary.Day);
 
-    private static DateTimeOffset TruncateUtc(DateTimeOffset value, DateTimeUnit unit)
+    /// <summary>
+    /// The start of the unit that holds <paramref name="value"/>, in UTC. A week starts on Monday
+    /// (ISO-8601 and PostgreSQL). Century and millennium start at a year that ends in 01, as in
+    /// PostgreSQL, so 2024 truncates to 2001-01-01; a decade starts at a year that ends in 0.
+    /// </summary>
+    private static DateTimeOffset TruncateUtc(string calledName, string unitText, DateTimeOffset value, DateTimeUnit unit)
     {
         DateTimeOffset utc = value.ToUniversalTime();
 
         return unit switch
         {
+            DateTimeUnit.Millennium => StartOfYear(calledName, (utc.Year - 1) / 1000 * 1000 + 1),
+            DateTimeUnit.Century => StartOfYear(calledName, (utc.Year - 1) / 100 * 100 + 1),
+            DateTimeUnit.Decade => StartOfYear(calledName, utc.Year / 10 * 10),
+            DateTimeUnit.Quarter => new DateTimeOffset(utc.Year, (utc.Month - 1) / 3 * 3 + 1, 1, 0, 0, 0, TimeSpan.Zero),
+            DateTimeUnit.Week => new DateTimeOffset(utc.Year, utc.Month, utc.Day, 0, 0, 0, TimeSpan.Zero)
+                .AddDays(-(((int)utc.DayOfWeek + 6) % 7)),
             DateTimeUnit.Year => new DateTimeOffset(utc.Year, 1, 1, 0, 0, 0, TimeSpan.Zero),
             DateTimeUnit.Month => new DateTimeOffset(utc.Year, utc.Month, 1, 0, 0, 0, TimeSpan.Zero),
             DateTimeUnit.Day => new DateTimeOffset(utc.Year, utc.Month, utc.Day, 0, 0, 0, TimeSpan.Zero),
@@ -351,8 +568,25 @@ internal static class DateTimeScalarFunctions
             DateTimeUnit.Millisecond => new DateTimeOffset(
                 utc.Ticks / TimeSpan.TicksPerMillisecond * TimeSpan.TicksPerMillisecond,
                 TimeSpan.Zero),
-            _ => throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Unsupported date/time unit '{unit}'"),
+            DateTimeUnit.Microsecond => new DateTimeOffset(
+                utc.Ticks / TimeSpan.TicksPerMicrosecond * TimeSpan.TicksPerMicrosecond,
+                TimeSpan.Zero),
+            _ => throw InvalidUnit(calledName, unitText),
         };
+    }
+
+    /// <summary>
+    /// January 1 of <paramref name="year"/>. The first decade starts at year 0, which a
+    /// <see cref="DateTimeOffset"/> cannot hold, so a value in the years 1-9 has no decade start.
+    /// </summary>
+    private static DateTimeOffset StartOfYear(string calledName, int year)
+    {
+        if (year < 1)
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInput,
+                $"Function '{calledName}' result is before year 1");
+
+        return new DateTimeOffset(year, 1, 1, 0, 0, 0, TimeSpan.Zero);
     }
 
     private static DateTimeOffset ParseDateTimeValue(string calledName, string value)
@@ -409,6 +643,17 @@ internal static class DateTimeScalarFunctions
             "minute" or "minutes" => DateTimeUnit.Minute,
             "second" or "seconds" => DateTimeUnit.Second,
             "millisecond" or "milliseconds" => DateTimeUnit.Millisecond,
+            "microsecond" or "microseconds" or "us" => DateTimeUnit.Microsecond,
+            "week" or "weeks" => DateTimeUnit.Week,
+            "quarter" or "quarters" => DateTimeUnit.Quarter,
+            "dow" => DateTimeUnit.DayOfWeek,
+            "isodow" => DateTimeUnit.IsoDayOfWeek,
+            "doy" => DateTimeUnit.DayOfYear,
+            "isoyear" => DateTimeUnit.IsoYear,
+            "epoch" => DateTimeUnit.Epoch,
+            "decade" or "decades" => DateTimeUnit.Decade,
+            "century" or "centuries" => DateTimeUnit.Century,
+            "millennium" or "millennia" or "millenniums" => DateTimeUnit.Millennium,
             _ => throw InvalidUnit(calledName, unit),
         };
     }
@@ -437,6 +682,11 @@ internal static class DateTimeScalarFunctions
     private static ColumnValue? PropagateNull(IReadOnlyList<ColumnValue> arguments)
         => ScalarFunctionArguments.PropagateNull(arguments);
 
+    /// <summary>
+    /// The units the date functions accept. <c>DayOfWeek</c>, <c>IsoDayOfWeek</c>, <c>DayOfYear</c>,
+    /// <c>IsoYear</c> and <c>Epoch</c> are parts only:
+    /// <c>date_trunc</c>, <c>date_add</c> and <c>date_diff</c> reject them.
+    /// </summary>
     private enum DateTimeUnit
     {
         Year,
@@ -446,5 +696,31 @@ internal static class DateTimeScalarFunctions
         Minute,
         Second,
         Millisecond,
+
+        /// <summary>As a part, the fraction of the current second in microseconds, 0-999999.</summary>
+        Microsecond,
+
+        /// <summary>The ISO-8601 week: a part is 1-53, and a week starts on Monday.</summary>
+        Week,
+
+        Quarter,
+
+        /// <summary>0 = Sunday to 6 = Saturday (PostgreSQL <c>dow</c>).</summary>
+        DayOfWeek,
+
+        /// <summary>1 = Monday to 7 = Sunday (PostgreSQL <c>isodow</c>).</summary>
+        IsoDayOfWeek,
+
+        DayOfYear,
+
+        /// <summary>The ISO-8601 year that owns the ISO week, which can differ from the calendar year near January 1.</summary>
+        IsoYear,
+
+        /// <summary>Whole seconds since 1970-01-01 UTC, rounded down.</summary>
+        Epoch,
+
+        Decade,
+        Century,
+        Millennium,
     }
 }

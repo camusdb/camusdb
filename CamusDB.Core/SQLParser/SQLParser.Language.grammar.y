@@ -1573,6 +1573,7 @@ expr       : equals_expr { $$.n = $1.n; }
            | group_paren_expr { $$.n = $1.n; }
            | fcall_expr { $$.n = $1.n; }
            | cast_expr { $$.n = $1.n; }
+           | extract_expr { $$.n = $1.n; }
            | case_expr { $$.n = $1.n; }
            | projection_all { $$.n = $1.n; }
            | use_default_expr { $$.n = $1.n; }
@@ -1762,6 +1763,14 @@ fcall_expr : identifier LPAREN RPAREN { $$.n = new(NodeType.ExprFuncCall, $1.n, 
            | identifier LPAREN fcall_argument_list RPAREN { $$.n = new(NodeType.ExprFuncCall, $1.n, $3.n, null, null, null, null, null, null); }
            | identifier query_expr { $$.n = new(NodeType.ExprFuncCall, $1.n, new NodeAst(NodeType.ExprScalarSubquery, $2.n, null, null, null, null, null, null, null), null, null, null, null, null, null); }
            ;
+
+/* EXTRACT(field FROM x) and EXTRACT('field' FROM x). EXTRACT is matched as a plain identifier, not a
+   keyword, so a table or column named extract keeps working; the FROM inside the parentheses is what
+   tells this form apart from an ordinary call. ExtractCall checks the name and builds the same call
+   node as extract('field', x). */
+extract_expr : identifier LPAREN identifier TFROM condition RPAREN { $$.n = ExtractCall.Build($1.n, $3.n.yytext, $5.n); }
+             | identifier LPAREN string TFROM condition RPAREN { $$.n = ExtractCall.Build($1.n, SqlStringLiteral.Decode($3.n.yytext ?? ""), $5.n); }
+             ;
 
 cast_expr : TCAST LPAREN condition TAS cast_target_type RPAREN { $$.n = new(NodeType.ExprCast, $3.n, $5.n, null, null, null, null, null, null); }
           ;
