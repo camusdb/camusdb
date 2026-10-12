@@ -525,8 +525,17 @@ if (!config.IsClusterMode)
         options.Interceptors.Add<CamusDB.App.Grpc.MetricsServerInterceptor>();
     });
 
-// Initialize min threads
-ThreadPool.SetMinThreads(1024, 512);
+// Thread-pool floor. The default of 1024 worker threads lets the pool grow without hill-climbing
+// delay whenever work queues, which protects a node whose request path still blocks a worker
+// somewhere, at the cost of running far more threads than cores under a saturating load (233-284
+// workers on 16 hardware threads in the tmpfs bank runs, each hop paying a run-queue wait).
+// CAMUS_THREADPOOL_MIN_THREADS overrides the worker floor so that trade can be measured; the
+// completion-port floor stays at 512 either way, and the default is unchanged when the variable
+// is absent or unparsable.
+int minWorkerThreads = int.TryParse(Environment.GetEnvironmentVariable("CAMUS_THREADPOOL_MIN_THREADS"), out int configuredMinWorkers) && configuredMinWorkers > 0
+    ? configuredMinWorkers
+    : 1024;
+ThreadPool.SetMinThreads(minWorkerThreads, 512);
 
 WebApplication app = builder.Build();
 
