@@ -341,6 +341,11 @@ The string cast reads each text form back, so `CAST(CAST(x AS string) AS T)` ret
 hex after either a `\x` or a `0x` prefix. Write `'\xdeadbeef'` as a plain string literal: a plain
 literal does no escape processing, so the backslash stays in the text.
 
+#### Bytes functions
+
+To convert `bytes` to text and back with an explicit format (`hex`, `base64`, `escape`), and to read
+or change single bytes and bits, see [bytes-functions.md](bytes-functions.md).
+
 ### Over HTTP / JSON
 
 The HTTP API exchanges values as JSON:

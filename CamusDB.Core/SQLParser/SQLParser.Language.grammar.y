@@ -1610,6 +1610,7 @@ expr       : equals_expr { $$.n = $1.n; }
            | fcall_expr { $$.n = $1.n; }
            | cast_expr { $$.n = $1.n; }
            | extract_expr { $$.n = $1.n; }
+           | position_expr { $$.n = $1.n; }
            | case_expr { $$.n = $1.n; }
            | projection_all { $$.n = $1.n; }
            | use_default_expr { $$.n = $1.n; }
@@ -1807,6 +1808,21 @@ fcall_expr : identifier LPAREN RPAREN { $$.n = new(NodeType.ExprFuncCall, $1.n, 
 extract_expr : identifier LPAREN identifier TFROM condition RPAREN { $$.n = ExtractCall.Build($1.n, $3.n.yytext, $5.n); }
              | identifier LPAREN string TFROM condition RPAREN { $$.n = ExtractCall.Build($1.n, SqlStringLiteral.Decode($3.n.yytext ?? ""), $5.n); }
              ;
+
+/* POSITION(needle IN haystack). POSITION is matched as a plain identifier, not a keyword, for the same
+   reason as EXTRACT; PositionCall checks the name and builds the call strpos(haystack, needle).
+   The haystack is restricted to position_operand, which cannot start with a parenthesis: after IN a
+   parenthesis already opens an IN list or a subquery, so a parenthesised haystack would be ambiguous.
+   A needle that uses a binary operator must be parenthesised, because IN binds tighter than those
+   operators. strpos(haystack, needle) takes any expression in both places. */
+position_expr : identifier LPAREN condition TIN position_operand RPAREN { $$.n = PositionCall.Build($1.n, $3.n, $5.n); }
+              ;
+
+position_operand : simple_expr { $$.n = $1.n; }
+                 | fcall_expr { $$.n = $1.n; }
+                 | cast_expr { $$.n = $1.n; }
+                 | case_expr { $$.n = $1.n; }
+                 ;
 
 cast_expr : TCAST LPAREN condition TAS cast_target_type RPAREN { $$.n = new(NodeType.ExprCast, $3.n, $5.n, null, null, null, null, null, null); }
           ;

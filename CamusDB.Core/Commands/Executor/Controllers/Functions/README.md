@@ -9,8 +9,9 @@ Built-in function groups. Each lowercase name in the second column is a register
 | File | Functions |
 |------|-----------|
 | `MathScalarFunctions` | `abs`, `ceil` / `ceiling`, `floor`, `round`, `trunc`, `sqrt`, `pow` / `power`, `mod`, `sign`, `random` |
-| `StringScalarFunctions` | `length`, `lower`, `upper`, `trim`, `ltrim`, `rtrim`, `substring`, `replace`, `contains`, `starts_with`, `ends_with`, `concat` |
-| `HashScalarFunctions` | `md5`, `sha1`, `sha256`, `sha512` — lowercase hex digest of a string (UTF-8) or bytes value; not for security |
+| `StringScalarFunctions` | `length`, `lower`, `upper`, `trim`, `ltrim`, `rtrim`, `substring`, `strpos`, `replace`, `contains`, `starts_with`, `ends_with`, `concat` — `length`, `substring`, the trims, `strpos` and the three predicates also take bytes; `POSITION(x IN y)` parses to `strpos(y, x)` (`PositionCall`) |
+| `HashScalarFunctions` | `md5`, `sha1`, `sha256`, `sha512` — lowercase hex digest of a string (UTF-8) or bytes value; not for security. `digest`, `hmac` — the digest or HMAC as bytes; `crc32` |
+| `BytesScalarFunctions` | `encode`, `decode`, `hex`, `unhex`, `to_base64`, `from_base64`, `convert_to`, `convert_from`, `get_byte`, `set_byte`, `get_bit`, `set_bit`, `bit_length`, `bit_count`, `gen_random_bytes` — see `docs/bytes-functions.md` |
 | `DateTimeScalarFunctions` | `current_timestamp` / `now`, `current_date`, `date_part`, `date_trunc`, `date_add`, `date_diff`, `unix_timestamp`, `from_unixtime` |
 | `DateTimeScalarFunctions` (MySQL shortcuts) | `year`, `month`, `day` / `dayofmonth`, `hour`, `minute`, `second`, `quarter`, `week`, `dayofweek`, `weekday`, `dayofyear`, `dayname`, `monthname` |
 | `DateTimeScalarFunctions` (SQL standard) | `EXTRACT(field FROM x)` — the parser turns it into a call to `extract`, an alias of `date_part` |
