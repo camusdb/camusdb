@@ -8,6 +8,7 @@
 using System.Net;
 using CamusDB.Core.CommandsExecutor;
 using CamusDB.Core.Diagnostics;
+using Microsoft.AspNetCore.Connections;
 using Microsoft.AspNetCore.Server.Kestrel.Core;
 
 namespace CamusDB.App.Middleware;
@@ -16,7 +17,7 @@ namespace CamusDB.App.Middleware;
 /// Feeds <c>SHOW CONNECTIONS</c> and the origin columns of <c>SHOW QUERIES</c> from the web server.
 ///
 /// <para><b>Two layers, because only the web server sees a connection.</b> A connection middleware
-/// (<see cref="UseClientConnectionTracking"/>) runs once per accepted TCP connection: it adds the
+/// (<see cref="UseClientConnectionTracking"/>) runs once per accepted TCP or QUIC connection: it adds the
 /// connection to the engine's <see cref="ClientConnectionRegistry"/> and removes it when the
 /// connection closes, whichever way it closes. The request middleware (<see cref="InvokeAsync"/>)
 /// runs once per request: it finds that connection by the web server's connection id, counts the
@@ -82,13 +83,20 @@ public sealed class ClientActivityMiddleware
     ///
     /// <para>The engine is resolved at the first connection, not here: the listener is configured
     /// before the service provider can build it.</para>
+    ///
+    /// <para><b>Two hooks, because the web server has two connection pipelines.</b> A TCP connection
+    /// (HTTP/1.1, HTTP/2) runs the connection middleware; a QUIC connection (HTTP/3) runs the
+    /// multiplexed connection middleware instead, and never the first. Both register the connection
+    /// under the id that every request on it later reports as <c>HttpContext.Connection.Id</c>, so
+    /// <see cref="InvokeAsync"/> finds an HTTP/3 connection the same way it finds a TCP one. The
+    /// multiplexed hook is only built when the listener serves HTTP/3.</para>
     /// </summary>
     public static ListenOptions UseClientConnectionTracking(ListenOptions listen)
     {
         IServiceProvider services = listen.ApplicationServices;
         ClientConnectionRegistry? registry = null;
 
-        listen.Use(nextConnection => async connectionContext =>
+        ClientConnection Open(BaseConnectionContext connectionContext)
         {
             registry ??= services.GetRequiredService<CommandExecutor>().QueryActivity.Connections;
 
@@ -96,7 +104,26 @@ public sealed class ClientActivityMiddleware
                 ? endPoint.Address.ToString()
                 : connectionContext.RemoteEndPoint?.ToString();
 
-            ClientConnection connection = registry.Open(connectionContext.ConnectionId, address);
+            return registry.Open(connectionContext.ConnectionId, address);
+        }
+
+        listen.Use(nextConnection => async connectionContext =>
+        {
+            ClientConnection connection = Open(connectionContext);
+
+            try
+            {
+                await nextConnection(connectionContext).ConfigureAwait(false);
+            }
+            finally
+            {
+                connection.Close();
+            }
+        });
+
+        ((IMultiplexedConnectionBuilder)listen).Use(nextConnection => async connectionContext =>
+        {
+            ClientConnection connection = Open(connectionContext);
 
             try
             {

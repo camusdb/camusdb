@@ -72,6 +72,7 @@ public class ConfigReader
         "http_port",
         "https_port",
         "https_certificate",
+        "http3_enabled",
         "raft_certificate",
         "grpc_certificate",
         "grpc_tls_enabled",

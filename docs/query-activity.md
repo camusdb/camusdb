@@ -52,15 +52,15 @@ reads, with `rows_returned` growing.
 
 ## `SHOW CONNECTIONS`
 
-One row per TCP connection the node accepted on a client-facing listener (HTTP, HTTPS and the gRPC
-client port), oldest first. The Raft listener is not tracked.
+One row per TCP or QUIC connection the node accepted on a client-facing listener (HTTP, HTTPS and the
+gRPC client port), oldest first. QUIC connections exist only when `http3_enabled` is on. The Raft listener is not tracked.
 
 | Column | Meaning |
 |---|---|
 | `connection_id` | The id the `connection_id` column of `SHOW QUERIES` refers to. |
 | `node` | The node that holds the connection. |
 | `client_address` | The client's IP address. |
-| `protocol` | `HTTP/1.1` or `HTTP/2`. A gRPC client is `HTTP/2`. |
+| `protocol` | `HTTP/1.1`, `HTTP/2` or `HTTP/3`. A gRPC client is `HTTP/2`. `HTTP/3` appears only on the HTTPS port with `http3_enabled`. |
 | `kind` | `client`, or `peer` for a connection another node opened to call an `/internal/` endpoint. |
 | `user_name` | The user of the last statement on the connection. NULL before the first one. |
 | `opened_at` | When the connection was accepted, UTC. |
