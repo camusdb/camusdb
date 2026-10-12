@@ -439,6 +439,13 @@ public sealed class Dataset
     /// transient: the schema leader is being elected or is moving. The budget matches the seeding
     /// propagation budget for the same reason — setup can afford to wait a minute, and a run that
     /// starts on a half-created schema is worse than one that waits.</para>
+    ///
+    /// <para>A transport failure is judged by its shape whatever code rode along
+    /// (<see cref="ErrorClassifier.IsRetryableForIdempotentSetup"/>), because the statement is
+    /// idempotent here. The gRPC client stamps a call cut under a dying node with CADB0000, and the
+    /// nightly append-placement run of 2026-10-12 lost its run to that: the nemesis killed the node
+    /// holding <c>CREATE TABLE elle_append</c>, and a code-respecting check gave up on the first
+    /// attempt.</para>
     /// </summary>
     internal static async Task EnsureDdlAsync(CamusConnection conn, string sql, string what, CancellationToken ct)
     {
@@ -462,7 +469,7 @@ public sealed class Dataset
                 OperationStatus status = ErrorClassifier.Classify(ex).Status;
                 bool retryable = status is OperationStatus.Conflict or OperationStatus.Transient
                     || IsDdlForwardingFailure(ex)
-                    || IsTransportTransient(ex);
+                    || ErrorClassifier.IsRetryableForIdempotentSetup(ex);
 
                 if (!retryable || attempt >= MaxSchemaAttempts || ct.IsCancellationRequested)
                     throw new InvalidOperationException(
@@ -499,25 +506,6 @@ public sealed class Dataset
         if (camus.Code == "CADB0099")
             return true;
         return camus.Message.Contains("forward DDL", StringComparison.OrdinalIgnoreCase);
-    }
-
-    /// <summary>
-    /// True when a DDL failed on the transport rather than on its merits: the call exceeded its
-    /// deadline, or the node was unavailable. These arrive as a <see cref="CamusException"/> whose
-    /// <see cref="CamusException.Code"/> is empty — the gRPC status never becomes a CamusDB error code
-    /// — so <see cref="ErrorClassifier"/> reads them as a domain error, which for a setup statement is
-    /// the wrong verdict: nothing about the statement is wrong, the cluster was busy. A node still
-    /// electing its schema leader answers exactly this way, and the very same statement succeeds a
-    /// second later.
-    /// </summary>
-    private static bool IsTransportTransient(Exception ex)
-    {
-        if (ex is not CamusException camus)
-            return false;
-
-        return camus.Message.Contains("DeadlineExceeded", StringComparison.OrdinalIgnoreCase)
-            || camus.Message.Contains("Unavailable", StringComparison.OrdinalIgnoreCase)
-            || camus.Message.Contains("deadline", StringComparison.OrdinalIgnoreCase);
     }
 
     /// <summary>
