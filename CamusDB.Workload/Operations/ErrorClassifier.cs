@@ -77,6 +77,42 @@ public static class ErrorClassifier
     private const string InternalUnmapped = "CADB0000";
 
     /// <summary>
+    /// True when a message names a connection that was cut under a call in flight: the response
+    /// stream ended before its answer, the socket was reset, the request was aborted, or the call
+    /// could not be started on a connection that was going away. The list mirrors
+    /// <c>CamusEndpointHealth.IndicatesEndpointDown</c> in the client. Such a call was sent and may
+    /// have run, so on the write path it carries no verdict, and for an idempotent request it is worth
+    /// another attempt.
+    ///
+    /// <para>The nightly append-placement run of 2026-10-12 lost its setup to one of these: the node
+    /// that held a <c>CREATE TABLE</c> was killed mid-call, the client reported "Error starting gRPC
+    /// call ... The response ended prematurely (ResponseEnded)" under CADB0000, no shape list matched
+    /// it, and the workload gave up after one attempt of a forty-attempt budget.</para>
+    /// </summary>
+    private static bool IsConnectionCut(string message)
+        => message.Contains("response ended prematurely", StringComparison.OrdinalIgnoreCase)
+            || message.Contains("ResponseEnded", StringComparison.OrdinalIgnoreCase)
+            || message.Contains("Error starting gRPC call", StringComparison.OrdinalIgnoreCase)
+            || message.Contains("Error reading next message", StringComparison.OrdinalIgnoreCase)
+            || message.Contains("Error writing", StringComparison.OrdinalIgnoreCase)
+            || message.Contains("request was aborted", StringComparison.OrdinalIgnoreCase)
+            || message.Contains("Connection reset", StringComparison.OrdinalIgnoreCase)
+            || message.Contains("connection was closed", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Every message shape that says the transport, not the server, failed: the connect-level shapes,
+    /// the deadline shapes, and the mid-flight cuts of <see cref="IsConnectionCut"/>. Shared by the two
+    /// idempotent-retry predicates, which read the shape whatever code rode along with it.
+    /// </summary>
+    private static bool LooksLikeTransportFailure(string message)
+        => message.Contains("subchannel", StringComparison.OrdinalIgnoreCase)
+            || message.Contains("Error connecting", StringComparison.OrdinalIgnoreCase)
+            || message.Contains("Connection refused", StringComparison.OrdinalIgnoreCase)
+            || message.Contains("Unavailable", StringComparison.OrdinalIgnoreCase)
+            || message.Contains("deadline", StringComparison.OrdinalIgnoreCase)
+            || IsConnectionCut(message);
+
+    /// <summary>
     /// True when a <see cref="CamusException"/> reports that the commit outcome is unavailable rather than a
     /// server decision. Three shapes qualify: a transport failure that came back with no error code and a
     /// message naming a gRPC transport condition (deadline / unavailable / cancelled); an explicit
@@ -99,7 +135,8 @@ public static class ErrorClassifier
             || message.Contains("deadline", StringComparison.OrdinalIgnoreCase)
             || message.Contains("Unavailable", StringComparison.OrdinalIgnoreCase)
             || message.Contains("Cancelled", StringComparison.OrdinalIgnoreCase)
-            || message.Contains("Canceled", StringComparison.OrdinalIgnoreCase);
+            || message.Contains("Canceled", StringComparison.OrdinalIgnoreCase)
+            || IsConnectionCut(message);
     }
 
     /// <summary>
@@ -126,7 +163,8 @@ public static class ErrorClassifier
             || message.Contains("Error connecting", StringComparison.OrdinalIgnoreCase)
             || message.Contains("Connection refused", StringComparison.OrdinalIgnoreCase)
             || message.Contains("Unavailable", StringComparison.OrdinalIgnoreCase)
-            || message.Contains("DeadlineExceeded", StringComparison.OrdinalIgnoreCase);
+            || message.Contains("DeadlineExceeded", StringComparison.OrdinalIgnoreCase)
+            || IsConnectionCut(message);
     }
 
     /// <summary>
@@ -155,13 +193,19 @@ public static class ErrorClassifier
             return true;
 
         // Transport shape, whatever code rode along with it.
-        string message = ex.Message;
-        return message.Contains("subchannel", StringComparison.OrdinalIgnoreCase)
-            || message.Contains("Error connecting", StringComparison.OrdinalIgnoreCase)
-            || message.Contains("Connection refused", StringComparison.OrdinalIgnoreCase)
-            || message.Contains("Unavailable", StringComparison.OrdinalIgnoreCase)
-            || message.Contains("DeadlineExceeded", StringComparison.OrdinalIgnoreCase);
+        return LooksLikeTransportFailure(ex.Message);
     }
+
+    /// <summary>
+    /// Whether an <b>idempotent setup statement</b> should be retried after this exception. Setup DDL
+    /// is idempotent by construction: <c>Dataset.EnsureDdlAsync</c> reads "already exists" as success,
+    /// so a <c>CREATE</c> that ran before its answer was lost costs nothing to send again, and the
+    /// client pool has by then marked the dead endpoint, so the retry goes elsewhere. Same
+    /// permissiveness as <see cref="IsRetryableForIdempotentRead"/>, for the same reason, and never
+    /// consulted on the measured path.
+    /// </summary>
+    public static bool IsRetryableForIdempotentSetup(Exception ex)
+        => IsRetryableForIdempotentRead(ex);
 
     /// <summary>
     /// One clause naming why an idempotent read failed, for the reconciliation give-up message. The

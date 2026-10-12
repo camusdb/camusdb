@@ -299,3 +299,70 @@ public sealed class IdempotentReadRetryTests
             Is.False);
     }
 }
+
+/// <summary>
+/// Covers a call that was cut under a node that died while it was in flight. The client stamps it
+/// CADB0000 with the gRPC transport text and no "Unavailable" word, so no shape list matched it. The
+/// nightly append-placement run of 2026-10-12 (and 2026-10-09) lost its setup that way: the nemesis
+/// killed the node holding <c>CREATE TABLE elle_append</c>, and the setup helper gave up after one
+/// attempt of forty.
+/// </summary>
+[TestFixture]
+public sealed class ConnectionCutClassificationTests
+{
+    private const string NightlyMessage =
+        "Endpoint https://camus3:5096: Error starting gRPC call. HttpRequestException: The response ended " +
+        "prematurely while waiting for the next frame from the server. (ResponseEnded) HttpIOException: The " +
+        "response ended prematurely while waiting for the next frame from the server. (ResponseEnded)";
+
+    [Test]
+    public void RetriesTheNightlySetupFailureWhateverItsCode()
+    {
+        Assert.That(ErrorClassifier.IsRetryableForIdempotentSetup(new CamusException("CADB0000", NightlyMessage)), Is.True);
+        Assert.That(ErrorClassifier.IsRetryableForIdempotentSetup(new CamusException("", NightlyMessage)), Is.True);
+        Assert.That(ErrorClassifier.IsRetryableForIdempotentRead(new CamusException("CADB0000", NightlyMessage)), Is.True);
+    }
+
+    [TestCase("Status(StatusCode=\"Unavailable\", Detail=\"Error reading next message. HttpIOException: The response ended prematurely\")")]
+    [TestCase("Endpoint https://camus2:5096: The request was aborted.")]
+    [TestCase("Endpoint https://camus2:5096: Connection reset by peer")]
+    [TestCase("Endpoint https://camus2:5096: Error writing to the stream; the connection was closed")]
+    public void RetriesEveryMidFlightCutShapeForAnIdempotentRequest(string message)
+    {
+        Assert.That(ErrorClassifier.IsRetryableForIdempotentSetup(new CamusException("CADB0000", message)), Is.True);
+    }
+
+    [Test]
+    public void ACodelessCutIsTransientBeforeCommitAndIndeterminateDuringIt()
+    {
+        CamusException ex = new("", NightlyMessage);
+
+        (OperationStatus before, _) = ErrorClassifier.Classify(ex, commitSubmitted: false);
+        Assert.That(before, Is.EqualTo(OperationStatus.Transient));
+
+        (OperationStatus during, _) = ErrorClassifier.Classify(ex, commitSubmitted: true);
+        Assert.That(during, Is.EqualTo(OperationStatus.Indeterminate), "the commit was sent and may have landed");
+    }
+
+    [Test]
+    public void ACodedCutStillKeepsItsCodeOnTheWritePath()
+    {
+        // Classify does not reinterpret a coded answer from its text: CADB0000 stays a domain error
+        // before commit and indeterminate during it, exactly as before this fixture existed.
+        CamusException ex = new("CADB0000", NightlyMessage);
+
+        (OperationStatus before, _) = ErrorClassifier.Classify(ex, commitSubmitted: false);
+        Assert.That(before, Is.EqualTo(OperationStatus.DomainError));
+
+        (OperationStatus during, _) = ErrorClassifier.Classify(ex, commitSubmitted: true);
+        Assert.That(during, Is.EqualTo(OperationStatus.Indeterminate));
+    }
+
+    [Test]
+    public void StillDoesNotRetryAServerVerdictOnSetup()
+    {
+        Assert.That(
+            ErrorClassifier.IsRetryableForIdempotentSetup(new CamusException("CADB0400", "syntax error near CREATE")),
+            Is.False);
+    }
+}
