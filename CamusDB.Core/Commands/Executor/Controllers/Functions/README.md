@@ -14,7 +14,8 @@ Built-in function groups. Each lowercase name in the second column is a register
 | `DateTimeScalarFunctions` | `current_timestamp` / `now`, `current_date`, `date_part`, `date_trunc`, `date_add`, `date_diff`, `unix_timestamp`, `from_unixtime` |
 | `DateTimeScalarFunctions` (MySQL shortcuts) | `year`, `month`, `day` / `dayofmonth`, `hour`, `minute`, `second`, `quarter`, `week`, `dayofweek`, `weekday`, `dayofyear`, `dayname`, `monthname` |
 | `DateTimeScalarFunctions` (SQL standard) | `EXTRACT(field FROM x)` — the parser turns it into a call to `extract`, an alias of `date_part` |
-| `CastScalarFunctions` | `CAST(x AS type)` and `x::type` (grammar forms); `to_string`, `to_int64`, `to_float64`, `to_float32`, `to_bool`, `to_date`, `to_datetime`, `to_bytes`, `to_id` / `str_id` |
+| `DatePatternScalarFunctions` | `to_char`, `to_timestamp`, `date_format`, `str_to_date` — format and strictly parse a date with a pattern (`DatePattern`); the two-argument `to_date(text, pattern)` is registered with the casts |
+| `CastScalarFunctions` | `CAST(x AS type)` and `x::type` (grammar forms); `to_string`, `to_int64`, `to_float64`, `to_float32`, `to_bool`, `to_date` (one argument; two arguments parse with a pattern), `to_datetime`, `to_bytes`, `to_id` / `str_id` |
 | `IdScalarFunctions` | `gen_id` — generates a new ObjectId |
 | `UuidScalarFunctions` | `gen_uuid_v4`, `gen_uuid_v7` |
 | `NullScalarFunctions` | `coalesce`, `ifnull` / `nvl` |
@@ -26,7 +27,7 @@ Built-in function groups. Each lowercase name in the second column is a register
 | `ArrayScalarFunctions` | `cardinality`, `array_length`, `array_contains` — an array read as a whole, for length and membership checks |
 | `QuantifierScalarFunctions` | `any`, `some`, `all` — stubs that reject a call; the parser rewrites `x = ANY (a)` and `x <> ALL (a)` before evaluation |
 
-The date units (`'week'`, `'quarter'`, `'dow'`, `'epoch'`, ...) and the functions that accept each one are listed in `docs/data-types.md`, section "Temporal functions".
+The date units (`'week'`, `'quarter'`, `'dow'`, `'epoch'`, ...) and the functions that accept each one are listed in `docs/data-types.md`, section "Temporal functions". The pattern tokens of `to_char` / `date_format` and the parse rules are in `docs/date-patterns.md`.
 
 `ScalarFunctionDescriptor` carries the function name(s), arity constraints, and the delegate that implements the function.
 `ScalarFunctionArguments` is the helper that evaluates argument expressions before passing them to the function delegate.

@@ -424,6 +424,10 @@ work with function results.
 | `WEEKDAY(temporal)` | `int64` | MySQL rule: 0 = Monday ... 6 = Sunday |
 | `WEEK(temporal [, mode])` | `int64` | Mode 0 (default): weeks start on Sunday, 0-53, the days before the first Sunday are week 0. Mode 3: ISO-8601 week, 1-53. Other modes are rejected |
 | `DAYNAME(temporal)`, `MONTHNAME(temporal)` | `string` | English names (`Sunday`, `February`), independent of server locale |
+| `TO_CHAR(temporal, pattern)`, `DATE_FORMAT(temporal, pattern)` | `string` | Format with a PostgreSQL template or MySQL `%` specifiers; see [date-patterns.md](date-patterns.md) |
+| `TO_TIMESTAMP(text, pattern)`, `STR_TO_DATE(text, pattern)` | `datetime` | Strict parse with a pattern; see [date-patterns.md](date-patterns.md) |
+| `TO_DATE(text, pattern)` | `date` | Strict parse with a PostgreSQL template, date only. `TO_DATE(x)` with one argument is still the cast to `date` |
+| `TO_TIMESTAMP(seconds)` | `datetime` | The PostgreSQL spelling of `FROM_UNIXTIME(seconds)` |
 
 ### Date units
 
