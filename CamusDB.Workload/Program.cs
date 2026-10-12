@@ -1044,7 +1044,8 @@ public static class Program
         {
             Console.WriteLine($"  Client headroom     : {(client.HeadroomAvailable ? "OK" : "SUSPECT")} " +
                               $"(CPU {client.CpuUtilization:P0} of {client.ProcessorCount} core(s), " +
-                              $"alloc {client.AllocatedMbPerSecond:F0} MB/s, peak pool queue {client.PeakThreadPoolQueue})");
+                              $"alloc {client.AllocatedMbPerSecond:F0} MB/s, pool queue peak {client.PeakThreadPoolQueue} " +
+                              $"p95 {client.ThreadPoolQueueP95:F0} longest backlog {client.ThreadPoolBacklogSeconds:F0} s)");
             foreach (string warning in client.Warnings)
                 Console.WriteLine($"    ⚠ {warning}");
         }

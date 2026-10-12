@@ -220,7 +220,10 @@ public static class BottleneckReport
         sb.AppendLine($"| Allocation rate | {F(c.AllocatedMbPerSecond)} MB/s |");
         sb.AppendLine($"| GC collections gen0/1/2 | {c.Gen0Collections} / {c.Gen1Collections} / {c.Gen2Collections} |");
         sb.AppendLine($"| GC pause share of window | {Pct(c.GcPauseFraction)} |");
-        sb.AppendLine($"| Peak thread-pool queue | {Fc(c.PeakThreadPoolQueue)} |");
+        sb.AppendLine($"| Peak thread-pool queue | {Fc(c.PeakThreadPoolQueue)} (one sample) |");
+        sb.AppendLine($"| Thread-pool queue p95 | {Fc(c.ThreadPoolQueueP95)} |");
+        sb.AppendLine($"| Longest thread-pool backlog | {F(c.ThreadPoolBacklogSeconds)} s above {ClientResourceSampler.ThreadPoolQueueBar} " +
+                      $"({c.ThreadPoolBacklogSamples} of {c.ThreadPoolQueueSamples} samples) |");
         sb.AppendLine($"| Peak working set | {Fc(c.PeakWorkingSetBytes / 1024.0 / 1024.0)} MB |");
         sb.AppendLine($"| In-flight needed | {F(c.RequiredInFlight)} " +
                       $"(closed loop caps it at {c.Workers} worker(s); open loop at {c.MaxInFlight}) |");

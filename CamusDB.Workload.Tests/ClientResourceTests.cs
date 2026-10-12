@@ -92,6 +92,105 @@ public sealed class ClientResourceTests
         Assert.That(resources!.Warnings.Where(w => w.Contains("max-in-flight")), Is.Empty);
     }
 
+    [Test]
+    public void OneSampleOverTheBarIsNotABacklog()
+    {
+        // rl7 (2026-10-11): a two-hour soak with a clean generator (CPU 6%, 71 MB/s) failed the
+        // headroom check on one 1-second sample of 103 against a bar of 100. One spike is the normal
+        // shape of a burst of continuations, not a client holding operations back.
+        List<ClientResourceSnapshot> series = Series(7_200, depth: 2);
+        series[4_000] = series[4_000] with { ThreadPoolQueue = 103 };
+
+        ClientResources resources = Summarize(series)!;
+
+        Assert.That(resources.PeakThreadPoolQueue, Is.EqualTo(103));
+        Assert.That(resources.ThreadPoolQueueP95, Is.EqualTo(2));
+        Assert.That(resources.ThreadPoolBacklogSeconds, Is.EqualTo(1).Within(0.001), "an isolated spike covers one sample cadence");
+        Assert.That(resources.ThreadPoolBacklogSamples, Is.EqualTo(1));
+        Assert.That(resources.ThreadPoolQueueSamples, Is.EqualTo(7_200));
+        Assert.That(resources.Warnings, Is.Empty);
+        Assert.That(resources.HeadroomAvailable, Is.True);
+    }
+
+    [Test]
+    public void AQueueThatStaysOverTheBarForTheDwellIsABacklog()
+    {
+        List<ClientResourceSnapshot> series = Series(600, depth: 2);
+        for (int i = 300; i < 305; i++)
+            series[i] = series[i] with { ThreadPoolQueue = 150 };
+
+        ClientResources resources = Summarize(series)!;
+
+        Assert.That(resources.ThreadPoolBacklogSeconds, Is.EqualTo(5).Within(0.001), "samples 300..304 over, 305 back under: five seconds");
+        Assert.That(resources.ThreadPoolQueueP95, Is.EqualTo(2), "under 5% of the window, so the percentile alone would not have fired");
+        Assert.That(resources.HeadroomAvailable, Is.False);
+        Assert.That(string.Join(" ", resources.Warnings), Does.Contain("for 5 s without a break"));
+    }
+
+    [Test]
+    public void FourSecondsOverTheBarIsStillUnderTheDwell()
+    {
+        List<ClientResourceSnapshot> series = Series(600, depth: 2);
+        for (int i = 300; i < 304; i++)
+            series[i] = series[i] with { ThreadPoolQueue = 150 };
+
+        ClientResources resources = Summarize(series)!;
+
+        Assert.That(resources.ThreadPoolBacklogSeconds, Is.EqualTo(4).Within(0.001));
+        Assert.That(resources.Warnings, Is.Empty);
+    }
+
+    [Test]
+    public void ManyShortSpikesAreABacklogWhenTheyCoverMoreThanFivePercentOfTheWindow()
+    {
+        // Every tenth sample over the bar: never five in a row, but 10% of the window. A generator
+        // that is behind one second in ten is behind.
+        List<ClientResourceSnapshot> series = Series(1_000, depth: 2);
+        for (int i = 0; i < series.Count; i += 10)
+            series[i] = series[i] with { ThreadPoolQueue = 120 };
+
+        ClientResources resources = Summarize(series)!;
+
+        Assert.That(resources.ThreadPoolBacklogSeconds, Is.EqualTo(1).Within(0.001));
+        Assert.That(resources.ThreadPoolQueueP95, Is.EqualTo(120));
+        Assert.That(resources.HeadroomAvailable, Is.False);
+        Assert.That(string.Join(" ", resources.Warnings), Does.Contain("more than 5% of samples"));
+    }
+
+    [Test]
+    public void ABacklogStillOpenAtTheEndOfTheWindowCountsItsLastSample()
+    {
+        List<ClientResourceSnapshot> series = Series(100, depth: 2);
+        for (int i = 94; i < 100; i++)
+            series[i] = series[i] with { ThreadPoolQueue = 500 };
+
+        ClientResourceSampler.ThreadPoolBacklog backlog = ClientResourceSampler.MeasureThreadPoolBacklog(series);
+
+        Assert.That(backlog.LongestSeconds, Is.EqualTo(6).Within(0.001), "samples 94..99 over, closed by one cadence past the last");
+        Assert.That(backlog.Samples, Is.EqualTo(6));
+    }
+
+    [Test]
+    public void BacklogOfAnEmptyWindowIsZero()
+    {
+        ClientResourceSampler.ThreadPoolBacklog backlog = ClientResourceSampler.MeasureThreadPoolBacklog([]);
+        Assert.That(backlog, Is.EqualTo(new ClientResourceSampler.ThreadPoolBacklog(0, 0, 0)));
+    }
+
+    private static readonly DateTime SeriesStart = new(2026, 10, 11, 0, 0, 0, DateTimeKind.Utc);
+
+    /// <summary>A one-second series of idle readings at a constant queue depth.</summary>
+    private static List<ClientResourceSnapshot> Series(int count, long depth) =>
+        Enumerable.Range(0, count).Select(i => new ClientResourceSnapshot(
+            AtUtc: SeriesStart.AddSeconds(i), CpuSeconds: i * 0.05, AllocatedBytes: i * 1_000_000L,
+            Gen0: i, Gen1: 0, Gen2: 0, GcPauseSeconds: i * 0.001, WorkingSetBytes: 100_000_000,
+            ThreadPoolThreads: 8, ThreadPoolQueue: depth)).ToList();
+
+    private static ClientResources? Summarize(IReadOnlyList<ClientResourceSnapshot> series) =>
+        ClientResourceSampler.Summarize(
+            series, SeriesStart, measuredSeconds: series.Count, mode: "closed", workers: 64, connections: 8,
+            maxInFlight: 4096, throughputOpsPerSec: 3_000, meanLatencyMs: 20);
+
     private static async Task<ClientResources?> SummarizeAsync(
         string mode, int workers, int maxInFlight, double throughputOpsPerSec, double meanLatencyMs)
     {
