@@ -74,6 +74,7 @@ public class ConfigReader
         "https_certificate",
         "raft_certificate",
         "grpc_certificate",
+        "grpc_tls_enabled",
         "peer_tls_enabled",
         "require_tls_when_auth_enabled",
         "grpc_enabled",
