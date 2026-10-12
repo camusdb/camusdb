@@ -43,7 +43,19 @@ internal static class CastScalarFunctions
         RegisterUnaryCast(registry, "to_float64",  ColumnType.Float64);
         RegisterUnaryCast(registry, "to_bool",     ColumnType.Bool);
         RegisterUnaryCast(registry, "to_float32",  ColumnType.Float32);
-        RegisterUnaryCast(registry, "to_date",     ColumnType.Date);
+        // to_date(x) is the cast to date. to_date(text, pattern) reads the text with a PostgreSQL
+        // template pattern instead (DatePatternScalarFunctions).
+        registry.Register(new ScalarFunctionDescriptor
+        {
+            Name = "to_date",
+            MinArity = 1,
+            MaxArity = 2,
+            Evaluator = (calledName, arguments) => arguments.Count == 1
+                ? CastValue(calledName, arguments[0], ColumnType.Date)
+                : DatePatternScalarFunctions.EvaluateParseToDate(calledName, arguments),
+            InferReturnType = _ => ColumnType.Date,
+        });
+
         RegisterUnaryCast(registry, "to_datetime", ColumnType.DateTime);
         RegisterUnaryCast(registry, "to_bytes",    ColumnType.Bytes);
 

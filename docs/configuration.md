@@ -53,6 +53,7 @@ Example: YAML `mode: cluster` with `--mode standalone` starts in standalone mode
 | `http_port` | `--http-port` | `5095` |
 | `https_port` | `--https-port` | `7141` |
 | `https_certificate` | `--https-certificate` | `""` |
+| `http3_enabled` | — | `false` (`true` also serves HTTP/3 over QUIC on `https_port`; see below) |
 | `raft_certificate` | `--raft-certificate` | `""` |
 | `grpc_enabled` | — | `true` |
 | `grpc_port` | — | `5096` |
@@ -116,6 +117,31 @@ without a restart.
 
 The query-activity knobs are YAML-only as well, and all three take effect without a restart; see
 [query-activity.md](query-activity.md).
+
+### HTTP/3 on the HTTPS API port
+
+`http3_enabled: true` makes the HTTPS API port serve HTTP/3 over QUIC, next to HTTP/1.1 and HTTP/2.
+It is off by default and takes effect at restart.
+
+```yaml
+https_port: 7141
+https_certificate: /etc/camusdb/api.pfx
+http3_enabled: true
+```
+
+- HTTP/3 needs TLS, so it applies to the HTTPS port only. Without `https_certificate` there is no
+  HTTPS port and the setting has no effect. The plain HTTP port, the Raft port and the gRPC port
+  do not change.
+- QUIC runs over UDP. Open `https_port` for UDP as well as TCP, including any Docker port mapping
+  (`-p 7141:7141/tcp -p 7141:7141/udp`) and firewall rule.
+- The host needs the platform QUIC library: `libmsquic` on Linux and macOS, or Windows 11 /
+  Windows Server 2022 and later. Without it the port keeps serving HTTP/1.1 and HTTP/2 only.
+- A client that connects over TCP gets an `Alt-Svc` header on each response. Browsers and other
+  clients that support it then move to HTTP/3 on the same port.
+
+When the setting is on but HTTP/3 cannot start (no certificate, or no QUIC library), the node still
+starts and logs a warning that names the cause. `SHOW CONNECTIONS` lists HTTP/3 connections with the
+protocol `HTTP/3`.
 
 ## Kahuna engine section
 

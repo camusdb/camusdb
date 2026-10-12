@@ -476,6 +476,28 @@ public class ConfigDefinition
     /// <summary>Path to a PFX certificate for the HTTPS API port; empty disables HTTPS.</summary>
     public string HttpsCertificate { get; set; } = "";
 
+    /// <summary>
+    /// Whether the HTTPS API port also serves HTTP/3 over QUIC, next to HTTP/1.1 and HTTP/2.
+    /// Default <c>false</c>.
+    ///
+    /// <para>It applies to the HTTPS port only. HTTP/3 runs only over TLS, so the plain HTTP port and
+    /// a node without <see cref="HttpsCertificate"/> cannot serve it; the setting then has no effect
+    /// and <see cref="CamusDB.Core.Config.Http3StartupChecks"/> says so at startup. The Raft and client gRPC ports are not
+    /// affected: they stay HTTP/2 only.</para>
+    ///
+    /// <para>A client reaches HTTP/3 in two ways. A client that knows the port serves it can connect
+    /// over QUIC directly. Any other client connects over TCP first and receives an <c>Alt-Svc</c>
+    /// header that the web server adds to every response, and a browser then moves to QUIC on the same
+    /// port number. QUIC uses UDP, so the port must be open for UDP as well as TCP.</para>
+    ///
+    /// <para>The web server needs the platform QUIC library (<c>libmsquic</c> on Linux and macOS, the
+    /// built-in one on Windows 11 and Windows Server 2022). Where it is missing, the port keeps serving
+    /// HTTP/1.1 and HTTP/2 and the startup check reports why HTTP/3 is off.</para>
+    ///
+    /// <para>Read once when the listener binds, so a change takes a restart.</para>
+    /// </summary>
+    public bool Http3Enabled { get; set; }
+
     /// <summary>Path to a PFX certificate for the Raft gRPC port in cluster mode.</summary>
     public string RaftCertificate { get; set; } = "";
 

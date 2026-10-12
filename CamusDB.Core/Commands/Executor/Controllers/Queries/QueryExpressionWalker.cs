@@ -166,6 +166,7 @@ internal static class QueryExpressionWalker
             case NodeType.Bool:
             case NodeType.Null:
             case NodeType.ObjectIdLiteral:
+            case NodeType.BytesLiteral:
             case NodeType.Placeholder:
                 return;
 

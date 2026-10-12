@@ -341,6 +341,11 @@ The string cast reads each text form back, so `CAST(CAST(x AS string) AS T)` ret
 hex after either a `\x` or a `0x` prefix. Write `'\xdeadbeef'` as a plain string literal: a plain
 literal does no escape processing, so the backslash stays in the text.
 
+#### Bytes functions
+
+To convert `bytes` to text and back with an explicit format (`hex`, `base64`, `escape`), and to read
+or change single bytes and bits, see [bytes-functions.md](bytes-functions.md).
+
 ### Over HTTP / JSON
 
 The HTTP API exchanges values as JSON:
@@ -424,6 +429,10 @@ work with function results.
 | `WEEKDAY(temporal)` | `int64` | MySQL rule: 0 = Monday ... 6 = Sunday |
 | `WEEK(temporal [, mode])` | `int64` | Mode 0 (default): weeks start on Sunday, 0-53, the days before the first Sunday are week 0. Mode 3: ISO-8601 week, 1-53. Other modes are rejected |
 | `DAYNAME(temporal)`, `MONTHNAME(temporal)` | `string` | English names (`Sunday`, `February`), independent of server locale |
+| `TO_CHAR(temporal, pattern)`, `DATE_FORMAT(temporal, pattern)` | `string` | Format with a PostgreSQL template or MySQL `%` specifiers; see [date-patterns.md](date-patterns.md) |
+| `TO_TIMESTAMP(text, pattern)`, `STR_TO_DATE(text, pattern)` | `datetime` | Strict parse with a pattern; see [date-patterns.md](date-patterns.md) |
+| `TO_DATE(text, pattern)` | `date` | Strict parse with a PostgreSQL template, date only. `TO_DATE(x)` with one argument is still the cast to `date` |
+| `TO_TIMESTAMP(seconds)` | `datetime` | The PostgreSQL spelling of `FROM_UNIXTIME(seconds)` |
 
 ### Date units
 

@@ -222,9 +222,14 @@ builder.WebHost.ConfigureKestrel(kestrel =>
     // The client-facing listeners track their connections for SHOW CONNECTIONS. The Raft listener
     // does not: it serves peers only.
     kestrel.ListenAnyIP(config.HttpPort, o => CamusDB.App.Middleware.ClientActivityMiddleware.UseClientConnectionTracking(o));
+    // http3_enabled adds HTTP/3 to the HTTPS port only: HTTP/3 needs TLS. The web server binds QUIC
+    // on the same port number over UDP and advertises it to TCP clients with an Alt-Svc header. Where
+    // the host has no QUIC, it serves HTTP/1.1 and HTTP/2 only; Http3StartupChecks reports that.
     if (!string.IsNullOrEmpty(config.HttpsCertificate))
         kestrel.ListenAnyIP(config.HttpsPort, o =>
         {
+            if (config.Http3Enabled)
+                o.Protocols = HttpProtocols.Http1AndHttp2AndHttp3;
             CamusDB.App.Middleware.ClientActivityMiddleware.UseClientConnectionTracking(o);
             o.UseHttps(config.HttpsCertificate);
         });
@@ -545,6 +550,14 @@ foreach (string warning in KeyRangeSplitStartupChecks.Inspect(config, camusOptio
 // normally, and only an observer on the network can tell. See TransportSecurityStartupChecks.
 foreach (string warning in TransportSecurityStartupChecks.Inspect(config))
     app.Logger.LogWarning("{TransportSecurityWarning}", warning);
+
+// Same again for HTTP/3: a node that cannot serve it still starts and serves HTTP/1.1 and HTTP/2, so
+// the operator who asked for it would not otherwise learn that it is off. The platform guard lets the
+// analyzer accept the QUIC probe, which is only defined on these three systems.
+bool quicSupported = (OperatingSystem.IsLinux() || OperatingSystem.IsMacOS() || OperatingSystem.IsWindows())
+                     && System.Net.Quic.QuicListener.IsSupported;
+foreach (string warning in Http3StartupChecks.Inspect(config, quicSupported))
+    app.Logger.LogWarning("{Http3Warning}", warning);
 
 if (config.IsClusterMode)
 {

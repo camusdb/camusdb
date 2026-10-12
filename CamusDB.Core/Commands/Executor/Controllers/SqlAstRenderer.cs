@@ -96,6 +96,7 @@ internal class SqlAstRenderer
             case NodeType.Float:
             case NodeType.Bool:
             case NodeType.ObjectIdLiteral:
+            case NodeType.BytesLiteral:
             case NodeType.Placeholder:
                 sb.Append(expr.yytext ?? throw Unsupported(expr));
                 return;

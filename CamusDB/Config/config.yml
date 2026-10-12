@@ -55,6 +55,8 @@ initial_partitions: 1      # Raft partition count (>= 1). Unset, it is 1 in stan
 # http_port: 5095          # HTTP API port (1..65535)
 # https_port: 7141         # HTTPS API port, used only when https_certificate is set (1..65535)
 # https_certificate:       # path to a PFX for HTTPS; omit to disable HTTPS
+# http3_enabled: false     # also serve HTTP/3 (QUIC) on https_port; needs https_certificate, the
+#                          # platform QUIC library (libmsquic on Linux/macOS) and the port open for UDP
 # raft_certificate:        # path to a PFX for Raft gRPC TLS in cluster mode
 #
 # grpc_enabled: true       # client-facing gRPC endpoint (CamusSql, CamusRows, reflection)

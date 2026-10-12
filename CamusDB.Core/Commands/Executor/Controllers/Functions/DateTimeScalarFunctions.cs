@@ -397,7 +397,7 @@ internal static class DateTimeScalarFunctions
         return new ColumnValue(ColumnType.Integer64, value.ToUnixTimeSeconds());
     }
 
-    private static ColumnValue EvaluateFromUnixtime(string calledName, IReadOnlyList<ColumnValue> arguments)
+    internal static ColumnValue EvaluateFromUnixtime(string calledName, IReadOnlyList<ColumnValue> arguments)
     {
         if (PropagateNull(arguments) is ColumnValue nullResult)
             return nullResult;
@@ -417,7 +417,7 @@ internal static class DateTimeScalarFunctions
         }
     }
 
-    private static DateTimeOffset ReadTemporal(string calledName, int argIndex, ColumnValue arg)
+    internal static DateTimeOffset ReadTemporal(string calledName, int argIndex, ColumnValue arg)
     {
         return arg.Type switch
         {

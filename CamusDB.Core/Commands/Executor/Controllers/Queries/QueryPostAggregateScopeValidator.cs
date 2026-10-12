@@ -183,6 +183,7 @@ internal static class QueryPostAggregateScopeValidator
             case NodeType.Bool:
             case NodeType.Null:
             case NodeType.ObjectIdLiteral:
+            case NodeType.BytesLiteral:
             case NodeType.Placeholder:
             case NodeType.ExprAllFields:
                 return;

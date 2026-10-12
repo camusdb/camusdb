@@ -44,9 +44,11 @@ internal sealed class ScalarFunctionRegistry
         IdScalarFunctions.Register(registry);
         UuidScalarFunctions.Register(registry);
         DateTimeScalarFunctions.Register(registry);
+        DatePatternScalarFunctions.Register(registry);
         MathScalarFunctions.Register(registry);
         StringScalarFunctions.Register(registry);
         HashScalarFunctions.Register(registry);
+        BytesScalarFunctions.Register(registry);
         VectorScalarFunctions.Register(registry);
         JsonScalarFunctions.Register(registry);
         CastScalarFunctions.Register(registry);
