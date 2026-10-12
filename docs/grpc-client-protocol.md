@@ -300,7 +300,7 @@ For code paths that operate on rows directly without composing SQL:
 
 | RPC | Request | Reply | Notes |
 |-----|---------|-------|-------|
-| `InsertRow` | `InsertRowRequest{database, table, map values}` | `NonQueryReply` | `values` maps column name → `Value`. |
+| `InsertRow` | `InsertRowRequest{database, table, map values}` | `NonQueryReply` | `values` maps column name → `Value`. A column left out of `values` takes its default, as in SQL `INSERT`; see [sequences](sequences.md#identity-columns) for identity columns. |
 | `Query` | `RowQueryRequest{database, table, index_name, filters, order_by}` | `stream QueryStreamMessage` | Schema-first (§3). `index_name` empty = primary scan. |
 | `QueryById` | `RowByIdRequest{database, table, id}` | `stream QueryStreamMessage` | Fetch by primary key. Schema-first even when the row is absent (schema, zero rows). |
 | `UpdateRows` | `UpdateRowsRequest{…, values, filters}` | `NonQueryReply` | Update matching rows. |

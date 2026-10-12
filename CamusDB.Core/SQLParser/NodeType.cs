@@ -131,6 +131,13 @@ public enum NodeType
     UpdateList,
     UpdateItem,
     Delete,
+    /// <summary>
+    /// <c>INSERT INTO t [(c1, …)] [OVERRIDING { SYSTEM | USER } VALUE] VALUES …</c>. <c>leftAst</c> is
+    /// the target table, <c>rightAst</c> the optional target column list, <c>extendedOne</c> the
+    /// <see cref="InsertBatchList"/> and <c>extendedTwo</c> the optional RETURNING list.
+    /// <c>yytext</c> is <c>"system"</c> or <c>"user"</c> for an OVERRIDING clause and null without
+    /// one; read it through <c>InsertOverridingClause.Of</c>.
+    /// </summary>
     Insert,
     InsertBatchList,
     /// <summary>
@@ -138,7 +145,8 @@ public enum NodeType
     /// <c>leftAst</c> is the target table, <c>rightAst</c> the optional target column list — but
     /// <c>extendedOne</c> holds the source <see cref="Select"/> statement instead of an
     /// <see cref="InsertBatchList"/>. The source's output columns are mapped onto the target
-    /// columns <b>positionally</b>, so the two lists must have the same arity.
+    /// columns <b>positionally</b>, so the two lists must have the same arity. An OVERRIDING clause is
+    /// carried in <c>yytext</c>, as for <see cref="Insert"/>.
     /// </summary>
     InsertSelect,
     Begin,

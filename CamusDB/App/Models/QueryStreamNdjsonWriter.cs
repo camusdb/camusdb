@@ -63,7 +63,7 @@ public sealed class QueryStreamTrailer
 /// <para>Line shapes (distinguished by their first JSON token — objects are header/trailer, arrays are
 /// rows):</para>
 /// <code>
-/// {"status":"ok","columns":[{"name":"id","type":1}, ...]}
+/// {"status":"ok","columns":[{"name":"id","type":1},{"name":"tags","type":10,"elementType":3}, ...]}
 /// ["6849f3…", 42, true]
 /// ["6849f4…", 43, false]
 /// {"status":"ok","total":2,"causalToken":{…},"serverTimeMs":3.1}
@@ -112,10 +112,17 @@ public sealed class QueryStreamNdjsonWriter
         this.buffer = buffer;
     }
 
-    /// <summary>Writes the schema header line. Must be called exactly once, before any row.</summary>
-    public void WriteHeader(IReadOnlyList<DerivedColumnSchema> schema)
+    /// <summary>
+    /// Writes the schema header line. Must be called exactly once, before any row.
+    /// </summary>
+    /// <param name="firstRows">
+    /// Rows already pulled from the cursor but not yet written, used only to type an array column the
+    /// planner could not (see <see cref="ColumnSchemaDto.FromSchema"/>). Null or empty when there are
+    /// none; the column is then sent without an element type.
+    /// </param>
+    public void WriteHeader(IReadOnlyList<DerivedColumnSchema> schema, IReadOnlyList<QueryResultRow>? firstRows = null)
     {
-        QueryStreamHeader header = new() { Columns = ToColumnDtos(schema) };
+        QueryStreamHeader header = new() { Columns = ColumnSchemaDto.FromSchema(schema, firstRows) };
         JsonSerializer.Serialize(writer, header, MetaOptions);
         EndLine();
         HeaderWritten = true;
@@ -147,11 +154,4 @@ public sealed class QueryStreamNdjsonWriter
         writer.Reset();
     }
 
-    private static List<ColumnSchemaDto> ToColumnDtos(IReadOnlyList<DerivedColumnSchema> schema)
-    {
-        List<ColumnSchemaDto> dtos = new(schema.Count);
-        foreach (DerivedColumnSchema col in schema)
-            dtos.Add(new ColumnSchemaDto { Name = col.Name, Type = col.Type });
-        return dtos;
-    }
 }

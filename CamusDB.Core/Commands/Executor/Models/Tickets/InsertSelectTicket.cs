@@ -39,15 +39,20 @@ public readonly struct InsertSelectTicket
 
     public Dictionary<string, ColumnValue>? Parameters { get; }
 
+    /// <summary>The statement's <c>OVERRIDING { SYSTEM | USER } VALUE</c> clause, if any.</summary>
+    public InsertOverriding Overriding { get; }
+
     public InsertSelectTicket(
         KvTransaction txnState,
         string databaseName,
         string tableName,
         IReadOnlyList<string>? targetColumns,
         NodeAst sourceSelect,
-        Dictionary<string, ColumnValue>? parameters
+        Dictionary<string, ColumnValue>? parameters,
+        InsertOverriding overriding = InsertOverriding.None
     )
     {
+        Overriding = overriding;
         TxnState = txnState;
         DatabaseName = databaseName;
         TableName = tableName;

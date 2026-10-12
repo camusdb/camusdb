@@ -18,7 +18,9 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.DML;
 ///
 /// <para>Both <c>INSERT … VALUES</c> and <c>INSERT … SELECT</c> shape their rows through this one
 /// class so the two forms cannot drift: a value that would be coerced, defaulted, or rejected one
-/// way in a VALUES list behaves identically when it arrives from a query.</para>
+/// way in a VALUES list behaves identically when it arrives from a query. The typed row insert
+/// (REST <c>/insert</c>, gRPC <c>InsertRow</c>) takes its omitted-column defaults from here too,
+/// through <see cref="ApplyOmittedDefaults"/>.</para>
 ///
 /// <para>The per-field schema lookup and the "has a default but was not listed" set are resolved
 /// once in <see cref="Create"/> and reused for every row of the statement, because the target
@@ -30,6 +32,13 @@ internal sealed class InsertRowShaper
 
     /// <summary>Per-target-column schema entry (null when the name is not a column) and constant default.</summary>
     private readonly (TableColumnSchema? Schema, ColumnValue Default)[] fieldMeta;
+
+    /// <summary>
+    /// Per-target-column flag: the statement supplies a value for this position but the value is
+    /// discarded and the column takes its default instead. Set for identity columns under
+    /// <c>OVERRIDING USER VALUE</c>; null when no position is ignored.
+    /// </summary>
+    private readonly bool[]? ignoredFields;
 
     /// <summary>
     /// Columns carrying a default that the statement's target list does not mention. A function
@@ -52,11 +61,13 @@ internal sealed class InsertRowShaper
     private InsertRowShaper(
         IReadOnlyList<string> fields,
         (TableColumnSchema?, ColumnValue)[] fieldMeta,
+        bool[]? ignoredFields,
         List<TableColumnSchema> extraDefaults,
         IReadOnlyList<string> defaultSequenceIds)
     {
         this.fields = fields;
         this.fieldMeta = fieldMeta;
+        this.ignoredFields = ignoredFields;
         this.extraDefaults = extraDefaults;
         DefaultSequenceIds = defaultSequenceIds;
     }
@@ -67,7 +78,16 @@ internal sealed class InsertRowShaper
     /// <summary>The target column names, in the order values are supplied.</summary>
     public IReadOnlyList<string> Fields => fields;
 
-    public static InsertRowShaper Create(TableSchema schema, IReadOnlyList<string> fields)
+    /// <summary>
+    /// Resolves the per-statement metadata for <paramref name="fields"/>.
+    /// </summary>
+    /// <param name="ignoredColumns">
+    /// Target columns whose supplied values are discarded, so the column is defaulted as if the
+    /// statement had omitted it — <c>OVERRIDING USER VALUE</c> on identity columns (see
+    /// <see cref="SequenceDefaults.ApplyIdentityRules"/>). The row still has to supply a value at
+    /// that position: only what happens to it changes. Null for none.
+    /// </param>
+    public static InsertRowShaper Create(TableSchema schema, IReadOnlyList<string> fields, IReadOnlySet<string>? ignoredColumns = null)
     {
         List<TableColumnSchema> schemaColumns = schema.Columns!;
 
@@ -82,6 +102,17 @@ internal sealed class InsertRowShaper
             fieldMeta[i] = (colDef, colDef?.DefaultValue ?? ColumnValue.Null);
         }
 
+        bool[]? ignoredFields = null;
+
+        if (ignoredColumns is { Count: > 0 })
+        {
+            for (int i = 0; i < fields.Count; i++)
+            {
+                if (ignoredColumns.Contains(fields[i]))
+                    (ignoredFields ??= new bool[fields.Count])[i] = true;
+            }
+        }
+
         List<TableColumnSchema> extraDefaults = new();
         List<string> defaultSequenceIds = [];
 
@@ -91,7 +122,7 @@ internal sealed class InsertRowShaper
                 || col.DefaultFunction is not null
                 || col.DefaultSequenceId is not null;
 
-            if (!hasDefault || fields.Contains(col.Name))
+            if (!hasDefault || (fields.Contains(col.Name) && !(ignoredColumns?.Contains(col.Name) ?? false)))
                 continue;
 
             // A column still DeleteOnly, part-way through ADD COLUMN, may not be written yet: the insert
@@ -107,7 +138,7 @@ internal sealed class InsertRowShaper
                 defaultSequenceIds.Add(sequenceId);
         }
 
-        return new InsertRowShaper(fields, fieldMeta, extraDefaults, defaultSequenceIds);
+        return new InsertRowShaper(fields, fieldMeta, ignoredFields, extraDefaults, defaultSequenceIds);
     }
 
     /// <summary>
@@ -130,15 +161,42 @@ internal sealed class InsertRowShaper
 
         for (int i = 0; i < fields.Count; i++)
         {
+            // An ignored position leaves the column out of the row, so ApplyOmittedDefaults below
+            // gives it its default.
+            if (ignoredFields is not null && ignoredFields[i])
+                continue;
+
             ColumnValue val = slots[i] ?? fieldMeta[i].Default;
             if (fieldMeta[i].Schema is { } schema)
                 val = CastScalarFunctions.CoerceToColumnType(val, schema);
             row[fields[i]] = val;
         }
 
-        // Columns with a default that the target list omitted. A function default is evaluated here,
-        // once per row, so each row gets a fresh value (e.g. a distinct gen_uuid_v7()); a constant
-        // default is copied as-is.
+        ApplyOmittedDefaults(row, parameters);
+
+        return row;
+    }
+
+    /// <summary>
+    /// Adds to <paramref name="row"/> the default of every column the target list omitted: a
+    /// constant default is copied as-is, a function default is evaluated here, once per row, so each
+    /// row gets a fresh value (e.g. a distinct <c>gen_uuid_v7()</c>), and a sequence default takes
+    /// the next value of the run reserved for the statement. A column the row already holds is left
+    /// alone.
+    ///
+    /// <para>Used by <see cref="ShapeRow"/> for SQL <c>INSERT</c>, and directly by the typed row
+    /// insert, which receives a row that is already a dictionary. Sharing it is what makes a row
+    /// written through either path take the same defaults.</para>
+    ///
+    /// <para><paramref name="row"/> must look keys up case-insensitively, as the dictionary
+    /// <see cref="ShapeRow"/> builds does, or a column supplied under a different case is defaulted
+    /// a second time.</para>
+    /// </summary>
+    /// <param name="parameters">
+    /// The parameter dictionary carrying the reserved sequence runs; see <see cref="ShapeRow"/>.
+    /// </param>
+    public void ApplyOmittedDefaults(Dictionary<string, ColumnValue> row, Dictionary<string, ColumnValue>? parameters)
+    {
         foreach (TableColumnSchema col in extraDefaults)
         {
             if (row.ContainsKey(col.Name))
@@ -154,7 +212,5 @@ internal sealed class InsertRowShaper
                 ? ScalarFunctionEvaluator.EvaluateNullary(col.DefaultFunction)
                 : col.DefaultValue!;
         }
-
-        return row;
     }
 }

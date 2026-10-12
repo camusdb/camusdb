@@ -84,10 +84,12 @@ internal sealed class SQLExecutorInsertCreator : SQLExecutorBaseCreator
         // forms coerce and default identically.
         // GENERATED ALWAYS means the column's values can only come from its sequence, so a
         // statement that names it — including the implicit all-columns form — is refused rather
-        // than having its value silently replaced.
-        SequenceDefaults.RequireNoValueForAlwaysIdentity(table.Schema, fields);
+        // than having its value silently replaced, unless it says OVERRIDING SYSTEM VALUE.
+        // OVERRIDING USER VALUE instead discards what it supplies for every identity column.
+        IReadOnlySet<string>? ignoredColumns = SequenceDefaults.ApplyIdentityRules(
+            database.Schema, table.Schema, fields, InsertOverridingClause.Of(ast));
 
-        InsertRowShaper shaper = InsertRowShaper.Create(table.Schema, fields);
+        InsertRowShaper shaper = InsertRowShaper.Create(table.Schema, fields, ignoredColumns);
 
         // Every value this statement will draw from a sequence is reserved here, in one call per
         // sequence, before the first row is shaped: the row count is known from the VALUES list and
@@ -151,7 +153,8 @@ internal sealed class SQLExecutorInsertCreator : SQLExecutorBaseCreator
             tableName: ast.leftAst.yytext!,
             targetColumns: targetColumns,
             sourceSelect: ast.extendedOne,
-            parameters: ticket.Parameters
+            parameters: ticket.Parameters,
+            overriding: InsertOverridingClause.Of(ast)
         );
     }
 

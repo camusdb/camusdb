@@ -91,10 +91,12 @@ internal sealed class RowInsertSelector
             );
 
         // GENERATED ALWAYS means the column's values can only come from its sequence, so a
-        // statement that names it — including the implicit all-columns form — is refused.
-        Functions.SequenceDefaults.RequireNoValueForAlwaysIdentity(table.Schema, targetColumns);
+        // statement that names it — including the implicit all-columns form — is refused unless it
+        // says OVERRIDING SYSTEM VALUE; OVERRIDING USER VALUE discards the identity columns' values.
+        IReadOnlySet<string>? ignoredColumns = Functions.SequenceDefaults.ApplyIdentityRules(
+            database.Schema, table.Schema, targetColumns, ticket.Overriding);
 
-        InsertRowShaper shaper = InsertRowShaper.Create(table.Schema, targetColumns);
+        InsertRowShaper shaper = InsertRowShaper.Create(table.Schema, targetColumns, ignoredColumns);
 
         int mutationLimit = database.Options.MaxMutationsPerTransaction;
 

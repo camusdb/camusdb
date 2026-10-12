@@ -721,7 +721,7 @@ internal sealed class SelectStatementExecutor
                     TableDescriptor table = await context.TableOpener.Open(database, describedName).ConfigureAwait(false);
                     PinSchemaVersion(database, table, ticket.TxnState);
 
-                    return (database, schemaQuerier.ShowColumns(table));
+                    return (database, schemaQuerier.ShowColumns(database, table));
                 }
 
             case NodeType.ShowIndexes:

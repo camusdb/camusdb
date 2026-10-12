@@ -894,23 +894,39 @@ public sealed class TestShowCreateTableRoundTrip : BaseTest
     }
 
     /// <summary>
-    /// An index with no comment reports an empty string rather than a null, so a consumer reading the
-    /// field does not have to null-check a column that is always present.
+    /// <c>SHOW INDEXES</c> keeps an unset index comment and an empty one apart: NULL for an index that
+    /// has no comment (including the primary key, which can never carry one), and <c>""</c> for
+    /// <c>COMMENT ON INDEX … IS ''</c>. A tool that rebuilds indexes from this listing reads that
+    /// difference to decide whether to emit <c>COMMENT ''</c>; reporting <c>""</c> for both lost it.
+    /// <c>IS NULL</c> afterwards takes the index back to NULL.
     /// </summary>
     [Test]
-    public async Task ShowIndexes_IndexWithoutComment_ReportsEmptyString()
+    public async Task ShowIndexes_DistinguishesUnsetCommentFromEmptyComment()
     {
         (string dbname, DatabaseDescriptor db, CommandExecutor executor) = await CreateDatabase();
 
         await DdlAsync(executor, db, dbname,
-            "CREATE TABLE src (id STRING NOT NULL PRIMARY KEY, a INT64 NOT NULL)");
+            "CREATE TABLE src (id STRING NOT NULL PRIMARY KEY, a INT64 NOT NULL, b INT64 NOT NULL)");
         await DdlAsync(executor, db, dbname, "CREATE INDEX a_idx ON src (a)");
+        await DdlAsync(executor, db, dbname, "CREATE INDEX b_idx ON src (b)");
+        await DdlAsync(executor, db, dbname, "COMMENT ON INDEX src.b_idx IS ''");
 
         List<QueryResultRow> rows = await QueryAsync(executor, db, dbname, "SHOW INDEXES FROM src");
-        QueryResultRow idx = rows.Find(r => r.Row["Key_name"].StrValue == "a_idx")!;
+        QueryResultRow unset = rows.Find(r => r.Row["Key_name"].StrValue == "a_idx")!;
+        QueryResultRow empty = rows.Find(r => r.Row["Key_name"].StrValue == "b_idx")!;
+        QueryResultRow primary = rows.Find(r => r.Row["Key_name"].StrValue == CamusDBConstants.PrimaryKeyInternalName)!;
 
-        Assert.AreEqual("", idx.Row["Comment"].StrValue);
-        Assert.AreEqual("ASC", idx.Row["Directions"].StrValue);
+        Assert.AreEqual(ColumnType.Null, unset.Row["Comment"].Type, "an index with no comment reports NULL");
+        Assert.AreEqual(ColumnType.String, empty.Row["Comment"].Type, "an empty comment is present, so it is not NULL");
+        Assert.AreEqual("", empty.Row["Comment"].StrValue);
+        Assert.AreEqual(ColumnType.Null, primary.Row["Comment"].Type, "the primary key never carries a comment");
+        Assert.AreEqual("ASC", unset.Row["Directions"].StrValue);
+
+        await DdlAsync(executor, db, dbname, "COMMENT ON INDEX src.b_idx IS NULL");
+
+        rows = await QueryAsync(executor, db, dbname, "SHOW INDEXES FROM src");
+        Assert.AreEqual(ColumnType.Null, rows.Find(r => r.Row["Key_name"].StrValue == "b_idx")!.Row["Comment"].Type,
+            "IS NULL removes the comment, so the index reports NULL again");
     }
 
     // ── Foreign keys ──────────────────────────────────────────────────────────

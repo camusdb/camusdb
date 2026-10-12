@@ -25,7 +25,7 @@ COMMENT ON COLUMN users.email IS '';     -- stores a comment that is present but
 
 These are **different states**, matching PostgreSQL, and the difference is observable:
 `SHOW CREATE TABLE` omits the clause entirely for a removed comment and emits `COMMENT ''` for an
-empty one. There is no inline form for removal — an inline `COMMENT` clause only ever sets a value,
+empty one. `SHOW INDEXES` reports a removed index comment as `NULL` and an empty one as `''`. There is no inline form for removal — an inline `COMMENT` clause only ever sets a value,
 so clearing one always goes through `COMMENT ON … IS NULL`.
 
 ## Inline comments in `CREATE TABLE`
@@ -89,6 +89,21 @@ CREATE TABLE `users` ( `id` OID NOT NULL COMMENT 'Internal user identifier',
  COMMENT 'Application users';
 ```
 
+### `SHOW INDEXES`
+
+The `Comment` field holds the index comment. It is `NULL` when the index has no comment, and `''`
+when the comment was set with `IS ''`, so a tool that rebuilds indexes from this listing can keep an
+empty comment. The primary key (`~pk`) cannot carry a comment, so its `Comment` is always `NULL`.
+
+```sql
+CREATE INDEX a_idx ON t (a);
+CREATE INDEX b_idx ON t (b);
+COMMENT ON INDEX t.b_idx IS '';
+SHOW INDEXES FROM t;   -- ~pk: NULL, a_idx: NULL, b_idx: ''
+```
+
+Earlier versions reported `''` for both states.
+
 ### `SHOW DATABASE`
 
 Returns the current database's name and comment:
@@ -101,8 +116,8 @@ SHOW DATABASE;
 |----------|------------------------------|
 | app      | Primary application database |
 
-Unlike `SHOW CREATE TABLE`, this surface cannot distinguish an unset comment from an empty one —
-both render as an empty string.
+Unlike `SHOW CREATE TABLE` and `SHOW INDEXES`, this surface cannot distinguish an unset comment from
+an empty one — both render as an empty string.
 
 `SHOW COLUMNS` is deliberately unchanged; its row shape (Field/Type/Null/Key/Default/Extra) is
 part of the wire contract.
@@ -126,8 +141,10 @@ COMMENT ON INDEX email_idx       IS '…';                       -- rejected
 `PRIMARY KEY (...)` line, which has no inline `COMMENT` form to round-trip through, so a comment
 stored there could never be shown. Comment the table instead.
 
-**Only these four object kinds are supported.** Constraints, branches, sequences, and functions have
-no `COMMENT ON` form, and there is no `pg_description` / `information_schema` catalog to query.
+**Only these object kinds are supported:** the four above, and sequences
+(`COMMENT ON SEQUENCE s IS '…'`, see [sequences](sequences.md#inspecting-sequences)). Constraints,
+branches, and functions have no `COMMENT ON` form, and there is no `pg_description` /
+`information_schema` catalog to query.
 
 ## `comment` is a reserved word
 
@@ -161,7 +178,8 @@ comment would inflate every schema checkpoint and every schema-log entry.
 
 ## Endpoints
 
-All four forms are accepted on the DDL and non-query SQL endpoints, over both REST and gRPC.
+All four forms, and `COMMENT ON SEQUENCE`, are accepted on the DDL and non-query SQL endpoints, over
+both REST and gRPC.
 `COMMENT ON DATABASE` needs no context database — it names its target in the statement — and starts
 no transaction, like `CREATE`/`DROP`/`RENAME DATABASE`. The other three require a context database.
 

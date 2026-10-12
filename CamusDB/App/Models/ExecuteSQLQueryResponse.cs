@@ -7,6 +7,8 @@
  */
 
 using CamusDB.Core.Catalogs.Models;
+using CamusDB.Core.CommandsExecutor.Models;
+using CamusDB.Core.CommandsExecutor.Models.Queries;
 using Kommander.Time;
 
 namespace CamusDB.App.Models;
@@ -15,11 +17,95 @@ namespace CamusDB.App.Models;
 /// Output column descriptor included in every row-producing query response.
 /// The <see cref="Type"/> integer matches the <see cref="ColumnType"/> enum value so clients
 /// can decode positional row values without per-cell type information.
+///
+/// <para>An array column (<c>type</c> 10) also carries <see cref="ElementType"/>. The positional
+/// JSON writes an array as a plain JSON array of element values — a DATE element as its ticks, a
+/// BYTES element as base64, a FLOAT64 <c>0</c> as <c>0</c> — so without the element type a client
+/// cannot tell what the numbers and strings inside it are.</para>
 /// </summary>
 public sealed class ColumnSchemaDto
 {
     public string Name { get; set; } = "";
     public ColumnType Type { get; set; }
+
+    /// <summary>
+    /// The <see cref="ColumnType"/> of the elements of an array column, serialized as
+    /// <c>elementType</c> with the same integer encoding as <see cref="Type"/>. Present only when
+    /// <see cref="Type"/> is <see cref="ColumnType.Array"/> and the element type is known; omitted
+    /// from the JSON otherwise, so a non-array column keeps its exact shape. Clients read this exact
+    /// name, so it must not be renamed.
+    /// </summary>
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public ColumnType? ElementType { get; set; }
+
+    /// <summary>
+    /// Builds the response column list for <paramref name="schema"/>, resolving the element type of
+    /// each array column.
+    ///
+    /// <para>The planner's element type (<see cref="DerivedColumnSchema.ElementType"/>) is used when it
+    /// has one: a table column's declared element type, known even for an empty result. Otherwise the
+    /// first array cell in <paramref name="rows"/> that names an element type supplies it — every
+    /// array value carries one, so a computed array (<c>ARRAY[…]</c>, a function result) is still
+    /// typed whenever the result holds a non-null one. With neither, the field is omitted rather than
+    /// guessed.</para>
+    ///
+    /// <para>The row scan runs only for an array column the planner could not type, and stops at the
+    /// first typed cell, so a result with no such column costs nothing extra.</para>
+    /// </summary>
+    /// <param name="rows">The rows the response carries, or the rows already pulled for a stream; may be empty.</param>
+    public static List<ColumnSchemaDto> FromSchema(IReadOnlyList<DerivedColumnSchema> schema, IReadOnlyList<QueryResultRow>? rows)
+    {
+        List<ColumnSchemaDto> dtos = new(schema.Count);
+
+        foreach (DerivedColumnSchema col in schema)
+        {
+            ColumnSchemaDto dto = new() { Name = col.Name, Type = col.Type };
+
+            if (col.Type == ColumnType.Array)
+                dto.ElementType = KnownElementType(col.ElementType) ?? FirstCellElementType(col, rows);
+
+            dtos.Add(dto);
+        }
+
+        return dtos;
+    }
+
+    /// <summary>
+    /// True when <see cref="FromSchema"/> would have to read rows to type an array column — the
+    /// planner left its element type open. A streaming writer uses it to decide whether to pull the
+    /// first row before it writes the header.
+    /// </summary>
+    public static bool NeedsRowsForElementTypes(IReadOnlyList<DerivedColumnSchema> schema)
+    {
+        foreach (DerivedColumnSchema col in schema)
+        {
+            if (col.Type == ColumnType.Array && KnownElementType(col.ElementType) is null)
+                return true;
+        }
+
+        return false;
+    }
+
+    // ColumnType.Null as an element type means "not known" (an empty or all-NULL array literal), not
+    // a type a client could decode by.
+    private static ColumnType? KnownElementType(ColumnType? type)
+        => type is { } t && t != ColumnType.Null && t != ColumnType.Array ? t : null;
+
+    private static ColumnType? FirstCellElementType(DerivedColumnSchema col, IReadOnlyList<QueryResultRow>? rows)
+    {
+        if (rows is null)
+            return null;
+
+        for (int i = 0; i < rows.Count; i++)
+        {
+            if (rows[i].Row.TryGetValue(col.RowKey, out ColumnValue? cell)
+                && cell is { Type: ColumnType.Array }
+                && KnownElementType(cell.ArrayElementType) is { } elementType)
+                return elementType;
+        }
+
+        return null;
+    }
 }
 
 public sealed class ExecuteSQLQueryResponse

@@ -26,4 +26,17 @@ public sealed record DerivedColumnSchema(string Name, ColumnType Type)
 {
     /// <summary>The key of this column's cell in a result row. Defaults to <see cref="Name"/>.</summary>
     public string RowKey { get; init; } = Name;
+
+    /// <summary>
+    /// The element type of an <see cref="ColumnType.Array"/> column when the planner knows it
+    /// statically: a table column (from <see cref="TableColumnSchema.ArrayElementType"/>), a column
+    /// of a derived table that knew it, or a cast to <c>ARRAY(T)</c>. Null for every other column,
+    /// and for an array expression whose element type is only known once it is evaluated.
+    ///
+    /// <para>A transport whose rows do not carry types (the REST positional JSON) reports this to the
+    /// client so it can decode the elements; a null here leaves that transport to read the type off
+    /// the first non-null array cell instead. Every array <see cref="ColumnValue"/> carries its element
+    /// type, so the cells are always authoritative.</para>
+    /// </summary>
+    public ColumnType? ElementType { get; init; }
 }

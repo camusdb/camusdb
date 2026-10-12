@@ -77,7 +77,25 @@ internal static class CreateTableAsSelectSchemaBuilder
             // inheriting a source column's declared length. That cap is far larger than any declared
             // length, so a copy can never be truncated or rejected by it; the only cost is that the
             // new table is more permissive than the one it was copied from.
-            columns[i + 1] = new ColumnInfo(derived[i].Name, derived[i].Type);
+            //
+            // An array column takes the element type the query declares, so a copy of an ARRAY(DATE)
+            // column is ARRAY(DATE) too. Without one the column could be created but not described:
+            // SHOW CREATE TABLE has no spelling for an array of nothing, so a dump of the new table
+            // would fail. Such a projection is refused instead.
+            ColumnType? elementType = null;
+
+            if (derived[i].Type == ColumnType.Array)
+            {
+                elementType = derived[i].ElementType is { } known && known is not ColumnType.Null and not ColumnType.Array
+                    ? known
+                    : throw new CamusDBException(
+                        CamusDBErrorCodes.InvalidInput,
+                        $"Cannot determine the element type of array output column {i + 1} ('{derived[i].Name}') of " +
+                        $"{statementName}; give the first element of the ARRAY[...] a known type, for example " +
+                        "ARRAY[x::int64, ...]");
+            }
+
+            columns[i + 1] = new ColumnInfo(derived[i].Name, derived[i].Type, arrayElementType: elementType);
         }
 
         ConstraintInfo[] constraints =

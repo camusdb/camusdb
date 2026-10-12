@@ -463,10 +463,67 @@ internal static class DerivedTableSchemaBuilder
 
             string name = QueryProjectionResolver.GetOutputNameFromProjectionExpression(projection.Expression, i);
             ColumnType type = InferType(projection.Expression, innerBound, innerResolver);
-            columns.Add(new DerivedColumnSchema(name, type) { RowKey = rowKeys[i] });
+            columns.Add(new DerivedColumnSchema(name, type)
+            {
+                RowKey = rowKeys[i],
+                ElementType = type == ColumnType.Array
+                    ? InferArrayElementType(projection.Expression, innerBound, innerResolver)
+                    : null,
+            });
         }
 
         return columns;
+    }
+
+    /// <summary>
+    /// The statically known element type of an array-typed projection, or null when only the
+    /// evaluated cells can tell. Known for a column reference (a base-table array column declares its
+    /// element type, and a derived-table column carries whatever its own projection knew) and for an
+    /// <c>ARRAY[…]</c> literal whose first non-NULL element has a certain type (see
+    /// <see cref="InferArrayLiteralElementType"/>). Every other array expression, such as a function
+    /// result, is left null; the cells carry their element type, which is what a transport falls back
+    /// to.
+    /// </summary>
+    private static ColumnType? InferArrayElementType(
+        NodeAst expression,
+        BoundSelectQuery innerBound,
+        QueryRowNameResolver innerResolver)
+    {
+        NodeAst target = QueryExpressionClassifier.UnwrapAlias(expression);
+
+        if (target.nodeType == NodeType.ArrayLiteral)
+            return InferArrayLiteralElementType(target, innerBound, innerResolver);
+
+        if (target.nodeType != NodeType.Identifier || target.yytext is null)
+            return null;
+
+        string lookupKey = innerResolver.ResolveRowLookupKey(target.yytext);
+
+        foreach (BoundTableSource source in innerBound.Sources)
+        {
+            foreach (TableColumnSchema column in source.Table.Schema.Columns ?? [])
+            {
+                if (!SchemaElementStateRules.IsReadable(column))
+                    continue;
+
+                if (lookupKey == column.Name || MatchesQualifiedKey(lookupKey, source.Alias, column.Name))
+                    return column.Type == ColumnType.Array ? column.ArrayElementType : null;
+            }
+        }
+
+        bool isQualified = TrySplitQualified(target.yytext, out _, out string bareName);
+
+        foreach (BoundDerivedTableSource source in innerBound.DerivedSources)
+        {
+            foreach (DerivedColumnSchema column in source.Columns)
+            {
+                if (string.Equals(column.Name, lookupKey, StringComparison.OrdinalIgnoreCase)
+                    || (isQualified && string.Equals(column.Name, bareName, StringComparison.OrdinalIgnoreCase)))
+                    return column.ElementType;
+            }
+        }
+
+        return null;
     }
 
     /// <summary>
@@ -508,7 +565,7 @@ internal static class DerivedTableSchemaBuilder
                     ? QueryRowNameResolver.FormatQualifiedKey(source.Alias, col.Name)
                     : col.Name;
 
-                columns.Add(new DerivedColumnSchema(name, col.Type));
+                columns.Add(new DerivedColumnSchema(name, col.Type) { ElementType = col.ArrayElementType });
             }
         }
 
@@ -526,7 +583,7 @@ internal static class DerivedTableSchemaBuilder
                     ? QueryRowNameResolver.FormatQualifiedKey(derived.Alias, col.RowKey)
                     : col.RowKey;
 
-                columns.Add(new DerivedColumnSchema(name, col.Type) { RowKey = rowKey });
+                columns.Add(new DerivedColumnSchema(name, col.Type) { RowKey = rowKey, ElementType = col.ElementType });
             }
         }
     }
@@ -553,7 +610,12 @@ internal static class DerivedTableSchemaBuilder
                 ? (val.Type == ColumnType.Null ? ColumnType.String : val.Type)
                 : ColumnType.String;
 
-            columns.Add(new DerivedColumnSchema(name, type) { RowKey = rowKeys[i] });
+            // The one row is already evaluated, so an array's element type is known from its value.
+            columns.Add(new DerivedColumnSchema(name, type)
+            {
+                RowKey = rowKeys[i],
+                ElementType = type == ColumnType.Array ? val!.ArrayElementType : null,
+            });
         }
 
         return columns;
@@ -617,6 +679,11 @@ internal static class DerivedTableSchemaBuilder
 
         if (IsBooleanResult(target.nodeType))
             return ColumnType.Bool;
+
+        // ARRAY[…] always evaluates to an array (or fails), whatever its elements are. Its element
+        // type is resolved separately, by InferArrayElementType.
+        if (target.nodeType == NodeType.ArrayLiteral)
+            return ColumnType.Array;
 
         return ColumnType.String;
     }
@@ -715,6 +782,65 @@ internal static class DerivedTableSchemaBuilder
         }
 
         return ColumnType.String;
+    }
+
+    /// <summary>
+    /// The element type an <c>ARRAY[…]</c> literal will evaluate to, when it is certain before any
+    /// row is read. The evaluator takes the type of the first non-NULL element and refuses any element
+    /// of another type, so the first element that is not a NULL literal decides it: a literal of a
+    /// fixed type, a <c>CAST</c> / <c>::</c>, or a reference to a base-table column.
+    ///
+    /// <para>Anything else (a function call, arithmetic, a placeholder, a derived-table column) returns
+    /// null rather than a guess: this builder types such expressions as <see cref="ColumnType.String"/>
+    /// when it does not know them, and declaring that as the element type would be wrong as often as
+    /// right. A null lets a transport read the type off the evaluated value instead. An empty or
+    /// all-NULL literal is null too: it evaluates with no element type.</para>
+    /// </summary>
+    private static ColumnType? InferArrayLiteralElementType(
+        NodeAst arrayLiteral,
+        BoundSelectQuery innerBound,
+        QueryRowNameResolver innerResolver)
+    {
+        NodeAst? first = FirstNonNullArrayElement(arrayLiteral.leftAst);
+
+        switch (first?.nodeType)
+        {
+            case NodeType.Integer: return ColumnType.Integer64;
+            case NodeType.Float: return ColumnType.Float64;
+            case NodeType.String: return ColumnType.String;
+            case NodeType.Bool: return ColumnType.Bool;
+            case NodeType.BytesLiteral: return ColumnType.Bytes;
+            case NodeType.ObjectIdLiteral: return ColumnType.Id;
+
+            case NodeType.ExprCast when first.rightAst is not null:
+                try
+                {
+                    ColumnType castType = CastScalarFunctions.InferCastReturnType(first.rightAst);
+                    return castType == ColumnType.Array ? null : castType;
+                }
+                catch (CamusDBException)
+                {
+                    return null;
+                }
+
+            case NodeType.Identifier when first.yytext is not null:
+                string lookupKey = innerResolver.ResolveRowLookupKey(first.yytext);
+
+                foreach (BoundTableSource source in innerBound.Sources)
+                {
+                    foreach (TableColumnSchema column in source.Table.Schema.Columns ?? [])
+                    {
+                        if (SchemaElementStateRules.IsReadable(column)
+                            && (lookupKey == column.Name || MatchesQualifiedKey(lookupKey, source.Alias, column.Name)))
+                            return column.Type == ColumnType.Array ? null : column.Type;
+                    }
+                }
+
+                return null;
+
+            default:
+                return null;
+        }
     }
 
     /// <summary>Returns the first element of an array literal's element list that is not a NULL literal.</summary>
