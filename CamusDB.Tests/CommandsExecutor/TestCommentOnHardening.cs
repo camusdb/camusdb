@@ -203,6 +203,45 @@ internal sealed class TestCommentOnHardening : BaseTest
     }
 
     /// <summary>
+    /// <c>COMMENT ON SEQUENCE</c> answered "Unknown non-query AST stmt: CommentOnSequence" on the
+    /// non-query route while the other <c>COMMENT ON</c> forms worked there. A client that sends every
+    /// non-SELECT statement to that route could not comment a sequence at all. Both values are
+    /// checked: <c>IS ''</c> stores an empty comment and <c>IS NULL</c> removes it.
+    /// </summary>
+    [Test]
+    public async Task NonQueryRoute_AcceptsCommentOnSequence()
+    {
+        (string dbname, _, CommandExecutor executor) = await CreateDatabase();
+        await ExecuteDdl(executor, dbname, "CREATE SEQUENCE s1");
+
+        await ExecuteNonQuery(executor, dbname, "COMMENT ON SEQUENCE s1 IS 'sequence via non-query'");
+        Assert.AreEqual("sequence via non-query", (await executor.OpenDatabase(dbname)).Schema.Sequences["s1"].Comment);
+
+        await ExecuteNonQuery(executor, dbname, "COMMENT ON SEQUENCE s1 IS ''");
+        Assert.AreEqual("", (await executor.OpenDatabase(dbname)).Schema.Sequences["s1"].Comment);
+
+        await ExecuteNonQuery(executor, dbname, "COMMENT ON SEQUENCE s1 IS NULL");
+        Assert.IsNull((await executor.OpenDatabase(dbname)).Schema.Sequences["s1"].Comment);
+    }
+
+    /// <summary>
+    /// The same statement over the REST <c>/execute-sql-non-query</c> endpoint, which is where the
+    /// failure was reported.
+    /// </summary>
+    [Test]
+    public async Task Rest_NonQuery_CommentOnSequenceSucceeds()
+    {
+        (string dbname, _, CommandExecutor executor) = await CreateDatabase();
+        await ExecuteDdl(executor, dbname, "CREATE SEQUENCE s1");
+
+        JsonResult result = await ExecuteOverRest(
+            executor, databaseName: dbname, sql: "COMMENT ON SEQUENCE s1 IS 'rest non-query'", ddlEndpoint: false);
+
+        Assert.AreEqual(200, result.StatusCode ?? 200, JsonSerializer.Serialize(result.Value));
+        Assert.AreEqual("rest non-query", (await executor.OpenDatabase(dbname)).Schema.Sequences["s1"].Comment);
+    }
+
+    /// <summary>
     /// The REST non-query endpoint opens a transaction for ordinary DML. A database-scoped statement
     /// returns no descriptor, so it has to bypass that entirely — otherwise the commit is handed a
     /// null descriptor after the registry write has already landed.

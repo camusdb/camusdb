@@ -157,6 +157,35 @@ public class TestGrpcRowsService : BaseTest
         }
     }
 
+    /// <summary>
+    /// A column the request leaves out takes its default, as in SQL <c>INSERT</c>: a constant default
+    /// (on a NOT NULL column, which used to be refused as NULL), a <c>nextval</c> default and a
+    /// <c>serial</c> column.
+    /// </summary>
+    [Test]
+    public async Task InsertRow_OmittedColumns_TakeTheirDefaults()
+    {
+        string db = await CreateTestDatabaseAsync();
+        await sqlService.ExecuteDdl(new SqlRequest { Database = db, Sql = "CREATE SEQUENCE s1" }, Ctx());
+        await sqlService.ExecuteDdl(new SqlRequest
+        {
+            Database = db,
+            Sql = "CREATE TABLE d (id oid PRIMARY KEY, k int64 NOT NULL DEFAULT(7), no int64 DEFAULT(nextval('s1')), n serial)",
+        }, Ctx());
+
+        NonQueryReply reply = await rowsService.InsertRow(InsertReq(db, "d", new() { ["id"] = Id(NewId()) }), Ctx());
+        Assert.That(reply.AffectedRows, Is.EqualTo(1));
+
+        (List<QueryStreamMessage> msgs, _) = await QueryRowsAsync(db, "d");
+        ResultSchema schema = GrpcAssert.AssertSchemaFirst(msgs, expectedRowCount: 1);
+        List<string> names = schema.Columns.Select(c => c.Name).ToList();
+        ResultRow row = msgs[1].Row;
+
+        Assert.That(row.Values[names.IndexOf("k")].Int64Value, Is.EqualTo(7));
+        Assert.That(row.Values[names.IndexOf("no")].Int64Value, Is.EqualTo(1));
+        Assert.That(row.Values[names.IndexOf("n")].Int64Value, Is.EqualTo(1));
+    }
+
     [Test]
     public async Task InsertRow_UnknownTable_Throws()
     {

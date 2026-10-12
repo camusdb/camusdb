@@ -207,8 +207,19 @@ internal sealed class MaterializedViewCreator
             // Null when authentication is off, in which case no base-relation check applies anyway.
             owner: ticket.Principal?.UserName);
 
-        IReadOnlyList<DerivedColumnSchema> outputs =
-            [.. (definition.Columns ?? []).Select(column => new DerivedColumnSchema(column.Name, column.Type))];
+        // The definition's columns are positionally aligned with the source's: they carry the view's
+        // final names, and the source carries what the planner knows about each column, including an
+        // array's element type, which the stored definition does not record.
+        List<ViewColumnSchema> definitionColumns = definition.Columns ?? [];
+        List<DerivedColumnSchema> outputs = new(definitionColumns.Count);
+
+        for (int i = 0; i < definitionColumns.Count; i++)
+        {
+            outputs.Add(new DerivedColumnSchema(definitionColumns[i].Name, definitionColumns[i].Type)
+            {
+                ElementType = i < source.Columns.Count ? source.Columns[i].ElementType : null,
+            });
+        }
 
         (ColumnInfo[] columns, ConstraintInfo[] constraints, string _) =
             CreateTableAsSelectSchemaBuilder.Build(source.Projections, outputs, "CREATE MATERIALIZED VIEW");

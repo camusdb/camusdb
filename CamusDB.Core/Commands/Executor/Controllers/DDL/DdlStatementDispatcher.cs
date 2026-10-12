@@ -164,6 +164,27 @@ internal sealed class DdlStatementDispatcher
         return authService;
     }
 
+    /// <summary>
+    /// Applies <c>COMMENT ON SEQUENCE &lt;name&gt; IS &lt;value&gt;</c> to an open database.
+    ///
+    /// <para>Shared by the DDL entry point and the non-query entry point. A client routes every
+    /// non-SELECT statement to whichever of the two it uses, so the statement must behave the same
+    /// through either; one implementation keeps the two from drifting.</para>
+    ///
+    /// <para>A null value node is <c>IS NULL</c>, which removes the comment, while <c>IS ''</c>
+    /// stores a present-but-empty one. The two must stay distinguishable end to end.</para>
+    /// </summary>
+    internal Task CommentOnSequenceAsync(DatabaseDescriptor database, NodeAst ast)
+    {
+        string commentedSequence = ast.leftAst!.yytext!;
+
+        string? sequenceComment = ast.rightAst is null
+            ? null
+            : DML.SQLExecutorBaseCreator.UnquoteStringLiteral(ast.rightAst.yytext!);
+
+        return sequenceDdl.SetCommentAsync(database, commentedSequence, sequenceComment);
+    }
+
     /// <param name="activity">The statement's entry in the running-statement list, which the parse names; or null.</param>
     internal async Task<ExecuteDDLSQLResult> ExecuteDDLSQL(
         CommandExecutor executor, ExecuteSQLTicket ticket, Diagnostics.QueryActivityEntry? activity = null)
@@ -570,15 +591,7 @@ internal sealed class DdlStatementDispatcher
 
             case NodeType.CommentOnSequence:
                 {
-                    string commentedSequence = ast.leftAst!.yytext!;
-
-                    // A null value node is IS NULL — remove the comment — while IS '' stores a
-                    // present-but-empty one. The two must stay distinguishable end to end.
-                    string? sequenceComment = ast.rightAst is null
-                        ? null
-                        : DML.SQLExecutorBaseCreator.UnquoteStringLiteral(ast.rightAst.yytext!);
-
-                    await sequenceDdl.SetCommentAsync(database, commentedSequence, sequenceComment).ConfigureAwait(false);
+                    await CommentOnSequenceAsync(database, ast).ConfigureAwait(false);
                     return new ExecuteDDLSQLResult(database, true);
                 }
 

@@ -35,6 +35,11 @@ The two lists must have the same number of columns; a mismatch is rejected befor
 With no explicit column list, the target is every column of the table in schema order — the same rule
 `INSERT … VALUES` uses.
 
+An `OVERRIDING SYSTEM VALUE` or `OVERRIDING USER VALUE` clause goes between the column list and the
+`SELECT`, as in `INSERT INTO t (id, n) OVERRIDING SYSTEM VALUE SELECT id, n FROM old_t`. It decides
+what happens to the values supplied for identity columns; see
+[sequences](sequences.md#overriding-system-value-and-overriding-user-value).
+
 Values are coerced to the target column's declared type, and target columns the statement does not
 mention take their column default (a function default such as `gen_uuid_v7()` is evaluated **per
 row**, so each row gets its own value). NOT NULL, CHECK, unique indexes and TTL are enforced exactly

@@ -483,6 +483,12 @@ internal sealed class NonQueryStatementDispatcher
                     return new(database, null!, 0);
                 }
 
+            // A sequence comment lives on the sequence record, not on a table, so it has its own
+            // implementation; the DDL entry point runs the same one.
+            case NodeType.CommentOnSequence:
+                await ddlDispatcher.CommentOnSequenceAsync(database, ast).ConfigureAwait(false);
+                return new(database, null!, 0);
+
             case NodeType.SetTransaction:
             case NodeType.SetTransactionLocking:
             case NodeType.SetTransactionPriority:

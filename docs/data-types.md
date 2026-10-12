@@ -41,6 +41,10 @@ These spellings are accepted as synonyms:
 | `boolean` | `bool` |
 | `decimal` | `numeric` |
 
+An alias is accepted everywhere a type is written: a column definition, `ALTER TABLE ... ADD COLUMN`,
+`CAST(x AS integer)`, `x::integer`, and an array element type such as `array(integer)`. The spelling
+is not kept: `SHOW CREATE TABLE` renders the canonical type.
+
 > The ObjectId type is spelled `oid` or `object_id` in SQL and `id` in HTTP create-table requests. The
 > two paths do not currently accept each other's spelling.
 
@@ -354,6 +358,26 @@ The HTTP API exchanges values as JSON:
 
 > **Bytes format differs by path:** SQL literals use `0x`-hex, JSON uses base64. A round-trip through
 > each path is lossless, but the encodings are not interchangeable.
+
+#### Array columns in REST query results
+
+The REST result endpoints (`/execute-sql-query`, `/execute-sql-query-stream`, and the
+`RETURNING` result of `/execute-sql-non-query`) write rows positionally, without a per-cell type.
+Each entry of `columns` gives the column's `type` as a `ColumnType` number. An array is written as a
+plain JSON array of its element values: a `date` element as ticks, a `bytes` element as base64, a
+`float64` zero as `0`. To decode the elements, a client reads `elementType`, which an array column
+(`type` 10) carries:
+
+```json
+{"name": "ad", "type": 10, "elementType": 8}
+```
+
+`elementType` uses the same numbers as `type`. A non-array column has no `elementType` field. A
+table column's element type comes from its declaration, so it is present even when the result has
+no rows. For a computed array, such as a function result, it comes from the first non-null array in
+the result. If the result has none, the field is omitted.
+
+gRPC needs no such field: each array value carries its own element type.
 
 ### Parameters of type `id`
 

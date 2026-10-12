@@ -6,6 +6,7 @@
  * file that was distributed with this source code.
  */
 
+using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Controllers.Queries;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Results;
@@ -42,19 +43,31 @@ internal sealed class RowCommandService
 
     private readonly QueryExecutor queryExecutor;
 
+    /// <summary>
+    /// Reserves the values a row insert draws for its omitted sequence-backed columns, the same way
+    /// SQL <c>INSERT</c> reserves them.
+    /// </summary>
+    private readonly Functions.SequenceStatementBinder sequenceBinder;
+
     internal RowCommandService(
         ExecutorContext context,
         RowInserter rowInserter,
         RowUpdater rowUpdater,
         RowDeleter rowDeleter,
-        QueryExecutor queryExecutor
+        QueryExecutor queryExecutor,
+        Functions.SequenceStatementBinder sequenceBinder
     )
     {
+        // Captured at construction; a binder built later in the composing constructor would be
+        // captured as null and fail only when a row insert first reaches a sequence default.
+        ArgumentNullException.ThrowIfNull(sequenceBinder);
+
         this.context = context;
         this.rowInserter = rowInserter;
         this.rowUpdater = rowUpdater;
         this.rowDeleter = rowDeleter;
         this.queryExecutor = queryExecutor;
+        this.sequenceBinder = sequenceBinder;
     }
 
     internal async Task<InsertResult> Insert(InsertTicket ticket)
@@ -71,9 +84,120 @@ internal sealed class RowCommandService
         TableDescriptor table = await context.TableOpener.Open(database, ticket.TableName).ConfigureAwait(false);
         SelectStatementExecutor.PinForWrite(database, table, ticket.TxnState, writeShapeEpoch);
 
-        int inserted = await rowInserter.Insert(database, table, ticket).ConfigureAwait(false);
-        context.Statistics.TrackInsert(database, table, inserted, ticket.Values);
+        InsertTicket defaulted = await ApplyColumnDefaultsAsync(database, table, ticket).ConfigureAwait(false);
+
+        int inserted = await rowInserter.Insert(database, table, defaulted).ConfigureAwait(false);
+        context.Statistics.TrackInsert(database, table, inserted, defaulted.Values);
         return new(database, table, inserted);
+    }
+
+    /// <summary>
+    /// Gives each row of a typed insert the defaults SQL <c>INSERT</c> gives a column its column list
+    /// leaves out: a constant default, a function default evaluated per row (<c>gen_id()</c>,
+    /// <c>gen_uuid_v7()</c>, <c>now()</c>), a <c>nextval</c> default, and an identity column's next
+    /// value. A <c>GENERATED ALWAYS AS IDENTITY</c> column the row supplies is refused, as INSERT
+    /// refuses it.
+    ///
+    /// <para>A row's keys are its column list, so a column is "omitted" exactly when the row has no
+    /// key for it. A key present with a NULL value is a supplied NULL and is written as one, as an
+    /// explicit <c>NULL</c> in a VALUES list is.</para>
+    ///
+    /// <para>The defaults are applied by <see cref="InsertRowShaper.ApplyOmittedDefaults"/> and the
+    /// sequence values are reserved by <see cref="Functions.SequenceStatementBinder.BindAsync"/> —
+    /// the code INSERT runs — so the two paths cannot disagree about what a default is. Every value
+    /// a statement draws is reserved in one call per sequence before the first row is defaulted.</para>
+    ///
+    /// <para><b>The caller's rows are never modified.</b> Each defaulted row is a new dictionary.
+    /// The transports keep the request's row and hand it to every serializable retry; a row that had
+    /// absorbed the first attempt's defaults would replay them as supplied values — a stale sequence
+    /// value, and a refusal for an ALWAYS identity column the caller never named.</para>
+    ///
+    /// <para>The new rows look keys up case-insensitively, like a row SQL INSERT builds, and carry
+    /// each supplied value under the schema's spelling of its column. Two keys that name one column
+    /// in different case are refused rather than resolved by whichever came last.</para>
+    ///
+    /// <para>Returns <paramref name="ticket"/> unchanged when the table has no column that defaults,
+    /// which keeps the common case free of any copy.</para>
+    /// </summary>
+    private async Task<InsertTicket> ApplyColumnDefaultsAsync(DatabaseDescriptor database, TableDescriptor table, InsertTicket ticket)
+    {
+        List<TableColumnSchema> columns = table.Schema.Columns!;
+
+        if (!HasDefaultingColumn(columns))
+            return ticket;
+
+        Dictionary<string, string> schemaNames = new(columns.Count, StringComparer.OrdinalIgnoreCase);
+        foreach (TableColumnSchema column in columns)
+            schemaNames.TryAdd(column.Name, column.Name);
+
+        List<Dictionary<string, ColumnValue>> rows = new(ticket.Values.Count);
+        InsertRowShaper[] shapers = new InsertRowShaper[ticket.Values.Count];
+        List<string> sequenceDemand = [];
+
+        InsertRowShaper? previous = null;
+
+        for (int i = 0; i < ticket.Values.Count; i++)
+        {
+            Dictionary<string, ColumnValue> supplied = ticket.Values[i];
+            Dictionary<string, ColumnValue> row = new(columns.Count, StringComparer.OrdinalIgnoreCase);
+            List<string> fields = new(supplied.Count);
+
+            foreach (KeyValuePair<string, ColumnValue> cell in supplied)
+            {
+                // An unknown name is kept as written; the insert validation refuses it by name.
+                string name = schemaNames.TryGetValue(cell.Key, out string? schemaName) ? schemaName : cell.Key;
+
+                if (!row.TryAdd(name, cell.Value))
+                    throw new CamusDBException(
+                        CamusDBErrorCodes.InvalidInput,
+                        $"Column '{name}' specified more than once in the inserted row");
+
+                fields.Add(name);
+            }
+
+            Functions.SequenceDefaults.RequireNoValueForAlwaysIdentity(table.Schema, fields);
+
+            // Consecutive rows usually name the same columns, so they share one shaper.
+            InsertRowShaper shaper = previous is not null && previous.Fields.SequenceEqual(fields, StringComparer.Ordinal)
+                ? previous
+                : InsertRowShaper.Create(table.Schema, fields);
+
+            previous = shaper;
+            shapers[i] = shaper;
+            sequenceDemand.AddRange(shaper.DefaultSequenceIds);
+            rows.Add(row);
+        }
+
+        ExecuteSQLTicket bound = await sequenceBinder.BindAsync(
+            database,
+            new ExecuteSQLTicket(ticket.TxnState, ticket.DatabaseName, sql: "", parameters: null),
+            statementAst: null,
+            allowedRegion: null,
+            // Rows may name different columns, so the demand is listed per row instead of being one
+            // per-row list multiplied by the row count: each entry is one value of that sequence.
+            rowCount: 1,
+            defaultSequenceIds: sequenceDemand,
+            statementKind: "INSERT",
+            CancellationToken.None).ConfigureAwait(false);
+
+        for (int i = 0; i < rows.Count; i++)
+            shapers[i].ApplyOmittedDefaults(rows[i], bound.Parameters);
+
+        Functions.SequenceStatementBinder.RecordDrawnValues(bound.Parameters, ticket.TxnState);
+
+        return new InsertTicket(ticket.TxnState, ticket.DatabaseName, ticket.TableName, rows);
+    }
+
+    /// <summary>True when some writable column of the table gives an omitted value a default.</summary>
+    private static bool HasDefaultingColumn(List<TableColumnSchema> columns)
+    {
+        foreach (TableColumnSchema column in columns)
+        {
+            if (column.DefaultValue is not null || column.DefaultFunction is not null || column.DefaultSequenceId is not null)
+                return true;
+        }
+
+        return false;
     }
 
     /// <summary>

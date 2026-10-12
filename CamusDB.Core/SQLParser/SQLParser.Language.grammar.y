@@ -214,7 +214,40 @@ insert_stmt : TINSERT TINTO any_identifier LPAREN insert_field_list RPAREN TVALU
                batch list uses, so both INSERT forms stay structurally parallel. */
             | TINSERT TINTO any_identifier LPAREN insert_field_list RPAREN select_stmt opt_returning { $$.n = new(NodeType.InsertSelect, $3.n, $5.n, $7.n, $8.n, null, null, null, null); }
             | TINSERT TINTO any_identifier select_stmt opt_returning { $$.n = new(NodeType.InsertSelect, $3.n, null, $4.n, $5.n, null, null, null, null); }
+            /* The same four forms with PostgreSQL's OVERRIDING { SYSTEM | USER } VALUE between the
+               column list and the row source. The clause is spelled out in separate productions
+               rather than as an optional nonterminal: an empty alternative before the row source would
+               have to be reduced on the "(" that may open either a column list or a parenthesized
+               SELECT, which LALR(1) cannot decide. The kind travels in yytext ("system" or "user"). */
+            | TINSERT TINTO any_identifier LPAREN insert_field_list RPAREN overriding_clause TVALUES insert_batch_list opt_returning { $$.n = new(NodeType.Insert, $3.n, $5.n, $9.n, $10.n, null, null, null, $7.s); }
+            | TINSERT TINTO any_identifier overriding_clause TVALUES insert_batch_list opt_returning { $$.n = new(NodeType.Insert, $3.n, null, $6.n, $7.n, null, null, null, $4.s); }
+            | TINSERT TINTO any_identifier LPAREN insert_field_list RPAREN overriding_clause select_stmt opt_returning { $$.n = new(NodeType.InsertSelect, $3.n, $5.n, $8.n, $9.n, null, null, null, $7.s); }
+            | TINSERT TINTO any_identifier overriding_clause select_stmt opt_returning { $$.n = new(NodeType.InsertSelect, $3.n, null, $5.n, $6.n, null, null, null, $4.s); }
 			;
+
+/* OVERRIDING SYSTEM VALUE / OVERRIDING USER VALUE. OVERRIDING, SYSTEM and VALUE are plain
+   identifiers, not keywords, so no table or column name is reserved by the clause; USER is already a
+   keyword. The words are checked here and the result is "system" or "user". */
+overriding_clause : TIDENTIFIER TIDENTIFIER TIDENTIFIER
+                    {
+                      if (!string.Equals($1.s, "overriding", System.StringComparison.OrdinalIgnoreCase) ||
+                          !string.Equals($2.s, "system", System.StringComparison.OrdinalIgnoreCase) ||
+                          !string.Equals($3.s, "value", System.StringComparison.OrdinalIgnoreCase))
+                          throw new CamusDB.Core.CamusDBException(
+                              CamusDB.Core.CamusDBErrorCodes.InvalidInput,
+                              "Expected: OVERRIDING { SYSTEM | USER } VALUE, got '" + $1.s + " " + $2.s + " " + $3.s + "'");
+                      $$.s = "system";
+                    }
+                  | TIDENTIFIER TUSER TIDENTIFIER
+                    {
+                      if (!string.Equals($1.s, "overriding", System.StringComparison.OrdinalIgnoreCase) ||
+                          !string.Equals($3.s, "value", System.StringComparison.OrdinalIgnoreCase))
+                          throw new CamusDB.Core.CamusDBException(
+                              CamusDB.Core.CamusDBErrorCodes.InvalidInput,
+                              "Expected: OVERRIDING { SYSTEM | USER } VALUE, got '" + $1.s + " USER " + $3.s + "'");
+                      $$.s = "user";
+                    }
+                  ;
 
 /* The list is a select list: the same items, aliases and * a SELECT accepts. */
 opt_returning : TRETURNING select_field_list { $$.n = $2.n; }
@@ -1477,6 +1510,10 @@ field_type : TTYPE_OBJECT_ID { $$.n = NodeAst.TypeObjectId; }
            | TTYPE_STRING { $$.n = NodeAst.TypeString; }
            | TTYPE_STRING LPAREN TDIGIT RPAREN { $$.n = new(NodeType.TypeStringSized, null, null, null, null, null, null, null, $3.s); }
            | TTYPE_INT64 { $$.n = NodeAst.TypeInteger64; }
+           /* INTEGER has its own token rather than sharing TTYPE_INT64 with INT and SMALLINT, but it
+              names the same type everywhere a type is written: a column, ADD COLUMN, CAST, :: and an
+              ARRAY element. */
+           | TINTEGER { $$.n = NodeAst.TypeInteger64; }
            | TTYPE_FLOAT64 { $$.n = NodeAst.TypeFloat64; }
            | TTYPE_BOOL { $$.n = NodeAst.TypeBool; }
            | TTYPE_FLOAT32 { $$.n = NodeAst.TypeFloat32; }
@@ -1492,7 +1529,6 @@ field_type : TTYPE_OBJECT_ID { $$.n = NodeAst.TypeObjectId; }
            ;
 
 cast_target_type : field_type { $$.n = $1.n; $$.s = $1.s; }
-                 | TINTEGER { $$.n = NodeAst.TypeInteger64; }
                  | TDOUBLE { $$.n = NodeAst.TypeFloat64; }
                  | TIDENTIFIER { $$.n = new(NodeType.Identifier, null, null, null, null, null, null, null, $$.s.ToLowerInvariant()); }
                  ;

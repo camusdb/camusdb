@@ -140,7 +140,7 @@ public sealed class ExecuteSQLController : CommandsController
     {
         if (result.ReturningColumns is { } columns && result.ReturningRows is { } rows)
         {
-            response.Columns = ToColumnDtos(columns);
+            response.Columns = ColumnSchemaDto.FromSchema(columns, rows);
             response.ReturningRows = new PositionalRowSet(rows, columns);
         }
 
@@ -153,14 +153,6 @@ public sealed class ExecuteSQLController : CommandsController
     /// writable one, not the read-only snapshot a SELECT runs in.
     /// </summary>
     private static bool WritesRows(NodeType rootType) => StatementScope.CanReturnWrittenRows(rootType);
-
-    private static List<ColumnSchemaDto> ToColumnDtos(IReadOnlyList<DerivedColumnSchema> schema)
-    {
-        List<ColumnSchemaDto> dtos = new(schema.Count);
-        foreach (DerivedColumnSchema col in schema)
-            dtos.Add(new ColumnSchemaDto { Name = col.Name, Type = col.Type });
-        return dtos;
-    }
 
     // The credential redaction runs only when the log level is enabled, so it is not "expensive and
     // unnecessary". CA1873's guard recognition does not extend to the source-generated Log.* form, so
@@ -256,7 +248,7 @@ public sealed class ExecuteSQLController : CommandsController
                 await foreach (QueryResultRow row in cursor)
                     rows.Add(row);
                 PositionalRowSet rowSet = new(rows, schemaHolder.Schema);
-                return new JsonResult(new ExecuteSQLQueryResponse("ok", rowSet.Count, ToColumnDtos(schemaHolder.Schema), rowSet) { ServerTimeMs = stopwatch.Elapsed.TotalMilliseconds });
+                return new JsonResult(new ExecuteSQLQueryResponse("ok", rowSet.Count, ColumnSchemaDto.FromSchema(schemaHolder.Schema, rows), rowSet) { ServerTimeMs = stopwatch.Elapsed.TotalMilliseconds });
             }
 
             // Explicit (caller-supplied) transaction — client handles retry and lifecycle. Advice is
@@ -285,7 +277,7 @@ public sealed class ExecuteSQLController : CommandsController
                     await foreach (QueryResultRow row in cursor)
                         rows.Add(row);
                     PositionalRowSet rowSet = new(rows, schemaHolder.Schema);
-                    ExecuteSQLQueryResponse txnResponse = new("ok", rowSet.Count, ToColumnDtos(schemaHolder.Schema), rowSet) { ServerTimeMs = stopwatch.Elapsed.TotalMilliseconds };
+                    ExecuteSQLQueryResponse txnResponse = new("ok", rowSet.Count, ColumnSchemaDto.FromSchema(schemaHolder.Schema, rows), rowSet) { ServerTimeMs = stopwatch.Elapsed.TotalMilliseconds };
                     txnResponse.Routing = ResolveRoutingDto(database, txnCollector);
                     return new JsonResult(txnResponse);
                 }
@@ -342,7 +334,7 @@ public sealed class ExecuteSQLController : CommandsController
                         rows.Add(row);
                     causalToken = await transactions.CommitOrReleaseAsync(db, tx, ct).ConfigureAwait(false);
                     resultRows = rows;
-                    resultColumns = ToColumnDtos(schemaHolder.Schema);
+                    resultColumns = ColumnSchemaDto.FromSchema(schemaHolder.Schema, rows);
                     resultSchema = schemaHolder.Schema;
                     routingDb = db;
                 }
@@ -511,7 +503,7 @@ public sealed class ExecuteSQLController : CommandsController
 
                 Response.StatusCode  = 200;
                 Response.ContentType = QueryStreamNdjsonWriter.ContentType;
-                ndjson.WriteHeader(schema);
+                ndjson.WriteHeader(schema, rows);
 
                 foreach (QueryResultRow row in rows)
                 {
@@ -666,6 +658,11 @@ public sealed class ExecuteSQLController : CommandsController
     /// through <c>CommitOrReleaseAsync</c>, never by dereferencing it. The header is written only after
     /// <see cref="CommandExecutor.ExecuteSQLQuery"/> succeeds, so a setup failure leaves the response
     /// unstarted and reportable as a clean HTTP error.
+    ///
+    /// <para>When the schema has an array column whose element type the planner does not know, the
+    /// first row is pulled before the header, so the header can declare the element type from it
+    /// (<see cref="ColumnSchemaDto.FromSchema"/>). A failure producing that row is then also a clean
+    /// HTTP error rather than a failure trailer.</para>
     /// </summary>
     private async Task<(DatabaseDescriptor? Database, int Count)> StreamQueryRowsAsync(
         ExecuteSQLTicket ticket,
@@ -676,14 +673,31 @@ public sealed class ExecuteSQLController : CommandsController
         (DatabaseDescriptor database, IAsyncEnumerable<QueryResultRow> cursor) =
             await executor.ExecuteSQLQuery(ticket, schemaOut: schemaHolder).ConfigureAwait(false);
 
+        IReadOnlyList<DerivedColumnSchema> schema = schemaHolder.Schema;
+        int count = 0;
+
+        await using IAsyncEnumerator<QueryResultRow> rows = cursor.GetAsyncEnumerator(ct);
+
+        // An array column the planner could not type takes its element type from the first row, so
+        // that row is pulled before the header is written. Only then: every other result keeps
+        // writing its header before the cursor is first advanced.
+        bool pending = false;
+        QueryResultRow[]? peeked = null;
+
+        if (ColumnSchemaDto.NeedsRowsForElementTypes(schema))
+        {
+            pending = await rows.MoveNextAsync().ConfigureAwait(false);
+            peeked = pending ? [rows.Current] : [];
+        }
+
         Response.StatusCode  = 200;
         Response.ContentType = QueryStreamNdjsonWriter.ContentType;
-        ndjson.WriteHeader(schemaHolder.Schema);
+        ndjson.WriteHeader(schema, peeked);
 
-        int count = 0;
-        await foreach (QueryResultRow row in cursor.WithCancellation(ct).ConfigureAwait(false))
+        while (pending || await rows.MoveNextAsync().ConfigureAwait(false))
         {
-            ndjson.WriteRow(row, schemaHolder.Schema);
+            pending = false;
+            ndjson.WriteRow(rows.Current, schema);
             count++;
 
             // Push buffered rows to the client every 128 rows: bounds server-held memory and delivers

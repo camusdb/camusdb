@@ -648,7 +648,7 @@ public sealed class CommandExecutor : IAsyncDisposable
             sequenceBinder
         );
         rowCommands = new Controllers.DML.RowCommandService(
-            executorContext, rowInserter, rowUpdater, rowDeleter, queryExecutor);
+            executorContext, rowInserter, rowUpdater, rowDeleter, queryExecutor, sequenceBinder);
         serverLevelDispatcher = new Controllers.ServerLevelStatementDispatcher(
             executorContext, sqlExecutor, databaseLifecycle, schemaDdl, userAdmin, clusterSettings,
             queryActivityService, statementAuthorizer);
