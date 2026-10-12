@@ -1166,23 +1166,80 @@ internal sealed class QueryExecutor
         }
 
         CancellationToken cancellationToken = ticket.CancellationToken;
+        LargeValueFetch largeValues = LargeValueFetch.Columns(table.Schema, plan.ScanRequiredColumns);
 
-        ObjectIdValue? rowId;
-        using (CamusDB.Core.Diagnostics.QueryStageProfile.Measure(CamusDB.Core.Diagnostics.QueryStage.IndexLookup))
-            rowId = await table.Store.LookupUnique(ticket.TxnState, index.KvId, lookupKey, cancellationToken).ConfigureAwait(false);
-
-        if (scanStats is not null)
-            scanStats.KvPointLookups++;
+        // A primary-key lookup may remember the row id the key resolved to last time and read the row
+        // directly. Only the primary key qualifies: its value cannot change for the life of the row and
+        // a row id is never reused, so a remembered id is wrong only when its row is gone, which the row
+        // read reports as no row. That answer is never trusted on its own: the lookup then forgets the
+        // id and takes the index path, which is authoritative (the key may since have been re-inserted
+        // under a new id). Index entries of other unique indexes can move to another row, so they keep
+        // the two reads. See UniqueRowIdCache.
+        ObjectIdValue? rowId = null;
+        string? rememberedKey = null;
+        bool rememberable = index.Name == CamusDBConstants.PrimaryKeyInternalName && table.Store.RemembersUniqueRowIds;
+        if (rememberable)
+        {
+            using (CamusDB.Core.Diagnostics.QueryStageProfile.Measure(CamusDB.Core.Diagnostics.QueryStage.IndexLookup))
+            {
+                if (table.Store.TryGetCachedUniqueRowId(index.KvId, lookupKey, out ObjectIdValue remembered, out rememberedKey))
+                    rowId = remembered;
+            }
+        }
 
         if (rowId is null)
-            yield break;
+        {
+            using (CamusDB.Core.Diagnostics.QueryStageProfile.Measure(CamusDB.Core.Diagnostics.QueryStage.IndexLookup))
+                rowId = await table.Store.LookupUnique(ticket.TxnState, index.KvId, lookupKey, cancellationToken).ConfigureAwait(false);
+
+            if (scanStats is not null)
+                scanStats.KvPointLookups++;
+            if (rememberable)
+                CamusDB.Core.Diagnostics.ServerDiagnostics.RecordRowIdCache("miss");
+            rememberedKey = null;
+
+            if (rowId is null)
+                yield break;
+        }
 
         // A row read Kahuna aborts under contention is recorded on the ticket's sink when the consumer
         // opted in; the scan then ends, and the consumer reports the abort instead of an empty result.
         ReadOnlyMemory<byte>? data;
         using (CamusDB.Core.Diagnostics.QueryStageProfile.Measure(CamusDB.Core.Diagnostics.QueryStage.RowGet))
-            data = await table.Store.GetRow(ticket.TxnState, rowId.Value, cancellationToken, LargeValueFetch.Columns(table.Schema, plan.ScanRequiredColumns), ticket.RetryableAborts).ConfigureAwait(false);
-        if (ticket.RetryableAborts is { HasAbort: true } || data is null || data.Value.Length == 0)
+            data = await table.Store.GetRow(ticket.TxnState, rowId.Value, cancellationToken, largeValues, ticket.RetryableAborts).ConfigureAwait(false);
+        if (ticket.RetryableAborts is { HasAbort: true })
+            yield break;
+
+        if (rememberedKey is not null)
+        {
+            if (data is null || data.Value.Length == 0)
+            {
+                // The remembered row is gone (deleted here or on another node, or not yet present at this
+                // transaction's snapshot). Forget it and resolve the key through the index as usual.
+                table.Store.EvictCachedUniqueRowId(rememberedKey);
+                CamusDB.Core.Diagnostics.ServerDiagnostics.RecordRowIdCache("stale");
+
+                using (CamusDB.Core.Diagnostics.QueryStageProfile.Measure(CamusDB.Core.Diagnostics.QueryStage.IndexLookup))
+                    rowId = await table.Store.LookupUnique(ticket.TxnState, index.KvId, lookupKey, cancellationToken).ConfigureAwait(false);
+
+                if (scanStats is not null)
+                    scanStats.KvPointLookups++;
+
+                if (rowId is null)
+                    yield break;
+
+                using (CamusDB.Core.Diagnostics.QueryStageProfile.Measure(CamusDB.Core.Diagnostics.QueryStage.RowGet))
+                    data = await table.Store.GetRow(ticket.TxnState, rowId.Value, cancellationToken, largeValues, ticket.RetryableAborts).ConfigureAwait(false);
+                if (ticket.RetryableAborts is { HasAbort: true })
+                    yield break;
+            }
+            else
+            {
+                CamusDB.Core.Diagnostics.ServerDiagnostics.RecordRowIdCache("hit");
+            }
+        }
+
+        if (data is null || data.Value.Length == 0)
             yield break;
 
         probe?.AddRowRead();

@@ -190,6 +190,12 @@ public static class ServerDiagnostics
     private static readonly Counter<long> QueryCache =
         Meter.CreateCounter<long>("camus.query_cache.requests", unit: "{lookup}", description: "Query-result-cache lookups by result.");
 
+    // ── Point-read row-id cache ──────────────────────────────────────────────────
+    // hit: the row was read straight from the remembered id; miss: no mapping, the index was read;
+    // stale: the remembered id pointed at a deleted row and the index was read after all.
+    private static readonly Counter<long> RowIdCache =
+        Meter.CreateCounter<long>("camus.point_read.row_id_cache.requests", unit: "{lookup}", description: "Primary-key point lookups by row-id cache outcome.");
+
     // ── Transactions ────────────────────────────────────────────────────────────
     // Both instruments below are recorded from the one place that owns the transaction manager's
     // tracking map, so a transaction is counted once on entry and once on exit and the gauge equals
@@ -358,6 +364,13 @@ public static class ServerDiagnostics
         if (!Enabled)
             return;
         QueryCache.Add(1, new TagList { { "result", result } });
+    }
+
+    public static void RecordRowIdCache(string result)
+    {
+        if (!Enabled)
+            return;
+        RowIdCache.Add(1, new TagList { { "result", result } });
     }
 
     /// <summary>

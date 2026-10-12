@@ -45,6 +45,9 @@ namespace CamusDB.Core.Storage.Kv;
 /// </summary>
 internal sealed class KvBatchWriter
 {
+    // Remembered key -> row-id mappings of this table (null when the feature is off or on a branch); a
+    // delete forgets the keys it removes so the next lookup does not have to discover the gap itself.
+    private readonly UniqueRowIdCache? rowIdCache;
     private readonly IKahuna kahuna;
     private readonly ILogger logger;
     private readonly KvKeyBuilder keys;
@@ -64,8 +67,10 @@ internal sealed class KvBatchWriter
         KvBranchReader branch,
         KahunaRetryPolicy retry,
         KvConflictMessageBuilder messages,
-        CamusDBOptions options)
+        CamusDBOptions options,
+        UniqueRowIdCache? rowIdCache = null)
     {
+        this.rowIdCache = rowIdCache;
         this.kahuna = kahuna;
         this.logger = logger;
         this.keys = keys;
@@ -633,6 +638,11 @@ internal sealed class KvBatchWriter
                     : keys.BuildNonUniqueIndexKey(ix.IndexId, ix.Key, ix.RowId);
                 deleteKeys.Add(kvKey);
 
+                // Forgotten at write time, before the delete commits: if this transaction rolls back the
+                // next lookup merely re-reads the index, whereas a stale entry would cost a failed row read.
+                if (ix.Unique)
+                    rowIdCache?.Remove(kvKey);
+
                 if (upgradeReads)
                     CollectSharedPointLock(tx, keys.BuildIndexBucketPrefix(ix.IndexId), kvKey, ref upgrades);
             }
@@ -679,6 +689,10 @@ internal sealed class KvBatchWriter
     /// </summary>
     internal async Task<int> DropIndexEntries(KvTransaction tx, string indexName, CancellationToken cancellationToken = default)
     {
+        // The index is going away; its remembered mappings go with it (the store itself is reopened by
+        // the DDL, so this only covers a lookup racing the drop).
+        rowIdCache?.Clear();
+
         await tx.EnsureSessionStartedAsync(cancellationToken, keys.TableKeyPrefix).ConfigureAwait(false);
 
         string bucketPrefix = keys.BuildIndexBucketPrefix(indexName);

@@ -126,6 +126,8 @@ public class ConfigReader
         "spill_enabled",
         "spill_threshold_rows",
         "spill_merge_fan_in",
+        "point_read_row_id_cache_enabled",
+        "point_read_row_id_cache_max_entries",
         "query_result_cache_enabled",
         "query_result_cache_default_ttl_ms",
         "query_result_cache_max_entries",
