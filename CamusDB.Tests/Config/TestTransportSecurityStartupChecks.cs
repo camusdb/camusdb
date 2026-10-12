@@ -114,6 +114,28 @@ public sealed class TestTransportSecurityStartupChecks
     }
 
     [Test]
+    public void GrpcTlsDisabled_IsReported_EvenWhenACertificateIsConfigured()
+    {
+        // The certificate covers the Raft port only once grpc_tls_enabled is false: the client port is
+        // plaintext by choice, and the warning names the setting that made it so rather than a missing file.
+        ConfigDefinition config = ExposedCluster();
+        config.PeerTlsEnabled = true;
+        config.RaftCertificate = "/etc/camusdb/raft.pfx";
+        config.GrpcCertificate = "/etc/camusdb/grpc.pfx";
+        config.GrpcTlsEnabled = false;
+
+        IReadOnlyList<string> warnings = TransportSecurityStartupChecks.Inspect(config);
+
+        Assert.AreEqual(1, warnings.Count, string.Join(" | ", warnings));
+        Assert.That(warnings[0], Does.Contain("grpc_tls_enabled"));
+        Assert.That(warnings[0], Does.Not.Contain("raft_certificate"));
+
+        // With the gRPC listener off the setting is inert and says nothing.
+        config.GrpcEnabled = false;
+        Assert.IsEmpty(TransportSecurityStartupChecks.Inspect(config));
+    }
+
+    [Test]
     public void MissingGrpcCertificate_IsReported_UnlessTheRaftOneCoversIt()
     {
         ConfigDefinition uncovered = ExposedCluster();

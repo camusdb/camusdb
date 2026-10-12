@@ -491,6 +491,21 @@ public class ConfigDefinition
     public string GrpcCertificate { get; set; } = "";
 
     /// <summary>
+    /// Whether the client-facing gRPC port serves TLS at all. <c>true</c> (the default) keeps the
+    /// behaviour above: the port uses <see cref="GrpcCertificate"/>, falls back to
+    /// <see cref="RaftCertificate"/>, and binds plaintext only when both are empty. <c>false</c> binds
+    /// plaintext <c>h2c</c> even when a certificate is configured, without touching the Raft port.
+    ///
+    /// <para>It exists because the two listeners share one certificate setting by default: a node that
+    /// must keep its peer traffic encrypted has no way to serve clients in the clear, which is what a
+    /// deployment that terminates TLS in front of the node (a sidecar, ingress or service mesh) needs,
+    /// and what a benchmark that separates the cost of TLS from the cost of the database needs. Clients
+    /// then connect with <c>http://</c>; a connection string that carries credentials to a non-loopback
+    /// plaintext endpoint is refused by the client unless it says <c>AllowInsecureCredentials=true</c>.</para>
+    /// </summary>
+    public bool GrpcTlsEnabled { get; set; } = true;
+
+    /// <summary>
     /// Whether this node reaches its peers' HTTP endpoints over TLS.
     ///
     /// <para>It selects the scheme the peer resolver builds for the three node-to-node HTTP channels:

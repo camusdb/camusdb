@@ -57,6 +57,7 @@ Example: YAML `mode: cluster` with `--mode standalone` starts in standalone mode
 | `grpc_enabled` | — | `true` |
 | `grpc_port` | — | `5096` |
 | `grpc_certificate` | — | `""` (falls back to `raft_certificate`) |
+| `grpc_tls_enabled` | — | `true` (`false` serves the client gRPC port as plaintext h2c even when a certificate is configured; the Raft port is unaffected) |
 | `require_tls_when_auth_enabled` | `--require-tls-when-auth-enabled` | `true` |
 | `default_isolation_level` | — | `serializable` |
 | `default_transaction_locking` | — | `pessimistic` |

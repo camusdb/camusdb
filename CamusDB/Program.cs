@@ -241,12 +241,14 @@ builder.WebHost.ConfigureKestrel(kestrel =>
     // grpc_certificate for TLS in exposed deployments. It falls back to raft_certificate so existing
     // configurations keep working, but the two are separate settings because the ports face different
     // networks: the Raft port is peer-only, while this one faces clients whose trust store must accept
-    // whatever it presents.
+    // whatever it presents. grpc_tls_enabled: false keeps this port plaintext regardless of either
+    // certificate, for a node behind a TLS-terminating proxy or a run that measures TLS apart.
     if (config.GrpcEnabled)
     {
-        string grpcCertificate = !string.IsNullOrEmpty(config.GrpcCertificate)
-            ? config.GrpcCertificate
-            : config.RaftCertificate;
+        string grpcCertificate = !config.GrpcTlsEnabled ? ""
+            : !string.IsNullOrEmpty(config.GrpcCertificate)
+                ? config.GrpcCertificate
+                : config.RaftCertificate;
 
         kestrel.ListenAnyIP(config.GrpcPort, o =>
         {

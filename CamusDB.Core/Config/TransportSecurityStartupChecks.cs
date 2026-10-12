@@ -59,7 +59,12 @@ public static class TransportSecurityStartupChecks
                 "plaintext HTTP/2 (h2c). Replicated row data and consensus traffic cross the network " +
                 "in the clear. Set raft_certificate in config.yml for an exposed cluster.");
 
-        if (config.GrpcEnabled && string.IsNullOrEmpty(config.GrpcCertificate) && string.IsNullOrEmpty(config.RaftCertificate))
+        if (config.GrpcEnabled && !config.GrpcTlsEnabled)
+            warnings.Add(
+                "The client-facing gRPC port serves plaintext HTTP/2 (h2c) because grpc_tls_enabled is " +
+                "false, so bearer tokens presented over it are readable on the wire unless TLS terminates " +
+                "in front of this node. Remove grpc_tls_enabled: false from config.yml to serve TLS.");
+        else if (config.GrpcEnabled && string.IsNullOrEmpty(config.GrpcCertificate) && string.IsNullOrEmpty(config.RaftCertificate))
             warnings.Add(
                 "The client-facing gRPC port has no certificate (neither grpc_certificate nor " +
                 "raft_certificate is set), so it serves plaintext HTTP/2 (h2c) and bearer tokens " +
