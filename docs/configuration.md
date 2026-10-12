@@ -134,6 +134,9 @@ http3_enabled: true
   (`-p 7141:7141/tcp -p 7141:7141/udp`) and firewall rule.
 - The host needs the platform QUIC library: `libmsquic` on Linux and macOS, or Windows 11 /
   Windows Server 2022 and later. Without it the port keeps serving HTTP/1.1 and HTTP/2 only.
+  On macOS, .NET does not search the Homebrew library folder: start the node with
+  `DYLD_FALLBACK_LIBRARY_PATH=/opt/homebrew/lib`. macOS removes `DYLD_*` variables for system
+  binaries such as `nohup`, so set the variable in the environment of the node process itself.
 - A client that connects over TCP gets an `Alt-Svc` header on each response. Browsers and other
   clients that support it then move to HTTP/3 on the same port.
 
