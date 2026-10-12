@@ -98,6 +98,12 @@ internal static class QueryExpressionClassifier
                 case NodeType.ExprSub:
                 case NodeType.ExprMult:
                 case NodeType.ExprDiv:
+                case NodeType.ExprConcat:
+                case NodeType.ExprBitAnd:
+                case NodeType.ExprBitOr:
+                case NodeType.ExprBitXor:
+                case NodeType.ExprShiftLeft:
+                case NodeType.ExprShiftRight:
                 case NodeType.ExprSubscript:
                 case NodeType.ArrayLiteral:
                 case NodeType.ExprValueSet:
@@ -123,6 +129,7 @@ internal static class QueryExpressionClassifier
                 case NodeType.ExprNot:
 
                 case NodeType.ExprNegate:
+                case NodeType.ExprBitNot:
                 case NodeType.ExprIsNull:
                 case NodeType.ExprIsNotNull:
                 case NodeType.ExprIsTrue:
@@ -225,6 +232,12 @@ internal static class QueryExpressionClassifier
                 case NodeType.ExprSub:
                 case NodeType.ExprMult:
                 case NodeType.ExprDiv:
+                case NodeType.ExprConcat:
+                case NodeType.ExprBitAnd:
+                case NodeType.ExprBitOr:
+                case NodeType.ExprBitXor:
+                case NodeType.ExprShiftLeft:
+                case NodeType.ExprShiftRight:
                 case NodeType.ExprSubscript:
                 case NodeType.ArrayLiteral:
                 case NodeType.ExprValueSet:
@@ -251,6 +264,7 @@ internal static class QueryExpressionClassifier
                 case NodeType.ExprNot:
 
                 case NodeType.ExprNegate:
+                case NodeType.ExprBitNot:
                 case NodeType.ExprIsNull:
                 case NodeType.ExprIsNotNull:
                 case NodeType.ExprIsTrue:
@@ -330,6 +344,12 @@ internal static class QueryExpressionClassifier
                 case NodeType.ExprSub:
                 case NodeType.ExprMult:
                 case NodeType.ExprDiv:
+                case NodeType.ExprConcat:
+                case NodeType.ExprBitAnd:
+                case NodeType.ExprBitOr:
+                case NodeType.ExprBitXor:
+                case NodeType.ExprShiftLeft:
+                case NodeType.ExprShiftRight:
                 case NodeType.ExprSubscript:
                 case NodeType.ArrayLiteral:
                 case NodeType.ExprValueSet:
@@ -356,6 +376,7 @@ internal static class QueryExpressionClassifier
                 case NodeType.ExprNot:
 
                 case NodeType.ExprNegate:
+                case NodeType.ExprBitNot:
                 case NodeType.ExprIsNull:
                 case NodeType.ExprIsNotNull:
                 case NodeType.ExprIsTrue:

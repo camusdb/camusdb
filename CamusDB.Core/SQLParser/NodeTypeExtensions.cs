@@ -24,6 +24,12 @@ public static class NodeTypeExtensions
             NodeType.ExprSub or
             NodeType.ExprMult or
             NodeType.ExprDiv or
+            NodeType.ExprConcat or
+            NodeType.ExprBitAnd or
+            NodeType.ExprBitOr or
+            NodeType.ExprBitXor or
+            NodeType.ExprShiftLeft or
+            NodeType.ExprShiftRight or
             NodeType.ExprOr or
             NodeType.ExprAnd => true,
             _ => false,

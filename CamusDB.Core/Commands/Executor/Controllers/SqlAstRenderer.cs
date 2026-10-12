@@ -148,6 +148,20 @@ internal class SqlAstRenderer
             case NodeType.ExprMult: RenderBinary(sb, expr, "*"); return;
             case NodeType.ExprDiv:  RenderBinary(sb, expr, "/"); return;
 
+            // ── concatenation and bitwise ───────────────────────────────────────
+            case NodeType.ExprConcat:     RenderBinary(sb, expr, "||"); return;
+            case NodeType.ExprBitAnd:     RenderBinary(sb, expr, "&");  return;
+            case NodeType.ExprBitOr:      RenderBinary(sb, expr, "|");  return;
+            case NodeType.ExprBitXor:     RenderBinary(sb, expr, "#");  return;
+            case NodeType.ExprShiftLeft:  RenderBinary(sb, expr, "<<"); return;
+            case NodeType.ExprShiftRight: RenderBinary(sb, expr, ">>"); return;
+
+            // Prefix `~` is bitwise NOT only where an operand starts, and it always does here.
+            case NodeType.ExprBitNot:
+                sb.Append('~');
+                RenderOperand(sb, expr.leftAst!);
+                return;
+
             // ── string matching ─────────────────────────────────────────────────
             case NodeType.ExprLike:  RenderBinary(sb, expr, "LIKE"); return;
             case NodeType.ExprILike: RenderBinary(sb, expr, "ILIKE"); return;

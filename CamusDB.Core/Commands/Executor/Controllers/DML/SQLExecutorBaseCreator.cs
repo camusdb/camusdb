@@ -583,6 +583,24 @@ internal abstract class SQLExecutorBaseCreator
             case NodeType.ExprNegate:
                 return EvalNegate(EvalExpr(expr.leftAst!, row, parameters, rowNameResolver, queryRow));
 
+            case NodeType.ExprConcat:
+                return ConcatAndBitwiseOperators.Concat(
+                    EvalExpr(expr.leftAst!, row, parameters, rowNameResolver, queryRow),
+                    EvalExpr(expr.rightAst!, row, parameters, rowNameResolver, queryRow));
+
+            case NodeType.ExprBitAnd:
+            case NodeType.ExprBitOr:
+            case NodeType.ExprBitXor:
+            case NodeType.ExprShiftLeft:
+            case NodeType.ExprShiftRight:
+                return ConcatAndBitwiseOperators.Bitwise(
+                    expr.nodeType,
+                    EvalExpr(expr.leftAst!, row, parameters, rowNameResolver, queryRow),
+                    EvalExpr(expr.rightAst!, row, parameters, rowNameResolver, queryRow));
+
+            case NodeType.ExprBitNot:
+                return ConcatAndBitwiseOperators.BitNot(EvalExpr(expr.leftAst!, row, parameters, rowNameResolver, queryRow));
+
             case NodeType.ExprFuncCall:
                 // Called directly rather than through a helper: a nested call re-enters this method
                 // once per level, so every frame on that cycle is paid once per level. The static

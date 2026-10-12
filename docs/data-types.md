@@ -314,8 +314,8 @@ column's declared element type the same way scalars do, so `ARRAY[1, 2]` is acce
 
 #### Text form of each type
 
-Every scalar type has one text form. `CAST(x AS string)`, `x::string`, `to_string(x)` and
-`concat(…)` all use it, so they always give the same text:
+Every scalar type has one text form. `CAST(x AS string)`, `x::string`, `to_string(x)`,
+`concat(…)` and the `||` operator all use it, so they always give the same text:
 
 | Type | Text form | Example |
 |------|-----------|---------|
@@ -330,11 +330,12 @@ Every scalar type has one text form. `CAST(x AS string)`, `x::string`, `to_strin
 | `date` | `yyyy-MM-dd` | `2026-03-15` |
 | `datetime` | ISO-8601 in UTC, seven fractional digits | `2026-03-15T08:30:00.1230000Z` |
 | `bytes` | `\x` and lowercase hex (PostgreSQL `bytea_output = hex`) | `\xdeadbeef` |
-| `array(T)` | none: the cast and `concat` raise `InvalidInput` | |
+| `array(T)` | none: the cast, `concat` and `\|\|` raise `InvalidInput` | |
 
 The text form uses the invariant culture and depends on the value only, so it is safe in a column
 `DEFAULT` and a stored `CHECK`. `concat` skips a NULL argument and returns NULL when every argument is
-NULL.
+NULL. The `||` operator gives NULL for a NULL operand; see
+[Concatenation](sql-expression-syntax.md#concatenation-).
 
 The string cast reads each text form back, so `CAST(CAST(x AS string) AS T)` returns `x` for `date`,
 `datetime`, `bytes`, `float32`, `float64`, `uuid` and `numeric`. A string cast to `bytes` accepts the

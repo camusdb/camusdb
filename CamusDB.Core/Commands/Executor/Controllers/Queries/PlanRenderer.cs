@@ -129,8 +129,7 @@ public static class PlanRenderer
         {
             if (node.OutputOrdering is { Count: > 0 })
             {
-                string order = string.Join(", ", node.OutputOrdering.Select(
-                    o => $"{o.ColumnName} {(o.Type == OrderType.Ascending ? "ASC" : "DESC")}"));
+                string order = string.Join(", ", node.OutputOrdering.Select(RenderOrderKey));
                 line += $" order=[{order}]";
             }
             line += $" decomposable={node.CanDecomposeToLocalPlusMerge.ToString().ToLowerInvariant()}";
@@ -219,6 +218,15 @@ public static class PlanRenderer
         return parts.Count > 0 ? $"aggregate({string.Join(", ", parts)})" : "aggregate";
     }
 
+    /// <summary>
+    /// Renders one sort key with its direction. An expression key prints the expression itself, the
+    /// same text the filter step prints, because its <see cref="QueryOrderBy.ColumnName"/> is only a
+    /// short label: the node type name for an operator, such as <c>ExprAdd</c>, and <c>name(…)</c>
+    /// for a call. A column key prints its column name.
+    /// </summary>
+    private static string RenderOrderKey(QueryOrderBy key) =>
+        $"{(key.Expression is { } expression ? RenderExpr(expression) : key.ColumnName)} {(key.Type == OrderType.Ascending ? "ASC" : "DESC")}";
+
     private static string RenderSort(SortNode node)
     {
         // The name distinguishes the two operators, because "no spill file appeared" is not evidence
@@ -228,8 +236,7 @@ public static class PlanRenderer
         if (node.OrderBy is not { Count: > 0 })
             return name;
 
-        string cols = string.Join(", ", node.OrderBy.Select(
-            o => $"{o.ColumnName} {(o.Type == OrderType.Ascending ? "ASC" : "DESC")}"));
+        string cols = string.Join(", ", node.OrderBy.Select(RenderOrderKey));
 
         return node.BoundedLimit is { } k
             ? $"topk(k: {k}, {cols})"
@@ -385,6 +392,16 @@ public static class PlanRenderer
             NodeType.ExprNegate => expr.leftAst!.nodeType == NodeType.Identifier
                 ? $"-{RenderExpr(expr.leftAst)}"
                 : $"-({RenderExpr(expr.leftAst)})",
+
+            NodeType.ExprConcat => $"{RenderExpr(expr.leftAst!)} || {RenderExpr(expr.rightAst!)}",
+            NodeType.ExprBitAnd => $"{RenderExpr(expr.leftAst!)} & {RenderExpr(expr.rightAst!)}",
+            NodeType.ExprBitOr => $"{RenderExpr(expr.leftAst!)} | {RenderExpr(expr.rightAst!)}",
+            NodeType.ExprBitXor => $"{RenderExpr(expr.leftAst!)} # {RenderExpr(expr.rightAst!)}",
+            NodeType.ExprShiftLeft => $"{RenderExpr(expr.leftAst!)} << {RenderExpr(expr.rightAst!)}",
+            NodeType.ExprShiftRight => $"{RenderExpr(expr.leftAst!)} >> {RenderExpr(expr.rightAst!)}",
+            NodeType.ExprBitNot => expr.leftAst!.nodeType == NodeType.Identifier
+                ? $"~{RenderExpr(expr.leftAst)}"
+                : $"~({RenderExpr(expr.leftAst)})",
 
             // Function names are case-insensitive; render them in a canonical lower-case form so the
             // EXPLAIN output is stable regardless of the case the function was written in.
