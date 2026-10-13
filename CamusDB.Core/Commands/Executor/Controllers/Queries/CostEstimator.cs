@@ -440,14 +440,15 @@ internal static class CostEstimator
                               ?? DefaultTableRowCount;
 
                 // Extract equi-key columns from the ON predicate so NDV/FK formula applies.
-                (IReadOnlyList<string> nljLeftCols, IReadOnlyList<string> nljRightCols) =
+                (IReadOnlyList<string> nljLeftCols, IReadOnlyList<string> nljRightCols, IReadOnlyList<string> nljLeftKeys) =
                     ExtractNljEquiKeyColumns(nlj.OnPredicate, nlj.RightSource.Alias);
 
+                TableDescriptor? nljLeftTable = TryResolveLeftTable(node.Input, nljLeftKeys, out bool nljLeftIsJoin);
                 long rows = CardinalityEstimator.EstimateJoinCardinality(
                     inputCardinality, innerRows,
                     nljRightCols, nlj.RightSource.Table?.Table,
-                    nljLeftCols, TryResolveLeftTable(node.Input),
-                    database, stats);
+                    nljLeftCols, nljLeftTable,
+                    database, stats, nljLeftIsJoin);
                 rows = ApplyOuterJoinFloor(nlj.Kind, rows, inputCardinality);
 
                 return (rows, new PlanCost
@@ -505,11 +506,12 @@ internal static class CostEstimator
                 // are bare today, but stripping a bare name is a no-op so both are defensive.
                 IReadOnlyList<string> probeKeyCols = StripQualifiers(hj.ProbeKeyColumns);
                 IReadOnlyList<string> buildKeyCols = StripQualifiers(hj.BuildKeyColumns);
+                TableDescriptor? hjLeftTable = TryResolveLeftTable(node.Input, hj.ProbeKeyColumns, out bool hjLeftIsJoin);
                 long rows = CardinalityEstimator.EstimateJoinCardinality(
                     inputCardinality, rightRows,           // logical left × right
                     buildKeyCols, hj.BuildSource.Table?.Table,
-                    probeKeyCols, TryResolveLeftTable(node.Input),
-                    database, stats);
+                    probeKeyCols, hjLeftTable,
+                    database, stats, hjLeftIsJoin);
                 rows = ApplyOuterJoinFloor(hj.Kind, rows, inputCardinality);
 
                 return (rows, new PlanCost
@@ -538,11 +540,12 @@ internal static class CostEstimator
                 // left keys are qualified; stripping a bare name is a no-op).
                 IReadOnlyList<string> leftKeyCols  = StripQualifiers(mj.LeftKeyColumns);
                 IReadOnlyList<string> rightKeyCols = StripQualifiers(mj.RightKeyColumns);
+                TableDescriptor? mjLeftTable = TryResolveLeftTable(node.Input, mj.LeftKeyColumns, out bool mjLeftIsJoin);
                 long rows = CardinalityEstimator.EstimateJoinCardinality(
                     inputCardinality, rightRows,
                     rightKeyCols, mj.RightSource.Table?.Table,
-                    leftKeyCols, TryResolveLeftTable(node.Input),
-                    database, stats);
+                    leftKeyCols, mjLeftTable,
+                    database, stats, mjLeftIsJoin);
                 rows = ApplyOuterJoinFloor(mj.Kind, rows, inputCardinality);
 
                 return (rows, new PlanCost
@@ -578,6 +581,84 @@ internal static class CostEstimator
     private static long ApplyOuterJoinFloor(JoinKind kind, long innerEstimate, long leftRows) =>
         kind == JoinKind.LeftOuter ? Math.Max(innerEstimate, leftRows) : innerEstimate;
 
+    // ─────────────────────────────────────────────────────────────────────────
+    // Join step cost
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Weight of one hash-table row against one row read from KV. The in-memory build costs a
+    /// tenth of a scan, the same ratio the plan annotation of <see cref="HashJoinNode"/> implies.
+    /// </summary>
+    internal const double HashTableRowWeight = 0.1;
+
+    /// <summary>
+    /// Cost of one hash-join step: one scan of the right input, one probe for each left row, and a
+    /// hash table on the smaller side. The <paramref name="leftRows"/> term is what makes the join
+    /// order matter: the left input of a step is the intermediate result of the steps before it,
+    /// so the total over a plan is the scan costs plus the size of each intermediate result.
+    /// </summary>
+    internal static double HashJoinStepCost(double leftRows, double rightRows, double rightScanCost) =>
+        rightScanCost + leftRows + Math.Min(leftRows, rightRows) * HashTableRowWeight;
+
+    /// <summary>
+    /// Cost of one index-lookup join step: one index probe and one row fetch for each left row. It
+    /// assumes one match for each left row; a non-unique index can return more.
+    /// </summary>
+    internal static double IndexLookupJoinStepCost(double leftRows) => leftRows * 2.0;
+
+    /// <summary>
+    /// Cost of one nested-loop join step: the nested-loop operator reads its right input again for
+    /// each left row. The builder uses it when no conjunct of the <c>ON</c> is an equi-key.
+    /// </summary>
+    internal static double NestedLoopJoinStepCost(double leftRows, double rightScanCost) =>
+        Math.Max(1.0, leftRows) * rightScanCost;
+
+    /// <summary>
+    /// The rule that selects a hash join over an index-lookup join. <see cref="JoinEnumerator"/>
+    /// and <see cref="JoinQueryPlanner"/> both call it, so the join order is costed with the
+    /// operator that the builder then builds. Hash wins only when it is strictly cheaper.
+    /// </summary>
+    internal static bool PrefersHashOverIndexLookup(double leftRows, double rightRows, double rightScanCost) =>
+        HashJoinStepCost(leftRows, rightRows, rightScanCost) < IndexLookupJoinStepCost(leftRows);
+
+    /// <summary>
+    /// The operator that the builder selects for one join step: an index-lookup join when the right
+    /// table has an index on a key column and hash is not strictly cheaper
+    /// (<see cref="PrefersHashOverIndexLookup"/>), else a hash join when a conjunct is an equi-key,
+    /// else a nested loop. This is the order of the checks in <see cref="JoinQueryPlanner"/>, so
+    /// with the same inputs the enumerator and the builder select the same operator.
+    /// </summary>
+    internal static JoinStepOperator SelectJoinStepOperator(
+        double leftRows,
+        double rightRows,
+        double rightScanCost,
+        bool hasEquiKey,
+        bool indexLookupPossible)
+    {
+        if (indexLookupPossible && !(hasEquiKey && PrefersHashOverIndexLookup(leftRows, rightRows, rightScanCost)))
+            return JoinStepOperator.IndexLookup;
+
+        return hasEquiKey ? JoinStepOperator.Hash : JoinStepOperator.NestedLoop;
+    }
+
+    /// <summary>
+    /// Cost of joining a right input to a left input of <paramref name="leftRows"/> rows, with the
+    /// operator that <see cref="SelectJoinStepOperator"/> selects.
+    /// </summary>
+    internal static double JoinStepCost(
+        double leftRows,
+        double rightRows,
+        double rightScanCost,
+        bool hasEquiKey,
+        bool indexLookupPossible) =>
+        SelectJoinStepOperator(leftRows, rightRows, rightScanCost, hasEquiKey, indexLookupPossible) switch
+        {
+            JoinStepOperator.IndexLookup => IndexLookupJoinStepCost(leftRows),
+            JoinStepOperator.Hash => HashJoinStepCost(leftRows, rightRows, rightScanCost),
+            _ => NestedLoopJoinStepCost(leftRows, rightScanCost),
+        };
+
+    // ─────────────────────────────────────────────────────────────────────────
     // Join-key helpers
     // ─────────────────────────────────────────────────────────────────────────
 
@@ -597,35 +678,105 @@ internal static class CostEstimator
     }
 
     /// <summary>
-    /// Walks the left-input subtree looking for a leaf scan node.
-    /// Passes through transparent nodes (Filter, Project, Limit, Sort).
-    /// Returns null when the left input is a complex subtree (e.g. a nested join).
-    /// In 3+-way joins the left input is itself a join node, so leftTable is null and the
-    /// FK/NDV check falls back to right-side-only NDV or <see cref="CardinalityEstimator.FallbackSelectivity"/>.
-    /// System-R join-order DP owns multi-table cardinality.
+    /// Resolves the table of the left join key, for the unique-key and NDV rules of
+    /// <see cref="CardinalityEstimator.EstimateJoinCardinality"/>.
+    ///
+    /// <para>A scan input (through Filter, Project, Limit and Sort) has one table, and that is the
+    /// answer. A join input holds several tables; there the qualifier of the left key names the
+    /// one it comes from, when every key names the same alias, and <paramref name="isJoinResult"/>
+    /// is true. Such a table gives the key's distinct count, never the unique-key shortcut: an
+    /// earlier join can repeat each row of the table, so a key that is unique in the table is not
+    /// unique in the join input. Without the alias rule a join over a join had no left table at
+    /// all and fell back to the fixed selectivity. The join-order enumerator estimates each set of
+    /// tables from the tables alone (<see cref="JoinEnumerator.EstimateSubsetRows"/>); this
+    /// annotation still comes from different code, so the two estimates can differ.</para>
     /// </summary>
-    private static TableDescriptor? TryResolveLeftTable(PhysicalPlanNode? input)
+    private static TableDescriptor? TryResolveLeftTable(
+        PhysicalPlanNode? input,
+        IReadOnlyList<string> leftKeys,
+        out bool isJoinResult)
     {
-        while (input is not null)
+        isJoinResult = false;
+        PhysicalPlanNode? current = input;
+
+        while (current is not null)
         {
-            if (input is TableScanNode { BoundSource: { } tsSrc })
+            if (current is TableScanNode { BoundSource: { } tsSrc })
                 return tsSrc.Table;
-            if (input is IndexRangeScanNode { BoundSource: { } irsSrc })
+            if (current is IndexRangeScanNode { BoundSource: { } irsSrc })
                 return irsSrc.Table;
-            if (input is IndexInListScanNode { BoundSource: { } ilsSrc })
+            if (current is IndexInListScanNode { BoundSource: { } ilsSrc })
                 return ilsSrc.Table;
-            if (input is FilterNode or ProjectNode or LimitNode or SortNode)
+            if (current is FilterNode or ProjectNode or LimitNode or SortNode)
             {
-                input = input.Input;
+                current = current.Input;
                 continue;
             }
             break;
         }
+
+        string? alias = CommonQualifier(leftKeys);
+        TableDescriptor? table = alias is null ? null : FindTableByAlias(input, alias);
+        isJoinResult = table is not null;
+        return table;
+    }
+
+    /// <summary>The alias that qualifies every key, or null when a key is bare or the keys name two aliases.</summary>
+    private static string? CommonQualifier(IReadOnlyList<string> keys)
+    {
+        string? alias = null;
+
+        foreach (string key in keys)
+        {
+            int dot = key.IndexOf('.');
+            if (dot <= 0 || dot >= key.Length - 1)
+                return null;
+
+            string qualifier = key[..dot];
+
+            if (alias is null)
+                alias = qualifier;
+            else if (!string.Equals(alias, qualifier, StringComparison.OrdinalIgnoreCase))
+                return null;
+        }
+
+        return alias;
+    }
+
+    /// <summary>
+    /// Finds the table that <paramref name="alias"/> names inside a left-deep join input: a scan
+    /// leaf on the left spine, or the right input of a join on it. Null for a derived source.
+    /// </summary>
+    private static TableDescriptor? FindTableByAlias(PhysicalPlanNode? input, string alias)
+    {
+        PhysicalPlanNode? current = input;
+
+        while (current is not null)
+        {
+            BoundTableSource? candidate = current switch
+            {
+                TableScanNode { BoundSource: { } source } => source,
+                IndexRangeScanNode { BoundSource: { } source } => source,
+                IndexInListScanNode { BoundSource: { } source } => source,
+                NestedLoopJoinNode nlj => nlj.RightSource.Table,
+                IndexNestedLoopJoinNode inlj => inlj.RightSource,
+                HashJoinNode hj => hj.BuildSource.Table,
+                MergeJoinNode mj => mj.RightSource.Table,
+                _ => null,
+            };
+
+            if (candidate is not null && string.Equals(candidate.Alias, alias, StringComparison.OrdinalIgnoreCase))
+                return candidate.Table;
+
+            current = current.Input;
+        }
+
         return null;
     }
 
     /// <summary>
-    /// Extracts unqualified column names on both sides of equi-conjuncts in an NLJ ON predicate.
+    /// Extracts unqualified column names on both sides of equi-conjuncts in an NLJ ON predicate,
+    /// and the left keys as written (with their qualifier, which names the left table).
     /// Only top-level AND conjuncts of the form "X.col = rightAlias.col" (or reversed) are extracted.
     /// Returns empty lists when the predicate contains no recognizable equi-keys.
     /// Non-Identifier operands (expressions, subqueries) are skipped, so a complex ON predicate
@@ -633,7 +784,7 @@ internal static class CostEstimator
     /// while hash/merge join (which use explicit node key columns) do not. Spec invariant
     /// "identical cardinality across hash/merge/NLJ" holds for simple Identifier=Identifier equi-joins.
     /// </summary>
-    private static (IReadOnlyList<string> LeftCols, IReadOnlyList<string> RightCols)
+    private static (IReadOnlyList<string> LeftCols, IReadOnlyList<string> RightCols, IReadOnlyList<string> LeftKeys)
         ExtractNljEquiKeyColumns(NodeAst onPredicate, string rightAlias)
     {
         var conjuncts = new List<NodeAst>();
@@ -641,6 +792,7 @@ internal static class CostEstimator
 
         var leftCols  = new List<string>();
         var rightCols = new List<string>();
+        var leftKeys  = new List<string>();
         string prefix = rightAlias + ".";
 
         foreach (NodeAst c in conjuncts)
@@ -658,6 +810,7 @@ internal static class CostEstimator
                 rightCols.Add(rightText[prefix.Length..]);
                 int dot = leftText.IndexOf('.');
                 leftCols.Add(dot < 0 ? leftText : leftText[(dot + 1)..]);
+                leftKeys.Add(leftText);
             }
             else if (leftText.StartsWith(prefix, StringComparison.Ordinal))
             {
@@ -665,9 +818,10 @@ internal static class CostEstimator
                 rightCols.Add(leftText[prefix.Length..]);
                 int dot = rightText.IndexOf('.');
                 leftCols.Add(dot < 0 ? rightText : rightText[(dot + 1)..]);
+                leftKeys.Add(rightText);
             }
         }
-        return (leftCols, rightCols);
+        return (leftCols, rightCols, leftKeys);
     }
 
     // ─────────────────────────────────────────────────────────────────────────

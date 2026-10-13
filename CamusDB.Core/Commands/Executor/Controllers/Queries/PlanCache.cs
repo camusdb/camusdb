@@ -258,15 +258,24 @@ internal readonly record struct PlanCacheDep(
 ///
 /// Join queries store only the table-alias ordering (e.g. <c>["sessions", "events", "users"]</c>),
 /// not the full <see cref="QuerySource"/> AST. On a cache hit the planner re-applies the cached
-/// ordering to the <em>current</em> query's source tree (via
-/// <see cref="JoinOrderOptimizer.ReorderByAliases"/>), so ON-predicate literals from the current
+/// ordering to the <em>current</em> query's source tree, so ON-predicate literals from the current
 /// query are always used. Storing the AST directly would freeze the first query's literal values
 /// and silently return wrong rows for subsequent queries with the same shape but different ON literals.
+///
+/// <para><see cref="JoinBuild"/> says how the tree of the miss got its predicates, because the
+/// order alone does not reproduce a tree whose conjuncts were redistributed. A
+/// <see cref="JoinBuildMode.WholePredicate"/> entry replays through
+/// <see cref="JoinOrderOptimizer.ReorderByAliases"/>; a <see cref="JoinBuildMode.Conjunct"/> or
+/// <see cref="JoinBuildMode.CostBased"/> entry rebuilds the tree through <see cref="JoinGraph"/>,
+/// also when the order equals the declared order, so a hit evaluates each conjunct at the same
+/// join as the miss. A cost-based entry also recomputes the enumerator's estimates of each join,
+/// so the hit selects the same join operators.</para>
 /// </summary>
 internal sealed record PlanCacheEntry(
     IReadOnlyList<PlanCacheDep> SchemaDeps,
     SingleTableDecision? SingleTable,
-    IReadOnlyList<string>? JoinAliasOrder);
+    IReadOnlyList<string>? JoinAliasOrder,
+    JoinBuildMode JoinBuild = JoinBuildMode.WholePredicate);
 
 /// <summary>
 /// Cached access-path decision for a single-table query.

@@ -6,8 +6,10 @@
  * file that was distributed with this source code.
  */
 
+using System.Buffers;
+using System.Buffers.Binary;
 using System.Collections.Concurrent;
-using System.Security.Cryptography;
+using System.IO.Hashing;
 using System.Text;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.Storage.Kv;
@@ -55,6 +57,12 @@ public sealed class StatementRoutingResolver
     /// within one TTL and correctness never depended on it.
     /// </summary>
     private const int PlacementCacheMaxEntries = 4_096;
+
+    /// <summary>
+    /// Stack buffer for the dependency-token input. Three short identifiers plus two fixed-width
+    /// numbers stay far below it; an unusually long identifier falls back to a pooled array.
+    /// </summary>
+    private const int TokenStackBufferSize = 512;
 
     private readonly record struct CachedPlacement(TablePlacement Placement, bool Initialized, long CapturedAtTicks);
 
@@ -157,18 +165,64 @@ public sealed class StatementRoutingResolver
     /// database identity (changes on drop/recreate), the relation identity, the effective storage
     /// identity plus contents generation (change on TRUNCATE and materialized-view refresh), and
     /// the schema version (changes on ALTER) — then hashed, so the client cannot be tempted to
-    /// parse it and the raw identifiers never travel. Deterministic across nodes on purpose: the
-    /// same dependencies must yield the same token whichever node answers, or a client alternating
-    /// gateways would see a phantom dependency change on every hop.
+    /// parse it. Deterministic across nodes on purpose: the same dependencies must yield the same
+    /// token whichever node answers, or a client alternating gateways would see a phantom
+    /// dependency change on every hop — hence the fixed little-endian layout and unseeded hash.
+    ///
+    /// <para><b>Non-cryptographic on purpose.</b> The token only has to change when a dependency
+    /// changes; it is not authentication and not a secret (the inputs are low-entropy identifiers
+    /// that no hash could hide from a guesser). XxHash128 truncated to 96 bits keeps the
+    /// accidental-collision odds negligible at a fraction of SHA-256's cost on the response
+    /// path. The input is length-prefixed, so two distinct dependency sets never compose the same
+    /// bytes whatever characters the identifiers hold.</para>
     /// </summary>
     private static string BuildDependencyToken(string databaseId, StatementRoutingCandidate candidate)
     {
-        string composed = string.Concat(
-            databaseId, "|", candidate.TableId, "|", candidate.StorageId, "|",
-            candidate.ContentsGeneration.ToString(), "|", candidate.SchemaVersion.ToString());
+        string tableId = candidate.TableId;
+        string storageId = candidate.StorageId;
 
-        Span<byte> hash = stackalloc byte[32];
-        SHA256.HashData(Encoding.UTF8.GetBytes(composed), hash);
-        return Convert.ToHexString(hash[..12]);
+        // Upper bound, not exact: avoids a second UTF-8 scan of each identifier. Identifiers are a
+        // few dozen characters, so the bound fits the stack buffer in practice.
+        int maxLength = 3 * sizeof(int)
+            + Encoding.UTF8.GetMaxByteCount(databaseId.Length)
+            + Encoding.UTF8.GetMaxByteCount(tableId.Length)
+            + Encoding.UTF8.GetMaxByteCount(storageId.Length)
+            + sizeof(long) + sizeof(int);
+
+        byte[]? rented = maxLength > TokenStackBufferSize ? ArrayPool<byte>.Shared.Rent(maxLength) : null;
+        try
+        {
+            Span<byte> buffer = rented is not null ? rented : stackalloc byte[TokenStackBufferSize];
+
+            int written = WriteLengthPrefixed(buffer, databaseId);
+            written += WriteLengthPrefixed(buffer[written..], tableId);
+            written += WriteLengthPrefixed(buffer[written..], storageId);
+
+            BinaryPrimitives.WriteInt64LittleEndian(buffer[written..], candidate.ContentsGeneration);
+            written += sizeof(long);
+            BinaryPrimitives.WriteInt32LittleEndian(buffer[written..], candidate.SchemaVersion);
+            written += sizeof(int);
+
+            Span<byte> hash = stackalloc byte[16];
+            XxHash128.Hash(buffer[..written], hash);
+            return Convert.ToHexString(hash[..12]);
+        }
+        finally
+        {
+            if (rented is not null)
+                ArrayPool<byte>.Shared.Return(rented);
+        }
+    }
+
+    /// <summary>
+    /// Writes <paramref name="value"/> as a little-endian <c>int</c> UTF-8 byte length followed by
+    /// its UTF-8 bytes, and returns the number of bytes written. The caller sizes
+    /// <paramref name="destination"/> from <see cref="Encoding.GetMaxByteCount"/>.
+    /// </summary>
+    private static int WriteLengthPrefixed(Span<byte> destination, string value)
+    {
+        int byteCount = Encoding.UTF8.GetBytes(value, destination[sizeof(int)..]);
+        BinaryPrimitives.WriteInt32LittleEndian(destination, byteCount);
+        return sizeof(int) + byteCount;
     }
 }

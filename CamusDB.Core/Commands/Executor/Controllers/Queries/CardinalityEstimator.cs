@@ -290,6 +290,12 @@ internal static class CardinalityEstimator
     /// <param name="leftTable">Left table descriptor (may be null for complex left subtrees).</param>
     /// <param name="database">Database descriptor used for stats cache key.</param>
     /// <param name="stats">Statistics manager; may be null when no stats are loaded.</param>
+    /// <param name="leftIsJoinResult">
+    /// True when the left input is a join and <paramref name="leftTable"/> is the base table that
+    /// the left key comes from. A key that is unique in that table is not unique in the join: an
+    /// earlier join can repeat each of its rows. The unique-left shortcut then does not apply, and
+    /// the key's distinct count (the table row count, for a unique key) enters the NDV formula.
+    /// </param>
     public static long EstimateJoinCardinality(
         long leftRows,
         long rightRows,
@@ -298,7 +304,8 @@ internal static class CardinalityEstimator
         IReadOnlyList<string> leftKeyColumns,
         TableDescriptor? leftTable,
         DatabaseDescriptor database,
-        StatisticsManager? stats)
+        StatisticsManager? stats,
+        bool leftIsJoinResult = false)
     {
         // FK-aware: unique key on the right → at most 1 right match per left row.
         if (rightTable is not null && rightKeyColumns.Count > 0
@@ -306,7 +313,7 @@ internal static class CardinalityEstimator
             return Math.Max(1, leftRows);
 
         // FK-aware: unique key on the left → at most 1 left match per right row.
-        if (leftTable is not null && leftKeyColumns.Count > 0
+        if (!leftIsJoinResult && leftTable is not null && leftKeyColumns.Count > 0
             && IsJoinKeyUnique(leftTable, leftKeyColumns))
             return Math.Max(1, rightRows);
 
@@ -314,7 +321,9 @@ internal static class CardinalityEstimator
         if (stats is not null)
         {
             long? ndvRight = GetJoinKeyNdv(database, rightTable, rightKeyColumns, stats);
-            long? ndvLeft  = GetJoinKeyNdv(database, leftTable, leftKeyColumns, stats);
+            long? ndvLeft  = leftIsJoinResult
+                ? KeyDistinctCount(leftTable, leftKeyColumns, TableRowCount(leftTable, database, stats), database, stats)
+                : GetJoinKeyNdv(database, leftTable, leftKeyColumns, stats);
             long maxNdv = Math.Max(ndvLeft ?? 0L, ndvRight ?? 0L);
             if (maxNdv > 0)
                 return Math.Max(1, (long)((double)leftRows * rightRows / maxNdv));
@@ -322,6 +331,74 @@ internal static class CardinalityEstimator
 
         // Fallback: fixed selectivity.
         return Math.Max(1, (long)((double)leftRows * rightRows * FallbackSelectivity));
+    }
+
+    /// <summary>
+    /// Selectivity of an equi-join between two tables on the key columns of each side:
+    /// <c>1 / max(ndvLeft, ndvRight)</c>, or <see cref="FallbackSelectivity"/> when neither side
+    /// has a count. The distinct-value count of a side is its table row count when its key
+    /// columns cover a unique index, else its column or composite-key NDV.
+    ///
+    /// <para>The inputs are the tables and columns that the conjuncts name, never the shape of a
+    /// join tree, so every plan for one set of tables gets the same estimate. The join-order
+    /// enumerator needs that: it compares plans for a set and reuses the row estimate of the set.
+    /// A unique side gives the standard estimate <c>leftRows × filteredRightRows / rightTableRows</c>;
+    /// a scan filter on the unique side reduces it.</para>
+    /// </summary>
+    /// <param name="leftTable">Left table; null for a derived source, whose side then has no count.</param>
+    /// <param name="leftKeyColumns">Bare key columns of the left side, in conjunct order.</param>
+    /// <param name="leftTableRows">Unfiltered row count of the left table.</param>
+    /// <param name="rightTable">Right table; null for a derived source.</param>
+    /// <param name="rightKeyColumns">Bare key columns of the right side, paired with the left ones.</param>
+    /// <param name="rightTableRows">Unfiltered row count of the right table.</param>
+    /// <param name="database">Database descriptor used for the stats cache key.</param>
+    /// <param name="stats">Statistics manager; may be null when no stats are loaded.</param>
+    internal static double EstimateEquiJoinSelectivity(
+        TableDescriptor? leftTable,
+        IReadOnlyList<string> leftKeyColumns,
+        long leftTableRows,
+        TableDescriptor? rightTable,
+        IReadOnlyList<string> rightKeyColumns,
+        long rightTableRows,
+        DatabaseDescriptor database,
+        StatisticsManager? stats)
+    {
+        long? ndvLeft = KeyDistinctCount(leftTable, leftKeyColumns, leftTableRows, database, stats);
+        long? ndvRight = KeyDistinctCount(rightTable, rightKeyColumns, rightTableRows, database, stats);
+        long maxNdv = Math.Max(ndvLeft ?? 0L, ndvRight ?? 0L);
+
+        return maxNdv > 0 ? 1.0 / maxNdv : FallbackSelectivity;
+    }
+
+    /// <summary>
+    /// The distinct count of <paramref name="keyColumns"/> in <paramref name="table"/>: the table row
+    /// count when the columns cover a unique index, else the column or composite-key NDV, else null.
+    /// </summary>
+    internal static long? EstimateKeyDistinctCount(
+        TableDescriptor? table,
+        IReadOnlyList<string> keyColumns,
+        long tableRows,
+        DatabaseDescriptor database,
+        StatisticsManager? stats) =>
+        KeyDistinctCount(table, keyColumns, tableRows, database, stats);
+
+    private static long TableRowCount(TableDescriptor? table, DatabaseDescriptor database, StatisticsManager stats) =>
+        (table is not null ? stats.GetRowCountEstimate(database, table) : null) ?? CostEstimator.DefaultTableRowCount;
+
+    private static long? KeyDistinctCount(
+        TableDescriptor? table,
+        IReadOnlyList<string> keyColumns,
+        long tableRows,
+        DatabaseDescriptor database,
+        StatisticsManager? stats)
+    {
+        if (table is null || keyColumns.Count == 0)
+            return null;
+
+        if (IsJoinKeyUnique(table, keyColumns))
+            return Math.Max(1L, tableRows);
+
+        return stats is null ? null : GetJoinKeyNdv(database, table, keyColumns, stats);
     }
 
     /// <summary>
