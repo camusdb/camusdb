@@ -29,7 +29,7 @@ using static CamusDB.Core.Util.ObjectIds.ObjectIdGenerator;
 namespace CamusDB.Tests.Storage;
 
 /// <summary>
-/// The identity a range scan carries to Kahuna (<see cref="KvTransaction.RangeScanIdentity"/>), and
+/// The identity a range scan carries to Kahuna (<see cref="KvTransaction.RangeScanIdentityFor"/>), and
 /// the failure a scan Kahuna gives up on surfaces as.
 ///
 /// <para>A scan that carries the transaction id pins every visited key's revision server-side, and a
@@ -87,14 +87,18 @@ public sealed class TestScanIdentity
         return (node, stub, new KvTableStore(stub, CamusDBOptions.Default, "testdb", tableId));
     }
 
-    private static async Task<KvTransaction> BeginAsync(IKahuna kahuna, string uniqueId, KeyValueTransactionLocking locking = KeyValueTransactionLocking.Pessimistic)
+    private static async Task<KvTransaction> BeginAsync(
+        IKahuna kahuna,
+        string uniqueId,
+        KeyValueTransactionLocking locking = KeyValueTransactionLocking.Pessimistic,
+        CamusIsolationLevel isolation = CamusIsolationLevel.ReadCommitted)
     {
         (KeyValueResponseType type, TransactionHandle handle) = await kahuna.LocateAndStartTransaction(
             new KeyValueTransactionOptions { CoordinatorKey = uniqueId, Locking = locking },
             CancellationToken.None
         );
         Assert.AreEqual(KeyValueResponseType.Set, type);
-        return new KvTransaction(handle.TransactionId, uniqueId, locking: locking);
+        return new KvTransaction(handle.TransactionId, uniqueId, isolationLevel: isolation, locking: locking);
     }
 
     private static async Task CommitAsync(IKahuna kahuna, KvTransaction tx)
@@ -155,7 +159,7 @@ public sealed class TestScanIdentity
 
         await store.InsertRow(tx, Generate(), [2]);
         Assert.That(tx.HasPendingWrites, Is.True);
-        Assert.That(tx.RangeScanIdentity, Is.EqualTo(tx.TransactionId));
+        Assert.That(tx.RangeScanIdentityFor(store.RowKeySpace), Is.EqualTo(tx.TransactionId));
 
         Assert.That(await CountRowsAsync(store, tx), Is.EqualTo(2), "read-your-own-writes needs the transaction id");
         Assert.That(stub.ScanIdentities[1], Is.EqualTo(tx.TransactionId));
@@ -175,7 +179,7 @@ public sealed class TestScanIdentity
 
         KvTransaction tx = await BeginAsync(stub, "scan_id_occ", KeyValueTransactionLocking.Optimistic);
         Assert.That(tx.FoldReads, Is.True);
-        Assert.That(tx.RangeScanIdentity, Is.EqualTo(tx.TransactionId));
+        Assert.That(tx.RangeScanIdentityFor(store.RowKeySpace), Is.EqualTo(tx.TransactionId));
 
         Assert.That(await CountRowsAsync(store, tx), Is.EqualTo(1));
         await CommitAsync(stub, tx);
@@ -192,7 +196,7 @@ public sealed class TestScanIdentity
             CamusIsolationLevel.Serializable, CamusTransactionMode.ReadOnly,
             readTimestamp: new HLCTimestamp(0, 1_000, 0));
 
-        Assert.That(snapshot.RangeScanIdentity, Is.EqualTo(HLCTimestamp.Zero));
+        Assert.That(snapshot.RangeScanIdentityFor("any-bucket"), Is.EqualTo(HLCTimestamp.Zero));
         Assert.That(snapshot.FoldReads, Is.False);
     }
 
@@ -234,5 +238,43 @@ public sealed class TestScanIdentity
         Assert.That(ex.Message, Does.Contain("index scan"));
         Assert.That(ex.Message, Does.Contain("WaitingForReplication"));
         Assert.That(stub.ScanIdentities[0], Is.EqualTo(HLCTimestamp.Zero), "an index scan follows the same identity rule");
+    }
+
+    /// <summary>
+    /// An Exclusive lock places a write intent of the locking transaction on every resident key it covers,
+    /// and every page of a scan after the first reads at the first page's snapshot, where another
+    /// transaction's live intent makes the page wait. A scan of the locked range must therefore carry the
+    /// transaction's identity, or it waits on its own intents until Kahuna's page budget fails it. 600 rows
+    /// span two 512-row pages. A scan of a table the transaction does not hold exclusively stays untracked.
+    /// </summary>
+    [Test]
+    public async Task ScanOfARangeHeldExclusively_CarriesTheIdentity_AndReadsPastTheFirstPage()
+    {
+        (EmbeddedKahuna node, RecordingKahuna stub, KvTableStore locked) = await CreateStoreAsync("tbl_scan_id_x");
+        await using EmbeddedKahuna __ = node;
+        KvTableStore other = new(stub, CamusDBOptions.Default, "testdb", "tbl_scan_id_x_other");
+
+        KvTransaction seed = await BeginAsync(stub, "scan_id_x_seed");
+        for (int i = 0; i < 600; i++)
+            await locked.InsertRow(seed, Generate(), [1]);
+        await other.InsertRow(seed, Generate(), [1]);
+        await CommitAsync(stub, seed);
+        stub.ScanIdentities.Clear();
+
+        // Serializable read-write: the isolation at which a hash-routed table takes the row range lock.
+        KvTransaction tx = await BeginAsync(stub, "scan_id_x", isolation: CamusIsolationLevel.Serializable);
+        await locked.AcquireRowRangeLockAsync(tx, exclusive: true);
+
+        Assert.That(tx.HasPendingWrites, Is.False, "the lock writes nothing the transaction tracks as a write");
+        Assert.That(tx.HoldsExclusiveLockIn(locked.RowKeySpace), Is.True);
+        Assert.That(tx.HoldsExclusiveLockIn(other.RowKeySpace), Is.False);
+
+        Assert.That(await CountRowsAsync(locked, tx), Is.EqualTo(600));
+        Assert.That(stub.ScanIdentities[0], Is.EqualTo(tx.TransactionId));
+
+        Assert.That(await CountRowsAsync(other, tx), Is.EqualTo(1));
+        Assert.That(stub.ScanIdentities[1], Is.EqualTo(HLCTimestamp.Zero));
+
+        await CommitAsync(stub, tx);
     }
 }

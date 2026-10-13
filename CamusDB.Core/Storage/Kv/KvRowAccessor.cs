@@ -372,9 +372,10 @@ internal sealed class KvRowAccessor
             string scanCoordinatorKey = tx.FoldReads ? tx.CoordinatorKey : "";
             TransactionOperationId scanOperationId = scanCoordinatorKey.Length == 0 ? default : TransactionOperationId.NewRandom();
 
-            // The identity the scan carries is a transaction property (KvTransaction.RangeScanIdentity):
-            // the transaction id only when the scan folds reads or must see this transaction's own
-            // writes, Zero otherwise. A tracked scan pins every visited key's revision in Kahuna, and a
+            // The identity the scan carries is a transaction property (KvTransaction.RangeScanIdentityFor):
+            // the transaction id only when the scan folds reads, must see this transaction's own writes,
+            // or reads a range this transaction holds an Exclusive lock in (whose write intents are its
+            // own), Zero otherwise. A tracked scan pins every visited key's revision in Kahuna, and a
             // page retried after a transient then aborts the whole read as soon as one of those keys is
             // overwritten — a read-only aggregate on a hot table under replication lag failed with a
             // write-conflict code. An untracked scan serves each row's committed head and cannot abort.
@@ -384,7 +385,7 @@ internal sealed class KvRowAccessor
             try
             {
                 ConfiguredCancelableAsyncEnumerable<(string Key, ReadOnlyKeyValueEntry Entry)> cursor = KvScanFailure.Translate(kahuna.LocateAndScanRange(
-                        tx.RangeScanIdentity,
+                        tx.RangeScanIdentityFor(keys.RowBucketPrefix),
                         keys.RowBucketPrefix,
                         scanStartKey, startInclusive,
                         // The upper bound is exclusive when there is one; with no end key the flag carries no
@@ -447,7 +448,7 @@ internal sealed class KvRowAccessor
             // tombstone and the value it suppresses share a row id, so they are either both inside
             // the bounds or both outside — a bound can never admit one and drop the other.
             iters[0] = branch.ScanRowsRawAsync(
-                tx.RangeScanIdentity,
+                tx.RangeScanIdentityFor(keys.RowBucketPrefix),
                 tx.ReadTimestamp,
                 startHex,
                 startInclusive,

@@ -174,6 +174,15 @@ public sealed class KvTransaction
     /// acquire that replaces a Shared one keeps the same bounds.
     /// </summary>
     private HashSet<string>? wholeBucketPrefixes;
+
+    /// <summary>
+    /// The bucket prefixes in which this transaction holds at least one Exclusive range or point lock.
+    /// Kahuna places a write intent of the locking transaction on every resident key an Exclusive lock
+    /// covers, so a scan of one of these buckets meets this transaction's own intents and must carry
+    /// its identity (<see cref="RangeScanIdentityFor"/>). Only grows: no lock is released before the
+    /// transaction ends.
+    /// </summary>
+    private HashSet<string>? exclusiveLockPrefixes;
     private HashSet<(string key, KeyValueDurability durability)>? modifiedKeys;
     private Dictionary<string, SchemaVersionPin>? schemaPins;
 
@@ -375,9 +384,10 @@ public sealed class KvTransaction
          ReadValidation == ReadValidation.TrackAndValidate);
 
     /// <summary>
-    /// The Kahuna identity a <b>range scan</b> issued by this transaction carries: the
-    /// <see cref="TransactionId"/> when the scan has something to observe through it, otherwise
-    /// <see cref="HLCTimestamp.Zero"/>, which makes the scan an untracked read of committed state.
+    /// The Kahuna identity a <b>range scan</b> of <paramref name="bucketPrefix"/> issued by this
+    /// transaction carries: the <see cref="TransactionId"/> when the scan has something to observe
+    /// through it, otherwise <see cref="HLCTimestamp.Zero"/>, which makes the scan an untracked read
+    /// of committed state.
     ///
     /// <para>Kahuna treats any read that carries a transaction id as transactional MVCC: for every
     /// key the scan visits it pins the revision first observed by the transaction, and any later
@@ -389,18 +399,30 @@ public sealed class KvTransaction
     /// 365 of 399 in-window probes on a lagging cluster. It also charged the server one MVCC entry
     /// per scanned key for the life of the session.</para>
     ///
-    /// <para>The id is only meaningful to a scan in two cases, and it is carried exactly then:
+    /// <para>The id is only meaningful to a scan in three cases, and it is carried exactly then:
     /// <list type="bullet">
     ///   <item><see cref="FoldReads"/> — the transaction wants its observations folded into the
     ///   commit-time read set (optimistic locking, <see cref="ReadValidation.TrackAndValidate"/>); the
     ///   pin is then the conflict detection the transaction asked for.</item>
     ///   <item><see cref="HasPendingWrites"/> — the transaction owns live write intents and must read
     ///   its own uncommitted rows (and not the rows it deleted) through the scan.</item>
+    ///   <item>The transaction holds an Exclusive lock in <paramref name="bucketPrefix"/>. Kahuna
+    ///   places a write intent of the locking transaction on every resident key the lock covers, before
+    ///   anything is written. A scan pages through the range: the first page reads the latest state, and
+    ///   every later page reads at the snapshot the first page took, where a live intent of another
+    ///   transaction makes the page wait. An untracked scan is "another transaction" to its own
+    ///   transaction's intents, so a write-driving scan (the source of <c>INSERT … SELECT</c>, the locate
+    ///   scan of <c>UPDATE</c> and <c>DELETE</c>, which take that lock) waited on intents that only it
+    ///   could resolve, and failed after Kahuna's page retry budget once it passed one page. The pin cost
+    ///   is safe here: no other transaction can write under the Exclusive lock, so a page retry cannot
+    ///   find a key that moved.</item>
     /// </list>
     /// A read-committed statement that has written nothing yet — every autocommit <c>SELECT</c>, every
-    /// aggregate, the harness's probes and reconciliation — matches neither, so its scan carries no
+    /// aggregate, the harness's probes and reconciliation — matches none, so its scan carries no
     /// id and can never be answered with a transaction abort; it serves each row's committed head
-    /// exactly as a point read without a timestamp does.</para>
+    /// exactly as a point read without a timestamp does. The third case is per bucket on purpose: a
+    /// scan of a range this transaction does not hold exclusively meets none of its intents and stays
+    /// untracked, so it keeps that protection.</para>
     ///
     /// <para><b>What this does not change.</b> Point reads keep the transaction id: they are the
     /// read-modify-write shape, and the pin they record is what makes a later write to the same key
@@ -416,8 +438,18 @@ public sealed class KvTransaction
     /// reads has a Zero <see cref="TransactionId"/> — hence <see cref="FoldReads"/> false — until its
     /// session opens.</para>
     /// </summary>
-    public HLCTimestamp RangeScanIdentity =>
-        FoldReads || HasPendingWrites ? TransactionId : HLCTimestamp.Zero;
+    public HLCTimestamp RangeScanIdentityFor(string bucketPrefix) =>
+        FoldReads || HasPendingWrites || HoldsExclusiveLockIn(bucketPrefix) ? TransactionId : HLCTimestamp.Zero;
+
+    /// <summary>
+    /// True when this transaction holds an Exclusive range or point lock in <paramref name="bucketPrefix"/>.
+    /// See <see cref="RangeScanIdentityFor"/> for why a scan needs to know.
+    /// </summary>
+    public bool HoldsExclusiveLockIn(string bucketPrefix)
+    {
+        lock (trackSync)
+            return exclusiveLockPrefixes?.Contains(bucketPrefix) == true;
+    }
 
     /// <summary>
     /// Monotonic elapsed-time counter started when the Kahuna coordinator session begins. Used to
@@ -764,8 +796,12 @@ public sealed class KvTransaction
             acquiredRangeLocks ??= [];
 
             if (mode == RangeLockMode.Exclusive)
+            {
                 acquiredRangeLocks.Remove(
                     new RangeLockBounds(prefix, startKey, startInclusive, endKey, endInclusive, durability, RangeLockMode.Shared));
+
+                (exclusiveLockPrefixes ??= new(StringComparer.Ordinal)).Add(prefix);
+            }
 
             acquiredRangeLocks.Add(new RangeLockBounds(prefix, startKey, startInclusive, endKey, endInclusive, durability, mode));
 
