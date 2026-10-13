@@ -345,6 +345,21 @@ internal sealed class SchemaAckTracker
         return lagging;
     }
 
+    /// <summary>
+    /// The highest schema version <paramref name="node"/> acknowledged for <paramref name="database"/>
+    /// on this tracker, or null when it never acknowledged anything here. A test seam: the gate alone
+    /// cannot show that an ack from a node outside the schema partition's replica set reached the
+    /// leader, because it skips a live member that has no record at all.
+    /// </summary>
+    public long? TryGetAckedVersion(string database, string node)
+    {
+        if (!databases.TryGetValue(database, out DatabaseAcks? acks))
+            return null;
+
+        lock (acks.Sync)
+            return acks.Nodes.TryGetValue(node, out NodeAck ack) ? ack.Version : null;
+    }
+
     private readonly record struct NodeAck(long Version, DateTime LastSeen);
 
     /// <summary>

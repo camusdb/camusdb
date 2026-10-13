@@ -115,21 +115,27 @@ public sealed class InProcessSchemaDdlForwarder : ISchemaDdlForwarder, ISchemaAc
     }
 
     /// <summary>
-    /// Hands the follower's applied version to the leader's tracker. A leader that is no longer
-    /// registered — it stopped while the ack was on its way — is ignored, because the interface
-    /// makes sending best-effort and the gate's timeout is the backstop.
+    /// Hands the follower's applied version to the tracker of the node the caller named, then answers
+    /// whether that node leads the schema partition, exactly as the HTTP endpoint does. The record
+    /// is kept on a non-leader too: should it win the next election its gate starts with the
+    /// follower's progress. A target that is no longer registered, because it stopped while the ack
+    /// was on its way, answers <see cref="SchemaAckDelivery.Failed"/> so the sender resolves again.
     /// </summary>
-    public Task SendSchemaAckAsync(
+    async Task<SchemaAckDelivery> ISchemaAckSender.SendSchemaAckAsync(
         string leaderEndpoint,
         string database,
         string nodeEndpoint,
         long schemaVersion,
         CancellationToken cancellationToken)
     {
-        if (nodes.TryGet(leaderEndpoint, out InProcessClusterNode? leader))
-            leader.Node.RecordRemoteSchemaAck(database, nodeEndpoint, schemaVersion);
+        if (!nodes.TryGet(leaderEndpoint, out InProcessClusterNode? target))
+            return SchemaAckDelivery.Failed;
 
-        return Task.CompletedTask;
+        target.Node.RecordRemoteSchemaAck(database, nodeEndpoint, schemaVersion);
+
+        return await target.Node.AmISchemaLeaderAsync(database, cancellationToken).ConfigureAwait(false)
+            ? SchemaAckDelivery.Accepted
+            : SchemaAckDelivery.NotLeader;
     }
 
     private ValueTask<CommandExecutor> LeaderAsync(string leaderEndpoint, string databaseName, CancellationToken cancellationToken)

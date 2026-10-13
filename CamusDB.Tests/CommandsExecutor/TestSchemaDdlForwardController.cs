@@ -143,6 +143,55 @@ public sealed class TestSchemaDdlForwardController
         catch { }
     }
 
+    // ── Schema ack endpoint ───────────────────────────────────────────────────
+
+    [Test]
+    public async Task ForwardSchemaAck_OnTheSchemaLeader_RecordsTheAckAndAnswersOk()
+    {
+        string dbname = await CreateTestDatabaseAsync();
+        try
+        {
+            DatabaseDescriptor database = await executor!.OpenDatabase(dbname);
+            string body = JsonSerializer.Serialize(new SchemaAckRequest
+            {
+                Database = database.Id,
+                NodeEndpoint = "peer:1",
+                AppliedSchemaVersion = 3,
+            }, JsonOpts);
+
+            JsonResult result = await BuildController(body, clusterNode: node).ForwardSchemaAck();
+
+            Assert.AreEqual("ok", ExtractResponse(result)!.Status);
+            Assert.AreEqual(3, node!.GetRecordedSchemaAck(database.Id, "peer:1"),
+                "The leader must record the follower's applied version");
+        }
+        finally
+        {
+            await DropTestDatabaseAsync(dbname);
+        }
+    }
+
+    /// <summary>
+    /// A node that is not the schema leader answers not-leader so the sender walks on to the leader:
+    /// an ack recorded in silence on the wrong node never reaches the leader's gate. Without a cluster
+    /// node the endpoint cannot be the leader of anything.
+    /// </summary>
+    [Test]
+    public async Task ForwardSchemaAck_WithoutAClusterNode_AnswersNotLeader()
+    {
+        string body = JsonSerializer.Serialize(new SchemaAckRequest
+        {
+            Database = "1",
+            NodeEndpoint = "peer:1",
+            AppliedSchemaVersion = 3,
+        }, JsonOpts);
+
+        JsonResult result = await BuildController(body, clusterNode: null).ForwardSchemaAck();
+
+        Assert.AreEqual((int)System.Net.HttpStatusCode.ServiceUnavailable, result.StatusCode);
+        Assert.AreEqual("not-leader", ExtractResponse(result)!.Status);
+    }
+
     // ── Leader gate ───────────────────────────────────────────────────────────
 
     [Test]

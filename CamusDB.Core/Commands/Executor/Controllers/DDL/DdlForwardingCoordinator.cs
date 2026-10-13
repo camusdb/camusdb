@@ -189,14 +189,30 @@ internal sealed class DdlForwardingCoordinator
             // the committed replica set instead.
             HashSet<string>? refuted = null;
             IReadOnlyList<string> replicas = database.Kahuna.SchemaLogReplicaEndpoints(database.Id);
+            string localEndpoint = database.Kahuna.Raft.GetLocalEndpoint();
             int attempts = Math.Max(3, replicas.Count + 1);
 
             for (int attempt = 0; attempt < attempts; attempt++)
             {
-                string? leader = await database.Kahuna.WaitForSchemaLeaderAsync(database.Id, CancellationToken.None).ConfigureAwait(false);
+                string leader = await database.Kahuna.WaitForSchemaLeaderAsync(database.Id, CancellationToken.None).ConfigureAwait(false);
 
-                if (refuted is not null && refuted.Contains(leader))
-                    leader = NextUntriedReplica(replicas, refuted) ?? leader;
+                if ((refuted is not null && refuted.Contains(leader)) || string.Equals(leader, localEndpoint, StringComparison.Ordinal))
+                    leader = NextUntriedReplica(replicas, refuted, localEndpoint) ?? leader;
+
+                if (string.Equals(leader, localEndpoint, StringComparison.Ordinal))
+                {
+                    // This node is the only candidate left, yet the leadership check above said it does
+                    // not lead. A forward to itself would re-enter this method for the same database and
+                    // wait on the DDL semaphore this call holds: a deadlock that only the transport
+                    // timeout ends, which is how a forwarded DDL once took 100 s. Either leadership
+                    // arrived meanwhile, and the ticket runs here, or the view is stale, and the next
+                    // attempt resolves again after a short pause.
+                    if (await database.Kahuna.AmISchemaLeaderAsync(database.Id, CancellationToken.None).ConfigureAwait(false))
+                        return null;
+
+                    await Task.Delay(100).ConfigureAwait(false);
+                    continue;
+                }
 
                 bool? result = await forward(leader, operationId, CancellationToken.None).ConfigureAwait(false);
                 if (result is not null)
@@ -221,11 +237,19 @@ internal sealed class DdlForwardingCoordinator
         );
     }
 
-    private static string? NextUntriedReplica(IReadOnlyList<string> replicas, HashSet<string> refuted)
+    /// <summary>
+    /// The first replica that neither refused the ticket nor is this node. The local node is never a
+    /// forward target: the caller already knows it does not lead, and a forward to itself deadlocks on
+    /// the DDL semaphore the caller holds.
+    /// </summary>
+    private static string? NextUntriedReplica(IReadOnlyList<string> replicas, HashSet<string>? refuted, string localEndpoint)
     {
         foreach (string replica in replicas)
         {
-            if (!refuted.Contains(replica))
+            if (string.Equals(replica, localEndpoint, StringComparison.Ordinal))
+                continue;
+
+            if (refuted is null || !refuted.Contains(replica))
                 return replica;
         }
 

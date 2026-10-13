@@ -369,6 +369,18 @@ Leader SchemaDdlForwardController
   then consults the op-id cache before executing. A leadership change between the check and
   execution surfaces as a typed error and the client re-forwards to the new leader — a finite,
   retry-bounded chain.
+  - **The check keys by the database id.** The schema log lives on the partition of `{id}/meta`
+    (§5.1); the database *name* hashes to a different partition, which has a different leader
+    under leader balancing and may not be hosted at all under replica placement (§6.5). The
+    controller opens the database to learn its id before it asks. A name-keyed check refused the
+    real leader, so every forward ended in CADB0099 until a client reached the leader directly,
+    and accepted a node that was not the leader, which then forwarded the ticket again.
+  - **A node never forwards to itself.** `TryForwardDdlAsync` holds the database's
+    `SchemaDdlSemaphore` while it waits for the leader's answer. A forward that lands back on the
+    same node re-enters that path and waits on the held semaphore, so the request only ends when
+    the HTTP client gives up (100 s). The walk over the replica set after a refusal therefore
+    skips the local endpoint; when it is the only candidate left, the coordinator re-checks its
+    own leadership and either runs the ticket locally or resolves again after a pause.
 - **`DdlOperationIdCache`** (`CamusDB/App/Services`) is the two-layer dedup: a stable op id
   makes a lost-response retry replay the prior result instead of bumping the schema version
   twice, and an in-flight reservation collapses concurrent duplicates. This is the
@@ -660,6 +672,16 @@ persists `{db}/meta/*` after every committed delta and before it answers a forwa
   loaded version for the same reason.
 - `DdlForwardingCoordinator.WaitForForwardedSchemaApplyAsync` reloads the checkpoint instead of
   polling for a Raft delivery that cannot come, so the forwarding node still reads its own write.
+- **The ack walks the replica set too.** The node's acknowledgement goes to the leader it can
+  name, which is the first voter until a gossiped hint forms and a stale hint after a leader
+  transfer. The `schema-ack` endpoint records the ack and answers 503 not-leader when the
+  receiving node does not lead the schema partition (keyed by the database id the request
+  carries); `ISchemaAckSender` reports that as `SchemaAckDelivery.NotLeader`, and
+  `PublishSchemaAckWithRetryAsync` moves to the next replica that has not refused, starting the
+  walk over once every replica has (an election in progress). A transport failure is
+  `SchemaAckDelivery.Failed` and is retried after the leader is resolved again. Before this, an
+  ack recorded in silence on the wrong replica never reached the leader, whose gate (§6.2) then
+  skipped the node, so the two-version invariant did not cover nodes outside the replica set.
 - `ClusterSettingsService` probes the settings generation stamp on the same cadence and re-scans
   the per-key checkpoint when it moved; a forwarded change re-scans on return.
 
