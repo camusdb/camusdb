@@ -62,9 +62,27 @@ public sealed class TestKvTableStoreRowIdCache
     private static CompositeColumnValue Key(long value) => new([new ColumnValue(ColumnType.Integer64, value)]);
 
     [Test]
-    public async Task OffByDefault_TheStoreRemembersNothing()
+    public async Task OnByDefault_TheStoreRemembersRowIds()
     {
-        (EmbeddedKahuna node, KvTableStore store) = await CreateStoreAsync("rc-off", CamusDBOptions.Default);
+        (EmbeddedKahuna node, KvTableStore store) = await CreateStoreAsync("rc-default", CamusDBOptions.Default);
+        await using EmbeddedKahuna __ = node;
+
+        Assert.That(CamusDBOptions.Default.PointReadRowIdCacheEnabled, Is.True, "the cache ships on");
+        Assert.That(store.RemembersUniqueRowIds, Is.True);
+
+        KvTransaction tx = await BeginTransaction(node.Kahuna, "rc-default-put");
+        await store.PutIndexEntry(tx, PrimaryKey, Key(1), new ObjectIdValue(1, 0, 0), unique: true);
+        await CommitTransaction(node.Kahuna, tx);
+
+        Assert.That(await store.LookupUnique(KvTransaction.CreateReadOnly(), PrimaryKey, Key(1)), Is.Not.Null);
+        Assert.That(store.RememberedUniqueRowIds, Is.EqualTo(1));
+    }
+
+    [Test]
+    public async Task ExplicitFalse_TheStoreRemembersNothing()
+    {
+        CamusDBOptions cacheOff = CamusDBOptions.Default with { PointReadRowIdCacheEnabled = false };
+        (EmbeddedKahuna node, KvTableStore store) = await CreateStoreAsync("rc-off", cacheOff);
         await using EmbeddedKahuna __ = node;
 
         Assert.That(store.RemembersUniqueRowIds, Is.False);

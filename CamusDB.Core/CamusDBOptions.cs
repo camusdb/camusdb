@@ -1846,11 +1846,12 @@ public sealed record CamusDBOptions
     /// first: one KV read per point SELECT or UPDATE locate instead of two. A row id is allocated once
     /// and never reused and a primary key cannot change, so a remembered mapping can only be stale by
     /// pointing at a deleted row, which the row read reports; the lookup then falls back to the index
-    /// read and forgets the entry. Root databases only. Default <c>false</c> while the gain is being
-    /// measured. Set via <c>point_read_row_id_cache_enabled</c> in <c>config.yml</c>.
+    /// read and forgets the entry. Root databases only. Default <c>true</c>: measured at +4-8% ops/s on
+    /// the cluster bank workload and qualified by the two-hour fault soak with kills, pauses and slow
+    /// disks. Set <c>point_read_row_id_cache_enabled: false</c> in <c>config.yml</c> to turn it off.
     /// </summary>
     [ConfigSetting(ConfigMutability.Restart, ConfigScope.Node)]
-    public bool PointReadRowIdCacheEnabled { get; init; } = false;
+    public bool PointReadRowIdCacheEnabled { get; init; } = true;
 
     /// <summary>
     /// Maximum remembered key → row-id mappings per table on this node. The cache is cleared when the

@@ -80,7 +80,7 @@ Example: YAML `mode: cluster` with `--mode standalone` starts in standalone mode
 | `spill_threshold_rows` | — | `500000` |
 | `spill_merge_fan_in` | — | `16` |
 | `spill_max_total_bytes` | — | `8589934592` (8 GiB; `<= 0` = no limit) |
-| `point_read_row_id_cache_enabled` | — | `false` (a primary-key point lookup remembers its row id and skips the index read next time; root databases only) |
+| `point_read_row_id_cache_enabled` | — | `true` (a primary-key point lookup remembers its row id and skips the index read next time; root databases only. A row id is never reused and a primary key never changes, so a remembered mapping can only point at a deleted row, which the row read detects before falling back to the index. Set `false` to turn it off) |
 | `point_read_row_id_cache_max_entries` | — | `1000000` |
 | `query_result_cache_enabled` | — | `true` |
 | `query_result_cache_default_ttl_ms` | — | `5000` |
