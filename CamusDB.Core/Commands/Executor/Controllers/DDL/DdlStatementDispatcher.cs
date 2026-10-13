@@ -195,7 +195,7 @@ internal sealed class DdlStatementDispatcher
         activity?.Describe(ast.nodeType);
 
         statementAuthorizer.SetAuthorizationScope(ticket, ast);
-        ticket = SessionScalarFunctions.AttachSessionValues(ticket, ast);
+        ticket = StatementScopedValues.Attach(ticket, ast);
         await statementAuthorizer.EnforceAsync(ticket, ast).ConfigureAwait(false);
 
         using ServerDiagnostics.ExecuteScope executeScope = ServerDiagnostics.MeasureExecute(

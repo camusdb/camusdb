@@ -133,6 +133,7 @@ internal sealed class RowCommandService
         List<Dictionary<string, ColumnValue>> rows = new(ticket.Values.Count);
         InsertRowShaper[] shapers = new InsertRowShaper[ticket.Values.Count];
         List<string> sequenceDemand = [];
+        bool defaultsReadStatementClock = false;
 
         InsertRowShaper? previous = null;
 
@@ -165,6 +166,7 @@ internal sealed class RowCommandService
             previous = shaper;
             shapers[i] = shaper;
             sequenceDemand.AddRange(shaper.DefaultSequenceIds);
+            defaultsReadStatementClock |= shaper.DefaultsReadStatementClock;
             rows.Add(row);
         }
 
@@ -179,6 +181,11 @@ internal sealed class RowCommandService
             defaultSequenceIds: sequenceDemand,
             statementKind: "INSERT",
             CancellationToken.None).ConfigureAwait(false);
+
+        // A clock default (DEFAULT now()) reads the transaction time from the parameters, so every row
+        // of the batch takes one time.
+        if (defaultsReadStatementClock)
+            bound = Functions.ClockScalarFunctions.AttachStatementClock(bound);
 
         for (int i = 0; i < rows.Count; i++)
             shapers[i].ApplyOmittedDefaults(rows[i], bound.Parameters);

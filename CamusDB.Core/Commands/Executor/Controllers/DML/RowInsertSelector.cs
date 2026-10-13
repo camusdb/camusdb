@@ -152,6 +152,13 @@ internal sealed class RowInsertSelector
             statementKind: "INSERT ... SELECT",
             statementTicket.CancellationToken).ConfigureAwait(false);
 
+        // A clock default is not in the statement's AST. When the statement text calls a clock function,
+        // the dispatcher attached the times already and the default keeps them; otherwise they are
+        // attached here, once, so every row takes one time. Either way the transaction time is the
+        // one the source query read.
+        if (shaper.DefaultsReadStatementClock)
+            bound = Functions.ClockScalarFunctions.AttachStatementClock(bound);
+
         List<Dictionary<string, ColumnValue>> rows = new(sourceRows.Count);
 
         foreach (ColumnValue?[] slots in sourceRows)

@@ -74,6 +74,35 @@ internal static class ScalarFunctionEvaluator
         => NodeAstWalk.Any(ast, IsSessionScopedCall);
 
     /// <summary>
+    /// Returns <c>true</c> if <paramref name="ast"/> or any descendant calls a function that reports
+    /// the start of the transaction or of the statement (<c>now()</c>, <c>current_date()</c>,
+    /// <c>statement_timestamp()</c> and the others in <see cref="ClockScalarFunctions"/>). The SQL
+    /// entry points use it to decide whether a statement needs those times attached to its
+    /// parameters, so, as for <see cref="ContainsSessionScopedFunction"/>, it must be answered against
+    /// the view-expanded AST.
+    /// </summary>
+    internal static bool ContainsStatementClockFunction(NodeAst? ast)
+        => NodeAstWalk.Any(ast, IsStatementClockCall);
+
+    /// <summary>
+    /// Returns <c>true</c> if <paramref name="ast"/> or any descendant calls a function that reads a
+    /// value of the statement rather than of the rows: a session function or a clock function. One
+    /// walk that lets <see cref="StatementScopedValues.Attach"/> skip both per-kind walks for the
+    /// statements that call neither.
+    /// </summary>
+    internal static bool ContainsStatementScopedFunction(NodeAst? ast)
+        => NodeAstWalk.Any(ast, IsStatementScopedCall);
+
+    /// <summary>
+    /// True when <paramref name="functionName"/> reports the start of the transaction or of the
+    /// statement. The insert paths use it to decide whether a function default needs those times.
+    /// </summary>
+    internal static bool IsStatementClockFunction(string functionName)
+    {
+        return Registry.TryGet(functionName, out ScalarFunctionDescriptor? descriptor) && descriptor.ReadsStatementClock;
+    }
+
+    /// <summary>
     /// True when <paramref name="functionName"/> reports the session it runs in
     /// (<c>current_database</c>, <c>current_user</c>, <c>current_role</c>). Used by DDL to explain why
     /// such a call cannot be frozen into a schema element such as a column default.
@@ -91,8 +120,10 @@ internal static class ScalarFunctionEvaluator
     /// <summary>
     /// Returns <c>true</c> if <paramref name="ast"/> or any descendant contains a call to a
     /// volatile scalar function (one whose result changes across evaluations: <c>random</c>,
-    /// <c>now</c>/<c>current_timestamp</c>, <c>current_date</c>, <c>unix_timestamp</c>,
-    /// <c>gen_id</c>). Used to gate cache eligibility: a query whose projection, WHERE,
+    /// <c>now</c>/<c>current_timestamp</c>, <c>statement_timestamp</c>, <c>clock_timestamp</c>,
+    /// <c>current_date</c>, <c>unix_timestamp</c>, <c>gen_id</c>). The clock functions are fixed
+    /// within a transaction or a statement, but not between two, so they are volatile here too.
+    /// Used to gate cache eligibility: a query whose projection, WHERE,
     /// HAVING, or GROUP BY contains a volatile call must bypass the result cache.
     ///
     /// <para><b>Registration invariant:</b> correctness depends on every volatile function
@@ -107,6 +138,12 @@ internal static class ScalarFunctionEvaluator
 
     private static bool IsSessionScopedCall(NodeAst node)
         => TryGetCalledDescriptor(node, out ScalarFunctionDescriptor? d) && d!.IsSessionScoped;
+
+    private static bool IsStatementClockCall(NodeAst node)
+        => TryGetCalledDescriptor(node, out ScalarFunctionDescriptor? d) && d!.ReadsStatementClock;
+
+    private static bool IsStatementScopedCall(NodeAst node)
+        => TryGetCalledDescriptor(node, out ScalarFunctionDescriptor? d) && (d!.IsSessionScoped || d.ReadsStatementClock);
 
     private static bool IsVolatileCall(NodeAst node)
         => TryGetCalledDescriptor(node, out ScalarFunctionDescriptor? d) && d!.IsVolatile;
@@ -155,14 +192,26 @@ internal static class ScalarFunctionEvaluator
     }
 
     /// <summary>
-    /// Evaluates a zero-argument scalar function by name, producing a fresh value. Used to apply a
-    /// function-call column default per inserted row. Assumes the name was validated via
+    /// Evaluates a zero-argument scalar function by name. Used to apply a function-call column
+    /// default per inserted row. Assumes the name was validated via
     /// <see cref="TryResolveVolatileNullary"/> at DDL time.
+    ///
+    /// <para>A per-row generator (<c>gen_uuid_v7()</c>) gives each call a fresh value. A clock
+    /// function (<c>now()</c>) reads the times in <paramref name="parameters"/> instead, so every
+    /// row of one statement takes the same default, and the default agrees with an explicit
+    /// <c>now()</c> in the same statement. The caller attaches the times when
+    /// <see cref="IsStatementClockFunction"/> says the default needs them.</para>
     /// </summary>
-    internal static ColumnValue EvaluateNullary(string functionName)
+    internal static ColumnValue EvaluateNullary(string functionName, Dictionary<string, ColumnValue>? parameters)
     {
         if (!Registry.TryGet(functionName, out ScalarFunctionDescriptor? descriptor))
             throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Default function not found: " + functionName);
+
+        // Only a clock function reads the statement here. A sequence function that passed the DDL
+        // check keeps its old path, which refuses: a default draws from a sequence through
+        // DefaultSequenceId, not through a call.
+        if (descriptor.ReadsStatementClock)
+            return descriptor.StatementEvaluator!(functionName, [], parameters);
 
         return descriptor.Evaluator(functionName, []);
     }

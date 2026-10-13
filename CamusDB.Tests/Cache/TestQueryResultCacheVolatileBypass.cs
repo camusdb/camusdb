@@ -23,8 +23,9 @@ namespace CamusDB.Tests.Cache;
 /// Verifies that queries containing volatile scalar functions bypass the result cache
 /// rather than publishing a result that would be incorrectly replayed on warm reads.
 ///
-/// Volatile functions: <c>random</c>, <c>now</c>/<c>current_timestamp</c>,
-/// <c>current_date</c>, <c>unix_timestamp</c>, <c>gen_id</c>.
+/// Volatile functions: <c>random</c>, <c>now</c>/<c>current_timestamp</c>/<c>transaction_timestamp</c>,
+/// <c>statement_timestamp</c>, <c>clock_timestamp</c>/<c>sysdate</c>, <c>current_date</c>,
+/// <c>unix_timestamp</c>, <c>gen_id</c>.
 /// Every hinted query that invokes any of these must report
 /// <see cref="QueryCacheStatus.Bypass"/> with
 /// <see cref="QueryCacheBypassReason.NonDeterministic"/> on every execution, including
@@ -178,6 +179,32 @@ public sealed class TestQueryResultCacheVolatileBypass : CommandsExecutor.BaseTe
 
         Assert.That(meta.Status, Is.EqualTo(QueryCacheStatus.Bypass));
         Assert.That(meta.BypassReason, Is.EqualTo(QueryCacheBypassReason.NonDeterministic));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // The other clock functions → bypass. transaction_timestamp() and
+    // statement_timestamp() are fixed within a statement but not between two, and
+    // clock_timestamp() / sysdate() change on each call.
+    // ─────────────────────────────────────────────────────────────────────────
+
+    [TestCase("transaction_timestamp")]
+    [TestCase("statement_timestamp")]
+    [TestCase("clock_timestamp")]
+    [TestCase("sysdate")]
+    public async Task ClockFunctionInProjection_BypassesCache(string function)
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+        await CreateRobotsTable(dbname, database, executor);
+        await InsertRobot(dbname, database, executor, "r5b", 55);
+
+        string sql = $"SELECT id, {function}() FROM robots{{cache=volatile_{function}}}";
+
+        CacheMetadataHolder first = await RunHintedQuery(dbname, executor, sql);
+        CacheMetadataHolder second = await RunHintedQuery(dbname, executor, sql);
+
+        Assert.That(first.Status, Is.EqualTo(QueryCacheStatus.Bypass));
+        Assert.That(first.BypassReason, Is.EqualTo(QueryCacheBypassReason.NonDeterministic));
+        Assert.That(second.Status, Is.EqualTo(QueryCacheStatus.Bypass));
     }
 
     // ─────────────────────────────────────────────────────────────────────────

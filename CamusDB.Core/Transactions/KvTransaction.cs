@@ -573,8 +573,48 @@ public sealed class KvTransaction
         Locking = locking;
         ReadValidation = readValidation;
         Priority = priority;
+        StartTime = ComputeStartTime(transactionId, ClientId, readTimestamp);
         if (transactionId != HLCTimestamp.Zero)
             lifetimeWatch = Stopwatch.StartNew();
+    }
+
+    /// <summary>
+    /// The instant this transaction started, in UTC. It is what <c>now()</c>,
+    /// <c>current_timestamp()</c>, <c>transaction_timestamp()</c>, <c>current_date()</c> and a
+    /// no-argument <c>unix_timestamp()</c> report for every statement of the transaction, so that
+    /// every row a transaction writes or reads in one statement, and every statement of an explicit
+    /// <c>BEGIN … COMMIT</c>, sees one time.
+    ///
+    /// <para><b>Why it is the later of the wall clock and the transaction's HLCs.</b> The physical
+    /// part of a hybrid logical clock is Unix milliseconds, so an HLC alone would drop the
+    /// sub-millisecond part of every <c>now()</c>. The wall clock alone would lose the causal
+    /// order: a node whose clock is behind could stamp a transaction that runs after another
+    /// node's transaction with an earlier time. The HLC of a session minted by another node, or a
+    /// local HLC advanced by replication, is never behind the clocks it heard from. Taking the later
+    /// value keeps the full tick precision when the local clock is ahead, and keeps the causal
+    /// order to the millisecond when it is not.</para>
+    ///
+    /// <para>Fixed at construction and never changed. A retried transaction is a new
+    /// <see cref="KvTransaction"/>, so its retry reports a new time, as PostgreSQL does. A
+    /// zero-identity read-only transaction has no HLC and takes the wall clock.</para>
+    /// </summary>
+    public DateTime StartTime { get; }
+
+    /// <summary>The number of Unix milliseconds that still fit in a <see cref="DateTime"/>.</summary>
+    private static readonly long MaxUnixMilliseconds =
+        (DateTime.MaxValue.Ticks - DateTime.UnixEpoch.Ticks) / TimeSpan.TicksPerMillisecond;
+
+    private static DateTime ComputeStartTime(HLCTimestamp transactionId, HLCTimestamp clientId, HLCTimestamp readTimestamp)
+    {
+        long ticks = DateTime.UtcNow.Ticks;
+        long hlcMilliseconds = Math.Max(transactionId.L, Math.Max(clientId.L, readTimestamp.L));
+
+        // A physical part out of the DateTime range is not a time (a hand-built test identity, for
+        // instance); the wall clock is the only value left to report then.
+        if (hlcMilliseconds > 0 && hlcMilliseconds <= MaxUnixMilliseconds)
+            ticks = Math.Max(ticks, DateTime.UnixEpoch.Ticks + hlcMilliseconds * TimeSpan.TicksPerMillisecond);
+
+        return new DateTime(ticks, DateTimeKind.Utc);
     }
 
     /// <summary>

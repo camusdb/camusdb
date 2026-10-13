@@ -21,8 +21,12 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.DDL;
 /// both standalone and cluster mode.
 ///
 /// <para><b>Each such row gets the value an INSERT would give it.</b> A constant default is copied, a
-/// function default (<c>now()</c>, <c>gen_uuid_v7()</c>) is evaluated once for each row, and a sequence
-/// default (<c>DEFAULT nextval('…')</c>, <c>GENERATED … AS IDENTITY</c>) draws one value for each row.
+/// per-row function default (<c>gen_uuid_v7()</c>) is evaluated once for each row, and a sequence
+/// default (<c>DEFAULT nextval('…')</c>, <c>GENERATED … AS IDENTITY</c>) draws one value for each row. A
+/// clock default (<c>now()</c>) gives every row the time the fill started, as one INSERT of all the rows
+/// would give them one time. The fill commits in many batch transactions, so it cannot use the time of
+/// any one of them. A fill that a new leader resumes takes its own start time for the rows that are
+/// left.
 /// A NOT NULL column whose fill is NULL fails with <see cref="CamusDBErrorCodes.NotNullViolation"/>, so
 /// the column is never published over a NULL it forbids.</para>
 ///
@@ -98,6 +102,11 @@ public sealed class TableColumnAdder
 
         ColumnFill fill = new(column);
         ObjectIdValue? afterRowId = null;
+
+        Dictionary<string, ColumnValue>? clockParameters =
+            column.DefaultFunction is { } function && ScalarFunctionEvaluator.IsStatementClockFunction(function)
+                ? ClockScalarFunctions.CreateFixedClock(DateTime.UtcNow)
+                : null;
         int modifiedRows = 0;
 
         while (true)
@@ -112,7 +121,7 @@ public sealed class TableColumnAdder
                 await intercept().ConfigureAwait(false);
 
             modifiedRows += await SerializableRetryHelper.ExecuteAutocommitAsync(
-                _ => FillBatchAsync(database, table, fill, rowIds, cancellationToken),
+                _ => FillBatchAsync(database, table, fill, rowIds, clockParameters, cancellationToken),
                 canRetry: static () => true,
                 maxAttempts: BatchAttempts,
                 cancellationToken: cancellationToken).ConfigureAwait(false);
@@ -185,11 +194,13 @@ public sealed class TableColumnAdder
     /// One batch in its own transaction: locks the rows, reads them, fills those that need a value, writes
     /// them and commits. Returns the number of rows written.
     /// </summary>
+    /// <param name="clockParameters">The fill's fixed time for a clock default, or null for any other default.</param>
     private async Task<int> FillBatchAsync(
         DatabaseDescriptor database,
         TableDescriptor table,
         ColumnFill fill,
         List<ObjectIdValue> rowIds,
+        Dictionary<string, ColumnValue>? clockParameters,
         CancellationToken cancellationToken)
     {
         KvTransaction tx = await database.Transactions.BeginAsync(
@@ -221,7 +232,7 @@ public sealed class TableColumnAdder
 
             if (pending.Count > 0)
             {
-                await AssignValuesAsync(database, table, fill.Column, tx, pending).ConfigureAwait(false);
+                await AssignValuesAsync(database, table, fill.Column, tx, pending, clockParameters).ConfigureAwait(false);
                 await StoredRowRewriter.RewriteAsync(database, table, tx, pending).ConfigureAwait(false);
             }
 
@@ -238,14 +249,16 @@ public sealed class TableColumnAdder
 
     /// <summary>
     /// Writes the column's value into each row of <paramref name="pending"/>. A sequence default draws
-    /// one reservation for the batch, sized to the rows that take a value.
+    /// one reservation for the batch, sized to the rows that take a value. A clock default reads
+    /// <paramref name="clockParameters"/>, the same time for every batch of the fill.
     /// </summary>
     private async Task AssignValuesAsync(
         DatabaseDescriptor database,
         TableDescriptor table,
         TableColumnSchema column,
         KvTransaction tx,
-        List<(ObjectIdValue RowId, IReadOnlyDictionary<string, ColumnValue> Values)> pending)
+        List<(ObjectIdValue RowId, IReadOnlyDictionary<string, ColumnValue> Values)> pending,
+        Dictionary<string, ColumnValue>? clockParameters)
     {
         Dictionary<string, ColumnValue>? sequenceRun = null;
 
@@ -266,7 +279,7 @@ public sealed class TableColumnAdder
             ColumnValue value = column.DefaultSequenceId is { } drawFrom
                 ? SequenceDefaults.TakeNextValue(drawFrom, column.Name, sequenceRun)
                 : column.DefaultFunction is { } function
-                    ? ScalarFunctionEvaluator.EvaluateNullary(function)
+                    ? ScalarFunctionEvaluator.EvaluateNullary(function, clockParameters)
                     : column.DefaultValue ?? ColumnValue.Null;
 
             if (column.NotNull && value.Type == ColumnType.Null)

@@ -16,7 +16,8 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Functions;
 /// <summary>
 /// The date and time scalar functions: <c>date_part</c> (and <c>EXTRACT</c>, which the parser turns
 /// into a call to it), <c>date_trunc</c>, <c>date_add</c>, <c>date_diff</c>, the MySQL one-argument
-/// shortcuts (<c>year(x)</c>, <c>dayofweek(x)</c>, ...), and the clock and unix-time functions.
+/// shortcuts (<c>year(x)</c>, <c>dayofweek(x)</c>, ...), and the unix-time functions. The functions
+/// that report the current time are in <see cref="ClockScalarFunctions"/>.
 /// </summary>
 /// <remarks>
 /// <para>Every unit is computed on the UTC value. A string argument must carry an explicit offset,
@@ -52,27 +53,6 @@ internal static class DateTimeScalarFunctions
 
     public static void Register(ScalarFunctionRegistry registry)
     {
-        registry.Register(new ScalarFunctionDescriptor
-        {
-            Name = "current_timestamp",
-            Aliases = ["now"],
-            MinArity = 0,
-            MaxArity = 0,
-            IsVolatile = true,
-            Evaluator = EvaluateCurrentTimestamp,
-            InferReturnType = _ => ColumnType.DateTime,
-        });
-
-        registry.Register(new ScalarFunctionDescriptor
-        {
-            Name = "current_date",
-            MinArity = 0,
-            MaxArity = 0,
-            IsVolatile = true,
-            Evaluator = EvaluateCurrentDate,
-            InferReturnType = _ => ColumnType.Date,
-        });
-
         // date_add always infers DateTime: the Date-vs-DateTime promotion rule (Date+subday→DateTime,
         // Date+day→Date) requires knowing the unit value at plan time, which InferReturnType cannot do
         // (it only sees argument types). Widening to DateTime keeps Evaluator and InferReturnType in agreement.
@@ -92,13 +72,17 @@ internal static class DateTimeScalarFunctions
 
         RegisterBinary(registry, "date_trunc", EvaluateDateTrunc, _ => ColumnType.DateTime);
 
+        // With no argument it reports the start of the transaction, as now() does, so it reads the
+        // statement's times; with one it converts its argument.
         registry.Register(new ScalarFunctionDescriptor
         {
             Name = "unix_timestamp",
             MinArity = 0,
             MaxArity = 1,
             IsVolatile = true,
-            Evaluator = EvaluateUnixTimestamp,
+            ReadsStatementClock = true,
+            StatementEvaluator = EvaluateUnixTimestamp,
+            Evaluator = static (calledName, arguments) => EvaluateUnixTimestamp(calledName, arguments, null),
             InferReturnType = _ => ColumnType.Integer64,
         });
 
@@ -213,16 +197,6 @@ internal static class DateTimeScalarFunctions
             Evaluator = evaluator,
             InferReturnType = inferReturnType,
         });
-    }
-
-    private static ColumnValue EvaluateCurrentTimestamp(string calledName, IReadOnlyList<ColumnValue> arguments)
-    {
-        return MakeDateTime(DateTimeOffset.UtcNow);
-    }
-
-    private static ColumnValue EvaluateCurrentDate(string calledName, IReadOnlyList<ColumnValue> arguments)
-    {
-        return MakeDate(DateTimeOffset.UtcNow);
     }
 
     private static ColumnValue EvaluateDateAdd(string calledName, IReadOnlyList<ColumnValue> arguments)
@@ -385,10 +359,14 @@ internal static class DateTimeScalarFunctions
         return MakeDateTime(truncated);
     }
 
-    private static ColumnValue EvaluateUnixTimestamp(string calledName, IReadOnlyList<ColumnValue> arguments)
+    private static ColumnValue EvaluateUnixTimestamp(
+        string calledName, IReadOnlyList<ColumnValue> arguments, Dictionary<string, ColumnValue>? parameters)
     {
         if (arguments.Count == 0)
-            return new ColumnValue(ColumnType.Integer64, DateTimeOffset.UtcNow.ToUnixTimeSeconds());
+        {
+            DateTime transactionStart = ClockScalarFunctions.ReadTransactionTime(calledName, parameters);
+            return new ColumnValue(ColumnType.Integer64, new DateTimeOffset(transactionStart).ToUnixTimeSeconds());
+        }
 
         if (PropagateNull(arguments) is ColumnValue nullResult)
             return nullResult;
@@ -431,9 +409,6 @@ internal static class DateTimeScalarFunctions
 
     private static ColumnValue MakeDateTime(DateTimeOffset value)
         => new(ColumnType.DateTime, value.ToUniversalTime().Ticks);
-
-    private static ColumnValue MakeDate(DateTimeOffset value)
-        => new(ColumnType.Date, value.ToUniversalTime().Date.Ticks);
 
     private static DateTimeOffset ApplyDateAdd(
         string calledName,

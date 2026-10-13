@@ -58,18 +58,28 @@ internal sealed class InsertRowShaper
     /// </summary>
     public IReadOnlyList<string> DefaultSequenceIds { get; }
 
+    /// <summary>
+    /// True when an omitted default is a clock function (<c>DEFAULT now()</c>). The insert path then
+    /// attaches the transaction and statement times to the parameters it shapes the rows with
+    /// (<see cref="Functions.ClockScalarFunctions.AttachStatementClock(Models.Tickets.ExecuteSQLTicket)"/>),
+    /// so every row of the statement takes the same default time.
+    /// </summary>
+    public bool DefaultsReadStatementClock { get; }
+
     private InsertRowShaper(
         IReadOnlyList<string> fields,
         (TableColumnSchema?, ColumnValue)[] fieldMeta,
         bool[]? ignoredFields,
         List<TableColumnSchema> extraDefaults,
-        IReadOnlyList<string> defaultSequenceIds)
+        IReadOnlyList<string> defaultSequenceIds,
+        bool defaultsReadStatementClock)
     {
         this.fields = fields;
         this.fieldMeta = fieldMeta;
         this.ignoredFields = ignoredFields;
         this.extraDefaults = extraDefaults;
         DefaultSequenceIds = defaultSequenceIds;
+        DefaultsReadStatementClock = defaultsReadStatementClock;
     }
 
     /// <summary>Number of values one row must supply — the arity every value row is checked against.</summary>
@@ -115,6 +125,7 @@ internal sealed class InsertRowShaper
 
         List<TableColumnSchema> extraDefaults = new();
         List<string> defaultSequenceIds = [];
+        bool defaultsReadStatementClock = false;
 
         foreach (TableColumnSchema col in schemaColumns)
         {
@@ -136,9 +147,12 @@ internal sealed class InsertRowShaper
 
             if (col.DefaultSequenceId is { Length: > 0 } sequenceId)
                 defaultSequenceIds.Add(sequenceId);
+
+            if (col.DefaultFunction is { } function && ScalarFunctionEvaluator.IsStatementClockFunction(function))
+                defaultsReadStatementClock = true;
         }
 
-        return new InsertRowShaper(fields, fieldMeta, ignoredFields, extraDefaults, defaultSequenceIds);
+        return new InsertRowShaper(fields, fieldMeta, ignoredFields, extraDefaults, defaultSequenceIds, defaultsReadStatementClock);
     }
 
     /// <summary>
@@ -181,8 +195,9 @@ internal sealed class InsertRowShaper
     /// Adds to <paramref name="row"/> the default of every column the target list omitted: a
     /// constant default is copied as-is, a function default is evaluated here, once per row, so each
     /// row gets a fresh value (e.g. a distinct <c>gen_uuid_v7()</c>), and a sequence default takes
-    /// the next value of the run reserved for the statement. A column the row already holds is left
-    /// alone.
+    /// the next value of the run reserved for the statement. A clock default (<c>now()</c>) reads the
+    /// times in <paramref name="parameters"/>, so it is the same for every row of the statement. A
+    /// column the row already holds is left alone.
     ///
     /// <para>Used by <see cref="ShapeRow"/> for SQL <c>INSERT</c>, and directly by the typed row
     /// insert, which receives a row that is already a dictionary. Sharing it is what makes a row
@@ -193,7 +208,8 @@ internal sealed class InsertRowShaper
     /// a second time.</para>
     /// </summary>
     /// <param name="parameters">
-    /// The parameter dictionary carrying the reserved sequence runs; see <see cref="ShapeRow"/>.
+    /// The parameter dictionary carrying the reserved sequence runs, and the statement times when
+    /// <see cref="DefaultsReadStatementClock"/> is set; see <see cref="ShapeRow"/>.
     /// </param>
     public void ApplyOmittedDefaults(Dictionary<string, ColumnValue> row, Dictionary<string, ColumnValue>? parameters)
     {
@@ -209,7 +225,7 @@ internal sealed class InsertRowShaper
             }
 
             row[col.Name] = col.DefaultFunction is not null
-                ? ScalarFunctionEvaluator.EvaluateNullary(col.DefaultFunction)
+                ? ScalarFunctionEvaluator.EvaluateNullary(col.DefaultFunction, parameters)
                 : col.DefaultValue!;
         }
     }

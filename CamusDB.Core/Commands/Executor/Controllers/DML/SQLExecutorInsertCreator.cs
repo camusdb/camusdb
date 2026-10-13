@@ -106,6 +106,11 @@ internal sealed class SQLExecutorInsertCreator : SQLExecutorBaseCreator
             statementKind: "INSERT",
             ticket.CancellationToken).ConfigureAwait(false);
 
+        // A clock default (DEFAULT now()) is not in the statement's AST, so the dispatcher attached no
+        // times for it. Attached once here, before the first row is shaped, so every row takes one time.
+        if (shaper.DefaultsReadStatementClock)
+            bound = ClockScalarFunctions.AttachStatementClock(bound);
+
         // Single-pass: build each row dictionary directly from the AST, applying coercion
         // and defaults in the same traversal — no List<List<ColumnValue?>> intermediate.
         List<Dictionary<string, ColumnValue>> batchValues = new();

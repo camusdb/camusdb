@@ -60,7 +60,8 @@ internal sealed class ScalarFunctionDescriptor
 
     /// <summary>
     /// Set instead of using <see cref="Evaluator"/> alone when the result comes from per-statement
-    /// state the parameters carry — today the sequence functions and their reserved runs. When
+    /// state the parameters carry — the sequence functions and their reserved runs, and the clock
+    /// functions and the transaction and statement times (<see cref="ClockScalarFunctions"/>). When
     /// present the evaluator dispatches here; <see cref="Evaluator"/> is then only reached from
     /// paths that carry no statement and exists to raise a clear error there.
     /// </summary>
@@ -69,6 +70,16 @@ internal sealed class ScalarFunctionDescriptor
     public required ScalarReturnTypeInferenceDelegate InferReturnType { get; init; }
 
     public bool IsVolatile { get; init; }
+
+    /// <summary>
+    /// True for a function that reports the start of the transaction or of the statement
+    /// (<c>now()</c>, <c>current_date()</c>, <c>statement_timestamp()</c>, a no-argument
+    /// <c>unix_timestamp()</c>). A statement that calls one gets those times attached to its
+    /// parameters (<see cref="ClockScalarFunctions.AttachStatementClock(Models.Tickets.ExecuteSQLTicket, SQLParser.NodeAst)"/>),
+    /// and a column default that names one is evaluated with them. Such a function is also
+    /// <see cref="IsVolatile"/>, so a query that calls it bypasses the shared result cache.
+    /// </summary>
+    public bool ReadsStatementClock { get; init; }
 
     /// <summary>
     /// True for a function whose value is fixed within a session but varies between sessions. Such a

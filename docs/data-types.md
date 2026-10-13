@@ -416,15 +416,17 @@ work with function results.
 
 | Function | Return type | Notes |
 |----------|-------------|-------|
-| `NOW()` / `CURRENT_TIMESTAMP()` | `datetime` | Current UTC instant |
-| `CURRENT_DATE()` | `date` | Current UTC date |
+| `NOW()` / `CURRENT_TIMESTAMP()` / `TRANSACTION_TIMESTAMP()` | `datetime` | Start of the transaction, UTC. See [Current time](#current-time) |
+| `STATEMENT_TIMESTAMP()` | `datetime` | Start of the statement, UTC |
+| `CLOCK_TIMESTAMP()` / `SYSDATE()` | `datetime` | The clock at each call, UTC |
+| `CURRENT_DATE()` | `date` | UTC date of the start of the transaction |
 | `DATE_ADD(temporal, n, unit)` | `datetime` | See promotion rule below |
 | `DATE_TRUNC(unit, temporal)` | `datetime` | Always yields datetime (Postgres-compatible) |
 | `FROM_UNIXTIME(seconds)` | `datetime` | Unix epoch seconds → UTC datetime |
 | `DATE_DIFF(a, b, unit)` | `int64` | Difference in `unit` units (unchanged) |
 | `DATE_PART(unit, temporal)` | `int64` | Extracts calendar component (unchanged) |
 | `EXTRACT(unit FROM temporal)` | `int64` | SQL-standard form of `DATE_PART(unit, temporal)` |
-| `UNIX_TIMESTAMP([temporal])` | `int64` | UTC seconds since epoch (unchanged) |
+| `UNIX_TIMESTAMP([temporal])` | `int64` | UTC seconds since epoch. With no argument, of the start of the transaction |
 | `YEAR`, `MONTH`, `DAY` / `DAYOFMONTH`, `HOUR`, `MINUTE`, `SECOND`, `QUARTER`, `DAYOFYEAR` `(temporal)` | `int64` | MySQL shortcuts: the same value as `DATE_PART` with that unit |
 | `DAYOFWEEK(temporal)` | `int64` | MySQL rule: 1 = Sunday ... 7 = Saturday |
 | `WEEKDAY(temporal)` | `int64` | MySQL rule: 0 = Monday ... 6 = Sunday |
@@ -434,6 +436,63 @@ work with function results.
 | `TO_TIMESTAMP(text, pattern)`, `STR_TO_DATE(text, pattern)` | `datetime` | Strict parse with a pattern; see [date-patterns.md](date-patterns.md) |
 | `TO_DATE(text, pattern)` | `date` | Strict parse with a PostgreSQL template, date only. `TO_DATE(x)` with one argument is still the cast to `date` |
 | `TO_TIMESTAMP(seconds)` | `datetime` | The PostgreSQL spelling of `FROM_UNIXTIME(seconds)` |
+
+### Current time
+
+Each function that reports the current time reads one of three clocks:
+
+| Function | Value | Same value for |
+|----------|-------|----------------|
+| `NOW()`, `CURRENT_TIMESTAMP()`, `TRANSACTION_TIMESTAMP()`, `CURRENT_DATE()`, `UNIX_TIMESTAMP()` | Start of the transaction | Every row and every statement of the transaction |
+| `STATEMENT_TIMESTAMP()` | Start of the statement | Every row of the statement |
+| `CLOCK_TIMESTAMP()`, `SYSDATE()` | The clock when the call runs | Nothing. Each call reads the clock again |
+
+So `SELECT NOW() = NOW()` is true, `INSERT INTO t SELECT id, NOW() FROM s` writes one time into every
+row, and two statements in one `BEGIN ... COMMIT` see the same `NOW()`. A statement outside an
+explicit transaction runs in its own transaction, so its `NOW()` is the start of that statement.
+`STATEMENT_TIMESTAMP()` is never earlier than `NOW()`.
+
+**Behavior change.** Before this change, `NOW()`, `CURRENT_TIMESTAMP()`, `CURRENT_DATE()` and
+`UNIX_TIMESTAMP()` read the clock on each call, so one statement could write a different time into
+each row. They now report the start of the transaction, as in PostgreSQL. To read the clock on each
+call, use `CLOCK_TIMESTAMP()`.
+
+**Comparison with PostgreSQL and MySQL.** CamusDB follows PostgreSQL. MySQL fixes `NOW()` at the start
+of the statement, not of the transaction. CamusDB needs the parentheses: write `CURRENT_TIMESTAMP()`,
+not `CURRENT_TIMESTAMP`.
+
+| CamusDB | PostgreSQL | MySQL |
+|---------|------------|-------|
+| `NOW()`, `CURRENT_TIMESTAMP()`, `TRANSACTION_TIMESTAMP()` | The same: start of the transaction | `NOW()` is the start of the statement. There is no transaction-start function |
+| `STATEMENT_TIMESTAMP()` | The same | `NOW()` |
+| `CLOCK_TIMESTAMP()`, `SYSDATE()` | `clock_timestamp()` | `SYSDATE()` |
+| `CURRENT_DATE()` | The same: date of the start of the transaction | `CURDATE()`: date of the start of the statement |
+| `UNIX_TIMESTAMP()` | `extract(epoch FROM now())`, which keeps the fraction | `UNIX_TIMESTAMP()`: start of the statement |
+
+**Precision and clocks.** The value has the full precision of the server clock (100 ns ticks). The
+start of a transaction is the later of the wall clock and the hybrid logical clock (HLC) of the
+transaction. The HLC is the clock the cluster uses to order events. Its physical part is in
+milliseconds and is never earlier than a clock the node heard from. So when a transaction follows
+another one on a different node, its `NOW()` is not earlier, to the millisecond, even when the clocks
+of the two nodes differ. When the clock of a node is behind the HLC, `NOW()` can be later than
+`CLOCK_TIMESTAMP()` on that node.
+
+**Column defaults.** A `DEFAULT NOW()` gives every row of one `INSERT` the same time, which also
+equals an explicit `NOW()` in that `INSERT`. A `DEFAULT STATEMENT_TIMESTAMP()` gives every row the
+start of its statement. `ALTER TABLE ... ADD COLUMN ... DEFAULT NOW()` gives every existing row one
+time: the time the fill of the column started. The fill commits in batches, so it cannot use the time
+of one batch. A fill that a new leader resumes uses its own start time for the rows that remain.
+
+**Other rules:**
+
+- A retried transaction is a new transaction, so it reports a new `NOW()`, as in PostgreSQL.
+- A query that calls any of these functions does not use the shared query result cache.
+- `WHERE col > NOW()` can use an index on `col`, also on a table of a join, as a literal bound
+  can. The index range and the row filter read the same time, the start of the transaction.
+- In a distributed query, the node that runs the statement evaluates every call. A call is never
+  sent to another node.
+- With `AS OF SYSTEM TIME`, `NOW()` is still the start of the transaction, not the time of the
+  snapshot.
 
 ### Date units
 

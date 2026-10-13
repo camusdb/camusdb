@@ -111,13 +111,19 @@ internal static class JoinEnumerator
     /// <see cref="JoinOrderOptimizer"/> when the graph refuses the tree, when it has more than
     /// <see cref="MaxTablesForEnumeration"/> tables, or when no order avoids a cross product.
     /// </summary>
+    /// <param name="clockValues">
+    /// The statement's transaction and statement times alone
+    /// (<see cref="Functions.ClockScalarFunctions.ClockValuesOnly"/>), or null. A leaf filter on
+    /// <c>now()</c> is costed as the index range the builder will make from the same values.
+    /// </param>
     public static JoinOrderChoice Enumerate(
         QuerySource root,
         BoundSelectQuery bound,
         JoinPredicatePushdown.Result pushdown,
         DatabaseDescriptor database,
         StatisticsManager stats,
-        CamusDBOptions options)
+        CamusDBOptions options,
+        Dictionary<string, ColumnValue>? clockValues = null)
     {
         JoinGraph? graph = JoinGraph.TryBuild(root, bound, pushdown.PostJoinConjuncts);
 
@@ -130,7 +136,7 @@ internal static class JoinEnumerator
         if (graph.LeafCount > MaxTablesForEnumeration)
             return JoinOrderOptimizer.ChooseWithGraph(root, bound, pushdown, graph);
 
-        CostInputs inputs = ComputeCostInputs(graph, bound, pushdown, database, stats, options);
+        CostInputs inputs = ComputeCostInputs(graph, bound, pushdown, database, stats, options, clockValues);
         int[]? order = FindCheapestOrder(graph, inputs);
 
         if (order is null)
@@ -162,8 +168,9 @@ internal static class JoinEnumerator
         JoinPredicatePushdown.Result pushdown,
         DatabaseDescriptor database,
         StatisticsManager stats,
-        CamusDBOptions options) =>
-        EstimateSteps(graph, order, tree, ComputeCostInputs(graph, bound, pushdown, database, stats, options));
+        CamusDBOptions options,
+        Dictionary<string, ColumnValue>? clockValues = null) =>
+        EstimateSteps(graph, order, tree, ComputeCostInputs(graph, bound, pushdown, database, stats, options, clockValues));
 
     private static IReadOnlyDictionary<JoinSource, JoinStepEstimate> EstimateSteps(
         JoinGraph graph,
@@ -213,7 +220,8 @@ internal static class JoinEnumerator
         JoinPredicatePushdown.Result pushdown,
         DatabaseDescriptor database,
         StatisticsManager stats,
-        CamusDBOptions options)
+        CamusDBOptions options,
+        Dictionary<string, ColumnValue>? clockValues = null)
     {
         int n = graph.LeafCount;
 
@@ -224,7 +232,7 @@ internal static class JoinEnumerator
         for (int i = 0; i < n; i++)
         {
             string alias = graph.Leaves[i].Alias;
-            EstimateLeaf(alias, pushdown, bound, database, stats, out firstLeafCost[i], out long rows, options);
+            EstimateLeaf(alias, pushdown, bound, database, stats, out firstLeafCost[i], out long rows, options, clockValues);
             leafRows[i] = rows;
             rightScanCost[i] = TableRows(FindTableDescriptor(alias, bound), database, stats);
         }
@@ -690,7 +698,8 @@ internal static class JoinEnumerator
         StatisticsManager stats,
         out double cost,
         out long card,
-        CamusDBOptions options)
+        CamusDBOptions options,
+        Dictionary<string, ColumnValue>? clockValues)
     {
         TableDescriptor? table = FindTableDescriptor(alias, bound);
 
@@ -711,7 +720,9 @@ internal static class JoinEnumerator
         // instead of a TableScanNode. Mirror that decision here so the DP costs what is actually built.
         if (options.CostBasedAccessPathEnabled)
         {
-            PredicateAnalysis raw = PredicateAnalyzer.Analyze(filter, null);
+            // Clock values only, the same input the builder's leaf analysis gets: a placeholder stays
+            // unresolved here as it does there.
+            PredicateAnalysis raw = PredicateAnalyzer.Analyze(filter, clockValues);
             PredicateAnalysis analysis = JoinEnumerator.StripAliasPrefix(raw, alias);
             // Cost the leaf over the same coerced constants the builder will select with, so the
             // DP never costs an index shape the builder then refuses.

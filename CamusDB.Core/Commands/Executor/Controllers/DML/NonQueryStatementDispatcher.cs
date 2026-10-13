@@ -224,7 +224,7 @@ internal sealed class NonQueryStatementDispatcher
         executeSpan?.SetTag("statement", MapStatementFamily(ast.nodeType));
 
         statementAuthorizer.SetAuthorizationScope(ticket, ast);
-        ticket = SessionScalarFunctions.AttachSessionValues(ticket, ast);
+        ticket = StatementScopedValues.Attach(ticket, ast);
         await statementAuthorizer.EnforceAsync(ticket, ast).ConfigureAwait(false);
 
         // Server-level statements are dispatched before any database is opened — including

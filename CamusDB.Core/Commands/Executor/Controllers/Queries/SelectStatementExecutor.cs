@@ -361,7 +361,7 @@ internal sealed class SelectStatementExecutor
         using (Diagnostics.QueryStageProfile.Measure(Diagnostics.QueryStage.Authorize))
         {
             statementAuthorizer.SetAuthorizationScope(ticket, ast);
-            ticket = SessionScalarFunctions.AttachSessionValues(ticket, ast);
+            ticket = StatementScopedValues.Attach(ticket, ast);
             await statementAuthorizer.EnforceAsync(ticket, ast).ConfigureAwait(false);
         }
 
@@ -539,9 +539,10 @@ internal sealed class SelectStatementExecutor
 
         ast = ExpandViews(database, ast);
 
-        // Expansion can pull a session call (current_user() and friends) in from a view body that the
-        // statement itself never names, so the snapshot is reconsidered against the expanded tree.
-        ticket = SessionScalarFunctions.AttachSessionValues(ticket, ast);
+        // Expansion can pull a session call (current_user() and friends) or a clock call (now()) in
+        // from a view body that the statement itself never names, so both are reconsidered against
+        // the expanded tree. A clock already attached keeps its times.
+        ticket = StatementScopedValues.Attach(ticket, ast);
 
         // Mark the transaction as having executed a statement for every statement type except the
         // SET TRANSACTION family — those must be the first statement per standard SQL semantics.
@@ -1210,8 +1211,8 @@ internal sealed class SelectStatementExecutor
         HLCTimestamp? explicitSnapshot = null)
     {
         // The source AST is a view/CTAS/INSERT…SELECT body that reached here already expanded, so it
-        // may call a session function the outer statement never named.
-        ticket = SessionScalarFunctions.AttachSessionValues(ticket, sourceAst);
+        // may call a session or clock function the outer statement never named.
+        ticket = StatementScopedValues.Attach(ticket, sourceAst);
 
         // A time-travel source reads through its OWN read-only snapshot transaction while the writes
         // keep using the caller's; see PrepareTimeTravelSourceAsync for why that is both possible and
