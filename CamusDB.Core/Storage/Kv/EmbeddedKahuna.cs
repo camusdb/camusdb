@@ -1113,23 +1113,35 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
 
     /// <summary>
     /// Delivers this follower's applied-version notification to the current schema-partition leader,
-    /// <b>retrying with backoff</b> until it succeeds or a deadline (under the gate's ack timeout)
-    /// elapses. A single dropped notification must not strand the leader's ack gate for its full
-    /// timeout — the dominant multi-node DDL flake. Confirmed mechanism: a follower applies the new
+    /// <b>retrying with backoff</b> until the leader accepts it or a deadline (under the gate's ack
+    /// timeout) elapses. A single dropped notification must not strand the leader's ack gate for its
+    /// full timeout — the dominant multi-node DDL flake. Confirmed mechanism: a follower applies the new
     /// schema version but its one fire-and-forget ack is lost (a transient <see cref="IRaft.WaitForLeader"/>
     /// that momentarily resolves this node as the leader and takes the "I am the leader" early-out, or
     /// a transient send), and because the gate waits for an explicit ack from every live node and never
     /// evicts a Raft-alive follower, the lost ack is only recovered by re-sending. Re-resolving the
     /// leader each attempt also rides through a real leadership change.
+    ///
+    /// <para><b>A refused ack walks the replica set.</b> A node that does not host the schema partition
+    /// has no Raft view of its leader: <see cref="ResolvePartitionLeaderAsync"/> answers from the
+    /// placement view, which names the first voter until a gossiped hint forms, and a stale hint
+    /// after a leader transfer. The target answers <see cref="SchemaAckDelivery.NotLeader"/> in that
+    /// case, and the next attempt goes to the next replica that has not refused yet. Once every replica
+    /// refused, an election is in progress and the walk starts over after the backoff. Without this
+    /// walk the ack was recorded on the wrong replica in silence, the leader never saw a record for the
+    /// node, and its gate skipped the node for every later DDL.</para>
     /// </summary>
     private async Task PublishSchemaAckWithRetryAsync(
         ISchemaAckSender sender, string db, string localEndpoint, long schemaVersion)
     {
         long deadline = Environment.TickCount64 + 25_000;
         int attempt = 0;
+        HashSet<string>? refuted = null;
 
         while (Environment.TickCount64 < deadline)
         {
+            bool tryNextReplicaAtOnce = false;
+
             try
             {
                 int partitionId = SchemaLogPartition(db);
@@ -1139,6 +1151,17 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
                 // acks (it reached the version through the durable checkpoint), and the only way it
                 // can name the leader is the placement view.
                 string leader = await ResolvePartitionLeaderAsync(partitionId, cts.Token).ConfigureAwait(false);
+
+                if (refuted is not null && refuted.Contains(leader))
+                {
+                    string? untried = NextUntriedReplica(ReplicaEndpoints(partitionId), refuted, localEndpoint);
+
+                    if (untried is null)
+                        refuted = null; // every replica refused: leadership is moving, walk again after the backoff
+                    else
+                        leader = untried;
+                }
+
                 Diagnostics.SchemaDiag.Log(
                     $"ACK-SEND node={localEndpoint} db={db} ver={schemaVersion} attempt={attempt} part={partitionId} resolvedLeader={leader}");
 
@@ -1156,9 +1179,24 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
                 }
                 else
                 {
-                    await sender.SendSchemaAckAsync(leader, db, localEndpoint, schemaVersion, cts.Token).ConfigureAwait(false);
-                    Diagnostics.SchemaDiag.Log($"ACK-SENT node={localEndpoint} to={leader} db={db} ver={schemaVersion}");
-                    return; // delivered to the leader
+                    SchemaAckDelivery outcome = await sender.SendSchemaAckAsync(leader, db, localEndpoint, schemaVersion, cts.Token).ConfigureAwait(false);
+
+                    switch (outcome)
+                    {
+                        case SchemaAckDelivery.Accepted:
+                            Diagnostics.SchemaDiag.Log($"ACK-SENT node={localEndpoint} to={leader} db={db} ver={schemaVersion}");
+                            return; // delivered to the leader
+
+                        case SchemaAckDelivery.NotLeader:
+                            Diagnostics.SchemaDiag.Log($"ACK-REFUSED node={localEndpoint} by={leader} db={db} ver={schemaVersion} (not the leader; trying another replica)");
+                            (refuted ??= new(StringComparer.Ordinal)).Add(leader);
+                            tryNextReplicaAtOnce = NextUntriedReplica(ReplicaEndpoints(partitionId), refuted, localEndpoint) is not null;
+                            break;
+
+                        default:
+                            Diagnostics.SchemaDiag.Log($"ACK-ERR node={localEndpoint} to={leader} db={db} ver={schemaVersion} attempt={attempt} outcome={outcome}");
+                            break;
+                    }
                 }
             }
             catch (Exception ex)
@@ -1166,6 +1204,9 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
                 Diagnostics.SchemaDiag.Log($"ACK-ERR node={localEndpoint} db={db} ver={schemaVersion} attempt={attempt} ex={ex.GetType().Name}:{ex.Message}");
                 // Transient (leader churn, transport, timeout) — fall through to backoff and retry.
             }
+
+            if (tryNextReplicaAtOnce)
+                continue; // a refusal is an answer, not a failure: no backoff before the next replica
 
             int delay = Math.Min(500, 50 * (1 << Math.Min(attempt, 4)));
             attempt++;
@@ -1175,6 +1216,33 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
 
         Diagnostics.SchemaDiag.Log($"ACK-GIVEUP node={localEndpoint} db={db} ver={schemaVersion} (deadline reached without delivering)");
     }
+
+    /// <summary>
+    /// The first replica of a partition that has not refused an ack and is not this node, or null when
+    /// every other replica refused. The local node is skipped because an ack to itself is the local
+    /// record, which the caller already holds.
+    /// </summary>
+    private static string? NextUntriedReplica(IReadOnlyList<string> replicas, HashSet<string> refuted, string localEndpoint)
+    {
+        foreach (string replica in replicas)
+        {
+            if (string.Equals(replica, localEndpoint, StringComparison.Ordinal))
+                continue;
+
+            if (!refuted.Contains(replica))
+                return replica;
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// The schema version <paramref name="nodeEndpoint"/> last acknowledged for <paramref name="db"/>
+    /// on this node's tracker, or null when no ack from it was recorded here. A test seam: it lets a
+    /// test assert that an ack from a node outside the schema partition's replica set reached the
+    /// leader, which the gate alone cannot show because it skips a live member without a record.
+    /// </summary>
+    internal long? GetRecordedSchemaAck(string db, string nodeEndpoint) => schemaAcks.TryGetAckedVersion(db, nodeEndpoint);
 
     /// <summary>
     /// The set of nodes the schema ack gate must wait on. Always includes the local node.

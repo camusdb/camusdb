@@ -512,6 +512,6 @@ internal sealed class TestBoundedTopK : SharedNodeBaseTest
 
         QueryResultRow topk = plan.Single(r => r.Row["node"].StrValue == "topk");
 
-        Assert.AreEqual("k: 10, l2_distance(…) ASC", topk.Row["detail"].StrValue);
+        Assert.AreEqual("k: 10, l2_distance(embedding, @q) ASC", topk.Row["detail"].StrValue);
     }
 }

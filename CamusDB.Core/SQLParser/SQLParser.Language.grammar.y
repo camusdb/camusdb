@@ -18,6 +18,11 @@
 %left TLIKE TILIKE TREGEXMATCH TREGEXIMATCH TREGEXNOTMATCH TREGEXNOTIMATCH
 %left TEQUALS TNOTEQUALS TBETWEEN
 %left TLESSTHAN TGREATERTHAN TLESSTHANEQUALS TGREATERTHANEQUALS
+/* Concatenation and the binary bitwise operators share one level, the PostgreSQL "any other
+   operator" level: above every comparison, below + and -. So `a || b = c` is `(a || b) = c`,
+   `1 + 2 & 3` is `(1 + 2) & 3`, and `a & b | c` groups left to right as `(a & b) | c`, not by the
+   C rule that puts & above |. */
+%left TCONCAT TBITAND TBITOR TBITXOR TSHIFTLEFT TSHIFTRIGHT
 %left TADD TMINUS
 %left TMULT TDIV TMOD
 /* IS (IS NULL / IS NOT NULL), IN, and the qualified-name dot bind tighter than any binary operator.
@@ -43,6 +48,7 @@
 %token TPRIMARY TKEY TUNIQUE TINDEX TALTER TWADD TDROP TCOLUMN TESCAPED_IDENTIFIER TLIMIT TOFFSET TAS TGROUP TSHOW TCONSTRAINT TCHECK
 %token TCOLUMNS TTABLES TDESCRIBE TDATABASES TDATABASE TAT LBRACE RBRACE TINDEXES TLIKE TILIKE TDEFAULT TIF TEXISTS TON TIN TIS
 %token TREGEXMATCH TREGEXIMATCH TREGEXNOTMATCH TREGEXNOTIMATCH
+%token TCONCAT TBITAND TBITOR TBITXOR TSHIFTLEFT TSHIFTRIGHT
 %token TBEGIN TSTART TTRANSACTION TROLLBACK TCOMMIT TJOIN TINNER TDOT THAVING TDISTINCT TBETWEEN TEXPLAIN
 /* LEFT, RIGHT, OUTER and CROSS are reserved for the join forms, as they are in PostgreSQL. FULL,
    NATURAL and USING are not: FULL is already a plain identifier that the foreign-key MATCH FULL
@@ -1597,6 +1603,9 @@ expr       : equals_expr { $$.n = $1.n; }
            | mult_expr { $$.n = $1.n; }
            | div_expr { $$.n = $1.n; }
            | mod_expr { $$.n = $1.n; }
+           | concat_expr { $$.n = $1.n; }
+           | bitwise_expr { $$.n = $1.n; }
+           | bit_not_expr { $$.n = $1.n; }
            | postfix_cast_expr { $$.n = $1.n; }
            | subscript_expr { $$.n = $1.n; }
            | like_expr { $$.n = $1.n; }
@@ -1634,9 +1643,9 @@ expr       : equals_expr { $$.n = $1.n; }
    Excluding the boolean operators from a bound removes the choice entirely: `x BETWEEN a AND b AND c`
    can only be `(x BETWEEN a AND b) AND c`, which is also SQL's rule that BETWEEN binds tighter than
    AND. A bound is therefore an arithmetic-level expression — literal, identifier, function call, CAST,
-   CASE, scalar subquery, parenthesised expression, or those combined with + - * / — matching the
-   standard's "row value predicand". Anything boolean still works inside parentheses: the LPAREN
-   delimits it, so `x BETWEEN (a AND b) AND c` parses. */
+   CASE, scalar subquery, parenthesised expression, or those combined with the arithmetic, `||` and
+   bitwise operators — matching the standard's "row value predicand". Anything boolean still works
+   inside parentheses: the LPAREN delimits it, so `x BETWEEN (a AND b) AND c` parses. */
 between_expr : condition TBETWEEN between_bound TAND between_bound { $$.n = new(NodeType.ExprBetween, $1.n, null, $3.n, $5.n, null, null, null, null); }
              ;
 
@@ -1661,7 +1670,14 @@ between_bound : simple_expr { $$.n = $1.n; }
               | between_bound TMULT between_bound { $$.n = new(NodeType.ExprMult, $1.n, $3.n, null, null, null, null, null, null); }
               | between_bound TDIV between_bound { $$.n = new(NodeType.ExprDiv, $1.n, $3.n, null, null, null, null, null, null); }
               | between_bound TMOD between_bound { $$.n = NodeAst.ModCall($1.n, $3.n); }
+              | between_bound TCONCAT between_bound { $$.n = new(NodeType.ExprConcat, $1.n, $3.n, null, null, null, null, null, null); }
+              | between_bound TBITAND between_bound { $$.n = new(NodeType.ExprBitAnd, $1.n, $3.n, null, null, null, null, null, null); }
+              | between_bound TBITOR between_bound { $$.n = new(NodeType.ExprBitOr, $1.n, $3.n, null, null, null, null, null, null); }
+              | between_bound TBITXOR between_bound { $$.n = new(NodeType.ExprBitXor, $1.n, $3.n, null, null, null, null, null, null); }
+              | between_bound TSHIFTLEFT between_bound { $$.n = new(NodeType.ExprShiftLeft, $1.n, $3.n, null, null, null, null, null, null); }
+              | between_bound TSHIFTRIGHT between_bound { $$.n = new(NodeType.ExprShiftRight, $1.n, $3.n, null, null, null, null, null, null); }
               | TMINUS between_bound %prec UMINUS { $$.n = NodeAst.Negate($2.n); }
+              | TREGEXMATCH between_bound %prec UMINUS { $$.n = new(NodeType.ExprBitNot, $2.n, null, null, null, null, null, null, null); }
               | between_bound TCOLONCOLON cast_target_type { $$.n = new(NodeType.ExprCast, $1.n, $3.n, null, null, null, null, null, null); }
               | between_bound LBRACKET condition RBRACKET { $$.n = new(NodeType.ExprSubscript, $1.n, $3.n, null, null, null, null, null, null); }
               ;
@@ -1720,6 +1736,29 @@ div_expr  : condition TDIV  condition { $$.n = new(NodeType.ExprDiv,  $1.n, $3.n
    integer-versus-float typing. The cost is cosmetic — a rendered view body or EXPLAIN shows mod(a, b). */
 mod_expr  : condition TMOD condition { $$.n = NodeAst.ModCall($1.n, $3.n); }
           ;
+
+/* `a || b` is concatenation, as in PostgreSQL, not the logical OR that MySQL reads by default. A
+   NULL operand gives NULL, which is the difference from concat(), so it is a node of its own and
+   not a call to concat(). */
+concat_expr : condition TCONCAT condition { $$.n = new(NodeType.ExprConcat, $1.n, $3.n, null, null, null, null, null, null); }
+            ;
+
+/* The binary bitwise operators. `#` is XOR, as in PostgreSQL; `^` is not an operator here, because
+   it is power in PostgreSQL and XOR in MySQL. */
+bitwise_expr : condition TBITAND condition { $$.n = new(NodeType.ExprBitAnd, $1.n, $3.n, null, null, null, null, null, null); }
+             | condition TBITOR condition { $$.n = new(NodeType.ExprBitOr, $1.n, $3.n, null, null, null, null, null, null); }
+             | condition TBITXOR condition { $$.n = new(NodeType.ExprBitXor, $1.n, $3.n, null, null, null, null, null, null); }
+             | condition TSHIFTLEFT condition { $$.n = new(NodeType.ExprShiftLeft, $1.n, $3.n, null, null, null, null, null, null); }
+             | condition TSHIFTRIGHT condition { $$.n = new(NodeType.ExprShiftRight, $1.n, $3.n, null, null, null, null, null, null); }
+             ;
+
+/* Prefix `~` is bitwise NOT; binary `a ~ b` stays the regex match. The lexer gives both the one
+   token TREGEXMATCH, and the position tells them apart: this rule applies only where an operand
+   starts, and the regex rule only after an operand. It binds as tightly as unary minus, so `~a + 1`
+   is `(~a) + 1`. PostgreSQL gives a prefix operator the "any other operator" level and reads that
+   text as `~(a + 1)`; the tighter binding is the C and MySQL reading, and the one a reader expects. */
+bit_not_expr : TREGEXMATCH condition %prec UMINUS { $$.n = new(NodeType.ExprBitNot, $2.n, null, null, null, null, null, null, null); }
+             ;
 
 /* `x::type` builds the very ExprCast node that CAST(x AS type) builds, so every consumer of a cast
    handles it with no change. It is left-associative, so x::text::int casts twice. */

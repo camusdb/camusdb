@@ -69,6 +69,11 @@ public sealed class SchemaDdlForwardController : CommandsController
             if (!await IsSchemaLeaderAsync(req.DatabaseName).ConfigureAwait(false))
                 return NotLeaderDdl();
         }
+        catch (CamusDBException e)
+        {
+            LogCommandFailure(e);
+            return FailedDdl(e.Code, e.Message);
+        }
         catch (Exception e)
         {
             logger.LogError("{Name}: {Message}", e.GetType().Name, e.Message);
@@ -132,6 +137,11 @@ public sealed class SchemaDdlForwardController : CommandsController
             if (!await IsSchemaLeaderAsync(req.DatabaseName).ConfigureAwait(false))
                 return NotLeaderDdl();
         }
+        catch (CamusDBException e)
+        {
+            LogCommandFailure(e);
+            return FailedDdl(e.Code, e.Message);
+        }
         catch (Exception e)
         {
             logger.LogError("{Name}: {Message}", e.GetType().Name, e.Message);
@@ -190,6 +200,11 @@ public sealed class SchemaDdlForwardController : CommandsController
             if (!await IsSchemaLeaderAsync(req.DatabaseName).ConfigureAwait(false))
                 return NotLeaderDdl();
         }
+        catch (CamusDBException e)
+        {
+            LogCommandFailure(e);
+            return FailedDdl(e.Code, e.Message);
+        }
         catch (Exception e)
         {
             logger.LogError("{Name}: {Message}", e.GetType().Name, e.Message);
@@ -237,12 +252,17 @@ public sealed class SchemaDdlForwardController : CommandsController
     }
 
     /// <summary>
-    /// Receives a schema-apply acknowledgement from a follower node and records it in the
-    /// local <see cref="EmbeddedKahuna"/>'s tracker. This makes the follower's progress
-    /// visible to the leader's two-version gate (<c>WaitForAllLiveAsync</c>) in real
-    /// multi-process deployments. The endpoint always returns 200 OK so that ack delivery
-    /// failures on the follower side are treated as best-effort transport errors rather
-    /// than hard failures — the gate's own timeout is the correctness backstop.
+    /// Receives a schema-apply acknowledgement from a follower node and records it in the local
+    /// <see cref="EmbeddedKahuna"/>'s tracker. This makes the follower's progress visible to the
+    /// leader's two-version gate (<c>WaitForAllLiveAsync</c>) in real multi-process deployments.
+    ///
+    /// <para>The answer says whether this node leads the schema partition of the database the ack
+    /// names (the request carries the database id). A sender outside the partition's replica set
+    /// has no Raft view of the leader and names a replica from the placement view, which is the
+    /// first voter until a gossiped hint forms; an ack recorded there in silence never reaches the
+    /// leader's gate, and the gate then skips that node for every later DDL. A 503 not-leader makes
+    /// the sender try the next replica. The record is kept here regardless: should this node win
+    /// the next election, its gate starts with the follower's progress.</para>
     /// </summary>
     [HttpPost]
     [Route("/internal/schema-ddl/schema-ack")]
@@ -262,8 +282,21 @@ public sealed class SchemaDdlForwardController : CommandsController
         }
 
         EmbeddedKahuna? clusterNode = HttpContext.RequestServices.GetService<EmbeddedKahuna>();
-        if (clusterNode is not null)
-            clusterNode.RecordRemoteSchemaAck(req.Database, req.NodeEndpoint, req.AppliedSchemaVersion);
+        if (clusterNode is null)
+            return NotLeaderDdl();
+
+        clusterNode.RecordRemoteSchemaAck(req.Database, req.NodeEndpoint, req.AppliedSchemaVersion);
+
+        try
+        {
+            if (!await clusterNode.AmISchemaLeaderAsync(req.Database, CancellationToken.None).ConfigureAwait(false))
+                return NotLeaderDdl();
+        }
+        catch (Exception e)
+        {
+            logger.LogError("{Name}: {Message}", e.GetType().Name, e.Message);
+            return FailedDdl(CamusDBErrorCodes.InvalidInternalOperation, e.Message);
+        }
 
         return new JsonResult(new SchemaDdlForwardResponse { Status = "ok" });
     }
@@ -281,6 +314,11 @@ public sealed class SchemaDdlForwardController : CommandsController
 
             if (!await IsSchemaLeaderAsync(req.DatabaseName).ConfigureAwait(false))
                 return NotLeaderDdl();
+        }
+        catch (CamusDBException e)
+        {
+            LogCommandFailure(e);
+            return FailedDdl(e.Code, e.Message);
         }
         catch (Exception e)
         {
@@ -337,6 +375,11 @@ public sealed class SchemaDdlForwardController : CommandsController
 
             if (!await IsSchemaLeaderAsync(req.DatabaseName).ConfigureAwait(false))
                 return NotLeaderDdl();
+        }
+        catch (CamusDBException e)
+        {
+            LogCommandFailure(e);
+            return FailedDdl(e.Code, e.Message);
         }
         catch (Exception e)
         {
@@ -396,6 +439,11 @@ public sealed class SchemaDdlForwardController : CommandsController
             if (!await IsSchemaLeaderAsync(req.DatabaseName).ConfigureAwait(false))
                 return NotLeaderDdl();
         }
+        catch (CamusDBException e)
+        {
+            LogCommandFailure(e);
+            return FailedDdl(e.Code, e.Message);
+        }
         catch (Exception e)
         {
             logger.LogError("{Name}: {Message}", e.GetType().Name, e.Message);
@@ -452,6 +500,11 @@ public sealed class SchemaDdlForwardController : CommandsController
             if (!await IsSchemaLeaderAsync(req.DatabaseName).ConfigureAwait(false))
                 return NotLeaderDdl();
         }
+        catch (CamusDBException e)
+        {
+            LogCommandFailure(e);
+            return FailedDdl(e.Code, e.Message);
+        }
         catch (Exception e)
         {
             logger.LogError("{Name}: {Message}", e.GetType().Name, e.Message);
@@ -507,6 +560,11 @@ public sealed class SchemaDdlForwardController : CommandsController
 
             if (!await IsSchemaLeaderAsync(req.DatabaseName).ConfigureAwait(false))
                 return NotLeaderDdl();
+        }
+        catch (CamusDBException e)
+        {
+            LogCommandFailure(e);
+            return FailedDdl(e.Code, e.Message);
         }
         catch (Exception e)
         {
@@ -570,6 +628,11 @@ public sealed class SchemaDdlForwardController : CommandsController
             if (!await IsSchemaLeaderAsync(req.DatabaseName).ConfigureAwait(false))
                 return NotLeaderDdl();
         }
+        catch (CamusDBException e)
+        {
+            LogCommandFailure(e);
+            return FailedDdl(e.Code, e.Message);
+        }
         catch (Exception e)
         {
             logger.LogError("{Name}: {Message}", e.GetType().Name, e.Message);
@@ -618,10 +681,22 @@ public sealed class SchemaDdlForwardController : CommandsController
     // ── Helpers ───────────────────────────────────────────────────────────────
 
     /// <summary>
-    /// Returns true iff this node is the Raft schema leader for
-    /// <paramref name="databaseName"/>.  Resolves <see cref="EmbeddedKahuna"/>
-    /// from the DI container so standalone nodes (no cluster node registered)
-    /// return false and the request is bounced back as not-leader.
+    /// Returns true iff this node is the Raft schema leader for <paramref name="databaseName"/>.
+    ///
+    /// <para><b>The check keys by the database id, never by its name.</b> The schema log of a database
+    /// lives on the partition of <c>{id}/meta</c>, and every engine-side leadership question asks about
+    /// that partition. The name hashes to a different partition, which has a different leader under
+    /// leader balancing and may not even be hosted here under replica placement. A name-keyed check
+    /// answered "not-leader" on the real leader, so every forward failed until the client happened to
+    /// reach the leader directly, and answered "leader" on a node that was not: that node then
+    /// re-forwarded the ticket while holding its own DDL semaphore, and the forward it sent to itself
+    /// deadlocked until the HTTP client's 100 s timeout. Both faces of that defect were the 43 s
+    /// <c>CREATE TABLE</c> on a 5-node, replication-factor-3 cluster.</para>
+    ///
+    /// <para>Resolves <see cref="EmbeddedKahuna"/> from the DI container so standalone nodes (no
+    /// cluster node registered) return false and the request is bounced back as not-leader. Opening
+    /// the database is how the id is learned; the executor opens it again for the ticket anyway, and a
+    /// database that does not exist surfaces as its own typed error.</para>
     /// </summary>
     private async Task<bool> IsSchemaLeaderAsync(string databaseName)
     {
@@ -629,7 +704,9 @@ public sealed class SchemaDdlForwardController : CommandsController
         if (clusterNode is null)
             return false;
 
-        return await clusterNode.AmISchemaLeaderAsync(databaseName, CancellationToken.None).ConfigureAwait(false);
+        DatabaseDescriptor database = await executor.OpenDatabase(databaseName).ConfigureAwait(false);
+
+        return await clusterNode.AmISchemaLeaderAsync(database.Id, CancellationToken.None).ConfigureAwait(false);
     }
 
     private DdlOperationIdCache? GetOperationIdCache() =>

@@ -131,6 +131,8 @@ internal static class QueryAggregateExtractor
                 node.rightAst),
 
             NodeType.ExprAdd or NodeType.ExprSub or NodeType.ExprMult or NodeType.ExprDiv
+            or NodeType.ExprConcat or NodeType.ExprBitAnd or NodeType.ExprBitOr or NodeType.ExprBitXor
+            or NodeType.ExprShiftLeft or NodeType.ExprShiftRight
             or NodeType.ExprSubscript or NodeType.ArrayLiteral or NodeType.ExprValueSet
             or NodeType.ExprEquals or NodeType.ExprNotEquals
             or NodeType.ExprLessThan or NodeType.ExprGreaterThan
@@ -151,7 +153,7 @@ internal static class QueryAggregateExtractor
                 node.leftAst is null ? null : Rewrite(node.leftAst, aggregates),
                 node.rightAst is null ? null : Rewrite(node.rightAst, aggregates)),
 
-            NodeType.ExprNot or NodeType.ExprNegate or NodeType.ExprIsNull or NodeType.ExprIsNotNull
+            NodeType.ExprNot or NodeType.ExprNegate or NodeType.ExprBitNot or NodeType.ExprIsNull or NodeType.ExprIsNotNull
                 or NodeType.ExprIsTrue or NodeType.ExprIsNotTrue
                 or NodeType.ExprIsFalse or NodeType.ExprIsNotFalse => With(node,
                 node.leftAst is null ? null : Rewrite(node.leftAst, aggregates),

@@ -920,4 +920,45 @@ public enum NodeType
     /// transaction, and returns no rows.
     /// </summary>
     CancelQuery,
+
+    /// <summary>
+    /// <c>a || b</c>: concatenation, as in PostgreSQL. String with string gives a string, bytes with
+    /// bytes gives bytes, and a string with any other scalar converts that scalar through the shared
+    /// text form and gives a string. A NULL operand gives NULL, which is the difference from
+    /// <c>concat()</c>, which skips NULL. An array operand is an error. The members from here to
+    /// <see cref="ExprShiftRight"/> are appended at the end for the reason <see cref="TypeNumeric"/>
+    /// gives.
+    /// </summary>
+    ExprConcat,
+
+    /// <summary><c>a &amp; b</c>: bitwise AND of two Integer64 values or two byte strings of equal length.</summary>
+    ExprBitAnd,
+
+    /// <summary><c>a | b</c>: bitwise OR of two Integer64 values or two byte strings of equal length.</summary>
+    ExprBitOr,
+
+    /// <summary>
+    /// <c>a # b</c>: bitwise XOR of two Integer64 values or two byte strings of equal length. The
+    /// spelling is PostgreSQL's; <c>^</c> is not an operator.
+    /// </summary>
+    ExprBitXor,
+
+    /// <summary>
+    /// Prefix <c>~a</c>: bitwise NOT of an Integer64 value or a byte string. <c>leftAst</c> = the
+    /// operand. The lexer gives prefix and binary <c>~</c> the same token; only binary <c>~</c> is
+    /// <see cref="ExprRegexMatch"/>.
+    /// </summary>
+    ExprBitNot,
+
+    /// <summary>
+    /// <c>a &lt;&lt; n</c>: Integer64 shift left. Only the low six bits of the count are used, so the
+    /// count is taken modulo 64, which is what PostgreSQL gives on x86-64 and ARM64.
+    /// </summary>
+    ExprShiftLeft,
+
+    /// <summary>
+    /// <c>a &gt;&gt; n</c>: arithmetic (sign-extending) Integer64 shift right, with the count rule of
+    /// <see cref="ExprShiftLeft"/>.
+    /// </summary>
+    ExprShiftRight,
 }

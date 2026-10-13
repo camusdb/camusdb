@@ -13,6 +13,8 @@ often:
 | Quantified comparison | `score > ALL (limits)` | `true` when `score` is above every element of `limits` |
 | Unary minus | `-total` | The negative of `total` |
 | Negated predicates | `year NOT BETWEEN 2020 AND 2021` | The same as `NOT (year BETWEEN 2020 AND 2021)` |
+| Concatenation | `first_name \|\| ' ' \|\| last_name` | The two strings joined; `NULL` if one side is `NULL` |
+| Bitwise operators | `flags & 4`, `a \| b`, `a # b`, `~a`, `1 << n`, `a >> n` | AND, OR, XOR, NOT and shifts on `int64` and `bytes` |
 
 Together they run a statement such as:
 
@@ -115,6 +117,110 @@ A `NULL` operand makes the positive predicate UNKNOWN, and `NOT` over UNKNOWN is
 row with a `NULL` year or name is not returned. `NOT BETWEEN` binds tighter than `AND`, the same as
 `BETWEEN`. `SHOW CREATE VIEW`, a CHECK constraint and `EXPLAIN` show the stored form,
 `NOT (year BETWEEN 2020 AND 2021)`.
+
+## Concatenation: `||`
+
+`a || b` joins two values. `||` is concatenation, as in PostgreSQL. It is not the logical OR that
+MySQL reads by default. Use `OR` for a logical OR.
+
+| Left | Right | Result |
+|------|-------|--------|
+| `string` | `string` | `string` |
+| `bytes` | `bytes` | `bytes` |
+| `string` | any other scalar | `string` |
+| any other scalar | `string` | `string` |
+
+```sql
+SELECT first_name || ' ' || last_name FROM users;   -- 'Ada Lovelace'
+SELECT X'01' || X'02';                              -- X'0102'
+SELECT 'n=' || 5;                                   -- 'n=5'
+SELECT 'v=' || X'01ff';                             -- 'v=\x01ff'
+```
+
+- When one side is a string, the other side converts to text. The conversion is the same as
+  `CAST(x AS string)` and `concat()`: a date is `2026-10-12`, bytes are `\x` and lowercase hex, and
+  a float is the shortest text that gives the same value.
+- A `NULL` operand gives `NULL`: `'a' || NULL` is `NULL`. This is the difference from `concat()`,
+  which skips a `NULL` argument: `concat('a', NULL)` is `'a'`.
+- Two operands that are not strings, such as `1 || 2` or `X'01' || 2`, are an error.
+- An array operand is an error. CamusDB has no array concatenation.
+
+## Bitwise operators
+
+| Operator | Meaning | Operand types |
+|----------|---------|---------------|
+| `a & b` | AND | two `int64`, or two `bytes` of equal length |
+| `a \| b` | OR | two `int64`, or two `bytes` of equal length |
+| `a # b` | XOR | two `int64`, or two `bytes` of equal length |
+| `~a` | NOT | `int64` or `bytes` |
+| `a << n` | shift left | two `int64` |
+| `a >> n` | shift right | two `int64` |
+
+```sql
+SELECT 12 & 10;            -- 8
+SELECT 12 | 10;            -- 14
+SELECT 12 # 10;            -- 6
+SELECT ~5;                 -- -6
+SELECT 1 << 4;             -- 16
+SELECT -16 >> 2;           -- -4
+SELECT X'F0F0' & X'FF00';  -- X'F000'
+SELECT ~X'F00F';           -- X'0FF0'
+SELECT id FROM items WHERE flags & 4 = 4;
+```
+
+- A `NULL` operand gives `NULL`.
+- `>>` is an arithmetic shift. It keeps the sign, so `-16 >> 2` is `-4`.
+- A shift uses only the low six bits of the count. Thus the count is taken modulo 64:
+  `1 << 64` is `1`, and `1 << -1` is the smallest `int64`. PostgreSQL gives the same results on
+  x86-64 and ARM64.
+- Two `bytes` operands of different lengths are an error, as for PostgreSQL `bit` strings.
+- A `float64`, `float32`, `numeric`, `bool` or `string` operand is an error. There is no implicit
+  conversion to `int64`.
+- `#` is XOR, as in PostgreSQL. `^` is not an operator: it is power in PostgreSQL and XOR in MySQL,
+  so each meaning is a surprise to some users. Use `#` for XOR and `power()` for a power.
+
+### Prefix `~` and regex match `~`
+
+`~` has two meanings. Where an operand starts, `~` is bitwise NOT. After an operand, `~` is the
+regex match. Thus `name ~ '^A'` is a regex match, `~flags` is a bitwise NOT, and `a ~ ~b` is a regex
+match of `a` against `~b`.
+
+Prefix `~` binds as tightly as unary minus, so `~a + 1` is `(~a) + 1`. This is the C and MySQL
+reading. PostgreSQL reads `~a + 1` as `~(a + 1)`, because it gives a prefix operator the lower
+"any other operator" level. Write the parentheses when a statement must give the same result on
+both systems.
+
+## Operator precedence
+
+The table lists the operators from the tightest binding to the loosest. Operators on one row have the
+same precedence. A left-associative row groups from left to right: `a - b - c` is `(a - b) - c`.
+
+| Operators | Associativity |
+|-----------|---------------|
+| `::` (cast), `[ ]` (subscript) | left |
+| unary `-`, prefix `~` | right |
+| `IS`, `IN`, `.` (qualified name) | left |
+| `*`, `/`, `%` | left |
+| `+`, `-` | left |
+| `\|\|`, `&`, `\|`, `#`, `<<`, `>>` | left |
+| `<`, `>`, `<=`, `>=` | left |
+| `=`, `<>`, `!=`, `BETWEEN` | left |
+| `LIKE`, `ILIKE`, `~`, `~*`, `!~`, `!~*` | left |
+| `NOT` | right |
+| `AND` | left |
+| `OR` | left |
+
+Some results of this table:
+
+```sql
+SELECT 1 + 2 & 3;        -- 3, that is (1 + 2) & 3
+SELECT 6 | 1 & 3;        -- 3, that is (6 | 1) & 3
+SELECT 1 << 1 + 1;       -- 4, that is 1 << (1 + 1)
+SELECT 'a' || 'b' = 'ab';  -- true, that is ('a' || 'b') = 'ab'
+```
+
+`||` and the bitwise operators share one level, as in PostgreSQL. Thus `6 | 1 & 3` is `(6 | 1) & 3`.
+In C, `&` binds tighter than `|`, and the result is 7.
 
 ## Several aggregates without `GROUP BY`
 

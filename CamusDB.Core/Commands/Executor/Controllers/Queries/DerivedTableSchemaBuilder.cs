@@ -7,6 +7,7 @@
  */
 
 using CamusDB.Core.Catalogs.Models;
+using CamusDB.Core.CommandsExecutor.Controllers.DML;
 using CamusDB.Core.CommandsExecutor.Controllers.Functions;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Queries;
@@ -633,6 +634,9 @@ internal static class DerivedTableSchemaBuilder
         if (QueryExpressionClassifier.IsCompoundAggregateProjection(target))
             return InferCompoundAggregateType(target, innerBound, innerResolver);
 
+        if (target.nodeType == NodeType.BytesLiteral)
+            return ColumnType.Bytes;
+
         if (target.nodeType == NodeType.Identifier && target.yytext is not null)
         {
             string lookupKey = innerResolver.ResolveRowLookupKey(target.yytext);
@@ -661,6 +665,28 @@ internal static class DerivedTableSchemaBuilder
             return MixedNumericComparison.ArithmeticResultType(
                        InferArgType(target.leftAst, innerBound, innerResolver),
                        InferArgType(target.rightAst, innerBound, innerResolver))
+                   ?? ColumnType.String;
+        }
+
+        // Concatenation and the bitwise operators: the evaluator's own type table. As for arithmetic,
+        // a pair the evaluator would refuse, or an operand of unknown type, keeps the String fallback.
+        if (target.nodeType is NodeType.ExprConcat or NodeType.ExprBitAnd or NodeType.ExprBitOr
+                or NodeType.ExprBitXor or NodeType.ExprShiftLeft or NodeType.ExprShiftRight
+            && target.leftAst is not null && target.rightAst is not null)
+        {
+            return ConcatAndBitwiseOperators.ResultType(
+                       target.nodeType,
+                       InferArgType(target.leftAst, innerBound, innerResolver),
+                       InferArgType(target.rightAst, innerBound, innerResolver))
+                   ?? ColumnType.String;
+        }
+
+        if (target.nodeType == NodeType.ExprBitNot && target.leftAst is not null)
+        {
+            return ConcatAndBitwiseOperators.ResultType(
+                       NodeType.ExprBitNot,
+                       InferArgType(target.leftAst, innerBound, innerResolver),
+                       ColumnType.Null)
                    ?? ColumnType.String;
         }
 

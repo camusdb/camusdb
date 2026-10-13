@@ -186,7 +186,7 @@ a vector rule.
 `EXPLAIN` shows how the query will be ranked. With a `LIMIT`, the sort is bounded:
 
 ```
-topk(k: 10, l2_distance(…) ASC)
+topk(k: 10, l2_distance(embedding, @q) ASC)
 ```
 
 Without one it is a full sort, which ranks and materializes every matching row.

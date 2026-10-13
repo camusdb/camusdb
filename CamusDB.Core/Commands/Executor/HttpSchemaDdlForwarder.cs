@@ -192,10 +192,11 @@ public sealed class HttpSchemaDdlForwarder : ISchemaDdlForwarder, ISchemaAckSend
 
     /// <summary>
     /// Posts a schema-apply ack from the local follower to the current leader's ack endpoint.
-    /// Fire-and-forget semantics: transport failures are logged at Debug and swallowed; the
-    /// gate's own timeout is the correctness backstop.
+    /// Transport failures are logged at Debug and reported as <see cref="SchemaAckDelivery.Failed"/>;
+    /// a 503 or a <c>not-leader</c> body is reported as <see cref="SchemaAckDelivery.NotLeader"/>. The
+    /// caller retries on both, so a dropped or misrouted ack does not strand the leader's gate.
     /// </summary>
-    async Task ISchemaAckSender.SendSchemaAckAsync(
+    async Task<SchemaAckDelivery> ISchemaAckSender.SendSchemaAckAsync(
         string leaderEndpoint,
         string database,
         string nodeEndpoint,
@@ -216,14 +217,41 @@ public sealed class HttpSchemaDdlForwarder : ISchemaDdlForwarder, ISchemaAckSend
         try
         {
             response = await httpClient.PostAsJsonAsync(endpoint, request, JsonOptions, cancellationToken).ConfigureAwait(false);
+
+            // The ack endpoint answers 503 not-leader like the DDL endpoints do, so the sender can
+            // walk the replica set; any other failure is retried after the leader is resolved again.
+            if (response.StatusCode == HttpStatusCode.ServiceUnavailable)
+                return SchemaAckDelivery.NotLeader;
+
+            SchemaDdlForwardResponse? body = response.IsSuccessStatusCode
+                ? await response.Content.ReadFromJsonAsync<SchemaDdlForwardResponse>(JsonOptions, cancellationToken).ConfigureAwait(false)
+                : null;
+
+            switch (body?.Status)
+            {
+                case "ok":
+                    return SchemaAckDelivery.Accepted;
+                case "not-leader":
+                    return SchemaAckDelivery.NotLeader;
+                default:
+                    Log.LogSchemaAckRejected(logger, endpoint, (int)response.StatusCode, body?.Status);
+                    return SchemaAckDelivery.Failed;
+            }
         }
         catch (HttpRequestException ex)
         {
             Log.LogSchemaAckFailed(logger, ex, endpoint);
+            return SchemaAckDelivery.Failed;
         }
         catch (TaskCanceledException ex) when (!cancellationToken.IsCancellationRequested)
         {
             Log.LogSchemaAckTimedOut(logger, ex, endpoint);
+            return SchemaAckDelivery.Failed;
+        }
+        catch (System.Text.Json.JsonException ex)
+        {
+            Log.LogSchemaAckFailed(logger, ex, endpoint);
+            return SchemaAckDelivery.Failed;
         }
         finally
         {

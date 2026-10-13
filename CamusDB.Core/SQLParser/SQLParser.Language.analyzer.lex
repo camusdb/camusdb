@@ -182,6 +182,12 @@ TMinus          \-
 TDiv            /
 TMod            %
 TColonColon     ::
+TConcat         \|\|
+TBitOr          \|
+TBitAnd         &
+TBitXor         #
+TShiftLeft      <<
+TShiftRight     >>
 TComma          ,
 TEquals         =
 TNotEquals      <>
@@ -482,6 +488,21 @@ TSequence       (S|s)(E|e)(Q|q)(U|u)(E|e)(N|n)(C|c)(E|e)
 {TMod} { return (int)Token.TMOD; }
 
 {TColonColon} { return (int)Token.TCOLONCOLON; }
+
+/* `||` and `|` are two tokens; longest match reads `||` as concatenation. `<<` and `>>` likewise
+   win over `<`, `<=`, `<>`, `>` and `>=`. `#` is XOR, never a comment: the only comments are `--`
+   and the block comment. */
+{TConcat} { return (int)Token.TCONCAT; }
+
+{TBitOr} { return (int)Token.TBITOR; }
+
+{TBitAnd} { return (int)Token.TBITAND; }
+
+{TBitXor} { return (int)Token.TBITXOR; }
+
+{TShiftLeft} { return (int)Token.TSHIFTLEFT; }
+
+{TShiftRight} { return (int)Token.TSHIFTRIGHT; }
 
 {LineComment}               /* skip */
 

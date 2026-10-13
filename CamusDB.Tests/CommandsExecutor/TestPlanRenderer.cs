@@ -186,6 +186,18 @@ public sealed class TestPlanRenderer
         Assert.That(rendered, Does.Contain("sort(year DESC)"));
     }
 
+    [Test]
+    public void Render_SortNode_ExpressionKeysShowTheExpression()
+    {
+        // An expression key prints the expression, not its node type name (ExprAdd) or a short
+        // call label (lower(…)). A column key beside it still prints its column name.
+        QueryPlan plan = Plan("SELECT * FROM robots ORDER BY year + 1 DESC, -year, lower(name), name");
+        string rendered = PlanRenderer.Render(plan);
+        Assert.That(rendered, Does.Contain("sort(year + 1 DESC, -year ASC, lower(name) ASC, name ASC)"));
+        Assert.That(rendered, Does.Not.Contain("ExprAdd"));
+        Assert.That(rendered, Does.Not.Contain("ExprNegate"));
+    }
+
     // ── limit ─────────────────────────────────────────────────────────────
 
     [Test]

@@ -12,13 +12,24 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 
+using System.IO;
+using System.Text;
+using System.Text.Json;
+
 using NUnit.Framework;
+using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 
 using Kommander;
 
+using CamusDB.App.Controllers;
+using CamusDB.App.Services;
 using CamusDB.Core;
 using CamusDB.Core.Catalogs.Models;
+using CamusDB.Core.CommandsExecutor;
+using CamusDB.Core.CommandsExecutor.Controllers.DDL;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Results;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
@@ -63,7 +74,13 @@ public sealed class TestClusterPartialPlacement
 
     private static readonly TimeSpan ConvergenceTimeout = TimeSpan.FromSeconds(20);
 
-    private static async Task<(InProcessSchemaCluster cluster, CapturingLoggerProvider logs)> StartClusterAsync()
+    /// <param name="leaderHints">
+    /// False keeps the gossiped leader hints from ever forming: the load reports that carry them are
+    /// published once an hour. A node outside a partition's replica set then names the first voter
+    /// of the replica set for every operation on it, which is the state of a cluster in its first
+    /// seconds, and the state the ack-routing scenario needs to hold for its whole run.
+    /// </param>
+    private static async Task<(InProcessSchemaCluster cluster, CapturingLoggerProvider logs)> StartClusterAsync(bool leaderHints = true)
     {
         CapturingLoggerProvider logs = new();
 
@@ -83,8 +100,8 @@ public sealed class TestClusterPartialPlacement
 
                 // Leader hints come from gossiped load reports; a short report cadence lets the
                 // placement view settle in a test-sized window instead of the 5 s production default.
-                node.LeaderBalancerReportInterval = TimeSpan.FromMilliseconds(500);
-                node.LeaderBalancerReportTtl = TimeSpan.FromSeconds(10);
+                node.LeaderBalancerReportInterval = leaderHints ? TimeSpan.FromMilliseconds(500) : TimeSpan.FromHours(1);
+                node.LeaderBalancerReportTtl = leaderHints ? TimeSpan.FromSeconds(10) : TimeSpan.FromHours(2);
             });
 
         return (cluster, logs);
@@ -419,6 +436,336 @@ public sealed class TestClusterPartialPlacement
 
             await cluster.DisposeAsync();
         }
+    }
+
+    /// <summary>
+    /// The inter-node DDL endpoint judges leadership by the schema log of the database <em>id</em>,
+    /// which is the partition the engine proposes on, and not by the partition the database
+    /// <em>name</em> hashes to. The two differ for about every second name, and under leader balancing
+    /// and replica placement they have different leaders, so a name-keyed check refused the real
+    /// leader and accepted a node that then re-forwarded the ticket to itself and deadlocked on its
+    /// own DDL semaphore until the HTTP client timed out: that is where a 5-node CREATE TABLE spent
+    /// 43 s per attempt. Here the two partitions are made to have different leaders on purpose, and
+    /// the endpoint is driven on both.
+    /// </summary>
+    [Test]
+    public async Task ForwardedDdl_IsJudgedByTheSchemaLogOfTheDatabaseId_NotByItsName()
+    {
+        (InProcessSchemaCluster cluster, CapturingLoggerProvider logs) = await StartClusterAsync();
+
+        try
+        {
+            await WaitForLeaderHintsAsync(cluster);
+
+            // A database whose name and id hash to different schema-log partitions. The id exists only
+            // once the database does, so candidates are created until one qualifies.
+            string db;
+            string id;
+            for (int candidate = 0; ; candidate++)
+            {
+                db = cluster.NextSchemaLogDatabaseName();
+                await cluster.OpenDatabaseOnAllNodesAsync(db);
+                id = cluster.Nodes[0].Database!.Id;
+
+                if (cluster.Nodes[0].Kahuna.SchemaLogPartition(db) != cluster.Nodes[0].Kahuna.SchemaLogPartition(id))
+                    break;
+
+                Assert.Less(candidate, 40, "No database name hashed to a different partition than its id");
+            }
+
+            InProcessSchemaCluster.Node leader = await cluster.WaitForSchemaLeaderNodeAsync(db);
+            InProcessSchemaCluster.Node nameLeader = await WaitForNodeLeadingAsync(cluster, db);
+
+            // The name's partition must be led by a node that does not lead the schema log, so the two
+            // answers differ. The leader of the name's partition is moved off the schema leader when
+            // the two coincide.
+            if (nameLeader.Index == leader.Index)
+            {
+                int namePartition = leader.Kahuna.SchemaLogPartition(db);
+                InProcessSchemaCluster.Node target = cluster.Nodes.First(node =>
+                    node.Index != leader.Index && node.Kahuna.Raft.HostsPartition(namePartition));
+
+                await leader.Kahuna.TransferSchemaLeadershipAsync(db, target.Kahuna.Raft.GetLocalEndpoint());
+                nameLeader = await WaitForNodeLeadingAsync(cluster, db, expected: target);
+            }
+
+            Assert.AreNotEqual(leader.Index, nameLeader.Index);
+            Assert.IsTrue(await leader.Kahuna.AmISchemaLeaderAsync(id), "The schema leader must lead the id's partition");
+            Assert.IsFalse(await nameLeader.Kahuna.AmISchemaLeaderAsync(id), "The name's leader must not lead the id's partition");
+            Assert.IsTrue(await nameLeader.Kahuna.AmISchemaLeaderAsync(db), "The name's leader must lead the name's partition");
+
+            string body = JsonSerializer.Serialize(new ForwardCreateTableRequest
+            {
+                OperationId = Guid.NewGuid().ToString("N"),
+                DatabaseName = db,
+                TableName = "robots",
+                Columns =
+                [
+                    new ColumnInfoRequest { Name = "id", Type = ColumnType.Id },
+                    new ColumnInfoRequest { Name = "name", Type = ColumnType.String, NotNull = true },
+                ],
+                Constraints =
+                [
+                    new ConstraintInfoRequest
+                    {
+                        Type = ConstraintType.PrimaryKey,
+                        Name = "~pk",
+                        Columns = [new ColumnIndexInfoRequest { Name = "id", Order = OrderType.Ascending }],
+                    },
+                ],
+                IfNotExists = false,
+            }, ForwardJson);
+
+            // The node that leads the name's partition, but not the schema log, must bounce the ticket
+            // without running it: a forwarded ticket that is forwarded again is the deadlock.
+            JsonResult refused = await BuildForwardController(nameLeader, body).ForwardCreateTable();
+            SchemaDdlForwardResponse refusal = (SchemaDdlForwardResponse)refused.Value!;
+            Assert.AreEqual("not-leader", refusal.Status, refusal.Message);
+            Assert.IsFalse(nameLeader.Database!.Schema.Tables.ContainsKey("robots"),
+                "A node that does not lead the schema log must not apply a forwarded ticket");
+
+            // The schema leader must accept and run it.
+            JsonResult accepted = await BuildForwardController(leader, body).ForwardCreateTable();
+            SchemaDdlForwardResponse acceptance = (SchemaDdlForwardResponse)accepted.Value!;
+            Assert.AreEqual("ok", acceptance.Status, acceptance.Message);
+            Assert.IsTrue(leader.Database!.Schema.Tables.ContainsKey("robots"));
+
+            await WaitForConvergenceAsync(cluster, db);
+
+            foreach (InProcessSchemaCluster.Node node in cluster.Nodes)
+                Assert.IsTrue(node.Database!.Schema.Tables.ContainsKey("robots"),
+                    $"{node.Kahuna.Raft.GetLocalNodeName()} must see the forwarded table");
+
+            AssertNoNotHostedErrors(logs);
+        }
+        finally
+        {
+            await cluster.DisposeAsync();
+        }
+    }
+
+    /// <summary>
+    /// A node outside the schema partition's replica set has no Raft view of its leader. Before a
+    /// gossiped hint forms it names the first voter of the replica set, and an ack recorded there in
+    /// silence never reached the leader, whose gate then skipped the node for every later DDL. The
+    /// replica that is not the leader must refuse the ack, and the sender must walk on to the leader.
+    /// Load reports, which carry the hints, stop after the one each node publishes at startup, and
+    /// leadership is moved to a replica no outsider names, so the first delivery is misrouted by
+    /// construction.
+    /// </summary>
+    [Test]
+    public async Task AckFromANodeOutsideTheReplicaSet_ReachesTheSchemaLeader_BeforeAnyLeaderHintForms()
+    {
+        (InProcessSchemaCluster cluster, CapturingLoggerProvider logs) = await StartClusterAsync(leaderHints: false);
+
+        try
+        {
+            string db = cluster.NextSchemaLogDatabaseName();
+
+            // Created and opened on one node only, so the id and the replica set are known before any
+            // node outside the replica set opens it and acknowledges its loaded version.
+            InProcessSchemaCluster.Node first = cluster.Nodes[0];
+            await first.Executor.CreateDatabase(new CreateDatabaseTicket(db, ifNotExists: true));
+            first.Database = await first.Executor.OpenDatabase(db);
+
+            string id = first.Database!.Id;
+            int schemaPartition = first.Database!.SchemaLogPartition;
+            (List<InProcessSchemaCluster.Node> hosting, List<InProcessSchemaCluster.Node> notHosting) =
+                SplitByHosting(cluster, schemaPartition);
+
+            InProcessSchemaCluster.Node leader = await cluster.WaitForSchemaLeaderNodeAsync(db);
+
+            // Each outsider names the leader from its placement view: the one report every node
+            // publishes at startup may have left a hint, else it is the first voter. Leadership is
+            // moved to a replica that no outsider names, so every first delivery is misrouted by
+            // construction, and it stays misrouted because no further report is ever published.
+            HashSet<string> named = new(StringComparer.Ordinal);
+            foreach (InProcessSchemaCluster.Node outsider in notHosting)
+                named.Add(await outsider.Kahuna.WaitForSchemaLeaderAsync(id));
+
+            InProcessSchemaCluster.Node target = hosting.First(node => !named.Contains(node.Kahuna.Raft.GetLocalEndpoint()));
+
+            if (target.Index != leader.Index)
+            {
+                await cluster.TransferSchemaLeadershipAsync(db, target);
+                leader = target;
+            }
+
+            foreach (InProcessSchemaCluster.Node outsider in notHosting)
+            {
+                Assert.AreNotEqual(leader.Kahuna.Raft.GetLocalEndpoint(), await outsider.Kahuna.WaitForSchemaLeaderAsync(id),
+                    "The scenario needs an outsider whose placement view names a replica other than the leader");
+
+                Assert.IsNull(leader.Kahuna.GetRecordedSchemaAck(id, outsider.Kahuna.Raft.GetLocalEndpoint()));
+            }
+
+            // Opening the database on a node outside the replica set acknowledges its loaded version
+            // through the ack sender, which can only name a replica from the placement view.
+            foreach (InProcessSchemaCluster.Node outsider in notHosting)
+                outsider.Database = await outsider.Executor.OpenDatabase(db);
+
+            foreach (InProcessSchemaCluster.Node outsider in notHosting)
+            {
+                string endpoint = outsider.Kahuna.Raft.GetLocalEndpoint();
+                long deadline = Environment.TickCount64 + 15_000;
+
+                while (leader.Kahuna.GetRecordedSchemaAck(id, endpoint) is null)
+                {
+                    if (Environment.TickCount64 >= deadline)
+                        Assert.Fail($"The schema leader never recorded an ack from {endpoint}, which does not host the schema partition");
+
+                    await Task.Delay(50);
+                }
+            }
+
+            AssertNoNotHostedErrors(logs);
+        }
+        finally
+        {
+            await cluster.DisposeAsync();
+        }
+    }
+
+    /// <summary>
+    /// A follower that forwards a ticket holds the database's DDL semaphore while it waits for the
+    /// answer. A forward to its own node re-enters the same path and waits on that semaphore: a
+    /// deadlock that only the transport timeout ends. So the walk over the replica set after a
+    /// refusal must skip the local node, even though it is a replica. Every target refuses here, so
+    /// the walk visits every candidate it is willing to try.
+    /// </summary>
+    [Test]
+    public async Task DdlForwarder_NeverSendsATicketToItsOwnNode()
+    {
+        (InProcessSchemaCluster cluster, CapturingLoggerProvider logs) = await StartClusterAsync();
+
+        try
+        {
+            string db = cluster.NextSchemaLogDatabaseName();
+            await cluster.OpenDatabaseOnAllNodesAsync(db);
+
+            InProcessSchemaCluster.Node leader = await cluster.WaitForSchemaLeaderNodeAsync(db);
+            (List<InProcessSchemaCluster.Node> hosting, _) = SplitByHosting(cluster, leader.Database!.SchemaLogPartition);
+            InProcessSchemaCluster.Node follower = hosting.First(node => node.Index != leader.Index);
+
+            RefusingForwarder forwarder = new();
+            DdlForwardingCoordinator coordinator = new(forwarder, isClusterMode: true);
+
+            CreateTableTicket ticket = new(
+                databaseName: db,
+                tableName: "robots",
+                columns: [new ColumnInfo("id", ColumnType.Id)],
+                constraints: [new ConstraintInfo(ConstraintType.PrimaryKey, "~pk", [new ColumnIndexInfo("id", OrderType.Ascending)])],
+                ifNotExists: false
+            );
+
+            CamusDBException? refused = Assert.ThrowsAsync<CamusDBException>(() =>
+                coordinator.TryForwardCreateTableAsync(follower.Database!, ticket).WaitAsync(TimeSpan.FromSeconds(30)));
+
+            Assert.AreEqual(CamusDBErrorCodes.InvalidInternalOperation, refused!.Code);
+
+            string self = follower.Kahuna.Raft.GetLocalEndpoint();
+            Assert.That(forwarder.Targets, Does.Not.Contain(self), "A node must never forward a ticket to itself");
+            Assert.That(forwarder.Targets, Does.Contain(leader.Kahuna.Raft.GetLocalEndpoint()), "The schema leader must have been tried");
+
+            AssertNoNotHostedErrors(logs);
+        }
+        finally
+        {
+            await cluster.DisposeAsync();
+        }
+    }
+
+    private static readonly JsonSerializerOptions ForwardJson = new()
+    {
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+        PropertyNameCaseInsensitive = true,
+    };
+
+    /// <summary>
+    /// The inter-node DDL endpoint of <paramref name="node"/>, driven without an HTTP pipeline: the
+    /// request body is <paramref name="jsonBody"/> and the service provider exposes the node's
+    /// <see cref="EmbeddedKahuna"/>, which is what the endpoint consults for leadership.
+    /// </summary>
+    private static SchemaDdlForwardController BuildForwardController(InProcessSchemaCluster.Node node, string jsonBody)
+    {
+        SchemaDdlForwardController controller = new(
+            node.Executor,
+            new HttpTransactionCoordinator(node.Executor),
+            NullLogger<ICamusDB>.Instance,
+            CamusDBOptions.Default);
+
+        byte[] bytes = Encoding.UTF8.GetBytes(jsonBody);
+        DefaultHttpContext httpContext = new() { RequestServices = new NodeServiceProvider(node.Kahuna) };
+        httpContext.Request.Body = new MemoryStream(bytes);
+        httpContext.Request.ContentLength = bytes.Length;
+
+        controller.ControllerContext = new ControllerContext { HttpContext = httpContext };
+        return controller;
+    }
+
+    /// <summary>
+    /// The node that leads the partition <paramref name="schemaKey"/> hashes to, by the engine's own
+    /// leadership question. With <paramref name="expected"/> set, waits until that node leads it.
+    /// </summary>
+    private static async Task<InProcessSchemaCluster.Node> WaitForNodeLeadingAsync(
+        InProcessSchemaCluster cluster, string schemaKey, InProcessSchemaCluster.Node? expected = null)
+    {
+        long deadline = Environment.TickCount64 + 20_000;
+
+        while (true)
+        {
+            foreach (InProcessSchemaCluster.Node node in cluster.Nodes)
+            {
+                if (expected is not null && node.Index != expected.Index)
+                    continue;
+
+                using CancellationTokenSource cts = new(TimeSpan.FromSeconds(2));
+                try
+                {
+                    if (await node.Kahuna.AmISchemaLeaderAsync(schemaKey, cts.Token))
+                        return node;
+                }
+                catch (OperationCanceledException) { }
+                catch (RaftException) { }
+            }
+
+            if (Environment.TickCount64 >= deadline)
+                Assert.Fail($"No node leads the partition of '{schemaKey}'");
+
+            await Task.Delay(100);
+        }
+    }
+
+    private sealed class NodeServiceProvider(EmbeddedKahuna kahuna) : IServiceProvider
+    {
+        public object? GetService(Type serviceType) => serviceType == typeof(EmbeddedKahuna) ? kahuna : null;
+    }
+
+    /// <summary>
+    /// A forwarder every target of which answers not-leader, recording the targets in the order they
+    /// were tried. It is what the coordinator sees when its placement view is stale on every attempt.
+    /// </summary>
+    private sealed class RefusingForwarder : ISchemaDdlForwarder
+    {
+        public List<string> Targets { get; } = [];
+
+        private Task<bool?> Refuse(string leader)
+        {
+            lock (Targets)
+                Targets.Add(leader);
+
+            return Task.FromResult<bool?>(null);
+        }
+
+        public Task<bool?> ForwardCreateTableAsync(string leader, CreateTableTicket ticket, string operationId, CancellationToken cancellationToken) => Refuse(leader);
+        public Task<bool?> ForwardAlterTableAsync(string leader, AlterTableTicket ticket, string operationId, CancellationToken cancellationToken) => Refuse(leader);
+        public Task<bool?> ForwardAlterIndexAsync(string leader, AlterIndexTicket ticket, string operationId, CancellationToken cancellationToken) => Refuse(leader);
+        public Task<bool?> ForwardDropTableAsync(string leader, DropTableTicket ticket, string operationId, CancellationToken cancellationToken) => Refuse(leader);
+        public Task<bool?> ForwardRelinkTableAsync(string leader, RelinkTableTicket ticket, string operationId, CancellationToken cancellationToken) => Refuse(leader);
+        public Task<bool?> ForwardTruncateTableAsync(string leader, TruncateTableTicket ticket, string operationId, CancellationToken cancellationToken) => Refuse(leader);
+        public Task<bool?> ForwardRenameTableAsync(string leader, RenameTableTicket ticket, string operationId, CancellationToken cancellationToken) => Refuse(leader);
+        public Task<bool?> ForwardAlterConstraintAsync(string leader, AlterConstraintTicket ticket, string operationId, CancellationToken cancellationToken) => Refuse(leader);
+        public Task<bool?> ForwardCommentAsync(string leader, CommentTicket ticket, string operationId, CancellationToken cancellationToken) => Refuse(leader);
     }
 
     private static async Task WaitForSettingOnEveryNodeAsync(

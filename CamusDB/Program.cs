@@ -231,7 +231,12 @@ builder.WebHost.ConfigureKestrel(kestrel =>
             if (config.Http3Enabled)
                 o.Protocols = HttpProtocols.Http1AndHttp2AndHttp3;
             CamusDB.App.Middleware.ClientActivityMiddleware.UseClientConnectionTracking(o);
-            o.UseHttps(config.HttpsCertificate);
+            // QUIC on macOS needs an exportable private key; see HttpsCertificateLoader.
+            if (config.Http3Enabled)
+                o.UseHttps(CamusDB.App.HttpsCertificateLoader.LoadForQuic(
+                    o.ApplicationServices.GetRequiredService<IHostEnvironment>().ContentRootPath, config.HttpsCertificate));
+            else
+                o.UseHttps(config.HttpsCertificate);
         });
     if (config.IsClusterMode)
     {

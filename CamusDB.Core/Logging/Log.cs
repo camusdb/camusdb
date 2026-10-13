@@ -143,6 +143,9 @@ internal static partial class Log
     [LoggerMessage(Level = LogLevel.Debug, Message = "Schema ack to {Endpoint} timed out; will retry on next apply")]
     public static partial void LogSchemaAckTimedOut(ILogger logger, Exception ex, Uri endpoint);
 
+    [LoggerMessage(Level = LogLevel.Debug, Message = "Schema ack to {Endpoint} answered HTTP {StatusCode} with status '{Status}'; will resolve the leader again and retry")]
+    public static partial void LogSchemaAckRejected(ILogger logger, Uri endpoint, int statusCode, string? status);
+
     [LoggerMessage(Level = LogLevel.Debug, Message = "Forwarding DDL {Operation} to {Endpoint}")]
     public static partial void LogForwardingDdl(ILogger logger, string operation, Uri endpoint);
 

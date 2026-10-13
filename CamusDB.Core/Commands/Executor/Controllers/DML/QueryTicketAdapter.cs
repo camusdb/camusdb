@@ -288,9 +288,9 @@ internal static class QueryTicketAdapter
     }
 
     /// <summary>
-    /// Short label for an expression key. It exists for error messages and plan output only — an
-    /// expression clause is never looked up by name — so a function call reports its own name rather
-    /// than a rendering of its arguments.
+    /// Short label for an expression key. It exists for error messages only — an expression clause is
+    /// never looked up by name, and <c>EXPLAIN</c> renders the expression itself — so a function call
+    /// reports its own name rather than a rendering of its arguments.
     /// </summary>
     private static string DescribeOrderExpression(NodeAst expression)
     {
