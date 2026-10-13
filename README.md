@@ -13,7 +13,8 @@ CamusDB is a SQL distributed database written in C# on .NET. It provides a SQL i
 
 <img width="808" height="507" alt="tui" src="https://github.com/user-attachments/assets/dcb65e29-cc3c-49fe-a2a8-07526400e99e" />
 
-<img width="939" height="705" alt="webconsole" src="https://github.com/user-attachments/assets/286690a1-bf7c-4c21-92a6-7c4ef3f86d4d" />
+<img width="808" height="507" alt="webconsole-opt" src="https://github.com/user-attachments/assets/a9a29095-2c4b-42cd-933f-70caf79518ba" />
+
 
 Why CamusDB?
 ------------
