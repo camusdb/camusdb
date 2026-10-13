@@ -58,8 +58,12 @@ on what statistics have been collected and will differ between deployments. When
 wrong, [`SHOW STATISTICS FOR <table>`](show-statistics.md) shows the inputs that produced it and
 whether they were collected at all. `estimated_cost` also
 includes a network term (`NetworkFactor`) for range-sharded deployments; it is 0 on a single node.
-Single-table estimates are accurate; join-node estimates are accurate when the cost-based
-join-order flag is on and otherwise remain heuristic. `(LOGICAL)` and `(PHYSICAL)` currently
+Hash, merge and nested-loop join estimates use the distinct-value counts and unique keys of the
+join-key tables; an index-nested-loop join estimates one row for each outer row. For a join over a
+join, the alias qualifier of the left key names its table, and the key's distinct count in that table
+is used; a key unique in its table is not taken as unique there, because an earlier join can repeat
+it. These estimates come from the plan annotation, not from the join-order search, so the two can
+differ. `(LOGICAL)` and `(PHYSICAL)` currently
 render the same physical tree, differing only in the `stage` label. See
 [`docs/query-planner.md` → Part V](./query-planner.md#part-v--the-cost-based-optimizer) for the
 cost model itself.
@@ -105,7 +109,7 @@ One row is emitted per physical plan node, in depth-first order (parent before c
 | `nested-loop-join`       | Join without a usable index on the right side | `on=<expr>, right=<alias>` |
 | `index-nested-loop-join` | Join where the right side's join key is indexed | `on=<expr>, index=<name>, left=<col>, right=<col>` |
 | `hash-join`              | Equi-join using an in-memory hash table; chosen over INLJ when the outer side is large relative to the inner | `on=<left>=<right>, build=<alias>` (build-filter appended when a pushed-down filter is present) |
-| `merge-join`             | Equi-join using a streaming two-pointer merge; chosen when both sides have free index ordering on the join key | `on=<left>=<right>` (right-filter appended when present) |
+| `merge-join`             | Equi-join using a streaming two-pointer merge; chosen when both sides have free index ordering on the join key | `on=<left>=<right>, right-order=forced-index=<name>\|sort` (right-filter appended when present) |
 | `derived-table-scan`     | Subquery in the `FROM` clause | `alias=<alias>` |
 | `constant-source`        | The single synthetic row of a **FROM-less** `SELECT` (no table access) | `1 row` |
 
@@ -129,12 +133,23 @@ Notes:
   See [`docs/joins.md`](./joins.md) for the contract and the pushdown rule the plan reflects.
 - `merge-join` streams both inputs when both arrive pre-ordered (ForcedIndex scan or an upstream
   sort); only the current equal-key run is buffered — O(run size) memory, not O(n+m).
+- **Where a join predicate appears.** For an inner-join tree the planner places each predicate
+  conjunct at the join where the last of its tables enters, not where the query text writes it
+  ([`query-planner.md` → Cost-based join-order enumeration](./query-planner.md#cost-based-join-order-enumeration)).
+  A conjunct can therefore appear on an earlier join than the `ON` it was written in, and a
+  cross-table `WHERE` conjunct such as `c.z = a.z` can appear on a join instead of after the last
+  join. `nested-loop-join` and `index-nested-loop-join` render the whole `on=` predicate of the join.
+  `hash-join` and `merge-join` render only their key pairs: an equi-conjunct that moved into the join
+  shows up as one more key (`on=b.y=y, a.z=z`), and a conjunct that is not a key is evaluated in the
+  join but is not shown. The filter that runs after the last join is not a plan node, so it is not
+  shown either. A `nested-loop-join(on=true, …)` is a cross product: the planner keeps one only when
+  the predicates need it (no conjunct connects the two sides).
 
 > **The plan reflects the active planner config.** Which access path a table uses, and the order
-> of join nodes, depend on whether the cost-based optimizer is enabled. By default the planner is
-> rule-based, so `EXPLAIN` shows the heuristic plan. With `cost_based_access_path_enabled` and/or
-> `cost_based_join_order_enabled` turned on **and** statistics collected (run `ANALYZE <table>`),
-> the same query may show a different (cheaper) index or join order — the output is correct for
+> of join nodes, depend on whether the cost-based optimizer is enabled. By default
+> `cost_based_access_path_enabled` and `cost_based_join_order_enabled` are on; with them off, `EXPLAIN`
+> shows the heuristic plan. With statistics collected (run `ANALYZE <table>`) the cost-based passes
+> can show a different (cheaper) index or join order than without — the output is correct for
 > whatever configuration produced it. See
 > [`docs/query-planner.md` → Part V](./query-planner.md#part-v--the-cost-based-optimizer).
 
@@ -289,8 +304,10 @@ EXPLAIN SELECT o.name, li.product
 stage     node        detail
 physical  hash-join   on=o.id=order_id, build=li
 physical  table-scan  table=orders
-physical  table-scan  table=line_items
 ```
+
+The plan walk follows the left input of each join, so the right input (`line_items`) has no row
+of its own; the join line names it (`build=li`).
 
 `build=li` means `line_items` is materialized into the in-memory hash table; `orders` is
 streamed as the probe side. The planner chose `li` as the build side because it estimated
@@ -312,12 +329,13 @@ EXPLAIN SELECT o.name, li.product
 
 ```
 stage     node              detail
-physical  merge-join        on=o.ext_key=order_id
+physical  merge-join        on=o.ext_key=order_id, right-order=forced-index=li_order_id_idx
 physical  table-scan        table=orders, forced-index=orders_ext_key_idx
-physical  table-scan        table=line_items, forced-index=li_order_id_idx
 ```
 
-Both scans use a `forced-index` so their rows arrive in join-key order. The executor streams
+Both sides use a `forced-index` scan so their rows arrive in join-key order: the left one has its
+own row, and the right one is named by `right-order` on the join line (`right-order=sort` when the
+right side is sorted instead). The executor streams
 both sides simultaneously and buffers only the current equal-key run — no full materialization
 of either side. `LeftIsOrdered = RightIsOrdered = true` on the `MergeJoinNode`.
 

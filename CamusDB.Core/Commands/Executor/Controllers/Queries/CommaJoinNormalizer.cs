@@ -17,6 +17,12 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 /// <summary>
 /// Normalizes SQL-89 comma joins into left-deep inner join trees and hoists equi-join
 /// predicates from WHERE into ON clauses.
+///
+/// <para>The tree follows the FROM order. A table with no equi-join conjunct to the tables
+/// before it gets <c>ON TRUE</c>, and all the conjuncts that connect a table go into one
+/// <c>ON</c>. That shape is not a plan: the join planner reads the conjuncts one at a time
+/// (<see cref="JoinGraph"/>) and rebuilds the tree in a connected order, so an <c>ON TRUE</c>
+/// here becomes a cross product only when the predicates need one.</para>
 /// </summary>
 internal static class CommaJoinNormalizer
 {

@@ -196,13 +196,13 @@ public sealed class TestClusterBroadcastJoin
     }
 
     private static async Task<List<QueryResultRow>> RunSql(
-        InProcessSchemaCluster.Node node, string db, string sql)
+        InProcessSchemaCluster.Node node, string db, string sql, Dictionary<string, ColumnValue>? parameters = null)
     {
         KvTransaction tx = await node.Database!.Transactions.BeginAsync();
         try
         {
             (_, IAsyncEnumerable<QueryResultRow> cursor) = await node.Executor.ExecuteSQLQuery(new ExecuteSQLTicket(
-                txnState: tx, database: db, sql: sql, parameters: null));
+                txnState: tx, database: db, sql: sql, parameters: parameters));
             List<QueryResultRow> rows = await cursor.ToListAsync();
             await node.Database.Transactions.CommitAsync(tx);
             return rows;
@@ -306,6 +306,106 @@ public sealed class TestClusterBroadcastJoin
                 Assert.AreEqual(canonicalReference, Canonical(Shape(await RunSql(node, db, joinSql))),
                     $"Node {node.Index}: join must stay exact when remote fragments fail and spans fall back locally");
             }
+        }
+        finally
+        {
+            await cluster.DisposeAsync();
+        }
+    }
+
+    /// <summary>
+    /// A parameter cannot be shipped to a peer node, so a join whose ON holds one runs its probe
+    /// locally. The planner may move a conjunct to an earlier join, but not a parameter: it stays
+    /// with the ON clause it was written in. Here the seeded row counts make every node join
+    /// dims, then facts, then tags; d.name &lt;&gt; @p was written with tags and names dims only, so
+    /// moved to where dims enters it would sit on the facts join and stop its broadcast.
+    /// </summary>
+    [Test]
+    public async Task BroadcastJoin_ParameterInALaterOnClause_KeepsTheFactJoinBroadcast()
+    {
+        (InProcessSchemaCluster cluster, string db, List<string> factIds) = await SetupAsync();
+
+        try
+        {
+            await cluster.RunOnSchemaLeaderAsync(db, leader => leader.Executor.CreateTable(new CreateTableTicket(
+                databaseName: db,
+                tableName: "tags",
+                columns:
+                [
+                    new ColumnInfo("id",    ColumnType.Id),
+                    new ColumnInfo("k",     ColumnType.Integer64),
+                    new ColumnInfo("label", ColumnType.String),
+                ],
+                constraints:
+                [
+                    new ConstraintInfo(ConstraintType.PrimaryKey, "~pk",
+                        [new ColumnIndexInfo("id", OrderType.Ascending)])
+                ],
+                ifNotExists: false
+            )).WaitAsync(TimeSpan.FromSeconds(20)));
+
+            await cluster.WaitForSchemaConvergenceAsync(db, version: 3);
+
+            InProcessSchemaCluster.Node writer = cluster.Nodes[0];
+            KvTransaction tx = await writer.Database!.Transactions.BeginAsync();
+
+            for (long k = 0; k < DimCount; k++)
+            {
+                await writer.Executor.Insert(new InsertTicket(
+                    txnState: tx, databaseName: db, tableName: "tags",
+                    values: new() { new() {
+                        { "id",    new(ColumnType.Id, ObjectIdGenerator.Generate().ToString()) },
+                        { "k",     new(ColumnType.Integer64, k) },
+                        { "label", new(ColumnType.String, "tag" + k) },
+                    }}));
+            }
+
+            await writer.Database.Transactions.CommitAsync(tx);
+
+            const string sql =
+                "SELECT f.id, f.val, d.name FROM facts f JOIN dims d ON f.dim_id = d.k " +
+                "JOIN tags t ON t.k = d.k AND d.name <> @p";
+
+            Dictionary<string, ColumnValue> parameters = new() { { "@p", new ColumnValue(ColumnType.String, "three") } };
+
+            List<(string FactId, long Val, string Name)> reference = Canonical(Shape(await RunSql(writer, db, sql, parameters)));
+
+            // Every fact with a key except key 3 (named "three"), and key 2 twice (two dims rows).
+            int expected = Enumerable.Range(0, FactCount).Count(i => i % 10 != 9 && i % DimCount != 3)
+                + Enumerable.Range(0, FactCount).Count(i => i % 10 != 9 && i % DimCount == 2);
+            Assert.AreEqual(expected, reference.Count, "Reference join must match the fixture");
+
+            await SplitFactsAtMedianAsync(cluster, db, factIds);
+
+            // dims is tiny and tags is the largest table, so the cheapest order is dims, facts,
+            // tags on every node: the facts join builds dims and probes facts. One run opens the
+            // tables on each node; the seed waits for their own row-count load, which would
+            // otherwise overwrite it.
+            foreach (InProcessSchemaCluster.Node node in cluster.Nodes)
+            {
+                await RunSql(node, db, sql, parameters);
+
+                foreach ((string table, long rows) in new[] { ("facts", 1_000_000L), ("dims", 10L), ("tags", 10_000_000L) })
+                {
+                    TableDescriptor descriptor = await node.Database!.TableDescriptors[table];
+
+                    for (int attempt = 0; attempt < 100 && node.Executor.Statistics.GetRowCountEstimate(node.Database, descriptor) is null; attempt++)
+                        await Task.Delay(50);
+
+                    node.Executor.Statistics.SeedRowCountForTesting(node.Database, descriptor, rows);
+                }
+            }
+
+            cluster.FragmentTransport!.ResetExecuted();
+
+            foreach (InProcessSchemaCluster.Node node in cluster.Nodes)
+            {
+                Assert.AreEqual(reference, Canonical(Shape(await RunSql(node, db, sql, parameters))),
+                    $"Node {node.Index}: the join must return the reference rows");
+            }
+
+            Assert.Greater(cluster.FragmentTransport.ExecutedJoinCount, 0,
+                "The facts join must still run as a broadcast join: its ON holds no parameter");
         }
         finally
         {

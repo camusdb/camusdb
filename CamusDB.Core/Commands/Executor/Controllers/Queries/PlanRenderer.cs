@@ -312,12 +312,27 @@ public static class PlanRenderer
     {
         string keys = string.Join(", ", node.LeftKeyColumns.Zip(node.RightKeyColumns,
             (l, r) => $"{l}={r}"));
-        string detail = $"on={keys}";
+        string detail = $"on={keys}{RenderMergeRightOrder(node)}";
         if (node.RightExecutionFilter is not null)
             detail += $", right-filter={RenderExpr(node.RightExecutionFilter)}";
         detail += RenderJoinKind(node.Kind);
         return $"merge-join({detail})";
     }
+
+    /// <summary>
+    /// How a merge join gets its right input in key order: from an index scan with no sort, or from
+    /// a sort. A plan walk follows the left input only, so the right input never has a row of its
+    /// own; without this field a reader cannot see whether the right side pays for a sort, which is
+    /// the main cost of the operator.
+    /// </summary>
+    private static string RenderMergeRightOrder(MergeJoinNode node) => node.RightPhysicalNode switch
+    {
+        TableScanNode { Source: TableScanSource.ForcedIndex, Index: { } index } => $", right-order=forced-index={index.Name}",
+        SortNode => ", right-order=sort",
+        // No physical right node (a derived table): the executor sorts the right input itself.
+        null => ", right-order=sort",
+        _ => "",
+    };
 
     private static string RenderDerivedTableScan(DerivedTableScanNode node) =>
         $"derived-table-scan(alias={node.BoundSource.Alias})";

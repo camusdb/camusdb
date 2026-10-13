@@ -98,7 +98,7 @@ internal sealed class JoinQueryPlanner
         // unconditional — EXPLAIN renders both on every plan.
         IReadOnlyList<PlanCacheDep>? cacheDeps = planCacheEnabled ? CollectCacheDeps(database, bound) : null;
 
-        QuerySource orderedSource;
+        JoinOrderChoice? choice = null;
         bool fromCache = false;
 
         if (planCacheEnabled
@@ -107,23 +107,30 @@ internal sealed class JoinQueryPlanner
         {
             // Re-apply the cached ordering to the CURRENT bound.Query.Source so that ON-predicate
             // literals from this query are used (not frozen from the first query of this shape).
-            orderedSource = JoinOrderOptimizer.ReorderByAliases(bound.Query.Source, cachedAliasOrder, bound);
-            fromCache = true;
+            choice = ReplayCachedOrder(database, bound, pushdown, cachedAliasOrder, cached.JoinBuild);
+
+            if (choice is not null)
+                fromCache = true;
+            else
+                _cache.RecordReplayFailure();
         }
-        else
-        {
-            orderedSource = _options.CostBasedJoinOrderEnabled && _stats is not null
-                    && AllBaseTableEstimatesLoaded(database, bound)
-                ? JoinEnumerator.Enumerate(bound.Query.Source, bound, pushdown, database, _stats, _options)
-                : JoinOrderOptimizer.Reorder(bound.Query.Source, bound, pushdown);
-        }
+
+        // A miss, or a hit whose order cannot be rebuilt over the current query: plan from the start.
+        choice ??= _options.CostBasedJoinOrderEnabled && _stats is not null
+                && AllBaseTableEstimatesLoaded(database, bound)
+            ? JoinEnumerator.Enumerate(bound.Query.Source, bound, pushdown, database, _stats, _options)
+            : JoinOrderOptimizer.Choose(bound.Query.Source, bound, pushdown);
+
+        QuerySource orderedSource = choice.Source;
 
         QueryPlan plan = new(database, ResolvePlanTable(bound), ticket)
         {
             BoundQuery = bound,
             PredicateAnalysis = PredicateAnalyzer.Analyze(ticket.Where, ticket.Parameters),
-            ExecutionFilter = pushdown.PostJoinFilter,
-            Root = BuildJoinTree(orderedSource, bound, pushdown, database, _stats),
+            // The filter that goes with the tree: a conjunct-mode tree already evaluates the WHERE
+            // conjuncts it moved into its joins.
+            ExecutionFilter = choice.PostJoinFilter,
+            Root = BuildJoinTree(orderedSource, bound, pushdown, database, _stats, choice.StepEstimates),
         };
 
         foreach (BoundTableSource source in bound.Sources)
@@ -145,9 +152,54 @@ internal sealed class JoinQueryPlanner
         if (!fromCache && planCacheEnabled)
             _cache!.Put(database.Id, shapeId,
                 new PlanCacheEntry(cacheDeps!, SingleTable: null,
-                    JoinAliasOrder: CollectAliasOrder(orderedSource)));
+                    JoinAliasOrder: CollectAliasOrder(orderedSource),
+                    JoinBuild: choice.Mode));
 
         return plan;
+    }
+
+    /// <summary>
+    /// Rebuilds a cached join order over the current query, in the mode the miss used. A
+    /// whole-predicate entry replays through <see cref="JoinOrderOptimizer.ReorderByAliases"/>, as
+    /// the heuristic built it. A conjunct or cost-based entry rebuilds through
+    /// <see cref="JoinGraph"/>, also when the order equals the declared order: the miss can keep
+    /// the declared order and still move a conjunct to an earlier join. A cost-based entry also
+    /// recomputes the estimates of each join, so the builder selects the operators of the miss.
+    /// Returns null when the entry cannot be rebuilt (the graph refuses the current tree, the order
+    /// is not a valid permutation of its leaves, or a cost-based entry finds a row count not
+    /// loaded); the caller then plans from the start, as on a miss.
+    /// </summary>
+    private JoinOrderChoice? ReplayCachedOrder(
+        DatabaseDescriptor database,
+        BoundSelectQuery bound,
+        JoinPredicatePushdown.Result pushdown,
+        IReadOnlyList<string> cachedAliasOrder,
+        JoinBuildMode mode)
+    {
+        if (mode == JoinBuildMode.WholePredicate)
+            return JoinOrderChoice.WholePredicate(
+                JoinOrderOptimizer.ReorderByAliases(bound.Query.Source, cachedAliasOrder, bound), pushdown);
+
+        JoinGraph? graph = JoinGraph.TryBuild(bound.Query.Source, bound, pushdown.PostJoinConjuncts);
+        if (graph is null)
+            return null;
+
+        int[]? order = graph.MapAliases(cachedAliasOrder);
+        if (order is null || !graph.IsConnectedOrder(order))
+            return null;
+
+        QuerySource? tree = graph.BuildTree(order);
+        if (tree is null)
+            return null;
+
+        if (mode == JoinBuildMode.Conjunct)
+            return JoinOrderChoice.Conjunct(tree, graph);
+
+        if (_stats is null || !AllBaseTableEstimatesLoaded(database, bound))
+            return null;
+
+        return JoinOrderChoice.CostBased(tree, graph,
+            JoinEnumerator.EstimateSteps(graph, order, tree, bound, pushdown, database, _stats, _options));
     }
 
     /// <summary>
@@ -224,12 +276,22 @@ internal sealed class JoinQueryPlanner
             CollectCacheDepsInto(database, d.InnerBound, deps);
     }
 
+    /// <summary>
+    /// Builds the physical tree for <paramref name="source"/>. When <paramref name="steps"/> has an
+    /// entry for a join (a tree from the cost-based enumerator), the operator choice of that join
+    /// (index lookup against hash, the merge-join size threshold, and the hash build side) uses the
+    /// enumerator's estimates instead of <see cref="EstimatePhysicalNodeRows"/>, which knows a join
+    /// input only as a fixed default, and <see cref="EstimateRightRows"/>, which counts a filtered
+    /// right input by its output rows although the operator reads all of it. Without estimates
+    /// (the heuristic order), the choice is the same as before the enumerator shared its numbers.
+    /// </summary>
     private PhysicalPlanNode BuildJoinTree(
         QuerySource source,
         BoundSelectQuery bound,
         JoinPredicatePushdown.Result pushdown,
         DatabaseDescriptor database,
-        StatisticsManager? stats)
+        StatisticsManager? stats,
+        IReadOnlyDictionary<JoinSource, JoinStepEstimate>? steps = null)
     {
         switch (source)
         {
@@ -271,7 +333,10 @@ internal sealed class JoinQueryPlanner
 
             case JoinSource joinSource:
             {
-                PhysicalPlanNode left = BuildJoinTree(joinSource.Left, bound, pushdown, database, stats);
+                PhysicalPlanNode left = BuildJoinTree(joinSource.Left, bound, pushdown, database, stats, steps);
+                JoinStepEstimate? step = steps is not null && steps.TryGetValue(joinSource, out JoinStepEstimate found)
+                    ? found
+                    : null;
                 BoundJoinRightSource right = BoundSourceCatalog.FindJoinRightSource(bound, joinSource.Right);
                 pushdown.ScanFiltersByAlias.TryGetValue(right.Alias, out NodeAst? rightFilter);
 
@@ -294,7 +359,7 @@ internal sealed class JoinQueryPlanner
                         { RightExecutionFilter = rightFilter, Kind = kind };
 
                 if (hasEquiKeys && stats?.ForceHashJoinForTesting == true)
-                    return BuildHashJoinNode(left, right, joinSource.OnPredicate, equiKeys!, rightFilter, database, stats, kind);
+                    return BuildHashJoinNode(left, right, joinSource.OnPredicate, equiKeys!, rightFilter, database, stats, kind, step);
 
                 if (hasEquiKeys && stats?.ForceMergeJoinForTesting == true)
                     return BuildMergeJoinNode(left, right, joinSource.OnPredicate!, equiKeys!, rightFilter, kind);
@@ -315,13 +380,13 @@ internal sealed class JoinQueryPlanner
                     //   INLJ   — outer side small (few point lookups; default when stats absent).
                     if (hasEquiKeys && stats is not null && !stats.ForceIndexNestedLoopForTesting)
                     {
-                        long leftRows = EstimatePhysicalNodeRows(left, database, stats);
+                        double leftRows = step?.LeftRows ?? EstimatePhysicalNodeRows(left, database, stats);
 
                         if (leftFree && rightFree && leftRows > MergeJoinPreferenceThreshold)
                             return BuildMergeJoinNode(left, right, joinSource.OnPredicate!, equiKeys!, rightFilter, kind);
 
-                        if (ShouldPreferHashOverIndexNestedLoop(left, right, database, stats, rightFilter))
-                            return BuildHashJoinNode(left, right, joinSource.OnPredicate, equiKeys!, rightFilter, database, stats, kind);
+                        if (ShouldPreferHashOverIndexNestedLoop(left, right, database, stats, rightFilter, step))
+                            return BuildHashJoinNode(left, right, joinSource.OnPredicate, equiKeys!, rightFilter, database, stats, kind, step);
                     }
 
                     return new IndexNestedLoopJoinNode(
@@ -345,12 +410,12 @@ internal sealed class JoinQueryPlanner
                 {
                     if (leftFree && rightFree && stats is not null)
                     {
-                        long leftRows = EstimatePhysicalNodeRows(left, database, stats);
+                        double leftRows = step?.LeftRows ?? EstimatePhysicalNodeRows(left, database, stats);
                         if (leftRows > MergeJoinPreferenceThreshold)
                             return BuildMergeJoinNode(left, right, joinSource.OnPredicate!, equiKeys!, rightFilter, kind);
                     }
 
-                    return BuildHashJoinNode(left, right, joinSource.OnPredicate, equiKeys!, rightFilter, database, stats, kind);
+                    return BuildHashJoinNode(left, right, joinSource.OnPredicate, equiKeys!, rightFilter, database, stats, kind, step);
                 }
 
                 return new NestedLoopJoinNode(left, right, joinSource.OnPredicate)
@@ -608,7 +673,8 @@ internal sealed class JoinQueryPlanner
         NodeAst? rightFilter,
         DatabaseDescriptor database,
         StatisticsManager? stats,
-        JoinKind kind = JoinKind.Inner)
+        JoinKind kind = JoinKind.Inner,
+        JoinStepEstimate? step = null)
     {
         string[] probeKeys = new string[equiKeys.Count];
         string[] buildKeys = new string[equiKeys.Count];
@@ -621,7 +687,10 @@ internal sealed class JoinQueryPlanner
 
         HashJoinBuildSide buildSide = kind == JoinKind.LeftOuter
             ? HashJoinBuildSide.Right
-            : ChooseBuildSide(left, right, database, stats, rightFilter);
+            : step is { } estimate
+                // The enumerator costed the hash table on the smaller input; build that one.
+                ? estimate.LeftRows < estimate.RightRows ? HashJoinBuildSide.Left : HashJoinBuildSide.Right
+                : ChooseBuildSide(left, right, database, stats, rightFilter);
 
         return new HashJoinNode(left, right, onPredicate, probeKeys, buildKeys)
         {
@@ -669,31 +738,33 @@ internal sealed class JoinQueryPlanner
 
     /// <summary>
     /// Returns <see langword="true"/> when the estimated hash-join cost is strictly below
-    /// the estimated index-nested-loop cost, using the same weights as
-    /// <see cref="CostEstimator.AnnotatePlan"/> for both operators:
+    /// the estimated index-nested-loop cost, through the one rule the join-order enumerator also
+    /// uses (<see cref="CostEstimator.PrefersHashOverIndexLookup"/>):
     /// <list type="bullet">
     ///   <item>INLJ  ≈ 2 × leftRows  (KvPointLookups + RowFetchesAfterIndex)</item>
-    ///   <item>Hash  ≈ (leftRows + rightRows) + min(L,R) × 0.1  (KvRangeScanEntries + InMemoryRows)</item>
+    ///   <item>Hash  ≈ rightRows + leftRows + min(L,R) × 0.1  (KvRangeScanEntries + InMemoryRows)</item>
     /// </list>
-    /// Hash beats INLJ when the outer (left) side is large relative to the indexed right side
-    /// — roughly when leftRows &gt; 1.1 × rightRows. For equal-sized inputs INLJ wins by a
-    /// small margin, matching the "prefer INLJ for equal/unknown cardinality" guidance in the spec.
+    /// The right row estimate stands in for the right scan cost here. Hash beats INLJ when the
+    /// outer (left) side is large relative to the indexed right side — roughly when
+    /// leftRows &gt; 1.1 × rightRows. For equal-sized inputs INLJ wins by a small margin, so equal
+    /// or unknown cardinalities keep the index lookup.
     /// </summary>
     private bool ShouldPreferHashOverIndexNestedLoop(
         PhysicalPlanNode leftNode,
         BoundJoinRightSource rightSource,
         DatabaseDescriptor database,
         StatisticsManager stats,
-        NodeAst? rightScanFilter = null)
+        NodeAst? rightScanFilter = null,
+        JoinStepEstimate? step = null)
     {
+        // A join from the cost-based enumerator decides with the numbers it was costed with.
+        if (step is { } estimate)
+            return CostEstimator.PrefersHashOverIndexLookup(estimate.LeftRows, estimate.RightRows, estimate.RightScanCost);
+
         long leftRows  = EstimatePhysicalNodeRows(leftNode, database, stats);
         long rightRows = EstimateRightRows(rightSource, database, stats, rightScanFilter);
 
-        double inljCost = leftRows * 2.0;
-        long   buildRows = Math.Min(leftRows, rightRows);
-        double hashCost  = (leftRows + rightRows) + buildRows * 0.1;
-
-        return hashCost < inljCost;
+        return CostEstimator.PrefersHashOverIndexLookup(leftRows, rightRows, rightScanCost: rightRows);
     }
 
     /// <summary>

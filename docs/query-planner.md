@@ -93,13 +93,14 @@ The mental model has three layers:
 1. **Always on:** the cost model annotates every node with an estimated cardinality and a `PlanCost`,
    and a handful of decisions are cost-driven regardless of flags — the range-scan-vs-full-scan veto,
    join-algorithm choice (INLJ vs hash vs merge), and the unique-`IN` vs range-scan comparison.
-2. **`cost_based_access_path_enabled` (default off):** the planner enumerates *all* viable index access
+2. **`cost_based_access_path_enabled` (default on):** the planner enumerates *all* viable index access
    paths per table and picks the cheapest by cost, instead of the rule-scored "first viable index" pick.
-3. **`cost_based_join_order_enabled` (default off):** a System-R-style dynamic program enumerates join
+3. **`cost_based_join_order_enabled` (default on):** a System-R-style dynamic program enumerates join
    orders and picks the cheapest left-deep tree, instead of the scan-selectivity heuristic.
 
-Both flags degrade to the exact heuristic path when off (or when statistics are absent), so plans are
-byte-identical to the rule-based planner until you opt in. The cost model is fed by a full statistics
+Both flags degrade to the heuristic path when off (or when statistics are absent). With the join-order
+flag off, the heuristic keeps its plans, except that it repairs a cross product that the predicates do
+not need. The cost model is fed by a full statistics
 stack — equi-depth histograms, distinct-value counts (NDV), per-column min/max — built by `ANALYZE`,
 plus a network-cost dimension for sharded deployments. See
 [Part V — The cost-based optimizer](#part-v--the-cost-based-optimizer) for the whole stack and
@@ -443,8 +444,10 @@ in `SQLExecutorBaseCreator.EvalComparison`, `EvalAnd` and `EvalOr`, which every 
 
 **File:** `Controllers/Queries/JoinQueryPlanner.cs`. Runs when `IsMultiSource`:
 
-1. **Join-order heuristics** — `JoinOrderOptimizer.Reorder` may reorder sources first (§Part V). A
-   tree that contains an outer join keeps its declared order.
+1. **Join order** — `JoinEnumerator` (cost-based, the default) or `JoinOrderOptimizer.Choose`
+   (heuristic, with the cross-product repair) may reorder sources first and move a conjunct to the join
+   where its last table enters (§Part V). A tree that contains an outer join keeps its declared order.
+   The returned `JoinOrderChoice` carries the tree and the filter that runs after its last join.
 2. **Predicate pushdown** — `JoinPredicatePushdown.Analyze` splits WHERE into per-source scan filters
    (`ScanFiltersByAlias`) and a cross-source `PostJoinFilter`. A single-alias conjunct is pushed only
    when its alias is not *null-extended* (in the right subtree of a `LeftOuter` join on its path to
@@ -713,7 +716,7 @@ when stats are missing, so the optimizer is strictly additive.
 | **Join-order heuristics** | `JoinOrderOptimizer` | Reorder inner-join sources before tree construction (scan-selectivity scoring, left-deep). The default when the join-order flag is off. |
 | **Cost-based scan veto** | `CostEstimator.ShouldPreferFullScan` | Always-on: replace a predicate-driven index range scan with a full table scan when it would touch too much of the table. Selectivity is histogram → min/max → fixed-constant. |
 | **Cost-based access-path selection** | `IndexScanSelector.EnumerateViableSteps` + `QueryPlanner.PickCheapestIndexOrFullScan` | Flag `cost_based_access_path_enabled`: enumerate *every* viable index for the predicate plus the full-scan baseline, cost each, pick the cheapest — subsuming the rule-scored "first viable index" pick and the veto above. |
-| **Cost-based join-order enumeration** | `JoinEnumerator` (System-R DP) | Flag `cost_based_join_order_enabled`: bottom-up dynamic program over table subsets that memoizes the cheapest left-deep sub-plan, replacing the scan-selectivity heuristic. Falls back to the heuristic for >12 tables; a tree with an outer join keeps its declared order under both. |
+| **Cost-based join-order enumeration** | `JoinEnumerator` (System-R DP) over `JoinGraph` | Flag `cost_based_join_order_enabled`: bottom-up dynamic program over table subsets that memoizes the cheapest left-deep sub-plan, replacing the scan-selectivity heuristic. Tables connect through `ON` and `WHERE` conjuncts, a step pays for its intermediate input, and each table set has one row estimate. Falls back to the heuristic (with its cross-product repair) for >12 tables; a tree with an outer join keeps its declared order under both. |
 | **Semi-/anti-join rewrite** | `SemiJoinAnalyzer` + `SemiJoinExecutor` | Rewrite eligible uncorrelated `IN`/`NOT IN` into an index-probing semi/anti/null-aware-anti join (instead of materializing), but only when the inner column is indexed; otherwise fall back to materialization. |
 | **DISTINCT streaming** | `QueryDistincter` + `IndexScanSelector` | When the `DISTINCT` columns form an index set-prefix and are all NOT NULL, and the index holds every row (any non-unique index; a unique index only when *all* of its key columns are NOT NULL), scan in index order and dedup by comparing adjacent rows (O(1) memory) instead of a hash set. The same condition gates streaming `GROUP BY`. |
 | **Value-list `IN` → index seeks** | `PredicateAnalyzer` + `QueryPlanner` + `IndexInListScanNode` | Turn `x IN (v1, v2, …)` on an indexed column into one index seek per value (point lookup for a unique index, equality range for a non-unique one), unioned and row-id-deduped, instead of a full scan + residual membership filter. Cost-gated, and cost-compared against a competing range scan so a selective unique `IN` wins. Falls back to a residual filter when the column is unindexed or the list is too large. |
@@ -837,7 +840,7 @@ remote access and filter pushdown automatically, because both ship fewer bytes.
 
 ## Cost-based access-path selection
 
-**Flag:** `cost_based_access_path_enabled` (default off). **Files:** `IndexScanSelector.EnumerateViableSteps`,
+**Flag:** `cost_based_access_path_enabled` (default on). **Files:** `IndexScanSelector.EnumerateViableSteps`,
 `QueryPlanner.PickCheapestIndexOrFullScan`.
 
 The heuristic `IndexScanSelector.TrySelectScan` picks the *first viable* index by a rule score (longest
@@ -854,16 +857,87 @@ the heuristic path.
 
 ## Cost-based join-order enumeration
 
-**Flag:** `cost_based_join_order_enabled` (default off). **File:** `Controllers/Queries/JoinEnumerator.cs`.
+**Flag:** `cost_based_join_order_enabled` (default `true`). **Files:** `Controllers/Queries/JoinGraph.cs`,
+`JoinEnumerator.cs`, `JoinOrderOptimizer.cs`, `JoinOrderChoice.cs`.
 
-When off, join order is the heuristic `JoinOrderOptimizer.Reorder` — a deterministic, inner-joins-only
-reorder that flattens the tree into leaves + a pool of `ON` predicates, scores each leaf (0 = equality on a
-unique index → outermost; 1 = any indexed predicate; 2 = no pushable predicate → last), and rebuilds a
-left-deep tree, with a feasibility guard that every rebuilt edge still has a connecting predicate.
+### The query graph
 
-When on, `JoinEnumerator` runs a **System-R-style bottom-up dynamic program** over table subsets (the
-classic textbook algorithm). `dp[mask]` is the cheapest left-deep sub-plan joining exactly the tables in
-the bitmask `mask`:
+The planner reads the predicates of an inner-join tree as **conjuncts**, not as whole `ON` clauses.
+`JoinGraph` flattens the tree into its leaves (declared order) and a **conjunct pool**:
+
+- each `ON` clause is split at its top-level `AND`s, and a literal `TRUE` is dropped, so `CROSS JOIN`
+  and a comma join with no equi-join conjunct add nothing;
+- each cross-table `WHERE` conjunct that `JoinPredicatePushdown` keeps after the last join is added
+  when it is safe to evaluate at a join: it names two or more tables, has no subquery, each of its
+  identifiers resolves to one table, and it passes `FragmentFilterShippability.IsShippable` (so a join
+  that the broadcast planner can ship from does not become one it cannot ship).
+
+Each conjunct gets a bitmask of the tables it names. A conjunct with two or more tables is an **edge**;
+a single-table conjunct and a constant connect nothing. A table connects to a set of tables when an edge
+names it, names at least one table of the set, and names no other table.
+
+The graph refuses the tree (the planner then keeps the whole-predicate heuristic path) when a join is
+not inner, when an `ON` conjunct has a subquery, or when an `ON` identifier does not resolve to exactly
+one table. A function name and a cast target type are skipped; they are not column references.
+
+**The attach rule.** For a leaf order, `JoinGraph.BuildTree` puts each conjunct at the join where the last
+of its tables enters the tree. A constant, and a conjunct on the first table only, go to the first join.
+The `ON` of a join is its conjuncts in pool order (the `ON` conjuncts in tree order, then the taken `WHERE`
+conjuncts), or `TRUE` when it has none. Each conjunct is attached exactly once; the build counts them
+and keeps the original tree if the count is wrong. For inner joins this keeps the results: an `ON` is a
+filter over the joined rows, so any join at or above the point where all of its tables are present
+gives the same rows.
+
+```
+  FROM r0, r1, r2 WHERE r0.a = r2.a AND r1.b = r2.b
+
+  declared tree (comma normalizer)        conjunct graph            rebuilt tree, order r2, r0, r1
+  ((r0 ⋈ r1 ON TRUE)                      r0 ── r2 ── r1            ((r2 ⋈ r0 ON r0.a = r2.a)
+     ⋈ r2 ON r0.a = r2.a AND r1.b = r2.b)                               ⋈ r1 ON r1.b = r2.b)
+```
+
+**Pinned conjuncts.** An `ON` conjunct that fails `FragmentFilterShippability.IsShippable` does not move on
+its own and does not connect tables:
+
+- A **volatile** conjunct (`random()`, `now()`, …) runs once for each row that reaches its join, so moving
+  it changes how many times it runs — a constant `random() < 0.5` moved from the last join to the first
+  would decide once for many rows. It keeps the **scope** of the join it was written on (that join and every
+  table before it) and attaches where the last table of the scope enters. The scope is also an **order
+  boundary**: the DP, the repair and the plan-cache replay accept only orders in which the scope's tables
+  join before any other table, so each combination of their rows reaches the conjunct exactly once. The
+  heuristic `Reorder` keeps the declared order for a tree with a volatile `ON` predicate.
+- Any other unshippable conjunct (a parameter) blocks a broadcast join on the join that holds it. It stays
+  with its `ON` clause: it attaches where the last table of that clause enters, which is where the
+  whole-predicate path puts the clause, so for any order it blocks the same join as before and no other.
+
+> **A conjunct can run at an earlier join than the query text shows.** A conjunct that moves from a late
+> `ON`, or from `WHERE`, into an earlier join runs on rows that a later join would remove. A conjunct that
+> can raise a runtime error (a division, a cast) can then raise it on such a row. Scan pushdown already
+> does the same for single-table conjuncts.
+
+### The heuristic order and the cross-product repair
+
+With the flag off, the order is the heuristic `JoinOrderOptimizer.Reorder` — a deterministic reorder that
+scores each leaf (0 = equality on a unique index → outermost; 1 = any indexed predicate; 2 = no pushable
+predicate), and rebuilds a left-deep tree with whole `ON` predicates, with a feasibility guard that every
+rebuilt join still has a connecting predicate.
+
+Whole predicates can leave a cross product that the predicates do not need: in the comma join above, `r1`
+has no edge to `r0`, so the declared tree joins them `ON TRUE`. `JoinOrderOptimizer.Choose` therefore
+checks the heuristic tree: when some join of it has no connecting `ON` conjunct **and** the conjunct graph
+is connected, it builds a connected order instead — from the scored order, each step takes the first
+remaining table that connects to the tables already in the tree — through `JoinGraph`. A tree with no
+avoidable cross product is returned unchanged, so its plan is the same as before. A query whose
+predicates need a cross product keeps the heuristic tree.
+
+The repair needs no statistics. It runs whenever the heuristic plans the join: with the flag off, while
+a table's row count is not loaded yet, above the 12-table enumeration cap, and when the enumerator finds
+no plan.
+
+### The dynamic program
+
+When the flag is on, `JoinEnumerator` runs a **System-R-style bottom-up dynamic program** over table
+subsets of the graph. `dp[mask]` is the cheapest left-deep plan that joins exactly the tables in `mask`:
 
 ```
   dp[{A}] dp[{B}] dp[{C}]                         singletons = per-table scan cost
@@ -872,26 +946,105 @@ the bitmask `mask`:
             \    |    /
           dp[{A,B,C}]                             size N: the answer (cheapest full join)
 
-  extend dp[leftMask] with leaf `bit`:
-     cost = INLJ (leftCard·2, if `bit` has an index on the join key)  vs  hash (rightScanCost) → min
-     only across a CONNECTING predicate (no cross products)
+  extend dp[leftMask] with leaf `bit` (only when `bit` connects to leftMask):
+     step = CostEstimator.JoinStepCost(rows[leftMask], leafRows[bit], scanCost[bit], equiKey, indexLookup)
 ```
 
-Subsets of each size are walked with **Gosper's hack** (next integer with the same popcount). Only splits
-joined by a connecting predicate are considered, so cross products are never enumerated; the N−1 tree-edge
-`ON` predicates are each attached exactly once, and cycle/extra predicates ride in the post-join filter
-(`pushdown.PostJoinFilter`) — so reordering is result-preserving. The search is **capped at 12 tables**
-(`MaxTablesForEnumeration`); wider joins fall back to the heuristic, and a tree with an outer join keeps its
-declared order under both (the heuristic bails on a non-inner kind as well).
+Subsets of each size are walked with **Gosper's hack**. Only connected splits are candidates, so the DP
+never costs a cross product; a query that needs one goes to the heuristic. The winning order is rebuilt
+through `JoinGraph.BuildTree`. The search is **capped at 12 tables** (`MaxTablesForEnumeration`).
 
-The classic win this unlocks: a star join `events ⋈ sessions ⋈ users` where the heuristic keeps the large
+**The step cost** is one function, `CostEstimator.JoinStepCost`, with the operator that the builder
+selects for the conjuncts that the step attaches. The checks are the builder's own
+(`JoinEquiJoinAnalyzer.TryExtractEquiKeys` and `TryMatch`), one conjunct at a time, so a composite key
+`a.x = b.x AND a.y = b.y` also offers an index lookup on `b.x`:
+
+| Operator | Step cost | When |
+|---|---|---|
+| hash | `rightScanCost + leftRows + 0.1 · min(leftRows, rightRows)` | an equi-key conjunct |
+| index lookup | `2 · leftRows` | an index on a key column of the right table, and hash is not strictly cheaper (`PrefersHashOverIndexLookup`, the same rule `JoinQueryPlanner` uses) |
+| nested loop | `max(1, leftRows) · rightScanCost` | no equi-key conjunct |
+
+`rightScanCost` is the row count of the right table: a join operator reads its right input with a full
+scan and applies the pushed filter in memory, so an index on the filter helps only the first table of the
+order. `rightRows` is the filtered row count.
+
+**The builder builds the costed operator.** For a tree from the DP, `JoinEnumerator.EstimateSteps` hands
+`JoinQueryPlanner` the left rows, right rows and right read cost of each join, and the builder decides
+index lookup against hash, the merge-join size threshold and the hash build side from those numbers, through
+`CostEstimator.SelectJoinStepOperator` — the rule the step cost uses. Without them the builder sees a join
+input only as a fixed 10,000 rows and a filtered right input only by its output rows, and could build a hash
+join where the DP costed an index lookup. The heuristic order keeps the builder's own estimates.
+
+The `leftRows` term is what makes the order matter: the left input of a step is the intermediate result
+of the steps before it, so the total of a plan is the scan costs plus the size of each intermediate
+result. Without it, every hash-only order of a query costs the sum of its scans and ties.
+
+**Ties.** For each subset, candidates are tried from the last declared table to the first, and a candidate
+replaces the current best only when it is strictly cheaper. The declared order is the first candidate for
+every prefix set, so two orders of equal cost keep the order the user wrote.
+
+### Row estimate of a table set
+
+A dynamic program over subsets is correct only when "the best plan for set S" has one meaning, which needs
+one row estimate for S, the same for every plan of S. `JoinEnumerator.EstimateSubsetRows` computes it from
+the subset alone:
+
+```
+rows[S] = Π leafRows[t ∈ S] × Π selectivity(g ⊆ S) × Π classFactor(C, S)
+```
+
+- **Column classes.** The columns that equi-conjuncts join are grouped into classes of equal columns
+  (`a.x = b.x` and `b.x = c.x` put all three in one class). A class with columns of three or more tables
+  counts once for a subset, however many of its equalities the query writes: over the `k` tables of the
+  subset with a column in it, it gives `k − 1` factors, `1 / d` for each table except the one with the
+  smallest distinct count `d`. JOB names one movie through up to six columns and writes all fifteen
+  equalities; multiplying fifteen selectivities made every join of such a query look almost empty.
+- **Pair groups.** The equi-conjuncts `x.c = y.d` whose class has only those two columns form one group for
+  each pair of tables, with one selectivity, `CardinalityEstimator.EstimateEquiJoinSelectivity`:
+  `1 / max(ndvX, ndvY)`; `FallbackSelectivity` (0.1) when neither side has a count. A composite key uses its
+  composite NDV.
+- The distinct count of a column is its **table row count** when it covers a unique index, else its column
+  or composite-key NDV. The conjunct's own alias gives the table of each column, so a unique key is
+  recognized wherever its table sits in the tree.
+- Every other edge (non-equi, an expression, three or more tables) is its own group with
+  `FallbackSelectivity`. Single-table conjuncts and constants are not counted.
+- The values are doubles with no floor or clamp; a caller that needs a row count floors and clamps it.
+
+A unique side gives the standard estimate `leftRows × filteredRightRows / rightTableRows`, so a scan
+filter on the unique side reduces it.
+
+The classic win the DP unlocks: a star join `events ⋈ sessions ⋈ users` where the heuristic keeps the large
 declared-first `events` outermost (paying a full `events` scan), while the DP drives the tiny filtered
 `sessions` into `events`'s `session_id` index via INLJ — orders of magnitude cheaper.
 
-> **Not yet modeled (documented gaps):** "interesting orders/distributions" (keeping a costlier sub-plan
-> that provides an ordering a parent needs) — `SubplanEntry` tracks cost + cardinality but not output
-> ordering; bushy plans (left-deep only); and comma-join / `WHERE`-clause join predicates (only `JOIN … ON`
-> predicates are pooled — others fall back to the heuristic).
+### Plan cache and the build mode
+
+The plan cache stores the join as an alias order plus a **build mode** (`JoinBuildMode`). A
+`WholePredicate` entry (the heuristic tree) replays through `JoinOrderOptimizer.ReorderByAliases`. A
+`Conjunct` entry (a repaired tree) or `CostBased` entry (a DP tree) rebuilds the tree through `JoinGraph` from
+the current query — also when the order equals the declared order, because the DP can keep the declared
+order and still move a conjunct to an earlier join. A `CostBased` hit also recomputes the step estimates, so
+it builds the operators of the miss. If the graph refuses the current query or the order is not connected, the
+planner plans from the start, as on a miss, and counts a replay failure. `ON` literals always come from the
+current query.
+
+> **Not yet modeled (documented gaps):**
+> - "interesting orders/distributions" (keeping a costlier sub-plan that provides an ordering a parent
+>   needs), and merge join in the DP — the builder can select a merge join that the DP did not cost;
+> - bushy plans (left-deep only), and a component-by-component plan for a query that needs a cross product;
+> - more than 12 tables (the heuristic plans them, with the repair);
+> - implied join edges: the column classes fix the estimate of `a.x = b.x AND b.x = c.x AND a.x = c.x`, but
+>   when the query writes only `a.x = b.x AND b.x = c.x`, no edge joins `a` and `c` directly;
+> - index-lookup fan-out: `2 · leftRows` assumes one match per left row, and a non-unique index can return
+>   more;
+> - a tree with one outer join gets no DP at all and keeps its declared order;
+> - a repaired or heuristic tree is built with the builder's own estimates (a join input counts as a fixed
+>   10,000 rows);
+> - `EXPLAIN` estimates come from `CostEstimator.AnnotatePlan`, not from the DP. For a join over a join they
+>   resolve the table of the left key from its alias qualifier and use that key's distinct count — never
+>   the unique-key shortcut, because an earlier join can repeat a key that is unique in its table — but the
+>   two estimates can still differ.
 
 ## Config flags summary
 
@@ -911,8 +1064,9 @@ Access-path costing engages on a DML-maintained row count alone: a table that ha
 `ANALYZE`d is costed with default selectivities rather than histograms/NDV, and can get a worse plan
 than the heuristic would pick. Automatic `ANALYZE` ([automatic-analyze.md](automatic-analyze.md))
 fills in the statistics once the table passes `auto_analyze_min_stale_rows`. With both switches off,
-the planner is byte-identical to the heuristic — that is the fallback if a bad histogram or a stale
-row count regresses a production plan.
+the planner gives the heuristic plans — that is the fallback if a bad histogram or a stale row count
+regresses a production plan. The one difference from the plain heuristic is the cross-product repair: a
+heuristic tree with a cross product that the predicates do not need is rebuilt in a connected order.
 
 ### Plan cache (`plan_cache_enabled`)
 
@@ -978,7 +1132,8 @@ per-table **access-path selection** (`cost_based_access_path_enabled`) and **joi
 via a System-R dynamic program (`cost_based_join_order_enabled`) — and an opt-in **plan cache**
 (`plan_cache_enabled`) that memoizes the access-path and join-order decision by query shape,
 skipping re-enumeration on repeated queries. The two cost-based passes default on and the plan cache
-defaults off. With all three off, the planner falls back to the heuristic with byte-identical plans.
+defaults off. With all three off, the planner falls back to the heuristic plans; the heuristic only
+repairs a cross product that the predicates do not need.
 
 ## Gaps and where to contribute
 
@@ -992,7 +1147,7 @@ These are the meaningful missing pieces and where new work fits.
 | **Cardinality estimator** | **Done** | `CardinalityEstimator`: histogram/NDV filter selectivity, IN-list, composite-key correlation, and FK-aware join cardinality (`|A||B|/max(NDV)`). |
 | **Cost model + network** | **Done** | `PlanCost`/`CostEstimator` populate `EstimatedCardinality`/`Cost` incl. a real `NetworkFactor` (`DataDistribution` + `PlacementReader` + `RowWidthEstimator`); always-on vetoes (range-vs-scan, join algorithm) plus the two flagged passes below. |
 | **Cost-based access-path selection** | **Done** | `cost_based_access_path_enabled`: enumerate + cost all index candidates per table, pick cheapest. On by default; off → heuristic. |
-| **Cost-based join-order enumeration** | **Done (opt-in)** | `cost_based_join_order_enabled`: System-R DP over table subsets (`JoinEnumerator`), capped at 12 tables, inner-joins-only, falls back to heuristic. On by default; off → heuristic. |
+| **Cost-based join-order enumeration** | **Done (opt-in)** | `cost_based_join_order_enabled`: System-R DP over table subsets (`JoinEnumerator`) of the conjunct graph (`JoinGraph`), capped at 12 tables, inner-joins-only, falls back to the heuristic with its cross-product repair. On by default; off → heuristic. |
 | **Plan-cache hooks** | **Partial** | Plans record `TableSchemaVersion`; no stable query-shape identifier yet. No plan reuse. The next phase — caching optimized plans keyed by query shape — is unbuilt. |
 | **Interesting orders in the join DP** | **Missing** | The DP costs by scan/join cost only; it does not keep a costlier sub-plan that supplies an ordering/distribution a parent needs (would avoid a later sort/exchange). |
 | **Semi-/anti-join rewrite** | **Done** | Eligible uncorrelated `IN`/`NOT IN` over an **indexed** inner column rewrite to semi / anti / null-aware-anti join (`SemiJoinAnalyzer`/`SemiJoinExecutor`); non-indexed falls back to materialization. Three-valued `NOT IN` semantics preserved. |
@@ -1030,7 +1185,8 @@ broadcast probes for inner hash joins; see Part IV for their eligibility.
 | Cost model | `Commands/Executor/Models/Plans/PlanCost.cs`, `Controllers/Queries/CostEstimator.cs` |
 | Single-table planner | `Commands/Executor/Controllers/Queries/QueryPlanner.cs` |
 | Join planner | `Commands/Executor/Controllers/Queries/JoinQueryPlanner.cs` |
-| Join-order heuristics | `Commands/Executor/Controllers/Queries/JoinOrderOptimizer.cs` |
+| Join-order heuristics and cross-product repair | `Commands/Executor/Controllers/Queries/JoinOrderOptimizer.cs` |
+| Join query graph (conjunct pool, attach rule) | `Commands/Executor/Controllers/Queries/JoinGraph.cs`, `JoinOrderChoice.cs` |
 | Cost-based join-order DP | `Commands/Executor/Controllers/Queries/JoinEnumerator.cs` |
 | Cost model & cardinality estimator | `Commands/Executor/Controllers/Queries/CostEstimator.cs`, `CardinalityEstimator.cs`, `Models/Plans/PlanCost.cs` |
 | Network / distribution cost | `Commands/Executor/Controllers/Queries/PlacementReader.cs`, `RowWidthEstimator.cs`, `Models/Plans/DataDistribution.cs` |

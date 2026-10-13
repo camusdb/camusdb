@@ -32,6 +32,13 @@ internal static class JoinPredicatePushdown
             new Dictionary<string, NodeAst?>(StringComparer.OrdinalIgnoreCase);
 
         public NodeAst? PostJoinFilter { get; init; }
+
+        /// <summary>
+        /// The conjuncts of <see cref="PostJoinFilter"/>, in <c>WHERE</c> order. A join tree built
+        /// through <see cref="JoinGraph"/> can move some of them into its joins; the filter after
+        /// the last join is then the conjuncts it did not move.
+        /// </summary>
+        public IReadOnlyList<NodeAst> PostJoinConjuncts { get; init; } = Array.Empty<NodeAst>();
     }
 
     public static Result Analyze(BoundSelectQuery bound, NodeAst? where)
@@ -76,6 +83,7 @@ internal static class JoinPredicatePushdown
         {
             ScanFiltersByAlias = scanFilters,
             PostJoinFilter = PredicateAnalyzer.CombineConjuncts(postJoinConjuncts),
+            PostJoinConjuncts = postJoinConjuncts,
         };
     }
 
@@ -125,10 +133,15 @@ internal static class JoinPredicatePushdown
         foreach (BoundDerivedTableSource source in bound.DerivedSources)
             scanFilters[source.Alias] = null;
 
+        List<NodeAst> postJoinConjuncts = [];
+        if (where is not null)
+            PredicateAnalyzer.CollectAndConjuncts(where, postJoinConjuncts);
+
         return new Result
         {
             ScanFiltersByAlias = scanFilters,
             PostJoinFilter = where,
+            PostJoinConjuncts = postJoinConjuncts,
         };
     }
 

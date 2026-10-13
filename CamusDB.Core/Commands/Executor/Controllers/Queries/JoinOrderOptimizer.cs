@@ -6,6 +6,7 @@
  */
 
 using CamusDB.Core.Catalogs.Models;
+using CamusDB.Core.CommandsExecutor.Controllers.Functions;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Queries;
 using CamusDB.Core.SQLParser;
@@ -33,6 +34,20 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 /// Outer-join guard: the optimizer bails out immediately if any join in the tree has a kind
 /// other than <see cref="JoinKind.Inner"/>.  Outer joins are not commutative and must not be
 /// reordered.
+///
+/// Volatile guard: a tree with an <c>ON</c> predicate that calls a volatile function
+/// (<c>random()</c>, <c>now()</c>, …) keeps its declared order. A whole <c>ON</c> runs once for
+/// each row that reaches its join; reordering changes which rows, and how many, reach it.
+///
+/// Cross-product repair (<see cref="ChooseWithGraph"/>): the steps above work on whole
+/// <c>ON</c> predicates, so a comma join whose tables connect only through a later table keeps a
+/// cross product (<c>ON TRUE</c>) that its predicates do not need. When the resulting tree has
+/// such a join and the conjunct graph (<see cref="JoinGraph"/>) is connected, the repair builds a
+/// connected order instead: from the scored order, each step takes the first remaining table that
+/// connects to the tables already in the tree. A tree with no avoidable cross product is returned
+/// unchanged, so its plan is the same as before the repair. The repair needs no statistics, so it
+/// also runs when the cost-based enumerator cannot: with the flag off, while a row count is not
+/// loaded, above the enumeration cap, and when the enumerator finds no plan.
 ///
 /// INL placement note: scoring is based purely on pushed-down WHERE scan-selectivity, not on
 /// whether a source holds the indexed join key that would enable
@@ -75,7 +90,7 @@ internal static class JoinOrderOptimizer
         if (!CollectLeaves(root, leaves, predicatePool))
             return root; // outer joins — not commutative, bail
 
-        if (leaves.Count <= 1 || leaves.Count != targetOrder.Count)
+        if (leaves.Count <= 1 || leaves.Count != targetOrder.Count || HasVolatilePredicate(predicatePool))
             return root;
 
         // Build alias → leaf map from the current source tree.
@@ -105,9 +120,78 @@ internal static class JoinOrderOptimizer
     }
 
     /// <summary>
+    /// The heuristic join order with the cross-product repair (see the class summary). Builds the
+    /// conjunct graph of <paramref name="root"/> first.
+    /// </summary>
+    public static JoinOrderChoice Choose(
+        QuerySource root,
+        BoundSelectQuery bound,
+        JoinPredicatePushdown.Result pushdown)
+    {
+        JoinGraph? graph = JoinGraph.TryBuild(root, bound, pushdown.PostJoinConjuncts);
+        return ChooseWithGraph(root, bound, pushdown, graph);
+    }
+
+    /// <summary>
+    /// The heuristic join order with the cross-product repair, over a graph that the caller
+    /// already built. A null <paramref name="graph"/> means the graph refused the tree; the
+    /// heuristic tree is then returned with no repair.
+    /// </summary>
+    public static JoinOrderChoice ChooseWithGraph(
+        QuerySource root,
+        BoundSelectQuery bound,
+        JoinPredicatePushdown.Result pushdown,
+        JoinGraph? graph)
+    {
+        QuerySource heuristic = Reorder(root, bound, pushdown);
+
+        if (graph is null || graph.LeafCount < 2 || graph.EveryJoinConnects(heuristic))
+            return JoinOrderChoice.WholePredicate(heuristic, pushdown);
+
+        // The heuristic tree has a cross product. Repair it only when the predicates do not need
+        // one; a query that needs a cross product keeps the heuristic tree.
+        int[]? order = graph.FindConnectedOrder(ScoredOrder(graph, bound, pushdown));
+        if (order is null)
+            return JoinOrderChoice.WholePredicate(heuristic, pushdown);
+
+        QuerySource? repaired = graph.BuildTree(order);
+
+        return repaired is null
+            ? JoinOrderChoice.WholePredicate(heuristic, pushdown)
+            : JoinOrderChoice.Conjunct(repaired, graph);
+    }
+
+    /// <summary>
+    /// The leaves of <paramref name="graph"/> sorted by the heuristic score, ties in declared
+    /// order: the same order <see cref="Reorder"/> tries first.
+    /// </summary>
+    private static List<int> ScoredOrder(
+        JoinGraph graph,
+        BoundSelectQuery bound,
+        JoinPredicatePushdown.Result pushdown)
+    {
+        List<(int Leaf, int Score)> scored = new(graph.LeafCount);
+
+        for (int i = 0; i < graph.LeafCount; i++)
+        {
+            JoinGraph.Leaf leaf = graph.Leaves[i];
+            scored.Add((i, ScoreSource(new LeafEntry(leaf.Node, leaf.Alias), bound, pushdown)));
+        }
+
+        scored.Sort((a, b) => a.Score != b.Score ? a.Score.CompareTo(b.Score) : a.Leaf.CompareTo(b.Leaf));
+
+        List<int> order = new(scored.Count);
+        foreach ((int leaf, _) in scored)
+            order.Add(leaf);
+
+        return order;
+    }
+
+    /// <summary>
     /// Returns a (potentially reordered) <see cref="QuerySource"/> tree root. The tree structure
     /// is always left-deep. If the heuristic produces no improvement or the reordering is not
-    /// feasible, returns <paramref name="root"/> unchanged.
+    /// feasible, returns <paramref name="root"/> unchanged. Each join keeps one whole <c>ON</c>
+    /// predicate; <see cref="Choose"/> adds the cross-product repair on top.
     /// </summary>
     public static QuerySource Reorder(
         QuerySource root,
@@ -121,7 +205,7 @@ internal static class JoinOrderOptimizer
         if (!CollectLeaves(root, leaves, predicatePool))
             return root;
 
-        if (leaves.Count <= 1)
+        if (leaves.Count <= 1 || HasVolatilePredicate(predicatePool))
             return root;
 
         // Score and sort (stable: primary=score, secondary=declared order)
@@ -187,6 +271,21 @@ internal static class JoinOrderOptimizer
                 // and the rebuilt tree would silently drop that source's rows.
                 return false;
         }
+    }
+
+    /// <summary>
+    /// True when an <c>ON</c> predicate calls a volatile function. See the volatile guard in the
+    /// class summary.
+    /// </summary>
+    private static bool HasVolatilePredicate(List<NodeAst> predicatePool)
+    {
+        foreach (NodeAst predicate in predicatePool)
+        {
+            if (ScalarFunctionEvaluator.ContainsVolatileFunction(predicate))
+                return true;
+        }
+
+        return false;
     }
 
     // ─────────────────────────────────────────────────────────────────────────
