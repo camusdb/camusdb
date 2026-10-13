@@ -50,20 +50,43 @@ internal sealed class KvIndexAccessor
     private readonly KvRangeLockManager locks;
     private readonly KvBranchReader branch;
     private readonly KahunaRetryPolicy retry;
+    private readonly UniqueRowIdCache? rowIdCache;
 
     internal KvIndexAccessor(
         IKahuna kahuna,
         KvKeyBuilder keys,
         KvRangeLockManager locks,
         KvBranchReader branch,
-        KahunaRetryPolicy retry)
+        KahunaRetryPolicy retry,
+        UniqueRowIdCache? rowIdCache = null)
     {
         this.kahuna = kahuna;
         this.keys = keys;
         this.locks = locks;
         this.branch = branch;
         this.retry = retry;
+        this.rowIdCache = rowIdCache;
     }
+
+    /// <summary>
+    /// Answers the row id a unique key resolved to on an earlier lookup, when the store remembers one.
+    /// A positive answer must be confirmed by reading the row: a remembered id may name a row that
+    /// has since been deleted, and the caller then evicts it with <see cref="EvictCachedUniqueRowId"/>
+    /// and falls back to <see cref="LookupUnique"/>. See <see cref="UniqueRowIdCache"/>.
+    /// </summary>
+    internal bool TryGetCachedUniqueRowId(string indexId, CompositeColumnValue key, out ObjectIdValue rowId, out string? kvKey)
+    {
+        rowId = default;
+        kvKey = null;
+        if (rowIdCache is null || !keys.TryBuildUniqueIndexKey(indexId, key, out string built))
+            return false;
+
+        kvKey = built;
+        return rowIdCache.TryGet(built, out rowId);
+    }
+
+    /// <summary>Forgets a remembered key → row-id mapping (the row it named is gone).</summary>
+    internal void EvictCachedUniqueRowId(string kvKey) => rowIdCache?.Remove(kvKey);
 
     /// <summary>
     /// Point-read a unique index entry. Returns the rowId the encoded key maps to, or
@@ -98,7 +121,15 @@ internal sealed class KvIndexAccessor
             return null;   // tombstone at this level
 
         if (idx.HasPayload)
-            return RowIdFromPayload(idx.Payload.Span);
+        {
+            ObjectIdValue rowId = RowIdFromPayload(idx.Payload.Span);
+            // Remember the mapping for the next lookup of this key. Only a level-0 hit is remembered: on a
+            // branch the store carries no cache at all, so this is the root path and the entry is this
+            // table's own. A snapshot read's answer is as good as a latest one here, because the mapping
+            // is immutable for the row's life and a later reader verifies existence by reading the row.
+            rowIdCache?.Set(kvKey, rowId);
+            return rowId;
+        }
 
         // Miss at level-0: walk ancestry.
         foreach ((KvKeyBuilder ancestorKeys, KvBranchReader ancestorReader, HLCTimestamp forkTimestamp) in branch.Levels)

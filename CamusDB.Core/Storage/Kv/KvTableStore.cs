@@ -108,6 +108,7 @@ public sealed partial class KvTableStore
     private readonly KvIndexAccessor indexes;
     private readonly KvBatchWriter batch;
     private readonly KvLargeValueReader largeValues;
+    private readonly UniqueRowIdCache? rowIdCache;
 
     // Branch lineage stores, in nearest-parent-first order. Retained (rather than only their key
     // builders and readers) because RegisterIndexDirections has to propagate into each ancestor.
@@ -161,8 +162,16 @@ public sealed partial class KvTableStore
 
         branch = new KvBranchReader(kahuna, keys, levels, ancestorReadGuard);
         rows = new KvRowAccessor(kahuna, keys, locks, branch, retry);
-        indexes = new KvIndexAccessor(kahuna, keys, locks, branch, retry);
-        batch = new KvBatchWriter(kahuna, this.logger, keys, locks, branch, retry, messages, options);
+
+        // Root databases only: a branch resolves a key through ancestor levels and tombstones, which the
+        // remembered-id shortcut does not model. See UniqueRowIdCache for why no invalidation is needed.
+        UniqueRowIdCache? rowIdCache = options.PointReadRowIdCacheEnabled && this.ancestorStores.Length == 0
+            ? new UniqueRowIdCache(options.PointReadRowIdCacheMaxEntries)
+            : null;
+        this.rowIdCache = rowIdCache;
+
+        indexes = new KvIndexAccessor(kahuna, keys, locks, branch, retry, rowIdCache);
+        batch = new KvBatchWriter(kahuna, this.logger, keys, locks, branch, retry, messages, options, rowIdCache);
         largeValues = new KvLargeValueReader(keys, branch, options);
 
         if (this.ancestorStores.Length >= BranchMetrics.LineageWarningThreshold)
@@ -560,6 +569,31 @@ public sealed partial class KvTableStore
     /// <inheritdoc cref="KvIndexAccessor.LookupUnique"/>
     public Task<ObjectIdValue?> LookupUnique(KvTransaction tx, string indexId, CompositeColumnValue key, CancellationToken cancellationToken = default)
         => indexes.LookupUnique(tx, indexId, key, cancellationToken);
+
+    /// <summary>Whether this store remembers key → row-id mappings for its unique lookups (root database, feature on).</summary>
+    public bool RemembersUniqueRowIds => rowIdCache is not null;
+
+    /// <summary>Remembered key → row-id mappings held right now (diagnostics and tests).</summary>
+    public int RememberedUniqueRowIds => rowIdCache?.Count ?? 0;
+
+    /// <inheritdoc cref="KvIndexAccessor.TryGetCachedUniqueRowId"/>
+    public bool TryGetCachedUniqueRowId(string indexId, CompositeColumnValue key, out ObjectIdValue rowId, out string? kvKey)
+        => indexes.TryGetCachedUniqueRowId(indexId, key, out rowId, out kvKey);
+
+    /// <inheritdoc cref="KvIndexAccessor.EvictCachedUniqueRowId"/>
+    public void EvictCachedUniqueRowId(string kvKey) => indexes.EvictCachedUniqueRowId(kvKey);
+
+    /// <summary>Plants a remembered mapping so a test can exercise the stale-id fallback.</summary>
+    internal void RememberUniqueRowIdForTesting(string kvKey, ObjectIdValue rowId) => rowIdCache?.Set(kvKey, rowId);
+
+    /// <summary>The remembered index keys, for tests that plant a mapping under the key the planner built.</summary>
+    internal IReadOnlyCollection<string> RememberedUniqueRowIdKeysForTesting() => rowIdCache is null ? [] : [.. rowIdCache.Keys];
+
+    internal bool TryGetCachedUniqueRowIdForTesting(string kvKey, out ObjectIdValue rowId)
+    {
+        rowId = default;
+        return rowIdCache is not null && rowIdCache.TryGet(kvKey, out rowId);
+    }
 
     /// <inheritdoc cref="KvIndexAccessor.LookupUniqueManyAsync"/>
     internal Task<bool[]> LookupUniqueManyAsync(KvTransaction tx, string indexId, IReadOnlyList<CompositeColumnValue> keys, CancellationToken cancellationToken = default)

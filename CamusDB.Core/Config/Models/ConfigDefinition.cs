@@ -1050,6 +1050,16 @@ public class ConfigDefinition
     public DiagnosticsConfig Diagnostics { get; set; } = new();
 
     // ──────────────────────────────────────────────────────────────────────────
+    // Point-read row-id cache
+    // ──────────────────────────────────────────────────────────────────────────
+
+    /// <summary>Lets a primary-key point lookup remember the row id it resolved to and skip the index read next time. Default: true. Maps to <c>CamusDBOptions.PointReadRowIdCacheEnabled</c>.</summary>
+    public bool PointReadRowIdCacheEnabled { get; set; } = true;
+
+    /// <summary>Maximum remembered key → row-id mappings per table. Default: 1 000 000. Maps to <c>CamusDBOptions.PointReadRowIdCacheMaxEntries</c>.</summary>
+    public int PointReadRowIdCacheMaxEntries { get; set; } = 1_000_000;
+
+    // ──────────────────────────────────────────────────────────────────────────
     // Query result cache
     // ──────────────────────────────────────────────────────────────────────────
 

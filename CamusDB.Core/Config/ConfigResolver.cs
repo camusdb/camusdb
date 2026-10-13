@@ -340,6 +340,8 @@ public static class ConfigResolver
             // leaves it unset, matching EmbeddedKahunaOptions.PitrWindow.
         PitrWindowSeconds = config.Kahuna.PitrWindowSeconds ?? 3600,
 
+        PointReadRowIdCacheEnabled = config.PointReadRowIdCacheEnabled,
+        PointReadRowIdCacheMaxEntries = config.PointReadRowIdCacheMaxEntries,
         QueryResultCacheEnabled = config.QueryResultCacheEnabled,
         QueryResultCacheDefaultTtlMs = config.QueryResultCacheDefaultTtlMs,
         QueryResultCacheMaxEntries = config.QueryResultCacheMaxEntries,
