@@ -79,8 +79,8 @@ evicted by the fast ones that followed it. Use `0` only on an idle node while re
 | `user` | `STRING` | Authenticated caller, or `NULL` when the node is not authenticating. |
 | `kind` | `STRING` | Statement kind: `select`, `insert`, `update`, `create_table`, … |
 | `rows_returned` | `INT64` | Rows the caller consumed, or rows affected for a mutation. |
-| `rows_read` | `INT64` | Rows fetched from storage before filtering. |
-| `full_scan` | `BOOL` | Some part of the statement read a whole relation. |
+| `rows_read` | `INT64` | Rows fetched from storage before filtering, on every side of every join. A nested-loop join that reads its right side again for each left row counts each read. A row a peer node ships for a distributed scan or a broadcast join is counted when it arrives; a row the peer read and did not ship is not. |
+| `full_scan` | `BOOL` | Some part of the statement read a whole relation, including the right side of a hash or nested-loop join. |
 | `spilled` | `BOOL` | Some blocking operator wrote to a spill file. |
 | `outcome` | `STRING` | `completed`, `abandoned` or `failed`. |
 | `error_code` | `STRING` | Engine error code when `outcome` is `failed`, `NULL` otherwise. |

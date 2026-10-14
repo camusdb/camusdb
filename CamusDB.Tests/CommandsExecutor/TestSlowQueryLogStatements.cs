@@ -170,6 +170,59 @@ internal sealed class TestSlowQueryLogStatements : BaseTest
     }
 
     /// <summary>
+    /// A join reads its rows through the join leaf scanner, not the single-table scan, and those
+    /// reads count the same way: a self-join on a column no index serves reads each side whole, so
+    /// both sides' rows are in the entry.
+    /// </summary>
+    [Test]
+    public async Task RowsReadCountsBothSidesOfAJoin()
+    {
+        (string dbname, _, CommandExecutor executor) = await SetupRobots(Logging(Options), rows: 10);
+
+        List<QueryResultRow> joined = await QueryAsync(executor, dbname,
+            "SELECT a.name, b.name FROM robots a INNER JOIN robots b ON b.year = a.year");
+
+        QueryResultRow? entry = FirstWithSql(await ShowSlowQueriesAsync(executor, dbname), "b.year = a.year");
+
+        Assert.IsNotNull(entry);
+        Assert.AreEqual(10, joined.Count);
+        Assert.AreEqual(joined.Count, Number(entry!.Value, "rows_returned"));
+        Assert.GreaterOrEqual(Number(entry!.Value, "rows_read"), 20, "each side is read at least once");
+        Assert.IsTrue(Flag(entry!.Value, "full_scan"));
+    }
+
+    /// <summary>
+    /// The right side of a hash or nested-loop join is read whole even when the left side seeks an
+    /// index. That right side is a table the join names, not a step of the plan, so the full-scan flag
+    /// must look at the join itself; the left seek alone would leave it false.
+    /// </summary>
+    [Test]
+    public async Task AFullScanOnTheRightSideOfAJoinIsReported()
+    {
+        (string dbname, _, CommandExecutor executor) = await SetupRobots(Logging(Options), rows: 10);
+
+        List<QueryResultRow> all = await QueryAsync(executor, dbname, "SELECT id FROM robots");
+        string id = all[0].Row["id"].StrValue!;
+
+        // An IN list on the primary key makes the left leaf an index seek; a single equality would not
+        // (the join planner leaves a unique point lookup as a table scan).
+        string sql = $"SELECT a.name, b.name FROM robots a INNER JOIN robots b ON b.year = a.year WHERE a.id IN (\"{id}\")";
+
+        List<QueryResultRow> plan = await QueryAsync(executor, dbname, "EXPLAIN " + sql);
+        string leaf = plan.Last(r => r.Row["node"].StrValue != "plan-info").Row["node"].StrValue!;
+        string join = plan[0].Row["node"].StrValue!;
+        if (leaf == "table-scan" || join == "index-nested-loop-join")
+            Assert.Ignore($"The plan ({join} over {leaf}) does not seek on the left and scan on the right; the test does not apply.");
+
+        await QueryAsync(executor, dbname, sql);
+
+        QueryResultRow? entry = FirstWithSql(await ShowSlowQueriesAsync(executor, dbname), "b.year = a.year");
+
+        Assert.IsNotNull(entry);
+        Assert.IsTrue(Flag(entry!.Value, "full_scan"), $"the right side of {join} is read whole");
+    }
+
+    /// <summary>
     /// A primary-key lookup seeks rather than scans, so it must not be reported as a full scan. The
     /// negative case matters as much as the positive one: a flag that is always true says nothing.
     /// </summary>

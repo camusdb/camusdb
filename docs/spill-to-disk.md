@@ -21,6 +21,7 @@ it can produce its first output row. Those are the spill targets:
 | Operator | Why it buffers | Spill strategy |
 |---|---|---|
 | Sort (`ORDER BY`) | needs all rows before emitting the first | external merge sort |
+| Top-k (`ORDER BY … LIMIT`) | keeps the `LIMIT + OFFSET` best rows | a spilling selection that keeps at most about k rows on disk, when the kept rows pass the byte cap |
 | Hash join | builds a hash table from one side | Grace / hybrid hash join (partition both sides) |
 | `GROUP BY` | one accumulator per group | partition rows by group key, aggregate per partition |
 | `DISTINCT` | one row per distinct tuple | partition rows by tuple hash, dedup per partition |
@@ -42,11 +43,42 @@ the mutation phase begins. That collection is the buffer that spills.
 
 ### Threshold and runs
 
-Each operator accumulates rows in memory up to `SpillThresholdRows`. When the next row would
-exceed the cap, the operator serializes its current buffer to a spill file and continues. A sort
-writes each buffer as a **sorted run**; the other operators write partitions or a single overflow
-file depending on their strategy. The threshold is applied **per operator instance**, not globally
-— two operators in the same query each get their own budget.
+Each operator accumulates rows in memory up to two caps: `SpillThresholdRows` rows and
+`SpillThresholdBytes` estimated bytes. When the buffer reaches either cap, the operator serializes
+its current buffer to a spill file and continues. A sort writes each buffer as a **sorted run**; the
+other operators write partitions or a single overflow file depending on their strategy. The caps
+apply **per operator instance**, not globally — two operators in the same query each get their own
+budget.
+
+The byte cap exists because a row count does not bound the heap. Ten thousand narrow rows and ten
+thousand rows that each hold a 64 KiB string differ by three orders of magnitude. The bytes are an
+estimate, charged per buffered row from what the row already holds:
+
+- the cell count and the length of each string, bytes and array value;
+- for a row read straight from the storage buffer (a borrowed row), the whole buffer, because the
+  buffer stays alive while the row does, even when the query reads one small cell;
+- for a joined row, both input rows.
+
+The estimate decodes nothing and walks no object graph. It errs high: a high estimate spills
+earlier than needed, which costs time but never changes a result.
+
+A **top-k** (`ORDER BY … LIMIT k`, where k is `LIMIT + OFFSET`) keeps only its `k` best rows and
+normally never spills. When those `k` rows pass the byte cap, the top-k hands its rows, then the rest
+of the input, to a spilling selection. The selection does not write the whole input to disk, as the
+external merge sort would:
+
+1. Rows collect in a buffer. When the buffer reaches the byte cap, it is sorted and merged with the
+   kept run (the best rows so far, at most `k`, on disk) into a new kept run. The old run's file is
+   deleted at once.
+2. When the kept run holds `k` rows, its last row is a cutoff. An input row that does not rank
+   strictly before the cutoff cannot be in the result, so it is dropped.
+3. At the end, the kept run and the buffer are merged, and the first `k` rows are returned.
+
+So the selection holds at most about `k` rows on disk, and a top-k over a large table does not
+need `spill_max_total_bytes` to hold the table. Keys computed by an `ORDER BY` expression are not
+computed again at the handover. Among rows with equal keys, the selection can keep a different
+subset than the in-memory top-k does. Both are correct, because SQL does not define which of the
+equal rows a `LIMIT` returns.
 
 ### Merging
 
@@ -64,7 +96,8 @@ three groups or three distinct tuples hold three entries in memory and never spi
 threshold, `DISTINCT` returns each new tuple the moment it first arrives, in first-seen order, so a
 `LIMIT` stops the scan early — exactly as with spill off.
 
-When admitting one more key would pass `SpillThresholdRows`, the operator writes the rest of its
+When admitting one more key would pass `SpillThresholdRows`, or the estimated bytes of the keys held
+so far (with their `GROUP BY` state) reach `SpillThresholdBytes`, the operator writes the rest of its
 input to `SpillMergeFanIn` partition files by a hash of the key. The state built so far — `GROUP BY`
 accumulators, or the tuples `DISTINCT` has already returned — moves in memory to the partition its
 key hashes to, because every later row with that key lands in the same partition. Each partition is
@@ -133,17 +166,20 @@ the lock is released explicitly.
 ## Configuration
 
 Spill is controlled by these knobs, settable in `config.yml` as `spill_enabled` /
-`spill_threshold_rows` / `spill_merge_fan_in` / `spill_max_total_bytes` (see
+`spill_threshold_rows` / `spill_threshold_bytes` / `spill_merge_fan_in` / `spill_max_total_bytes` (see
 [configuration.md](configuration.md)):
 
 | Knob | YAML key | Default | Meaning |
 |---|---|---|---|
 | `SpillEnabled` | `spill_enabled` | `false` | Master switch. When `false`, no operator spills and behavior is identical to pre-spill CamusDB. |
 | `SpillThresholdRows` | `spill_threshold_rows` | `500_000` | Per-operator in-memory row cap before that operator begins spilling. |
+| `SpillThresholdBytes` | `spill_threshold_bytes` | `268435456` (256 MiB) | Per-operator cap on the estimated bytes in memory before that operator begins spilling. Checked beside the row cap. `<= 0` removes it. |
 | `SpillMergeFanIn` | `spill_merge_fan_in` | `16` | Maximum simultaneously-open spill runs during a merge pass; more runs trigger a multi-pass merge. |
 | `SpillMaxTotalBytes` | `spill_max_total_bytes` | `8589934592` (8 GiB) | Limit on the bytes of all live spill files on the node. `<= 0` removes it; the `min_free_disk_bytes` floor still applies. |
 
-When `SpillEnabled` is `false`, the threshold, fan-in and total-bytes knobs are ignored.
+When `SpillEnabled` is `false`, the threshold, fan-in and total-bytes knobs are ignored. This includes
+the byte cap: without spill an operator has nowhere to put its rows, so the spill-off behavior does
+not change.
 
 ## Errors
 
@@ -168,6 +204,13 @@ other queries release their spill files or when disk space is freed.
 
 With `SpillEnabled` off, this does not apply — behavior is unchanged from a build without spill.
 
+- **The caps are per operator, not per statement.** A statement with several retaining operators,
+  and several statements at once, can hold a multiple of `SpillThresholdBytes`.
+- **Some state is not charged.** `GROUP BY` charges a group when it admits it. An aggregate whose
+  state grows inside one group (a `MIN` or `MAX` over strings) is charged at its starting size only.
+  A `GROUP BY`, `DISTINCT` or Grace hash join partition that still passes a cap at the deepest
+  re-partition level finishes in memory (`GROUP BY`, `DISTINCT`) or as a nested-loop join over the
+  partition files (hash join). The streaming merge join holds one equal-key run with no cap.
 - **Some IN / NOT IN value sets stay in memory.** When the inner subquery has an index on its
   projected column it is rewritten to a bounded semi/anti join (including inner `DISTINCT`, which is a
   no-op for membership). The remaining cases — no index on the inner column, inner `GROUP BY`/`HAVING`,
@@ -186,5 +229,3 @@ With `SpillEnabled` off, this does not apply — behavior is unchanged from a bu
 - **Fail loud, never silent.** The cardinal rule is that a required spill which cannot be performed
   is an error (CADB0507, CADB0549 or CADB0536), not a quiet return to unbounded buffering.
 
-A byte-budget threshold (capping spill by estimated row width rather than row count) is not yet
-implemented; the current threshold bounds row **count** only.

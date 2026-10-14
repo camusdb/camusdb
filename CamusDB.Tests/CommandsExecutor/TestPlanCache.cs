@@ -24,6 +24,7 @@ using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.SQLParser;
 using CamusDB.Core.Storage.Kv;
 using CamusDB.Core.Transactions;
+using CamusDB.Core.Util.ObjectIds;
 
 namespace CamusDB.Tests.CommandsExecutor;
 
@@ -677,5 +678,141 @@ public sealed class TestPlanCache : BaseTest
         Assert.AreEqual(failuresBefore, executor.PlanCache.ReplayFailures);
         Assert.IsFalse(Array.Exists(afterDrop, n => n.Contains("products_cat", StringComparison.Ordinal)),
             $"The dropped index must not appear in the plan; got: {string.Join(", ", afterDrop)}");
+    }
+
+    // ─── A hit whose literals move the estimate is re-planned ─────────────────
+
+    /// <summary>
+    /// A table whose <c>price</c> runs 1..<paramref name="rows"/> with an index on it, analyzed, so a
+    /// range predicate's estimate follows its literal through the histogram.
+    /// </summary>
+    private async Task<(string dbname, DatabaseDescriptor database, CommandExecutor executor)> CreatePricedProducts(int rows = 60)
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+
+        await executor.CreateTable(new CreateTableTicket(
+            databaseName: dbname,
+            tableName: "priced",
+            columns:
+            [
+                new("id",    ColumnType.Id),
+                new("price", ColumnType.Integer64, notNull: true),
+            ],
+            constraints:
+            [
+                new(ConstraintType.PrimaryKey, "~pk",         [new("id",    OrderType.Ascending)]),
+                new(ConstraintType.IndexMulti, "priced_price", [new("price", OrderType.Ascending)]),
+            ],
+            ifNotExists: false));
+
+        KvTransaction txn = await database.Transactions.BeginAsync();
+        for (int i = 1; i <= rows; i++)
+        {
+            await executor.Insert(new InsertTicket(txnState: txn, databaseName: dbname, tableName: "priced",
+                values: [new() { { "id", new(ColumnType.Id, ObjectIdGenerator.Generate().ToString()) }, { "price", new(ColumnType.Integer64, (long)i) } }]));
+        }
+        await database.Transactions.CommitAsync(txn);
+
+        await RunQueryAsync(executor, dbname, "ANALYZE priced");
+        return (dbname, database, executor);
+    }
+
+    /// <summary>Plans each SQL in turn through one planner wired to the executor's cache; returns each rendered plan.</summary>
+    private async Task<string[][]> PlanEach(CommandExecutor executor, DatabaseDescriptor database, string dbname, string tableName, params string[] sqls)
+    {
+        DatabaseDescriptor db = await executor.OpenDatabase(dbname);
+        TableDescriptor table = await db.TableDescriptors[tableName];
+        QueryPlanner planner = new(executor.Statistics, executor.PlanCache, Options);
+
+        KvTransaction txn = await database.Transactions.BeginAsync();
+        try
+        {
+            List<string[]> plans = [];
+            foreach (string sql in sqls)
+            {
+                NodeAst ast = SQLParserProcessor.Parse(sql);
+                SelectQuery query = new SelectQueryCreator().CreateSelectQuery(ast);
+                ExecuteSQLTicket executeTicket = new(txnState: txn, database: dbname, sql: sql, parameters: null);
+                QueryTicket ticket = QueryTicketAdapter.ToQueryTicket(query, executeTicket);
+                QueryPlan plan = planner.GetPlan(db, table, ticket);
+                plans.Add(PlanRenderer.WalkNodes(plan.Root!, plan)
+                    .Select(n => n.Detail.Length == 0 ? n.Name : $"{n.Name}({n.Detail})")
+                    .ToArray());
+            }
+
+            return [.. plans];
+        }
+        finally
+        {
+            await database.Transactions.RollbackIfNotCompletedAsync(txn);
+        }
+    }
+
+    [Test]
+    public async Task CachedIndexChoice_ForASelectiveLiteral_IsReplannedForABroadLiteral()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreatePricedProducts();
+
+        long replansBefore = executor.PlanCache.EstimateReplans;
+
+        string[][] plans = await PlanEach(executor, database, dbname, "priced",
+            "SELECT id FROM priced WHERE price > 58",   // a few rows: the index
+            "SELECT id FROM priced WHERE price > 1",    // almost every row: a full scan is cheaper
+            "SELECT id FROM priced WHERE price > 57");  // a few rows again
+
+        string Joined(string[] plan) => string.Join(", ", plan);
+
+        Assert.That(Joined(plans[0]), Does.Contain("priced_price"), Joined(plans[0]));
+        Assert.That(Joined(plans[1]), Does.Not.Contain("priced_price"), "the broad literal must not replay the index: " + Joined(plans[1]));
+        Assert.That(Joined(plans[2]), Does.Contain("priced_price"), Joined(plans[2]));
+        Assert.AreEqual(replansBefore + 2, executor.PlanCache.EstimateReplans);
+    }
+
+    [Test]
+    public async Task CachedChoice_ForASimilarLiteral_IsReplayed()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreatePricedProducts();
+
+        long replansBefore = executor.PlanCache.EstimateReplans;
+        long hitsBefore = executor.PlanCache.Hits;
+
+        string[][] plans = await PlanEach(executor, database, dbname, "priced",
+            "SELECT id FROM priced WHERE price > 58",
+            "SELECT id FROM priced WHERE price > 57");
+
+        Assert.AreEqual(hitsBefore + 1, executor.PlanCache.Hits);
+        Assert.AreEqual(replansBefore, executor.PlanCache.EstimateReplans, "a literal of the same regime replays the entry");
+        Assert.That(string.Join(", ", plans[1]), Does.Contain("priced_price"));
+    }
+
+    [Test]
+    public async Task CachedChoice_ForASmallLimit_IsReplannedForALargeOne()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreatePricedProducts();
+
+        long replansBefore = executor.PlanCache.EstimateReplans;
+
+        await PlanEach(executor, database, dbname, "priced",
+            "SELECT id FROM priced WHERE price > 30 ORDER BY price LIMIT 3",
+            "SELECT id FROM priced WHERE price > 30 ORDER BY price LIMIT 1000");
+
+        Assert.AreEqual(replansBefore + 1, executor.PlanCache.EstimateReplans, "a LIMIT far from the cached one re-plans");
+    }
+
+    [Test]
+    public async Task UnanalyzedTable_HitsAreNotGuarded()
+    {
+        // Without statistics every literal gets the same default estimate: nothing to re-plan for.
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateProductsTable();
+
+        long replansBefore = executor.PlanCache.EstimateReplans;
+        long hitsBefore = executor.PlanCache.Hits;
+
+        await PlanEach(executor, database, dbname, "products",
+            "SELECT id FROM products WHERE category = \"books\"",
+            "SELECT id FROM products WHERE category = \"electronics\"");
+
+        Assert.AreEqual(hitsBefore + 1, executor.PlanCache.Hits);
+        Assert.AreEqual(replansBefore, executor.PlanCache.EstimateReplans);
     }
 }

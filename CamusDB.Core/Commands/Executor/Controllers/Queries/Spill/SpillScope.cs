@@ -126,6 +126,34 @@ public sealed class SpillScope : IAsyncDisposable
         }
     }
 
+    /// <summary>
+    /// Deletes one finished spill file of this scope before the scope ends, and gives back the
+    /// <paramref name="reservedBytes"/> its writer reserved (<see cref="SpillWriteStream.ReservedBytes"/>).
+    /// For an operator that replaces a run with a new one and must not hold the old run's disk space
+    /// until the statement ends. The file's writer must be closed and no reader may have it open.
+    ///
+    /// <para>The bytes are given back even when the delete fails, for the reason
+    /// <see cref="DisposeAsync"/> gives: a held reservation would make every later spill on the node
+    /// fail. The scope's own dispose deletes the directory again, file included.</para>
+    /// </summary>
+    internal void DeleteFile(string path, long reservedBytes)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+
+        try
+        {
+            File.Delete(path);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            // Left for the scope's dispose, which deletes the whole directory.
+        }
+
+        long released = Math.Min(Math.Max(0, reservedBytes), _reservedBytes);
+        _budget.Release(released);
+        _reservedBytes -= released;
+    }
+
     /// <summary>The directory where all spill files for this scope are stored.</summary>
     public string ScopeDirectory => _scopeDir;
 

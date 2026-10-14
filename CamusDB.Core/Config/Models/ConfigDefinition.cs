@@ -840,6 +840,14 @@ public class ConfigDefinition
     public int SpillThresholdRows { get; set; } = 500_000;
 
     /// <summary>
+    /// Per-operator in-memory byte cap (estimated) before the operator begins spilling to disk,
+    /// checked beside <see cref="SpillThresholdRows"/>. <c>&lt;= 0</c> removes the byte cap.
+    /// Ignored when <see cref="SpillEnabled"/> is <c>false</c>.
+    /// Maps to <c>CamusDBOptions.SpillThresholdBytes</c>.
+    /// </summary>
+    public long SpillThresholdBytes { get; set; } = 256L * 1024 * 1024;
+
+    /// <summary>
     /// Maximum number of simultaneously-open spill-run readers during a k-way merge pass.
     /// When the number of spilled runs exceeds this value, a multi-pass merge is performed.
     /// Must be &gt; 0. Ignored when <see cref="SpillEnabled"/> is <c>false</c>.

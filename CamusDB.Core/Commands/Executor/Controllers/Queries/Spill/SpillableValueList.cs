@@ -8,6 +8,7 @@
 using System.IO;
 using System.Runtime.CompilerServices;
 using CamusDB.Core.CommandsExecutor.Models;
+using CamusDB.Core.CommandsExecutor.Models.Queries;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers.Queries.Spill;
 
@@ -18,7 +19,8 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Queries.Spill;
 ///
 /// <para>
 /// <b>Memory phase:</b> values are accumulated in a <see cref="List{T}"/> until the buffer
-/// reaches <see cref="_context.Options.SpillEffectiveThreshold"/>. When the threshold is hit,
+/// reaches <see cref="_context.Options.SpillEffectiveThreshold"/> values or
+/// <see cref="CamusDBOptions.SpillEffectiveThresholdBytes"/> estimated bytes. When a threshold is hit,
 /// every buffered value is flushed to a spill file (encoded as a single-column
 /// <see cref="QueryResultRow"/> via <see cref="SpillRowCodec"/>) and subsequent values are
 /// written directly to disk; the in-memory list is released.
@@ -62,6 +64,9 @@ internal sealed class SpillableValueList : IAsyncDisposable
     
     private bool _overflowed;
 
+    /// <summary>Estimated bytes of the values in memory (<see cref="RowMemoryEstimator"/>); charged only while spill is enabled.</summary>
+    private long _memoryBytes;
+
     /// <summary>Total value count (memory + spill).</summary>
     public int Count { get; private set; }
 
@@ -70,7 +75,8 @@ internal sealed class SpillableValueList : IAsyncDisposable
 
     /// <summary>
     /// Appends a value to the list. When <see cref="_context.Options.SpillEnabled"/> is
-    /// <c>true</c> and the buffer reaches <see cref="_context.Options.SpillEffectiveThreshold"/>,
+    /// <c>true</c> and the buffer reaches <see cref="_context.Options.SpillEffectiveThreshold"/> values
+    /// or <see cref="CamusDBOptions.SpillEffectiveThresholdBytes"/> estimated bytes,
     /// all buffered values are flushed to a spill file and subsequent values are written
     /// directly to disk. Must not be called after <see cref="SealAsync"/>.
     /// </summary>
@@ -81,8 +87,14 @@ internal sealed class SpillableValueList : IAsyncDisposable
             _memoryValues.Add(value);
             Count++;
 
-            if (_context.Options.SpillEnabled && _memoryValues.Count >= _context.Options.SpillEffectiveThreshold)
-                await OverflowToSpillAsync(ct).ConfigureAwait(false);
+            if (_context.Options.SpillEnabled)
+            {
+                _memoryBytes += RowMemoryEstimator.ReferenceBytes + RowMemoryEstimator.EstimateValue(value);
+
+                if (_memoryValues.Count >= _context.Options.SpillEffectiveThreshold
+                    || _memoryBytes >= _context.Options.SpillEffectiveThresholdBytes)
+                    await OverflowToSpillAsync(ct).ConfigureAwait(false);
+            }
         }
         else
         {
@@ -165,6 +177,7 @@ internal sealed class SpillableValueList : IAsyncDisposable
 
         await _spillWriter.FlushAsync(ct).ConfigureAwait(false);
         _memoryValues.Clear();
+        _memoryBytes = 0;
         _overflowed = true;
     }
 

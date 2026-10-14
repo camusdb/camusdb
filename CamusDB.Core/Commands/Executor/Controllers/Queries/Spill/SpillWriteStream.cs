@@ -34,6 +34,13 @@ public sealed class SpillWriteStream : Stream
         this.scope = scope;
     }
 
+    /// <summary>
+    /// Bytes this writer reserved in its scope, which is the size of the file it wrote. Readable after
+    /// the writer is closed, so an operator that later deletes the file early
+    /// (<see cref="SpillScope.DeleteFile"/>) can give back exactly these bytes.
+    /// </summary>
+    public long ReservedBytes { get; private set; }
+
     public override bool CanRead => false;
 
     public override bool CanSeek => false;
@@ -50,7 +57,7 @@ public sealed class SpillWriteStream : Stream
 
     public override void Write(ReadOnlySpan<byte> buffer)
     {
-        scope.Reserve(buffer.Length);
+        Reserve(buffer.Length);
         inner.Write(buffer);
     }
 
@@ -59,18 +66,24 @@ public sealed class SpillWriteStream : Stream
 
     public override void WriteByte(byte value)
     {
-        scope.Reserve(1);
+        Reserve(1);
         inner.WriteByte(value);
     }
 
     public override ValueTask WriteAsync(ReadOnlyMemory<byte> buffer, CancellationToken cancellationToken = default)
     {
-        scope.Reserve(buffer.Length);
+        Reserve(buffer.Length);
         return inner.WriteAsync(buffer, cancellationToken);
     }
 
     public override Task WriteAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken)
         => WriteAsync(buffer.AsMemory(offset, count), cancellationToken).AsTask();
+
+    private void Reserve(int bytes)
+    {
+        scope.Reserve(bytes);
+        ReservedBytes += bytes;
+    }
 
     public override void Flush() => inner.Flush();
 

@@ -70,7 +70,7 @@ internal sealed class BroadcastJoinPlanner
     internal BroadcastJoinPlan? TryPrepareBroadcastJoin(
         HashJoinNode joinNode,
         QueryPlan plan,
-        Dictionary<CompositeColumnValue, List<IReadOnlyDictionary<string, ColumnValue>>> hashTable,
+        JoinHashTable hashTable,
         HashJoinBuildSide buildSide)
     {
         // Not a "decline": with no transport, or the feature off, broadcast was never
@@ -145,9 +145,7 @@ internal sealed class BroadcastJoinPlanner
         // (buckets only group equal keys); what matters is that equal-key rows keep their
         // bucket order, so the remote's rebuilt buckets match this coordinator's exactly and
         // match indices reproduce the same merge order.
-        int buildCount = 0;
-        foreach (List<IReadOnlyDictionary<string, ColumnValue>> bucket in hashTable.Values)
-            buildCount += bucket.Count;
+        int buildCount = hashTable.RowCount;
 
         if (buildCount == 0 || buildCount > liveOptions.BroadcastJoinMaxBuildRows)
             return Decline(plan, $"build row count {buildCount} outside (0, {liveOptions.BroadcastJoinMaxBuildRows}]");
@@ -155,7 +153,7 @@ internal sealed class BroadcastJoinPlanner
         List<IReadOnlyDictionary<string, ColumnValue>> flat = new(buildCount);
         string[] encoded = new string[buildCount];
 
-        foreach (List<IReadOnlyDictionary<string, ColumnValue>> bucket in hashTable.Values)
+        foreach (JoinBucket bucket in hashTable.Buckets)
         {
             foreach (IReadOnlyDictionary<string, ColumnValue> row in bucket)
             {

@@ -69,7 +69,7 @@ internal sealed class BroadcastHashProbeExecutor
     internal async IAsyncEnumerable<QueryResultRow> ExecuteBroadcastHashProbe(
         HashJoinNode joinNode,
         QueryPlan plan,
-        Dictionary<CompositeColumnValue, List<IReadOnlyDictionary<string, ColumnValue>>> hashTable,
+        JoinHashTable hashTable,
         BroadcastJoinPlan broadcast)
     {
         TableDescriptor table = broadcast.ProbeTable;
@@ -93,12 +93,40 @@ internal sealed class BroadcastHashProbeExecutor
         var channels = new Channel<BroadcastProbeItem>[spans.Count];
         var workers = new Task[spans.Count];
 
+        // EXPLAIN (ANALYZE) only. Thread-safety is by ownership, as in the gather: each span record
+        // is written by its span's worker, except RowsDelivered, which only this consumer writes;
+        // the node counters are written only on this consumer thread. The probe-side reads belong
+        // to the node that owns the probe input: the left leaf for a right build (it never runs as
+        // a node on this path, so its rows are counted here), the join itself for a left build
+        // (the right side has no node of its own). As in the gather, every probe row this node
+        // decodes counts as read, local or shipped; the rows a remote span scanned and did not ship
+        // appear only in its span record.
+        PlanNodeStats? joinStats = joinNode.Stats;
+        GatherSpanExecution[]? spanExecutions = null;
+        PlanNodeStats? probeStats = null;
+        bool countProbeEmitted = false;
+
+        if (joinStats is not null)
+        {
+            joinStats.RanAs = "broadcast";
+            spanExecutions = new GatherSpanExecution[spans.Count];
+            for (int i = 0; i < spans.Count; i++)
+                spanExecutions[i] = new GatherSpanExecution { PartitionId = spans[i].PartitionId };
+            joinStats.BroadcastSpans = spanExecutions;
+
+            countProbeEmitted = !broadcast.Spec.BuildIsLeft;
+            probeStats = countProbeEmitted ? joinNode.Input!.Stats : joinStats;
+        }
+
+        Diagnostics.StatementProbe? statementProbe = plan.Ticket.Probe;
+
         for (int i = 0; i < spans.Count; i++)
         {
             channels[i] = Channel.CreateBounded<BroadcastProbeItem>(
                 new BoundedChannelOptions(256) { SingleReader = true, SingleWriter = true });
 
             PlacementSpan span = spans[i];
+            GatherSpanExecution? spanExecution = spanExecutions?[i];
 
             // Bounds were validated during preparation; a failure here means the placement
             // snapshot changed shape underneath us — fail closed via the channel.
@@ -115,7 +143,7 @@ internal sealed class BroadcastHashProbeExecutor
             bool remote = !span.LeaderIsLocal && span.LeaderEndpoint is not null;
 
             workers[i] = remote
-                ? RunRemoteProbeSpanAsync(channels[i].Writer, span, fromRowId, untilRowId)
+                ? RunRemoteProbeSpanAsync(channels[i].Writer, span, fromRowId, untilRowId, spanExecution)
                 : RunLocalProbeSpanAsync(channels[i].Writer, fromRowId, untilRowId, afterRowId: null);
         }
 
@@ -127,17 +155,33 @@ internal sealed class BroadcastHashProbeExecutor
         bool buildIsLeft = broadcast.Spec.BuildIsLeft;
         IReadOnlyList<string> localProbeKeys = buildIsLeft ? joinNode.BuildKeyColumns : probeKeys;
         ColumnValue[] probeKeyScratch = new ColumnValue[localProbeKeys.Count];
-        var probeLookup = hashTable.GetAlternateLookup<ReadOnlySpan<ColumnValue>>();
         RowLayout? qualifiedProbeLayout = null;
         RowLayout? joinLayout = null;
         Dictionary<string, int>? rightOrdinalMap = null;
+        JoinRowPairer pairer = new();
 
         try
         {
             for (int i = 0; i < spans.Count; i++)
             {
+                GatherSpanExecution? spanExecution = spanExecutions?[i];
+
                 await foreach (BroadcastProbeItem item in channels[i].Reader.ReadAllAsync(plan.Ticket.CancellationToken).ConfigureAwait(false))
                 {
+                    if (spanExecution is not null)
+                        spanExecution.RowsDelivered++;
+
+                    statementProbe?.AddRowRead();
+                    if (probeStats is not null)
+                    {
+                        probeStats.KvScanEntries++;
+                        probeStats.RowsRead++;
+
+                        // A shipped row already passed the probe filter at the data: it left the leaf.
+                        if (countProbeEmitted && item.Matches is not null)
+                            probeStats.RowsEmitted++;
+                    }
+
                     qualifiedProbeLayout ??= QueryRowMerger.BuildQualifiedLayout(item.Row.Layout, broadcast.ProbeAlias);
                     IReadOnlyDictionary<string, ColumnValue> qualifiedProbe = QueryRowMerger.QualifyRowAsQueryRow(item.Row, qualifiedProbeLayout);
 
@@ -152,9 +196,12 @@ internal sealed class BroadcastHashProbeExecutor
                             && !await services.Filterer.MeetWhereAsync(broadcast.ProbeFilter, qualifiedProbe, ticket, database).ConfigureAwait(false))
                             continue;
 
+                        if (countProbeEmitted && probeStats is not null)
+                            probeStats.RowsEmitted++;
+
                         if (!JoinKeyExtractor.TryExtractKeyInto(keySource, localProbeKeys, probeKeyScratch)) continue;
 
-                        if (!probeLookup.TryGetValue(probeKeyScratch.AsSpan(), out List<IReadOnlyDictionary<string, ColumnValue>>? bucket))
+                        if (!hashTable.TryGetBucket(probeKeyScratch, out JoinBucket bucket))
                             continue;
 
                         foreach (IReadOnlyDictionary<string, ColumnValue> buildRow in bucket)
@@ -224,19 +271,20 @@ internal sealed class BroadcastHashProbeExecutor
             {
                 joinLayout      ??= QueryRowMerger.BuildJoinLayout(buildRow, bareProbe, rightAlias);
                 rightOrdinalMap ??= QueryRowMerger.BuildRightKeyOrdinalMap(bareProbe, rightAlias, joinLayout);
-                return QueryRowMerger.MergeRowsAsQueryRow(buildRow, bareProbe, joinLayout, rightOrdinalMap);
+                return pairer.Pair(buildRow, bareProbe, joinLayout, rightOrdinalMap);
             }
 
             joinLayout      ??= QueryRowMerger.BuildJoinLayout(qualifiedProbe, buildRow, rightAlias);
             rightOrdinalMap ??= QueryRowMerger.BuildRightKeyOrdinalMap(buildRow, rightAlias, joinLayout);
-            return QueryRowMerger.MergeRowsAsQueryRow(qualifiedProbe, buildRow, joinLayout, rightOrdinalMap);
+            return pairer.Pair(qualifiedProbe, buildRow, joinLayout, rightOrdinalMap);
         }
 
         async Task RunRemoteProbeSpanAsync(
             ChannelWriter<BroadcastProbeItem> writer,
             PlacementSpan span,
             ObjectIdValue? fromRowId,
-            ObjectIdValue? untilRowId)
+            ObjectIdValue? untilRowId,
+            GatherSpanExecution? spanExecution)
         {
             // Probe rows already delivered from this span; frames are per probe row (all of a
             // row's matches ship together), so resuming locally AFTER this row on failure
@@ -246,6 +294,12 @@ internal sealed class BroadcastHashProbeExecutor
 
             if (services.DistributedMetrics is not null)
                 Interlocked.Increment(ref services.DistributedMetrics.FragmentsDispatched);
+
+            if (spanExecution is not null)
+            {
+                spanExecution.DispatchedRemotely = true;
+                spanExecution.RemoteEndpoint = span.LeaderEndpoint;
+            }
 
             try
             {
@@ -264,6 +318,7 @@ internal sealed class BroadcastHashProbeExecutor
                     ReadTsCounter = readTs.C,
                     RequiredColumns = broadcast.ProbeRequiredColumns?.ToArray(),
                     Join = broadcast.Spec,
+                    WantStats = spanExecution is not null,
                 };
 
                 RowEncoder.RowDecodeState decodeState = new();
@@ -271,8 +326,14 @@ internal sealed class BroadcastHashProbeExecutor
                 await foreach (QueryFragmentRow fragmentRow in services.FragmentTransport!
                     .ExecuteFragmentAsync(span.LeaderEndpoint!, request, cts.Token).ConfigureAwait(false))
                 {
-                    if (fragmentRow.Stats is not null)
+                    // Terminal stats frame (sent only when WantStats was requested): actuals for
+                    // EXPLAIN (ANALYZE), never row data.
+                    if (fragmentRow.Stats is { } fragmentStats)
+                    {
+                        if (spanExecution is not null)
+                            spanExecution.RemoteRowsScanned = fragmentStats.RowsScanned;
                         continue;
+                    }
 
                     if (fragmentRow.MatchIndices is null)
                         throw new CamusDBException(
@@ -299,6 +360,9 @@ internal sealed class BroadcastHashProbeExecutor
                     await writer.WriteAsync(new BroadcastProbeItem(rowId, row, fragmentRow.MatchIndices), cts.Token).ConfigureAwait(false);
                     lastEmitted = rowId;
                     shippedThisSpan++;
+
+                    if (spanExecution is not null)
+                        spanExecution.RemoteRowsShipped = shippedThisSpan;
                 }
 
                 writer.Complete();
@@ -314,6 +378,9 @@ internal sealed class BroadcastHashProbeExecutor
 
                 if (services.DistributedMetrics is not null)
                     Interlocked.Increment(ref services.DistributedMetrics.FragmentFallbacks);
+
+                if (spanExecution is not null)
+                    spanExecution.FellBackToLocal = true;
 
                 await RunLocalProbeSpanAsync(writer, fromRowId, untilRowId, afterRowId: lastEmitted).ConfigureAwait(false);
             }

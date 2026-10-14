@@ -454,7 +454,8 @@ public sealed class QueryPlanner
         if (shapeId is not null
             && planCacheEnabled
             && _cache!.TryGet(database.Id, shapeId, cacheDeps!, out PlanCacheEntry? cached)
-            && cached!.SingleTable is { } cachedDecision)
+            && cached!.SingleTable is { } cachedDecision
+            && !EstimateMovedFromCachedDecision(database, table, ticket, analysis, cachedDecision))
         {
             (scanNode, scanStep, absorbedInListConjunct) =
                 BuildScanNodeFromCachedDecision(database, table, ticket, analysis, cachedDecision, out bool replayFailed);
@@ -485,20 +486,29 @@ public sealed class QueryPlanner
             && ticket.OrderBy is { Count: > 0 }
             && ticket.GroupBy is not { Count: > 0 }
             && !ticket.IsDistinct
-            && IndexScanSelector.ScanSatisfiesOrderBy(table, scanStep.Value, ticket.OrderBy))
+            && IndexScanSelector.ScanSatisfiesOrderBy(table, scanStep.Value, ticket.OrderBy, IndexScanSelector.ConstantColumns(analysis)))
             scanNode.OutputOrdering = ticket.OrderBy;
 
         bool scanSatisfiesOrderBy = scanNode.OutputOrdering is not null;
         plan.ScanRowLimit = TryComputeScanRowLimit(ticket, plan.ExecutionFilter, scanSatisfiesOrderBy);
+
+        // The streaming DISTINCT / GROUP BY overrides below may swap the scan for a full ordered index
+        // scan only when the scan they replace reads every row and applies no predicate itself. A null
+        // scan step alone does not prove that: an IN-list index scan also has no step, and it applies
+        // the IN conjunct it took out of the execution filter. Swapping it would leave nothing to
+        // apply that conjunct, and the query would return rows outside the list.
+        bool scanIsUnfilteredFullRead = absorbedInListConjunct is null
+            && (scanStep is null || scanStep.Value.Type == QueryPlanStepType.FullScanFromTableIndex);
 
         // Streaming distinct detection.
         // When SELECT DISTINCT projects only simple column identifiers that are covered by
         // an index prefix, use a streaming (adjacent-key) dedup instead of a hash set,
         // reducing memory from O(distinct-count) to O(1).
         // Override the scan with a full ordered index scan when no predicate-driven scan was
-        // chosen (scanStep == null). Only override when scanStep is null so predicate-driven
-        // scans are not disrupted. ExecutionFilter is unaffected (a FullScanFromIndex step consumes
-        // no predicates, same as a null/table-scan step), but the override is only safe when the
+        // chosen (scanIsUnfilteredFullRead). Only override then, so predicate-driven scans —
+        // including an IN-list scan, which has no step — are not disrupted. ExecutionFilter is
+        // unaffected (a FullScanFromIndex step consumes no predicates, same as a null/table-scan
+        // step), but the override is only safe when the
         // forced index holds every row: a unique index omits rows with a NULL in any key column,
         // so TryFindStreamingDistinctIndex accepts a unique candidate only when all of its columns
         // are NOT NULL. The DISTINCT-column check below is not sufficient on its own.
@@ -514,7 +524,7 @@ public sealed class QueryPlanner
                     isStreamingDistinct = true;
                     streamingDistinctOrdering = BuildDistinctOrdering(scanStep.Value.Index!, distinctCols);
                 }
-                else if (scanStep is null || scanStep.Value.Type == QueryPlanStepType.FullScanFromTableIndex)
+                else if (scanIsUnfilteredFullRead)
                 {
                     TableIndexSchema? distinctIndex = IndexScanSelector.TryFindStreamingDistinctIndex(table, distinctCols);
                     if (distinctIndex is not null)
@@ -545,6 +555,11 @@ public sealed class QueryPlanner
         // Must run before `root = scanNode` so that scan-node overrides propagate into the plan tree.
         bool hasGroupBy = ticket.GroupBy is { Count: > 0 };
         bool isStreamingGroupBy = false;
+
+        // The order streaming aggregation emits its groups in: the order its input scan delivers the
+        // grouping columns, which is the index column order and direction (as for streaming
+        // DISTINCT). Null when grouping is not streaming.
+        IReadOnlyList<QueryOrderBy>? streamingGroupByOrdering = null;
         if (hasGroupBy && !ticket.IsDistinct)
         {
             List<string>? groupByCols = TryExtractGroupByColumns(ticket.GroupBy!);
@@ -555,9 +570,9 @@ public sealed class QueryPlanner
                 {
                     // Case 1: predicate-driven scan already covers the GROUP BY columns.
                     isStreamingGroupBy = true;
+                    streamingGroupByOrdering = BuildDistinctOrdering(scanStep.Value.Index!, groupByCols);
                 }
-                else if (scanStep is null
-                    || scanStep.Value.Type == QueryPlanStepType.FullScanFromTableIndex)
+                else if (scanIsUnfilteredFullRead)
                 {
                     // Case 2: no predicate-driven scan; force a full ordered index scan if an
                     // index covers the GROUP BY columns, exactly as streaming DISTINCT does.
@@ -568,6 +583,7 @@ public sealed class QueryPlanner
                         scanNode = WithDistribution(
                             new TableScanNode(TableScanSource.ForcedIndex, groupByIndex), table);
                         isStreamingGroupBy = true;
+                        streamingGroupByOrdering = BuildDistinctOrdering(groupByIndex, groupByCols);
                     }
                 }
             }
@@ -596,13 +612,25 @@ public sealed class QueryPlanner
                 GroupByExpressions = ticket.GroupBy,
                 AggregateProjections = ExtractAggregateProjections(ticket),
                 IsStreamingGroupBy = isStreamingGroupBy,
+                OutputOrdering = streamingGroupByOrdering,
             };
 
             if (ticket.Having is not null)
                 root = new HavingFilterNode(ticket.Having, root);
 
             if (ticket.OrderBy is not null && ticket.OrderBy.Count > 0)
-                root = new SortNode(root) { OrderBy = ticket.OrderBy, OutputOrdering = ticket.OrderBy };
+            {
+                // Streaming aggregation already emits its groups in index order. When ORDER BY asks
+                // for that order (or a prefix of it), the sort is dropped, and a LIMIT then stops the
+                // scan after enough groups instead of after every group. HAVING only removes groups,
+                // so it keeps the order.
+                bool orderElided = streamingGroupByOrdering is not null
+                    && TryResolveGroupedOrderBy(ticket.OrderBy, ticket.Projection, out List<QueryOrderBy>? resolvedOrderBy)
+                    && StreamingOrderSatisfiesOrderBy(streamingGroupByOrdering, resolvedOrderBy);
+
+                if (!orderElided)
+                    root = new SortNode(root) { OrderBy = ticket.OrderBy, OutputOrdering = ticket.OrderBy };
+            }
 
             if (ticket.Projection is not null && ticket.Projection.Count > 0 && !QueryPostScanPipeline.IsFullProjection(ticket.Projection))
                 root = new ProjectNode(root);
@@ -727,9 +755,15 @@ public sealed class QueryPlanner
             && plan.Steps is [{ } s0, ..]
             && s0.Type != QueryPlanStepType.InListScanFromIndex)
         {
+            bool guarded = s0.Type != QueryPlanStepType.QueryFromIndex;
+
             _cache!.Put(database.Id, shapeId,
                 new PlanCacheEntry(cacheDeps!,
-                    SingleTable: new SingleTableDecision(s0.Index?.Name, ClassifyDecision(s0)),
+                    SingleTable: new SingleTableDecision(
+                        s0.Index?.Name,
+                        ClassifyDecision(s0),
+                        guarded ? TryEstimateSelectivityForCache(database, table, analysis) : null,
+                        guarded ? TryComputeRowDemand(ticket) : null),
                     JoinAliasOrder: null));
         }
 
@@ -807,6 +841,15 @@ public sealed class QueryPlanner
     ///   estimatedRows × 2 units (index entry + primary-store row fetch, non-covering).
     /// Unique-index lookups always cost 2 units regardless of table size.
     /// NetworkFactor is included when key-range sharding is on.
+    ///
+    /// <para><b>ORDER BY and LIMIT.</b> The cheapest scan is not always the cheapest result. With an
+    /// ORDER BY, a candidate that does not deliver that order also pays for the sort of its output
+    /// (<see cref="SortCost"/>, priced as the plan annotation prices a sort). With a LIMIT on a
+    /// row-preserving query, the index that delivers the ORDER BY order joins the competition even
+    /// though no predicate drives it: it stops once the LIMIT has enough surviving rows, so it reads
+    /// about <c>(limit + offset) / selectivity</c> entries, never more than the table holds. Without a
+    /// LIMIT that candidate reads every entry plus a row fetch each and loses to the full scan, as
+    /// before.</para>
     /// </summary>
     private (PhysicalPlanNode Node, QueryPlanStep? Step) PickCheapestIndexOrFullScan(
         DatabaseDescriptor database,
@@ -815,8 +858,14 @@ public sealed class QueryPlanner
         PredicateAnalysis analysis,
         long tableRowCount)
     {
+        bool hasOrderBy = ticket.OrderBy is { Count: > 0 };
+        IReadOnlySet<string>? constantColumns = hasOrderBy ? IndexScanSelector.ConstantColumns(analysis) : null;
+        long? rowDemand = hasOrderBy ? TryComputeRowDemand(ticket) : null;
+        double selectivity = hasOrderBy ? EstimateWhereSelectivity(database, table, analysis) : 1.0;
+        double sortCost = hasOrderBy ? SortCost(tableRowCount * selectivity, rowDemand) : 0.0;
+
         PhysicalPlanNode fullScanNode = WithDistribution(new TableScanNode(TableScanSource.PrimaryRows), table);
-        double bestCost = CostEstimator.EstimateScanLeafCost(fullScanNode, tableRowCount, _stats, database, table, _options);
+        double bestCost = CostEstimator.EstimateScanLeafCost(fullScanNode, tableRowCount, _stats, database, table, _options) + sortCost;
         PhysicalPlanNode bestNode = fullScanNode;
         QueryPlanStep? bestStep = null;
         bool bestCovers = false;
@@ -830,6 +879,9 @@ public sealed class QueryPlanner
             bool covers = ScanCoversProjection(step, ticket);
             PhysicalPlanNode candidateNode = WithDistribution(ToScanNode(step), table);
             double cost = CostEstimator.EstimateScanLeafCost(candidateNode, tableRowCount, _stats, database, table, _options, covers);
+
+            if (hasOrderBy && !IndexScanSelector.ScanSatisfiesOrderBy(table, step, ticket.OrderBy, constantColumns))
+                cost += sortCost;
 
             // Ties resolve in two layers, both required for determinism and plan quality:
             //   1. A covering candidate beats a non-covering equal-cost best (including the
@@ -856,7 +908,152 @@ public sealed class QueryPlanner
             }
         }
 
+        // The index that delivers the ORDER BY order, costed for the rows the LIMIT needs. It must
+        // satisfy the whole ORDER BY, or a sort would still read everything it returns.
+        if (rowDemand is { } demand
+            && IndexScanSelector.TrySelectOrderByScan(table, ticket.OrderBy) is { } orderStep
+            && IndexScanSelector.ScanSatisfiesOrderBy(table, orderStep, ticket.OrderBy, constantColumns))
+        {
+            bool covers = ScanCoversProjection(orderStep, ticket);
+            double entries = Math.Min(tableRowCount, demand / Math.Max(selectivity, MinimumSelectivity));
+            double cost = entries * (covers ? 1.0 : 2.0);
+
+            if (cost < bestCost)
+                return (WithDistribution(ToScanNode(orderStep), table), orderStep);
+        }
+
         return (bestNode, bestStep);
+    }
+
+    /// <summary>Lower bound on an estimated selectivity, so a division by it stays finite.</summary>
+    private const double MinimumSelectivity = 1e-9;
+
+    /// <summary>
+    /// How far a cached single-table decision's estimate may move, in either direction, before a hit
+    /// is re-planned. Four times keeps a hit for literals of the same regime and re-plans across the
+    /// regimes that change the cheapest path (a few rows against half the table).
+    /// </summary>
+    private const double CachedEstimateReplanFactor = 4.0;
+
+    /// <summary>
+    /// The WHERE selectivity a cached decision is guarded with, or null when the table has no
+    /// analyzed statistics: then the estimate is a fixed default for every literal and cannot move.
+    /// </summary>
+    private double? TryEstimateSelectivityForCache(DatabaseDescriptor database, TableDescriptor table, PredicateAnalysis analysis)
+    {
+        if (_stats is null || !_stats.HasAnalyzedStatistics(database, table))
+            return null;
+
+        return EstimateWhereSelectivity(database, table, analysis);
+    }
+
+    /// <summary>
+    /// True when the current literals moved the estimate far from the one <paramref name="decision"/>
+    /// was made for, so the hit must not be replayed: the selectivity or the LIMIT demand changed by
+    /// more than <see cref="CachedEstimateReplanFactor"/>, or a demand appeared or disappeared. The
+    /// planner then plans from the start and the fresh decision replaces the entry. Costs one
+    /// selectivity estimate per guarded hit (statistics lookups, no storage read).
+    /// </summary>
+    private bool EstimateMovedFromCachedDecision(
+        DatabaseDescriptor database,
+        TableDescriptor table,
+        QueryTicket ticket,
+        PredicateAnalysis analysis,
+        SingleTableDecision decision)
+    {
+        bool moved = false;
+
+        if (decision.Selectivity is { } cachedSelectivity
+            && TryEstimateSelectivityForCache(database, table, analysis) is { } currentSelectivity)
+        {
+            moved = MovedByFactor(cachedSelectivity, currentSelectivity);
+        }
+
+        // The demand changes the choice only through ORDER BY: it prices the sort and the index
+        // that delivers the order (PickCheapestIndexOrFullScan).
+        if (!moved && ticket.OrderBy is { Count: > 0 })
+        {
+            long? currentDemand = TryComputeRowDemand(ticket);
+            moved = (decision.RowDemand, currentDemand) switch
+            {
+                (null, null) => false,
+                ({ } cachedDemand, { } demand) => MovedByFactor(Math.Max(1, cachedDemand), Math.Max(1, demand)),
+                _ => true,
+            };
+        }
+
+        if (moved)
+            _cache!.RecordEstimateReplan();
+
+        return moved;
+
+        static bool MovedByFactor(double cached, double current)
+        {
+            double low = Math.Max(Math.Min(cached, current), MinimumSelectivity);
+            return Math.Max(cached, current) / low > CachedEstimateReplanFactor;
+        }
+    }
+
+    /// <summary>
+    /// The cost of sorting <paramref name="rows"/> rows, as <see cref="CostEstimator"/> prices a
+    /// <see cref="SortNode"/>: one in-memory unit (0.1) for each row the sort keeps, which is all
+    /// of them, or only the rows a LIMIT can reach when the sort is bounded.
+    /// </summary>
+    private static double SortCost(double rows, long? rowDemand)
+    {
+        double retained = rowDemand is { } demand ? Math.Min(demand, rows) : rows;
+        return Math.Max(0.0, retained) * CostEstimator.SortRowWeight;
+    }
+
+    /// <summary>
+    /// The estimated fraction of the table's rows the whole WHERE keeps. Comparisons and IN lists
+    /// use the statistics; each other conjunct counts at the fallback selectivity, which can only
+    /// make an early-stopping ordered scan look more expensive, never cheaper.
+    /// </summary>
+    private double EstimateWhereSelectivity(DatabaseDescriptor database, TableDescriptor table, PredicateAnalysis analysis)
+    {
+        double selectivity = CardinalityEstimator.EstimatePredicateSelectivity(
+            analysis.IndexableComparisons, analysis.InListComparisons, database, table, _stats!);
+
+        for (int i = 0; i < analysis.ResidualConjuncts.Count + analysis.ColumnComparisons.Count; i++)
+            selectivity *= CardinalityEstimator.FallbackSelectivity;
+
+        return Math.Clamp(selectivity, MinimumSelectivity, 1.0);
+    }
+
+    /// <summary>
+    /// The number of scanned rows that survive to the LIMIT, <c>limit + offset</c>, when every
+    /// surviving scan row is one result row: no DISTINCT, grouping, HAVING, aggregate or semi-join
+    /// sits between them. Null otherwise, or when the values are not integers (the executor
+    /// reports that error, not the planner).
+    /// </summary>
+    private static long? TryComputeRowDemand(QueryTicket ticket)
+    {
+        if (ticket.Limit is null || ticket.IsDistinct || ticket.GroupBy is { Count: > 0 } || ticket.Having is not null)
+            return null;
+
+        if (ticket.SemiJoinSpecs is { Count: > 0 })
+            return null;
+
+        if (ticket.Projection is { Count: > 0 } && QueryPostScanPipeline.HasAggregation(ticket.Projection, ticket))
+            return null;
+
+        ColumnValue limit = SqlExecutor.EvalExpr(ticket.Limit, new Dictionary<string, ColumnValue>(), ticket.Parameters);
+        if (limit.Type != ColumnType.Integer64 || limit.LongValue < 0)
+            return null;
+
+        long demand = limit.LongValue;
+
+        if (ticket.Offset is not null)
+        {
+            ColumnValue offset = SqlExecutor.EvalExpr(ticket.Offset, new Dictionary<string, ColumnValue>(), ticket.Parameters);
+            if (offset.Type != ColumnType.Integer64 || offset.LongValue < 0)
+                return null;
+
+            demand = offset.LongValue > long.MaxValue - demand ? long.MaxValue : demand + offset.LongValue;
+        }
+
+        return demand;
     }
 
     /// <summary>
@@ -998,7 +1195,7 @@ public sealed class QueryPlanner
                     && analysis.InListComparisons is { Count: > 0 })
                 {
                     bool rangeSatisfiesOrder = ticket.OrderBy is { Count: > 0 }
-                        && IndexScanSelector.ScanSatisfiesOrderBy(table, chosenRange, ticket.OrderBy);
+                        && IndexScanSelector.ScanSatisfiesOrderBy(table, chosenRange, ticket.OrderBy, IndexScanSelector.ConstantColumns(analysis));
                     if (!rangeSatisfiesOrder)
                     {
                         IndexInListScanNode? competitor = TryBuildCompetingInListScanNode(
@@ -1071,7 +1268,7 @@ public sealed class QueryPlanner
             && analysis.InListComparisons is { Count: > 0 })
         {
             bool rangeSatisfiesOrder = ticket.OrderBy is { Count: > 0 }
-                && IndexScanSelector.ScanSatisfiesOrderBy(table, rangeStep, ticket.OrderBy);
+                && IndexScanSelector.ScanSatisfiesOrderBy(table, rangeStep, ticket.OrderBy, IndexScanSelector.ConstantColumns(analysis));
             if (!rangeSatisfiesOrder)
             {
                 IndexInListScanNode? competitor = TryBuildCompetingInListScanNode(
@@ -1436,6 +1633,63 @@ public sealed class QueryPlanner
         for (int i = 0; i < distinctCols.Count; i++)
             ordering.Add(new QueryOrderBy(index.Columns[i], index.DirectionAt(i)));
         return ordering;
+    }
+
+    /// <summary>
+    /// Translates the ORDER BY keys of a grouped query into the source columns they order by, so
+    /// they can be compared with the order streaming aggregation emits. A key that names an output
+    /// alias resolves to the expression behind it, which must be a bare column; a key that names no
+    /// output is a source column already. Returns false — keep the sort — for a computed key, an
+    /// alias over an aggregate or any other expression, or a name more than one output carries.
+    /// </summary>
+    private static bool TryResolveGroupedOrderBy(
+        IReadOnlyList<QueryOrderBy> orderBy,
+        List<NodeAst>? projection,
+        [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out List<QueryOrderBy>? resolved)
+    {
+        resolved = new List<QueryOrderBy>(orderBy.Count);
+
+        foreach (QueryOrderBy key in orderBy)
+        {
+            if (key.IsExpression)
+            {
+                resolved = null;
+                return false;
+            }
+
+            string column = key.ColumnName;
+            int matches = 0;
+
+            if (projection is not null)
+            {
+                for (int i = 0; i < projection.Count; i++)
+                {
+                    if (!string.Equals(QueryProjectionResolver.GetOutputNameFromProjectionExpression(projection[i], i), key.ColumnName, StringComparison.OrdinalIgnoreCase))
+                        continue;
+
+                    matches++;
+                    NodeAst expr = projection[i].nodeType == NodeType.ExprAlias ? projection[i].leftAst! : projection[i];
+
+                    if (expr.nodeType != NodeType.Identifier || expr.yytext is null)
+                    {
+                        resolved = null;
+                        return false;
+                    }
+
+                    column = expr.yytext;
+                }
+            }
+
+            if (matches > 1)
+            {
+                resolved = null;
+                return false;
+            }
+
+            resolved.Add(new QueryOrderBy(column, key.Type));
+        }
+
+        return true;
     }
 
     /// <summary>

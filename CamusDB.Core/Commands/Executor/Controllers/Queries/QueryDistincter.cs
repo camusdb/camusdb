@@ -25,7 +25,8 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 ///
 /// <para><b>Spill path (<see cref="CamusDBOptions.SpillEnabled"/> = <c>true</c>).</b> Identical to the
 /// hash path until the count of <b>distinct</b> tuples reaches
-/// <see cref="CamusDBOptions.SpillEffectiveThreshold"/> — so below the threshold the two paths return
+/// <see cref="CamusDBOptions.SpillEffectiveThreshold"/>, or their estimated bytes reach
+/// <see cref="CamusDBOptions.SpillEffectiveThresholdBytes"/> — so below the thresholds the two paths return
 /// the same rows in the same order, and spill on costs nothing. A low-cardinality DISTINCT over many
 /// rows never spills at all. The trigger and the partitioning follow the GROUP BY spill path
 /// (<see cref="QueryAggregator"/>); see <see cref="DistinctWithSpill"/> for how the rows already
@@ -131,7 +132,8 @@ internal sealed class QueryDistincter
     /// <summary>
     /// Spill-aware DISTINCT. Rows dedup through a hash set exactly as <see cref="DistinctRows"/> does,
     /// and spilling starts only when admitting one more distinct tuple would push the set past
-    /// <see cref="CamusDBOptions.SpillEffectiveThreshold"/>.
+    /// <see cref="CamusDBOptions.SpillEffectiveThreshold"/> rows, or when the set's estimated bytes
+    /// (<see cref="RowMemoryEstimator"/>) are already at <see cref="CamusDBOptions.SpillEffectiveThresholdBytes"/>.
     ///
     /// <para><b>The rows already returned travel with their partition.</b> At overflow every row in the
     /// set has already gone to the caller, so it must never be returned again, yet a later duplicate of
@@ -159,6 +161,8 @@ internal sealed class QueryDistincter
         ct = context.Effective(ct);
 
         int threshold = context.Options.SpillEffectiveThreshold;
+        long byteThreshold = context.Options.SpillEffectiveThresholdBytes;
+        long seenBytes = 0;
         int K = Math.Max(2, context.Options.SpillMergeFanIn);
 
         DistinctRowEqualityComparer comparer = new();
@@ -179,12 +183,16 @@ internal sealed class QueryDistincter
                     continue;
                 }
 
-                // Below the cap one Add both tests and admits the tuple. At the cap, a duplicate is
-                // still suppressed in memory; only a new tuple triggers the spill.
-                if (seen.Count < threshold)
+                // Below the caps one Add both tests and admits the tuple. At a cap, a duplicate is
+                // still suppressed in memory; only a new tuple triggers the spill. The byte cap is
+                // passed by at most one row, as the row cap is reached by one.
+                if (seen.Count < threshold && seenBytes < byteThreshold)
                 {
                     if (seen.Add(row))
+                    {
+                        seenBytes += RowMemoryEstimator.Estimate(row);
                         yield return row;
+                    }
                     continue;
                 }
 
@@ -243,7 +251,8 @@ internal sealed class QueryDistincter
     /// this one partition, so a tuple new to this set is new to the whole query.
     ///
     /// <para><b>Overflow works as it does at level 0.</b> When admitting a new tuple would push the set
-    /// past <see cref="CamusDBOptions.SpillEffectiveThreshold"/> and <paramref name="depth"/> is below
+    /// past <see cref="CamusDBOptions.SpillEffectiveThreshold"/>, or the set's bytes (carried rows
+    /// included) are already at <see cref="CamusDBOptions.SpillEffectiveThresholdBytes"/>, and <paramref name="depth"/> is below
     /// <see cref="MaxDistinctRecursionDepth"/>, the set's rows (all returned by now) are routed to
     /// sub-partitions under <paramref name="seed"/>+1, so tuples that collided here separate, and only
     /// the rest of the file is written to those sub-partitions. Beyond the depth cap the partition
@@ -265,13 +274,18 @@ internal sealed class QueryDistincter
             yield break;
 
         int threshold = context.Options.SpillEffectiveThreshold;
+        long byteThreshold = context.Options.SpillEffectiveThresholdBytes;
+        long seenBytes = 0;
         int K = Math.Max(2, context.Options.SpillMergeFanIn);
         int newSeed = seed + 1;
 
         DistinctRowEqualityComparer comparer = new();
         HashSet<QueryResultRow> seen = new(carriedRows.Count, comparer);
         for (int i = 0; i < carriedRows.Count; i++)
-            seen.Add(carriedRows[i]);
+        {
+            if (seen.Add(carriedRows[i]))
+                seenBytes += RowMemoryEstimator.Estimate(carriedRows[i]);
+        }
 
         string[]? subPaths = null;
         SpillWriteStream[]? subWriters = null;
@@ -291,10 +305,13 @@ internal sealed class QueryDistincter
                         continue;
                     }
 
-                    if (depth >= MaxDistinctRecursionDepth || seen.Count < threshold)
+                    if (depth >= MaxDistinctRecursionDepth || (seen.Count < threshold && seenBytes < byteThreshold))
                     {
                         if (seen.Add(row))
+                        {
+                            seenBytes += RowMemoryEstimator.Estimate(row);
                             yield return row;
+                        }
                         continue;
                     }
 

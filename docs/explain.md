@@ -23,10 +23,6 @@ reports actual runtime counters alongside the estimated columns.
 An unrecognized option word (e.g. `EXPLAIN (VERBOSE) ...`) is rejected with an error rather
 than silently treated as a plain `EXPLAIN`.
 
-> **Join limitation:** `EXPLAIN (ANALYZE)` is not yet supported for queries with `JOIN` — it
-> raises an error. Use plain `EXPLAIN` to inspect join plans; full join instrumentation is
-> planned for a future release.
-
 > **Subquery note:** planning a statement that contains an uncorrelated subquery executes that
 > inner subquery once (it is materialized during planning), so `EXPLAIN` of such a statement
 > does read storage for the inner query. The outer query is never executed by plain `EXPLAIN`.
@@ -83,6 +79,63 @@ All columns from plain `EXPLAIN`, plus:
 `actual_rows` ≤ `rows_read` for scan nodes: `rows_read` counts rows decoded from storage
 before predicate evaluation; `actual_rows` counts rows that passed all filters and were
 yielded upstream.
+
+#### Join plans
+
+A join plan is a chain: each join node has one plan input, its left side, and names its right
+side (a table or a derived table) without a row of its own. `EXPLAIN (ANALYZE)` therefore
+reports a join row this way:
+
+- `actual_rows` is the number of rows the join produced.
+- `rows_read`, `kv_lookups` and `kv_scan_entries` count the reads of the **right side**:
+  - `nested-loop-join` reads a base-table right side from storage once, keeps its rows (in
+    memory, or in a spill file when spilling is on), and compares every left row with them. So
+    `rows_read` is the right rows one time. The join reads nothing on the right when the left
+    side is empty. It reads the right side again for every left row (`rows_read` is left rows ×
+    right rows, and the detail shows `ran=nested-loop-rescan`) in two cases: the right-side
+    filter calls a volatile function, or spilling is off and the right side has more rows than
+    `HashJoinMaxBuildRows`.
+  - `index-nested-loop-join` over a unique index adds one `kv_lookups` for each probe with a
+    non-NULL key. Over a non-unique index, it adds one `kv_scan_entries` for each index entry it
+    visits, including the one entry past the key that ends each probe. `rows_read` counts the
+    right rows it fetched, before the right-side filter.
+  - `hash-join` reads its right side one time, as the build or as the probe.
+  - A `hash-join` or `nested-loop-join` whose right table has a pushed filter on an indexed column
+    reads that table through the index; the detail shows `right-index=<name>` (or
+    `right-in-list=<name>`), and `rows_read` counts only the rows the index returned.
+  - `merge-join` adds the reads of its ordered right input (an index walk or a sorted scan).
+    That input is a node, but the plan walk does not render it.
+- A leaf row (`table-scan`, `index-range-scan`, `index-in-list`) counts its own reads, as on a
+  single-table plan. A `derived-table-scan` row counts the rows of its materialized result. Its
+  inner query has no rows here, so its `rows_read` is `0`. A derived table on the right side
+  adds nothing to the join's `rows_read`.
+- `actual_time_ms` is on the root row only, as on a single-table plan.
+
+The work after the last join is not a plan node for a join query: the filter that runs after the
+joins, grouping, ordering, `LIMIT` and projection. So the root row is the last join, not the final
+result. A `LIMIT` shows as a join that produced fewer rows, because the cursor is lazy.
+
+A join row's detail can also show two values that only execution knows:
+
+| Suffix | Meaning |
+|--------|---------|
+| `ran=grace-hash` | The hash build was larger than the spill threshold, so the join ran as a Grace hash join. |
+| `ran=nested-loop-fallback` | The hash build was larger than `HashJoinMaxBuildRows` with spilling off, so the join ran as a nested-loop join. |
+| `ran=nested-loop-rescan` | The nested-loop join read its right side again for every left row, instead of one time (see above). |
+| `ran=broadcast` | The build was small enough to ship, so the join probed the other side span by span. One `broadcast-span` row follows for each span. |
+| `join-order-est-rows=<n>` | The join-order search's estimate of the rows of this join. It appears only when the search costed the order (statistics loaded, cost-based join order on). |
+
+`estimated_rows` comes from the plan annotation, and the join-order search chose the order with
+its own estimate (`join-order-est-rows`). The two models can disagree. With both next to
+`actual_rows`, you can see which one was closer.
+
+A node can run more than one time in one statement. A hash join fallback reads its build input
+again, for example. The counters add up over each run, which is the work the statement did.
+
+A `broadcast-span` row has the same columns as a `gather-span` row (see the distributed section
+below). The node that owns the probe input counts each probe row that this node decoded, from a
+local span or shipped from a peer: the left leaf for a right build, or the join row for a left
+build. The rows that a peer scanned and did not ship are only in its `broadcast-span` row.
 
 ---
 
@@ -374,6 +427,17 @@ physical  index-range-scan  index=year_idx
 No `sort` node appears: the index scan already guarantees the requested ordering, so the sort
 is elided.
 
+The same holds for streaming grouping and streaming `DISTINCT`. An `aggregate(... streaming: true)`
+emits its groups in the order of the index it reads, so `ORDER BY` on the grouping columns in that
+order and direction (or on their output aliases) needs no sort:
+
+```sql
+EXPLAIN SELECT status, COUNT(*) AS cnt FROM sales GROUP BY status ORDER BY status LIMIT 20;
+```
+
+There is no `sort` row, and the `LIMIT` stops the scan after 20 groups. `ORDER BY` in the other
+direction, or on an aggregate (`ORDER BY cnt`), keeps the `sort`.
+
 ---
 
 ### LIMIT pushdown
@@ -431,6 +495,43 @@ analyze  index-range-scan   index=year_idx, from>=2022, to<2023   ...           
 
 ---
 
+### EXPLAIN ANALYZE — a join chain
+
+JOB query 1a on a small synthetic copy of the IMDB data, after `ANALYZE` of every table
+(abridged detail, estimated cost and time columns left out):
+
+```sql
+EXPLAIN (ANALYZE)
+SELECT MIN(mc.note), MIN(t.title), MIN(t.production_year)
+FROM company_type AS ct, info_type AS it, movie_companies AS mc, movie_info_idx AS mi_idx, title AS t
+WHERE ct.kind = 'production companies' AND it.info = 'top 250 rank'
+  AND mc.note NOT LIKE '%(as Metro-Goldwyn-Mayer Pictures)%'
+  AND (mc.note LIKE '%(co-production)%' OR mc.note LIKE '%(presents)%')
+  AND ct.id = mc.company_type_id AND t.id = mc.movie_id AND t.id = mi_idx.movie_id
+  AND mc.movie_id = mi_idx.movie_id AND it.id = mi_idx.info_type_id;
+```
+
+```
+node                    detail (abridged)                                            estimated_rows  actual_rows  rows_read  kv_lookups  kv_scan_entries
+index-nested-loop-join  index=~pk, right=id, join-order-est-rows=6                   1               6            6          6           0
+index-nested-loop-join  index=~pk, right-filter=it.info = 'top 250 rank',
+                        join-order-est-rows=6                                        1               6            88         88          0
+index-nested-loop-join  index=movie_id_movie_info_idx, join-order-est-rows=63        1               88           88         0           142
+index-nested-loop-join  index=company_type_id_movie_companies,
+                        right-filter=NOT mc.note LIKE '...' AND (... OR ...),
+                        join-order-est-rows=65                                       1               54           1162       0           1163
+table-scan              table=company_type                                           1               1            4          0           4
+```
+
+Read it from the bottom. One company type passes its filter. The first join probes the
+non-unique `company_type_id_movie_companies` index for it, visits 1163 entries, fetches 1162
+rows and keeps the 54 that pass the right-side filter. The plan annotation estimated 1 row at
+every step, because it estimates one row for each outer row of an index-nested-loop join. The
+join-order search estimated 65, 63, 6 and 6, which is much closer to the actual 54, 88, 6 and 6.
+The `it` join fetches 88 rows by primary key and keeps 6: its filter runs after the fetch.
+
+---
+
 ## Verbose / distributed-properties mode
 
 `PlanRenderer.Render(plan, includeDistributedProperties: true)` appends distribution
@@ -455,7 +556,9 @@ node for an eligible multi-span primary-row scan and a `distribution` row with
 reason. A gather can run eligible fragments on peer leaders; its presence alone does not mean
 every span was dispatched remotely. `EXPLAIN (ANALYZE)` adds a `gather-span` row per span to
 show which spans ran remotely, how many rows the peer scanned and shipped, and whether the span
-fell back to local execution. Partial aggregation is disabled under `ANALYZE`, so the reported
+fell back to local execution. A hash join that ran as a broadcast probe adds a `broadcast-span`
+row per probed span, with the same detail; for a remote span, `actual_rows` counts only the
+probe rows that matched, because the peer ships nothing else. Partial aggregation is disabled under `ANALYZE`, so the reported
 plan is the row-gather path that actually ran. See [query planning](query-planner.md#part-iv--distributed-ready-plan-properties)
 for eligibility and operator limits.
 
@@ -471,4 +574,5 @@ scan loop, not as a separate pipeline stage. As a result:
 - `kv_lookups` and `kv_scan_entries` are `0` on the filter row — all storage costs are
   attributed to the scan node directly below.
 - `actual_time_ms` is `NULL` (filter evaluation time is not separately measured; it is
-  included in the scan's wall clock, reported only on the root node).
+  included in the scan's wall clock, reported only on the root node). When the filter is the
+  root node, it carries the time of the whole plan, as every root node does.

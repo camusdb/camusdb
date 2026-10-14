@@ -780,11 +780,12 @@ public sealed record CamusDBOptions
     /// cached structural decision.
     ///
     /// Plan-stability tradeoff: because the cache key ignores literal values, a non-selective
-    /// query (e.g. <c>WHERE status = 'all'</c>) can inherit the access path cached by a
-    /// selective query of the same shape (e.g. <c>WHERE status = 'rare'</c>). Both decisions
-    /// are correct — the planner would have chosen the same index for both — but the cache
-    /// prevents re-scoring when ANALYZE produces new statistics that would change the choice.
-    /// Schema changes (DDL) do invalidate the cache; ANALYZE alone does not.
+    /// query (e.g. <c>WHERE status = 'all'</c>) could inherit the access path cached by a
+    /// selective query of the same shape (e.g. <c>WHERE status = 'rare'</c>). A cached
+    /// single-table decision therefore keeps the estimated selectivity and LIMIT demand it was
+    /// made for, and a hit whose literals move either by more than a fixed factor is re-planned
+    /// (on analyzed tables; without statistics the estimate cannot move). Schema changes (DDL),
+    /// index changes and ANALYZE all invalidate cached decisions.
     ///
     /// Disabled by default following the project convention that all cost-based optimizations
     /// are opt-in (<c>cost_based_access_path_enabled</c>, <c>cost_based_join_order_enabled</c>).
@@ -1371,6 +1372,33 @@ public sealed record CamusDBOptions
     public int SpillThresholdRows { get; init; } = 500_000;
 
     /// <summary>
+    /// Per-operator in-memory byte cap before the operator begins spilling to disk, checked beside
+    /// <see cref="SpillThresholdRows"/>: an operator spills when it reaches either cap. A row count
+    /// alone does not bound the heap — ten thousand narrow rows and ten thousand rows that each hold
+    /// a 64 KiB string differ by three orders of magnitude — so this cap gives each retaining
+    /// operator a memory ceiling that does not depend on the row width.
+    ///
+    /// <para>The bytes are an estimate (<c>RowMemoryEstimator</c>), charged per buffered row from
+    /// its representation: the cell count, the string and bytes lengths, and the whole KV buffer a
+    /// borrowed row keeps alive. There is no deep object walk, and the estimate errs high. The cap is
+    /// per operator, like the row cap, so a statement with several retaining operators, or several
+    /// statements at once, can hold a multiple of it.</para>
+    ///
+    /// <para>It covers the external sort, the bounded top-k retention (which moves to a spilling
+    /// selection that keeps about k rows on disk when its retained rows pass the cap), GROUP BY group state, DISTINCT, the hash-join
+    /// build and its Grace partitions, and the spill-capable row and value buffers. Group state is
+    /// charged when a group is admitted; an aggregate whose state grows inside one group is not
+    /// charged for that growth. Ignored when <see cref="SpillEnabled"/> is <c>false</c>: without
+    /// spill an operator has nowhere to put the rows, so the spill-off behavior does not change.
+    /// <c>&lt;= 0</c> removes the byte cap and leaves only the row cap. Runtime-mutable and
+    /// node-scoped for the same reasons as <see cref="SpillThresholdRows"/>.</para>
+    ///
+    /// Default: <c>256 MiB</c>.
+    /// </summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Node)]
+    public long SpillThresholdBytes { get; init; } = 256L * 1024 * 1024;
+
+    /// <summary>
     /// Maximum number of simultaneously-open spill-run readers during a k-way merge pass.
     /// When the number of spilled runs exceeds this value, a multi-pass merge is performed:
     /// runs are merged in groups of <c>SpillMergeFanIn</c> until a single merged output remains.
@@ -1480,6 +1508,13 @@ public sealed record CamusDBOptions
     /// (test override), otherwise <see cref="SpillThresholdRows"/>.
     /// </summary>
     public int SpillEffectiveThreshold => ForceSpillThresholdRows ?? SpillThresholdRows;
+
+    /// <summary>
+    /// Returns the effective per-operator byte cap: <see cref="SpillThresholdBytes"/> when it is
+    /// positive, otherwise <see cref="long.MaxValue"/> (no byte cap). Operators compare their
+    /// estimated buffered bytes against this value only when <see cref="SpillEnabled"/> is set.
+    /// </summary>
+    public long SpillEffectiveThresholdBytes => SpillThresholdBytes > 0 ? SpillThresholdBytes : long.MaxValue;
 
     /// <summary>
     /// Maximum number of user-visible secondary indexes allowed per table. The implicit primary-key

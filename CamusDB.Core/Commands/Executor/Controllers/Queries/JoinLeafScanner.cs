@@ -41,6 +41,13 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 /// multi-keyspace cache fence lands, the join cache path assigns a collector and this
 /// instrumentation starts recording with no further change here.</para>
 ///
+/// <para><b>Runtime counters:</b> every read method takes an optional <see cref="PlanNodeStats"/>,
+/// the counters of the plan node the read is charged to. A leaf scan passes its own node's; a join
+/// operator reading its right side passes the join node's, because the right side has no node of
+/// its own (see <see cref="PlanNodeStats"/>). The argument is null unless the statement runs under
+/// EXPLAIN (ANALYZE). The statement's slow-query-log probe (<c>plan.Ticket.Probe</c>) is counted at
+/// the same sites, so a join reports the rows it read exactly as a single-table scan does.</para>
+///
 /// <para>Nothing in this class is thread-safe. A scan builds its layouts and its decode state
 /// lazily and reuses them across rows, so one scan belongs to one consumer.</para>
 /// </summary>
@@ -56,14 +63,21 @@ internal sealed class JoinLeafScanner
         this.derivedTableExecutor = derivedTableExecutor;
     }
 
+    /// <summary>
+    /// Reads the right side of a join: a full scan of a base table, or the materialized rows of a
+    /// derived table. <paramref name="stats"/> is the join node's counters (null outside
+    /// EXPLAIN (ANALYZE)); a nested-loop join calls this once per left row, so its counters show
+    /// every re-read.
+    /// </summary>
     internal async IAsyncEnumerable<QueryResultRow> ScanJoinRightSource(
         BoundJoinRightSource source,
         NodeAst? executionFilter,
-        QueryPlan plan)
+        QueryPlan plan,
+        PlanNodeStats? stats = null)
     {
         if (source.Table is not null)
         {
-            await foreach (QueryResultRow row in ScanBoundTable(source.Table, executionFilter, plan).ConfigureAwait(false))
+            await foreach (QueryResultRow row in ScanBoundTable(source.Table, executionFilter, plan, stats: stats).ConfigureAwait(false))
                 yield return row;
 
             yield break;
@@ -77,12 +91,14 @@ internal sealed class JoinLeafScanner
         BoundTableSource source,
         NodeAst? executionFilter,
         QueryPlan plan,
-        IReadOnlySet<string>? requiredColumns = null)
+        IReadOnlySet<string>? requiredColumns = null,
+        PlanNodeStats? stats = null)
     {
         TableDescriptor table = source.Table;
         HLCTimestamp txId = plan.Ticket.TxnState.TransactionId;
         IReadOnlySet<string>? required = requiredColumns ?? JoinAliasMetadata.GetRequiredColumnsForAlias(plan, source.Alias);
         QueryDependencyCollector? deps = plan.DepCollector;
+        CamusDB.Core.Diagnostics.StatementProbe? probe = plan.Ticket.Probe;
         RowEncoder.RowDecodeState rowDecodeState = new();
         RowLayout? qualifiedLayout = null;
 
@@ -109,6 +125,13 @@ internal sealed class JoinLeafScanner
                 JoinAliasMetadata.GetTableSchemaVersionForAlias(plan, source.Alias),
                 rowDecodeState).ConfigureAwait(false);
 
+            probe?.AddRowRead();
+            if (stats is not null)
+            {
+                stats.KvScanEntries++;
+                stats.RowsRead++;
+            }
+
             if (executionFilter is not null)
             {
                 qualifiedLayout ??= QueryRowMerger.BuildQualifiedLayout(row.Layout, source.Alias);
@@ -134,6 +157,7 @@ internal sealed class JoinLeafScanner
         TableIndexSchema index,
         NodeAst? executionFilter,
         QueryPlan plan,
+        PlanNodeStats? stats = null,
         [EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
         TableDescriptor table = source.Table;
@@ -148,7 +172,7 @@ internal sealed class JoinLeafScanner
         using CancellationTokenSource? linked = JoinCancellation.Link(plan, cancellationToken);
         CancellationToken scanToken = linked?.Token ?? plan.Ticket.CancellationToken;
 
-        JoinLeafRowPage page = new(services, plan, source, executionFilter);
+        JoinLeafRowPage page = new(services, plan, source, executionFilter, stats: stats);
 
         await foreach ((CompositeColumnValue _, ObjectIdValue rowId, ReadOnlyMemory<byte> _) in table.Store.ScanIndex(
             plan.Ticket.TxnState,
@@ -157,6 +181,9 @@ internal sealed class JoinLeafScanner
             from: null, to: null, unique: unique, cancellationToken: scanToken).ConfigureAwait(false))
         {
             scanToken.ThrowIfCancellationRequested();
+
+            if (stats is not null)
+                stats.KvScanEntries++;
 
             // Recorded before the fetch, per row id, exactly as the per-entry path did: a later update
             // to a non-indexed projected column must invalidate this result even if the row is skipped.
@@ -186,6 +213,7 @@ internal sealed class JoinLeafScanner
     internal async IAsyncEnumerable<QueryResultRow> ScanBoundTableByIndexRange(
         IndexRangeScanNode rangeNode,
         QueryPlan plan,
+        PlanNodeStats? stats = null,
         [EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
         BoundTableSource source = rangeNode.BoundSource!;
@@ -203,7 +231,7 @@ internal sealed class JoinLeafScanner
         using CancellationTokenSource? linked = JoinCancellation.Link(plan, cancellationToken);
         CancellationToken scanToken = linked?.Token ?? plan.Ticket.CancellationToken;
 
-        JoinLeafRowPage page = new(services, plan, source, rangeNode.ExecutionFilter);
+        JoinLeafRowPage page = new(services, plan, source, rangeNode.ExecutionFilter, stats: stats);
 
         await foreach ((CompositeColumnValue _, ObjectIdValue rowId, ReadOnlyMemory<byte> _) in table.Store.ScanIndex(
             plan.Ticket.TxnState,
@@ -216,6 +244,9 @@ internal sealed class JoinLeafScanner
             unique: unique, cancellationToken: scanToken).ConfigureAwait(false))
         {
             scanToken.ThrowIfCancellationRequested();
+
+            if (stats is not null)
+                stats.KvScanEntries++;
 
             deps?.RecordPoint(table.Store.RowPointKey(rowId));
 
@@ -247,6 +278,7 @@ internal sealed class JoinLeafScanner
     internal async IAsyncEnumerable<QueryResultRow> ScanBoundTableByInList(
         IndexInListScanNode inListNode,
         QueryPlan plan,
+        PlanNodeStats? stats = null,
         [EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
         BoundTableSource source = inListNode.BoundSource!;
@@ -266,7 +298,7 @@ internal sealed class JoinLeafScanner
         // One page spans the whole IN list: ids are appended in list order (and, per value, in index
         // order), so a page can hold the tail of one value's matches and the head of the next. Order
         // and the index-side `seen` dedup are unaffected — both happen before an id is buffered.
-        JoinLeafRowPage page = new(services, plan, source, inListNode.ExecutionFilter);
+        JoinLeafRowPage page = new(services, plan, source, inListNode.ExecutionFilter, stats: stats);
 
         foreach (ColumnValue value in inListNode.Values)
         {
@@ -278,6 +310,9 @@ internal sealed class JoinLeafScanner
             {
                 ObjectIdValue? rowId = await table.Store.LookupUnique(
                     plan.Ticket.TxnState, inListNode.Index.KvId, lookupKey, scanToken).ConfigureAwait(false);
+
+                if (stats is not null)
+                    stats.KvPointLookups++;
 
                 if (rowId is null || !seen.Add(rowId.Value))
                     continue;
@@ -305,6 +340,9 @@ internal sealed class JoinLeafScanner
                     maxRows: null, cancellationToken: scanToken).ConfigureAwait(false))
                 {
                     scanToken.ThrowIfCancellationRequested();
+
+                    if (stats is not null)
+                        stats.KvScanEntries++;
 
                     if (!seen.Add(rowId))
                         continue;
@@ -366,7 +404,8 @@ internal sealed class JoinLeafScanner
         ObjectIdValue rowId,
         NodeAst? executionFilter,
         QueryPlan plan,
-        RightDecodeState? decodeState = null)
+        RightDecodeState? decodeState = null,
+        PlanNodeStats? stats = null)
     {
         ReadOnlyMemory<byte>? dataOpt = await source.Table.Store.GetRow(
             plan.Ticket.TxnState, rowId, plan.Ticket.CancellationToken,
@@ -385,6 +424,10 @@ internal sealed class JoinLeafScanner
             JoinAliasMetadata.GetRequiredColumnsForAlias(plan, source.Alias),
             JoinAliasMetadata.GetTableSchemaVersionForAlias(plan, source.Alias),
             decodeState?.DecodeState).ConfigureAwait(false);
+
+        plan.Ticket.Probe?.AddRowRead();
+        if (stats is not null)
+            stats.RowsRead++;
 
         if (executionFilter is not null)
         {

@@ -36,7 +36,8 @@ public enum HashJoinBuildSide { Right, Left }
 /// for this kind, and the executor refuses the other pairing.</para>
 ///
 /// When <c>CamusDBOptions.SpillEnabled</c> is true and the build side exceeds
-/// <c>CamusDBOptions.SpillEffectiveThreshold</c>, the executor routes to the Grace/hybrid hash
+/// <c>CamusDBOptions.SpillEffectiveThreshold</c> rows or <c>CamusDBOptions.SpillEffectiveThresholdBytes</c>
+/// estimated bytes, the executor routes to the Grace/hybrid hash
 /// join: both sides are partitioned to spill files by hash of the join key, then each partition
 /// pair is joined in memory. Skewed partitions that still exceed the threshold are recursively
 /// repartitioned; beyond the recursion depth limit a nested-loop join over the partition files
@@ -80,6 +81,18 @@ public sealed class HashJoinNode : PhysicalPlanNode
 
     /// <summary>Single-table predicate pushed into the build-side scan.</summary>
     public NodeAst? BuildExecutionFilter { get; init; }
+
+    /// <summary>
+    /// The physical input that reads the right table (<see cref="BuildSource"/>), when the planner
+    /// gave it its own access path: an index range or IN-list scan driven by the pushed filter, with
+    /// the rest of that filter as its residual. Null means the operator reads the right table with
+    /// a full scan and applies <see cref="BuildExecutionFilter"/> to each row. The right side is the
+    /// build for a right build and the probe for a left build; either way, every read of it (the
+    /// build, the Grace partitioning, the nested-loop fallback) goes through this node, so the plan
+    /// and the reads agree. A broadcast probe of the right table reads it span by span with the
+    /// filter instead; the rows are the same.
+    /// </summary>
+    public PhysicalPlanNode? RightPhysicalNode { get; internal set; }
 
     /// <summary>
     /// Which physical side is materialised. Set by the planner's build-side selection.

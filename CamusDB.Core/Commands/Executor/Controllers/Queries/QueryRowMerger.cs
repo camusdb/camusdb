@@ -84,9 +84,9 @@ internal static class QueryRowMerger
     /// <paramref name="joinLayout"/>.
     /// <para>
     /// Build this once per join node (lazily from the first row pair) and pass to
-    /// <see cref="MergeRowsAsQueryRow(IReadOnlyDictionary{string,ColumnValue},IReadOnlyDictionary{string,ColumnValue},RowLayout,Dictionary{string,int})"/>
-    /// to avoid per-row <see cref="QueryRowNameResolver.FormatQualifiedKey"/> and
-    /// <see cref="RowLayout.IndexOf"/> calls for right-side columns.
+    /// <see cref="JoinRowPairer.Pair"/>, which maps each right key to its output column through it
+    /// instead of per-row <see cref="QueryRowNameResolver.FormatQualifiedKey"/> and
+    /// <see cref="RowLayout.IndexOf"/> calls.
     /// </para>
     /// <para>
     /// The key set of right rows is fixed for the lifetime of the plan (same table schema),
@@ -294,65 +294,6 @@ internal static class QueryRowMerger
                 throw new CamusDBException(
                     CamusDBErrorCodes.InvalidInternalOperation,
                     $"Join row shape diverged from join layout: duplicate placement at '{key}'");
-            values[ord] = entry.Value;
-            placements++;
-        }
-
-        if (placements != joinLayout.Count)
-            throw new CamusDBException(
-                CamusDBErrorCodes.InvalidInternalOperation,
-                $"Join row shape diverged from join layout: expected {joinLayout.Count} columns, placed {placements}");
-
-        return new QueryRow(default(ObjectIdValue), joinLayout, values);
-    }
-
-    /// <summary>
-    /// Fast-path variant of
-    /// <see cref="MergeRowsAsQueryRow(IReadOnlyDictionary{string,ColumnValue},IReadOnlyDictionary{string,ColumnValue},string,RowLayout)"/>
-    /// that uses a precomputed right-key → layout-ordinal map (from
-    /// <see cref="BuildRightKeyOrdinalMap"/>) in place of per-row
-    /// <see cref="QueryRowNameResolver.FormatQualifiedKey"/> and
-    /// <see cref="RowLayout.IndexOf"/> calls for right-side columns.
-    /// <para>
-    /// Use at sites where <paramref name="rightKeyOrdinalMap"/> was built once from the
-    /// first row pair and the right row's key set is stable across iterations (same table
-    /// schema — true for any fixed query plan).
-    /// </para>
-    /// </summary>
-    public static QueryRow MergeRowsAsQueryRow(
-        IReadOnlyDictionary<string, ColumnValue> leftQualified,
-        IReadOnlyDictionary<string, ColumnValue> rightRow,
-        RowLayout joinLayout,
-        Dictionary<string, int> rightKeyOrdinalMap)
-    {
-        ColumnValue[] values = new ColumnValue[joinLayout.Count];
-        int placements = 0;
-
-        foreach (KeyValuePair<string, ColumnValue> entry in leftQualified)
-        {
-            int ord = joinLayout.IndexOf(entry.Key);
-            if (ord < 0)
-                throw new CamusDBException(
-                    CamusDBErrorCodes.InvalidInternalOperation,
-                    $"Join row shape diverged from join layout: unexpected left key '{entry.Key}'");
-            if (values[ord] is not null)
-                throw new CamusDBException(
-                    CamusDBErrorCodes.InvalidInternalOperation,
-                    $"Join row shape diverged from join layout: duplicate placement at '{entry.Key}'");
-            values[ord] = entry.Value;
-            placements++;
-        }
-
-        foreach (KeyValuePair<string, ColumnValue> entry in rightRow)
-        {
-            if (!rightKeyOrdinalMap.TryGetValue(entry.Key, out int ord) || ord < 0)
-                throw new CamusDBException(
-                    CamusDBErrorCodes.InvalidInternalOperation,
-                    $"Join row shape diverged from join layout: unexpected right key '{entry.Key}'");
-            if (values[ord] is not null)
-                throw new CamusDBException(
-                    CamusDBErrorCodes.InvalidInternalOperation,
-                    $"Join row shape diverged from join layout: duplicate placement at '{entry.Key}'");
             values[ord] = entry.Value;
             placements++;
         }

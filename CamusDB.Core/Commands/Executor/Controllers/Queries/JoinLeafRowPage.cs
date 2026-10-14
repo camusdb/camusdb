@@ -64,24 +64,32 @@ internal sealed class JoinLeafRowPage
     private readonly RightDecodeState decode;
     private readonly List<ObjectIdValue> rowIds;
     private readonly int pageSize;
+    private readonly PlanNodeStats? stats;
 
     /// <param name="decode">
     /// The decode plan and alias-qualified layout to use. A caller that also decodes right rows
     /// elsewhere passes its own state so the join builds one plan and one layout, not two; a
     /// leaf scan passes nothing and the page owns a fresh one.
     /// </param>
+    /// <param name="stats">
+    /// The counters each fetched row is charged to under EXPLAIN (ANALYZE): the leaf's own node for a
+    /// leaf scan, the join node for an index nested-loop probe. Null otherwise. The caller counts
+    /// the index entries it walks; the page counts the rows the fetch returned.
+    /// </param>
     internal JoinLeafRowPage(
         JoinExecutionServices services,
         QueryPlan plan,
         BoundTableSource source,
         NodeAst? executionFilter,
-        RightDecodeState? decode = null)
+        RightDecodeState? decode = null,
+        PlanNodeStats? stats = null)
     {
         this.services = services;
         this.plan = plan;
         this.source = source;
         this.executionFilter = executionFilter;
         this.decode = decode ?? new RightDecodeState();
+        this.stats = stats;
 
         // Pinned once for the whole scan, like every other reader of the published options record.
         options = services.Options;
@@ -136,6 +144,10 @@ internal sealed class JoinLeafRowPage
                     required,
                     schemaVersion,
                     decode.DecodeState).ConfigureAwait(false);
+
+                plan.Ticket.Probe?.AddRowRead();
+                if (stats is not null)
+                    stats.RowsRead++;
 
                 if (executionFilter is not null)
                 {

@@ -191,6 +191,103 @@ internal sealed class TestLargeValueStorage : SharedNodeBaseTest
         Assert.IsTrue(all.All(r => Text(r, "body")!.Length == 4000), "SELECT * must resolve every value, never a placeholder");
     }
 
+    /// <summary>
+    /// A large value that only the projection reads is fetched for the rows the filter keeps, not for
+    /// every scanned row. One survivor of twenty costs one fetch, where resolving before the filter
+    /// cost two (one per scan window). The value is the stored one.
+    /// </summary>
+    [Test]
+    public async Task ProjectionOnlyLargeValue_IsFetchedForFilterSurvivorsOnly()
+    {
+        (string db, DatabaseDescriptor database, CommandExecutor executor) = await CreateDocsAsync();
+
+        Dictionary<string, string> bodies = [];
+        for (int i = 0; i < 20; i++)
+        {
+            bodies["t" + i] = Incompressible(4000);
+            await NonQueryAsync(executor, db, "INSERT INTO docs (id, title, body) VALUES (GEN_ID(), @title, @body)", Params("t" + i, bodies["t" + i]));
+        }
+
+        TableDescriptor table = await executor.OpenTable(new OpenTableTicket(db, "docs"));
+
+        long before = table.Store.LargeValueFetchCalls;
+        QueryResultRow row = (await QueryAsync(executor, db, "SELECT body FROM docs WHERE title = 't7'")).Single();
+
+        Assert.AreEqual(bodies["t7"], Text(row, "body"));
+        Assert.AreEqual(1, table.Store.LargeValueFetchCalls - before, "only the one survivor's value is fetched");
+    }
+
+    /// <summary>
+    /// When every row survives, the survivors are fetched in the same doubling windows the scan uses,
+    /// and every value, in every column, is the stored one.
+    /// </summary>
+    [Test]
+    public async Task ProjectionOnlyLargeValue_AllRowsSurvive_SameResultsAndWindows()
+    {
+        (string db, DatabaseDescriptor database, CommandExecutor executor) = await CreateDocsAsync();
+
+        Dictionary<string, string> bodies = [];
+        for (int i = 0; i < 20; i++)
+        {
+            bodies["t" + i] = Incompressible(4000);
+            await NonQueryAsync(executor, db, "INSERT INTO docs (id, title, body) VALUES (GEN_ID(), @title, @body)", Params("t" + i, bodies["t" + i]));
+        }
+
+        TableDescriptor table = await executor.OpenTable(new OpenTableTicket(db, "docs"));
+
+        long before = table.Store.LargeValueFetchCalls;
+        List<QueryResultRow> rows = await QueryAsync(executor, db, "SELECT * FROM docs WHERE title <> 'x'");
+
+        Assert.AreEqual(20, rows.Count);
+        foreach (QueryResultRow row in rows)
+            Assert.AreEqual(bodies[Text(row, "title")!], Text(row, "body"));
+        Assert.AreEqual(2, table.Store.LargeValueFetchCalls - before, "a window of 16 survivors, then one of 4");
+    }
+
+    /// <summary>A filter on the large column itself needs the value before it can decide: no deferral, same rows.</summary>
+    [Test]
+    public async Task FilterOnTheLargeColumn_ReadsItBeforeFiltering()
+    {
+        (string db, DatabaseDescriptor database, CommandExecutor executor) = await CreateDocsAsync();
+
+        string marked = "Z" + Incompressible(3999);
+        await NonQueryAsync(executor, db, "INSERT INTO docs (id, title, body) VALUES (GEN_ID(), @title, @body)", Params("hit", marked));
+        for (int i = 0; i < 5; i++)
+            await NonQueryAsync(executor, db, "INSERT INTO docs (id, title, body) VALUES (GEN_ID(), @title, @body)", Params("t" + i, "a" + Incompressible(3999)));
+
+        List<QueryResultRow> rows = await QueryAsync(executor, db, "SELECT title, body FROM docs WHERE body LIKE 'Z%'");
+
+        Assert.AreEqual("hit", Text(rows.Single(), "title"));
+        Assert.AreEqual(marked, Text(rows.Single(), "body"));
+    }
+
+    /// <summary>
+    /// The survivor window closes on the decoded byte bound too, like the scan's own window, with the
+    /// same results.
+    /// </summary>
+    [Test]
+    public async Task ProjectionOnlyLargeValue_SurvivorWindowClosesOnTheByteBound()
+    {
+        (string db, DatabaseDescriptor database, CommandExecutor executor) = await CreateDocsAsync(Options with { LargeValueResolveBatchBytes = 10_000 });
+
+        Dictionary<string, string> bodies = [];
+        for (int i = 0; i < 20; i++)
+        {
+            bodies["t" + i] = Incompressible(4000);
+            await NonQueryAsync(executor, db, "INSERT INTO docs (id, title, body) VALUES (GEN_ID(), @title, @body)", Params("t" + i, bodies["t" + i]));
+        }
+
+        TableDescriptor table = await executor.OpenTable(new OpenTableTicket(db, "docs"));
+
+        long before = table.Store.LargeValueFetchCalls;
+        List<QueryResultRow> rows = await QueryAsync(executor, db, "SELECT title, body FROM docs WHERE title <> 'x'");
+
+        Assert.AreEqual(20, rows.Count);
+        foreach (QueryResultRow row in rows)
+            Assert.AreEqual(bodies[Text(row, "title")!], Text(row, "body"));
+        Assert.AreEqual(10, table.Store.LargeValueFetchCalls - before, "two 4000-byte values fit a 10,000-byte window");
+    }
+
     [Test]
     public async Task ScanAndBatchRead_CloseOnTheDecodedByteBound_WithoutChangingResults()
     {

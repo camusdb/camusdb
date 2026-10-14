@@ -516,7 +516,11 @@ applies the `PostJoinFilter`, then hands the cursor to `QueryPostScanPipeline.Ap
 
 - `TableScanNode` → full scan with per-alias inline filter.
 - `DerivedTableScanNode` → materializes the inner query once, caches in `plan.DerivedMaterializations`.
-- `NestedLoopJoinNode` → for each left row, scan the full right source, merge, evaluate `ON`.
+- `NestedLoopJoinNode` → for each left row, walk the right source, merge, evaluate `ON`.
+  A base-table right side is read from storage once, on the first left row, and kept for the
+  other left rows (`NestedLoopInnerSpool`: in memory, or in a spill file when spilling is on).
+  It is read again for each left row when its filter calls a volatile function, or when spilling
+  is off and it has more than `HashJoinMaxBuildRows` rows.
   Left outer: a left row whose inner scan accepted no pair is emitted once, padded.
 - `IndexNestedLoopJoinNode` → for each left row, probe the right index (unique → point lookup;
   non-unique → equality-prefix scan). A NULL lookup value is never probed. Left outer: a NULL
@@ -626,7 +630,7 @@ following properties:
 
 | Property | Meaning | Status today |
 |----------|---------|--------------|
-| `OutputOrdering` | The ordering this node guarantees on its output | Set on index scans that satisfy ORDER BY and on `SortNode`; drives sort elision |
+| `OutputOrdering` | The ordering this node guarantees on its output | Set on index scans that satisfy ORDER BY, on a streaming `DistinctNode` or `AggregateNode` (the index order of their grouping columns), and on `SortNode`; drives sort elision |
 | `EstimatedCardinality` | Estimated output rows | Populated by the `CostEstimator` (single-table accurate; join estimates real when the cost flags are on) |
 | `Cost` (`PlanCost?`) | Weighted cost estimate for the node | Populated by the `CostEstimator`; `null` if the plan was not costed. Carries a real `NetworkFactor` (see below) |
 | `Distribution` (`DataDistribution?`) | How the node's output rows are spread across the cluster | Set on scan leaves: `Gathered` (single-node/unsharded), `Partitioned(keyColumns)` (range-sharded by these columns), or `Replicated`. `null` on non-leaf nodes |
@@ -850,10 +854,27 @@ keeps the cheapest. So a higher-scored index loses to a lower-scored one that is
 range-vs-full-scan veto becomes a true cost comparison rather than a fixed-threshold flip.
 
 It engages only when the flag is on, stats and a row count exist, and the query is not an `UPDATE`/`DELETE`
-(those keep the heuristic to avoid widening exclusive row-range locks). ORDER BY needs no special handling:
-sort-elision is applied downstream from the *chosen* scan node's own ordering, so a cost-picked
-order-satisfying index still elides the sort. IN-list competition runs after the cost pick, exactly as in
-the heuristic path.
+(those keep the heuristic to avoid widening exclusive row-range locks). IN-list competition runs after the
+cost pick, exactly as in the heuristic path.
+
+**ORDER BY and LIMIT are part of the comparison.** The cheapest scan alone is not always the cheapest
+result:
+
+- With an `ORDER BY`, a candidate that does not deliver that order also pays for the sort of its estimated
+  output (0.1 for each row the sort keeps, as the plan annotation prices a `SortNode`; a bounded sort
+  keeps only `limit + offset` rows). A candidate that delivers the order pays nothing extra.
+- With a `LIMIT` on a row-preserving query (no DISTINCT, grouping, HAVING, aggregate or semi-join), the
+  index that delivers the `ORDER BY` order joins the competition even when no predicate drives it. It
+  stops once enough rows survive the filter, so it costs `min(tableRows, (limit + offset) / selectivity)`
+  entries at 2 units each (1 when the index covers the projection). `selectivity` is the estimate of the
+  whole `WHERE`; a conjunct the statistics cannot estimate counts at the fallback 0.1, which only makes
+  this candidate look more expensive. Without a `LIMIT` it would read every entry and a row each, and it
+  loses to the full scan.
+
+**A column fixed by `=` orders nothing.** Sort elision skips the columns that a top-level `=` conjunct
+fixes, on the index side and on the `ORDER BY` side (`IndexScanSelector.ConstantColumns`). So
+`WHERE category = ? ORDER BY created` over an index on `(category, created)` needs no sort, and the `LIMIT`
+then goes into the scan.
 
 ## Cost-based join-order enumeration
 
@@ -963,11 +984,13 @@ selects for the conjuncts that the step attaches. The checks are the builder's o
 |---|---|---|
 | hash | `rightScanCost + leftRows + 0.1 · min(leftRows, rightRows)` | an equi-key conjunct |
 | index lookup | `2 · leftRows` | an index on a key column of the right table, and hash is not strictly cheaper (`PrefersHashOverIndexLookup`, the same rule `JoinQueryPlanner` uses) |
-| nested loop | `max(1, leftRows) · rightScanCost` | no equi-key conjunct |
+| nested loop | `rightScanCost + 0.1 · max(1, leftRows) · max(1, rightRows)` | no equi-key conjunct |
 
-`rightScanCost` is the row count of the right table: a join operator reads its right input with a full
-scan and applies the pushed filter in memory, so an index on the filter helps only the first table of the
-order. `rightRows` is the filtered row count.
+`rightScanCost` is the cost of reading the right table: the same leaf cost the table would have as the
+first input of the order. When its pushed filter drives an index (a range or an IN list, past the breakeven
+veto), a hash or nested-loop join reads the right table through that index
+(`JoinQueryPlanner.AttachRightAccessPath`, shown as `right-index=` in `EXPLAIN`), and the cost is the index
+cost; otherwise it is the table's row count. `rightRows` is the filtered row count.
 
 **The builder builds the costed operator.** For a tree from the DP, `JoinEnumerator.EstimateSteps` hands
 `JoinQueryPlanner` the left rows, right rows and right read cost of each join, and the builder decides
@@ -1086,21 +1109,29 @@ row. A hit whose decision cannot be rebuilt falls back to a full replan and repl
 counts these in `ReplayFailures` beside `Hits` and `Misses`, because a hit is counted at lookup time and
 `Hits` alone cannot distinguish a cache that serves plans from one that only pays lookup plus replan.
 
-**Plan-stability tradeoff.** Because the cache key ignores literal values, the access-path decision is
-shared across all queries of the same shape regardless of the filter value:
+**Plan stability across literals.** The cache key ignores literal values, so one entry serves every
+query of a shape:
 
 ```sql
--- Q1 seeds the cache with, say, an index scan on `status_idx`
-SELECT * FROM orders WHERE status = 'pending'
+-- Q1 seeds the cache with, say, an index range scan on `price_idx`
+SELECT * FROM orders WHERE price > 990
 
--- Q2 is a cache hit → inherits the index-scan decision even though 'all' might be non-selective
-SELECT * FROM orders WHERE status = 'all'
+-- Q2 has the same shape, but almost every row matches: a full scan is cheaper
+SELECT * FROM orders WHERE price > 1
 ```
 
-Both decisions are *correct* — the planner would choose the same index for either literal — but if
-ANALYZE updates statistics that would change the choice (e.g. `status = 'all'` is now cheaper as a
-full scan), the cache will not re-score until the next schema change (DDL) invalidates the entry.
-ANALYZE alone does not invalidate the cache.
+A single-table entry therefore also keeps the estimate it was made for: the estimated selectivity of the
+whole `WHERE` and the `LIMIT` demand (`limit + offset`, which matters with an `ORDER BY`). On a hit the
+planner estimates both again for the current literals. When either moved by more than 4 times, in either
+direction, it plans from the start and the fresh decision replaces the entry; `PlanCache.EstimateReplans`
+counts these. The estimates come from the statistics only (no storage read), and a unique point lookup is
+not guarded, because its cost does not depend on the literal.
+
+Limits: the guard sees what the estimator sees. On a table with no `ANALYZE` every literal gets the same
+default estimate, so nothing moves. An equality uses `1 / NDV`, the same for every value, so a skewed
+column (`status = 'rare'` against `status = 'all'`) does not move the estimate either; the planner's own
+fresh choice cannot tell those literals apart, so the replayed decision is the one it would make.
+Schema changes (DDL), index changes, and `ANALYZE` all invalidate cached decisions.
 
 **Recovery.** To force a cache flush without a schema change: restart the process, or set
 `plan_cache_enabled: false` and reload config. In the field, the cache is fully transparent:
@@ -1152,7 +1183,7 @@ These are the meaningful missing pieces and where new work fits.
 | **Interesting orders in the join DP** | **Missing** | The DP costs by scan/join cost only; it does not keep a costlier sub-plan that supplies an ordering/distribution a parent needs (would avoid a later sort/exchange). |
 | **Semi-/anti-join rewrite** | **Done** | Eligible uncorrelated `IN`/`NOT IN` over an **indexed** inner column rewrite to semi / anti / null-aware-anti join (`SemiJoinAnalyzer`/`SemiJoinExecutor`); non-indexed falls back to materialization. Three-valued `NOT IN` semantics preserved. |
 | **DISTINCT streaming** | **Done** | `SELECT DISTINCT` over a NOT-NULL index set-prefix streams (adjacent-row dedup, O(1) memory); otherwise hash dedup. |
-| **EXPLAIN ANALYZE for joins** | **Missing** | Throws today; needs the join executor instrumented with `PlanNodeStats`. |
+| **EXPLAIN ANALYZE for joins** | **Done** | Every join operator records `PlanNodeStats`; a join row counts the reads of its right side, shows `ran=` when a hash join changed strategy at run time, and shows the join-order search estimate next to the plan annotation's ([`explain.md`](./explain.md#join-plans)). |
 | **Logical EXPLAIN** | **Cosmetic** | `(LOGICAL)` renders the physical tree relabeled; there is no distinct logical-plan rendering. |
 | **Per-node timing** | **Root-only** | `actual_time_ms` is only measured for the whole plan, not per operator. |
 | **Error/semantics matrix** | **Done** | `TestErrorMatrix.cs` — 14 negative cases (ambiguous column, bad HAVING refs, multi-column/multi-row subqueries, `COUNT(DISTINCT)`, etc.) asserting precise codes + messages. |
@@ -1211,7 +1242,7 @@ broadcast probes for inner hash joins; see Part IV for their eligibility.
 | KV table access | `Storage/Kv/KvTableStore.cs` |
 | Row encoding / decoding | `CommandsExecutor/Models/RowEncoder.cs` |
 | Query plan model | `Commands/Executor/Models/QueryPlan.cs`, `QueryPlanStep.cs`, `QueryPlanStepType.cs` |
-| Planner / EXPLAIN tests | `TestQueryPlanner.cs`, `TestPredicateAnalyzer.cs`, `TestJoinQueryPlanner.cs`, `TestPlanRenderer.cs`, `TestPlanDistributedProperties.cs`, `TestExplainExecutor.cs`, `TestExplainAnalyzeExecutor.cs`, `TestCostEstimator.cs`, `TestStatisticsManager.cs` |
+| Planner / EXPLAIN tests | `TestQueryPlanner.cs`, `TestPredicateAnalyzer.cs`, `TestJoinQueryPlanner.cs`, `TestPlanRenderer.cs`, `TestPlanDistributedProperties.cs`, `TestExplainExecutor.cs`, `TestExplainAnalyzeExecutor.cs`, `TestExplainAnalyzeJoins.cs`, `TestCostEstimator.cs`, `TestStatisticsManager.cs` |
 | Cost-optimizer tests | `TestStatisticsHistogram.cs`, `TestStatisticsNdv.cs`, `TestAnalyzeTable.cs`, `TestCardinalityEstimator.cs`, `TestPlanCostBasedAccessPath.cs`, `TestPlanCostBasedJoinOrder.cs` (+ `…Persistence.cs` variants) |
 | Integration tests | `CamusDB.Tests/CommandsExecutor/TestExecuteSqlSelect.cs` |
 
@@ -1250,8 +1281,8 @@ broadcast probes for inner hash joins; see Part IV for their eligibility.
 - **Predicate** — a boolean expression (`WHERE`/`ON`/`HAVING`). *Residual* = must be evaluated per row.
 - **Pushdown** — moving work (filters, projections, limits) closer to the scan to do less.
 - **Sort elision** — skipping a sort because an index already yields rows in the requested order.
-- **Nested-loop join / index-nested-loop join** — for each left row, scan the right source / probe the
-  right index.
+- **Nested-loop join / index-nested-loop join** — for each left row, compare with the right source
+  (read once and kept) / probe the right index.
 - **Heuristic vs cost-based** — rule-driven plan choice vs statistics-driven cost comparison. CamusDB
   defaults to the heuristic planner with a real cost-based optimizer layered on top behind config flags
   (cost-based access-path selection and join-order enumeration).

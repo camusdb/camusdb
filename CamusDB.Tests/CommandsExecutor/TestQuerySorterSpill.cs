@@ -417,6 +417,91 @@ public sealed class TestQuerySorterSpill
     }
 
     // ──────────────────────────────────────────────────────────────────────────
+    // Top-k past the byte cap: the spilling selection
+    // ──────────────────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Spill on with the row cap out of reach and a byte cap of <paramref name="byteCap"/>, so a
+    /// bounded retention of wide rows passes the byte cap and hands over to the spilling selection.
+    /// </summary>
+    private QueryExecutionContext SpillOnBytes(long byteCap, CamusDB.Core.Diagnostics.StatementProbe probe) =>
+        new(CamusDBOptions.Default with { SpillEnabled = true, SpillThresholdBytes = byteCap, SpillMergeFanIn = 4 },
+            spillDirectory: _dataDir, probe: probe);
+
+    /// <summary>200 rows with 1 KiB strings; <c>n</c> repeats every 50 rows and <c>tie</c> is unique.</summary>
+    private static List<QueryResultRow> WideRows(string order)
+    {
+        IEnumerable<int> ids = Enumerable.Range(0, 200);
+
+        ids = order switch
+        {
+            "ascending" => ids,
+            "descending" => ids.Reverse(),
+            _ => ids.OrderBy(i => (i * 37) % 200),
+        };
+
+        return ids.Select(i => Row(("n", (long)(i % 50)), ("tie", (long)i), ("s", new string('w', 1024)))).ToList();
+    }
+
+    /// <summary>
+    /// A top-k whose rows pass the byte cap returns exactly the rows the in-memory retention returns,
+    /// whatever order the input arrives in. Ascending input under a descending order makes every row
+    /// better than the rows before it, so every flush merges with the kept run; descending input makes
+    /// the first k rows the answer, so the cutoff drops every later row.
+    /// </summary>
+    [TestCase("ascending")]
+    [TestCase("descending")]
+    [TestCase("shuffled")]
+    public async Task TopK_PastTheByteCap_ReturnsTheRowsOfTheInMemoryRetention(string order)
+    {
+        QueryTicket ticket = MakeTicket(
+            new QueryOrderBy("n", OrderType.Descending),
+            new QueryOrderBy("tie", OrderType.Ascending));
+
+        CamusDB.Core.Diagnostics.StatementProbe probe = new();
+
+        List<QueryResultRow> reference = await new QuerySorter().SortResultset(ticket, ToAsync(WideRows(order)), SpillOff, boundedLimit: 30).ToListAsync();
+        List<QueryResultRow> spilled = await new QuerySorter().SortResultset(ticket, ToAsync(WideRows(order)), SpillOnBytes(8 * 1024, probe), boundedLimit: 30).ToListAsync();
+
+        Assert.IsTrue(probe.Spilled, "30 rows of 1 KiB pass an 8 KiB cap");
+        Assert.AreEqual(30, spilled.Count);
+        Assert.That(spilled.Select(r => r.Row["tie"].LongValue), Is.EqualTo(reference.Select(r => r.Row["tie"].LongValue)).AsCollection);
+        Assert.AreEqual(0, SpillFileCount(), "the selection's files are deleted when it ends");
+    }
+
+    /// <summary>
+    /// With the order on a key that repeats, ties decide which rows enter the result. Any choice is
+    /// correct SQL, but the result must hold k rows with exactly the k best keys, in order.
+    /// </summary>
+    [Test]
+    public async Task TopK_PastTheByteCap_WithTiedKeys_ReturnsTheBestKeys()
+    {
+        QueryTicket ticket = MakeTicket(new QueryOrderBy("n", OrderType.Ascending));
+        CamusDB.Core.Diagnostics.StatementProbe probe = new();
+
+        List<QueryResultRow> spilled = await new QuerySorter().SortResultset(ticket, ToAsync(WideRows("shuffled")), SpillOnBytes(4 * 1024, probe), boundedLimit: 17).ToListAsync();
+
+        // n = i % 50 over 200 rows: four rows per key, so the 17 best keys are 0 x4, 1 x4, 2 x4, 3 x4, 4 x1.
+        long[] expected = Enumerable.Range(0, 17).Select(i => (long)(i / 4)).ToArray();
+
+        Assert.IsTrue(probe.Spilled);
+        Assert.That(spilled.Select(r => r.Row["n"].LongValue), Is.EqualTo(expected).AsCollection);
+    }
+
+    /// <summary>A bound larger than the input returns every row, in order, through the same path.</summary>
+    [Test]
+    public async Task TopK_PastTheByteCap_WithABoundLargerThanTheInput_ReturnsEveryRow()
+    {
+        QueryTicket ticket = MakeTicket(new QueryOrderBy("tie", OrderType.Ascending));
+        CamusDB.Core.Diagnostics.StatementProbe probe = new();
+
+        List<QueryResultRow> spilled = await new QuerySorter().SortResultset(ticket, ToAsync(WideRows("shuffled")), SpillOnBytes(8 * 1024, probe), boundedLimit: 500).ToListAsync();
+
+        Assert.IsTrue(probe.Spilled);
+        Assert.That(spilled.Select(r => r.Row["tie"].LongValue), Is.EqualTo(Enumerable.Range(0, 200).Select(i => (long)i)).AsCollection);
+    }
+
+    // ──────────────────────────────────────────────────────────────────────────
     // Helpers
     // ──────────────────────────────────────────────────────────────────────────
 

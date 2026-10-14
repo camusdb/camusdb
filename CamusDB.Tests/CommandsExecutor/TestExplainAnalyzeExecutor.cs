@@ -330,11 +330,16 @@ public class TestExplainAnalyzeExecutor : SharedNodeBaseTest
     [Test]
     public async Task TestExplainAnalyze_FilterNode_ActualTimeMsIsNull()
     {
-        // FilterNode is folded into the scan — timing not captured; must be NULL not 0.0.
+        // FilterNode is folded into the scan — timing not captured; must be NULL not 0.0. The sort
+        // keeps the filter off the root: the root row carries the statement time, whatever its node
+        // (see TestExplainAnalyze_FilterRoot_KeepsTheStatementTime).
         (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupRobotsTable(5);
 
         List<QueryResultRow> rows = await ExplainAnalyzeAsync(executor, database, dbname,
-            "EXPLAIN (ANALYZE) SELECT * FROM robots WHERE name = 'robot 1'");
+            "EXPLAIN (ANALYZE) SELECT * FROM robots WHERE name = 'robot 1' ORDER BY year");
+
+        if (rows[0].Row["node"].StrValue!.StartsWith("filter"))
+            Assert.Ignore("The filter is the plan root; test does not apply.");
 
         QueryResultRow? filterRow = rows.FirstOrDefault(r => r.Row["node"].StrValue!.StartsWith("filter"));
         if (filterRow is null || filterRow.Value.Row.Count == 0)
@@ -573,6 +578,25 @@ public class TestExplainAnalyzeExecutor : SharedNodeBaseTest
     }
 
     [Test]
+    public async Task TestExplainAnalyze_FilterRoot_KeepsTheStatementTime()
+    {
+        // A filter can be the root of the plan, and the root alone carries the statement time.
+        // The filter's counters are derived from its child scan; the time must survive that.
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupRobotsTable(5);
+
+        List<QueryResultRow> rows = await ExplainAnalyzeAsync(executor, database, dbname,
+            "EXPLAIN (ANALYZE) SELECT * FROM robots WHERE name = 'robot 2'");
+
+        QueryResultRow root = rows[0];
+        if (!root.Row["node"].StrValue!.StartsWith("filter"))
+            Assert.Ignore("The plan root is not a filter; test does not apply.");
+
+        Assert.That(root.Row["actual_time_ms"].Type, Is.EqualTo(ColumnType.Float64),
+            "a filter root must carry the statement time");
+        Assert.That(root.Row["actual_rows"].LongValue, Is.EqualTo(1));
+    }
+
+    [Test]
     public async Task TestExplainAnalyze_FilterNode_KvCountersAreZero()
     {
         // The filter node itself adds no KV reads — those are charged to the scan node.
@@ -591,7 +615,7 @@ public class TestExplainAnalyzeExecutor : SharedNodeBaseTest
             "filter node kv_scan_entries must be 0 — KV work is charged to the scan");
     }
 
-    // ── join not-yet-supported guard ──────────────────────────────────────────
+    // ── join plans ────────────────────────────────────────────────────────────
 
     private async Task<(string dbname, DatabaseDescriptor database, CommandExecutor executor)> SetupTwoTables()
     {
@@ -636,42 +660,26 @@ public class TestExplainAnalyzeExecutor : SharedNodeBaseTest
     }
 
     [Test]
-    public async Task TestExplainAnalyze_JoinQuery_ThrowsNotSupported()
+    public async Task TestExplainAnalyze_JoinQuery_RunsAndReportsJoinCounters()
     {
-        // PINNING TEST: EXPLAIN ANALYZE on join queries must throw rather than silently execute
-        // only the left scan and return misleading NULL stats for join/right nodes.
-        // QueryPlanStepAdapter emits no step for join nodes; the join path (QueryJoinExecutor)
-        // is bypassed entirely by ExecuteQueryPlanInternal.
+        // A join plan runs through the join executor under ANALYZE: the join row reports the rows
+        // the join produced, and the leaf reports the rows of its table. Per-operator coverage is in
+        // TestExplainAnalyzeJoins.
         (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupTwoTables();
 
-        Assert.ThrowsAsync<CamusDBException>(async () =>
-        {
-            await ExplainAnalyzeAsync(executor, database, dbname,
-                "EXPLAIN (ANALYZE) SELECT u.email, p.title FROM app_users u INNER JOIN posts p ON p.user_id = u.id");
-        });
-    }
+        List<QueryResultRow> rows = await ExplainAnalyzeAsync(executor, database, dbname,
+            "EXPLAIN (ANALYZE) SELECT u.email, p.title FROM app_users u INNER JOIN posts p ON p.user_id = u.id");
 
-    [Test]
-    public async Task TestExplainAnalyze_JoinQuery_ErrorMessageMentionsJoin()
-    {
-        // The error message must name the limitation so users know to use plain EXPLAIN.
-        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupTwoTables();
-
-        CamusDBException ex = Assert.ThrowsAsync<CamusDBException>(async () =>
-        {
-            await ExplainAnalyzeAsync(executor, database, dbname,
-                "EXPLAIN (ANALYZE) SELECT u.email FROM app_users u INNER JOIN posts p ON p.user_id = u.id");
-        })!;
-
-        Assert.That(ex.Message, Does.Contain("JOIN").Or.Contain("join"),
-            "Error message should mention JOIN so users understand the limitation");
+        Assert.That(rows[0].Row["stage"].StrValue, Is.EqualTo("analyze"));
+        Assert.That(rows[0].Row["node"].StrValue, Does.EndWith("join"));
+        Assert.That(rows[0].Row["actual_rows"].LongValue, Is.EqualTo(0), "both tables are empty");
+        Assert.That(rows[0].Row["actual_time_ms"].Type, Is.EqualTo(ColumnType.Float64), "the root carries the statement time");
     }
 
     [Test]
     public async Task TestExplain_JoinQuery_StillWorksWithoutAnalyze()
     {
-        // Plain EXPLAIN (without ANALYZE) on joins must continue to work — this guard only
-        // applies to EXPLAIN ANALYZE.
+        // Plain EXPLAIN (without ANALYZE) on joins builds the plan and executes nothing.
         (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupTwoTables();
 
         List<QueryResultRow> rows = await ExplainAnalyzeAsync(

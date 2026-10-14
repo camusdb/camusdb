@@ -43,6 +43,7 @@ internal sealed class PlanCache
     private long _misses;
     private long _evictions;
     private long _replayFailures;
+    private long _estimateReplans;
 
     public long Hits    => _hits;
     public long Misses  => _misses;
@@ -58,6 +59,16 @@ internal sealed class PlanCache
 
     /// <summary>Records one failed replay. Called by the planner when a hit falls back to <c>BuildScanNode</c>.</summary>
     public void RecordReplayFailure() => Interlocked.Increment(ref _replayFailures);
+
+    /// <summary>
+    /// Hits the planner did not replay because the current literals moved the estimate far from the
+    /// one the cached decision was made for (see <see cref="SingleTableDecision"/>); each re-planned
+    /// and replaced the entry. Counted in <see cref="Hits"/> too, as a failed replay is.
+    /// </summary>
+    public long EstimateReplans => _estimateReplans;
+
+    /// <summary>Records one hit re-planned for a moved estimate.</summary>
+    public void RecordEstimateReplan() => Interlocked.Increment(ref _estimateReplans);
 
     /// <summary>Current number of cached plans; for tests and diagnostics.</summary>
     public int Count { get { lock (_lock) return _map.Count; } }
@@ -296,8 +307,22 @@ internal sealed record PlanCacheEntry(
 /// </list>
 /// The dependency fingerprint (schema version, index-set generation) invalidates the entry on
 /// any DDL that could change which kind applies.
+///
+/// <para><b>The estimate the decision was made for.</b> The shape abstracts literals away, so one
+/// entry serves <c>WHERE status = 'rare'</c> and <c>WHERE status = 'all'</c>, and the cheapest
+/// access path for the one can be the most expensive for the other. <paramref name="Selectivity"/>
+/// is the estimated fraction of rows the WHERE kept when the decision was made, and
+/// <paramref name="RowDemand"/> the <c>limit + offset</c> it was made for (an ORDER BY index scan wins
+/// only for a small demand). On a hit the planner estimates both again for the current literals and
+/// re-plans when either moved by more than a fixed factor; the fresh decision replaces the entry.
+/// Null means not guarded: no statistics to estimate from, or a unique point lookup, whose cost does
+/// not depend on the literal.</para>
 /// </summary>
-internal sealed record SingleTableDecision(string? IndexName, ScanDecisionKind Kind);
+internal sealed record SingleTableDecision(
+    string? IndexName,
+    ScanDecisionKind Kind,
+    double? Selectivity = null,
+    long? RowDemand = null);
 
 /// <summary>How a cached single-table decision used its index. See <see cref="SingleTableDecision"/>.</summary>
 internal enum ScanDecisionKind

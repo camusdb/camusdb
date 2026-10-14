@@ -314,6 +314,77 @@ public sealed class TestClusterBroadcastJoin
     }
 
     /// <summary>
+    /// EXPLAIN (ANALYZE) of a broadcast join says what the plan cannot: the hash join ran as a
+    /// broadcast probe (<c>ran=broadcast</c>), and each probed span has a <c>broadcast-span</c> row.
+    /// A span that ran on its leader reports the rows that leader scanned, from the fragment's
+    /// terminal stats frame, which the coordinator asks for only under ANALYZE. The join's actual
+    /// rows are the rows the query returns.
+    /// </summary>
+    [Test]
+    public async Task BroadcastJoin_ExplainAnalyze_ReportsTheBroadcastAndItsSpans()
+    {
+        (InProcessSchemaCluster cluster, string db, List<string> factIds) = await SetupAsync();
+
+        try
+        {
+            const string joinSql =
+                "SELECT f.id, f.val, d.name FROM facts f JOIN dims d ON f.dim_id = d.k WHERE f.val >= 20 AND f.val < 180";
+
+            int expected = (await RunSql(cluster.Nodes[0], db, joinSql)).Count;
+
+            await SplitFactsAtMedianAsync(cluster, db, factIds);
+
+            bool sawBroadcast = false;
+            bool sawRemoteSpan = false;
+
+            foreach (InProcessSchemaCluster.Node node in cluster.Nodes)
+            {
+                List<QueryResultRow> rows = await RunSql(node, db, "EXPLAIN (ANALYZE) " + joinSql);
+                string dump = string.Join("\n", rows.Select(r =>
+                    $"{r.Row["node"].StrValue} | {r.Row["detail"].StrValue} | est={r.Row["estimated_rows"]} | actual={r.Row["actual_rows"]} | read={r.Row["rows_read"]} | scan={r.Row["kv_scan_entries"]}"));
+
+                int joinIndex = rows.FindIndex(r => r.Row["node"].StrValue == "hash-join");
+                if (joinIndex < 0)
+                    continue; // this node's statistics chose another operator; broadcast needs a hash join
+
+                QueryResultRow join = rows[joinIndex];
+                Assert.AreEqual(expected, join.Row["actual_rows"].LongValue, $"Node {node.Index}:\n{dump}");
+
+                if (!join.Row["detail"].StrValue!.Contains("ran=broadcast", StringComparison.Ordinal))
+                    continue;
+
+                sawBroadcast = true;
+
+                List<QueryResultRow> spans = rows.Skip(joinIndex + 1)
+                    .TakeWhile(r => r.Row["node"].StrValue == "broadcast-span")
+                    .ToList();
+
+                Assert.That(spans, Is.Not.Empty, $"Node {node.Index}: a broadcast join lists its spans\n{dump}");
+
+                foreach (QueryResultRow span in spans)
+                {
+                    string detail = span.Row["detail"].StrValue!;
+                    Assert.That(span.Row["actual_rows"].Type, Is.EqualTo(ColumnType.Integer64), dump);
+
+                    if (detail.Contains("mode=remote,", StringComparison.Ordinal))
+                    {
+                        sawRemoteSpan = true;
+                        Assert.That(span.Row["rows_read"].Type, Is.EqualTo(ColumnType.Integer64),
+                            $"Node {node.Index}: a remote span reports the rows its leader scanned\n{dump}");
+                    }
+                }
+            }
+
+            Assert.IsTrue(sawBroadcast, "at least one node must run the join as a broadcast probe");
+            Assert.IsTrue(sawRemoteSpan, "every node cannot lead every span, so some span must run remotely");
+        }
+        finally
+        {
+            await cluster.DisposeAsync();
+        }
+    }
+
+    /// <summary>
     /// A parameter cannot be shipped to a peer node, so a join whose ON holds one runs its probe
     /// locally. The planner may move a conjunct to an earlier join, but not a parameter: it stays
     /// with the ON clause it was written in. Here the seeded row counts make every node join

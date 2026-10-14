@@ -42,6 +42,12 @@ internal static class QueryPlanStepAdapter
     /// <para>A statement runs more than one plan when it has a join, a subquery or a derived table.
     /// The probe belongs to the statement rather than the plan, so the flag means "some part of this
     /// statement scanned a whole relation", which is the question an operator is actually asking.</para>
+    ///
+    /// <para>The step list covers the left chain of a join plan, a merge join's ordered right input,
+    /// and the index access path of a hash or nested-loop join's right table. A right table with no
+    /// access path of its own is a table the join node names, not a step, and the join reads it
+    /// whole, so it is checked on the tree. An index nested-loop join seeks the index per outer row
+    /// and is not a full scan; a derived right side runs its own plan, which reports its own scans.</para>
     /// </summary>
     private static void NoteScanStrategy(QueryPlan plan)
     {
@@ -51,6 +57,23 @@ internal static class QueryPlanStepAdapter
         foreach (QueryPlanStep step in plan.Steps)
         {
             if (step.Type is QueryPlanStepType.FullScanFromTableIndex or QueryPlanStepType.FullScanFromIndex)
+            {
+                probe.NoteFullScan();
+                return;
+            }
+        }
+
+        for (PhysicalPlanNode? node = plan.Root; node is not null; node = node.Input)
+        {
+            bool fullRightScan = node switch
+            {
+                NestedLoopJoinNode nestedLoop => nestedLoop.RightPhysicalNode is null && nestedLoop.RightSource.Table is not null,
+                HashJoinNode hash => hash.RightPhysicalNode is null && hash.BuildSource.Table is not null,
+                MergeJoinNode merge => merge.RightPhysicalNode is null && merge.RightSource.Table is not null,
+                _ => false,
+            };
+
+            if (fullRightScan)
             {
                 probe.NoteFullScan();
                 return;
@@ -102,13 +125,18 @@ internal static class QueryPlanStepAdapter
                 // matches — see the scan exactly as they would without fragmentation.
                 return;
 
-            case NestedLoopJoinNode:
+            case NestedLoopJoinNode nestedLoop:
+                // A right table read through its own index path is a separate branch, as for merge.
+                if (nestedLoop.RightPhysicalNode is not null)
+                    Flatten(nestedLoop.RightPhysicalNode, steps, stepNodes);
                 return;
 
             case IndexNestedLoopJoinNode:
                 return;
 
-            case HashJoinNode:
+            case HashJoinNode hash:
+                if (hash.RightPhysicalNode is not null)
+                    Flatten(hash.RightPhysicalNode, steps, stepNodes);
                 return;
 
             case MergeJoinNode mergeJoin:

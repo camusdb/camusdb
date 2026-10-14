@@ -312,6 +312,7 @@ public static class ConfigResolver
 
         SpillEnabled = config.SpillEnabled,
         SpillThresholdRows = config.SpillThresholdRows,
+        SpillThresholdBytes = config.SpillThresholdBytes,
         SpillMergeFanIn = config.SpillMergeFanIn,
 
         MaxIdentifierLength = config.MaxIdentifierLength,

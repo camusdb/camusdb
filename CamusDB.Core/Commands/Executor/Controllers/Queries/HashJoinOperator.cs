@@ -83,8 +83,10 @@ internal sealed class HashJoinOperator
     ///
     /// Returns null to signal that the caller should route to a fallback:
     /// <list type="bullet">
-    ///   <item>When <see cref="CamusDBOptions.SpillEnabled"/> is true, the effective cap is
-    ///     <see cref="CamusDBOptions.SpillEffectiveThreshold"/>; overflow routes to
+    ///   <item>When <see cref="CamusDBOptions.SpillEnabled"/> is true, the effective caps are
+    ///     <see cref="CamusDBOptions.SpillEffectiveThreshold"/> rows and
+    ///     <see cref="CamusDBOptions.SpillEffectiveThresholdBytes"/> estimated bytes
+    ///     (<see cref="JoinHashTable.EstimateAddedBytes"/>); overflow of either routes to
     ///     <see cref="GraceHashJoinOperator.GraceHashJoinAsync"/>.</item>
     ///   <item>When spill is disabled, the cap is <see cref="CamusDBOptions.HashJoinMaxBuildRows"/>;
     ///     overflow routes to a full nested-loop scan.</item>
@@ -104,13 +106,12 @@ internal sealed class HashJoinOperator
     /// column names such as <c>o.id</c>). Stored rows are already qualified — at probe
     /// time they are passed directly as the left arg to <c>MergeRows</c>.
     /// </summary>
-    private async Task<Dictionary<CompositeColumnValue, List<IReadOnlyDictionary<string, ColumnValue>>>?> BuildHashTable(
+    private async Task<JoinHashTable?> BuildHashTable(
         HashJoinNode joinNode,
         QueryPlan plan,
         HashJoinBuildSide buildSide)
     {
-        Dictionary<CompositeColumnValue, List<IReadOnlyDictionary<string, ColumnValue>>> table =
-            new(CompositeColumnValueComparer.Instance);
+        JoinHashTable table = new();
 
         // With spill enabled, cap at SpillEffectiveThreshold so the Grace path is triggered
         // at the configured spill boundary instead of the (much larger) legacy NLJ cap.
@@ -121,43 +122,48 @@ internal sealed class HashJoinOperator
             ? context.Options.SpillEffectiveThreshold
             : context.Options.HashJoinMaxBuildRows;
 
+        // With spill enabled the build also stops at the byte cap, so a build of wide rows routes to
+        // Grace before it holds the row cap's worth of them. With spill disabled the byte cap does
+        // not apply: the nested-loop fallback is the only way out, and the row cap still selects it.
+        bool capBytes = context.Options.SpillEnabled && context.Options.SpillThresholdBytes > 0;
+        long byteCap = capBytes ? context.Options.SpillEffectiveThresholdBytes : long.MaxValue;
+        long buildBytes = 0;
+
         int rowCount = 0;
 
         // Keys are looked up as a span over a reused scratch array; an owned key is copied
         // (comparer Create) only when a new bucket is inserted, so a duplicate-heavy build
-        // allocates one key per distinct key rather than one per row.
-        var lookup = table.GetAlternateLookup<ReadOnlySpan<ColumnValue>>();
+        // allocates one key per distinct key rather than one per row (see JoinHashTable).
 
         if (buildSide == HashJoinBuildSide.Right)
         {
             IReadOnlyList<string> buildKeys = joinNode.BuildKeyColumns;
             ColumnValue[] keyScratch = new ColumnValue[buildKeys.Count];
 
-            await foreach (QueryResultRow row in scanner.ScanJoinRightSource(
-                joinNode.BuildSource, joinNode.BuildExecutionFilter, plan).ConfigureAwait(false))
+            await foreach (QueryResultRow row in ReadRightSide(joinNode, plan, tree, scanner).ConfigureAwait(false))
             {
-                if (rowCount >= buildCap) return null;
+                if (rowCount >= buildCap || buildBytes >= byteCap) return null;
 
                 if (!JoinKeyExtractor.TryExtractKeyInto(row.Row, buildKeys, keyScratch)) continue;
 
-                if (!lookup.TryGetValue(keyScratch.AsSpan(), out List<IReadOnlyDictionary<string, ColumnValue>>? bucket))
-                { bucket = []; lookup[keyScratch.AsSpan()] = bucket; }
-
-                bucket.Add(row.Row);
+                bool newBucket = table.Add(keyScratch, row.Row);
                 rowCount++;
+
+                if (capBytes)
+                    buildBytes += JoinHashTable.EstimateAddedBytes(keyScratch, row.Row, newBucket);
             }
         }
         else
         {
             // BuildSide.Left: materialise the left subtree; rows are qualified immediately so
-            // they can be passed directly as the "left" arg to MergeRowsAsQueryRow during probe.
+            // they can be passed directly as the "left" row of the joined pair during probe.
             IReadOnlyList<string> probeKeys = joinNode.ProbeKeyColumns;
             ColumnValue[] keyScratch = new ColumnValue[probeKeys.Count];
             RowLayout? qualifiedLeftLayout = null;
 
             await foreach (QueryResultRow leftRow in tree.ExecuteNode(joinNode.Input!, plan).ConfigureAwait(false))
             {
-                if (rowCount >= buildCap) return null;
+                if (rowCount >= buildCap || buildBytes >= byteCap) return null;
 
                 IReadOnlyDictionary<string, ColumnValue> qualified;
                 string leftAlias = JoinAliasMetadata.ResolveLeftAlias(joinNode.Input!, leftRow);
@@ -173,16 +179,28 @@ internal sealed class HashJoinOperator
 
                 if (!JoinKeyExtractor.TryExtractKeyInto(qualified, probeKeys, keyScratch)) continue;
 
-                if (!lookup.TryGetValue(keyScratch.AsSpan(), out List<IReadOnlyDictionary<string, ColumnValue>>? bucket))
-                { bucket = []; lookup[keyScratch.AsSpan()] = bucket; }
-
-                bucket.Add(qualified);
+                bool newBucket = table.Add(keyScratch, qualified);
                 rowCount++;
+
+                if (capBytes)
+                    buildBytes += JoinHashTable.EstimateAddedBytes(keyScratch, qualified, newBucket);
             }
         }
 
         return table;
     }
+
+    /// <summary>
+    /// Reads the right table of <paramref name="joinNode"/>: through its own access path when the
+    /// planner gave it one (<see cref="HashJoinNode.RightPhysicalNode"/>), else with a full scan and the
+    /// pushed filter. Every read of the right side uses this, so the build, the Grace partitioning
+    /// and the probe of a left build all read the input the plan shows.
+    /// </summary>
+    internal static IAsyncEnumerable<QueryResultRow> ReadRightSide(
+        HashJoinNode joinNode, QueryPlan plan, IJoinNodeExecutor tree, JoinLeafScanner scanner) =>
+        joinNode.RightPhysicalNode is { } rightInput
+            ? tree.ExecuteNode(rightInput, plan)
+            : scanner.ScanJoinRightSource(joinNode.BuildSource, joinNode.BuildExecutionFilter, plan, joinNode.Stats);
 
     internal async IAsyncEnumerable<QueryResultRow> ExecuteHashJoin(
         HashJoinNode joinNode,
@@ -203,8 +221,7 @@ internal sealed class HashJoinOperator
         using CancellationTokenSource? linked = JoinCancellation.Link(plan, ct);
         CancellationToken token = JoinCancellation.Effective(plan, linked);
 
-        Dictionary<CompositeColumnValue, List<IReadOnlyDictionary<string, ColumnValue>>>? hashTable =
-            await BuildHashTable(joinNode, plan, buildSide).ConfigureAwait(false);
+        JoinHashTable? hashTable = await BuildHashTable(joinNode, plan, buildSide).ConfigureAwait(false);
 
         if (hashTable is null)
         {
@@ -213,16 +230,26 @@ internal sealed class HashJoinOperator
             // Both paths re-scan the build side from scratch (~2× cost on this rare path).
             if (plan.Database.Options.SpillEnabled)
             {
+                if (joinNode.Stats is { } graceStats)
+                    graceStats.RanAs = "grace-hash";
+
                 await foreach (QueryResultRow row in graceHashJoin.GraceHashJoinAsync(joinNode, plan, token).ConfigureAwait(false))
                     yield return row;
                 yield break;
             }
 
-            // Spill disabled — fall back to nested-loop for correctness.
+            // Spill disabled — fall back to nested-loop for correctness. The fallback node shares
+            // the hash join's counters, so its right-side re-reads are charged to the node the
+            // plan shows; its output passes through this method and is counted there.
+            if (joinNode.Stats is { } fallbackStats)
+                fallbackStats.RanAs = "nested-loop-fallback";
+
             NestedLoopJoinNode fallback = new(joinNode.Input!, joinNode.BuildSource, joinNode.OnPredicate!)
             {
                 RightExecutionFilter = joinNode.BuildExecutionFilter,
+                RightPhysicalNode = joinNode.RightPhysicalNode,
                 Kind = joinNode.Kind,
+                Stats = joinNode.Stats,
             };
 
             await foreach (QueryResultRow row in nestedLoopJoin.ExecuteNestedLoopJoin(fallback, plan).ConfigureAwait(false))
@@ -236,6 +263,7 @@ internal sealed class HashJoinOperator
         RowLayout? joinLayout = null;
         RowLayout? qualifiedLeftLayout = null;
         Dictionary<string, int>? rightOrdinalMap = null;
+        JoinRowPairer pairer = new();
         OuterJoinPadding? padding = joinNode.Kind == JoinKind.LeftOuter
             ? await OuterJoinPadding.CreateAsync(joinNode.BuildSource, plan).ConfigureAwait(false)
             : null;
@@ -258,12 +286,11 @@ internal sealed class HashJoinOperator
             }
 
             // Standard path: probe = left subtree, build = right source.
-            // Hash table rows are unqualified; MergeRowsAsQueryRow qualifies them with rightAlias.
+            // Hash table rows are unqualified; the joined row reads them under rightAlias.
             // Probe keys go through the span alternate lookup: no key array or composite key
             // is allocated per probe row — misses and hits alike reuse the scratch array.
             IReadOnlyList<string> probeKeys = joinNode.ProbeKeyColumns;
             ColumnValue[] probeKeyScratch = new ColumnValue[probeKeys.Count];
-            var probeLookup = hashTable.GetAlternateLookup<ReadOnlySpan<ColumnValue>>();
 
             await foreach (QueryResultRow leftRow in tree.ExecuteNode(joinNode.Input!, plan).ConfigureAwait(false))
             {
@@ -288,7 +315,7 @@ internal sealed class HashJoinOperator
                 // A NULL key or an absent bucket matches nothing: dropped for an inner join,
                 // padded once for a left outer join.
                 if (!JoinKeyExtractor.TryExtractKeyInto(leftQualified, probeKeys, probeKeyScratch)
-                    || !probeLookup.TryGetValue(probeKeyScratch.AsSpan(), out List<IReadOnlyDictionary<string, ColumnValue>>? bucket))
+                    || !hashTable.TryGetBucket(probeKeyScratch, out JoinBucket bucket))
                 {
                     if (padding is not null)
                         yield return new QueryResultRow(default(ObjectIdValue), padding.Pad(leftQualified));
@@ -302,7 +329,7 @@ internal sealed class HashJoinOperator
                 {
                     joinLayout      ??= QueryRowMerger.BuildJoinLayout(leftQualified, buildRow, rightAlias);
                     rightOrdinalMap ??= QueryRowMerger.BuildRightKeyOrdinalMap(buildRow, rightAlias, joinLayout);
-                    QueryRow merged  = QueryRowMerger.MergeRowsAsQueryRow(leftQualified, buildRow, joinLayout, rightOrdinalMap);
+                    QueryRow merged  = pairer.Pair(leftQualified, buildRow, joinLayout, rightOrdinalMap);
 
                     if (!await services.Filterer.MeetWhereAsync(joinNode.OnPredicate!, merged, ticket, plan.Database).ConfigureAwait(false))
                         continue;
@@ -332,25 +359,23 @@ internal sealed class HashJoinOperator
 
             // Build-left path: build = left subtree (stored qualified in hash table),
             // probe = right source (scanned unqualified).
-            // MergeRowsAsQueryRow(leftQualifiedBuildRow, rightUnqualifiedProbeRow, rightAlias) is the
+            // pairer.Pair(leftQualifiedBuildRow, rightUnqualifiedProbeRow, ...) is the
             // same call shape as the standard path — output column naming is identical.
             IReadOnlyList<string> buildKeys = joinNode.BuildKeyColumns;
             ColumnValue[] probeKeyScratch = new ColumnValue[buildKeys.Count];
-            var probeLookup = hashTable.GetAlternateLookup<ReadOnlySpan<ColumnValue>>();
 
-            await foreach (QueryResultRow rightRow in scanner.ScanJoinRightSource(
-                joinNode.BuildSource, joinNode.BuildExecutionFilter, plan).ConfigureAwait(false))
+            await foreach (QueryResultRow rightRow in ReadRightSide(joinNode, plan, tree, scanner).ConfigureAwait(false))
             {
                 if (!JoinKeyExtractor.TryExtractKeyInto(rightRow.Row, buildKeys, probeKeyScratch)) continue;
 
-                if (!probeLookup.TryGetValue(probeKeyScratch.AsSpan(), out List<IReadOnlyDictionary<string, ColumnValue>>? bucket))
+                if (!hashTable.TryGetBucket(probeKeyScratch, out JoinBucket bucket))
                     continue;
 
                 foreach (IReadOnlyDictionary<string, ColumnValue> leftBuildRow in bucket)
                 {
                     joinLayout      ??= QueryRowMerger.BuildJoinLayout(leftBuildRow, rightRow.Row, rightAlias);
                     rightOrdinalMap ??= QueryRowMerger.BuildRightKeyOrdinalMap(rightRow.Row, rightAlias, joinLayout);
-                    QueryRow merged  = QueryRowMerger.MergeRowsAsQueryRow(leftBuildRow, rightRow.Row, joinLayout, rightOrdinalMap);
+                    QueryRow merged  = pairer.Pair(leftBuildRow, rightRow.Row, joinLayout, rightOrdinalMap);
 
                     if (!await services.Filterer.MeetWhereAsync(joinNode.OnPredicate!, merged, ticket, plan.Database).ConfigureAwait(false))
                         continue;

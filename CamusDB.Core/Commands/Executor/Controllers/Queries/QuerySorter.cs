@@ -25,7 +25,9 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 ///
 /// <b>External merge-sort path</b> (active when <see cref="context.Options.SpillEnabled"/> is
 /// <c>true</c>): rows are accumulated in a buffer until the buffer reaches
-/// <see cref="context.Options.SpillEffectiveThreshold"/>. When the threshold is hit the buffer
+/// <see cref="context.Options.SpillEffectiveThreshold"/> rows or
+/// <see cref="CamusDBOptions.SpillEffectiveThresholdBytes"/> estimated bytes
+/// (<see cref="RowMemoryEstimator"/>). When the threshold is hit the buffer
 /// is sorted and written as a sorted run to a spill file; the buffer is cleared and filling
 /// restarts. If no spill occurred when the input ends, the buffered rows are sorted and
 /// yielded in-memory (same result as the small-input path). Otherwise the last partial buffer
@@ -81,11 +83,31 @@ internal sealed class QuerySorter
         if (boundedLimit == 0)
             yield break;
 
+        bool capRetainedBytes = context.Options.SpillEnabled && context.Options.SpillThresholdBytes > 0;
+
         if (!HasComputedKey(ticket.OrderBy))
         {
-            IAsyncEnumerable<QueryResultRow> plain = boundedLimit is { } plainBound
-                ? TopKAsync(dataCursor, new QueryResultRowOrderComparer(ticket.OrderBy), (int)plainBound, cancellationToken)
-                : SortByKeys(dataCursor, ticket.OrderBy, context, cancellationToken);
+            IAsyncEnumerable<QueryResultRow> plain;
+
+            if (boundedLimit is { } plainBound)
+            {
+                QueryResultRowOrderComparer comparer = new(ticket.OrderBy);
+                CancellationToken token = cancellationToken;
+                int k = (int)plainBound;
+
+                TopKByteCap<QueryResultRow>? byteCap = capRetainedBytes
+                    ? new(
+                        context.Options.SpillEffectiveThresholdBytes,
+                        static row => RowMemoryEstimator.Estimate(row),
+                        rows => SelectWithSpillAsync(rows, comparer, k, context, token))
+                    : null;
+
+                plain = TopKAsync(dataCursor, comparer, k, byteCap, cancellationToken);
+            }
+            else
+            {
+                plain = SortByKeys(dataCursor, ticket.OrderBy, context, cancellationToken);
+            }
 
             await foreach (QueryResultRow row in plain.ConfigureAwait(false))
                 yield return row;
@@ -93,17 +115,29 @@ internal sealed class QuerySorter
             yield break;
         }
 
-        // Bounded retention never spills — the heap holds only k rows — so the computed keys do
-        // not need to survive a spill round trip. They ride beside the heap entries instead of
-        // being attached as carrier columns, which removes both per-row dictionary copies the
-        // carrier costs (the attach on every input row and the strip on every emitted row).
+        // Bounded retention holds only k rows, so the computed keys ride beside the heap entries
+        // instead of being attached as carrier columns, which removes both per-row copies the
+        // carrier costs (the attach on every input row and the strip on every emitted row). Only
+        // when the k retained rows pass the byte cap does the retention hand over to the spilling
+        // selection; the already-evaluated keys are attached as carriers at that point, never
+        // evaluated again.
         if (boundedLimit is { } bound)
         {
             IAsyncEnumerable<RankedRow> ranked = EvaluateSortKeysAsync(
                 ticket, ticket.OrderBy, dataCursor, cancellationToken);
 
+            CancellationToken token = cancellationToken;
+            int k = (int)bound;
+
+            TopKByteCap<RankedRow>? byteCap = capRetainedBytes
+                ? new(
+                    context.Options.SpillEffectiveThresholdBytes,
+                    static entry => RowMemoryEstimator.Estimate(entry.Row) + RowMemoryEstimator.EstimateKey(entry.Keys),
+                    entries => SelectRankedWithSpillAsync(entries, ticket.OrderBy, k, context, token))
+                : null;
+
             await foreach (RankedRow entry in TopKAsync(
-                ranked, new RankedRowComparer(ticket.OrderBy), (int)bound, cancellationToken).ConfigureAwait(false))
+                ranked, new RankedRowComparer(ticket.OrderBy), k, byteCap, cancellationToken).ConfigureAwait(false))
             {
                 yield return entry.Row;
             }
@@ -153,9 +187,11 @@ internal sealed class QuerySorter
 
     /// <summary>
     /// A row paired with its evaluated ordering keys, one per ORDER BY clause. Used by the two
-    /// computed-key paths that never write rows to disk: the bounded retention (at most k alive)
+    /// computed-key paths that do not write rows to disk: the bounded retention (at most k alive)
     /// and the spill-disabled full sort (everything buffered in memory anyway). Keys held here
-    /// never become row columns, so the row itself travels untouched.
+    /// do not become row columns, so the row itself travels untouched — except when a bounded
+    /// retention passes its byte cap and hands its entries to the spilling selection, which attaches
+    /// these same keys as carrier columns (<see cref="SelectRankedWithSpillAsync"/>).
     /// </summary>
     private readonly record struct RankedRow(QueryResultRow Row, ColumnValue[] Keys);
 
@@ -214,8 +250,8 @@ internal sealed class QuerySorter
     ///
     /// <para>The alternative — sort everything, then throw all but <c>k</c> away — costs
     /// <c>O(n log n)</c> time, <c>O(n)</c> memory, and spills to disk on a large table. This is
-    /// <c>O(n log k)</c> and never spills, which is what makes an exact nearest-neighbour query over
-    /// a large table finish at all.</para>
+    /// <c>O(n log k)</c> and does not spill while its k rows stay under the byte cap (below), which is
+    /// what makes an exact nearest-neighbour query over a large table finish at all.</para>
     ///
     /// <para>The heap is ordered <b>against</b> the query's ordering, so its head is the worst row
     /// retained so far and a new row only has to beat that one to earn a place. The retained set is
@@ -226,42 +262,383 @@ internal sealed class QuerySorter
     /// <para>Ties are resolved by whichever row arrived first, which SQL leaves unspecified and which
     /// need not match what the full sort would do. A query that needs a determinate order among equal
     /// keys has to name a tie-breaking key.</para>
+    ///
+    /// <para><b>Byte cap.</b> A row cap of k does not bound the heap when the rows are wide: k rows of
+    /// 64 KiB each hold k times 64 KiB. With <paramref name="byteCap"/> set (spill enabled), each
+    /// retained entry is charged its estimated bytes, and when the retained entries pass the cap the
+    /// retention stops: it hands the retained entries, followed by the rest of the input, to the
+    /// spilling selection (<see cref="SelectWithSpillAsync"/>), which returns the same first k rows
+    /// (ties aside) with the heap under the cap and at most about k rows on disk. Without a cap the
+    /// retention never spills.</para>
     /// </summary>
     private static async IAsyncEnumerable<T> TopKAsync<T>(
         IAsyncEnumerable<T> input,
         IComparer<T> comparer,
         int k,
+        TopKByteCap<T>? byteCap,
         [EnumeratorCancellation] CancellationToken cancellationToken)
     {
         if (k <= 0)
             yield break;
 
         IComparer<T> worstFirst = new ReversedComparer<T>(comparer);
-        PriorityQueue<T, T> retained = new(worstFirst);
+        PriorityQueue<(T Row, long Bytes), T> retained = new(worstFirst);
+        long retainedBytes = 0;
 
-        await foreach (T row in input.WithCancellation(cancellationToken).ConfigureAwait(false))
+        await using IAsyncEnumerator<T> rows = input.GetAsyncEnumerator(cancellationToken);
+
+        while (await rows.MoveNextAsync().ConfigureAwait(false))
         {
+            T row = rows.Current;
+
             if (retained.Count < k)
             {
-                retained.Enqueue(row, row);
-                continue;
+                long bytes = byteCap?.SizeOf(row) ?? 0;
+                retained.Enqueue((row, bytes), row);
+                retainedBytes += bytes;
+            }
+            else
+            {
+                // Strictly better than the worst retained row, so it displaces it. Using strict
+                // comparison keeps an equal-ranking row out, which makes the first arrival win a tie.
+                retained.TryPeek(out _, out T? worst);
+
+                if (comparer.Compare(row, worst) >= 0)
+                    continue;
+
+                long bytes = byteCap?.SizeOf(row) ?? 0;
+                long evictedBytes = retained.DequeueEnqueue((row, bytes), row).Bytes;
+                retainedBytes += bytes - evictedBytes;
             }
 
-            // Strictly better than the worst retained row, so it displaces it. Using strict
-            // comparison keeps an equal-ranking row out, which makes the first arrival win a tie.
-            if (comparer.Compare(row, retained.Peek()) < 0)
-                retained.DequeueEnqueue(row, row);
+            if (byteCap is null || retainedBytes < byteCap.Limit)
+                continue;
+
+            // The retained rows passed the byte cap. Hand them, then the rest of the input, to the
+            // spilling selection, and release the heap's references before it starts buffering.
+            T[] held = new T[retained.Count];
+            int heldCount = 0;
+
+            foreach (((T Row, long Bytes) Element, T Priority) item in retained.UnorderedItems)
+                held[heldCount++] = item.Element.Row;
+
+            retained.Clear();
+
+            int emitted = 0;
+
+            await foreach (T selected in byteCap.Overflow(ResumeAsync(held, rows)).WithCancellation(cancellationToken).ConfigureAwait(false))
+            {
+                yield return selected;
+
+                if (++emitted == k)
+                    yield break;
+            }
+
+            yield break;
         }
 
         List<T> ordered = new(retained.Count);
 
         while (retained.Count > 0)
-            ordered.Add(retained.Dequeue());
+            ordered.Add(retained.Dequeue().Row);
 
         ordered.Sort(comparer);
 
         foreach (T row in ordered)
             yield return row;
+    }
+
+    /// <summary>
+    /// The byte cap of a bounded retention and its way out: the cap (<see cref="Limit"/>), how to
+    /// charge one retained entry (<see cref="SizeOf"/>), and the spilling selection that takes over
+    /// when the retained entries pass the cap (<see cref="Overflow"/>). The selection must return the
+    /// first k rows of its input, in order, under the same comparison the retention uses.
+    /// </summary>
+    private sealed record TopKByteCap<T>(
+        long Limit,
+        Func<T, long> SizeOf,
+        Func<IAsyncEnumerable<T>, IAsyncEnumerable<T>> Overflow);
+
+    /// <summary>
+    /// Yields <paramref name="held"/>, then every row <paramref name="rest"/> has not yet produced.
+    /// Does not dispose <paramref name="rest"/>: the caller that opened it owns it.
+    /// </summary>
+    private static async IAsyncEnumerable<T> ResumeAsync<T>(T[] held, IAsyncEnumerator<T> rest)
+    {
+        for (int i = 0; i < held.Length; i++)
+        {
+            yield return held[i];
+            held[i] = default!;
+        }
+
+        while (await rest.MoveNextAsync().ConfigureAwait(false))
+            yield return rest.Current;
+    }
+
+    /// <summary>
+    /// The spilling selection a computed-key bounded retention hands over to. The keys were evaluated
+    /// once, when each row entered the retention, so they are attached as carrier columns from the
+    /// entries (<see cref="SortKeyCarrier.Attach"/>), never evaluated again, and the selection orders on
+    /// them exactly as the spill-capable full computed sort does. The returned entries carry the
+    /// stripped row only; their key arrays are empty, because no comparison follows.
+    /// </summary>
+    private static async IAsyncEnumerable<RankedRow> SelectRankedWithSpillAsync(
+        IAsyncEnumerable<RankedRow> entries,
+        IReadOnlyList<QueryOrderBy> orderBy,
+        int k,
+        QueryExecutionContext context,
+        [EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        SortKeyCarrier carrier = new(orderBy.Count);
+        QueryResultRowOrderComparer comparer = new(BuildMaterializedOrder(orderBy));
+
+        await foreach (QueryResultRow row in SelectWithSpillAsync(
+            AttachRankedKeysAsync(entries, carrier, cancellationToken), comparer, k, context, cancellationToken).ConfigureAwait(false))
+        {
+            yield return new RankedRow(carrier.Strip(row), []);
+        }
+    }
+
+    /// <summary>
+    /// The sorted run of the best rows a spilling selection has written so far: at most k rows, in
+    /// order, with <see cref="Last"/> its final row and <see cref="ReservedBytes"/> the disk bytes its
+    /// file holds.
+    /// </summary>
+    private sealed record KeptRun(SpillRun Run, int Count, QueryResultRow Last, long ReservedBytes);
+
+    /// <summary>
+    /// Returns the first <paramref name="k"/> rows of <paramref name="input"/> under
+    /// <paramref name="comparer"/>, in order, with the heap held near the byte cap and at most about
+    /// k rows on disk. This is the way out of a bounded retention whose k rows are wider than
+    /// <see cref="CamusDBOptions.SpillEffectiveThresholdBytes"/>.
+    ///
+    /// <para><b>Why not the external sort.</b> The external sort writes every input row to disk. For a
+    /// top-k over a large table that is the whole table, which can pass
+    /// <see cref="CamusDBOptions.SpillMaxTotalBytes"/> and fail a query that only needs k rows. This
+    /// selection writes only rows that can still be in the result.</para>
+    ///
+    /// <para><b>How.</b> Rows collect in a buffer. When the buffer reaches the byte cap, it is sorted
+    /// and merged with the kept run (at most k rows, on disk) into a new kept run of the first k rows;
+    /// the old run's file is deleted at once and its disk bytes are given back. Once the kept run holds
+    /// k rows, its last row is a cutoff: k rows at least as good exist, so an input row that does not
+    /// rank strictly before the cutoff cannot be in the result and is dropped without being buffered.
+    /// The buffer is also cut to its first k rows whenever it holds 2k, which moves the cutoff the
+    /// same way. At the end the kept run and the sorted buffer are merged, and the first k rows are
+    /// returned.</para>
+    ///
+    /// <para>Ties: a row equal to the cutoff is dropped (strict comparison), and a merge takes the kept
+    /// run's row first. The buffer sort is not stable, so among equal rows the selection can keep a
+    /// different subset than the in-memory retention does. Both are correct: SQL leaves the choice
+    /// among equal keys unspecified. The <see cref="SpillScope"/> is disposed in a <c>finally</c>
+    /// block, so the files are deleted on completion, cancellation and error.</para>
+    /// </summary>
+    private static async IAsyncEnumerable<QueryResultRow> SelectWithSpillAsync(
+        IAsyncEnumerable<QueryResultRow> input,
+        IComparer<QueryResultRow> comparer,
+        int k,
+        QueryExecutionContext context,
+        [EnumeratorCancellation] CancellationToken ct)
+    {
+        if (k <= 0)
+            yield break;
+
+        long byteThreshold = context.Options.SpillEffectiveThresholdBytes;
+        List<QueryResultRow> buffer = new();
+        long bufferedBytes = 0;
+        QueryResultRow? cutoff = null;
+        KeptRun? kept = null;
+        SpillScope? scope = null;
+
+        try
+        {
+            await foreach (QueryResultRow row in input.WithCancellation(ct).ConfigureAwait(false))
+            {
+                if (cutoff is { } limit && comparer.Compare(row, limit) >= 0)
+                    continue;
+
+                buffer.Add(row);
+                bufferedBytes += RowMemoryEstimator.Estimate(row);
+
+                if (buffer.Count >= 2L * k)
+                {
+                    // Only the first k buffered rows can be in the result, so the rest is dropped, and
+                    // the k-th row bounds every later row the same way the kept run's last row does.
+                    buffer.Sort(comparer);
+                    buffer.RemoveRange(k, buffer.Count - k);
+                    cutoff = FirstOf(cutoff, buffer[k - 1], comparer);
+
+                    bufferedBytes = 0;
+                    foreach (QueryResultRow held in buffer)
+                        bufferedBytes += RowMemoryEstimator.Estimate(held);
+                }
+
+                if (bufferedBytes < byteThreshold)
+                    continue;
+
+                if (scope is null)
+                {
+                    context.Probe?.NoteSpill();
+                    scope = SpillFileManager.CreateScope(context.SpillDirectory, context.Options);
+                }
+
+                buffer.Sort(comparer);
+                if (buffer.Count > k)
+                    buffer.RemoveRange(k, buffer.Count - k);
+
+                kept = await WriteKeptRunAsync(scope, kept, buffer, comparer, k, context, ct).ConfigureAwait(false);
+                buffer.Clear();
+                bufferedBytes = 0;
+
+                if (kept.Count == k)
+                    cutoff = FirstOf(cutoff, kept.Last, comparer);
+            }
+
+            buffer.Sort(comparer);
+
+            int emitted = 0;
+
+            await foreach (QueryResultRow row in MergeRunWithSortedAsync(kept?.Run, buffer, comparer, context, ct).ConfigureAwait(false))
+            {
+                yield return row;
+
+                if (++emitted == k)
+                    break;
+            }
+        }
+        finally
+        {
+            if (scope is not null)
+                await scope.DisposeAsync().ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
+    /// Writes the first <paramref name="k"/> rows of the merge of <paramref name="kept"/> and the sorted
+    /// <paramref name="sortedBuffer"/> as a new kept run, then deletes the old run's file and gives back
+    /// its disk bytes, so a spilling selection never holds more than two kept runs on disk. The new run
+    /// uses the value-only format when every row it can hold shares one <see cref="RowLayout"/>.
+    /// </summary>
+    private static async Task<KeptRun> WriteKeptRunAsync(
+        SpillScope scope,
+        KeptRun? kept,
+        List<QueryResultRow> sortedBuffer,
+        IComparer<QueryResultRow> comparer,
+        int k,
+        QueryExecutionContext context,
+        CancellationToken ct)
+    {
+        RowLayout? layout = SharedLayout(kept, sortedBuffer);
+        string path = scope.OpenWriter(out SpillWriteStream writer);
+        int count = 0;
+        QueryResultRow last = default;
+
+        try
+        {
+            await foreach (QueryResultRow row in MergeRunWithSortedAsync(kept?.Run, sortedBuffer, comparer, context, ct).ConfigureAwait(false))
+            {
+                if (layout is not null)
+                    SpillRowCodec.EncodeValueOnlyToStream(writer, (QueryRow)row.Row);
+                else
+                    SpillRowCodec.EncodeToStream(writer, row);
+
+                last = row;
+
+                if (++count == k)
+                    break;
+            }
+
+            await writer.FlushAsync(ct).ConfigureAwait(false);
+        }
+        finally
+        {
+            writer.Close();
+        }
+
+        // The merge above disposed its reader when the loop ended, so the old file is closed here.
+        if (kept is not null)
+            scope.DeleteFile(kept.Run.Path, kept.ReservedBytes);
+
+        return new KeptRun(new SpillRun(path, layout), count, last, writer.ReservedBytes);
+    }
+
+    /// <summary>
+    /// The layout a new kept run can be written under in the value-only format: the layout shared by
+    /// the old run (when it has one) and every buffered row, or null when any row differs, in which
+    /// case the run is written in the schema-less format.
+    /// </summary>
+    private static RowLayout? SharedLayout(KeptRun? kept, List<QueryResultRow> sortedBuffer)
+    {
+        RowLayout? layout = kept is null ? null : kept.Run.Layout;
+
+        if (kept is not null && layout is null)
+            return null;
+
+        foreach (QueryResultRow row in sortedBuffer)
+        {
+            if (row.Row is not QueryRow qr)
+                return null;
+
+            layout ??= qr.Layout;
+
+            if (!ReferenceEquals(qr.Layout, layout))
+                return null;
+        }
+
+        return layout;
+    }
+
+    /// <summary>
+    /// Merges the sorted run file <paramref name="run"/> (or nothing, when null) with the sorted list
+    /// <paramref name="sorted"/>. On equal rows the run's row comes first: it arrived earlier. The run's
+    /// reader is disposed when the enumeration ends, early or not.
+    /// </summary>
+    private static async IAsyncEnumerable<QueryResultRow> MergeRunWithSortedAsync(
+        SpillRun? run,
+        List<QueryResultRow> sorted,
+        IComparer<QueryResultRow> comparer,
+        QueryExecutionContext context,
+        [EnumeratorCancellation] CancellationToken ct)
+    {
+        SpillRunReader? reader = run is { } spilled
+            ? await SpillRunReader.OpenAsync(spilled.Path, context.Options.SpillMaxFrameBytes, spilled.Layout, ct).ConfigureAwait(false)
+            : null;
+
+        try
+        {
+            bool runHasRow = reader is not null;
+            int next = 0;
+
+            while (runHasRow || next < sorted.Count)
+            {
+                if (runHasRow && (next >= sorted.Count || comparer.Compare(reader!.Current, sorted[next]) <= 0))
+                {
+                    yield return reader!.Current;
+                    runHasRow = await reader.AdvanceAsync(ct).ConfigureAwait(false);
+                }
+                else
+                {
+                    yield return sorted[next++];
+                }
+            }
+        }
+        finally
+        {
+            if (reader is not null)
+                await reader.DisposeAsync().ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>The row of the two that ranks first; <paramref name="current"/> wins a tie.</summary>
+    private static QueryResultRow FirstOf(QueryResultRow? current, QueryResultRow candidate, IComparer<QueryResultRow> comparer) =>
+        current is { } held && comparer.Compare(held, candidate) <= 0 ? held : candidate;
+
+    private static async IAsyncEnumerable<QueryResultRow> AttachRankedKeysAsync(
+        IAsyncEnumerable<RankedRow> entries,
+        SortKeyCarrier carrier,
+        [EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        await foreach (RankedRow entry in entries.WithCancellation(cancellationToken).ConfigureAwait(false))
+            yield return carrier.Attach(entry.Row, entry.Keys);
     }
 
     /// <summary>
@@ -540,6 +917,8 @@ internal sealed class QuerySorter
         [EnumeratorCancellation] CancellationToken ct)
     {
         int threshold = context.Options.SpillEffectiveThreshold;
+        long byteThreshold = context.Options.SpillEffectiveThresholdBytes;
+        long bufferedBytes = 0;
         List<QueryResultRow> buffer = new();
         List<SpillRun> runs = new();
         SpillScope? scope = null;
@@ -549,8 +928,14 @@ internal sealed class QuerySorter
             await foreach (QueryResultRow row in input.WithCancellation(ct).ConfigureAwait(false))
             {
                 buffer.Add(row);
-                if (buffer.Count >= threshold)
+                bufferedBytes += RowMemoryEstimator.Estimate(row);
+
+                // A run ends at the row cap or at the byte cap, whichever comes first, so a buffer of
+                // wide rows spills before it holds the row cap's worth of them.
+                if (buffer.Count >= threshold || bufferedBytes >= byteThreshold)
                 {
+                    bufferedBytes = 0;
+
                     if (scope is null)
                     {
                         context.Probe?.NoteSpill();

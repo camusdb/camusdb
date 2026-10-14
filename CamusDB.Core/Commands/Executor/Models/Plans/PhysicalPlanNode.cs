@@ -34,6 +34,15 @@ public abstract class PhysicalPlanNode
     public long? EstimatedCardinality { get; internal set; }
 
     /// <summary>
+    /// The join-order search's estimate of this join's output rows; null on a non-join node, and on
+    /// a join whose order the search did not cost (heuristic order, or statistics not loaded).
+    /// It is a second estimate, not a correction of <see cref="EstimatedCardinality"/>: the search
+    /// chose the order with this number, while the plan annotation computes its own afterward, and
+    /// the two models can disagree. EXPLAIN (ANALYZE) prints both next to the actual rows.
+    /// </summary>
+    public double? JoinOrderEstimatedRows { get; internal set; }
+
+    /// <summary>
     /// Distribution of this node's output data across the cluster.
     /// Populated on scan leaves by <see cref="Controllers.Queries.QueryPlanner"/> /
     /// <see cref="Controllers.Queries.JoinQueryPlanner"/> from the table/index sharding scheme.

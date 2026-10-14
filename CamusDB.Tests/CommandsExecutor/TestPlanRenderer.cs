@@ -540,6 +540,34 @@ public sealed class TestPlanRenderer
         Assert.AreEqual(expected, rendered);
     }
 
+    // ── expression grouping ───────────────────────────────────────────────
+
+    // The rendered text must read as the expression the tree holds. The tree has no parentheses
+    // (grouping is its shape), so an operand that binds more loosely than its operator is wrapped;
+    // one that binds at least as tightly stays bare, so a plain conjunct chain is unchanged.
+    [TestCase("a = 1 AND (b = 2 OR c = 3)", "a = 1 AND (b = 2 OR c = 3)")]
+    [TestCase("(a = 1 OR b = 2) AND c = 3", "(a = 1 OR b = 2) AND c = 3")]
+    [TestCase("a = 1 OR b = 2 AND c = 3", "a = 1 OR b = 2 AND c = 3")]
+    [TestCase("a = 1 AND b = 2 AND c = 3", "a = 1 AND b = 2 AND c = 3")]
+    [TestCase("NOT (a = 1 AND b = 2)", "NOT (a = 1 AND b = 2)")]
+    [TestCase("NOT a LIKE 'x%'", "NOT a LIKE 'x%'")]
+    [TestCase("NOT a LIKE 'x%' AND (a LIKE 'y%' OR a LIKE 'z%')", "NOT a LIKE 'x%' AND (a LIKE 'y%' OR a LIKE 'z%')")]
+    [TestCase("(a + b) * c > 1", "(a + b) * c > 1")]
+    [TestCase("a + b * c > 1", "a + b * c > 1")]
+    [TestCase("a - (b - c) > 1", "a - (b - c) > 1")]
+    [TestCase("a - b - c > 1", "a - b - c > 1")]
+    [TestCase("(a + b) IS NULL", "(a + b) IS NULL")]
+    [TestCase("a BETWEEN 1 AND 2", "a BETWEEN 1 AND 2")]
+    public void RenderExpr_ParenthesizesLooserOperands(string condition, string expected)
+    {
+        string rendered = PlanRenderer.RenderExpr(SQLParserProcessor.ParseCondition(condition));
+        Assert.AreEqual(expected, rendered);
+
+        // The rendered text parses back to a tree that renders the same: the grouping survived.
+        string again = PlanRenderer.RenderExpr(SQLParserProcessor.ParseCondition(rendered));
+        Assert.AreEqual(rendered, again);
+    }
+
     // ── helper ────────────────────────────────────────────────────────────
 
     private QueryPlan BuildJoinPlan(PhysicalPlanNode root, TableDescriptor table)

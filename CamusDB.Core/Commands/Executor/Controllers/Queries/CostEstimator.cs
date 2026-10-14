@@ -453,10 +453,12 @@ internal static class CostEstimator
 
                 return (rows, new PlanCost
                 {
-                    // Saturating multiply: deep join trees can each carry multi-billion-row
-                    // estimates, and a raw long multiply wraps negative — poisoning the
-                    // annotated cost (and any future cost-driven join choice) silently.
-                    KvRangeScanEntries = SaturatingMultiply(inputCardinality, innerRows),
+                    // The right side is read once (NestedLoopInnerSpool) and every left × right
+                    // pair is compared in memory. Saturating multiply: deep join trees can each
+                    // carry multi-billion-row estimates, and a raw long multiply wraps negative —
+                    // poisoning the annotated cost (and any cost-driven join choice) silently.
+                    KvRangeScanEntries = innerRows,
+                    InMemoryRows       = SaturatingMultiply(inputCardinality, innerRows),
                     EstimatedRows      = rows,
                 });
             }
@@ -592,6 +594,12 @@ internal static class CostEstimator
     internal const double HashTableRowWeight = 0.1;
 
     /// <summary>
+    /// Weight of one row a sort keeps against one row read from KV: the in-memory weight of
+    /// <see cref="PlanCost.Total"/>, the price the <see cref="SortNode"/> annotation charges.
+    /// </summary>
+    internal const double SortRowWeight = 0.1;
+
+    /// <summary>
     /// Cost of one hash-join step: one scan of the right input, one probe for each left row, and a
     /// hash table on the smaller side. The <paramref name="leftRows"/> term is what makes the join
     /// order matter: the left input of a step is the intermediate result of the steps before it,
@@ -607,11 +615,23 @@ internal static class CostEstimator
     internal static double IndexLookupJoinStepCost(double leftRows) => leftRows * 2.0;
 
     /// <summary>
-    /// Cost of one nested-loop join step: the nested-loop operator reads its right input again for
-    /// each left row. The builder uses it when no conjunct of the <c>ON</c> is an equi-key.
+    /// Weight of one left × right pair a nested-loop join compares in memory against one row read
+    /// from KV: the same in-memory weight as a hash-table row (<see cref="HashTableRowWeight"/>).
     /// </summary>
-    internal static double NestedLoopJoinStepCost(double leftRows, double rightScanCost) =>
-        Math.Max(1.0, leftRows) * rightScanCost;
+    internal const double NestedLoopPairWeight = 0.1;
+
+    /// <summary>
+    /// Cost of one nested-loop join step: one read of the right input, then one in-memory
+    /// comparison for each left × right pair. The operator reads a base-table right side from
+    /// storage once and replays it for the other left rows (<see cref="NestedLoopInnerSpool"/>),
+    /// so the right read is not multiplied by the left rows. <paramref name="rightRows"/> is the
+    /// right input after its pushed filter, which is what the spool holds. The builder uses this
+    /// step when no conjunct of the <c>ON</c> is an equi-key, so it decides the join order, not the
+    /// operator. A right filter with a volatile function still re-reads per left row; that case
+    /// is rare and is not priced separately.
+    /// </summary>
+    internal static double NestedLoopJoinStepCost(double leftRows, double rightRows, double rightScanCost) =>
+        rightScanCost + Math.Max(1.0, leftRows) * Math.Max(1.0, rightRows) * NestedLoopPairWeight;
 
     /// <summary>
     /// The rule that selects a hash join over an index-lookup join. <see cref="JoinEnumerator"/>
@@ -655,7 +675,7 @@ internal static class CostEstimator
         {
             JoinStepOperator.IndexLookup => IndexLookupJoinStepCost(leftRows),
             JoinStepOperator.Hash => HashJoinStepCost(leftRows, rightRows, rightScanCost),
-            _ => NestedLoopJoinStepCost(leftRows, rightScanCost),
+            _ => NestedLoopJoinStepCost(leftRows, rightRows, rightScanCost),
         };
 
     // ─────────────────────────────────────────────────────────────────────────

@@ -126,6 +126,7 @@ public class ConfigReader
         "snapshot_hold_retry_budget_ms",
         "spill_enabled",
         "spill_threshold_rows",
+        "spill_threshold_bytes",
         "spill_merge_fan_in",
         "point_read_row_id_cache_enabled",
         "point_read_row_id_cache_max_entries",

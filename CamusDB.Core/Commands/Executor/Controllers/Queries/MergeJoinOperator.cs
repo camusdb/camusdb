@@ -138,7 +138,7 @@ internal sealed class MergeJoinOperator
         {
             // Fallback: full scan via ScanJoinRightSource + internal sort.
             await foreach (QueryResultRow rightRow in scanner.ScanJoinRightSource(
-                joinNode.RightSource, joinNode.RightExecutionFilter, plan).ConfigureAwait(false))
+                joinNode.RightSource, joinNode.RightExecutionFilter, plan, joinNode.Stats).ConfigureAwait(false))
             {
                 ColumnValue[]? key = JoinKeyExtractor.ExtractMergeKey(rightRow.Row, joinNode.RightKeyColumns);
                 if (key is null) continue;
@@ -153,6 +153,7 @@ internal sealed class MergeJoinOperator
         int ri = 0;
         RowLayout? joinLayout = null;
         Dictionary<string, int>? rightOrdinalMap = null;
+        JoinRowPairer pairer = new();
 
         while (li < leftRows.Count && ri < rightRows.Count)
         {
@@ -199,7 +200,7 @@ internal sealed class MergeJoinOperator
                 {
                     joinLayout      ??= QueryRowMerger.BuildJoinLayout(leftRows[l].QualifiedRow, rightRows[r].Row, rightAlias);
                     rightOrdinalMap ??= QueryRowMerger.BuildRightKeyOrdinalMap(rightRows[r].Row, rightAlias, joinLayout);
-                    QueryRow merged  = QueryRowMerger.MergeRowsAsQueryRow(
+                    QueryRow merged  = pairer.Pair(
                         leftRows[l].QualifiedRow, rightRows[r].Row, joinLayout, rightOrdinalMap);
 
                     if (!await services.Filterer.MeetWhereAsync(joinNode.OnPredicate!, merged, ticket, plan.Database).ConfigureAwait(false))
@@ -241,6 +242,7 @@ internal sealed class MergeJoinOperator
         RowLayout? joinLayout = null;
         RowLayout? qualifiedLeftLayout = null;
         Dictionary<string, int>? rightOrdinalMap = null;
+        JoinRowPairer pairer = new();
         OuterJoinPadding? padding = joinNode.Kind == JoinKind.LeftOuter
             ? await OuterJoinPadding.CreateAsync(joinNode.RightSource, plan).ConfigureAwait(false)
             : null;
@@ -316,7 +318,7 @@ internal sealed class MergeJoinOperator
                 {
                     joinLayout      ??= QueryRowMerger.BuildJoinLayout(leftQualified, rightRow, rightAlias);
                     rightOrdinalMap ??= QueryRowMerger.BuildRightKeyOrdinalMap(rightRow, rightAlias, joinLayout);
-                    QueryRow merged  = QueryRowMerger.MergeRowsAsQueryRow(leftQualified, rightRow, joinLayout, rightOrdinalMap);
+                    QueryRow merged  = pairer.Pair(leftQualified, rightRow, joinLayout, rightOrdinalMap);
 
                     if (!await services.Filterer.MeetWhereAsync(joinNode.OnPredicate!, merged, ticket, plan.Database).ConfigureAwait(false))
                         continue;

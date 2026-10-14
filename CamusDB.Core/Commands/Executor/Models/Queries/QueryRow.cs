@@ -18,9 +18,11 @@ namespace CamusDB.Core.CommandsExecutor.Models.Queries;
 /// One layout is shared by every row a scan or join node emits; the per-row array owns the cell values.
 ///
 /// <para>
-/// <b>Three backings.</b> A row is built from ready <see cref="ColumnValue"/>s (synthetic producers:
-/// projection, join, merge, aggregate — eager), from decoded <see cref="ValueSlot"/>s (the slot decode
-/// path), or from a borrowed <see cref="RowView"/> over the raw KV bytes (the zero-copy decode path).
+/// <b>Four backings.</b> A row is built from ready <see cref="ColumnValue"/>s (synthetic producers:
+/// projection, merge, aggregate — eager), from decoded <see cref="ValueSlot"/>s (the slot decode
+/// path), from a borrowed <see cref="RowView"/> over the raw KV bytes (the zero-copy decode path), or
+/// from a pair of join input rows (<see cref="FromPair"/>: a joined row that reads each cell from the
+/// left or right input on demand, so a pair the <c>ON</c> rejects never copies its cells).
 /// Both decode backings convert to <see cref="ColumnValue"/> <b>lazily, per accessed cell</b> (cached),
 /// so a row that is filtered out — or a cell that is never read — never pays for a
 /// <see cref="ColumnValue"/>. The borrowed backing goes further: it allocates no <c>ValueSlot[]</c> at
@@ -70,6 +72,11 @@ public sealed class QueryRow : IReadOnlyDictionary<string, ColumnValue>
     private readonly int[]? _outputToStored;
     private ColumnValue[]? _eager;
     private ColumnValue?[]? _cellCache;
+    // Pair backing: a joined row over its two input rows. _pairMap says, for each output ordinal, which
+    // input holds the cell and where; the inputs are owned rows the join retains anyway.
+    private readonly JoinPairMap? _pairMap;
+    private readonly IReadOnlyDictionary<string, ColumnValue>? _pairLeft;
+    private readonly IReadOnlyDictionary<string, ColumnValue>? _pairRight;
 
     /// <summary>Eager backing — synthetic producers that already hold <see cref="ColumnValue"/>s.</summary>
     public QueryRow(ObjectIdValue rowId, RowLayout layout, ColumnValue[] values)
@@ -133,6 +140,39 @@ public sealed class QueryRow : IReadOnlyDictionary<string, ColumnValue>
         return new QueryRow(rowId, layout, view, outputToStored, cache);
     }
 
+    private QueryRow(RowLayout layout, JoinPairMap map, IReadOnlyDictionary<string, ColumnValue> left, IReadOnlyDictionary<string, ColumnValue> right)
+    {
+        RowId = default;
+        Layout = layout;
+        _pairMap = map;
+        _pairLeft = left;
+        _pairRight = right;
+        _slots = null;
+        _eager = null;
+    }
+
+    /// <summary>
+    /// Pair backing — a joined row over its left and right input rows. No cell is copied at
+    /// construction: <see cref="GetColumnValue"/> reads a cell from the input that holds it, through
+    /// <paramref name="map"/>, and caches it. A join evaluates its <c>ON</c> on this row, so a rejected
+    /// pair costs one small object instead of a value array and a read of every input cell, and an
+    /// accepted pair flows on as the same row, so a later projection reads only the cells it needs.
+    ///
+    /// <para>The inputs must not change while the row lives; join inputs are owned rows (or rows the
+    /// join retains in a hash table or spool), so they do not. The shape is checked here by count,
+    /// and by key when a cell is read (<see cref="JoinPairMap"/>): a row whose keys diverge from the
+    /// layout throws instead of returning a wrong cell.</para>
+    /// </summary>
+    internal static QueryRow FromPair(
+        RowLayout layout,
+        JoinPairMap map,
+        IReadOnlyDictionary<string, ColumnValue> left,
+        IReadOnlyDictionary<string, ColumnValue> right)
+    {
+        map.EnsureShape(layout, left, right);
+        return new QueryRow(layout, map, left, right);
+    }
+
     /// <summary>
     /// True when this row is slot-backed (lazy per-cell materialization); false when eager
     /// (<see cref="ColumnValue"/><c>[]</c>). Reflects the decode path chosen for the producing scan —
@@ -147,6 +187,72 @@ public sealed class QueryRow : IReadOnlyDictionary<string, ColumnValue>
     /// diagnostics; consumers read values through <see cref="GetColumnValue"/> regardless of backing.
     /// </summary>
     internal bool IsBorrowedBacked => _rowView is not null && _eager is null;
+
+    /// <summary>
+    /// Estimated heap bytes this row keeps alive, for the byte cap of a retaining operator
+    /// (<see cref="RowMemoryEstimator"/>). Reads only what the backing already holds, so it decodes and
+    /// materializes nothing:
+    /// <list type="bullet">
+    /// <item>eager — the value array and each value with its payload;</item>
+    /// <item>slot — the slot array and each slot's string, bytes or element payload;</item>
+    /// <item>borrowed — the whole KV buffer the view references, which stays alive with the row;</item>
+    /// <item>pair — both input rows, charged in full although other pair rows can share them.</item>
+    /// </list>
+    /// The shared <see cref="Layout"/> and a borrowed row's output-to-stored map are charged to no row.
+    /// Cells materialized from the backing (the per-cell cache, or the array of a promoted row) add one
+    /// value object each. A cell decoded from a borrowed view also adds its payload, because the
+    /// decode copies the bytes into a new string or array; a slot or pair cell shares its payload with
+    /// the backing, which is already charged.
+    /// </summary>
+    internal long EstimateRetainedBytes()
+    {
+        long total = RowMemoryEstimator.QueryRowBytes;
+        bool hasBacking = _slots is not null || _rowView is not null || _pairMap is not null;
+        bool copiesPayload = _rowView is not null;
+
+        if (_eager is not null)
+        {
+            total += RowMemoryEstimator.ArrayHeaderBytes + (long)RowMemoryEstimator.ReferenceBytes * _eager.Length;
+
+            for (int i = 0; i < _eager.Length; i++)
+                total += !hasBacking || copiesPayload
+                    ? RowMemoryEstimator.EstimateValue(_eager[i])
+                    : RowMemoryEstimator.ColumnValueBytes;
+
+            // A promoted row still holds its original backing, charged below.
+            if (!hasBacking)
+                return total;
+        }
+
+        if (_cellCache is not null)
+        {
+            total += RowMemoryEstimator.ArrayHeaderBytes + (long)RowMemoryEstimator.ReferenceBytes * _cellCache.Length;
+
+            for (int i = 0; i < _cellCache.Length; i++)
+            {
+                if (_cellCache[i] is { } cell)
+                    total += copiesPayload ? RowMemoryEstimator.EstimateValue(cell) : RowMemoryEstimator.ColumnValueBytes;
+            }
+        }
+
+        if (_slots is not null)
+        {
+            total += RowMemoryEstimator.ArrayHeaderBytes + (long)RowMemoryEstimator.ValueSlotBytes * _slots.Length;
+
+            for (int i = 0; i < _slots.Length; i++)
+                total += RowMemoryEstimator.SlotPayloadBytes(_slots[i]);
+        }
+        else if (_rowView is { } view)
+        {
+            total += RowMemoryEstimator.BackingBufferBytes(view.Storage);
+        }
+        else if (_pairMap is not null)
+        {
+            total += RowMemoryEstimator.EstimateRow(_pairLeft!) + RowMemoryEstimator.EstimateRow(_pairRight!);
+        }
+
+        return total;
+    }
 
     /// <summary>
     /// The cell at <paramref name="ordinal"/> as a <see cref="ColumnValue"/>. For a slot-backed row this
@@ -169,6 +275,9 @@ public sealed class QueryRow : IReadOnlyDictionary<string, ColumnValue>
             // reaching here with stored < 0 means a genuinely absent value → NULL.
             return _cellCache[ordinal] = stored < 0 ? ColumnValue.Null : view.GetSlot(stored).ToColumnValue();
         }
+
+        if (_pairMap is { } pairMap)
+            return _cellCache[ordinal] = pairMap.Resolve(ordinal, _pairLeft!, _pairRight!);
 
         return _cellCache[ordinal] = _slots![ordinal].ToColumnValue();
     }

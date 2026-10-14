@@ -145,6 +145,89 @@ internal sealed class QueryScanner
 
         try
         {
+            if (DeferredLargeValueSurvivalColumns(plan, table) is { } survivalColumns)
+            {
+                // A large value only the projection reads is fetched for the rows the filter keeps,
+                // not for every scanned row (see DeferredLargeValueSurvivalColumns).
+                RowEncoder.RowDecodeState survivalDecode = new() { SlotBackedDecode = true, BorrowedDecode = false };
+                LargeValueFetch? projectionFetch = LargeValueFetch.Columns(table.Schema, plan.ScanRequiredColumns);
+                List<ObjectIdValue> windowIds = new(DeferredWindowInitial);
+                List<ReadOnlyMemory<byte>?> windowRows = new(DeferredWindowInitial);
+                int window = DeferredWindowInitial;
+                long budget = plan.Database.Options.LargeValueResolveBatchBytes;
+                long windowBytes = 0;
+
+                await foreach ((ObjectIdValue rowId, ReadOnlyMemory<byte> data) in table.Store.ScanRows(
+                    plan.Ticket.TxnState, maxRows: plan.ScanRowLimit, cancellationToken: cancellationToken,
+                    largeValues: LargeValueFetch.Columns(table.Schema, survivalColumns)))
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+
+                    if (data.Length == 0)
+                        continue;
+
+                    rowsScanned++;
+                    if (scanStats is not null)
+                        scanStats.KvScanEntries++;
+
+                    deps?.RecordPoint(table.Store.RowPointKey(rowId));
+
+                    // Decode only the columns the filter reads: the projection-only cells may still
+                    // be pointers, and a decoder that read one would throw.
+                    QueryRow survivalRow = await RowEncoder.DecodeToQueryRowAsync(
+                        table.Schema, txId, rowId, data, plan.Database.Options,
+                        survivalColumns, visibilityVersion, survivalDecode).ConfigureAwait(false);
+
+                    probe?.AddRowRead();
+                    if (scanStats is not null)
+                        scanStats.RowsRead++;
+
+                    if (!await queryFilterer.MeetPlanFilterAsync(plan, survivalRow).ConfigureAwait(false))
+                        continue;
+
+                    // Survivors wait in a window so their deferred values cost one fetch; the window
+                    // keeps scan order, and it doubles like the scan's own window, so a LIMIT that
+                    // stops early holds few extra rows. Like the scan's window it also closes before a
+                    // row that would take the values it will expand past LargeValueResolveBatchBytes.
+                    long rowBytes = RowStorageForms.MarkedRawBytes(data.Span);
+
+                    if (budget > 0 && windowIds.Count > 0 && windowBytes + rowBytes > budget)
+                    {
+                        await foreach (QueryResultRow row in DecodeDeferredWindowAsync(plan, table, queryFilterer, windowIds, windowRows, projectionFetch, decodeState, cancellationToken).ConfigureAwait(false))
+                        {
+                            rowsReturned++;
+                            yield return row;
+                        }
+
+                        windowBytes = 0;
+                    }
+
+                    windowIds.Add(rowId);
+                    windowRows.Add(data);
+                    windowBytes += rowBytes;
+
+                    if (windowIds.Count < window)
+                        continue;
+
+                    window = Math.Min(window * 2, DeferredWindowMax);
+                    windowBytes = 0;
+
+                    await foreach (QueryResultRow row in DecodeDeferredWindowAsync(plan, table, queryFilterer, windowIds, windowRows, projectionFetch, decodeState, cancellationToken).ConfigureAwait(false))
+                    {
+                        rowsReturned++;
+                        yield return row;
+                    }
+                }
+
+                await foreach (QueryResultRow row in DecodeDeferredWindowAsync(plan, table, queryFilterer, windowIds, windowRows, projectionFetch, decodeState, cancellationToken).ConfigureAwait(false))
+                {
+                    rowsReturned++;
+                    yield return row;
+                }
+
+                yield break;
+            }
+
             if (parallelism > 1)
             {
                 // Parallel decode pipeline: one producer streams the scan (identical fetch to the
@@ -230,6 +313,187 @@ internal sealed class QueryScanner
                 Diagnostics.ServerDiagnostics.Tags.Scan.Full, Diagnostics.ServerDiagnostics.Tags.Stage.Scanned, rowsScanned);
             Diagnostics.ServerDiagnostics.RecordQueryRows(
                 Diagnostics.ServerDiagnostics.Tags.Scan.Full, Diagnostics.ServerDiagnostics.Tags.Stage.Returned, rowsReturned);
+        }
+    }
+
+    /// <summary>First window of filter survivors whose deferred large values are fetched together.</summary>
+    private const int DeferredWindowInitial = 16;
+
+    /// <summary>Largest survivor window: one Kahuna scan page, as for the scan's own large-value window.</summary>
+    private const int DeferredWindowMax = KvStoreConstants.DefaultPageSize;
+
+    /// <summary>
+    /// The columns a full scan must resolve before its residual filter, when the scan can fetch the
+    /// other large values for the surviving rows only; null when it cannot, and the scan resolves every
+    /// required cell up front as before.
+    ///
+    /// <para><b>Why.</b> A <c>string</c>, <c>bytes</c> or array cell can be stored out of line (a pointer
+    /// to its own KV key). The scan fetches those values in windows before it decodes, so for
+    /// <c>SELECT payload FROM events WHERE score &gt; ?</c> a row the filter rejects still fetched its
+    /// payload. With deferral the scan fetches only what the filter reads, filters, and then fetches the
+    /// rest for the survivors.</para>
+    ///
+    /// <para><b>When.</b> Every condition is required:</para>
+    /// <list type="bullet">
+    ///   <item>There is a residual filter; without one every row survives and nothing is saved.</item>
+    ///   <item>The row a survivor returns must be the row its filter decision was made on. At a fixed
+    ///   snapshot both fetches see one version (a value that does not match its row is a corruption
+    ///   error). Under read committed the second fetch can find the row changed and re-read it
+    ///   (<c>KvLargeValueReader</c>), so the filter runs again on the final row there, and a row that
+    ///   no longer passes is dropped; read committed lets each read see any committed version, and
+    ///   this way the version returned is the version filtered.</item>
+    ///   <item>The filter has no subquery and no volatile call, and every identifier in it is a column
+    ///   of the table, so the first pass resolves every cell the filter can read, and a second run of
+    ///   the filter gives the same answer.</item>
+    ///   <item>Some column the query needs, outside the filter, can be stored out of line.</item>
+    /// </list>
+    /// </summary>
+    internal static IReadOnlySet<string>? DeferredLargeValueSurvivalColumns(QueryPlan plan, TableDescriptor table)
+    {
+        if (plan.ExecutionFilter is not { } filter)
+            return null;
+
+        // Without a fixed snapshot the filter can run twice on a survivor; a volatile call could then
+        // give two answers for one row.
+        if (Functions.ScalarFunctionEvaluator.ContainsVolatileFunction(filter))
+            return null;
+
+        if (!TryCollectFilterColumns(filter, out List<string>? identifiers))
+            return null;
+
+        List<TableColumnSchema> columns = table.Schema.Columns ?? [];
+        HashSet<string> survival = new(StringComparer.Ordinal);
+
+        foreach (string identifier in identifiers)
+        {
+            int dot = identifier.LastIndexOf('.');
+            string bare = dot >= 0 && dot < identifier.Length - 1 ? identifier[(dot + 1)..] : identifier;
+
+            TableColumnSchema? column = columns.Find(c => string.Equals(c.Name, bare, StringComparison.OrdinalIgnoreCase));
+            if (column is null)
+                return null;
+
+            survival.Add(column.Name);
+        }
+
+        foreach (TableColumnSchema column in columns)
+        {
+            if (TableColumnSchema.SupportsStorageStrategy(column.Type)
+                && !survival.Contains(column.Name)
+                && (plan.ScanRequiredColumns is null || plan.ScanRequiredColumns.Contains(column.Name)))
+                return survival;
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// Every identifier <paramref name="filter"/> references, walked iteratively (a long expression
+    /// is deep). A function name and a cast target type are identifiers in the tree but not column
+    /// references, so they are skipped. Returns false when the filter has a subquery: its identifiers
+    /// may name outer columns this walk cannot see.
+    /// </summary>
+    private static bool TryCollectFilterColumns(NodeAst filter, [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out List<string>? identifiers)
+    {
+        identifiers = [];
+        Stack<NodeAst> pending = new();
+        pending.Push(filter);
+
+        while (pending.Count > 0)
+        {
+            NodeAst node = pending.Pop();
+
+            switch (node.nodeType)
+            {
+                case NodeType.Identifier:
+                    if (node.yytext is { } text)
+                        identifiers.Add(text);
+                    continue;
+
+                case NodeType.ExprScalarSubquery:
+                case NodeType.ExprExistsSubquery:
+                case NodeType.ExprExistsCorrelated:
+                case NodeType.ExprInSubquery:
+                case NodeType.ExprNotInSubquery:
+                case NodeType.Select:
+                    identifiers = null;
+                    return false;
+
+                case NodeType.ExprFuncCall:
+                    // leftAst is the function name.
+                    PushChildren(node, pending, skipLeft: true);
+                    continue;
+
+                case NodeType.ExprCast:
+                    // rightAst is the target type, which can be an identifier.
+                    if (node.leftAst is not null)
+                        pending.Push(node.leftAst);
+                    continue;
+
+                default:
+                    PushChildren(node, pending, skipLeft: false);
+                    continue;
+            }
+        }
+
+        return true;
+
+        static void PushChildren(NodeAst node, Stack<NodeAst> pending, bool skipLeft)
+        {
+            if (!skipLeft && node.leftAst is not null) pending.Push(node.leftAst);
+            if (node.rightAst is not null) pending.Push(node.rightAst);
+            if (node.extendedOne is not null) pending.Push(node.extendedOne);
+            if (node.extendedTwo is not null) pending.Push(node.extendedTwo);
+            if (node.extendedThree is not null) pending.Push(node.extendedThree);
+            if (node.extendedFour is not null) pending.Push(node.extendedFour);
+            if (node.extendedFive is not null) pending.Push(node.extendedFive);
+            if (node.extendedSix is not null) pending.Push(node.extendedSix);
+            if (node.extendedSeven is not null) pending.Push(node.extendedSeven);
+        }
+    }
+
+    /// <summary>
+    /// Fetches the deferred large values of a window of filter survivors in one call, decodes each
+    /// row with every column the query needs, and yields them in window order; then empties the
+    /// window. Without a fixed snapshot the fetch may have re-read a changed row, so the filter runs
+    /// again on the decoded row and a row that no longer passes is not returned (see
+    /// <see cref="DeferredLargeValueSurvivalColumns"/>).
+    /// </summary>
+    private static async IAsyncEnumerable<QueryResultRow> DecodeDeferredWindowAsync(
+        QueryPlan plan,
+        TableDescriptor table,
+        QueryFilterer queryFilterer,
+        List<ObjectIdValue> windowIds,
+        List<ReadOnlyMemory<byte>?> windowRows,
+        LargeValueFetch? projectionFetch,
+        RowEncoder.RowDecodeState decodeState,
+        [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken = default)
+    {
+        if (windowIds.Count == 0)
+            yield break;
+
+        ReadOnlyMemory<byte>?[] resolved = [.. windowRows];
+        ObjectIdValue[] ids = [.. windowIds];
+        windowIds.Clear();
+        windowRows.Clear();
+
+        await table.Store.ResolveLargeValuesAsync(plan.Ticket.TxnState, ids, resolved, projectionFetch, cancellationToken).ConfigureAwait(false);
+
+        bool refilter = plan.Ticket.TxnState.ReadTimestamp.IsNull();
+
+        for (int i = 0; i < ids.Length; i++)
+        {
+            if (resolved[i] is not { } data)
+                continue;
+
+            QueryRow row = await RowEncoder.DecodeToQueryRowAsync(
+                table.Schema, plan.Ticket.TxnState.TransactionId, ids[i], data, plan.Database.Options,
+                plan.ScanRequiredColumns, plan.TableSchemaVersion, decodeState).ConfigureAwait(false);
+
+            if (refilter && !await queryFilterer.MeetPlanFilterAsync(plan, row).ConfigureAwait(false))
+                continue;
+
+            yield return new QueryResultRow(ids[i], row);
         }
     }
 

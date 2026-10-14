@@ -131,6 +131,17 @@ says little about its memory. A scan, a batch read and a rewrite batch close at
 fetched. A single row that is larger than the bound is read alone. The setting changes memory use and
 the number of fetches only. It never changes a result.
 
+### Values only the result needs are fetched for surviving rows
+
+A full table scan with a filter reads an out-of-line value in two steps when the filter does not read
+that column. For `SELECT payload FROM events WHERE score > 90`, the scan fetches only the values the
+filter reads, applies the filter, and then fetches `payload` for the rows that passed, in windows of
+16 rows that double up to 512 and close at `large_value_resolve_batch_bytes`. A row the filter rejects
+never fetches its payload. The scan does this only when the filter calls no subquery and no volatile
+function, and every name in it is a column of the table. Under read committed the filter runs again on
+the final row, because the second fetch can find the row changed; a row that no longer passes is not
+returned.
+
 A setting change never alters an existing row. It decides the form of rows written after the change.
 
 ## Data written before this feature

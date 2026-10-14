@@ -476,6 +476,13 @@ internal sealed class QueryExecutor
     internal IAsyncEnumerable<QueryResultRow> ExecuteQueryPlan(QueryPlan plan)
         => ExecuteQueryPlanInternal(plan);
 
+    /// <summary>
+    /// Executes a pre-built join plan through the join executor. Used by EXPLAIN ANALYZE, which
+    /// builds the plan itself (see <see cref="QueryJoinExecutor.ExecuteJoinPlan"/>).
+    /// </summary>
+    internal IAsyncEnumerable<QueryResultRow> ExecuteJoinPlan(QueryPlan plan)
+        => queryJoinExecutor.ExecuteJoinPlan(plan);
+
     public IAsyncEnumerable<QueryResultRow> ExecuteJoinQuery(
         DatabaseDescriptor database,
         BoundSelectQuery bound,
@@ -1166,7 +1173,7 @@ internal sealed class QueryExecutor
         }
 
         CancellationToken cancellationToken = ticket.CancellationToken;
-        LargeValueFetch largeValues = LargeValueFetch.Columns(table.Schema, plan.ScanRequiredColumns);
+        LargeValueFetch? largeValues = LargeValueFetch.Columns(table.Schema, plan.ScanRequiredColumns);
 
         // A primary-key lookup may remember the row id the key resolved to last time and read the row
         // directly. Only the primary key qualifies: its value cannot change for the life of the row and

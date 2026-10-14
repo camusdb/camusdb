@@ -398,4 +398,114 @@ public sealed class TestGroupByStreaming : BaseTest
         foreach (QueryResultRow row in hashRows)
             Assert.AreEqual(6L, row.Row["cnt"].LongValue, "Hash: each amount group has 6 rows (3 statuses × 2 regions)");
     }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // F. ORDER BY over streaming groups
+    // ─────────────────────────────────────────────────────────────────────────
+
+    private static long[] Statuses(List<QueryResultRow> rows, string column = "status") =>
+        rows.Select(r => r.Row[column].LongValue).ToArray();
+
+    /// <summary>
+    /// Streaming aggregation emits its groups in index order, so ORDER BY on the grouping column in
+    /// that direction needs no sort. The plan has none, and the rows come back in order.
+    /// </summary>
+    [Test]
+    public async Task OrderByGroupColumn_MatchingTheIndex_HasNoSort()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupSalesAsync();
+
+        const string sql = "SELECT status, COUNT(*) AS cnt FROM sales GROUP BY status ORDER BY status";
+
+        string plan = await ExplainAsync(executor, database, dbname, "EXPLAIN " + sql);
+        List<QueryResultRow> rows = await RunSqlAsync(executor, database, dbname, sql);
+
+        Assert.That(plan, Does.Contain("streaming: true"), plan);
+        Assert.That(plan, Does.Not.Contain("sort("), plan);
+        Assert.AreEqual(new long[] { 1, 2, 3 }, Statuses(rows));
+        Assert.That(rows.Select(r => r.Row["cnt"].LongValue), Is.All.EqualTo(8L));
+    }
+
+    /// <summary>The opposite direction is not the index order: the sort stays and orders the groups.</summary>
+    [Test]
+    public async Task OrderByGroupColumn_AgainstTheIndexDirection_KeepsTheSort()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupSalesAsync();
+
+        const string sql = "SELECT status, COUNT(*) AS cnt FROM sales GROUP BY status ORDER BY status DESC";
+
+        string plan = await ExplainAsync(executor, database, dbname, "EXPLAIN " + sql);
+        List<QueryResultRow> rows = await RunSqlAsync(executor, database, dbname, sql);
+
+        Assert.That(plan, Does.Contain("sort("), plan);
+        Assert.AreEqual(new long[] { 3, 2, 1 }, Statuses(rows));
+    }
+
+    /// <summary>An ORDER BY on the output alias of the grouping column is the same order.</summary>
+    [Test]
+    public async Task OrderByAliasOfTheGroupColumn_HasNoSort()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupSalesAsync();
+
+        const string sql = "SELECT status AS s, COUNT(*) AS cnt FROM sales GROUP BY status ORDER BY s";
+
+        string plan = await ExplainAsync(executor, database, dbname, "EXPLAIN " + sql);
+        List<QueryResultRow> rows = await RunSqlAsync(executor, database, dbname, sql);
+
+        Assert.That(plan, Does.Not.Contain("sort("), plan);
+        Assert.AreEqual(new long[] { 1, 2, 3 }, Statuses(rows, "s"));
+    }
+
+    /// <summary>An ORDER BY on an aggregate is not the group order: the sort stays.</summary>
+    [Test]
+    public async Task OrderByAggregateAlias_KeepsTheSort()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupSalesAsync();
+
+        const string sql = "SELECT status, SUM(score) AS total FROM sales GROUP BY status ORDER BY total DESC";
+
+        string plan = await ExplainAsync(executor, database, dbname, "EXPLAIN " + sql);
+        List<QueryResultRow> rows = await RunSqlAsync(executor, database, dbname, sql);
+
+        Assert.That(plan, Does.Contain("sort("), plan);
+        Assert.AreEqual(new long[] { 3, 2, 1 }, Statuses(rows), "score is status × 10, so the totals order the statuses");
+    }
+
+    /// <summary>
+    /// With the sort gone, LIMIT stops pulling groups, and the streaming aggregation stops pulling
+    /// rows: the scan reads the first group and one row of the next, not the whole table.
+    /// </summary>
+    [Test]
+    public async Task OrderByGroupColumnWithLimit_StopsTheScanEarly()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupSalesAsync();
+
+        const string sql = "SELECT status, COUNT(*) AS cnt FROM sales GROUP BY status ORDER BY status LIMIT 1";
+
+        List<QueryResultRow> rows = await RunSqlAsync(executor, database, dbname, sql);
+        List<QueryResultRow> analyze = await RunSqlAsync(executor, database, dbname, "EXPLAIN (ANALYZE) " + sql);
+
+        Assert.AreEqual(new long[] { 1 }, Statuses(rows));
+        Assert.AreEqual(8L, rows[0].Row["cnt"].LongValue);
+
+        string plan = string.Join("\n", analyze.Select(r => $"{r.Row["node"].StrValue}({r.Row["detail"].StrValue}) read={r.Row["rows_read"]}"));
+        QueryResultRow scan = analyze.Last(r => r.Row["node"].StrValue != "plan-info");
+        Assert.That(plan, Does.Not.Contain("sort("), plan);
+        Assert.Less(scan.Row["rows_read"].LongValue, 24L, "the scan must stop after the first group\n" + plan);
+    }
+
+    /// <summary>A HAVING between the aggregation and the ORDER BY only removes groups, so the order holds.</summary>
+    [Test]
+    public async Task OrderByGroupColumnWithHaving_HasNoSort()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupSalesAsync();
+
+        const string sql = "SELECT status, SUM(score) AS total FROM sales GROUP BY status HAVING SUM(score) > 80 ORDER BY status";
+
+        string plan = await ExplainAsync(executor, database, dbname, "EXPLAIN " + sql);
+        List<QueryResultRow> rows = await RunSqlAsync(executor, database, dbname, sql);
+
+        Assert.That(plan, Does.Not.Contain("sort("), plan);
+        Assert.AreEqual(new long[] { 2, 3 }, Statuses(rows), "status 1 totals 80 and is removed by HAVING");
+    }
 }

@@ -118,6 +118,7 @@ internal sealed class JoinFragmentProbeExecutor
         RowLayout? qualifiedLayout = null;
         RowLayout? joinLayout = null;
         Dictionary<string, int>? rightOrdinalMap = null;
+        JoinRowPairer pairer = new();
         ColumnValue[] probeKeyScratch = new ColumnValue[probeKeyColumns.Length];
         List<int> matches = [];
         long scanned = 0, shipped = 0;
@@ -170,13 +171,13 @@ internal sealed class JoinFragmentProbeExecutor
                 {
                     joinLayout      ??= QueryRowMerger.BuildJoinLayout(buildRow, row, join.BuildAlias);
                     rightOrdinalMap ??= QueryRowMerger.BuildRightKeyOrdinalMap(row, join.BuildAlias, joinLayout);
-                    merged = QueryRowMerger.MergeRowsAsQueryRow(buildRow, row, joinLayout, rightOrdinalMap);
+                    merged = pairer.Pair(buildRow, row, joinLayout, rightOrdinalMap);
                 }
                 else
                 {
                     joinLayout      ??= QueryRowMerger.BuildJoinLayout(qualified, buildRow, join.BuildAlias);
                     rightOrdinalMap ??= QueryRowMerger.BuildRightKeyOrdinalMap(buildRow, join.BuildAlias, joinLayout);
-                    merged = QueryRowMerger.MergeRowsAsQueryRow(qualified, buildRow, joinLayout, rightOrdinalMap);
+                    merged = pairer.Pair(qualified, buildRow, joinLayout, rightOrdinalMap);
                 }
 
                 if (await services.Filterer.MeetWhereAsync(onPredicate, merged, ticket, database).ConfigureAwait(false))

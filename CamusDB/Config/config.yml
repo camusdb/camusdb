@@ -419,10 +419,11 @@ initial_partitions: 1      # Raft partition count (>= 1). Unset, it is 1 in stan
 # With spill_enabled false, every blocking operator (sort, GROUP BY, DISTINCT, hash join,
 # derived-table materialization, DELETE/UPDATE row buffers) stays in memory. With it true, an operator
 # writes sorted runs or partitioned rows to temp files under {data_dir}/tmp/spill/ once its buffer
-# exceeds spill_threshold_rows. Spill files are deleted when the operator finishes, is cancelled or
+# reaches spill_threshold_rows or spill_threshold_bytes. Spill files are deleted when the operator finishes, is cancelled or
 # fails; files left by a crash are removed at the next startup. See docs/spill-to-disk.md.
 # spill_enabled: false
 # spill_threshold_rows: 500000     # per-operator row cap before spilling; must be > 0
+# spill_threshold_bytes: 268435456 # per-operator cap on estimated bytes in memory before spilling (256 MiB); <= 0 = no byte cap
 # spill_merge_fan_in: 16           # run readers open at once in a k-way merge; must be > 0
 # spill_max_frame_bytes: 268435456 # largest spill record a reader accepts before it allocates (256 MiB); must be > 0
 # spill_max_total_bytes: 8589934592 # bytes all live spill files on this node may hold (8 GiB); <= 0 = no limit.

@@ -90,20 +90,45 @@ internal static class JoinEnumerator
         public required double[] FirstLeafCost { get; init; }
 
         /// <summary>
-        /// Cost of reading the leaf as the right input of a join. The join operators read a right
-        /// input with a full scan and apply its pushed filter in memory, so this is the row count
-        /// of the table, never the cost of an index leaf.
+        /// Cost of reading the leaf as the right input of a join. A hash or nested-loop join reads
+        /// its right table through the same index leaf the leaf would get as the first input
+        /// (<c>JoinQueryPlanner.AttachRightAccessPath</c>), so this is the same cost as
+        /// <see cref="FirstLeafCost"/>: the index cost when the pushed filter drives an index, the
+        /// table's row count otherwise.
         /// </summary>
         public required double[] RightScanCost { get; init; }
 
         /// <summary>Rows the leaf returns after its pushed filter.</summary>
         public required double[] LeafRows { get; init; }
 
-        /// <summary>Row estimate of each subset, from <see cref="EstimateSubsetRows"/>.</summary>
-        public required double[] SubsetRows { get; init; }
+        /// <summary>
+        /// Row estimate of each subset, from <see cref="EstimateSubsetRows"/>, or null when the
+        /// inputs serve a cache replay. The dynamic program reads every subset, so it gets the
+        /// dense array; a replay reads only the prefixes of one known order, so it computes those
+        /// alone through <see cref="RowsOf"/> instead of all 2^n.
+        /// </summary>
+        public required double[]? SubsetRows { get; init; }
+
+        /// <summary>The selectivity model <see cref="EstimateMaskRows"/> reads for one subset.</summary>
+        public required SelectivityModel Selectivity { get; init; }
 
         public required List<StepEdge>[] StepEdges { get; init; }
+
+        /// <summary>
+        /// The row estimate of the subset <paramref name="mask"/>: from the dense array when there is
+        /// one, otherwise computed alone. Both use <see cref="EstimateMaskRows"/>, so the value is the
+        /// same bit for bit.
+        /// </summary>
+        public double RowsOf(int mask) =>
+            SubsetRows is { } dense ? dense[mask] : EstimateMaskRows(mask, LeafRows, Selectivity, []);
     }
+
+    /// <summary>
+    /// The inputs of a subset row estimate that do not depend on the subset: the pair and edge
+    /// groups with their selectivities, and the column equivalence classes. Built once per plan by
+    /// <see cref="BuildSelectivityGroups"/>.
+    /// </summary>
+    private sealed record SelectivityModel(List<(ulong Mask, double Selectivity)> Groups, List<EquivalenceClass> Classes);
 
     /// <summary>
     /// Returns the cheapest left-deep join tree for <paramref name="root"/>, the filter that stays
@@ -170,7 +195,7 @@ internal static class JoinEnumerator
         StatisticsManager stats,
         CamusDBOptions options,
         Dictionary<string, ColumnValue>? clockValues = null) =>
-        EstimateSteps(graph, order, tree, ComputeCostInputs(graph, bound, pushdown, database, stats, options, clockValues));
+        EstimateSteps(graph, order, tree, ComputeCostInputs(graph, bound, pushdown, database, stats, options, clockValues, denseSubsets: false));
 
     private static IReadOnlyDictionary<JoinSource, JoinStepEstimate> EstimateSteps(
         JoinGraph graph,
@@ -198,7 +223,7 @@ internal static class JoinEnumerator
             int leaf = order[k];
             (bool equiKey, bool indexLookup) = StepOperators(inputs.StepEdges[leaf], (ulong)(prefix | (1 << leaf)));
 
-            double leftRows = inputs.SubsetRows[prefix];
+            double leftRows = inputs.RowsOf(prefix);
             double rightRows = inputs.LeafRows[leaf];
             double rightScanCost = inputs.RightScanCost[leaf];
 
@@ -206,7 +231,8 @@ internal static class JoinEnumerator
                 leftRows,
                 rightRows,
                 rightScanCost,
-                CostEstimator.SelectJoinStepOperator(leftRows, rightRows, rightScanCost, equiKey, indexLookup));
+                CostEstimator.SelectJoinStepOperator(leftRows, rightRows, rightScanCost, equiKey, indexLookup),
+                inputs.RowsOf(prefix | (1 << leaf)));
 
             prefix |= 1 << leaf;
         }
@@ -214,6 +240,11 @@ internal static class JoinEnumerator
         return steps;
     }
 
+    /// <param name="denseSubsets">
+    /// True to estimate every subset up front, for the dynamic program. A cache replay passes false:
+    /// it reads only the n prefixes of its order, which <see cref="CostInputs.RowsOf"/> then computes
+    /// one by one.
+    /// </param>
     private static CostInputs ComputeCostInputs(
         JoinGraph graph,
         BoundSelectQuery bound,
@@ -221,7 +252,8 @@ internal static class JoinEnumerator
         DatabaseDescriptor database,
         StatisticsManager stats,
         CamusDBOptions options,
-        Dictionary<string, ColumnValue>? clockValues = null)
+        Dictionary<string, ColumnValue>? clockValues = null,
+        bool denseSubsets = true)
     {
         int n = graph.LeafCount;
 
@@ -234,15 +266,20 @@ internal static class JoinEnumerator
             string alias = graph.Leaves[i].Alias;
             EstimateLeaf(alias, pushdown, bound, database, stats, out firstLeafCost[i], out long rows, options, clockValues);
             leafRows[i] = rows;
-            rightScanCost[i] = TableRows(FindTableDescriptor(alias, bound), database, stats);
+            rightScanCost[i] = firstLeafCost[i];
         }
+
+        (List<(ulong Mask, double Selectivity)> groups, List<EquivalenceClass> classes) =
+            BuildSelectivityGroups(graph, bound, database, stats);
+        SelectivityModel selectivity = new(groups, classes);
 
         return new CostInputs
         {
             FirstLeafCost = firstLeafCost,
             RightScanCost = rightScanCost,
             LeafRows = leafRows,
-            SubsetRows = EstimateSubsetRows(graph, leafRows, bound, database, stats),
+            SubsetRows = denseSubsets ? EstimateAllSubsets(n, leafRows, selectivity) : null,
+            Selectivity = selectivity,
             StepEdges = BuildStepEdges(graph, bound),
         };
     }
@@ -307,7 +344,7 @@ internal static class JoinEnumerator
                     (bool equiKey, bool indexLookup) = StepOperators(inputs.StepEdges[bit], (ulong)mask);
 
                     double total = cost[left] + CostEstimator.JoinStepCost(
-                        inputs.SubsetRows[left], inputs.LeafRows[bit], inputs.RightScanCost[bit], equiKey, indexLookup);
+                        inputs.SubsetRows![left], inputs.LeafRows[bit], inputs.RightScanCost[bit], equiKey, indexLookup);
 
                     if (total < cost[mask])
                     {
@@ -458,45 +495,60 @@ internal static class JoinEnumerator
         DatabaseDescriptor database,
         StatisticsManager? stats)
     {
-        int n = graph.LeafCount;
         (List<(ulong Mask, double Selectivity)> groups, List<EquivalenceClass> classes) =
             BuildSelectivityGroups(graph, bound, database, stats);
 
+        return EstimateAllSubsets(graph.LeafCount, leafRows, new SelectivityModel(groups, classes));
+    }
+
+    /// <summary>The estimate of every non-empty subset of <paramref name="n"/> leaves; index 0 is unused.</summary>
+    private static double[] EstimateAllSubsets(int n, IReadOnlyList<double> leafRows, SelectivityModel selectivity)
+    {
         double[] rows = new double[1 << n];
         List<long?> counts = [];
 
         for (int mask = 1; mask < rows.Length; mask++)
-        {
-            double estimate = 1.0;
-
-            for (int leaf = 0; leaf < n; leaf++)
-            {
-                if ((mask & (1 << leaf)) != 0)
-                    estimate *= leafRows[leaf];
-            }
-
-            foreach ((ulong groupMask, double selectivity) in groups)
-            {
-                if ((groupMask & ~(ulong)mask) == 0)
-                    estimate *= selectivity;
-            }
-
-            foreach (EquivalenceClass equivalence in classes)
-            {
-                counts.Clear();
-                foreach ((int leaf, long? distinct) in equivalence.Leaves)
-                {
-                    if ((mask & (1 << leaf)) != 0)
-                        counts.Add(distinct);
-                }
-
-                estimate *= ClassFactor(counts);
-            }
-
-            rows[mask] = estimate;
-        }
+            rows[mask] = EstimateMaskRows(mask, leafRows, selectivity, counts);
 
         return rows;
+    }
+
+    /// <summary>
+    /// The row estimate of one subset (see <see cref="EstimateSubsetRows"/>): the product of its
+    /// leaf rows, then the selectivity of each group inside it, then the factor of each column
+    /// class over its leaves. It reads no other subset, so any subset can be computed alone. The
+    /// order of the products is fixed; the dense array and a single-mask call give the same double.
+    /// <paramref name="counts"/> is scratch space, reused across calls by a caller that loops.
+    /// </summary>
+    private static double EstimateMaskRows(int mask, IReadOnlyList<double> leafRows, SelectivityModel selectivity, List<long?> counts)
+    {
+        double estimate = 1.0;
+
+        for (int leaf = 0; leaf < leafRows.Count; leaf++)
+        {
+            if ((mask & (1 << leaf)) != 0)
+                estimate *= leafRows[leaf];
+        }
+
+        foreach ((ulong groupMask, double groupSelectivity) in selectivity.Groups)
+        {
+            if ((groupMask & ~(ulong)mask) == 0)
+                estimate *= groupSelectivity;
+        }
+
+        foreach (EquivalenceClass equivalence in selectivity.Classes)
+        {
+            counts.Clear();
+            foreach ((int leaf, long? distinct) in equivalence.Leaves)
+            {
+                if ((mask & (1 << leaf)) != 0)
+                    counts.Add(distinct);
+            }
+
+            estimate *= ClassFactor(counts);
+        }
+
+        return estimate;
     }
 
     /// <summary>

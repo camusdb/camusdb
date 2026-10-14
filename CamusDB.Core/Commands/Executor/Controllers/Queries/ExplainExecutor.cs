@@ -208,18 +208,19 @@ internal sealed class ExplainExecutor
     /// Executes the query for real (draining the full cursor), collects runtime counters per
     /// physical plan node, then yields one result row per node with actual stats.
     ///
-    /// The result row schema extends the plain EXPLAIN schema with four actual columns:
-    /// <c>actual_rows INT64</c>, <c>actual_time_ms FLOAT64</c>, <c>kv_lookups INT64</c>,
-    /// <c>kv_scan_entries INT64</c>. <c>actual_time_ms</c> is the total wall-clock milliseconds
-    /// for the whole plan (reported on the root node only; zero for inner nodes).
+    /// The result row schema extends the plain EXPLAIN schema with five actual columns:
+    /// <c>actual_rows INT64</c>, <c>rows_read INT64</c>, <c>actual_time_ms FLOAT64</c>,
+    /// <c>kv_lookups INT64</c>, <c>kv_scan_entries INT64</c>. <c>actual_time_ms</c> is the total
+    /// wall-clock milliseconds for the whole plan, reported on the root node only (NULL elsewhere).
     ///
-    /// KNOWN LIMITATION — join plans are not supported:
-    /// <see cref="QueryExecutor.ExecuteQueryPlan"/> executes only single-table plan trees; join
-    /// node types (NestedLoopJoinNode, IndexNestedLoopJoinNode, HashJoinNode, MergeJoinNode,
-    /// DerivedTableScanNode) execute through <see cref="QueryJoinExecutor"/>, which does not
-    /// carry per-node runtime stats. Rather than produce misleading stats, this method throws
-    /// for join queries.
-    /// Full join instrumentation requires carrying stats through QueryJoinExecutor (deferred).
+    /// <para><b>Join plans</b> run through <see cref="QueryJoinExecutor.ExecuteJoinPlan"/>. A join
+    /// node's storage columns count the reads of its right side, which has no row of its own (see
+    /// <see cref="PlanNodeStats"/>); a merge join's ordered right input is added to its row. A join
+    /// row's detail also shows what the plan cannot: <c>ran=</c> when a hash join changed strategy at
+    /// run time, and <c>join-order-est-rows=</c>, the join-order search's estimate, next to the plan
+    /// annotation's <c>estimated_rows</c>. A broadcast probe adds one <c>broadcast-span</c> row per
+    /// span. The work after the last join (the residual filter, grouping, ordering, limit) has no
+    /// node in a join plan, so the root row is the last join and not the final result.</para>
     ///
     /// <para>Every check and the plan itself are done before this method returns, for the reason given
     /// on <see cref="ExplainQueryAsync"/>: the tables are resolved, and so authorized, in the flow that
@@ -242,12 +243,6 @@ internal sealed class ExplainExecutor
 
         QueryPlan plan = await BuildPlanAsync(database, selectAst, ticket).ConfigureAwait(false);
 
-        if (plan.BoundQuery is not null)
-            throw new CamusDBException(
-                CamusDBErrorCodes.InvalidInput,
-                "EXPLAIN (ANALYZE) is not yet supported for JOIN queries. " +
-                "Use plain EXPLAIN to inspect the join plan.");
-
         return RunAnalyzedPlan(plan);
     }
 
@@ -259,7 +254,15 @@ internal sealed class ExplainExecutor
     {
         plan.CollectRuntimeStats = true;
 
-        IAsyncEnumerable<QueryResultRow> cursor = queryExecutor.ExecuteQueryPlan(plan);
+        // A join plan (BoundQuery set) runs through the join executor, which does not allocate
+        // counters: they are attached here, before the cursor opens, to every node that will run.
+        bool isJoin = plan.BoundQuery is not null;
+        if (isJoin)
+            AttachJoinStats(plan.Root);
+
+        IAsyncEnumerable<QueryResultRow> cursor = isJoin
+            ? queryExecutor.ExecuteJoinPlan(plan)
+            : queryExecutor.ExecuteQueryPlan(plan);
 
         Stopwatch sw = Stopwatch.StartNew();
         await foreach (QueryResultRow _ in cursor.ConfigureAwait(false)) { }
@@ -280,17 +283,22 @@ internal sealed class ExplainExecutor
             PhysicalPlanNode? physNode = i < orderedNodes.Count ? orderedNodes[i] : null;
 
             // FilterNode is folded into the scan (ExecutionFilter); it never appears in StepNodes
-            // and has no Stats of its own. Attribute its actual_rows from the child scan's
+            // and has no counters of its own. Attribute its actual_rows from the child scan's
             // RowsEmitted — that count is already post-filter (the scan only yields passing rows).
-            // KV counters are 0: predicate evaluation adds no storage reads.
+            // KV counters are 0: predicate evaluation adds no storage reads. A filter can be the
+            // root, and the root alone carries the statement's time, so the time is kept.
             PlanNodeStats? stats;
-            bool isFilter = physNode is FilterNode;
-            if (isFilter)
-                stats = physNode?.Input?.Stats is { } childStats
-                    ? new PlanNodeStats { RowsEmitted = childStats.RowsEmitted }
+            if (physNode is FilterNode)
+                stats = physNode.Input?.Stats is { } childStats
+                    ? new PlanNodeStats { RowsEmitted = childStats.RowsEmitted, ElapsedMs = physNode.Stats?.ElapsedMs }
                     : null;
+            else if (physNode is not null && RightInputOf(physNode) is { } rightInput)
+                stats = WithRightInputReads(physNode.Stats, rightInput);
             else
                 stats = physNode?.Stats;
+
+            if (physNode is not null)
+                detail = AppendRuntimeDetail(detail, physNode, stats);
 
             yield return new QueryResultRow(default, new Dictionary<string, ColumnValue>(StringComparer.OrdinalIgnoreCase)
             {
@@ -312,15 +320,24 @@ internal sealed class ExplainExecutor
 
             // A gather that ran carries per-span actuals: one gather-span row per placement
             // span, so ANALYZE attributes rows to the span (and node) that produced them
-            // rather than reporting only the merged stream.
-            if (physNode is GatherNode { SpanExecutions: { } spanExecutions })
+            // rather than reporting only the merged stream. A broadcast probe does the same
+            // for the spans it probed, under the join that ran it.
+            GatherSpanExecution[]? spanExecutions = physNode switch
             {
+                GatherNode gather => gather.SpanExecutions,
+                _ => physNode?.Stats?.BroadcastSpans,
+            };
+
+            if (spanExecutions is not null)
+            {
+                string spanNode = physNode is GatherNode ? "gather-span" : "broadcast-span";
+
                 foreach (GatherSpanExecution span in spanExecutions)
                 {
                     yield return new QueryResultRow(default, new Dictionary<string, ColumnValue>(StringComparer.OrdinalIgnoreCase)
                     {
                         { "stage",           new ColumnValue(ColumnType.String, "analyze") },
-                        { "node",            new ColumnValue(ColumnType.String, "gather-span") },
+                        { "node",            new ColumnValue(ColumnType.String, spanNode) },
                         { "detail",          new ColumnValue(ColumnType.String, DescribeGatherSpan(span)) },
                         { "estimated_rows",  ColumnValue.Null },
                         { "estimated_cost",  ColumnValue.Null },
@@ -360,7 +377,94 @@ internal sealed class ExplainExecutor
     }
 
     /// <summary>
-    /// Renders one span's execution actuals for the ANALYZE <c>gather-span</c> row. The mode
+    /// Attaches a fresh <see cref="PlanNodeStats"/> to every node of a join plan that can run: the
+    /// left chain through <see cref="PhysicalPlanNode.Input"/>, and each right input that is a plan
+    /// node of its own (<see cref="RightInputOf"/>), a subtree off that chain. The plan tree is
+    /// rebuilt for every execution, so the counters belong to this statement only.
+    /// </summary>
+    private static void AttachJoinStats(PhysicalPlanNode root)
+    {
+        for (PhysicalPlanNode? node = root; node is not null; node = node.Input)
+        {
+            node.Stats = new();
+
+            if (RightInputOf(node) is { } rightInput)
+            {
+                for (PhysicalPlanNode? right = rightInput; right is not null; right = right.Input)
+                    right.Stats = new();
+            }
+        }
+    }
+
+    /// <summary>
+    /// The right input of a join that reads its right table through a plan node of its own (a merge
+    /// join's ordered input, or the index access path of a hash or nested-loop join); null otherwise.
+    /// </summary>
+    private static PhysicalPlanNode? RightInputOf(PhysicalPlanNode node) => node switch
+    {
+        MergeJoinNode merge => merge.RightPhysicalNode,
+        HashJoinNode hash => hash.RightPhysicalNode,
+        NestedLoopJoinNode nestedLoop => nestedLoop.RightPhysicalNode,
+        _ => null,
+    };
+
+    /// <summary>
+    /// The counters printed on a join row whose right table is read through a node of its own (a
+    /// merge join's ordered input, or the index access path of a hash or nested-loop join): the
+    /// join's own, plus the storage reads of that input. The plan walk does not render the input,
+    /// and a join without one charges its right-side reads to the join row, so these do the same.
+    /// Returns a copy; the nodes keep their own counters.
+    /// </summary>
+    private static PlanNodeStats? WithRightInputReads(PlanNodeStats? joinStats, PhysicalPlanNode rightInput)
+    {
+        if (joinStats is null)
+            return null;
+
+        PlanNodeStats combined = new()
+        {
+            RowsEmitted = joinStats.RowsEmitted,
+            RowsRead = joinStats.RowsRead,
+            KvPointLookups = joinStats.KvPointLookups,
+            KvScanEntries = joinStats.KvScanEntries,
+            ElapsedMs = joinStats.ElapsedMs,
+            RanAs = joinStats.RanAs,
+            BroadcastSpans = joinStats.BroadcastSpans,
+        };
+
+        for (PhysicalPlanNode? right = rightInput; right is not null; right = right.Input)
+        {
+            if (right.Stats is not { } rightStats)
+                continue;
+
+            combined.RowsRead += rightStats.RowsRead;
+            combined.KvPointLookups += rightStats.KvPointLookups;
+            combined.KvScanEntries += rightStats.KvScanEntries;
+        }
+
+        return combined;
+    }
+
+    /// <summary>
+    /// Appends what only execution knows to a node's detail: <c>ran=</c> when the operator ran a
+    /// different strategy than the plan names, and, on a join the join-order search costed,
+    /// <c>join-order-est-rows=</c>, the search's estimate of the join's output. The second is a plan
+    /// fact, but it is shown only here: it is useful only beside <c>actual_rows</c>, and plain
+    /// EXPLAIN output stays unchanged.
+    /// </summary>
+    private static string AppendRuntimeDetail(string detail, PhysicalPlanNode node, PlanNodeStats? stats)
+    {
+        if (stats?.RanAs is { } ranAs)
+            detail += ", ran=" + ranAs;
+
+        if (node.JoinOrderEstimatedRows is { } searchRows)
+            detail += ", join-order-est-rows=" + searchRows.ToString("0", System.Globalization.CultureInfo.InvariantCulture);
+
+        return detail;
+    }
+
+    /// <summary>
+    /// Renders one span's execution actuals for the ANALYZE <c>gather-span</c> and
+    /// <c>broadcast-span</c> rows. The mode
     /// distinguishes the three ways a span can run — local from the start, remote to
     /// completion, remote that failed and resumed locally — because "rows_delivered" alone
     /// cannot: after a fallback the delivered count mixes shipped rows with locally resumed

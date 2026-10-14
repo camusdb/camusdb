@@ -29,6 +29,13 @@ public sealed class NestedLoopJoinNode : PhysicalPlanNode
     /// <summary>Single-table predicate pushed into the right-side scan.</summary>
     public NodeAst? RightExecutionFilter { get; init; }
 
+    /// <summary>
+    /// The physical input that reads the right table, when the planner gave it its own access path
+    /// (an index range or IN-list scan driven by the pushed filter); null for a full scan with
+    /// <see cref="RightExecutionFilter"/>. The spool reads the right side through it.
+    /// </summary>
+    public PhysicalPlanNode? RightPhysicalNode { get; internal set; }
+
     public NestedLoopJoinNode(PhysicalPlanNode left, BoundJoinRightSource rightSource, NodeAst onPredicate)
     {
         Input = left;

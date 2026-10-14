@@ -778,9 +778,10 @@ public sealed class TestJoinQueryPlanner : BaseTest
     public async Task HashJoinCost_MuchLessThanNestedLoopForSameInputs()
     {
         // For two unindexed N-row inputs:
-        //   NestedLoop cost ≈ N × N   KV range-scan entries = N²
+        //   NestedLoop cost ≈ N KV range-scan entries (the right side is read once and replayed)
+        //                     + N × N in-memory pair comparisons at 0.1 each
         //   HashJoin cost  ≈ N + N   KV range-scan entries + N × 0.1 in-memory rows
-        //   For N = 1 000 → NLJ Total = 1 000 000,  HJ Total ≈ 2 100
+        //   For N = 1 000 → NLJ Total ≈ 101 000,  HJ Total ≈ 2 100
         //
         // Both plans are built with the same stats so the comparison is apples-to-apples.
         const long N = 1_000;
@@ -812,9 +813,13 @@ public sealed class TestJoinQueryPlanner : BaseTest
         Assert.Greater(nljCost, hashCost,
             $"NLJ cost ({nljCost}) must exceed hash-join cost ({hashCost}) for {N}×{N} inputs");
 
-        // For N=1000, NLJ ≈ 1_000_000 while hash join ≈ 2_100 — check the ratio is substantial.
-        Assert.Greater(nljCost / hashCost, 100,
-            $"Hash join should be at least 100× cheaper than NLJ at N={N}");
+        // For N=1000, NLJ ≈ 101_000 while hash join ≈ 2_100 — check the ratio is substantial.
+        Assert.Greater(nljCost / hashCost, 20,
+            $"Hash join should be at least 20× cheaper than NLJ at N={N}");
+
+        // The nested loop reads its right side once; the pairs are compared in memory.
+        Assert.AreEqual(N, nljNode.Cost.Value.KvRangeScanEntries, "the right side is read once");
+        Assert.AreEqual(N * N, nljNode.Cost.Value.InMemoryRows, "every left × right pair is compared");
 
         // Sanity: hash join cost fields
         Assert.AreEqual(N + N, hashJoin.Cost.Value.KvRangeScanEntries,

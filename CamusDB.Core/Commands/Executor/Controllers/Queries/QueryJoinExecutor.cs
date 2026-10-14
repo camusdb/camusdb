@@ -148,6 +148,22 @@ internal sealed class QueryJoinExecutor : IJoinNodeExecutor
         JoinQueryPlanner planner = new(services.Statistics, planCache, services.Options);
         QueryPlan plan = planner.GetPlan(database, bound, ticket);
 
+        return ExecuteJoinPlan(plan);
+    }
+
+    /// <summary>
+    /// Runs a join plan that is already built: the join tree, the filter that runs after the last
+    /// join, and the post-scan pipeline (grouping, ordering, projection, limit).
+    ///
+    /// <para>EXPLAIN (ANALYZE) enters here rather than through <see cref="ExecuteJoinQuery"/>, for two
+    /// reasons. It must build the plan before it returns its cursor, because resolving the tables
+    /// is where the caller's privileges are checked (see <c>ExplainExecutor.ExplainQueryAsync</c>);
+    /// and the counters it reads afterward live on the nodes of that one plan. When
+    /// <see cref="QueryPlan.CollectRuntimeStats"/> is set, the caller has already put a
+    /// <see cref="PlanNodeStats"/> on each node it will read; nothing here allocates them.</para>
+    /// </summary>
+    internal IAsyncEnumerable<QueryResultRow> ExecuteJoinPlan(QueryPlan plan)
+    {
         IAsyncEnumerable<QueryResultRow> cursor = ExecuteJoinTree(plan.Root, plan);
 
         if (plan.ExecutionFilter is not null)
@@ -155,7 +171,7 @@ internal sealed class QueryJoinExecutor : IJoinNodeExecutor
 
         cursor = QueryPostScanPipeline.Apply(
             plan.Database,
-            ticket,
+            plan.Ticket,
             cursor,
             services.Filterer,
             services.Sorter,
@@ -191,7 +207,34 @@ internal sealed class QueryJoinExecutor : IJoinNodeExecutor
         }
     }
 
-    private async IAsyncEnumerable<QueryResultRow> ExecuteJoinTree(
+    /// <summary>
+    /// Opens the cursor of one node of the join tree. Under EXPLAIN (ANALYZE) the node carries a
+    /// <see cref="PlanNodeStats"/>, and the cursor is wrapped to count the rows the node produced;
+    /// otherwise the node's stats are null and the cursor is returned as is.
+    /// </summary>
+    private IAsyncEnumerable<QueryResultRow> ExecuteJoinTree(
+        PhysicalPlanNode node,
+        QueryPlan plan)
+    {
+        IAsyncEnumerable<QueryResultRow> cursor = ExecuteJoinNode(node, plan);
+
+        return plan.CollectRuntimeStats && node.Stats is { } stats
+            ? CountRowsEmitted(cursor, stats)
+            : cursor;
+    }
+
+    private static async IAsyncEnumerable<QueryResultRow> CountRowsEmitted(
+        IAsyncEnumerable<QueryResultRow> source,
+        PlanNodeStats stats)
+    {
+        await foreach (QueryResultRow row in source.ConfigureAwait(false))
+        {
+            stats.RowsEmitted++;
+            yield return row;
+        }
+    }
+
+    private async IAsyncEnumerable<QueryResultRow> ExecuteJoinNode(
         PhysicalPlanNode node,
         QueryPlan plan)
     {
@@ -241,7 +284,7 @@ internal sealed class QueryJoinExecutor : IJoinNodeExecutor
 
             case IndexRangeScanNode { BoundSource: not null } rangeLeaf:
             {
-                await foreach (QueryResultRow row in leafScanner.ScanBoundTableByIndexRange(rangeLeaf, plan).ConfigureAwait(false))
+                await foreach (QueryResultRow row in leafScanner.ScanBoundTableByIndexRange(rangeLeaf, plan, rangeLeaf.Stats).ConfigureAwait(false))
                     yield return row;
 
                 yield break;
@@ -249,7 +292,7 @@ internal sealed class QueryJoinExecutor : IJoinNodeExecutor
 
             case IndexInListScanNode { BoundSource: not null } inListLeaf:
             {
-                await foreach (QueryResultRow row in leafScanner.ScanBoundTableByInList(inListLeaf, plan).ConfigureAwait(false))
+                await foreach (QueryResultRow row in leafScanner.ScanBoundTableByInList(inListLeaf, plan, inListLeaf.Stats).ConfigureAwait(false))
                     yield return row;
 
                 yield break;
@@ -258,7 +301,7 @@ internal sealed class QueryJoinExecutor : IJoinNodeExecutor
             case TableScanNode { BoundSource: not null, Source: TableScanSource.ForcedIndex, Index: not null } indexScanNode:
             {
                 await foreach (QueryResultRow row in leafScanner.ScanBoundTableByIndex(
-                    indexScanNode.BoundSource, indexScanNode.Index, indexScanNode.ExecutionFilter, plan).ConfigureAwait(false))
+                    indexScanNode.BoundSource, indexScanNode.Index, indexScanNode.ExecutionFilter, plan, indexScanNode.Stats).ConfigureAwait(false))
                     yield return row;
 
                 yield break;
@@ -270,7 +313,8 @@ internal sealed class QueryJoinExecutor : IJoinNodeExecutor
                     scanNode.BoundSource,
                     scanNode.ExecutionFilter,
                     plan,
-                    scanNode.RequiredColumns).ConfigureAwait(false))
+                    scanNode.RequiredColumns,
+                    scanNode.Stats).ConfigureAwait(false))
                     yield return row;
 
                 yield break;

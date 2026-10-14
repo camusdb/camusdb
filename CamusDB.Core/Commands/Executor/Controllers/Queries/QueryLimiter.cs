@@ -50,17 +50,30 @@ internal sealed class QueryLimiter
             offset = offsetValue.LongValue;
         }
 
+        // The input is lazy, so every row pulled from it is work done upstream — for a join, finding
+        // one more match can mean reading much of its right side. The loop therefore stops as soon as
+        // it has yielded the last row it needs, and LIMIT 0 pulls nothing, instead of pulling one row
+        // past the limit only to discard it.
+        if (limit is not null && limit.Value <= 0)
+            yield break;
+
+        // The position after the last row to return. It saturates: a LIMIT near long.MaxValue plus an
+        // OFFSET must not wrap to a negative end, which would stop the query after its first row.
+        long end = limit is null || (offset > 0 && limit.Value > long.MaxValue - offset)
+            ? long.MaxValue
+            : offset + limit.Value;
+
         long count = 0;
 
         await foreach (QueryResultRow resultRow in dataCursor)
         {
-            if (limit is not null && count >= offset + limit.Value)
-                yield break;
-
             if (count >= offset)
                 yield return resultRow;
 
             count++;
+
+            if (count >= end)
+                yield break;
         }
     }
 }

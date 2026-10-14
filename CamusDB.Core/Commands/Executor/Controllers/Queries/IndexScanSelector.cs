@@ -349,7 +349,7 @@ internal static class IndexScanSelector
         return false;
     }
 
-    private static QueryPlanStep? TrySelectOrderByScan(
+    internal static QueryPlanStep? TrySelectOrderByScan(
         TableDescriptor table,
         IReadOnlyList<QueryOrderBy>? orderBy)
     {
@@ -527,10 +527,23 @@ internal static class IndexScanSelector
         return prefix.SetEquals(distinctSet);
     }
 
+    /// <summary>
+    /// True when the rows <paramref name="scanStep"/> delivers are already in
+    /// <paramref name="orderBy"/> order, so the sort can be dropped.
+    ///
+    /// <para><paramref name="constantColumns"/> are the columns the query's top-level <c>=</c>
+    /// conjuncts fix to one value: every result row holds the same value there. Such a column orders
+    /// nothing, so it is skipped on both sides — an index column it names is passed over, and an
+    /// ORDER BY key on it is ignored. That is what lets <c>WHERE category = ? ORDER BY created</c> use
+    /// an index on <c>(category, created)</c> with no sort. A scan delivers its index order whether
+    /// or not the equality is applied in the scan bounds or in the residual filter, so the rule holds
+    /// either way. Null or empty means no column is known to be constant.</para>
+    /// </summary>
     internal static bool ScanSatisfiesOrderBy(
         TableDescriptor table,
         QueryPlanStep scanStep,
-        IReadOnlyList<QueryOrderBy>? orderBy)
+        IReadOnlyList<QueryOrderBy>? orderBy,
+        IReadOnlySet<string>? constantColumns = null)
     {
         if (orderBy is null || orderBy.Count == 0)
             return true;
@@ -539,11 +552,74 @@ internal static class IndexScanSelector
         {
             QueryPlanStepType.QueryFromIndex => true,
             QueryPlanStepType.RangeScanFromIndex => scanStep.Index is not null
-                && MatchOrderByPrefixLength(scanStep.Index, orderBy) >= orderBy.Count,
+                && IndexOrderSatisfies(scanStep.Index, orderBy, constantColumns),
             QueryPlanStepType.FullScanFromIndex => scanStep.Index is not null
-                && MatchOrderByPrefixLength(scanStep.Index, orderBy) >= orderBy.Count,
+                && IndexOrderSatisfies(scanStep.Index, orderBy, constantColumns),
             _ => false
         };
+    }
+
+    /// <summary>
+    /// Walks the ORDER BY keys against the index columns, skipping the columns in
+    /// <paramref name="constantColumns"/> on both sides (see <see cref="ScanSatisfiesOrderBy"/>).
+    /// Every other key must name the next index column, in that column's direction: there is no
+    /// backward scan to flip a direction.
+    /// </summary>
+    private static bool IndexOrderSatisfies(
+        TableIndexSchema index,
+        IReadOnlyList<QueryOrderBy> orderBy,
+        IReadOnlySet<string>? constantColumns)
+    {
+        if (constantColumns is null || constantColumns.Count == 0)
+            return MatchOrderByPrefixLength(index, orderBy) >= orderBy.Count;
+
+        int position = 0;
+
+        foreach (QueryOrderBy key in orderBy)
+        {
+            // A computed key is never provided by an index; its label is a diagnostic, not a column.
+            if (key.IsExpression)
+                return false;
+
+            string column = BareColumnName(key.ColumnName);
+
+            if (constantColumns.Contains(column))
+                continue;
+
+            while (position < index.Columns.Length && constantColumns.Contains(index.Columns[position]))
+                position++;
+
+            if (position >= index.Columns.Length)
+                return false;
+
+            if (!string.Equals(index.Columns[position], column, StringComparison.Ordinal)
+                || index.DirectionAt(position) != key.Type)
+                return false;
+
+            position++;
+        }
+
+        return true;
+    }
+
+    /// <summary>
+    /// The bare names of the columns that a top-level <c>=</c> conjunct with a constant fixes to
+    /// one value, or null when there is none. Feeds <see cref="ScanSatisfiesOrderBy"/>.
+    /// </summary>
+    internal static IReadOnlySet<string>? ConstantColumns(PredicateAnalysis analysis)
+    {
+        HashSet<string>? columns = null;
+
+        foreach (AnalyzedComparison comparison in analysis.IndexableComparisons)
+        {
+            if (comparison.Operator != "=")
+                continue;
+
+            columns ??= new HashSet<string>(StringComparer.Ordinal);
+            columns.Add(BareColumnName(comparison.ColumnName));
+        }
+
+        return columns;
     }
 
     private static int MatchOrderByPrefixLength(TableIndexSchema index, IReadOnlyList<QueryOrderBy> orderBy)

@@ -839,7 +839,7 @@ public sealed class TestJoinOrderConjunctGraph : BaseTest
     }
 
     [Test]
-    public async Task IndexedFilter_IsCheapOnlyOnTheFirstInput()
+    public async Task IndexedFilter_IsReadThroughTheIndexOnEitherInput()
     {
         CamusDBOptions options = DpOn with { CostBasedAccessPathEnabled = true };
         Db db = await CreateDb(options);
@@ -848,14 +848,31 @@ public sealed class TestJoinOrderConjunctGraph : BaseTest
         await Ddl(db, "CREATE INDEX b_f_idx ON b (f)");
         await Seed(db, ("a", 1000), ("b", 1_000_000));
 
-        // As the first input, b is read through its index on f. As the right input of a join it is
-        // read with a full scan of 1,000,000 rows, whatever its filter. Costed as an index read
-        // there, b would look cheap after a; read in full, b first is cheaper.
+        // b is read through its index on f whichever input it is: as the first input it is an index
+        // leaf, and as the right input of a hash or nested-loop join the join reads it through the
+        // same leaf. The search costs it that way in both positions, so the order is chosen for the
+        // reads the plan makes, and the full 1,000,000-row scan of b never happens.
         QueryPlan plan = await Plan(db, "SELECT a.id FROM a JOIN b ON a.x = b.x WHERE b.f = 5", options);
         string rendered = PlanRenderer.Render(plan);
 
-        CollectionAssert.AreEqual(new[] { "b", "a" }, JoinOrder(plan.Root), rendered);
-        Assert.AreEqual(1, FindNodes<IndexRangeScanNode>(plan.Root).Count, rendered);
+        int indexReads = FindNodes<IndexRangeScanNode>(plan.Root).Count;
+        foreach (PhysicalPlanNode join in JoinNodes(plan.Root))
+        {
+            PhysicalPlanNode? rightInput = join switch
+            {
+                HashJoinNode hash => hash.RightPhysicalNode,
+                NestedLoopJoinNode nestedLoop => nestedLoop.RightPhysicalNode,
+                _ => null,
+            };
+
+            if (rightInput is IndexRangeScanNode)
+                indexReads++;
+        }
+
+        Assert.AreEqual(1, indexReads, rendered);
+        Assert.That(rendered, Does.Contain("b_f_idx"), rendered);
+
+        await AssertBuiltOperatorsAreTheCostedOperators(db, "SELECT a.id FROM a JOIN b ON a.x = b.x WHERE b.f = 5", options);
     }
 
     [Test]
@@ -922,7 +939,22 @@ public sealed class TestJoinOrderConjunctGraph : BaseTest
             miss.ExecutionFilter is null ? null : PlanRenderer.RenderExpr(miss.ExecutionFilter),
             hit.ExecutionFilter is null ? null : PlanRenderer.RenderExpr(hit.ExecutionFilter));
 
+        // A cost-based replay estimates only the prefixes of the cached order, where the miss
+        // estimated every subset. The estimates of each join must still be the same, bit for bit:
+        // they choose the operators, and EXPLAIN (ANALYZE) prints them.
+        Assert.AreEqual(JoinOrderEstimates(miss.Root), JoinOrderEstimates(hit.Root),
+            "The hit must carry the join-order estimates of the miss.");
+
         return hit;
+    }
+
+    /// <summary>The join-order search estimate of each node of the left chain, root first.</summary>
+    private static List<double?> JoinOrderEstimates(PhysicalPlanNode root)
+    {
+        List<double?> estimates = [];
+        for (PhysicalPlanNode? node = root; node is not null; node = node.Input)
+            estimates.Add(node.JoinOrderEstimatedRows);
+        return estimates;
     }
 
     private static void AssertEachConjunctOnceAndInScope(JoinGraph graph, QuerySource tree, string sql)

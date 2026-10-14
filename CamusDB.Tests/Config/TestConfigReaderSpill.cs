@@ -179,6 +179,31 @@ public sealed class TestConfigReaderSpill
         Assert.That(resolved.SpillMaxTotalBytes, Is.EqualTo(expected));
     }
 
+    /// <summary>
+    /// <c>spill_threshold_bytes</c> is read and carried to the options. A value of zero or less is
+    /// accepted, because it is the documented way to remove the byte cap; the effective cap is then
+    /// unlimited.
+    /// </summary>
+    [TestCase("spill_threshold_bytes: 1048576", 1L << 20, 1L << 20)]
+    [TestCase("spill_threshold_bytes: 0", 0L, long.MaxValue)]
+    [TestCase("spill_threshold_bytes: -1", -1L, long.MaxValue)]
+    public void SpillThresholdBytes_ReadAndResolved(string yml, long expected, long effective)
+    {
+        CamusDBOptions resolved = ConfigResolver.Resolve(new ConfigReader().Read(yml));
+
+        Assert.That(resolved.SpillThresholdBytes, Is.EqualTo(expected));
+        Assert.That(resolved.SpillEffectiveThresholdBytes, Is.EqualTo(effective));
+    }
+
+    /// <summary>When <c>spill_threshold_bytes</c> is absent, the options keep the 256 MiB default.</summary>
+    [Test]
+    public void SpillThresholdBytes_Omitted_DefaultsTo256MiB()
+    {
+        CamusDBOptions resolved = ConfigResolver.Resolve(new ConfigReader().Read("mode: standalone"));
+
+        Assert.That(resolved.SpillThresholdBytes, Is.EqualTo(256L * 1024 * 1024));
+    }
+
     /// <summary>When <c>spill_max_total_bytes</c> is absent, the options keep the 8 GiB default.</summary>
     [Test]
     public void SpillMaxTotalBytes_Omitted_DefaultsToEightGiB()

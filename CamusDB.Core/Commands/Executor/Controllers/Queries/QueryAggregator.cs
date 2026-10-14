@@ -62,9 +62,10 @@ internal sealed class QueryAggregator
     /// <summary>
     /// Aggregates grouped rows. When <see cref="context.Options.SpillEnabled"/> is <c>false</c>
     /// (the default), all groups are accumulated in a single in-memory dictionary — same as the
-    /// original implementation. When spilling is enabled the path buffers input rows until the
-    /// buffer reaches <see cref="context.Options.SpillEffectiveThreshold"/>; if overflow occurs
-    /// the rows are partitioned into <see cref="context.Options.SpillMergeFanIn"/> spill files by
+    /// original implementation. When spilling is enabled rows fold into accumulators until the
+    /// distinct group count reaches <see cref="context.Options.SpillEffectiveThreshold"/> or the
+    /// estimated group bytes reach <see cref="CamusDBOptions.SpillEffectiveThresholdBytes"/>; if
+    /// overflow occurs the remaining rows are partitioned into <see cref="context.Options.SpillMergeFanIn"/> spill files by
     /// group-key hash, and each partition is then aggregated in-memory independently. Because
     /// the hash is deterministic, all rows that share a group key land in the same partition and
     /// the per-partition result is identical to the global result.
@@ -77,7 +78,7 @@ internal sealed class QueryAggregator
         [EnumeratorCancellation] CancellationToken ct = default)
     {
         IReadOnlyList<NodeAst> groupBy = ticket.GroupBy!;
-        List<AnalyzedProjection> projections = AnalyzeGroupedWorkspace(ticket);
+        AggregateLayout layout = AggregateLayout.Build(AnalyzeGroupedWorkspace(ticket));
 
         if (!context.Options.SpillEnabled)
         {
@@ -90,7 +91,7 @@ internal sealed class QueryAggregator
                 ReadOnlySpan<ColumnValue> groupKey = keyBuilder.BuildInto(groupBy, resultRow.Row, ticket, keyScratch);
                 if (!groupLookup.TryGetValue(groupKey, out GroupAccumulator? accumulator))
                 {
-                    accumulator = new GroupAccumulator(projections);
+                    accumulator = new GroupAccumulator(layout);
                     groupLookup[groupKey] = accumulator;
                 }
                 accumulator.AddRow(resultRow.Row, ticket);
@@ -101,7 +102,7 @@ internal sealed class QueryAggregator
         }
 
         await foreach (QueryResultRow row in AggregateGroupedWithPossibleSpill(
-            groupBy, projections, ticket, dataCursor, stats, context, ct).ConfigureAwait(false))
+            groupBy, layout, ticket, dataCursor, stats, context, ct).ConfigureAwait(false))
             yield return row;
     }
 
@@ -118,13 +119,13 @@ internal sealed class QueryAggregator
         IReadOnlyList<NodeAst> groupBy = ticket.GroupBy
             ?? throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation,
                 "Streaming GROUP BY requires GROUP BY expressions");
-        List<AnalyzedProjection> projections = AnalyzeGroupedWorkspace(ticket);
-        return StreamingAggregateRows(groupBy, projections, ticket, dataCursor, context, context.CancellationToken);
+        AggregateLayout layout = AggregateLayout.Build(AnalyzeGroupedWorkspace(ticket));
+        return StreamingAggregateRows(groupBy, layout, ticket, dataCursor, context, context.CancellationToken);
     }
 
     private static async IAsyncEnumerable<QueryResultRow> StreamingAggregateRows(
         IReadOnlyList<NodeAst> groupBy,
-        List<AnalyzedProjection> projections,
+        AggregateLayout layout,
         QueryTicket ticket,
         IAsyncEnumerable<QueryResultRow> dataCursor,
         QueryExecutionContext context,
@@ -147,7 +148,7 @@ internal sealed class QueryAggregator
                     yield return currentAccumulator.ToResultRow(ticket);
 
                 currentKey = rowKey;
-                currentAccumulator = new GroupAccumulator(projections);
+                currentAccumulator = new GroupAccumulator(layout);
             }
 
             currentAccumulator!.AddRow(resultRow.Row, ticket);
@@ -177,13 +178,16 @@ internal sealed class QueryAggregator
     /// <para>The <see cref="SpillScope"/> is disposed in a <c>finally</c> block so spill files are
     /// cleaned up on completion, cancellation, and exception.</para>
     ///
-    /// <para><b>Bounded by group count, not bytes.</b> Peak state is one accumulator per distinct group
-    /// up to the threshold, which is strictly less than the raw rows the previous shape held for the
-    /// same threshold; a wide group key is not separately budgeted, matching the recursive level.</para>
+    /// <para><b>Bounded by group count and by bytes.</b> A new group is admitted only while the group
+    /// count is under the row cap and the estimated group bytes (<see cref="AggregateLayout.GroupBytes"/>:
+    /// the key plus the group's state) are under <see cref="CamusDBOptions.SpillEffectiveThresholdBytes"/>,
+    /// so a wide group key spills earlier than a narrow one. The recursive level applies the same two
+    /// caps. The carried accumulators stay in memory until their partition runs, and a state that grows
+    /// inside one group is charged at its starting size only.</para>
     /// </summary>
     private static async IAsyncEnumerable<QueryResultRow> AggregateGroupedWithPossibleSpill(
         IReadOnlyList<NodeAst> groupBy,
-        List<AnalyzedProjection> projections,
+        AggregateLayout layout,
         QueryTicket ticket,
         IAsyncEnumerable<QueryResultRow> dataCursor,
         StatisticsManager? stats,
@@ -191,6 +195,8 @@ internal sealed class QueryAggregator
         [EnumeratorCancellation] CancellationToken ct)
     {
         int threshold = context.Options.SpillEffectiveThreshold;
+        long byteThreshold = context.Options.SpillEffectiveThresholdBytes;
+        long groupBytes = 0;
         int K = context.Options.SpillMergeFanIn;
 
         SpillScope? scope = null;
@@ -221,11 +227,13 @@ internal sealed class QueryAggregator
                     continue;
                 }
 
-                // A new distinct group: the threshold is checked before it is admitted, so the group
-                // count never exceeds the cap — the same admission rule the partition level applies.
-                if (groups.Count < threshold)
+                // A new distinct group: the thresholds are checked before it is admitted, so the group
+                // count never exceeds the row cap and the group bytes pass the byte cap by at most one
+                // group — the same admission rule the partition level applies.
+                if (groups.Count < threshold && groupBytes < byteThreshold)
                 {
-                    accumulator = new GroupAccumulator(projections);
+                    groupBytes += layout.GroupBytes(key);
+                    accumulator = new GroupAccumulator(layout);
                     lookup[key] = accumulator;
                     accumulator.AddRow(row.Row, ticket);
                     continue;
@@ -264,7 +272,7 @@ internal sealed class QueryAggregator
                 for (int i = 0; i < K; i++)
                 {
                     await foreach (QueryResultRow row in AggregatePartitionAsync(
-                        paths![i], carried![i], projections, groupBy, ticket, scope!, depth: 0, seed: 0, stats, context, ct).ConfigureAwait(false))
+                        paths![i], carried![i], layout, groupBy, ticket, scope!, depth: 0, seed: 0, stats, context, ct).ConfigureAwait(false))
                         yield return row;
                 }
             }
@@ -371,7 +379,8 @@ internal sealed class QueryAggregator
     /// </para>
     ///
     /// <para><b>Overflow works exactly as it does at level 0.</b> When admitting a new group would push
-    /// the group count past <see cref="context.Options.SpillEffectiveThreshold"/> and
+    /// the group count past <see cref="context.Options.SpillEffectiveThreshold"/>, or the group bytes
+    /// (carried groups included) are already at <see cref="CamusDBOptions.SpillEffectiveThresholdBytes"/>, and
     /// <paramref name="depth"/> is below <see cref="MaxGroupByRecursionDepth"/>, this level starts its
     /// own spill: the accumulators built so far are routed to sub-partitions under
     /// <paramref name="seed"/>+1 (so keys that collided here are separated), and only the rows from
@@ -383,7 +392,7 @@ internal sealed class QueryAggregator
     private static async IAsyncEnumerable<QueryResultRow> AggregatePartitionAsync(
         string path,
         IReadOnlyList<KeyValuePair<CompositeColumnValue, GroupAccumulator>> carriedGroups,
-        List<AnalyzedProjection> projections,
+        AggregateLayout layout,
         IReadOnlyList<NodeAst> groupBy,
         QueryTicket ticket,
         SpillScope scope,
@@ -394,11 +403,16 @@ internal sealed class QueryAggregator
         [EnumeratorCancellation] CancellationToken ct)
     {
         int threshold = context.Options.SpillEffectiveThreshold;
+        long byteThreshold = context.Options.SpillEffectiveThresholdBytes;
+        long groupBytes = 0;
 
         Dictionary<CompositeColumnValue, GroupAccumulator> groups = new(GroupKeyComparer.Instance);
 
         for (int i = 0; i < carriedGroups.Count; i++)
+        {
             groups[carriedGroups[i].Key] = carriedGroups[i].Value;
+            groupBytes += layout.GroupBytes(carriedGroups[i].Key.Values);
+        }
 
         SpillRunReader? reader = await SpillRunReader.OpenAsync(path, context.Options.SpillMaxFrameBytes, ct: ct).ConfigureAwait(false);
 
@@ -442,9 +456,10 @@ internal sealed class QueryAggregator
                     continue;
                 }
 
-                if (depth >= MaxGroupByRecursionDepth || groups.Count < threshold)
+                if (depth >= MaxGroupByRecursionDepth || (groups.Count < threshold && groupBytes < byteThreshold))
                 {
-                    accumulator = new GroupAccumulator(projections);
+                    groupBytes += layout.GroupBytes(key);
+                    accumulator = new GroupAccumulator(layout);
                     partitionLookup[key] = accumulator;
                     accumulator.AddRow(row.Row, ticket);
                     continue;
@@ -486,7 +501,7 @@ internal sealed class QueryAggregator
         for (int i = 0; i < K; i++)
         {
             await foreach (QueryResultRow row in AggregatePartitionAsync(
-                subPaths![i], subCarried![i], projections, groupBy, ticket, scope, depth + 1, newSeed, stats, context, ct).ConfigureAwait(false))
+                subPaths![i], subCarried![i], layout, groupBy, ticket, scope, depth + 1, newSeed, stats, context, ct).ConfigureAwait(false))
                 yield return row;
         }
     }
@@ -672,7 +687,7 @@ internal sealed class QueryAggregator
         if (ticket.Having is not null)
             QueryHavingWorkspace.AddHiddenProjections(ticket.Having, ticket, projections, outputNames);
 
-        GroupAccumulator accumulator = new(projections);
+        GroupAccumulator accumulator = new(AggregateLayout.Build(projections));
 
         await foreach (QueryResultRow resultRow in dataCursor.ConfigureAwait(false))
             accumulator.AddRow(resultRow.Row, ticket);
@@ -921,80 +936,174 @@ internal sealed class QueryAggregator
     }
 
     /// <summary>
+    /// What one aggregate call is: its node, its kind, and whether it is <c>COUNT(*)</c>. Decided
+    /// once per query by <see cref="AggregateLayout"/>, not once per group.
+    /// </summary>
+    private sealed record AggregateDescriptor(NodeAst FuncCall, QueryAggregationType Type, bool IsCountAll);
+
+    /// <summary>
+    /// The part of grouped aggregation that is the same for every group, analyzed once per query:
+    /// the distinct aggregate calls, which one each projection reads, the placeholders of each
+    /// compound projection, and the plain columns a compound projection reads.
+    ///
+    /// <para>Before it existed, every new group repeated this work: it compared every aggregate
+    /// call with every other (<see cref="QueryAstComparer.AreEquivalent"/>) to share states,
+    /// resolved each call's kind from its name, and walked each compound expression for its free
+    /// columns. With many groups that work dominated the per-group cost, and none of it depends
+    /// on the group. A group now allocates only its mutable states and the values it captures.</para>
+    ///
+    /// <para>Immutable after <see cref="Build"/>, so the spill path, which carries accumulators
+    /// between partitions, and every group of one query share one instance.</para>
+    /// </summary>
+    private sealed class AggregateLayout
+    {
+        /// <summary>One entry of the group table (hash, next, key and value references) plus its bucket.</summary>
+        private const int GroupTableEntryBytes = 32;
+
+        /// <summary>A <see cref="GroupAccumulator"/> object and its fields.</summary>
+        private const int AccumulatorBytes = 48;
+
+        /// <summary>The accumulator's captured-value dictionary before entries.</summary>
+        private const int CapturedDictionaryBytes = 128;
+
+        /// <summary>One captured-value dictionary entry.</summary>
+        private const int CapturedEntryBytes = 32;
+
+        /// <summary>One <see cref="AggregateMetricState"/> with its inline sum and average accumulators.</summary>
+        private const int AggregateStateBytes = 256;
+
+        public required List<AnalyzedProjection> Projections { get; init; }
+
+        /// <summary>The distinct aggregate calls; structurally equal calls share one entry.</summary>
+        public required AggregateDescriptor[] Aggregates { get; init; }
+
+        /// <summary>For each projection, the aggregate a bare-aggregate projection reads, else -1.</summary>
+        public required int[] ProjectionAggregate { get; init; }
+
+        /// <summary>For each projection, the (placeholder, aggregate) pairs of a compound projection; empty otherwise.</summary>
+        public required (string Placeholder, int Aggregate)[][] CompoundSlots { get; init; }
+
+        /// <summary>For each projection, the plain column references of a compound projection; empty otherwise.</summary>
+        public required NodeAst[][] CompoundFreeColumns { get; init; }
+
+        /// <summary>
+        /// Estimated heap bytes of one group's state, without its key: the group-table entry, the
+        /// accumulator with its captured-value dictionary, and one state per distinct aggregate. A
+        /// spilling GROUP BY charges this plus the key (<see cref="GroupBytes"/>) when it admits a
+        /// group. A state that grows with its rows (a MIN or MAX over strings) is charged at its
+        /// starting size only.
+        /// </summary>
+        public required long GroupStateBytes { get; init; }
+
+        /// <summary>Estimated heap bytes of one admitted group with key <paramref name="key"/>.</summary>
+        public long GroupBytes(ReadOnlySpan<ColumnValue> key) => RowMemoryEstimator.EstimateKey(key) + GroupStateBytes;
+
+        public static AggregateLayout Build(List<AnalyzedProjection> projections)
+        {
+            List<AggregateDescriptor> aggregates = [];
+            int[] projectionAggregate = new int[projections.Count];
+            var compoundSlots = new (string, int)[projections.Count][];
+            var freeColumns = new NodeAst[projections.Count][];
+
+            for (int i = 0; i < projections.Count; i++)
+            {
+                AnalyzedProjection projection = projections[i];
+                projectionAggregate[i] = -1;
+                compoundSlots[i] = [];
+                freeColumns[i] = [];
+
+                if (projection.IsAggregate)
+                {
+                    projectionAggregate[i] = IndexOf(projection.FuncCall!, aggregates);
+                }
+                else if (projection.IsCompound)
+                {
+                    var slots = new (string, int)[projection.CompoundAggregates!.Count];
+                    for (int j = 0; j < slots.Length; j++)
+                    {
+                        (NodeAst aggregateNode, string placeholder) = projection.CompoundAggregates[j];
+                        slots[j] = (placeholder, IndexOf(aggregateNode, aggregates));
+                    }
+
+                    compoundSlots[i] = slots;
+
+                    List<NodeAst> columns = [];
+                    QueryExpressionClassifier.CollectNonAggregateColumnRefs(projection.Expression, columns);
+                    freeColumns[i] = [.. columns];
+                }
+            }
+
+            int capturedValues = 0;
+            for (int i = 0; i < projections.Count; i++)
+            {
+                if (!projections[i].IsAggregate)
+                    capturedValues += projections[i].IsCompound ? freeColumns[i].Length : 1;
+            }
+
+            return new AggregateLayout
+            {
+                Projections = projections,
+                Aggregates = [.. aggregates],
+                ProjectionAggregate = projectionAggregate,
+                CompoundSlots = compoundSlots,
+                CompoundFreeColumns = freeColumns,
+                GroupStateBytes = GroupTableEntryBytes
+                    + AccumulatorBytes
+                    + CapturedDictionaryBytes + (long)capturedValues * (CapturedEntryBytes + RowMemoryEstimator.ColumnValueBytes)
+                    + RowMemoryEstimator.ArrayHeaderBytes + (long)aggregates.Count * (RowMemoryEstimator.ReferenceBytes + AggregateStateBytes),
+            };
+        }
+
+        /// <summary>
+        /// The index of the aggregate structurally equal to <paramref name="aggregateNode"/>, added
+        /// when there is none. O(n) in the aggregate count, which is small, and paid once per query.
+        /// </summary>
+        private static int IndexOf(NodeAst aggregateNode, List<AggregateDescriptor> aggregates)
+        {
+            for (int i = 0; i < aggregates.Count; i++)
+            {
+                if (QueryAstComparer.AreEquivalent(aggregates[i].FuncCall, aggregateNode))
+                    return i;
+            }
+
+            aggregates.Add(new AggregateDescriptor(aggregateNode, GetAggregationType(aggregateNode), IsCountAll(aggregateNode)));
+            return aggregates.Count - 1;
+        }
+    }
+
+    /// <summary>
     /// Accumulates rows for one group (or the global no-GROUP-BY aggregate). Handles three
     /// projection kinds: plain (group-key columns, captured once), bare aggregate (one
-    /// <see cref="AggregateMetricState"/> per projection), and compound aggregate
+    /// <see cref="AggregateMetricState"/> per distinct aggregate), and compound aggregate
     /// (one <see cref="AggregateMetricState"/> per extracted sub-aggregate; the rewritten
     /// scalar expression is evaluated at finalize time against the resolved placeholder values).
     ///
     /// Identical aggregate sub-expressions across projections share one <see cref="AggregateMetricState"/>
-    /// instance (compared structurally via <see cref="QueryAstComparer.AreEquivalent"/>), so each
+    /// (the shared <see cref="AggregateLayout"/> decided which ones once per query), so each
     /// distinct aggregate is accumulated exactly once per row regardless of how many projections
     /// reference it.
     /// </summary>
     private sealed class GroupAccumulator
     {
-        private readonly List<AnalyzedProjection> projections;
+        private readonly AggregateLayout layout;
         private readonly Dictionary<string, ColumnValue> outputValues = new(StringComparer.OrdinalIgnoreCase);
-        private readonly AggregateMetricState?[] aggregateStates;
-        // Flat list: (projectionIndex, placeholder, state) for each sub-aggregate in each compound projection.
-        private readonly (int ProjIdx, string Placeholder, AggregateMetricState State)[] compoundStates;
-        // Deduplicated list of every unique state — each is fed exactly once per row in AddRow.
-        private readonly AggregateMetricState[] allUniqueStates;
+        private readonly AggregateMetricState[] states;
         private bool capturedGroupValues;
 
-        public GroupAccumulator(List<AnalyzedProjection> projections)
+        public GroupAccumulator(AggregateLayout layout)
         {
-            this.projections = projections;
-            aggregateStates = new AggregateMetricState?[projections.Count];
+            this.layout = layout;
+            states = new AggregateMetricState[layout.Aggregates.Length];
 
-            // Shared pool: when two projections reference structurally identical aggregates
-            // they share one AggregateMetricState so each row is accumulated only once.
-            List<(NodeAst Node, AggregateMetricState State)> sharedPool = [];
-            List<(int, string, AggregateMetricState)> compoundList = [];
-
-            for (int i = 0; i < projections.Count; i++)
-            {
-                if (projections[i].IsAggregate)
-                    aggregateStates[i] = GetOrCreateState(projections[i].FuncCall!, sharedPool);
-                else if (projections[i].IsCompound)
-                {
-                    foreach (var (aggregateNode, placeholder) in projections[i].CompoundAggregates!)
-                        compoundList.Add((i, placeholder, GetOrCreateState(aggregateNode, sharedPool)));
-                }
-            }
-
-            compoundStates = [.. compoundList];
-
-            allUniqueStates = new AggregateMetricState[sharedPool.Count];
-            for (int i = 0; i < sharedPool.Count; i++)
-                allUniqueStates[i] = sharedPool[i].State;
-        }
-
-        /// <summary>
-        /// Returns the existing <see cref="AggregateMetricState"/> from <paramref name="pool"/>
-        /// whose aggregate node is structurally equivalent to <paramref name="aggregateNode"/>,
-        /// or creates and registers a new one if none matches. O(n) in pool size; n is
-        /// typically 1-3 aggregates per group accumulator.
-        /// </summary>
-        private static AggregateMetricState GetOrCreateState(
-            NodeAst aggregateNode,
-            List<(NodeAst Node, AggregateMetricState State)> pool)
-        {
-            foreach (var (node, state) in pool)
-            {
-                if (QueryAstComparer.AreEquivalent(node, aggregateNode))
-                    return state;
-            }
-            AggregateMetricState newState = new(aggregateNode);
-            pool.Add((aggregateNode, newState));
-            return newState;
+            for (int i = 0; i < states.Length; i++)
+                states[i] = new AggregateMetricState(layout.Aggregates[i]);
         }
 
         public void AddRow(IReadOnlyDictionary<string, ColumnValue> row, QueryTicket ticket)
         {
             if (!capturedGroupValues)
             {
+                List<AnalyzedProjection> projections = layout.Projections;
                 QueryRow? qr = row as QueryRow;
                 for (int i = 0; i < projections.Count; i++)
                 {
@@ -1006,9 +1115,7 @@ internal sealed class QueryAggregator
                         // Capture values for each non-aggregate column reference in the compound
                         // expression. These are the free variables the rewritten expression will
                         // look up by name in the synthetic row built by ToResultRow.
-                        List<NodeAst> colRefs = [];
-                        QueryExpressionClassifier.CollectNonAggregateColumnRefs(projections[i].Expression, colRefs);
-                        foreach (NodeAst colRef in colRefs)
+                        foreach (NodeAst colRef in layout.CompoundFreeColumns[i])
                         {
                             string colName = colRef.yytext!;
                             if (outputValues.ContainsKey(colName))
@@ -1029,15 +1136,15 @@ internal sealed class QueryAggregator
                 capturedGroupValues = true;
             }
 
-            // Each unique state is fed exactly once, even when shared across projections.
-            foreach (AggregateMetricState state in allUniqueStates)
+            // Each distinct aggregate is fed exactly once, even when several projections read it.
+            foreach (AggregateMetricState state in states)
                 state.AddRow(row, ticket);
         }
 
         /// <summary>
         /// Finalizes all aggregate states, evaluates compound projections' rewritten
         /// scalar expressions against the resolved placeholder values, and returns
-        /// the complete output row.
+        /// the complete output row. An aggregate that several projections read is finalized once.
         ///
         /// The synthetic row is evaluated with <c>rowNameResolver: null</c> because the
         /// placeholder names (null-char prefix) would cause <see cref="QueryRowNameResolver"/>
@@ -1048,24 +1155,23 @@ internal sealed class QueryAggregator
         /// </summary>
         public QueryResultRow ToResultRow(QueryTicket ticket)
         {
+            List<AnalyzedProjection> projections = layout.Projections;
             Dictionary<string, ColumnValue> row = new(outputValues, StringComparer.OrdinalIgnoreCase);
+            ColumnValue?[] finalized = new ColumnValue?[states.Length];
 
             for (int i = 0; i < projections.Count; i++)
             {
                 if (projections[i].IsAggregate)
                 {
-                    row[projections[i].OutputName] = aggregateStates[i]!.FinalizeValue();
+                    row[projections[i].OutputName] = Finalized(layout.ProjectionAggregate[i]);
                 }
                 else if (projections[i].IsCompound)
                 {
                     // Build a synthetic row that merges the already-captured group-key values
                     // with the finalized placeholder values for this projection's sub-aggregates.
                     Dictionary<string, ColumnValue> syntheticRow = new(row, StringComparer.OrdinalIgnoreCase);
-                    foreach (var (projIdx, placeholder, state) in compoundStates)
-                    {
-                        if (projIdx == i)
-                            syntheticRow[placeholder] = state.FinalizeValue();
-                    }
+                    foreach ((string placeholder, int aggregate) in layout.CompoundSlots[i])
+                        syntheticRow[placeholder] = Finalized(aggregate);
 
                     row[projections[i].OutputName] = SqlExecutor.EvalExpr(
                         projections[i].RewrittenExpression!,
@@ -1076,6 +1182,8 @@ internal sealed class QueryAggregator
             }
 
             return new QueryResultRow(default(ObjectIdValue), row);
+
+            ColumnValue Finalized(int aggregate) => finalized[aggregate] ??= states[aggregate].FinalizeValue();
         }
     }
 
@@ -1280,6 +1388,7 @@ internal sealed class QueryAggregator
     {
         private readonly NodeAst funcCall;
         private readonly QueryAggregationType aggregationType;
+        private readonly bool isCountAll;
         private long countAll;
         private long countNonNull;
         private SumAccumulator sum;
@@ -1287,10 +1396,12 @@ internal sealed class QueryAggregator
         private ColumnValue? min;
         private ColumnValue? max;
 
-        public AggregateMetricState(NodeAst funcCall)
+        /// <param name="descriptor">The call, decided once per query by <see cref="AggregateLayout"/>.</param>
+        public AggregateMetricState(AggregateDescriptor descriptor)
         {
-            this.funcCall = funcCall;
-            aggregationType = GetAggregationType(funcCall);
+            funcCall = descriptor.FuncCall;
+            aggregationType = descriptor.Type;
+            isCountAll = descriptor.IsCountAll;
         }
 
         public void AddRow(IReadOnlyDictionary<string, ColumnValue> row, QueryTicket ticket)
@@ -1298,7 +1409,7 @@ internal sealed class QueryAggregator
             switch (aggregationType)
             {
                 case QueryAggregationType.Count:
-                    if (IsCountAll(funcCall))
+                    if (isCountAll)
                     {
                         countAll++;
                         return;
@@ -1353,7 +1464,7 @@ internal sealed class QueryAggregator
             {
                 QueryAggregationType.Count => new ColumnValue(
                     ColumnType.Integer64,
-                    IsCountAll(funcCall) ? countAll : countNonNull),
+                    isCountAll ? countAll : countNonNull),
                 QueryAggregationType.Sum => sum.Result(),
                 QueryAggregationType.Average => average.Result(),
                 QueryAggregationType.Min => min ?? ColumnValue.Null,

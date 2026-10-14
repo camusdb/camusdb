@@ -61,6 +61,7 @@ internal sealed class IndexNestedLoopJoinOperator
         RowLayout? joinLayout = null;
         RowLayout? qualifiedLeftLayout = null;
         Dictionary<string, int>? rightOrdinalMap = null;
+        JoinRowPairer pairer = new();
         RightDecodeState rightDecodeState = new();
         OuterJoinPadding? padding = joinNode.Kind == JoinKind.LeftOuter
             ? await OuterJoinPadding.CreateAsync(BoundJoinRightSource.FromTable(joinNode.RightSource), plan).ConfigureAwait(false)
@@ -72,7 +73,7 @@ internal sealed class IndexNestedLoopJoinOperator
         // rightDecodeState so the join owns exactly one decode plan and one qualified layout.
         JoinLeafRowPage? probePage = joinNode.UseUniqueLookup
             ? null
-            : new JoinLeafRowPage(services, plan, joinNode.RightSource, joinNode.RightExecutionFilter, rightDecodeState);
+            : new JoinLeafRowPage(services, plan, joinNode.RightSource, joinNode.RightExecutionFilter, rightDecodeState, joinNode.Stats);
 
         await foreach (QueryResultRow leftRow in tree.ExecuteNode(joinNode.Input!, plan).ConfigureAwait(false))
         {
@@ -120,7 +121,7 @@ internal sealed class IndexNestedLoopJoinOperator
             {
                 joinLayout      ??= QueryRowMerger.BuildJoinLayout(leftQualified, rightRow.Row, rightAlias);
                 rightOrdinalMap ??= QueryRowMerger.BuildRightKeyOrdinalMap(rightRow.Row, rightAlias, joinLayout);
-                QueryRow merged  = QueryRowMerger.MergeRowsAsQueryRow(leftQualified, rightRow.Row, joinLayout, rightOrdinalMap);
+                QueryRow merged  = pairer.Pair(leftQualified, rightRow.Row, joinLayout, rightOrdinalMap);
 
                 if (!await services.Filterer.MeetWhereAsync(joinNode.OnPredicate, merged, ticket, plan.Database).ConfigureAwait(false))
                     continue;
@@ -183,6 +184,9 @@ internal sealed class IndexNestedLoopJoinOperator
 
         ObjectIdValue? rowId = await table.Store.LookupUnique(plan.Ticket.TxnState, joinNode.Index.KvId, lookupKey, plan.Ticket.CancellationToken).ConfigureAwait(false);
 
+        if (joinNode.Stats is { } stats)
+            stats.KvPointLookups++;
+
         if (rowId is null)
             yield break;
 
@@ -190,7 +194,7 @@ internal sealed class IndexNestedLoopJoinOperator
         // update to a non-indexed column could change what the join returns.
         deps?.RecordPoint(table.Store.RowPointKey(rowId.Value));
 
-        QueryResultRow? row = await scanner.LoadRightRow(source, rowId.Value, joinNode.RightExecutionFilter, plan, decodeState).ConfigureAwait(false);
+        QueryResultRow? row = await scanner.LoadRightRow(source, rowId.Value, joinNode.RightExecutionFilter, plan, decodeState, joinNode.Stats).ConfigureAwait(false);
 
         if (row is QueryResultRow loadedRow)
             yield return loadedRow;
@@ -244,6 +248,9 @@ internal sealed class IndexNestedLoopJoinOperator
             unique: false, cancellationToken: cancellationToken).ConfigureAwait(false))
         {
             cancellationToken.ThrowIfCancellationRequested();
+
+            if (joinNode.Stats is { } stats)
+                stats.KvScanEntries++;
 
             int cmp = key.Values[0].CompareTo(lookupValue);
 

@@ -345,92 +345,16 @@ internal sealed class JoinQueryPlanner
                 JoinStepEstimate? step = steps is not null && steps.TryGetValue(joinSource, out JoinStepEstimate found)
                     ? found
                     : null;
-                BoundJoinRightSource right = BoundSourceCatalog.FindJoinRightSource(bound, joinSource.Right);
-                pushdown.ScanFiltersByAlias.TryGetValue(right.Alias, out NodeAst? rightFilter);
 
-                // Pre-extract equi-keys (no index required) — shared by both hash-join paths below.
-                // A left outer join keys the same way as an inner join: every operator keeps the
-                // left input as the preserved side, so index, hash and merge are all valid for it.
-                JoinKind kind = joinSource.Kind;
-                IReadOnlyList<JoinEquiKeyPair>? equiKeys = null;
-                bool hasEquiKeys = kind is JoinKind.Inner or JoinKind.LeftOuter
-                    && JoinEquiJoinAnalyzer.TryExtractEquiKeys(right, joinSource.OnPredicate, bound, out equiKeys);
+                PhysicalPlanNode joinNode = BuildJoinNode(joinSource, left, step, bound, pushdown, database, stats);
+                AttachRightAccessPath(joinNode, database, stats, clockValues);
 
-                // Try to find an index match on the right side (INLJ candidate).
-                JoinEquiJoinIndexMatch? indexMatch = null;
-                bool hasIndexMatch = right.Table is not null
-                    && JoinEquiJoinAnalyzer.TryMatch(right.Table, joinSource.OnPredicate, bound, out indexMatch);
+                // Kept beside the annotated estimate, not in place of it: EXPLAIN (ANALYZE) prints both,
+                // so a reader can see which of the two models was closer to the rows the join produced.
+                if (step is { } estimate)
+                    joinNode.JoinOrderEstimatedRows = estimate.OutputRows;
 
-                // Test-only overrides — checked before any algorithm selection.
-                if (stats?.ForceNestedLoopForTesting == true)
-                    return new NestedLoopJoinNode(left, right, joinSource.OnPredicate)
-                        { RightExecutionFilter = rightFilter, Kind = kind };
-
-                if (hasEquiKeys && stats?.ForceHashJoinForTesting == true)
-                    return BuildHashJoinNode(left, right, joinSource.OnPredicate, equiKeys!, rightFilter, database, stats, kind, step);
-
-                if (hasEquiKeys && stats?.ForceMergeJoinForTesting == true)
-                    return BuildMergeJoinNode(left, right, joinSource.OnPredicate!, equiKeys!, rightFilter, kind);
-
-                // Cost-based merge-join selection: check whether both sides have free index
-                // ordering before entering the index/hash branches; if yes, merge join beats
-                // both INLJ and hash for large inputs.
-                (bool leftFree, bool rightFree) = hasEquiKeys
-                    ? CheckFreeOrdering(left, right, equiKeys!)
-                    : (false, false);
-
-                if (hasIndexMatch)
-                {
-                    // Three-way selection: merge / hash / INLJ.
-                    //   Merge  — both sides have a secondary index covering the join key AND the outer
-                    //            side is large (scanning in index order wins over per-row lookups).
-                    //   Hash   — outer side large relative to inner indexed side.
-                    //   INLJ   — outer side small (few point lookups; default when stats absent).
-                    if (hasEquiKeys && stats is not null && !stats.ForceIndexNestedLoopForTesting)
-                    {
-                        double leftRows = step?.LeftRows ?? EstimatePhysicalNodeRows(left, database, stats);
-
-                        if (leftFree && rightFree && leftRows > MergeJoinPreferenceThreshold)
-                            return BuildMergeJoinNode(left, right, joinSource.OnPredicate!, equiKeys!, rightFilter, kind);
-
-                        if (ShouldPreferHashOverIndexNestedLoop(left, right, database, stats, rightFilter, step))
-                            return BuildHashJoinNode(left, right, joinSource.OnPredicate, equiKeys!, rightFilter, database, stats, kind, step);
-                    }
-
-                    return new IndexNestedLoopJoinNode(
-                        left,
-                        right.Table!,
-                        joinSource.OnPredicate,
-                        indexMatch!.Index,
-                        indexMatch.LeftLookupColumn,
-                        indexMatch.RightIndexColumn)
-                    {
-                        RightExecutionFilter = rightFilter,
-                        Kind = kind,
-                    };
-                }
-
-                // No right-side INLJ index (right has a composite or multi-column index whose
-                // leading prefix covers the join key, so TryMatch missed it but FindIndexForJoinKey
-                // found it): apply the same threshold guard as the indexed branch to avoid
-                // materialising both sides for small joins.
-                if (hasEquiKeys)
-                {
-                    if (leftFree && rightFree && stats is not null)
-                    {
-                        double leftRows = step?.LeftRows ?? EstimatePhysicalNodeRows(left, database, stats);
-                        if (leftRows > MergeJoinPreferenceThreshold)
-                            return BuildMergeJoinNode(left, right, joinSource.OnPredicate!, equiKeys!, rightFilter, kind);
-                    }
-
-                    return BuildHashJoinNode(left, right, joinSource.OnPredicate, equiKeys!, rightFilter, database, stats, kind, step);
-                }
-
-                return new NestedLoopJoinNode(left, right, joinSource.OnPredicate)
-                {
-                    RightExecutionFilter = rightFilter,
-                    Kind = kind,
-                };
+                return joinNode;
             }
 
             default:
@@ -438,6 +362,139 @@ internal sealed class JoinQueryPlanner
                     CamusDBErrorCodes.InvalidInput,
                     $"Unsupported join source: {source.GetType().Name}");
         }
+    }
+
+    /// <summary>
+    /// Gives the right table of a hash or nested-loop join its own access path, when its pushed
+    /// filter drives an index: the same index range or IN-list leaf (<see cref="TryBuildIndexLeaf"/>,
+    /// with its breakeven veto) the first table of the order would get. Without it the operator read
+    /// the whole right table and filtered it in memory, so <c>b.category = 'rare'</c> used an index
+    /// only when <c>b</c> came first. The join-order search prices the right read with the same leaf
+    /// (<see cref="JoinEnumerator"/>), so the order and the operators are chosen for the reads the
+    /// plan makes. Index lookup and merge joins read the right side their own way and are left alone.
+    /// </summary>
+    private void AttachRightAccessPath(
+        PhysicalPlanNode joinNode,
+        DatabaseDescriptor database,
+        StatisticsManager? stats,
+        Dictionary<string, ColumnValue>? clockValues)
+    {
+        if (!_options.CostBasedAccessPathEnabled || stats is null)
+            return;
+
+        switch (joinNode)
+        {
+            case HashJoinNode { BuildSource.Table: { } table, BuildExecutionFilter: { } filter } hash:
+                hash.RightPhysicalNode = TryBuildIndexLeaf(filter, table, database, stats, clockValues);
+                break;
+
+            case NestedLoopJoinNode { RightSource.Table: { } table, RightExecutionFilter: { } filter } nestedLoop:
+                nestedLoop.RightPhysicalNode = TryBuildIndexLeaf(filter, table, database, stats, clockValues);
+                break;
+        }
+    }
+
+    /// <summary>
+    /// Chooses and builds the operator of one join over an already built left input: index
+    /// nested-loop, hash, merge or nested-loop, with the test-only overrides first. Split from
+    /// <see cref="BuildJoinTree"/> so that every operator the choice can return passes through one
+    /// place on its way out, where the caller records the join-order search estimate.
+    /// </summary>
+    private PhysicalPlanNode BuildJoinNode(
+        JoinSource joinSource,
+        PhysicalPlanNode left,
+        JoinStepEstimate? step,
+        BoundSelectQuery bound,
+        JoinPredicatePushdown.Result pushdown,
+        DatabaseDescriptor database,
+        StatisticsManager? stats)
+    {
+        BoundJoinRightSource right = BoundSourceCatalog.FindJoinRightSource(bound, joinSource.Right);
+        pushdown.ScanFiltersByAlias.TryGetValue(right.Alias, out NodeAst? rightFilter);
+
+        // Pre-extract equi-keys (no index required) — shared by both hash-join paths below.
+        // A left outer join keys the same way as an inner join: every operator keeps the
+        // left input as the preserved side, so index, hash and merge are all valid for it.
+        JoinKind kind = joinSource.Kind;
+        IReadOnlyList<JoinEquiKeyPair>? equiKeys = null;
+        bool hasEquiKeys = kind is JoinKind.Inner or JoinKind.LeftOuter
+            && JoinEquiJoinAnalyzer.TryExtractEquiKeys(right, joinSource.OnPredicate, bound, out equiKeys);
+
+        // Try to find an index match on the right side (INLJ candidate).
+        JoinEquiJoinIndexMatch? indexMatch = null;
+        bool hasIndexMatch = right.Table is not null
+            && JoinEquiJoinAnalyzer.TryMatch(right.Table, joinSource.OnPredicate, bound, out indexMatch);
+
+        // Test-only overrides — checked before any algorithm selection.
+        if (stats?.ForceNestedLoopForTesting == true)
+            return new NestedLoopJoinNode(left, right, joinSource.OnPredicate)
+                { RightExecutionFilter = rightFilter, Kind = kind };
+
+        if (hasEquiKeys && stats?.ForceHashJoinForTesting == true)
+            return BuildHashJoinNode(left, right, joinSource.OnPredicate, equiKeys!, rightFilter, database, stats, kind, step);
+
+        if (hasEquiKeys && stats?.ForceMergeJoinForTesting == true)
+            return BuildMergeJoinNode(left, right, joinSource.OnPredicate!, equiKeys!, rightFilter, kind);
+
+        // Cost-based merge-join selection: check whether both sides have free index
+        // ordering before entering the index/hash branches; if yes, merge join beats
+        // both INLJ and hash for large inputs.
+        (bool leftFree, bool rightFree) = hasEquiKeys
+            ? CheckFreeOrdering(left, right, equiKeys!)
+            : (false, false);
+
+        if (hasIndexMatch)
+        {
+            // Three-way selection: merge / hash / INLJ.
+            //   Merge  — both sides have a secondary index covering the join key AND the outer
+            //            side is large (scanning in index order wins over per-row lookups).
+            //   Hash   — outer side large relative to inner indexed side.
+            //   INLJ   — outer side small (few point lookups; default when stats absent).
+            if (hasEquiKeys && stats is not null && !stats.ForceIndexNestedLoopForTesting)
+            {
+                double leftRows = step?.LeftRows ?? EstimatePhysicalNodeRows(left, database, stats);
+
+                if (leftFree && rightFree && leftRows > MergeJoinPreferenceThreshold)
+                    return BuildMergeJoinNode(left, right, joinSource.OnPredicate!, equiKeys!, rightFilter, kind);
+
+                if (ShouldPreferHashOverIndexNestedLoop(left, right, database, stats, rightFilter, step))
+                    return BuildHashJoinNode(left, right, joinSource.OnPredicate, equiKeys!, rightFilter, database, stats, kind, step);
+            }
+
+            return new IndexNestedLoopJoinNode(
+                left,
+                right.Table!,
+                joinSource.OnPredicate,
+                indexMatch!.Index,
+                indexMatch.LeftLookupColumn,
+                indexMatch.RightIndexColumn)
+            {
+                RightExecutionFilter = rightFilter,
+                Kind = kind,
+            };
+        }
+
+        // No right-side INLJ index (right has a composite or multi-column index whose
+        // leading prefix covers the join key, so TryMatch missed it but FindIndexForJoinKey
+        // found it): apply the same threshold guard as the indexed branch to avoid
+        // materialising both sides for small joins.
+        if (hasEquiKeys)
+        {
+            if (leftFree && rightFree && stats is not null)
+            {
+                double leftRows = step?.LeftRows ?? EstimatePhysicalNodeRows(left, database, stats);
+                if (leftRows > MergeJoinPreferenceThreshold)
+                    return BuildMergeJoinNode(left, right, joinSource.OnPredicate!, equiKeys!, rightFilter, kind);
+            }
+
+            return BuildHashJoinNode(left, right, joinSource.OnPredicate, equiKeys!, rightFilter, database, stats, kind, step);
+        }
+
+        return new NestedLoopJoinNode(left, right, joinSource.OnPredicate)
+        {
+            RightExecutionFilter = rightFilter,
+            Kind = kind,
+        };
     }
 
     /// <summary>

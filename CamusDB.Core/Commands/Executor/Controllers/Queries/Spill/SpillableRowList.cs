@@ -8,6 +8,7 @@
 using System.IO;
 using System.Runtime.CompilerServices;
 using CamusDB.Core.CommandsExecutor.Models;
+using CamusDB.Core.CommandsExecutor.Models.Queries;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers.Queries.Spill;
 
@@ -18,7 +19,8 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Queries.Spill;
 ///
 /// <para>
 /// <b>Memory phase:</b> rows are accumulated in a <see cref="List{T}"/> until the buffer
-/// reaches <see cref="_context.Options.SpillEffectiveThreshold"/>. When the threshold is hit,
+/// reaches <see cref="_context.Options.SpillEffectiveThreshold"/> rows or
+/// <see cref="CamusDBOptions.SpillEffectiveThresholdBytes"/> estimated bytes. When a threshold is hit,
 /// every buffered row is flushed to a single spill file (via <see cref="SpillRowCodec"/>)
 /// and subsequent rows are written directly to that file; the in-memory list is cleared.
 /// </para>
@@ -69,12 +71,16 @@ internal sealed class SpillableRowList : IAsyncDisposable
     
     private bool _overflowed;
 
+    /// <summary>Estimated bytes of the rows in memory (<see cref="RowMemoryEstimator"/>); charged only while spill is enabled.</summary>
+    private long _memoryBytes;
+
     /// <summary>Total row count (memory + spill).</summary>
     public int Count { get; private set; }
 
     /// <summary>
     /// Appends a row to the list. When <see cref="_context.Options.SpillEnabled"/> is
-    /// <c>true</c> and the buffer reaches <see cref="_context.Options.SpillEffectiveThreshold"/>,
+    /// <c>true</c> and the buffer reaches <see cref="_context.Options.SpillEffectiveThreshold"/> rows
+    /// or <see cref="CamusDBOptions.SpillEffectiveThresholdBytes"/> estimated bytes,
     /// all buffered rows are flushed to a spill file and subsequent rows are written
     /// directly to disk. Must not be called after <see cref="SealAsync"/>.
     /// </summary>
@@ -85,8 +91,14 @@ internal sealed class SpillableRowList : IAsyncDisposable
             _memoryRows.Add(row);
             Count++;
 
-            if (_context.Options.SpillEnabled && _memoryRows.Count >= _context.Options.SpillEffectiveThreshold)
-                await OverflowToSpillAsync(ct).ConfigureAwait(false);
+            if (_context.Options.SpillEnabled)
+            {
+                _memoryBytes += RowMemoryEstimator.Estimate(row);
+
+                if (_memoryRows.Count >= _context.Options.SpillEffectiveThreshold
+                    || _memoryBytes >= _context.Options.SpillEffectiveThresholdBytes)
+                    await OverflowToSpillAsync(ct).ConfigureAwait(false);
+            }
         }
         else
         {
@@ -157,6 +169,7 @@ internal sealed class SpillableRowList : IAsyncDisposable
 
         await _spillWriter.FlushAsync(ct).ConfigureAwait(false);
         _memoryRows.Clear();
+        _memoryBytes = 0;
         _overflowed = true;
     }
 

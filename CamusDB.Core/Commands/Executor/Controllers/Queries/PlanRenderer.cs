@@ -274,6 +274,7 @@ public static class PlanRenderer
         string detail = $"on={RenderExpr(node.OnPredicate)}, right={node.RightSource.Alias}";
         if (node.RightExecutionFilter is not null)
             detail += $", right-filter={RenderExpr(node.RightExecutionFilter)}";
+        detail += RenderRightInput(node.RightPhysicalNode);
         detail += RenderJoinKind(node.Kind);
         return $"nested-loop-join({detail})";
     }
@@ -297,9 +298,23 @@ public static class PlanRenderer
         string detail = $"on={keys}, build={build}";
         if (node.BuildExecutionFilter is not null)
             detail += $", build-filter={RenderExpr(node.BuildExecutionFilter)}";
+        detail += RenderRightInput(node.RightPhysicalNode);
         detail += RenderJoinKind(node.Kind);
         return $"hash-join({detail})";
     }
+
+    /// <summary>
+    /// How a hash or nested-loop join reads its right table when the planner gave it its own access
+    /// path: <c>right-index=</c> for an index range scan, <c>right-in-list=</c> for an IN-list scan.
+    /// Nothing for a full scan. The plan walk follows the left input only, so the right input has no
+    /// row of its own and the join line names it.
+    /// </summary>
+    private static string RenderRightInput(PhysicalPlanNode? rightInput) => rightInput switch
+    {
+        IndexRangeScanNode range => $", right-index={range.Index.Name}",
+        IndexInListScanNode inList => $", right-in-list={inList.Index.Name}",
+        _ => "",
+    };
 
     private static string? ResolveNodeAlias(PhysicalPlanNode? node) => node switch
     {
@@ -354,7 +369,81 @@ public static class PlanRenderer
 
     // ── expression renderer ────────────────────────────────────────────────
 
-    /// <summary>Renders a NodeAst expression as a compact, deterministic string.</summary>
+    /// <summary>The level a <c>BETWEEN</c> operand must bind tighter than to be printed bare.</summary>
+    private static readonly int BetweenOperandFloor = Precedence(NodeType.ExprBetween) + 1;
+
+    /// <summary>
+    /// The binding level of an operator, from the precedence declarations of the SQL grammar
+    /// (<c>SQLParser.Language.grammar.y</c>), loosest first: <c>OR</c>, <c>AND</c>, <c>NOT</c>, the
+    /// <c>LIKE</c> and regex family, <c>=</c> <c>&lt;&gt;</c> <c>BETWEEN</c>, the ordering comparisons,
+    /// the string and bit operators, <c>+</c> <c>-</c>, <c>*</c> <c>/</c>, then <c>IS</c> and
+    /// <c>IN</c>, then the unary operators. A node that prints self-delimited (a literal, a name, a
+    /// call, <c>CAST(...)</c>, <c>CASE ... END</c>, a subquery) never needs parentheses and gets the
+    /// highest level.
+    /// </summary>
+    private static int Precedence(NodeType type) => type switch
+    {
+        NodeType.ExprOr => 1,
+        NodeType.ExprAnd => 2,
+        NodeType.ExprNot => 3,
+        NodeType.ExprLike or NodeType.ExprILike
+            or NodeType.ExprRegexMatch or NodeType.ExprRegexMatchCi
+            or NodeType.ExprRegexNotMatch or NodeType.ExprRegexNotMatchCi => 4,
+        NodeType.ExprEquals or NodeType.ExprNotEquals or NodeType.ExprBetween
+            or NodeType.ExprQuantifiedComparison => 5,
+        NodeType.ExprLessThan or NodeType.ExprGreaterThan
+            or NodeType.ExprLessEqualsThan or NodeType.ExprGreaterEqualsThan => 6,
+        NodeType.ExprConcat or NodeType.ExprBitAnd or NodeType.ExprBitOr or NodeType.ExprBitXor
+            or NodeType.ExprShiftLeft or NodeType.ExprShiftRight => 7,
+        NodeType.ExprAdd or NodeType.ExprSub => 8,
+        NodeType.ExprMult or NodeType.ExprDiv => 9,
+        NodeType.ExprIsNull or NodeType.ExprIsNotNull or NodeType.ExprIsTrue or NodeType.ExprIsNotTrue
+            or NodeType.ExprIsFalse or NodeType.ExprIsNotFalse
+            or NodeType.ExprInSubquery or NodeType.ExprNotInSubquery
+            or NodeType.ExprInMembership or NodeType.ExprNotInMembership => 10,
+        NodeType.ExprNegate or NodeType.ExprBitNot => 11,
+        _ => int.MaxValue,
+    };
+
+    /// <summary>
+    /// Renders a left-associative binary operator. The left operand is bare unless it binds more
+    /// loosely; the right operand is also put in parentheses at the same level, because
+    /// <c>a - (b - c)</c> is not <c>a - b - c</c>. The one exception is the same associative
+    /// operator on both sides (<c>a AND (b AND c)</c>), where the grouping changes nothing and the
+    /// planner's right-nested conjunct lists keep printing as a flat chain.
+    /// </summary>
+    private static string RenderBinary(NodeAst expr, string op)
+    {
+        int level = Precedence(expr.nodeType);
+        NodeAst right = expr.rightAst!;
+
+        bool sameAssociative = right.nodeType == expr.nodeType && IsAssociative(expr.nodeType);
+        int rightFloor = sameAssociative ? level : level + 1;
+
+        return $"{RenderOperand(expr.leftAst!, level)} {op} {RenderOperand(right, rightFloor)}";
+    }
+
+    private static bool IsAssociative(NodeType type) =>
+        type is NodeType.ExprAnd or NodeType.ExprOr or NodeType.ExprAdd or NodeType.ExprMult
+            or NodeType.ExprConcat or NodeType.ExprBitAnd or NodeType.ExprBitOr or NodeType.ExprBitXor;
+
+    /// <summary>Renders <paramref name="operand"/>, in parentheses when it binds more loosely than <paramref name="floor"/>.</summary>
+    private static string RenderOperand(NodeAst operand, int floor)
+    {
+        string text = RenderExpr(operand);
+        return Precedence(operand.nodeType) < floor ? $"({text})" : text;
+    }
+
+    /// <summary>
+    /// Renders a NodeAst expression as a compact, deterministic string.
+    ///
+    /// <para>The tree carries no parentheses: grouping is its shape. So an operand that binds more
+    /// loosely than the operator around it is put in parentheses, or the text would read as a
+    /// different expression — <c>a AND (b OR c)</c> printed bare is <c>a AND b OR c</c>, which SQL
+    /// reads as <c>(a AND b) OR c</c>. The levels are the grammar's (see <see cref="Precedence"/>);
+    /// an operand that binds at least as tightly is printed bare, so a plain chain of conjuncts
+    /// prints exactly as before.</para>
+    /// </summary>
     public static string RenderExpr(NodeAst expr)
     {
         return expr.nodeType switch
@@ -372,48 +461,48 @@ public static class PlanRenderer
             NodeType.ExprAlias =>
                 $"{RenderExpr(expr.leftAst!)} AS {expr.yytext ?? RenderExpr(expr.rightAst!)}",
 
-            NodeType.ExprEquals => $"{RenderExpr(expr.leftAst!)} = {RenderExpr(expr.rightAst!)}",
-            NodeType.ExprNotEquals => $"{RenderExpr(expr.leftAst!)} <> {RenderExpr(expr.rightAst!)}",
-            NodeType.ExprLessThan => $"{RenderExpr(expr.leftAst!)} < {RenderExpr(expr.rightAst!)}",
-            NodeType.ExprGreaterThan => $"{RenderExpr(expr.leftAst!)} > {RenderExpr(expr.rightAst!)}",
-            NodeType.ExprLessEqualsThan => $"{RenderExpr(expr.leftAst!)} <= {RenderExpr(expr.rightAst!)}",
-            NodeType.ExprGreaterEqualsThan => $"{RenderExpr(expr.leftAst!)} >= {RenderExpr(expr.rightAst!)}",
+            NodeType.ExprEquals => RenderBinary(expr, "="),
+            NodeType.ExprNotEquals => RenderBinary(expr, "<>"),
+            NodeType.ExprLessThan => RenderBinary(expr, "<"),
+            NodeType.ExprGreaterThan => RenderBinary(expr, ">"),
+            NodeType.ExprLessEqualsThan => RenderBinary(expr, "<="),
+            NodeType.ExprGreaterEqualsThan => RenderBinary(expr, ">="),
 
             NodeType.ExprBetween =>
-                $"{RenderExpr(expr.leftAst!)} BETWEEN {RenderExpr(expr.extendedOne!)} AND {RenderExpr(expr.extendedTwo!)}",
+                $"{RenderOperand(expr.leftAst!, BetweenOperandFloor)} BETWEEN {RenderOperand(expr.extendedOne!, BetweenOperandFloor)} AND {RenderOperand(expr.extendedTwo!, BetweenOperandFloor)}",
 
-            NodeType.ExprAnd => $"{RenderExpr(expr.leftAst!)} AND {RenderExpr(expr.rightAst!)}",
-            NodeType.ExprOr => $"{RenderExpr(expr.leftAst!)} OR {RenderExpr(expr.rightAst!)}",
+            NodeType.ExprAnd => RenderBinary(expr, "AND"),
+            NodeType.ExprOr => RenderBinary(expr, "OR"),
 
-            NodeType.ExprLike => $"{RenderExpr(expr.leftAst!)} LIKE {RenderExpr(expr.rightAst!)}",
-            NodeType.ExprILike => $"{RenderExpr(expr.leftAst!)} ILIKE {RenderExpr(expr.rightAst!)}",
-            NodeType.ExprRegexMatch => $"{RenderExpr(expr.leftAst!)} ~ {RenderExpr(expr.rightAst!)}",
-            NodeType.ExprRegexMatchCi => $"{RenderExpr(expr.leftAst!)} ~* {RenderExpr(expr.rightAst!)}",
-            NodeType.ExprRegexNotMatch => $"{RenderExpr(expr.leftAst!)} !~ {RenderExpr(expr.rightAst!)}",
-            NodeType.ExprRegexNotMatchCi => $"{RenderExpr(expr.leftAst!)} !~* {RenderExpr(expr.rightAst!)}",
+            NodeType.ExprLike => RenderBinary(expr, "LIKE"),
+            NodeType.ExprILike => RenderBinary(expr, "ILIKE"),
+            NodeType.ExprRegexMatch => RenderBinary(expr, "~"),
+            NodeType.ExprRegexMatchCi => RenderBinary(expr, "~*"),
+            NodeType.ExprRegexNotMatch => RenderBinary(expr, "!~"),
+            NodeType.ExprRegexNotMatchCi => RenderBinary(expr, "!~*"),
 
-            NodeType.ExprNot => $"NOT {RenderExpr(expr.leftAst!)}",
-            NodeType.ExprIsNull => $"{RenderExpr(expr.leftAst!)} IS NULL",
-            NodeType.ExprIsNotNull => $"{RenderExpr(expr.leftAst!)} IS NOT NULL",
-            NodeType.ExprIsTrue => $"{RenderExpr(expr.leftAst!)} IS TRUE",
-            NodeType.ExprIsNotTrue => $"{RenderExpr(expr.leftAst!)} IS NOT TRUE",
-            NodeType.ExprIsFalse => $"{RenderExpr(expr.leftAst!)} IS FALSE",
-            NodeType.ExprIsNotFalse => $"{RenderExpr(expr.leftAst!)} IS NOT FALSE",
+            NodeType.ExprNot => $"NOT {RenderOperand(expr.leftAst!, Precedence(NodeType.ExprNot))}",
+            NodeType.ExprIsNull => $"{RenderOperand(expr.leftAst!, Precedence(NodeType.ExprIsNull))} IS NULL",
+            NodeType.ExprIsNotNull => $"{RenderOperand(expr.leftAst!, Precedence(NodeType.ExprIsNotNull))} IS NOT NULL",
+            NodeType.ExprIsTrue => $"{RenderOperand(expr.leftAst!, Precedence(NodeType.ExprIsTrue))} IS TRUE",
+            NodeType.ExprIsNotTrue => $"{RenderOperand(expr.leftAst!, Precedence(NodeType.ExprIsNotTrue))} IS NOT TRUE",
+            NodeType.ExprIsFalse => $"{RenderOperand(expr.leftAst!, Precedence(NodeType.ExprIsFalse))} IS FALSE",
+            NodeType.ExprIsNotFalse => $"{RenderOperand(expr.leftAst!, Precedence(NodeType.ExprIsNotFalse))} IS NOT FALSE",
 
-            NodeType.ExprAdd => $"{RenderExpr(expr.leftAst!)} + {RenderExpr(expr.rightAst!)}",
-            NodeType.ExprSub => $"{RenderExpr(expr.leftAst!)} - {RenderExpr(expr.rightAst!)}",
-            NodeType.ExprMult => $"{RenderExpr(expr.leftAst!)} * {RenderExpr(expr.rightAst!)}",
-            NodeType.ExprDiv  => $"{RenderExpr(expr.leftAst!)} / {RenderExpr(expr.rightAst!)}",
+            NodeType.ExprAdd => RenderBinary(expr, "+"),
+            NodeType.ExprSub => RenderBinary(expr, "-"),
+            NodeType.ExprMult => RenderBinary(expr, "*"),
+            NodeType.ExprDiv  => RenderBinary(expr, "/"),
             NodeType.ExprNegate => expr.leftAst!.nodeType == NodeType.Identifier
                 ? $"-{RenderExpr(expr.leftAst)}"
                 : $"-({RenderExpr(expr.leftAst)})",
 
-            NodeType.ExprConcat => $"{RenderExpr(expr.leftAst!)} || {RenderExpr(expr.rightAst!)}",
-            NodeType.ExprBitAnd => $"{RenderExpr(expr.leftAst!)} & {RenderExpr(expr.rightAst!)}",
-            NodeType.ExprBitOr => $"{RenderExpr(expr.leftAst!)} | {RenderExpr(expr.rightAst!)}",
-            NodeType.ExprBitXor => $"{RenderExpr(expr.leftAst!)} # {RenderExpr(expr.rightAst!)}",
-            NodeType.ExprShiftLeft => $"{RenderExpr(expr.leftAst!)} << {RenderExpr(expr.rightAst!)}",
-            NodeType.ExprShiftRight => $"{RenderExpr(expr.leftAst!)} >> {RenderExpr(expr.rightAst!)}",
+            NodeType.ExprConcat => RenderBinary(expr, "||"),
+            NodeType.ExprBitAnd => RenderBinary(expr, "&"),
+            NodeType.ExprBitOr => RenderBinary(expr, "|"),
+            NodeType.ExprBitXor => RenderBinary(expr, "#"),
+            NodeType.ExprShiftLeft => RenderBinary(expr, "<<"),
+            NodeType.ExprShiftRight => RenderBinary(expr, ">>"),
             NodeType.ExprBitNot => expr.leftAst!.nodeType == NodeType.Identifier
                 ? $"~{RenderExpr(expr.leftAst)}"
                 : $"~({RenderExpr(expr.leftAst)})",
@@ -442,10 +531,10 @@ public static class PlanRenderer
 
             NodeType.ExprCase => RenderCase(expr),
 
-            NodeType.ExprInSubquery => $"{RenderExpr(expr.leftAst!)} IN (SELECT ...)",
-            NodeType.ExprNotInSubquery => $"{RenderExpr(expr.leftAst!)} NOT IN (SELECT ...)",
-            NodeType.ExprInMembership => $"{RenderExpr(expr.leftAst!)} IN (...)",
-            NodeType.ExprNotInMembership => $"{RenderExpr(expr.leftAst!)} NOT IN (...)",
+            NodeType.ExprInSubquery => $"{RenderOperand(expr.leftAst!, Precedence(NodeType.ExprInSubquery))} IN (SELECT ...)",
+            NodeType.ExprNotInSubquery => $"{RenderOperand(expr.leftAst!, Precedence(NodeType.ExprNotInSubquery))} NOT IN (SELECT ...)",
+            NodeType.ExprInMembership => $"{RenderOperand(expr.leftAst!, Precedence(NodeType.ExprInMembership))} IN (...)",
+            NodeType.ExprNotInMembership => $"{RenderOperand(expr.leftAst!, Precedence(NodeType.ExprNotInMembership))} NOT IN (...)",
             NodeType.ExprQuantifiedComparison =>
                 $"{RenderExpr(expr.leftAst!)} {QuantifiedComparison.OperatorText(QuantifiedComparison.OperatorOf(expr))} "
                 + $"{QuantifiedComparison.QuantifierOf(expr)} ({RenderExpr(expr.rightAst!)})",

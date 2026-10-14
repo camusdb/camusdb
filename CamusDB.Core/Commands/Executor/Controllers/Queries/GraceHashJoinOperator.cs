@@ -191,7 +191,8 @@ internal sealed class GraceHashJoinOperator
     /// Grace/hybrid hash join entry point. Partitions both build and probe sides into
     /// <see cref="CamusDBOptions.SpillMergeFanIn"/> spill files each (keyed by join-key hash),
     /// then joins each partition pair. Partitions whose build side exceeds
-    /// <see cref="CamusDBOptions.SpillEffectiveThreshold"/> are recursively re-partitioned up to
+    /// <see cref="CamusDBOptions.SpillEffectiveThreshold"/> rows or
+    /// <see cref="CamusDBOptions.SpillEffectiveThresholdBytes"/> estimated bytes are recursively re-partitioned up to
     /// <see cref="MaxGraceHashDepth"/> levels deep; beyond that depth the entire partition is
     /// loaded into the hash table regardless (correctness backstop for extreme single-key skew).
     ///
@@ -240,7 +241,7 @@ internal sealed class GraceHashJoinOperator
 
         if (joinNode.BuildSide == HashJoinBuildSide.Right)
         {
-            buildStream     = scanner.ScanJoinRightSource(joinNode.BuildSource, joinNode.BuildExecutionFilter, plan);
+            buildStream     = HashJoinOperator.ReadRightSide(joinNode, plan, tree, scanner);
             buildKeyColumns = joinNode.BuildKeyColumns;
             probeStream     = QualifyStreamAsync(joinNode.Input!, plan, ct);
             probeKeyColumns = joinNode.ProbeKeyColumns;
@@ -249,7 +250,7 @@ internal sealed class GraceHashJoinOperator
         {
             buildStream     = QualifyStreamAsync(joinNode.Input!, plan, ct);
             buildKeyColumns = joinNode.ProbeKeyColumns;
-            probeStream     = scanner.ScanJoinRightSource(joinNode.BuildSource, joinNode.BuildExecutionFilter, plan);
+            probeStream     = HashJoinOperator.ReadRightSide(joinNode, plan, tree, scanner);
             probeKeyColumns = joinNode.BuildKeyColumns;
         }
 
@@ -291,7 +292,8 @@ internal sealed class GraceHashJoinOperator
     /// and streaming the probe partition against it.
     ///
     /// <para>
-    /// When the build partition count exceeds <see cref="CamusDBOptions.SpillEffectiveThreshold"/>
+    /// When the build partition count exceeds <see cref="CamusDBOptions.SpillEffectiveThreshold"/>,
+    /// or its estimated bytes exceed <see cref="CamusDBOptions.SpillEffectiveThresholdBytes"/>,
     /// and the recursion depth allows it, both files are re-read with a perturbed hash seed to
     /// split into sub-partitions. When the depth limit is reached (extreme skew where a single
     /// key dominates and cannot be split further), the method falls back to a nested-loop join
@@ -313,6 +315,7 @@ internal sealed class GraceHashJoinOperator
         [EnumeratorCancellation] CancellationToken ct)
     {
         int threshold = plan.Database.Options.SpillEffectiveThreshold;
+        long byteThreshold = plan.Database.Options.SpillEffectiveThresholdBytes;
         int K = plan.Database.Options.SpillMergeFanIn;
         QueryTicket ticket = plan.Ticket;
         string rightAlias = joinNode.BuildSource.Alias;
@@ -320,13 +323,12 @@ internal sealed class GraceHashJoinOperator
         // Load build partition into an in-memory hash table, stopping early whenever
         // the threshold is exceeded regardless of depth — the depth determines the
         // overflow strategy, not whether we detect the overflow.
-        Dictionary<CompositeColumnValue, List<IReadOnlyDictionary<string, ColumnValue>>> hashTable =
-            new(CompositeColumnValueComparer.Instance);
-        var hashLookup = hashTable.GetAlternateLookup<ReadOnlySpan<ColumnValue>>();
+        JoinHashTable hashTable = new();
         // Separate scratch arrays for the build and probe loops of this partition: reusing one
         // buffer across the two phases would risk a probe reading leftover build-key values.
         ColumnValue[] buildKeyScratch = new ColumnValue[buildKeyColumns.Count];
         int buildCount = 0;
+        long buildBytes = 0;
         bool overflow = false;
 
         await using IAsyncEnumerator<QueryResultRow> buildEnum =
@@ -339,16 +341,15 @@ internal sealed class GraceHashJoinOperator
             // never count toward the overflow decision.
             if (!JoinKeyExtractor.TryExtractKeyInto(buildRow.Row, buildKeyColumns, buildKeyScratch)) continue;
 
-            if (buildCount >= threshold)
+            if (buildCount >= threshold || buildBytes >= byteThreshold)
             {
                 overflow = true;
                 break;
             }
 
-            if (!hashLookup.TryGetValue(buildKeyScratch.AsSpan(), out List<IReadOnlyDictionary<string, ColumnValue>>? bucket))
-            { bucket = []; hashLookup[buildKeyScratch.AsSpan()] = bucket; }
-            bucket.Add(buildRow.Row);
+            bool newBucket = hashTable.Add(buildKeyScratch, buildRow.Row);
             buildCount++;
+            buildBytes += JoinHashTable.EstimateAddedBytes(buildKeyScratch, buildRow.Row, newBucket);
         }
 
         if (overflow)
@@ -388,11 +389,12 @@ internal sealed class GraceHashJoinOperator
 
         // An empty build partition matches nothing; an inner join is done, a left outer join
         // still owes one padded row per probe row of the partition.
-        if (hashTable.Count == 0 && padding is null) yield break;
+        if (hashTable.RowCount == 0 && padding is null) yield break;
 
         // Probe phase: stream probe partition against the loaded hash table.
         RowLayout? joinLayout = null;
         Dictionary<string, int>? rightOrdinalMap = null;
+        JoinRowPairer pairer = new();
         ColumnValue[] probeKeyScratch = new ColumnValue[probeKeyColumns.Count];
         await foreach (QueryResultRow probeRow in ReadSpillFileAsync(probeFile, services.Options.SpillMaxFrameBytes, ct).ConfigureAwait(false))
         {
@@ -404,7 +406,7 @@ internal sealed class GraceHashJoinOperator
 
             // Probe files hold keyed rows only (the unkeyed ones were set aside at partitioning).
             if (!JoinKeyExtractor.TryExtractKeyInto(probeRow.Row, probeKeyColumns, probeKeyScratch)
-                || !hashLookup.TryGetValue(probeKeyScratch.AsSpan(), out List<IReadOnlyDictionary<string, ColumnValue>>? bucket))
+                || !hashTable.TryGetBucket(probeKeyScratch, out JoinBucket bucket))
             {
                 if (padding is not null)
                     yield return new QueryResultRow(default(ObjectIdValue), padding.Pad(probeRow.Row));
@@ -422,7 +424,7 @@ internal sealed class GraceHashJoinOperator
                 IReadOnlyDictionary<string, ColumnValue> rightR = joinNode.BuildSide == HashJoinBuildSide.Right ? buildRow : probeRow.Row;
                 joinLayout      ??= QueryRowMerger.BuildJoinLayout(leftQ, rightR, rightAlias);
                 rightOrdinalMap ??= QueryRowMerger.BuildRightKeyOrdinalMap(rightR, rightAlias, joinLayout);
-                QueryRow merged  = QueryRowMerger.MergeRowsAsQueryRow(leftQ, rightR, joinLayout, rightOrdinalMap);
+                QueryRow merged  = pairer.Pair(leftQ, rightR, joinLayout, rightOrdinalMap);
 
                 if (!await services.Filterer.MeetWhereAsync(joinNode.OnPredicate!, merged, ticket, plan.Database).ConfigureAwait(false))
                     continue;
@@ -456,6 +458,7 @@ internal sealed class GraceHashJoinOperator
         string rightAlias = joinNode.BuildSource.Alias;
         RowLayout? joinLayout = null;
         Dictionary<string, int>? rightOrdinalMap = null;
+        JoinRowPairer pairer = new();
 
         // The outer scratch must stay stable while the inner loop compares against it,
         // so the two loops each own a buffer.
@@ -490,7 +493,7 @@ internal sealed class GraceHashJoinOperator
                 IReadOnlyDictionary<string, ColumnValue> rightR = joinNode.BuildSide == HashJoinBuildSide.Right ? buildRow.Row : probeRow.Row;
                 joinLayout      ??= QueryRowMerger.BuildJoinLayout(leftQ, rightR, rightAlias);
                 rightOrdinalMap ??= QueryRowMerger.BuildRightKeyOrdinalMap(rightR, rightAlias, joinLayout);
-                QueryRow merged  = QueryRowMerger.MergeRowsAsQueryRow(leftQ, rightR, joinLayout, rightOrdinalMap);
+                QueryRow merged  = pairer.Pair(leftQ, rightR, joinLayout, rightOrdinalMap);
 
                 if (!await services.Filterer.MeetWhereAsync(joinNode.OnPredicate!, merged, ticket, plan.Database).ConfigureAwait(false))
                     continue;
