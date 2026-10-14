@@ -106,6 +106,40 @@ public class ConfigDefinition
     public bool JoinExisting { get; set; }
 
     /// <summary>
+    /// Id (GUID) of the leaf backup a joining node seeds itself from before it joins, or null for an
+    /// ordinary join. The node replays the chain ending at this backup into its store and writes a
+    /// committed checkpoint into its Raft WAL at each partition's restored index. It then presents to
+    /// the leader at that index and receives only the entries after it, instead of presenting at
+    /// index 0 and receiving a full snapshot that overwrites the restored store.
+    ///
+    /// <para>The data directory must already hold the restored image of the same chain (the output of
+    /// <c>POST /v1/restore</c>, copied in), because the replay starts from the full backup's state
+    /// and does not install it. The WAL must be empty, so a node that already ran, or a bootstrap
+    /// that failed half way, is refused instead of re-seeded over its own log. Requires
+    /// <see cref="JoinExisting"/> and <c>kahuna.backup_dir</c> (the catalog the chain is read from).
+    /// A string here so a malformed id is reported by name at config time; read it through
+    /// <see cref="PitrBootstrapLeafBackupId"/>. See <c>docs/backups-and-point-in-time-recovery.md</c>.</para>
+    /// </summary>
+    public string? PitrBootstrapFrom { get; set; }
+
+    /// <summary>
+    /// The point in time, in Unix epoch milliseconds, that <see cref="PitrBootstrapFrom"/> seeds the
+    /// node to. 0 (the default) seeds to the latest point the chain covers. A non-zero value must
+    /// match the <c>targetTimeMs</c> the data directory was restored with: the replay and the WAL
+    /// checkpoints follow this value, so a different one leaves the store and the log at two
+    /// different points.
+    /// </summary>
+    public long PitrBootstrapTargetTimeMs { get; set; }
+
+    /// <summary>
+    /// <see cref="PitrBootstrapFrom"/> parsed, or null when no bootstrap is configured. Only valid
+    /// after <see cref="Validate"/>, which rejects an id that does not parse.
+    /// </summary>
+    [YamlIgnore]
+    public Guid? PitrBootstrapLeafBackupId =>
+        string.IsNullOrWhiteSpace(PitrBootstrapFrom) ? null : Guid.Parse(PitrBootstrapFrom);
+
+    /// <summary>
     /// How long a DDL proposer waits for every live node to ack the previous schema
     /// version before giving up (the two-version gate). Milliseconds; must be &gt; 0.
     /// Maps to <c>EmbeddedKahuna.SchemaAckWaitTimeout</c>.
@@ -1614,6 +1648,26 @@ public class ConfigDefinition
             if (Peers.Count == 0)
                 throw Invalid("'join_existing' requires 'peers' to list at least one seed endpoint of the running cluster");
         }
+
+        // A bootstrap seeds a node so that it can join, so it is meaningless without a join, and it
+        // reads the backup chain from the catalog under backup_dir.
+        if (PitrBootstrapFrom is not null)
+        {
+            if (!Guid.TryParse(PitrBootstrapFrom, out Guid leafBackupId) || leafBackupId == Guid.Empty)
+                throw Invalid($"'pitr_bootstrap_from' must be a backup id (a non-empty GUID), got '{PitrBootstrapFrom}'");
+
+            if (!JoinExisting)
+                throw Invalid("'pitr_bootstrap_from' requires 'join_existing: true': the seeded node must join a running cluster");
+
+            if (string.IsNullOrWhiteSpace(Kahuna.BackupDir))
+                throw Invalid("'pitr_bootstrap_from' requires 'kahuna.backup_dir' to point at the backup catalog that holds the chain");
+        }
+
+        if (PitrBootstrapTargetTimeMs < 0)
+            throw Invalid($"'pitr_bootstrap_target_time_ms' must be >= 0, got {PitrBootstrapTargetTimeMs}");
+
+        if (PitrBootstrapTargetTimeMs != 0 && PitrBootstrapFrom is null)
+            throw Invalid("'pitr_bootstrap_target_time_ms' is set but 'pitr_bootstrap_from' is not; it has no effect alone");
     }
 
     private static void ValidateHostPort(string value, string field)

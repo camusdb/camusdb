@@ -31,6 +31,8 @@ public class ConfigReader
         "peers",
         "http_peers",
         "join_existing",
+        "pitr_bootstrap_from",
+        "pitr_bootstrap_target_time_ms",
         "schema_ack_wait_timeout_ms",
         "schema_ack_live_node_lease_ms",
         "stats_flush_interval_ms",

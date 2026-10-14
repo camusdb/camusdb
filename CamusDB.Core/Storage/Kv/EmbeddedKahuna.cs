@@ -16,6 +16,7 @@ using Kommander.Communication.Grpc;
 using Kommander.Discovery;
 using Kahuna.Server.Communication.Internode;
 using Kahuna.Server.Configuration;
+using Kahuna.Server.Persistence.Pitr;
 using Kommander.Data;
 using Microsoft.Extensions.Logging;
 
@@ -133,6 +134,21 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
     // Kommander's "Invalid partition". RunContinuationsAsynchronously so a resumed waiter never runs
     // inline on the thread that completes StartAsync.
     private readonly TaskCompletionSource startedSignal = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    // Set once StartAsync is entered. A backup bootstrap writes the store and the WAL that Raft reads
+    // when it starts, so it must finish before that point and is refused after it.
+    private int startBegun;
+
+    // Where the backup bootstrap is in its life: none, running, completed or failed. StartAsync refuses
+    // a running or failed bootstrap, because either leaves the WAL describing a store that is not
+    // there yet. Paired with startBegun through full fences, so of two racing callers at least one
+    // sees the other.
+    private int bootstrapState;
+
+    private const int BootstrapNone = 0;
+    private const int BootstrapRunning = 1;
+    private const int BootstrapCompleted = 2;
+    private const int BootstrapFailed = 3;
 
     /// <summary>
     /// The Kahuna KV API. Used by KvTableStore and the transaction layer.
@@ -509,6 +525,21 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
     {
         WarnIfPreviousStorageRevisionPresent();
 
+        Interlocked.Exchange(ref startBegun, 1);
+
+        int bootstrap = Volatile.Read(ref bootstrapState);
+        if (bootstrap is BootstrapRunning or BootstrapFailed)
+        {
+            CamusDBException refused = new(
+                CamusDBErrorCodes.PitrBootstrapFailed,
+                bootstrap == BootstrapRunning
+                    ? "The node cannot start while its backup bootstrap is still running"
+                    : "The node cannot start after its backup bootstrap failed: the store and the WAL may be seeded only in part. " +
+                      "Copy a fresh restored data root into place and start again");
+            startedSignal.TrySetException(refused);
+            throw refused;
+        }
+
         try
         {
             await node.StartAsync(cancellationToken).ConfigureAwait(false);
@@ -591,6 +622,173 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
     /// </summary>
     public Task WaitUntilStartedAsync(CancellationToken cancellationToken = default)
         => startedSignal.Task.WaitAsync(cancellationToken);
+
+    /// <summary>
+    /// Seeds this joining node from a backup chain so it presents to the leader at the restored index
+    /// instead of at index 0. Kahuna replays the chain ending at <paramref name="leafBackupId"/> into the
+    /// store and writes one committed checkpoint per partition into the Raft WAL at the index the
+    /// chain reached. When <see cref="StartAsync"/> then joins, the leader sends only the entries after
+    /// that index. Without this, a node booted from a restored data root has an empty WAL: the leader
+    /// sees index 0, installs a full snapshot and overwrites the restored store, so the restore buys
+    /// nothing.
+    ///
+    /// <para><b>Order.</b> Call after construction and before <see cref="StartAsync"/>, once. Raft reads
+    /// the WAL when it starts, so a seed written later would race the log it describes; a call after
+    /// start is refused, and a start during or after a failed bootstrap is refused too.</para>
+    ///
+    /// <para><b>Trust.</b> Kahuna reads the chain as a restore does: through the configured backup
+    /// storage, with every manifest authenticated against <c>kahuna.backup_mac_key_file</c> when one is
+    /// set. It also refuses a chain stamped with a <c>kahuna.backup_cluster_id</c> other than this
+    /// node's, because its indexes would describe another cluster's log. All of these checks run before
+    /// the store or the WAL changes.</para>
+    ///
+    /// <para><b>Preconditions the engine cannot see.</b> The replay starts from the full backup's
+    /// state and does not install it, so the store must already hold the restored image of the same
+    /// chain: the data root <c>POST /v1/restore</c> writes, copied in. A store without it would end
+    /// up with only the incremental writes under a WAL that claims the whole chain.
+    /// <see cref="EnsureDataRootReadyForBootstrap"/> checks the directories before the node is built;
+    /// this method checks again through the WAL that it holds no entry, so a node that already ran
+    /// is never re-seeded over its own log.</para>
+    ///
+    /// <para><paramref name="targetTimeMs"/> must equal the <c>targetTimeMs</c> the data root was
+    /// restored with (0 = the chain's latest point), or the store and the WAL describe two different
+    /// points in time. Every failure surfaces as <see cref="CamusDBErrorCodes.PitrBootstrapFailed"/>
+    /// and marks the bootstrap failed, so the node cannot start on a half-seeded WAL.</para>
+    /// </summary>
+    public async Task BootstrapFromBackupAsync(Guid leafBackupId, long targetTimeMs)
+    {
+        if (leafBackupId == Guid.Empty)
+            throw new CamusDBException(CamusDBErrorCodes.PitrBootstrapFailed, "A backup bootstrap needs a leaf backup id");
+
+        if (targetTimeMs < 0)
+            throw new CamusDBException(CamusDBErrorCodes.PitrBootstrapFailed, $"A backup bootstrap target time must be >= 0, got {targetTimeMs}");
+
+        if (!isClusterMode || Options.JoinExistingSeeds is not { Count: > 0 })
+            throw new CamusDBException(
+                CamusDBErrorCodes.PitrBootstrapFailed,
+                "A backup bootstrap seeds a node that joins a running cluster; this node is not configured to join one");
+
+        if (string.IsNullOrWhiteSpace(Options.BackupDir))
+            throw new CamusDBException(
+                CamusDBErrorCodes.PitrBootstrapFailed,
+                "A backup bootstrap reads the chain from the backup catalog; set 'kahuna.backup_dir'");
+
+        if (Interlocked.CompareExchange(ref bootstrapState, BootstrapRunning, BootstrapNone) != BootstrapNone)
+            throw new CamusDBException(CamusDBErrorCodes.PitrBootstrapFailed, "The backup bootstrap already ran on this node");
+
+        if (Volatile.Read(ref startBegun) != 0)
+        {
+            // Nothing was written, but the node is already starting: leave it to start as it is.
+            Volatile.Write(ref bootstrapState, BootstrapNone);
+            throw new CamusDBException(
+                CamusDBErrorCodes.PitrBootstrapFailed,
+                "A backup bootstrap must run before the node starts; the node already started");
+        }
+
+        try
+        {
+            EnsureWalIsEmpty();
+
+            await node.Kahuna.BootstrapFromPitrBackupAsync(
+                Options.BackupDir,
+                leafBackupId,
+                PitrTargetResolver.FromUnixMilliseconds(targetTimeMs),
+                node.Raft.WalAdapter,
+                Options.PitrWindow,
+                Options.BaseSnapshotInterval).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            Volatile.Write(ref bootstrapState, BootstrapFailed);
+            logger?.LogCritical(ex, "Backup bootstrap from {LeafBackupId} failed; the node will not start", leafBackupId);
+
+            if (ex is CamusDBException)
+                throw;
+
+            // Kahuna reports a refused or failed chain as a typed outcome with a path-free message and an
+            // operation id; the full detail is in Kahuna's log under that id.
+            string cause = ex is KahunaBackupException backupEx ? $"{backupEx.Outcome}: {ex.Message}" : ex.Message;
+
+            throw new CamusDBException(
+                CamusDBErrorCodes.PitrBootstrapFailed,
+                $"Backup bootstrap from {leafBackupId} failed ({cause}). The store and the WAL may be seeded only in part; " +
+                "copy a fresh restored data root into place before the next start");
+        }
+
+        Volatile.Write(ref bootstrapState, BootstrapCompleted);
+
+        logger?.LogInformation(
+            "Seeded the node from backup {LeafBackupId} (target {TargetTimeMs} ms, 0 = latest); it joins at the restored index",
+            leafBackupId, targetTimeMs);
+    }
+
+    /// <summary>
+    /// Refuses a backup bootstrap over a WAL that holds any entry or checkpoint on the partitions the
+    /// node is configured with. Such a WAL belongs to a node that already ran, or to an earlier
+    /// bootstrap that stopped part way, and writing checkpoints into it would describe a store that is
+    /// not the one on disk.
+    /// </summary>
+    private void EnsureWalIsEmpty()
+    {
+        Kommander.WAL.IWAL wal = node.Raft.WalAdapter;
+
+        // Partition 0 is the system partition; 1..InitialPartitions are the data partitions.
+        for (int partitionId = 0; partitionId <= Options.InitialPartitions; partitionId++)
+        {
+            long maxLog = wal.GetMaxLog(partitionId);
+            long checkpoint = wal.GetLastCheckpoint(partitionId);
+
+            if (maxLog > 0 || checkpoint > 0)
+                throw new CamusDBException(
+                    CamusDBErrorCodes.PitrBootstrapFailed,
+                    $"A backup bootstrap needs an empty WAL, but partition {partitionId} already holds entries up to index {Math.Max(maxLog, checkpoint)}. " +
+                    "This node already ran, or an earlier bootstrap stopped part way. Remove 'pitr_bootstrap_from' to start it as it is, " +
+                    "or copy a fresh restored data root into place");
+        }
+    }
+
+    /// <summary>
+    /// Checks the data directories before a node that will run <see cref="BootstrapFromBackupAsync"/> is
+    /// built, because building the node opens them: after that, a missing store is created empty and an
+    /// empty WAL directory gains files, so the two cases the bootstrap must refuse can no longer be
+    /// told apart on disk.
+    ///
+    /// <para>Requires the RocksDB store and WAL that a restored data root holds. The store directory
+    /// (<c>{kv}/{revision}</c>) must exist and hold files, because the replay builds on the full
+    /// backup's image and does not install it. The WAL directory (<c>{wal}/{revision}</c>) must be
+    /// absent or empty, because <c>POST /v1/restore</c> creates an empty one and anything in it came
+    /// from a run of this node.</para>
+    /// </summary>
+    public static void EnsureDataRootReadyForBootstrap(EmbeddedKahunaOptions options)
+    {
+        ArgumentNullException.ThrowIfNull(options);
+
+        if (!string.Equals(options.Storage, "rocksdb", StringComparison.Ordinal) ||
+            !string.Equals(options.WalStorage, "rocksdb", StringComparison.Ordinal))
+            throw new CamusDBException(
+                CamusDBErrorCodes.PitrBootstrapFailed,
+                $"A backup bootstrap needs the RocksDB store and WAL a restored data root holds; this node uses storage '{options.Storage}' and WAL '{options.WalStorage}'");
+
+        if (string.IsNullOrWhiteSpace(options.StoragePath) || string.IsNullOrWhiteSpace(options.StorageRevision) ||
+            string.IsNullOrWhiteSpace(options.WalPath) || string.IsNullOrWhiteSpace(options.WalRevision))
+            throw new CamusDBException(
+                CamusDBErrorCodes.PitrBootstrapFailed,
+                "A backup bootstrap needs fixed store and WAL paths and revisions, so it can find the restored image");
+
+        string store = System.IO.Path.Combine(options.StoragePath, options.StorageRevision);
+        if (!System.IO.Directory.Exists(store) || !System.IO.Directory.EnumerateFileSystemEntries(store).Any())
+            throw new CamusDBException(
+                CamusDBErrorCodes.PitrBootstrapFailed,
+                $"A backup bootstrap needs the restored image of the chain in '{store}', and it is missing or empty. " +
+                "Restore the chain with POST /v1/restore and use the data root it returns as data_dir");
+
+        string wal = System.IO.Path.Combine(options.WalPath, options.WalRevision);
+        if (System.IO.Directory.Exists(wal) && System.IO.Directory.EnumerateFileSystemEntries(wal).Any())
+            throw new CamusDBException(
+                CamusDBErrorCodes.PitrBootstrapFailed,
+                $"A backup bootstrap needs an empty WAL, but '{wal}' is not empty. This node already ran, or an earlier bootstrap " +
+                "stopped part way. Remove 'pitr_bootstrap_from' to start it as it is, or copy a fresh restored data root into place");
+    }
 
     /// <summary>
     /// Blocks until the partition that owns <paramref name="key"/> has an elected leader.

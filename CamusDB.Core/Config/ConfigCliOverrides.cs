@@ -41,6 +41,15 @@ public sealed class ConfigCliOverrides
     /// </summary>
     public bool? JoinExisting { get; init; }
 
+    /// <summary>
+    /// Null leaves the YAML value alone; otherwise the id of the leaf backup a joining node seeds
+    /// itself from before it joins. Kept as text so validation reports a malformed id by name.
+    /// </summary>
+    public string? PitrBootstrapFrom { get; init; }
+
+    /// <summary>Null leaves the YAML/default value alone; the point in time the bootstrap seeds to.</summary>
+    public long? PitrBootstrapTargetTimeMs { get; init; }
+
     public int? SchemaAckWaitTimeoutMs { get; init; }
 
     public int? SchemaAckLiveNodeLeaseMs { get; init; }

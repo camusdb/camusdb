@@ -510,6 +510,11 @@ if (config.IsClusterMode)
     {
         EmbeddedKahunaOptions options = EmbeddedKahunaOptionsBuilder.BuildCluster(config, camusOptions);
 
+        // A node that seeds itself from a backup must find the restored image and an empty WAL before
+        // it is built: building it opens both directories and erases the difference.
+        if (config.PitrBootstrapLeafBackupId is not null)
+            EmbeddedKahuna.EnsureDataRootReadyForBootstrap(options);
+
         ILoggerFactory loggerFactory = services.GetRequiredService<ILoggerFactory>();
         EmbeddedKahuna kahuna = EmbeddedKahuna.CreateCluster(options, config.Peers, loggerFactory);
 
@@ -642,6 +647,12 @@ if (config.IsClusterMode)
     ISchemaDdlForwarder ddlForwarder = app.Services.GetRequiredService<ISchemaDdlForwarder>();
     sharedNode.SetSchemaAckForwarder(ddlForwarder);
 }
+
+// A joining node configured with pitr_bootstrap_from seeds its store and WAL from the backup chain
+// now, before Raft reads the WAL, so it joins at the restored index and the leader sends only the
+// entries after it instead of a full snapshot.
+if (config.PitrBootstrapLeafBackupId is Guid pitrBootstrapLeaf)
+    await sharedNode.BootstrapFromBackupAsync(pitrBootstrapLeaf, config.PitrBootstrapTargetTimeMs);
 
 await sharedNode.StartAsync();
 

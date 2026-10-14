@@ -47,6 +47,8 @@ Example: YAML `mode: cluster` with `--mode standalone` starts in standalone mode
 | `peers` | `--initial-cluster` | `[]` |
 | `http_peers` | `--http-peers` | `[]` |
 | `join_existing` | `--join-existing` | `false` |
+| `pitr_bootstrap_from` | `--pitr-bootstrap-from` | unset (see [backups-and-point-in-time-recovery.md](backups-and-point-in-time-recovery.md)) |
+| `pitr_bootstrap_target_time_ms` | `--pitr-bootstrap-target-time-ms` | `0` (the latest point the chain covers) |
 | `schema_ack_wait_timeout_ms` | `--schema-ack-wait-timeout-ms` | `30000` |
 | `schema_ack_live_node_lease_ms` | `--schema-ack-live-node-lease-ms` | `30000` |
 | `unhosted_control_log_probe_interval_ms` | — | `250` |

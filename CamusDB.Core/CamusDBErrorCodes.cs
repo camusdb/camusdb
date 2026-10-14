@@ -731,6 +731,16 @@ public static class CamusDBErrorCodes
     public const string BackupInsecureRoot = "CADB070F";
 
     /// <summary>
+    /// A joining node configured with <c>pitr_bootstrap_from</c> could not seed itself from the backup
+    /// chain, so it refused to start: the data directory does not hold a restored image, its WAL is not
+    /// empty, or the chain could not be resolved and replayed. The message names the cause. Starting
+    /// anyway would either join with a store whose log does not describe it or join at index 0 and be
+    /// re-seeded by snapshot. Copy a fresh restored data root into place and start again. A startup
+    /// failure, never returned to an API caller.
+    /// </summary>
+    public const string PitrBootstrapFailed = "CADB0710";
+
+    /// <summary>
     /// Returns the HTTP status code that should be used when surfacing <paramref name="code"/>
     /// to an API caller. Client errors (permanent, non-retryable caller mistakes) map to 400;
     /// all other codes map to 500.

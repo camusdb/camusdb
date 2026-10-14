@@ -163,6 +163,16 @@ initial_partitions: 1      # Raft partition count (>= 1). Unset, it is 1 in stan
 #   is POST /v1/cluster/leave. Also settable as --join-existing true|false.
 # join_existing: false
 #
+# pitr_bootstrap_from: seed a joining node from a backup chain before it joins, so the leader sends it
+#   only the entries after the restored point instead of a full snapshot. The value is the leaf backup
+#   id. data_dir must hold the data root POST /v1/restore wrote for that chain, with its WAL still
+#   empty. Requires join_existing: true and kahuna.backup_dir. Remove it after the first start: a node
+#   whose WAL is no longer empty refuses to start with it. Also settable as --pitr-bootstrap-from.
+# pitr_bootstrap_target_time_ms: the point in time (Unix epoch ms) to seed to; must match the
+#   targetTimeMs of the restore. 0 = the latest point the chain covers.
+# pitr_bootstrap_from: 00000000-0000-0000-0000-000000000000
+# pitr_bootstrap_target_time_ms: 0
+#
 # Schema two-version gate. A DDL proposer waits for every live node to ack the previous schema
 # version before it proposes the next one.
 # schema_ack_wait_timeout_ms: how long to wait for all acks before giving up (> 0).

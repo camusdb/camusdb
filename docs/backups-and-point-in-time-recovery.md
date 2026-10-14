@@ -131,9 +131,59 @@ restored image:
    different directory and does not read it. To carry a backup across revisions, restore it with
    the CamusDB version that took it and then dump it logically — see
    [logical-dump-and-reimport.md](logical-dump-and-reimport.md).
-4. **(Cluster only)** the restored node holds data as of the restore point; it is admitted to
-   membership and caught up by normal Raft replication. Whole-cluster disaster recovery restores every
-   node to one coordinated point and brings the cluster back up.
+4. **(Cluster only)** whole-cluster disaster recovery restores every node to one coordinated point and
+   brings the cluster back up. To add a node to a **running** cluster from a backup, use the seeded
+   join below: a restored data root started alone does not keep its data.
+
+## Seeding a joining node from a backup
+
+A node that joins a running cluster (`join_existing: true`) with an empty WAL presents to the leader
+at index 0. The leader then sends it a full snapshot, and that snapshot overwrites the restored store,
+so a restored data root alone saves nothing. The seeded join fixes this. Before the node joins, it
+replays the backup chain into its store and writes one committed checkpoint per partition into its
+WAL at the index the chain reached. The leader then sends only the entries after that index.
+
+1. **Restore the chain into a fresh data root** with `POST /v1/restore` on any node, as in step 1
+   above. Note the `leafBackupId` and the `targetTimeMs` you used.
+2. **Copy the data root to the new host** and use it as the new node's `data_dir`. Do not start a
+   node on it before the next step: its WAL must stay empty.
+3. **Make the backup catalog readable on the new host** and set `kahuna.backup_dir` to it. The seed
+   reads the chain from there, not from the data root.
+4. **Start the node with the seed options:**
+
+   ```yml
+   mode: cluster
+   peers: [10.0.0.1:7070, 10.0.0.2:7070]   # seeds: members of the running cluster
+   join_existing: true
+   pitr_bootstrap_from: <leafBackupId>
+   pitr_bootstrap_target_time_ms: 0         # the targetTimeMs of the restore; 0 = latest
+   kahuna:
+     backup_dir: /opt/camusdb/backups
+   ```
+
+   or `--join-existing true --pitr-bootstrap-from <leafBackupId>` on the command line.
+5. **Remove `pitr_bootstrap_from`** from the configuration after the node is up.
+
+The node refuses to start, with `PitrBootstrapFailed` (`CADB0710`) and a message that names the cause,
+when one of these conditions is true:
+
+- `data_dir` does not hold the restored image (`{data_dir}/kv/{revision}` is missing or empty). The
+  replay builds on the full backup's image and does not install it.
+- The WAL (`{data_dir}/wal/{revision}`) is not empty. The node ran before, or an earlier seed stopped
+  part way. Copy a fresh data root into place, or remove `pitr_bootstrap_from` to start the node as it is.
+- The store or the WAL is not RocksDB.
+- A manifest in the chain fails authentication: `kahuna.backup_mac_key_file` is set and the manifest
+  is unsigned or signed with another key. The seed checks manifests exactly as a restore does.
+- The chain belongs to another cluster: a manifest carries a `kahuna.backup_cluster_id` that differs
+  from this node's. The seeded indexes would describe the other cluster's log. A chain with no
+  cluster id (taken before the id was set) is accepted.
+- The chain cannot be resolved, or the target is outside the chain's coverage or older than the
+  leader's retention window (`pitr_window_seconds` plus `base_snapshot_interval_seconds`). Past that
+  window the leader no longer holds the entries after the seeded index, so it sends a snapshot anyway.
+- An earlier seed attempt in the same process failed.
+
+`pitr_bootstrap_target_time_ms` must match the `targetTimeMs` of the restore. With a different value,
+the store and the WAL describe two different points in time.
 
 ## Notes and limits
 

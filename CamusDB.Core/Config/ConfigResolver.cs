@@ -99,6 +99,18 @@ public static class ConfigResolver
             config.RecordSource("join_existing", ConfigValueSource.CommandLine);
         }
 
+        if (cli.PitrBootstrapFrom is not null)
+        {
+            config.PitrBootstrapFrom = cli.PitrBootstrapFrom;
+            config.RecordSource("pitr_bootstrap_from", ConfigValueSource.CommandLine);
+        }
+
+        if (cli.PitrBootstrapTargetTimeMs is long pitrBootstrapTargetTimeMs)
+        {
+            config.PitrBootstrapTargetTimeMs = pitrBootstrapTargetTimeMs;
+            config.RecordSource("pitr_bootstrap_target_time_ms", ConfigValueSource.CommandLine);
+        }
+
         if (cli.SchemaAckWaitTimeoutMs is int schemaAckWait)
         {
             config.SchemaAckWaitTimeoutMs = schemaAckWait;

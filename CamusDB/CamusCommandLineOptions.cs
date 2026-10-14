@@ -61,6 +61,17 @@ public class CamusCommandLineOptions
                    "joiner booted without it forms a separate cluster")]
     public bool? JoinExisting { get; set; }
 
+    [Option("pitr-bootstrap-from", Required = false,
+        HelpText = "Backup id (GUID) of the leaf backup a joining node seeds itself from before it joins, so the " +
+                   "leader sends it only the entries after the restored point instead of a full snapshot. " +
+                   "Requires --join-existing true, kahuna.backup_dir, and a data_dir that holds the restored image")]
+    public string? PitrBootstrapFrom { get; set; }
+
+    [Option("pitr-bootstrap-target-time-ms", Required = false,
+        HelpText = "Point in time (Unix epoch ms) --pitr-bootstrap-from seeds to; 0 = the latest point the chain " +
+                   "covers. Must match the targetTimeMs the data_dir was restored with")]
+    public long? PitrBootstrapTargetTimeMs { get; set; }
+
     [Option("schema-ack-wait-timeout-ms", Required = false, HelpText = "Schema two-version gate ack wait timeout (ms)")]
     public int? SchemaAckWaitTimeoutMs { get; set; }
 
@@ -107,6 +118,8 @@ public class CamusCommandLineOptions
             Peers = peers,
             HttpPeers = httpPeers,
             JoinExisting = JoinExisting,
+            PitrBootstrapFrom = PitrBootstrapFrom,
+            PitrBootstrapTargetTimeMs = PitrBootstrapTargetTimeMs,
             SchemaAckWaitTimeoutMs = SchemaAckWaitTimeoutMs,
             SchemaAckLiveNodeLeaseMs = SchemaAckLiveNodeLeaseMs,
             HttpPort = HttpPort,
