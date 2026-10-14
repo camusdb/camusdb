@@ -1,0 +1,47 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Plan-quality regression harness. It runs a fixed corpus of tagged queries on seeded data,
+    measures each plan with counters that repeat between runs (storage reads, join steps costed,
+    estimate errors), and compares them with a baseline file in this project. Split out of
+    CamusDB.Tests so it stays out of the long main suite and runs as its own CI job.
+    See docs/plan-quality-harness.md.
+  -->
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <ServerGarbageCollection>false</ServerGarbageCollection>
+    <IsPackable>false</IsPackable>
+    <LangVersion>latest</LangVersion>
+    <NoWarn>$(NoWarn);NU1903</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Extensions.Logging.Console" Version="10.0.12" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.12" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.10.1" />
+    <PackageReference Include="NUnit" Version="3.14.0" />
+    <PackageReference Include="NUnit3TestAdapter" Version="4.6.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\CamusDB.Core\CamusDB.Core.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- The single-node test timings are shared with the main suite, so both boot nodes the same way. -->
+    <Compile Include="..\CamusDB.Tests\TestNodeDefaults.cs" Link="Engine\TestNodeDefaults.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- The harness reads the corpus and the baselines from the source tree, not from the build
+         output, so a baseline update writes the file that goes into the commit. -->
+    <AssemblyAttribute Include="System.Reflection.AssemblyMetadataAttribute">
+      <_Parameter1>PlanQualityProjectDirectory</_Parameter1>
+      <_Parameter2>$(MSBuildProjectDirectory)</_Parameter2>
+    </AssemblyAttribute>
+  </ItemGroup>
+
+</Project>

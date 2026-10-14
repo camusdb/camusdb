@@ -162,18 +162,19 @@ internal static class JoinEnumerator
             return JoinOrderOptimizer.ChooseWithGraph(root, bound, pushdown, graph);
 
         CostInputs inputs = ComputeCostInputs(graph, bound, pushdown, database, stats, options, clockValues);
-        int[]? order = FindCheapestOrder(graph, inputs);
+        int[]? order = FindCheapestOrder(graph, inputs, out long costedSteps);
 
+        // The fallbacks keep the count: the search ran, and its work is what the count reports.
         if (order is null)
-            return JoinOrderOptimizer.ChooseWithGraph(root, bound, pushdown, graph);
+            return JoinOrderOptimizer.ChooseWithGraph(root, bound, pushdown, graph) with { CostedJoinSteps = costedSteps };
 
         // A wrong conjunct count keeps the original tree: a conjunct evaluated zero or two times
         // changes the rows.
         QuerySource? tree = graph.BuildTree(order);
 
         return tree is null
-            ? JoinOrderChoice.WholePredicate(root, pushdown)
-            : JoinOrderChoice.CostBased(tree, graph, EstimateSteps(graph, order, tree, inputs));
+            ? JoinOrderChoice.WholePredicate(root, pushdown) with { CostedJoinSteps = costedSteps }
+            : JoinOrderChoice.CostBased(tree, graph, EstimateSteps(graph, order, tree, inputs), costedSteps);
     }
 
     /// <summary>
@@ -297,10 +298,17 @@ internal static class JoinEnumerator
         DatabaseDescriptor database,
         StatisticsManager stats,
         CamusDBOptions options) =>
-        FindCheapestOrder(graph, ComputeCostInputs(graph, bound, pushdown, database, stats, options));
+        FindCheapestOrder(graph, ComputeCostInputs(graph, bound, pushdown, database, stats, options), out _);
 
-    private static int[]? FindCheapestOrder(JoinGraph graph, CostInputs inputs)
+    /// <summary>
+    /// The dynamic program over left-deep orders. <paramref name="costedSteps"/> is the number of
+    /// join steps it costed, one for each (left subset, right leaf) pair that passes the boundary
+    /// and connectivity checks. The count depends only on the graph, so it repeats between runs of
+    /// the same query.
+    /// </summary>
+    private static int[]? FindCheapestOrder(JoinGraph graph, CostInputs inputs, out long costedSteps)
     {
+        costedSteps = 0;
         int n = graph.LeafCount;
         int size = 1 << n;
         double[] cost = new double[size];
@@ -342,6 +350,7 @@ internal static class JoinEnumerator
                         continue;
 
                     (bool equiKey, bool indexLookup) = StepOperators(inputs.StepEdges[bit], (ulong)mask);
+                    costedSteps++;
 
                     double total = cost[left] + CostEstimator.JoinStepCost(
                         inputs.SubsetRows![left], inputs.LeafRows[bit], inputs.RightScanCost[bit], equiKey, indexLookup);

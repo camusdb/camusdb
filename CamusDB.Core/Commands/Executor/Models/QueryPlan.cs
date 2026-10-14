@@ -127,6 +127,13 @@ public sealed class QueryPlan
     public IReadOnlyList<(string TableId, int SchemaVersion)>? SchemaDeps { get; internal set; }
 
     /// <summary>
+    /// How the join order of this plan was chosen, and how many join steps the search costed. Set
+    /// by <see cref="Controllers.Queries.JoinQueryPlanner"/> on a join plan; null on a single-table
+    /// plan. Only EXPLAIN (ANALYZE) reads it.
+    /// </summary>
+    internal Controllers.Queries.JoinOrderSearchSummary? JoinOrderSearch { get; set; }
+
+    /// <summary>
     /// Optional scan-level row cap for LIMIT pushdown.
     /// When set, scan operators may stop after emitting this many rows.
     /// </summary>

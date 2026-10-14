@@ -45,6 +45,55 @@ jobs:
             --blame-crash \
             -- NUnit.MaxParallelWorkers=4
 
+  Plan-Quality:
+    # The plan-quality gate (docs/plan-quality-harness.md): a fixed corpus of tagged queries on seeded
+    # data, compared with the committed baseline on counters that repeat between runs (storage reads,
+    # statement rows read, join steps costed). Wall time is reported but never graded, because a
+    # hosted runner's speed says nothing about the change. It runs beside the main suite, not inside
+    # it, and has no path filter: a change to statistics, storage counters or the parser can move a
+    # plan too. The report is uploaded on every run, also on success, so a reviewer can read the plan
+    # changes that did not fail the gate.
+    runs-on: "ubuntu-latest"
+    steps:
+      - name: Check out repository code
+        uses: actions/checkout@v6
+
+      - name: Install .NET
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Cache NuGet packages
+        uses: actions/cache@v5
+        with:
+          path: ~/.nuget/packages
+          key: ${{ runner.os }}-nuget-${{ hashFiles('**/*.csproj') }}
+          restore-keys: |
+            ${{ runner.os }}-nuget-
+
+      - name: Build
+        run: dotnet build CamusDB.PlanQuality.Tests/CamusDB.PlanQuality.Tests.csproj --configuration Debug
+
+      - name: Run the plan-quality gate
+        timeout-minutes: 20
+        env:
+          PLAN_QUALITY_REPORT_DIR: ${{ github.workspace }}/artifacts/plan-quality
+        run: |
+          dotnet test CamusDB.PlanQuality.Tests/CamusDB.PlanQuality.Tests.csproj \
+            --no-build \
+            --configuration Debug \
+            --filter "TestCategory=PlanQuality" \
+            --logger "console;verbosity=normal"
+
+      - name: Upload the plan-quality report
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: plan-quality-report-${{ github.run_attempt }}
+          path: artifacts/plan-quality/
+          retention-days: 14
+          if-no-files-found: warn
+
   Browser-Playground-Smoke:
     # Builds the browser playground host and runs the engine under Node, on the same single-threaded
     # browser-wasm runtime a browser tab uses. It catches a dependency or engine change that stops

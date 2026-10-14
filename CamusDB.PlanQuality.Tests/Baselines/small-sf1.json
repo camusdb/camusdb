@@ -1,0 +1,2237 @@
+{
+  "tier": "small",
+  "dataSet": "retail",
+  "seed": "20261013",
+  "scale": "1",
+  "queries": [
+    {
+      "id": "jc-2-big-both-sides",
+      "tags": [
+        "join",
+        "join:chain",
+        "tables:2"
+      ],
+      "rows": 1,
+      "resultHash": "1b8044e02a2872f8",
+      "work": 4754,
+      "statementRowsRead": 2068,
+      "qErrorMedian": 2.45,
+      "qErrorMax": 2.48,
+      "joinOrder": "cost-based",
+      "joinStepsCosted": 2,
+      "plan": [
+        "index-nested-loop-join(on=i.order_id = o.id, index=order_items_order_idx, left=o.id, right=order_id)",
+        "index-range-scan(index=orders_status_total_idx, from>='pending', to<='pending')"
+      ]
+    },
+    {
+      "id": "jc-2-distinct",
+      "tags": [
+        "join",
+        "join:chain",
+        "tables:2",
+        "distinct"
+      ],
+      "rows": 23,
+      "resultHash": "170b1bd1ee69bc75",
+      "work": 4899,
+      "statementRowsRead": 2300,
+      "qErrorMedian": 1.05,
+      "qErrorMax": 1.1,
+      "joinOrder": "cost-based",
+      "joinStepsCosted": 2,
+      "plan": [
+        "index-nested-loop-join(on=ci.id = c.city_id, index=customers_city_idx, left=ci.id, right=city_id, right-filter=c.credit > 4500)",
+        "table-scan(table=cities)"
+      ]
+    },
+    {
+      "id": "jc-2-group-by",
+      "tags": [
+        "join",
+        "join:chain",
+        "tables:2",
+        "group-by"
+      ],
+      "rows": 32,
+      "resultHash": "6700c2452e0fa543",
+      "work": 33232,
+      "statementRowsRead": 15867,
+      "qErrorMedian": 1,
+      "qErrorMax": 1,
+      "joinOrder": "cost-based",
+      "joinStepsCosted": 2,
+      "plan": [
+        "index-nested-loop-join(on=p.id = i.product_id, index=order_items_product_idx, left=p.id, right=product_id)",
+        "table-scan(table=products)"
+      ]
+    },
+    {
+      "id": "jc-2-in-list",
+      "tags": [
+        "join",
+        "join:chain",
+        "tables:2",
+        "in-list"
+      ],
+      "rows": 1,
+      "resultHash": "97a151e90ed24f7d",
+      "work": 3253,
+      "statementRowsRead": 1624,
+      "qErrorMedian": 54.47,
+      "qErrorMax": 107.93,
+      "joinOrder": "cost-based",
+      "joinStepsCosted": 2,
+      "plan": [
+        "index-nested-loop-join(on=c.id = o.customer_id, index=orders_customer_idx, left=c.id, right=customer_id)",
+        "index-in-list(index=~pk, values=5)"
+      ]
+    },
+    {
+      "id": "jc-2-order-limit",
+      "tags": [
+        "join",
+        "join:chain",
+        "tables:2",
+        "order-limit"
+      ],
+      "rows": 10,
+      "resultHash": "387d1608397f2703",
+      "work": 17590,
+      "statementRowsRead": 7797,
+      "qErrorMedian": 1.02,
+      "qErrorMax": 1.04,
+      "joinOrder": "cost-based",
+      "joinStepsCosted": 2,
+      "plan": [
+        "index-nested-loop-join(on=c.id = o.customer_id, index=orders_customer_idx, left=c.id, right=customer_id)",
+        "table-scan(table=customers)"
+      ]
+    },
+    {
+      "id": "jc-2-point",
+      "tags": [
+        "join",
+        "join:chain",
+        "tables:2",
+        "index-join"
+      ],
+      "rows": 1,
+      "resultHash": "c55938181b2736fc",
+      "work": 4183,
+      "statementRowsRead": 2091,
+      "qErrorMedian": 15.67,
+      "qErrorMax": 30.33,
+      "joinOrder": "cost-based",
+      "joinStepsCosted": 2,
+      "plan": [
+        "index-nested-loop-join(on=o.customer_id = c.id, index=orders_customer_idx, left=c.id, right=customer_id)",
+        "table-scan(table=customers)"
+      ]
+    },
+    {
+      "id": "jc-2-range",
+      "tags": [
+        "join",
+        "join:chain",
+        "tables:2",
+        "range"
+      ],
+      "rows": 1,
+      "resultHash": "ce92d3fb0b36dc21",
+      "work": 591,
+      "statementRowsRead": 280,
+      "qErrorMedian": 1.01,
+      "qErrorMax": 1.02,
+      "joinOrder": "cost-based",
+      "joinStepsCosted": 2,
+      "plan": [
+        "index-nested-loop-join(on=d.id = o.day_id, index=orders_day_idx, left=d.id, right=day_id)",
+        "index-range-scan(index=~pk, from>=200, to<=230)"
+      ]
+    },
+    {
+      "id": "jc-3-geo",
+      "tags": [
+        "join",
+        "join:chain",
+        "tables:3"
+      ],
+      "rows": 5,
+      "resultHash": "b97a3ec5c307bd60",
+      "work": 250,
+      "statementRowsRead": 122,
+      "qErrorMedian": 1,
+      "qErrorMax": 2.22,
+      "joinOrder": "cost-based",
+      "joinStepsCosted": 6,
+      "plan": [
+        "index-nested-loop-join(on=ci.country_id = co.id, index=cities_country_idx, left=co.id, right=country_id)",
+        "index-nested-loop-join(on=co.region_id = r.id, index=countries_region_idx, left=r.id, right=region_id)",
+        "table-scan(table=regions)"
+      ]
+    },
+    {
+      "id": "jc-3-like",
+      "tags": [
+        "join",
+        "join:chain",
+        "tables:3",
+        "like"
+      ],
+      "rows": 1,
+      "resultHash": "ab55c7f193cf86fe",
+      "work": 2902,
+      "statementRowsRead": 1376,
+      "qErrorMedian": 4.67,
+      "qErrorMax": 6.03,
+      "joinOrder": "cost-based",
+      "joinStepsCosted": 6,
+      "plan": [
+        "index-nested-loop-join(on=ci.id = c.city_id, index=customers_city_idx, left=ci.id, right=city_id)",
+        "index-nested-loop-join(on=co.id = ci.country_id, index=cities_country_idx, left=co.id, right=country_id)",
+        "table-scan(table=countries)"
+      ]
+    },
+    {
+      "id": "jc-3-reviews",
+      "tags": [
+        "join",
+        "join:chain",
+        "tables:3"
+      ],
+      "rows": 27,
+      "resultHash": "95c9a9f767ac729c",
+      "work": 3010,
+      "statementRowsRead": 1314,
+      "qErrorMedian": 2.75,
+      "qErrorMax": 8.05,
+      "joinOrder": "cost-based",
+      "joinStepsCosted": 6,
+      "plan": [
+        "index-nested-loop-join(on=p.id = r.product_id, index=reviews_product_idx, left=p.id, right=product_id, right-filter=r.stars = 5)",
+        "index-nested-loop-join(on=b.id = p.brand_id, index=products_brand_idx, left=b.id, right=brand_id)",
+        "table-scan(table=brands)"
+      ]
+    },
+    {
+      "id": "jc-4-comma",
+      "tags": [
+        "join",
+        "join:chain",
+        "tables:4",
+        "comma-join"
+      ],
+      "rows": 6,
+      "resultHash": "966b8cf0878b44c3",
+      "work": 5005,
+      "statementRowsRead": 2336,
+      "qErrorMedian": 1,
+      "qErrorMax": 1,
+      "joinOrder": "cost-based",
+      "joinStepsCosted": 12,
+      "plan": [
+        "index-nested-loop-join(on=c.city_id = ci.id, index=customers_city_idx, left=ci.id, right=city_id)",
+        "index-nested-loop-join(on=ci.country_id = co.id, index=cities_country_idx, left=co.id, right=country_id)",
+        "index-nested-loop-join(on=co.region_id = r.id, index=countries_region_idx, left=r.id, right=region_id)",
+        "table-scan(table=regions)"
+      ]
+    },
+    {
+      "id": "jc-4-geo-customers",
+      "tags": [
+        "join",
+        "join:chain",
+        "tables:4"
+      ],
+      "rows": 6,
+      "resultHash": "966b8cf0878b44c3",
+      "work": 5005,
+      "statementRowsRead": 2336,
+      "qErrorMedian": 1,
+      "qErrorMax": 1,
+      "joinOrder": "cost-based",
+      "joinStepsCosted": 12,
+      "plan": [
+        "index-nested-loop-join(on=c.city_id = ci.id, index=customers_city_idx, left=ci.id, right=city_id)",
+        "index-nested-loop-join(on=ci.country_id = co.id, index=cities_country_idx, left=co.id, right=country_id)",
+        "index-nested-loop-join(on=co.region_id = r.id, index=countries_region_idx, left=r.id, right=region_id)",
+        "table-scan(table=regions)"
+      ]
+    },
+    {
+      "id": "jc-5-comma-scrambled",
+      "tags": [
+        "join",
+        "join:chain",
+        "tables:5",
+        "comma-join"
+      ],
+      "rows": 1,
+      "resultHash": "301a5e49dd9a39db",
+      "work": 1880,
+      "statementRowsRead": 841,
+      "qErrorMedian": 1.22,
+      "qErrorMax": 2.19,
+      "joinOrder": "cost-based",
+      "joinStepsCosted": 20,
+      "plan": [
+        "index-nested-loop-join(on=o.customer_id = c.id, index=orders_customer_idx, left=c.id, right=customer_id)",
+        "index-nested-loop-join(on=c.city_id = ci.id, index=customers_city_idx, left=ci.id, right=city_id)",
+        "index-nested-loop-join(on=ci.country_id = co.id, index=cities_country_idx, left=co.id, right=country_id)",
+        "index-nested-loop-join(on=co.region_id = r.id, index=countries_region_idx, left=r.id, right=region_id)",
+        "table-scan(table=regions)"
+      ]
+    },
+    {
+      "id": "jc-5-geo-orders",
+      "tags": [
+        "join",
+        "join:chain",
+        "tables:5"
+      ],
+      "rows": 2,
+      "resultHash": "bd88e8b7328c230d",
+      "work": 3403,
+      "statementRowsRead": 1475,
+      "qErrorMedian": 1.66,
+      "qErrorMax": 2.73,
+      "joinOrder": "cost-based",
+      "joinStepsCosted": 20,
+      "plan": [
+        "index-nested-loop-join(on=o.customer_id = c.id, index=orders_customer_idx, left=c.id, right=customer_id)",
+        "index-nested-loop-join(on=c.city_id = ci.id, index=customers_city_idx, left=ci.id, right=city_id)",
+        "index-nested-loop-join(on=ci.country_id = co.id, index=cities_country_idx, left=co.id, right=country_id)",
+        "index-nested-loop-join(on=co.region_id = r.id, index=countries_region_idx, left=r.id, right=region_id, right-filter=co.code LIKE 'B%')",
+        "table-scan(table=regions)"
+      ]
+    },
+    {
+      "id": "jc-6-categories",
+      "tags": [
+        "join",
+        "join:chain",
+        "tables:6"
+      ],
+      "rows": 32,
+      "resultHash": "05f7458b79d154a0",
+      "work": 20151,
+      "statementRowsRead": 9718,
+      "qErrorMedian": 250.14,
+      "qErrorMax": 250.14,
+      "joinOrder": "cost-based",
+      "joinStepsCosted": 30,
+      "plan": [
+        "index-nested-loop-join(on=parent.id = cat.parent_id, index=~pk, left=cat.parent_id, right=id)",
+        "index-nested-loop-join(on=cat.id = p.category_id, index=~pk, left=p.category_id, right=id)",
+        "index-nested-loop-join(on=p.id = i.product_id, index=~pk, left=i.product_id, right=id)",
+        "index-nested-loop-join(on=i.order_id = o.id, index=order_items_order_idx, left=o.id, right=order_id)",
+        "index-nested-loop-join(on=o.customer_id = c.id, index=orders_customer_idx, left=c.id, right=customer_id)",
+        "table-scan(table=customers)"
+      ]
+    },
+    {
+      "id": "jc-7-comma-reversed",
+      "tags": [
+        "join",
+        "join:chain",
+        "tables:7",
+        "comma-join",
+        "selective"
+      ],
+      "rows": 1,
+      "resultHash": "e1a9d4e0b5b0caba",
+      "work": 3397,
+      "statementRowsRead": 1698,
+      "qErrorMedian": 3.6,
+      "qErrorMax": 4.2,
+      "joinOrder": "cost-based",
+      "joinStepsCosted": 42,
+      "plan": [
+        "hash-join(on=co.region_id=id, build=r)",
+        "index-nested-loop-join(on=co.id = ci.country_id, index=~pk, left=ci.country_id, right=id)",
+        "index-nested-loop-join(on=ci.id = c.city_id, index=~pk, left=c.city_id, right=id)",
+        "index-nested-loop-join(on=c.id = o.customer_id, index=~pk, left=o.customer_id, right=id)",
+        "index-nested-loop-join(on=o.id = i.order_id, index=~pk, left=i.order_id, right=id)",
+        "index-nested-loop-join(on=i.product_id = p.id, index=order_items_product_idx, left=p.id, right=product_id)",
+        "table-scan(table=products)"
+      ]
+    },
+    {
+      "id": "jc-7-selective-far-end",
+      "tags": [
+        "join",
+        "join:chain",
+        "tables:7",
+        "selective"
+      ],
+      "rows": 1,
+      "resultHash": "e1a9d4e0b5b0caba",
+      "work": 3397,
+      "statementRowsRead": 1698,
+      "qErrorMedian": 3.6,
+      "qErrorMax": 4.2,
+      "joinOrder": "cost-based",
+      "joinStepsCosted": 42,
+      "plan": [
+        "hash-join(on=co.region_id=id, build=r)",
+        "index-nested-loop-join(on=ci.country_id = co.id, index=~pk, left=ci.country_id, right=id)",
+        "index-nested-loop-join(on=c.city_id = ci.id, index=~pk, left=c.city_id, right=id)",
+        "index-nested-loop-join(on=o.customer_id = c.id, index=~pk, left=o.customer_id, right=id)",
+        "index-nested-loop-join(on=i.order_id = o.id, index=~pk, left=i.order_id, right=id)",
+        "index-nested-loop-join(on=p.id = i.product_id, index=order_items_product_idx, left=p.id, right=product_id)",
+        "table-scan(table=products)"
+      ]
+    },
+    {
+      "id": "jc-8-revenue",
+      "tags": [
+        "join",
+        "join:chain",
+        "tables:8"
+      ],
+      "rows": 6,
+      "resultHash": "057f6464d55a6653",
+      "work": 8996,
+      "statementRowsRead": 4455,
+      "qErrorMedian": 8.63,
+      "qErrorMax": 8.93,
+      "joinOrder": "cost-based",
+      "joinStepsCosted": 56,
+      "plan": [
+        "hash-join(on=co.region_id=id, build=r)",
+        "hash-join(on=ci.country_id=id, build=co)",
+        "index-nested-loop-join(on=c.city_id = ci.id, index=~pk, left=c.city_id, right=id)",
+        "index-nested-loop-join(on=o.customer_id = c.id, index=~pk, left=o.customer_id, right=id)",
+        "index-nested-loop-join(on=i.order_id = o.id, index=~pk, left=i.order_id, right=id)",
+        "index-nested-loop-join(on=p.id = i.product_id, index=order_items_product_idx, left=p.id, right=product_id)",
+        "index-nested-loop-join(on=b.id = p.brand_id, index=products_brand_idx, left=b.id, right=brand_id)",
+        "table-scan(table=brands)"
+      ]
+    },
+    {
+      "id": "jo-cross",
+      "tags": [
+        "join",
+        "cross-join",
+        "tables:2"
+      ],
+      "rows": 1,
+      "resultHash": "585689ab1344bef0",
+      "work": 22,
+      "statementRowsRead": 11,
+      "qErrorMedian": 5.5,
+      "qErrorMax": 10,
+      "joinOrder": "heuristic",
+      "joinStepsCosted": 0,
+      "plan": [
+        "nested-loop-join(on=true, right=s)",
+        "table-scan(table=regions)"
+      ]
+    },
+    {
+      "id": "jo-left-after-inner",
+      "tags": [
+        "join",
+        "outer-join",
+        "left-join",
+        "tables:3"
+      ],
+      "rows": 4,
+      "resultHash": "0458c68530305d70",
+      "work": 12108,
+      "statementRowsRead": 6054,
+      "qErrorMedian": 4.96,
+      "qErrorMax": 4.96,
+      "joinOrder": "heuristic",
+      "joinStepsCosted": 0,
+      "plan": [
+        "hash-join(on=o.promotion_id=id, build=pr, kind=left-outer)",
+        "hash-join(on=o.store_id=id, build=st, build-filter=st.id <= 4, right-index=~pk)",
+        "table-scan(table=orders)"
+      ]
+    },
+    {
+      "id": "jo-left-anti",
+      "tags": [
+        "join",
+        "outer-join",
+        "left-join",
+        "tables:2",
+        "anti-join"
+      ],
+      "rows": 1,
+      "resultHash": "ce8f657d25a7b0b7",
+      "work": 17590,
+      "statementRowsRead": 7797,
+      "qErrorMedian": 2.16,
+      "qErrorMax": 3.32,
+      "joinOrder": "heuristic",
+      "joinStepsCosted": 0,
+      "plan": [
+        "index-nested-loop-join(on=o.customer_id = c.id, index=orders_customer_idx, left=c.id, right=customer_id, kind=left-outer)",
+        "table-scan(table=customers)"
+      ]
+    },
+    {
+      "id": "jo-left-chain-3",
+      "tags": [
+        "join",
+        "outer-join",
+        "left-join",
+        "tables:3"
+      ],
+      "rows": 1,
+      "resultHash": "e41ace61292e19c1",
+      "work": 235,
+      "statementRowsRead": 95,
+      "qErrorMedian": 1.5,
+      "qErrorMax": 1.5,
+      "joinOrder": "heuristic",
+      "joinStepsCosted": 0,
+      "plan": [
+        "hash-join(on=sh.carrier_id=id, build=ca, kind=left-outer)",
+        "index-nested-loop-join(on=sh.order_id = o.id, index=shipments_order_idx, left=o.id, right=order_id, kind=left-outer)",
+        "index-range-scan(index=orders_store_idx, from>=20, to<21)"
+      ]
+    },
+    {
+      "id": "jo-left-count",
+      "tags": [
+        "join",
+        "outer-join",
+        "left-join",
+        "tables:2",
+        "group-by"
+      ],
+      "rows": 20,
+      "resultHash": "74635f0bf58529b8",
+      "work": 4968,
+      "statementRowsRead": 2474,
+      "qErrorMedian": 61.85,
+      "qErrorMax": 122.7,
+      "joinOrder": "heuristic",
+      "joinStepsCosted": 0,
+      "plan": [
+        "index-nested-loop-join(on=o.customer_id = c.id, index=orders_customer_idx, left=c.id, right=customer_id, kind=left-outer)",
+        "index-range-scan(index=~pk, to<=20)"
+      ]
+    },
+    {
+      "id": "jo-left-on-filter",
+      "tags": [
+        "join",
+        "outer-join",
+        "left-join",
+        "tables:2"
+      ],
+      "rows": 1,
+      "resultHash": "d2bf65d4b88a1102",
+      "work": 1781,
+      "statementRowsRead": 848,
+      "qErrorMedian": 1.2,
+      "qErrorMax": 1.33,
+      "joinOrder": "heuristic",
+      "joinStepsCosted": 0,
+      "plan": [
+        "index-nested-loop-join(on=r.product_id = p.id AND r.stars = 1, index=reviews_product_idx, left=p.id, right=product_id, kind=left-outer)",
+        "index-range-scan(index=products_category_idx, from>=12, to<13)"
+      ]
+    },
+    {
+      "id": "jo-right",
+      "tags": [
+        "join",
+        "outer-join",
+        "right-join",
+        "tables:2",
+        "nullable-key"
+      ],
+      "rows": 1,
+      "resultHash": "e5af12e3902de903",
+      "work": 12100,
+      "statementRowsRead": 6050,
+      "qErrorMedian": 14.17,
+      "qErrorMax": 27.15,
+      "joinOrder": "heuristic",
+      "joinStepsCosted": 0,
+      "plan": [
+        "hash-join(on=pr.id=promotion_id, build=o, kind=left-outer)",
+        "table-scan(table=promotions)"
+      ]
+    },
+    {
+      "id": "jq-3-clique",
+      "tags": [
+        "join",
+        "join:clique",
+        "tables:3"
+      ],
+      "rows": 1,
+      "resultHash": "61e7ba6a19cb79d8",
+      "work": 368,
+      "statementRowsRead": 138,
+      "qErrorMedian": 1.64,
+      "qErrorMax": 1.72,
+      "joinOrder": "cost-based",
+      "joinStepsCosted": 9,
+      "plan": [
+        "index-nested-loop-join(on=pa.order_id = o.id AND pa.order_id = sh.order_id, index=payments_order_idx, left=o.id, right=order_id)",
+        "index-nested-loop-join(on=sh.order_id = o.id, index=shipments_order_idx, left=o.id, right=order_id)",
+        "index-range-scan(index=orders_store_idx, from>=12, to<13)"
+      ]
+    },
+    {
+      "id": "jq-4-clique",
+      "tags": [
+        "join",
+        "join:clique",
+        "tables:4"
+      ],
+      "rows": 1,
+      "resultHash": "994649cedcdb341b",
+      "work": 3280,
+      "statementRowsRead": 1288,
+      "qErrorMedian": 1.02,
+      "qErrorMax": 1.03,
+      "joinOrder": "cost-based",
+      "joinStepsCosted": 28,
+      "plan": [
+        "index-nested-loop-join(on=i.order_id = o.id AND i.order_id = sh.order_id AND i.order_id = pa.order_id, index=order_items_order_idx, left=o.id, right=order_id)",
+        "index-nested-loop-join(on=pa.order_id = o.id AND pa.order_id = sh.order_id, index=payments_order_idx, left=o.id, right=order_id)",
+        "index-nested-loop-join(on=sh.order_id = o.id, index=shipments_order_idx, left=o.id, right=order_id)",
+        "index-range-scan(index=orders_day_idx, from>=100, to<=130)"
+      ]
+    },
+    {
+      "id": "jq-4-clique-comma",
+      "tags": [
+        "join",
+        "join:clique",
+        "tables:4",
+        "comma-join"
+      ],
+      "rows": 1,
+      "resultHash": "5d6723d9db68326d",
+      "work": 23347,
+      "statementRowsRead": 11623,
+      "qErrorMedian": 1.82,
+      "qErrorMax": 3.24,
+      "joinOrder": "cost-based",
+      "joinStepsCosted": 28,
+      "plan": [
+        "index-nested-loop-join(on=pa.order_id = i.order_id AND i.order_id = sh.order_id AND i.order_id = o.id, index=order_items_order_idx, left=pa.order_id, right=order_id)",
+        "index-nested-loop-join(on=pa.order_id = o.id AND sh.order_id = o.id, index=~pk, left=pa.order_id, right=id)",
+        "merge-join(on=sh.order_id=order_id, right-order=forced-index=payments_order_idx, right-filter=pa.method = 'voucher')",
+        "table-scan(table=shipments, forced-index=shipments_order_idx)"
+      ]
+    },
+    {
+      "id": "jq-non-equi",
+      "tags": [
+        "join",
+        "non-equi",
+        "tables:2",
+        "nested-loop"
+      ],
+      "rows": 1,
+      "resultHash": "9db9a3469d08fdfa",
+      "work": 200,
+      "statementRowsRead": 100,
+      "qErrorMedian": 2.73,
+      "qErrorMax": 4.45,
+      "joinOrder": "cost-based",
+      "joinStepsCosted": 2,
+      "plan": [
+        "nested-loop-join(on=p1.discount_pct < p2.discount_pct, right=p2)",
+        "table-scan(table=promotions)"
+      ]
+    },
+    {
+      "id": "jq-self-join-manager",
+      "tags": [
+        "join",
+        "self-join",
+        "tables:3",
+        "nullable-key"
+      ],
+      "rows": 5,
+      "resultHash": "cf05cb761baed1e9",
+      "work": 1875,
+      "statementRowsRead": 935,
+      "qErrorMedian": 1,
+      "qErrorMax": 1.2,
+      "joinOrder": "cost-based",
+      "joinStepsCosted": 6,
+      "plan": [
+        "hash-join(on=m.id=manager_id, build=e)",
+        "index-nested-loop-join(on=st.id = m.store_id, index=employees_store_idx, left=st.id, right=store_id)",
+        "index-range-scan(index=~pk, to<=5)"
+      ]
+    },
+    {
+      "id": "jq-self-join-referral",
+      "tags": [
+        "join",
+        "self-join",
+        "tables:2",
+        "nullable-key"
+      ],
+      "rows": 1,
+      "resultHash": "34b7f4931ab75fea",
+      "work": 4414,
+      "statementRowsRead": 2207,
+      "qErrorMedian": 6.81,
+      "qErrorMax": 10.41,
+      "joinOrder": "cost-based",
+      "joinStepsCosted": 2,
+      "plan": [
+        "hash-join(on=ref.id=referred_by, build=c)",
+        "index-range-scan(index=customers_tier_idx, from>='gold', to<='gold')"
+      ]
+    },
+    {
+      "id": "js-comma",
+      "tags": [
+        "join",
+        "join:star",
+        "tables:5",
+        "comma-join"
+      ],
+      "rows": 1,
+      "resultHash": "2ee1a971a7e01f4e",
+      "work": 4364,
+      "statementRowsRead": 2170,
+      "qErrorMedian": 2.05,
+      "qErrorMax": 2.86,
+      "joinOrder": "cost-based",
+      "joinStepsCosted": 36,
+      "plan": [
+        "index-nested-loop-join(on=o.employee_id = e.id, index=~pk, left=o.employee_id, right=id)",
+        "index-nested-loop-join(on=o.customer_id = c.id, index=~pk, left=o.customer_id, right=id, right-filter=c.tier = 'gold')",
+        "index-nested-loop-join(on=o.day_id = d.id, index=~pk, left=o.day_id, right=id, right-filter=d.weekday = 0)",
+        "index-nested-loop-join(on=o.store_id = st.id, index=orders_store_idx, left=st.id, right=store_id)",
+        "table-scan(table=stores)"
+      ]
+    },
+    {
+      "id": "js-items-5",
+      "tags": [
+        "join",
+        "join:snowflake",
+        "tables:5"
+      ],
+      "rows": 10,
+      "resultHash": "40f5b507fb633d66",
+      "work": 1720,
+      "statementRowsRead": 826,
+      "qErrorMedian": 1.44,
+      "qErrorMax": 3.37,
+      "joinOrder": "cost-based",
+      "joinStepsCosted": 36,
+      "plan": [
+        "index-nested-loop-join(on=p.id = i.product_id, index=order_items_product_idx, left=p.id, right=product_id)",
+        "index-nested-loop-join(on=b.id = p.brand_id, index=~pk, left=p.brand_id, right=id)",
+        "index-nested-loop-join(on=su.id = p.supplier_id, index=~pk, left=p.supplier_id, right=id, right-filter=su.rating = 5)",
+        "index-nested-loop-join(on=cat.id = p.category_id, index=products_category_idx, left=cat.id, right=category_id)",
+        "index-range-scan(index=categories_parent_idx, from>=2, to<3)"
+      ]
+    },
+    {
+      "id": "js-orders-4",
+      "tags": [
+        "join",
+        "join:star",
+        "tables:4"
+      ],
+      "rows": 1,
+      "resultHash": "30ce1c6407d6e36f",
+      "work": 579,
+      "statementRowsRead": 289,
+      "qErrorMedian": 1,
+      "qErrorMax": 1.72,
+      "joinOrder": "cost-based",
+      "joinStepsCosted": 15,
+      "plan": [
+        "index-nested-loop-join(on=e.id = o.employee_id, index=~pk, left=o.employee_id, right=id)",
+        "index-nested-loop-join(on=d.id = o.day_id, index=~pk, left=o.day_id, right=id, right-filter=d.cal_month = 12 AND d.cal_year = 2025)",
+        "index-nested-loop-join(on=st.id = o.store_id, index=orders_store_idx, left=st.id, right=store_id)",
+        "table-scan(table=stores)"
+      ]
+    },
+    {
+      "id": "js-orders-6",
+      "tags": [
+        "join",
+        "join:star",
+        "tables:6"
+      ],
+      "rows": 5,
+      "resultHash": "fc87e31596391484",
+      "work": 2487,
+      "statementRowsRead": 1230,
+      "qErrorMedian": 1.36,
+      "qErrorMax": 2.95,
+      "joinOrder": "cost-based",
+      "joinStepsCosted": 59,
+      "plan": [
+        "index-nested-loop-join(on=st.id = o.store_id, index=~pk, left=o.store_id, right=id)",
+        "hash-join(on=c.segment_id=id, build=seg)",
+        "index-nested-loop-join(on=c.id = o.customer_id, index=~pk, left=o.customer_id, right=id)",
+        "index-nested-loop-join(on=e.id = o.employee_id, index=~pk, left=o.employee_id, right=id, right-filter=e.salary > 100000)",
+        "index-nested-loop-join(on=d.id = o.day_id, index=orders_day_idx, left=d.id, right=day_id)",
+        "table-scan(table=days)"
+      ]
+    },
+    {
+      "id": "js-promotions",
+      "tags": [
+        "join",
+        "join:star",
+        "tables:3",
+        "nullable-key"
+      ],
+      "rows": 18,
+      "resultHash": "cc1a6a85b628cc1f",
+      "work": 12549,
+      "statementRowsRead": 6200,
+      "qErrorMedian": 1,
+      "qErrorMax": 1.2,
+      "joinOrder": "cost-based",
+      "joinStepsCosted": 6,
+      "plan": [
+        "hash-join(on=o.promotion_id=id, build=pr, build-filter=pr.discount_pct >= 40)",
+        "index-nested-loop-join(on=st.id = o.store_id, index=orders_store_idx, left=st.id, right=store_id)",
+        "table-scan(table=stores)"
+      ]
+    },
+    {
+      "id": "js-reviews-segments",
+      "tags": [
+        "join",
+        "join:star",
+        "tables:3",
+        "hash-join"
+      ],
+      "rows": 5,
+      "resultHash": "b7b30e38232abfa6",
+      "work": 12014,
+      "statementRowsRead": 6005,
+      "qErrorMedian": 1,
+      "qErrorMax": 1,
+      "joinOrder": "cost-based",
+      "joinStepsCosted": 6,
+      "plan": [
+        "hash-join(on=c.id=customer_id, build=r)",
+        "index-nested-loop-join(on=seg.id = c.segment_id, index=customers_segment_idx, left=seg.id, right=segment_id)",
+        "table-scan(table=segments)"
+      ]
+    },
+    {
+      "id": "js-unindexed-dimensions",
+      "tags": [
+        "join",
+        "join:star",
+        "tables:4",
+        "hash-join"
+      ],
+      "rows": 12,
+      "resultHash": "8749322fe854cb4b",
+      "work": 12380,
+      "statementRowsRead": 6190,
+      "qErrorMedian": 1.29,
+      "qErrorMax": 1.29,
+      "joinOrder": "cost-based",
+      "joinStepsCosted": 15,
+      "plan": [
+        "index-nested-loop-join(on=o.id = sh.order_id, index=~pk, left=sh.order_id, right=id)",
+        "hash-join(on=sh.carrier_id=id, build=ca)",
+        "hash-join(on=d.id=day_id, build=d)",
+        "table-scan(table=days)"
+      ]
+    },
+    {
+      "id": "jw-10",
+      "tags": [
+        "join",
+        "join:snowflake",
+        "tables:10"
+      ],
+      "rows": 5,
+      "resultHash": "f6261e3ea09d6666",
+      "work": 6132,
+      "statementRowsRead": 2920,
+      "qErrorMedian": 10.12,
+      "qErrorMax": 10.24,
+      "joinOrder": "cost-based",
+      "joinStepsCosted": 175,
+      "plan": [
+        "index-nested-loop-join(on=b.id = p.brand_id, index=~pk, left=p.brand_id, right=id)",
+        "hash-join(on=co.region_id=id, build=r)",
+        "index-nested-loop-join(on=co.id = ci.country_id, index=~pk, left=ci.country_id, right=id)",
+        "index-nested-loop-join(on=ci.id = c.city_id, index=~pk, left=c.city_id, right=id)",
+        "index-nested-loop-join(on=c.id = o.customer_id, index=~pk, left=o.customer_id, right=id)",
+        "hash-join(on=p.category_id=id, build=cat, build-filter=cat.parent_id = 1, right-index=categories_parent_idx)",
+        "index-nested-loop-join(on=p.id = i.product_id, index=~pk, left=i.product_id, right=id)",
+        "index-nested-loop-join(on=o.id = i.order_id, index=order_items_order_idx, left=o.id, right=order_id)",
+        "index-nested-loop-join(on=d.id = o.day_id, index=orders_day_idx, left=d.id, right=day_id)",
+        "table-scan(table=days)"
+      ]
+    },
+    {
+      "id": "jw-12",
+      "tags": [
+        "join",
+        "join:snowflake",
+        "tables:12"
+      ],
+      "rows": 6,
+      "resultHash": "9f7603e49853bf66",
+      "work": 18536,
+      "statementRowsRead": 8961,
+      "qErrorMedian": 4.27,
+      "qErrorMax": 5.07,
+      "joinOrder": "cost-based",
+      "joinStepsCosted": 831,
+      "plan": [
+        "hash-join(on=p.brand_id=id, build=b)",
+        "hash-join(on=p.category_id=id, build=cat)",
+        "index-nested-loop-join(on=p.id = i.product_id, index=~pk, left=i.product_id, right=id)",
+        "index-nested-loop-join(on=o.id = i.order_id, index=order_items_order_idx, left=o.id, right=order_id)",
+        "index-nested-loop-join(on=st.id = o.store_id, index=~pk, left=o.store_id, right=id)",
+        "hash-join(on=co.region_id=id, build=r)",
+        "hash-join(on=ci.country_id=id, build=co)",
+        "index-nested-loop-join(on=ci.id = c.city_id, index=~pk, left=c.city_id, right=id)",
+        "index-nested-loop-join(on=c.id = o.customer_id, index=~pk, left=o.customer_id, right=id)",
+        "index-nested-loop-join(on=e.id = o.employee_id, index=~pk, left=o.employee_id, right=id, right-filter=e.salary >= 110000)",
+        "index-nested-loop-join(on=d.id = o.day_id, index=orders_day_idx, left=d.id, right=day_id)",
+        "table-scan(table=days)"
+      ]
+    },
+    {
+      "id": "jw-12-selective-far-end",
+      "tags": [
+        "join",
+        "join:snowflake",
+        "tables:12",
+        "selective"
+      ],
+      "rows": 1,
+      "resultHash": "69999a163f8ba366",
+      "work": 7834,
+      "statementRowsRead": 3897,
+      "qErrorMedian": 29.2,
+      "qErrorMax": 29.9,
+      "joinOrder": "cost-based",
+      "joinStepsCosted": 831,
+      "plan": [
+        "index-nested-loop-join(on=e.id = o.employee_id, index=~pk, left=o.employee_id, right=id)",
+        "index-nested-loop-join(on=st.id = o.store_id, index=~pk, left=o.store_id, right=id)",
+        "index-nested-loop-join(on=d.id = o.day_id, index=~pk, left=o.day_id, right=id)",
+        "hash-join(on=co.region_id=id, build=r)",
+        "index-nested-loop-join(on=ci.country_id = co.id, index=~pk, left=ci.country_id, right=id)",
+        "index-nested-loop-join(on=c.city_id = ci.id, index=~pk, left=c.city_id, right=id)",
+        "index-nested-loop-join(on=o.customer_id = c.id, index=~pk, left=o.customer_id, right=id)",
+        "index-nested-loop-join(on=i.order_id = o.id, index=~pk, left=i.order_id, right=id)",
+        "index-nested-loop-join(on=p.id = i.product_id, index=order_items_product_idx, left=p.id, right=product_id)",
+        "index-nested-loop-join(on=b.id = p.brand_id, index=~pk, left=p.brand_id, right=id)",
+        "index-nested-loop-join(on=cat.id = p.category_id, index=products_category_idx, left=cat.id, right=category_id, right-filter=p.id = 7)",
+        "table-scan(table=categories)"
+      ]
+    },
+    {
+      "id": "jw-13",
+      "tags": [
+        "join",
+        "join:snowflake",
+        "tables:13",
+        "over-dp-limit"
+      ],
+      "rows": 3,
+      "resultHash": "e371801ed2cfcf1e",
+      "work": 52298,
+      "statementRowsRead": 26149,
+      "qErrorMedian": 9.79,
+      "qErrorMax": 93.9,
+      "joinOrder": "heuristic",
+      "joinStepsCosted": 0,
+      "plan": [
+        "hash-join(on=o.employee_id=id, build=e)",
+        "hash-join(on=o.store_id=id, build=st)",
+        "hash-join(on=o.day_id=id, build=d, build-filter=d.cal_month = 7)",
+        "hash-join(on=p.brand_id=id, build=b)",
+        "hash-join(on=p.category_id=id, build=cat)",
+        "hash-join(on=i.product_id=id, build=p)",
+        "hash-join(on=co.region_id=id, build=r, build-filter=r.name = 'west')",
+        "hash-join(on=ci.country_id=id, build=co)",
+        "hash-join(on=c.city_id=id, build=ci)",
+        "hash-join(on=c.segment_id=id, build=seg)",
+        "hash-join(on=o.customer_id=id, build=c)",
+        "hash-join(on=i.order_id=id, build=o)",
+        "table-scan(table=order_items)"
+      ]
+    },
+    {
+      "id": "jw-13-comma",
+      "tags": [
+        "join",
+        "join:snowflake",
+        "tables:13",
+        "over-dp-limit",
+        "comma-join"
+      ],
+      "rows": 1,
+      "resultHash": "975d3286429f0d18",
+      "work": 15544,
+      "statementRowsRead": 7491,
+      "qErrorMedian": 2.1,
+      "qErrorMax": 16.55,
+      "joinOrder": "heuristic",
+      "joinStepsCosted": 0,
+      "plan": [
+        "hash-join(on=o.employee_id=id, build=e)",
+        "hash-join(on=o.store_id=id, build=st)",
+        "hash-join(on=c.segment_id=id, build=seg)",
+        "hash-join(on=p.category_id=id, build=cat)",
+        "hash-join(on=p.brand_id=id, build=b)",
+        "hash-join(on=i.product_id=id, build=p)",
+        "hash-join(on=co.region_id=id, build=r, build-filter=r.name = 'west')",
+        "hash-join(on=ci.country_id=id, build=co)",
+        "hash-join(on=c.city_id=id, build=ci)",
+        "hash-join(on=o.customer_id=id, build=c)",
+        "index-nested-loop-join(on=o.id = i.order_id, index=order_items_order_idx, left=o.id, right=order_id)",
+        "index-nested-loop-join(on=d.id = o.day_id, index=orders_day_idx, left=d.id, right=day_id)",
+        "table-scan(table=days)"
+      ]
+    },
+    {
+      "id": "jw-15",
+      "tags": [
+        "join",
+        "join:snowflake",
+        "tables:15",
+        "over-dp-limit"
+      ],
+      "rows": 5,
+      "resultHash": "fccc63816e25caf7",
+      "work": 52798,
+      "statementRowsRead": 26399,
+      "qErrorMedian": 3.95,
+      "qErrorMax": 73.3,
+      "joinOrder": "heuristic",
+      "joinStepsCosted": 0,
+      "plan": [
+        "hash-join(on=o.promotion_id=id, build=pr, build-filter=pr.discount_pct >= 45)",
+        "hash-join(on=o.employee_id=id, build=e)",
+        "hash-join(on=o.store_id=id, build=st)",
+        "hash-join(on=o.day_id=id, build=d)",
+        "hash-join(on=p.supplier_id=id, build=su)",
+        "hash-join(on=p.brand_id=id, build=b)",
+        "hash-join(on=p.category_id=id, build=cat)",
+        "hash-join(on=i.product_id=id, build=p)",
+        "hash-join(on=co.region_id=id, build=r)",
+        "hash-join(on=ci.country_id=id, build=co)",
+        "hash-join(on=c.city_id=id, build=ci)",
+        "hash-join(on=c.segment_id=id, build=seg, build-filter=seg.name = 'corporate')",
+        "hash-join(on=o.customer_id=id, build=c)",
+        "hash-join(on=i.order_id=id, build=o)",
+        "table-scan(table=order_items)"
+      ]
+    },
+    {
+      "id": "jw-17",
+      "tags": [
+        "join",
+        "join:snowflake",
+        "tables:17",
+        "over-dp-limit"
+      ],
+      "rows": 12,
+      "resultHash": "02e6246e593b6686",
+      "work": 62864,
+      "statementRowsRead": 31432,
+      "qErrorMedian": 8.97,
+      "qErrorMax": 63.01,
+      "joinOrder": "heuristic",
+      "joinStepsCosted": 0,
+      "plan": [
+        "hash-join(on=sh.carrier_id=id, build=ca)",
+        "hash-join(on=o.id=order_id, build=sh)",
+        "hash-join(on=o.promotion_id=id, build=pr)",
+        "hash-join(on=o.employee_id=id, build=e)",
+        "hash-join(on=o.store_id=id, build=st)",
+        "hash-join(on=o.day_id=id, build=d, build-filter=d.cal_year = 2025)",
+        "hash-join(on=p.supplier_id=id, build=su)",
+        "hash-join(on=p.brand_id=id, build=b)",
+        "hash-join(on=p.category_id=id, build=cat, build-filter=cat.parent_id = 3, right-index=categories_parent_idx)",
+        "hash-join(on=i.product_id=id, build=p)",
+        "hash-join(on=co.region_id=id, build=r)",
+        "hash-join(on=ci.country_id=id, build=co)",
+        "hash-join(on=c.city_id=id, build=ci)",
+        "hash-join(on=c.segment_id=id, build=seg)",
+        "hash-join(on=o.customer_id=id, build=c)",
+        "hash-join(on=i.order_id=id, build=o)",
+        "table-scan(table=order_items)"
+      ]
+    },
+    {
+      "id": "jy-4-cycle-comma",
+      "tags": [
+        "join",
+        "join:cycle",
+        "tables:4",
+        "comma-join",
+        "correlation"
+      ],
+      "rows": 1,
+      "resultHash": "292e78d4b488b276",
+      "work": 163981,
+      "statementRowsRead": 80803,
+      "qErrorMedian": 11.13,
+      "qErrorMax": 341.5,
+      "joinOrder": "cost-based",
+      "joinStepsCosted": 20,
+      "plan": [
+        "index-nested-loop-join(on=o.store_id = st.id AND o.customer_id = c.id, index=orders_store_idx, left=st.id, right=store_id)",
+        "index-nested-loop-join(on=c.city_id = ci.id, index=customers_city_idx, left=ci.id, right=city_id)",
+        "index-nested-loop-join(on=st.city_id = ci.id, index=stores_city_idx, left=ci.id, right=city_id)",
+        "table-scan(table=cities)"
+      ]
+    },
+    {
+      "id": "jy-4-cycle-filtered",
+      "tags": [
+        "join",
+        "join:cycle",
+        "tables:4",
+        "correlation"
+      ],
+      "rows": 3,
+      "resultHash": "63a60409a091d6f5",
+      "work": 141590,
+      "statementRowsRead": 62207,
+      "qErrorMedian": 729.46,
+      "qErrorMax": 1464,
+      "joinOrder": "cost-based",
+      "joinStepsCosted": 20,
+      "plan": [
+        "index-nested-loop-join(on=o.customer_id = c.id AND st.id = o.store_id, index=orders_customer_idx, left=c.id, right=customer_id)",
+        "index-nested-loop-join(on=c.city_id = ci.id, index=customers_city_idx, left=ci.id, right=city_id)",
+        "index-nested-loop-join(on=st.city_id = ci.id, index=stores_city_idx, left=ci.id, right=city_id)",
+        "index-range-scan(index=~pk, to<=3)"
+      ]
+    },
+    {
+      "id": "jy-4-cycle-local-store",
+      "tags": [
+        "join",
+        "join:cycle",
+        "tables:4",
+        "correlation"
+      ],
+      "rows": 1,
+      "resultHash": "84c8ccae3f4e7c42",
+      "work": 160155,
+      "statementRowsRead": 70502,
+      "qErrorMedian": 8.34,
+      "qErrorMax": 147,
+      "joinOrder": "cost-based",
+      "joinStepsCosted": 20,
+      "plan": [
+        "index-nested-loop-join(on=o.customer_id = c.id AND st.id = o.store_id, index=orders_customer_idx, left=c.id, right=customer_id)",
+        "index-nested-loop-join(on=ci.id = c.city_id, index=customers_city_idx, left=ci.id, right=city_id)",
+        "index-nested-loop-join(on=ci.id = st.city_id, index=~pk, left=st.city_id, right=id)",
+        "table-scan(table=stores)"
+      ]
+    },
+    {
+      "id": "jy-5-cycle-supplier-city",
+      "tags": [
+        "join",
+        "join:cycle",
+        "tables:5"
+      ],
+      "rows": 1,
+      "resultHash": "14220173ceac8428",
+      "work": 45932,
+      "statementRowsRead": 22217,
+      "qErrorMedian": 1,
+      "qErrorMax": 9.04,
+      "joinOrder": "cost-based",
+      "joinStepsCosted": 35,
+      "plan": [
+        "hash-join(on=o.store_id=id, su.city_id=city_id, build=st)",
+        "hash-join(on=i.order_id=id, build=o)",
+        "index-nested-loop-join(on=p.id = i.product_id, index=order_items_product_idx, left=p.id, right=product_id)",
+        "hash-join(on=su.id=supplier_id, build=su)",
+        "table-scan(table=suppliers)"
+      ]
+    },
+    {
+      "id": "sq-derived-aggregate",
+      "tags": [
+        "subquery",
+        "derived-table",
+        "join",
+        "tables:2"
+      ],
+      "rows": 6,
+      "resultHash": "f3dd23ccad3e36a0",
+      "work": 300,
+      "statementRowsRead": 150,
+      "qErrorMedian": 833.83,
+      "qErrorMax": 1666.67,
+      "joinOrder": "cost-based",
+      "joinStepsCosted": 2,
+      "plan": [
+        "hash-join(on=st.id=store_id, build=st, build-filter=x.n > 100)",
+        "table-scan(table=stores)"
+      ]
+    },
+    {
+      "id": "sq-derived-filter",
+      "tags": [
+        "subquery",
+        "derived-table"
+      ],
+      "rows": 1,
+      "resultHash": "3355a64987e80a32",
+      "work": 0,
+      "statementRowsRead": 896,
+      "qErrorMedian": 526.32,
+      "qErrorMax": 526.32,
+      "joinOrder": "heuristic",
+      "joinStepsCosted": 0,
+      "plan": [
+        "derived-table-scan(alias=s)"
+      ]
+    },
+    {
+      "id": "sq-exists-after-join",
+      "tags": [
+        "subquery",
+        "exists",
+        "correlated",
+        "join",
+        "tables:2"
+      ],
+      "rows": 1,
+      "resultHash": "4ada54121a6251a3",
+      "work": 1705,
+      "statementRowsRead": 844,
+      "qErrorMedian": 1.14,
+      "qErrorMax": 1.16,
+      "joinOrder": "cost-based",
+      "joinStepsCosted": 2,
+      "plan": [
+        "index-nested-loop-join(on=st.id = o.store_id, index=orders_store_idx, left=st.id, right=store_id)",
+        "table-scan(table=stores)"
+      ]
+    },
+    {
+      "id": "sq-exists-correlated",
+      "tags": [
+        "subquery",
+        "exists",
+        "correlated",
+        "semi-join"
+      ],
+      "rows": 1,
+      "resultHash": "61e7ba6a19cb79d8",
+      "work": 100,
+      "statementRowsRead": 0,
+      "qErrorMedian": 1.59,
+      "qErrorMax": 4.6,
+      "joinOrder": null,
+      "joinStepsCosted": 0,
+      "plan": [
+        "project",
+        "aggregate(aggs=[count(*)])",
+        "filter(EXISTS (SELECT ...))",
+        "index-range-scan(index=~pk, to<=100, index-only=true)"
+      ]
+    },
+    {
+      "id": "sq-in-subquery",
+      "tags": [
+        "subquery",
+        "in-subquery",
+        "semi-join"
+      ],
+      "rows": 1,
+      "resultHash": "99cbebc134eecbe4",
+      "work": 12000,
+      "statementRowsRead": 6000,
+      "qErrorMedian": 1,
+      "qErrorMax": 1.78,
+      "joinOrder": null,
+      "joinStepsCosted": 0,
+      "plan": [
+        "project",
+        "aggregate(aggs=[count(*)])",
+        "semi-join(outer=customer_id, inner=customers.id, index=~pk)",
+        "table-scan(table=orders)"
+      ]
+    },
+    {
+      "id": "sq-in-subquery-nested-in-list",
+      "tags": [
+        "subquery",
+        "in-subquery",
+        "in-list"
+      ],
+      "rows": 1,
+      "resultHash": "901f76e8e543ef70",
+      "work": 28734,
+      "statementRowsRead": 14367,
+      "qErrorMedian": 1,
+      "qErrorMax": 3.88,
+      "joinOrder": null,
+      "joinStepsCosted": 0,
+      "plan": [
+        "project",
+        "aggregate(aggs=[count(*)])",
+        "semi-join(outer=product_id, inner=products.id, index=~pk)",
+        "table-scan(table=order_items)"
+      ]
+    },
+    {
+      "id": "sq-not-exists",
+      "tags": [
+        "subquery",
+        "not-exists",
+        "correlated",
+        "anti-join"
+      ],
+      "rows": 1,
+      "resultHash": "52f43635e0edd7f0",
+      "work": 3000,
+      "statementRowsRead": 1500,
+      "qErrorMedian": 1.48,
+      "qErrorMax": 5.08,
+      "joinOrder": null,
+      "joinStepsCosted": 0,
+      "plan": [
+        "project",
+        "aggregate(aggs=[count(*)])",
+        "filter(NOT EXISTS (SELECT ...))",
+        "table-scan(table=products)"
+      ]
+    },
+    {
+      "id": "sq-not-in",
+      "tags": [
+        "subquery",
+        "not-in"
+      ],
+      "rows": 1,
+      "resultHash": "756b63af9ebcf8d3",
+      "work": 300,
+      "statementRowsRead": 150,
+      "qErrorMedian": 1,
+      "qErrorMax": 9.53,
+      "joinOrder": null,
+      "joinStepsCosted": 0,
+      "plan": [
+        "project",
+        "aggregate(aggs=[count(*)])",
+        "anti-join(outer=id, inner=orders.store_id, index=orders_store_idx)",
+        "table-scan(table=stores)"
+      ]
+    },
+    {
+      "id": "sq-not-in-with-null",
+      "tags": [
+        "subquery",
+        "not-in",
+        "null"
+      ],
+      "rows": 1,
+      "resultHash": "2d15847e88030526",
+      "work": 0,
+      "statementRowsRead": 0,
+      "qErrorMedian": 100.5,
+      "qErrorMax": 2000,
+      "joinOrder": null,
+      "joinStepsCosted": 0,
+      "plan": [
+        "project",
+        "aggregate(aggs=[count(*)])",
+        "null-aware-anti-join(outer=id, inner=orders.customer_id, index=orders_customer_idx)",
+        "table-scan(table=customers)"
+      ]
+    },
+    {
+      "id": "sq-quantified-all",
+      "tags": [
+        "subquery",
+        "quantified"
+      ],
+      "rows": 1,
+      "resultHash": "2d15847e88030526",
+      "work": 3000,
+      "statementRowsRead": 1500,
+      "qErrorMedian": 75.5,
+      "qErrorMax": 1500,
+      "joinOrder": null,
+      "joinStepsCosted": 0,
+      "plan": [
+        "project",
+        "aggregate(aggs=[count(*)])",
+        "filter(price > ALL ((...)))",
+        "table-scan(table=products)"
+      ]
+    },
+    {
+      "id": "sq-scalar",
+      "tags": [
+        "subquery",
+        "scalar"
+      ],
+      "rows": 1,
+      "resultHash": "cb01c69e837ccf62",
+      "work": 12000,
+      "statementRowsRead": 6000,
+      "qErrorMedian": 1.52,
+      "qErrorMax": 4.88,
+      "joinOrder": null,
+      "joinStepsCosted": 0,
+      "plan": [
+        "project",
+        "aggregate(aggs=[count(*)])",
+        "filter(total > 2580.2083333333335)",
+        "table-scan(table=orders)"
+      ]
+    },
+    {
+      "id": "sq-view-join",
+      "tags": [
+        "subquery",
+        "view",
+        "join",
+        "tables:2"
+      ],
+      "rows": 4,
+      "resultHash": "3fb850dfa6974eb2",
+      "work": 4000,
+      "statementRowsRead": 8000,
+      "qErrorMedian": 1.93,
+      "qErrorMax": 2.85,
+      "joinOrder": "cost-based",
+      "joinStepsCosted": 2,
+      "plan": [
+        "hash-join(on=c.id=customer_id, build=c)",
+        "table-scan(table=customers)"
+      ]
+    },
+    {
+      "id": "sq-view-join-3",
+      "tags": [
+        "subquery",
+        "view",
+        "join",
+        "tables:3"
+      ],
+      "rows": 3,
+      "resultHash": "fa5642f4862c4791",
+      "work": 6093,
+      "statementRowsRead": 4328,
+      "qErrorMedian": 1.06,
+      "qErrorMax": 1.75,
+      "joinOrder": "cost-based",
+      "joinStepsCosted": 6,
+      "plan": [
+        "index-nested-loop-join(on=i.product_id = ap.id, index=order_items_product_idx, left=ap.id, right=product_id)",
+        "hash-join(on=b.id=brand_id, build=ap)",
+        "index-range-scan(index=~pk, to<=3)"
+      ]
+    },
+    {
+      "id": "st-aggregate-all",
+      "tags": [
+        "single-table",
+        "aggregate",
+        "full-scan"
+      ],
+      "rows": 1,
+      "resultHash": "5b4890f8b64c0f5e",
+      "work": 12000,
+      "statementRowsRead": 6000,
+      "qErrorMedian": 1,
+      "qErrorMax": 1,
+      "joinOrder": null,
+      "joinStepsCosted": 0,
+      "plan": [
+        "project",
+        "aggregate(aggs=[count(*), min(total), max(total), avg(total)])",
+        "table-scan(table=orders)"
+      ]
+    },
+    {
+      "id": "st-bool-filter",
+      "tags": [
+        "single-table",
+        "bool"
+      ],
+      "rows": 1,
+      "resultHash": "cf1497d94b48f261",
+      "work": 3000,
+      "statementRowsRead": 1500,
+      "qErrorMedian": 1.01,
+      "qErrorMax": 10.14,
+      "joinOrder": null,
+      "joinStepsCosted": 0,
+      "plan": [
+        "project",
+        "aggregate(aggs=[count(*)])",
+        "filter(discontinued = true)",
+        "table-scan(table=products)"
+      ]
+    },
+    {
+      "id": "st-composite-full",
+      "tags": [
+        "single-table",
+        "composite-index",
+        "range"
+      ],
+      "rows": 50,
+      "resultHash": "76839d766539cdfb",
+      "work": 100,
+      "statementRowsRead": 50,
+      "qErrorMedian": 3,
+      "qErrorMax": 3,
+      "joinOrder": null,
+      "joinStepsCosted": 0,
+      "plan": [
+        "project",
+        "sort(total ASC, id ASC)",
+        "index-range-scan(index=orders_status_total_idx, from>=('cancelled', 4500), to<='cancelled')"
+      ]
+    },
+    {
+      "id": "st-composite-prefix",
+      "tags": [
+        "single-table",
+        "composite-index"
+      ],
+      "rows": 1,
+      "resultHash": "d6e4093ff7318732",
+      "work": 618,
+      "statementRowsRead": 0,
+      "qErrorMedian": 1,
+      "qErrorMax": 2.43,
+      "joinOrder": null,
+      "joinStepsCosted": 0,
+      "plan": [
+        "project",
+        "aggregate(aggs=[count(*)])",
+        "index-range-scan(index=orders_status_total_idx, from>='pending', to<='pending', index-only=true)"
+      ]
+    },
+    {
+      "id": "st-correlated-columns",
+      "tags": [
+        "single-table",
+        "correlation"
+      ],
+      "rows": 1,
+      "resultHash": "1d76a606799aaf42",
+      "work": 596,
+      "statementRowsRead": 298,
+      "qErrorMedian": 1.01,
+      "qErrorMax": 2.66,
+      "joinOrder": null,
+      "joinStepsCosted": 0,
+      "plan": [
+        "project",
+        "aggregate(aggs=[count(*)])",
+        "filter(price >= 1000)",
+        "index-range-scan(index=products_category_idx, from>=9, to<10)"
+      ]
+    },
+    {
+      "id": "st-desc-index-order",
+      "tags": [
+        "single-table",
+        "descending-index",
+        "order-limit"
+      ],
+      "rows": 15,
+      "resultHash": "ec8acdcfa22f15cd",
+      "work": 4000,
+      "statementRowsRead": 2000,
+      "qErrorMedian": 1,
+      "qErrorMax": 1,
+      "joinOrder": null,
+      "joinStepsCosted": 0,
+      "plan": [
+        "limit(15)",
+        "project",
+        "topk(k: 15, signup_year DESC, id ASC)",
+        "index-range-scan(index=customers_signup_desc_idx)"
+      ]
+    },
+    {
+      "id": "st-desc-index-range",
+      "tags": [
+        "single-table",
+        "descending-index",
+        "range"
+      ],
+      "rows": 1,
+      "resultHash": "e3d1de654f998112",
+      "work": 4000,
+      "statementRowsRead": 2000,
+      "qErrorMedian": 1.02,
+      "qErrorMax": 27.4,
+      "joinOrder": null,
+      "joinStepsCosted": 0,
+      "plan": [
+        "project",
+        "aggregate(aggs=[count(*)])",
+        "filter(signup_year >= 2024)",
+        "table-scan(table=customers)"
+      ]
+    },
+    {
+      "id": "st-distinct-indexed",
+      "tags": [
+        "single-table",
+        "distinct",
+        "secondary-index"
+      ],
+      "rows": 59,
+      "resultHash": "7c90f64d4ddf68db",
+      "work": 150,
+      "statementRowsRead": 0,
+      "qErrorMedian": 1,
+      "qErrorMax": 1.78,
+      "joinOrder": null,
+      "joinStepsCosted": 0,
+      "plan": [
+        "distinct(streaming: true)",
+        "project",
+        "index-range-scan(index=stores_city_idx, index-only=true)"
+      ]
+    },
+    {
+      "id": "st-distinct-unindexed",
+      "tags": [
+        "single-table",
+        "distinct"
+      ],
+      "rows": 5,
+      "resultHash": "4502743287be97d1",
+      "work": 8000,
+      "statementRowsRead": 4000,
+      "qErrorMedian": 280.5,
+      "qErrorMax": 560,
+      "joinOrder": null,
+      "joinStepsCosted": 0,
+      "plan": [
+        "sort(stars ASC)",
+        "distinct(hash)",
+        "project",
+        "table-scan(table=reviews)"
+      ]
+    },
+    {
+      "id": "st-empty-result",
+      "tags": [
+        "single-table",
+        "empty"
+      ],
+      "rows": 0,
+      "resultHash": "e3b0c44298fc1c14",
+      "work": 12000,
+      "statementRowsRead": 6000,
+      "qErrorMedian": 600,
+      "qErrorMax": 6000,
+      "joinOrder": null,
+      "joinStepsCosted": 0,
+      "plan": [
+        "project",
+        "filter(total > 999999)",
+        "table-scan(table=orders)"
+      ]
+    },
+    {
+      "id": "st-group-by-having",
+      "tags": [
+        "single-table",
+        "group-by",
+        "having"
+      ],
+      "rows": 43,
+      "resultHash": "fee2516bc9355a6f",
+      "work": 14367,
+      "statementRowsRead": 0,
+      "qErrorMedian": 4.53,
+      "qErrorMax": 6.67,
+      "joinOrder": null,
+      "joinStepsCosted": 0,
+      "plan": [
+        "project",
+        "having-filter(count(*) > 40)",
+        "aggregate(group=[product_id], aggs=[count(*)], streaming: true)",
+        "index-range-scan(index=order_items_product_idx, index-only=true)"
+      ]
+    },
+    {
+      "id": "st-group-by-indexed",
+      "tags": [
+        "single-table",
+        "group-by",
+        "secondary-index"
+      ],
+      "rows": 10,
+      "resultHash": "d41aae98c071df4c",
+      "work": 12000,
+      "statementRowsRead": 6000,
+      "qErrorMedian": 1,
+      "qErrorMax": 8,
+      "joinOrder": null,
+      "joinStepsCosted": 0,
+      "plan": [
+        "limit(10)",
+        "project",
+        "topk(k: 10, n DESC, store_id ASC)",
+        "aggregate(group=[store_id], aggs=[count(*), sum(total)], streaming: true)",
+        "table-scan(table=orders, forced-index=orders_store_idx)"
+      ]
+    },
+    {
+      "id": "st-group-by-two-columns",
+      "tags": [
+        "single-table",
+        "group-by"
+      ],
+      "rows": 12,
+      "resultHash": "7d9a4ced8c236daa",
+      "work": 2068,
+      "statementRowsRead": 1034,
+      "qErrorMedian": 15,
+      "qErrorMax": 15,
+      "joinOrder": null,
+      "joinStepsCosted": 0,
+      "plan": [
+        "project",
+        "sort(status ASC, store_id ASC)",
+        "aggregate(group=[status, store_id], aggs=[count(*)])",
+        "index-range-scan(index=orders_store_idx, to<=3)"
+      ]
+    },
+    {
+      "id": "st-group-by-unindexed",
+      "tags": [
+        "single-table",
+        "group-by"
+      ],
+      "rows": 4,
+      "resultHash": "4f428520747efa28",
+      "work": 12478,
+      "statementRowsRead": 6239,
+      "qErrorMedian": 311.75,
+      "qErrorMax": 311.75,
+      "joinOrder": null,
+      "joinStepsCosted": 0,
+      "plan": [
+        "project",
+        "sort(method ASC)",
+        "aggregate(group=[method], aggs=[count(*), sum(amount)])",
+        "table-scan(table=payments)"
+      ]
+    },
+    {
+      "id": "st-in-list-secondary",
+      "tags": [
+        "single-table",
+        "in-list",
+        "secondary-index"
+      ],
+      "rows": 1,
+      "resultHash": "55ff17da8cd26563",
+      "work": 2158,
+      "statementRowsRead": 1079,
+      "qErrorMedian": 1,
+      "qErrorMax": 5.4,
+      "joinOrder": null,
+      "joinStepsCosted": 0,
+      "plan": [
+        "project",
+        "aggregate(aggs=[count(*)])",
+        "index-in-list(index=orders_store_idx, values=5)"
+      ]
+    },
+    {
+      "id": "st-is-not-null-group",
+      "tags": [
+        "single-table",
+        "null",
+        "group-by"
+      ],
+      "rows": 3,
+      "resultHash": "df10db92e4fbc7f0",
+      "work": 2000,
+      "statementRowsRead": 0,
+      "qErrorMedian": 13.33,
+      "qErrorMax": 13.33,
+      "joinOrder": null,
+      "joinStepsCosted": 0,
+      "plan": [
+        "project",
+        "sort(tier ASC)",
+        "aggregate(group=[tier], aggs=[count(*)])",
+        "filter(tier IS NOT NULL)",
+        "index-range-scan(index=customers_tier_idx, index-only=true)"
+      ]
+    },
+    {
+      "id": "st-is-null",
+      "tags": [
+        "single-table",
+        "null",
+        "secondary-index"
+      ],
+      "rows": 1,
+      "resultHash": "1b557337acc0ea38",
+      "work": 4000,
+      "statementRowsRead": 2000,
+      "qErrorMedian": 1.48,
+      "qErrorMax": 5.08,
+      "joinOrder": null,
+      "joinStepsCosted": 0,
+      "plan": [
+        "project",
+        "aggregate(aggs=[count(*)])",
+        "filter(tier IS NULL)",
+        "table-scan(table=customers)"
+      ]
+    },
+    {
+      "id": "st-like-infix",
+      "tags": [
+        "single-table",
+        "like",
+        "full-scan"
+      ],
+      "rows": 1,
+      "resultHash": "9f5bb6a711cebe12",
+      "work": 4000,
+      "statementRowsRead": 2000,
+      "qErrorMedian": 3.13,
+      "qErrorMax": 52.63,
+      "joinOrder": null,
+      "joinStepsCosted": 0,
+      "plan": [
+        "project",
+        "aggregate(aggs=[count(*)])",
+        "filter(name LIKE '%99%')",
+        "table-scan(table=customers)"
+      ]
+    },
+    {
+      "id": "st-like-prefix",
+      "tags": [
+        "single-table",
+        "like"
+      ],
+      "rows": 1,
+      "resultHash": "dabdea20e51a0cd4",
+      "work": 3000,
+      "statementRowsRead": 1500,
+      "qErrorMedian": 1.18,
+      "qErrorMax": 13.51,
+      "joinOrder": null,
+      "joinStepsCosted": 0,
+      "plan": [
+        "project",
+        "aggregate(aggs=[count(*)])",
+        "filter(name LIKE 'product 12%')",
+        "table-scan(table=products)"
+      ]
+    },
+    {
+      "id": "st-not-equal",
+      "tags": [
+        "single-table",
+        "negation"
+      ],
+      "rows": 1,
+      "resultHash": "268c5a820ff48317",
+      "work": 12000,
+      "statementRowsRead": 6000,
+      "qErrorMedian": 1.72,
+      "qErrorMax": 3.26,
+      "joinOrder": null,
+      "joinStepsCosted": 0,
+      "plan": [
+        "project",
+        "aggregate(aggs=[count(*)])",
+        "filter(status <> 'delivered')",
+        "table-scan(table=orders)"
+      ]
+    },
+    {
+      "id": "st-or-same-column",
+      "tags": [
+        "single-table",
+        "or",
+        "secondary-index"
+      ],
+      "rows": 1,
+      "resultHash": "9babd2f3f59f4a16",
+      "work": 4000,
+      "statementRowsRead": 2000,
+      "qErrorMedian": 1.02,
+      "qErrorMax": 9.66,
+      "joinOrder": null,
+      "joinStepsCosted": 0,
+      "plan": [
+        "project",
+        "aggregate(aggs=[count(*)])",
+        "filter(segment_id = 4 OR segment_id = 5)",
+        "table-scan(table=customers)"
+      ]
+    },
+    {
+      "id": "st-or-two-columns",
+      "tags": [
+        "single-table",
+        "or"
+      ],
+      "rows": 1,
+      "resultHash": "3f55201ad8cadee4",
+      "work": 4000,
+      "statementRowsRead": 2000,
+      "qErrorMedian": 1.45,
+      "qErrorMax": 5.26,
+      "joinOrder": null,
+      "joinStepsCosted": 0,
+      "plan": [
+        "project",
+        "aggregate(aggs=[count(*)])",
+        "filter(tier = 'gold' OR credit < 0)",
+        "table-scan(table=customers)"
+      ]
+    },
+    {
+      "id": "st-order-limit-desc",
+      "tags": [
+        "single-table",
+        "order-limit"
+      ],
+      "rows": 10,
+      "resultHash": "f6015a971ab05a60",
+      "work": 3000,
+      "statementRowsRead": 1500,
+      "qErrorMedian": 1,
+      "qErrorMax": 1,
+      "joinOrder": null,
+      "joinStepsCosted": 0,
+      "plan": [
+        "limit(10)",
+        "project",
+        "topk(k: 10, price DESC, id ASC)",
+        "table-scan(table=products)"
+      ]
+    },
+    {
+      "id": "st-order-limit-filtered",
+      "tags": [
+        "single-table",
+        "order-limit",
+        "secondary-index"
+      ],
+      "rows": 5,
+      "resultHash": "37581b835a801343",
+      "work": 180,
+      "statementRowsRead": 90,
+      "qErrorMedian": 1,
+      "qErrorMax": 1.5,
+      "joinOrder": null,
+      "joinStepsCosted": 0,
+      "plan": [
+        "limit(5)",
+        "project",
+        "topk(k: 5, total DESC, id ASC)",
+        "index-range-scan(index=orders_store_idx, from>=5, to<6)"
+      ]
+    },
+    {
+      "id": "st-order-limit-indexed",
+      "tags": [
+        "single-table",
+        "order-limit",
+        "secondary-index"
+      ],
+      "rows": 10,
+      "resultHash": "bcbdaa8c78f3ad2f",
+      "work": 3000,
+      "statementRowsRead": 1500,
+      "qErrorMedian": 1,
+      "qErrorMax": 1,
+      "joinOrder": null,
+      "joinStepsCosted": 0,
+      "plan": [
+        "limit(10)",
+        "project",
+        "topk(k: 10, price ASC, id ASC)",
+        "index-range-scan(index=products_price_idx)"
+      ]
+    },
+    {
+      "id": "st-order-limit-pk",
+      "tags": [
+        "single-table",
+        "order-limit",
+        "primary-key"
+      ],
+      "rows": 20,
+      "resultHash": "f32aed012b82c7ae",
+      "work": 40,
+      "statementRowsRead": 20,
+      "qErrorMedian": 300,
+      "qErrorMax": 300,
+      "joinOrder": null,
+      "joinStepsCosted": 0,
+      "plan": [
+        "limit(20)",
+        "project",
+        "index-range-scan(index=~pk)"
+      ]
+    },
+    {
+      "id": "st-order-offset",
+      "tags": [
+        "single-table",
+        "order-limit"
+      ],
+      "rows": 10,
+      "resultHash": "e6de45a9cc5e5e5a",
+      "work": 4000,
+      "statementRowsRead": 2000,
+      "qErrorMedian": 1,
+      "qErrorMax": 1,
+      "joinOrder": null,
+      "joinStepsCosted": 0,
+      "plan": [
+        "limit(10 offset 100)",
+        "project",
+        "topk(k: 110, credit ASC, id ASC)",
+        "table-scan(table=customers)"
+      ]
+    },
+    {
+      "id": "st-pk-in-list",
+      "tags": [
+        "single-table",
+        "in-list",
+        "primary-key"
+      ],
+      "rows": 6,
+      "resultHash": "c3df3a7431eca532",
+      "work": 12,
+      "statementRowsRead": 6,
+      "qErrorMedian": 1,
+      "qErrorMax": 1,
+      "joinOrder": null,
+      "joinStepsCosted": 0,
+      "plan": [
+        "project",
+        "index-in-list(index=~pk, values=6)"
+      ]
+    },
+    {
+      "id": "st-pk-point",
+      "tags": [
+        "single-table",
+        "point-lookup",
+        "primary-key"
+      ],
+      "rows": 1,
+      "resultHash": "ca921fa503152661",
+      "work": 2,
+      "statementRowsRead": 1,
+      "qErrorMedian": 1,
+      "qErrorMax": 1,
+      "joinOrder": null,
+      "joinStepsCosted": 0,
+      "plan": [
+        "project",
+        "index-lookup(index=~pk, key=1234)"
+      ]
+    },
+    {
+      "id": "st-pk-range",
+      "tags": [
+        "single-table",
+        "range",
+        "primary-key"
+      ],
+      "rows": 1,
+      "resultHash": "3449831a257f85ea",
+      "work": 400,
+      "statementRowsRead": 200,
+      "qErrorMedian": 1,
+      "qErrorMax": 1,
+      "joinOrder": null,
+      "joinStepsCosted": 0,
+      "plan": [
+        "project",
+        "aggregate(aggs=[count(*), sum(total)])",
+        "index-range-scan(index=~pk, from>=1000, to<1200)"
+      ]
+    },
+    {
+      "id": "st-pk-range-order-limit",
+      "tags": [
+        "single-table",
+        "range",
+        "order-limit",
+        "primary-key"
+      ],
+      "rows": 5,
+      "resultHash": "20f0451c0f90c502",
+      "work": 10005,
+      "statementRowsRead": 0,
+      "qErrorMedian": 873.4,
+      "qErrorMax": 2873.4,
+      "joinOrder": null,
+      "joinStepsCosted": 0,
+      "plan": [
+        "limit(5)",
+        "project",
+        "filter(id > 10000)",
+        "index-range-scan(index=~pk, index-only=true)"
+      ]
+    },
+    {
+      "id": "st-secondary-point-popular",
+      "tags": [
+        "single-table",
+        "point-lookup",
+        "secondary-index",
+        "skew"
+      ],
+      "rows": 1,
+      "resultHash": "e1f5bcd16da67c9f",
+      "work": 390,
+      "statementRowsRead": 0,
+      "qErrorMedian": 1,
+      "qErrorMax": 1,
+      "joinOrder": null,
+      "joinStepsCosted": 0,
+      "plan": [
+        "project",
+        "aggregate(aggs=[count(*)])",
+        "index-range-scan(index=customers_city_idx, from>=1, to<2, index-only=true)"
+      ]
+    },
+    {
+      "id": "st-secondary-point-rare",
+      "tags": [
+        "single-table",
+        "point-lookup",
+        "secondary-index",
+        "skew"
+      ],
+      "rows": 0,
+      "resultHash": "e3b0c44298fc1c14",
+      "work": 0,
+      "statementRowsRead": 0,
+      "qErrorMedian": 1,
+      "qErrorMax": 1,
+      "joinOrder": null,
+      "joinStepsCosted": 0,
+      "plan": [
+        "project",
+        "sort(id ASC)",
+        "index-range-scan(index=customers_city_idx, from>=290, to<291)"
+      ]
+    },
+    {
+      "id": "st-secondary-range-narrow",
+      "tags": [
+        "single-table",
+        "range",
+        "secondary-index"
+      ],
+      "rows": 51,
+      "resultHash": "a07af96ccfd7b25a",
+      "work": 102,
+      "statementRowsRead": 51,
+      "qErrorMedian": 1.02,
+      "qErrorMax": 1.02,
+      "joinOrder": null,
+      "joinStepsCosted": 0,
+      "plan": [
+        "project",
+        "sort(price ASC, id ASC)",
+        "index-range-scan(index=products_price_idx, from>=950, to<=1000)"
+      ]
+    },
+    {
+      "id": "st-secondary-range-wide",
+      "tags": [
+        "single-table",
+        "range",
+        "secondary-index"
+      ],
+      "rows": 1,
+      "resultHash": "0efaf1b832fde09a",
+      "work": 1182,
+      "statementRowsRead": 0,
+      "qErrorMedian": 1,
+      "qErrorMax": 1,
+      "joinOrder": null,
+      "joinStepsCosted": 0,
+      "plan": [
+        "project",
+        "aggregate(aggs=[count(*)])",
+        "index-range-scan(index=products_price_idx, from>300, index-only=true)"
+      ]
+    },
+    {
+      "id": "st-two-ranges",
+      "tags": [
+        "single-table",
+        "range",
+        "secondary-index"
+      ],
+      "rows": 1,
+      "resultHash": "713fbb3c85d28a0f",
+      "work": 1626,
+      "statementRowsRead": 813,
+      "qErrorMedian": 3.39,
+      "qErrorMax": 58.14,
+      "joinOrder": null,
+      "joinStepsCosted": 0,
+      "plan": [
+        "project",
+        "aggregate(aggs=[count(*)])",
+        "filter(total >= 100 AND total <= 200)",
+        "index-range-scan(index=orders_day_idx, from>=1, to<=100)"
+      ]
+    },
+    {
+      "id": "st-view",
+      "tags": [
+        "single-table",
+        "view"
+      ],
+      "rows": 1,
+      "resultHash": "8b7e9f4ba22bcb55",
+      "work": 0,
+      "statementRowsRead": 6000,
+      "qErrorMedian": 104.17,
+      "qErrorMax": 104.17,
+      "joinOrder": "heuristic",
+      "joinStepsCosted": 0,
+      "plan": [
+        "derived-table-scan(alias=big_orders)"
+      ]
+    }
+  ]
+}

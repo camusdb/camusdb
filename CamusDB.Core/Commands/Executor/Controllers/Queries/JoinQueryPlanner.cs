@@ -139,6 +139,10 @@ internal sealed class JoinQueryPlanner
             Root = BuildJoinTree(orderedSource, bound, pushdown, database, _stats, choice.StepEstimates, clockValues),
         };
 
+        plan.JoinOrderSearch = new JoinOrderSearchSummary(
+            fromCache ? "cached" : choice.Mode == JoinBuildMode.CostBased ? "cost-based" : "heuristic",
+            choice.CostedJoinSteps);
+
         foreach (BoundTableSource source in bound.Sources)
             plan.TableSchemaVersionByAlias[source.Alias] = source.Table.Schema.Version;
 
@@ -205,8 +209,10 @@ internal sealed class JoinQueryPlanner
         if (_stats is null || !AllBaseTableEstimatesLoaded(database, bound))
             return null;
 
+        // A replay runs no search, so it costs no step.
         return JoinOrderChoice.CostBased(tree, graph,
-            JoinEnumerator.EstimateSteps(graph, order, tree, bound, pushdown, database, _stats, _options, clockValues));
+            JoinEnumerator.EstimateSteps(graph, order, tree, bound, pushdown, database, _stats, _options, clockValues),
+            costedJoinSteps: 0);
     }
 
     /// <summary>

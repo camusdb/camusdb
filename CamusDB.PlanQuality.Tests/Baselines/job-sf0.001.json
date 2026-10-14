@@ -1,0 +1,3028 @@
+{
+  "tier": "job",
+  "dataSet": "job-synthetic-imdb",
+  "seed": "gen_job.py",
+  "scale": "0.001",
+  "queries": [
+    {
+      "id": "10a",
+      "tags": [
+        "job",
+        "join",
+        "tables:7"
+      ],
+      "rows": 1,
+      "resultHash": "641cea12565dbf0f",
+      "work": 11079,
+      "statementRowsRead": 5539,
+      "qErrorMedian": 3,
+      "qErrorMax": 302,
+      "joinOrder": "cost-based",
+      "joinStepsCosted": 126,
+      "plan": [
+        "index-nested-loop-join(on=ct.id = mc.company_type_id, index=~pk, left=mc.company_type_id, right=id)",
+        "index-nested-loop-join(on=chn.id = ci.person_role_id, index=~pk, left=ci.person_role_id, right=id)",
+        "index-nested-loop-join(on=cn.id = mc.company_id, index=~pk, left=mc.company_id, right=id, right-filter=cn.country_code = '[ru]')",
+        "index-nested-loop-join(on=ci.movie_id = mc.movie_id AND t.id = mc.movie_id, index=movie_id_movie_companies, left=ci.movie_id, right=movie_id)",
+        "index-nested-loop-join(on=t.id = ci.movie_id, index=~pk, left=ci.movie_id, right=id, right-filter=t.production_year > 2005)",
+        "index-nested-loop-join(on=rt.id = ci.role_id, index=role_id_cast_info, left=rt.id, right=role_id, right-filter=ci.note LIKE '%(voice)%' AND ci.note LIKE '%(uncredited)%')",
+        "table-scan(table=role_type)"
+      ]
+    },
+    {
+      "id": "10b",
+      "tags": [
+        "job",
+        "join",
+        "tables:7"
+      ],
+      "rows": 1,
+      "resultHash": "82b17d86e8237693",
+      "work": 12222,
+      "statementRowsRead": 6084,
+      "qErrorMedian": 1.33,
+      "qErrorMax": 3.42,
+      "joinOrder": "cost-based",
+      "joinStepsCosted": 126,
+      "plan": [
+        "index-nested-loop-join(on=ct.id = mc.company_type_id, index=~pk, left=mc.company_type_id, right=id)",
+        "index-nested-loop-join(on=chn.id = ci.person_role_id, index=~pk, left=ci.person_role_id, right=id)",
+        "index-nested-loop-join(on=cn.id = mc.company_id, index=~pk, left=mc.company_id, right=id, right-filter=cn.country_code = '[ru]')",
+        "index-nested-loop-join(on=ci.movie_id = mc.movie_id AND t.id = mc.movie_id, index=movie_id_movie_companies, left=ci.movie_id, right=movie_id)",
+        "index-nested-loop-join(on=t.id = ci.movie_id, index=~pk, left=ci.movie_id, right=id, right-filter=t.production_year > 2010)",
+        "index-nested-loop-join(on=rt.id = ci.role_id, index=role_id_cast_info, left=rt.id, right=role_id, right-filter=ci.note LIKE '%(producer)%')",
+        "table-scan(table=role_type)"
+      ]
+    },
+    {
+      "id": "10c",
+      "tags": [
+        "job",
+        "join",
+        "tables:7"
+      ],
+      "rows": 1,
+      "resultHash": "b591bb66a94a8ce0",
+      "work": 14011,
+      "statementRowsRead": 6890,
+      "qErrorMedian": 4.19,
+      "qErrorMax": 9.38,
+      "joinOrder": "cost-based",
+      "joinStepsCosted": 126,
+      "plan": [
+        "hash-join(on=ci.role_id=id, build=rt)",
+        "index-nested-loop-join(on=chn.id = ci.person_role_id, index=~pk, left=ci.person_role_id, right=id)",
+        "index-nested-loop-join(on=ci.movie_id = mc.movie_id AND t.id = ci.movie_id, index=movie_id_cast_info, left=mc.movie_id, right=movie_id, right-filter=ci.note LIKE '%(producer)%')",
+        "hash-join(on=mc.company_type_id=id, build=ct)",
+        "index-nested-loop-join(on=t.id = mc.movie_id, index=~pk, left=mc.movie_id, right=id, right-filter=t.production_year > 1990)",
+        "index-nested-loop-join(on=cn.id = mc.company_id, index=company_id_movie_companies, left=cn.id, right=company_id)",
+        "table-scan(table=company_name)"
+      ]
+    },
+    {
+      "id": "11a",
+      "tags": [
+        "job",
+        "join",
+        "tables:8"
+      ],
+      "rows": 1,
+      "resultHash": "05760069c3c3545f",
+      "work": 116,
+      "statementRowsRead": 55,
+      "qErrorMedian": 1.05,
+      "qErrorMax": 4,
+      "joinOrder": "cost-based",
+      "joinStepsCosted": 255,
+      "plan": [
+        "index-nested-loop-join(on=mc.company_id = cn.id, index=~pk, left=mc.company_id, right=id, right-filter=cn.country_code <> '[pl]' AND (cn.name LIKE '%Film%' OR cn.name LIKE '%Warner%'))",
+        "index-nested-loop-join(on=mk.keyword_id = k.id, index=~pk, left=mk.keyword_id, right=id, right-filter=k.keyword = 'sequel')",
+        "index-nested-loop-join(on=mk.movie_id = mc.movie_id AND ml.movie_id = mk.movie_id AND t.id = mk.movie_id, index=movie_id_movie_keyword, left=mc.movie_id, right=movie_id)",
+        "index-nested-loop-join(on=mc.company_type_id = ct.id, index=~pk, left=mc.company_type_id, right=id, right-filter=ct.kind = 'production companies')",
+        "index-nested-loop-join(on=ml.movie_id = mc.movie_id AND t.id = mc.movie_id, index=movie_id_movie_companies, left=ml.movie_id, right=movie_id, right-filter=mc.note IS NULL)",
+        "index-nested-loop-join(on=ml.movie_id = t.id, index=~pk, left=ml.movie_id, right=id, right-filter=t.production_year BETWEEN 1950 AND 2000)",
+        "index-nested-loop-join(on=lt.id = ml.link_type_id, index=link_type_id_movie_link, left=lt.id, right=link_type_id)",
+        "table-scan(table=link_type)"
+      ]
+    },
+    {
+      "id": "11b",
+      "tags": [
+        "job",
+        "join",
+        "tables:8"
+      ],
+      "rows": 1,
+      "resultHash": "6e5ee429f7c210e2",
+      "work": 57,
+      "statementRowsRead": 28,
+      "qErrorMedian": 1,
+      "qErrorMax": 2.2,
+      "joinOrder": "cost-based",
+      "joinStepsCosted": 255,
+      "plan": [
+        "index-nested-loop-join(on=mc.company_id = cn.id, index=~pk, left=mc.company_id, right=id, right-filter=cn.country_code <> '[pl]' AND (cn.name LIKE '%Film%' OR cn.name LIKE '%Warner%'))",
+        "index-nested-loop-join(on=mk.keyword_id = k.id, index=~pk, left=mk.keyword_id, right=id, right-filter=k.keyword = 'sequel')",
+        "index-nested-loop-join(on=mk.movie_id = mc.movie_id AND ml.movie_id = mk.movie_id AND t.id = mk.movie_id, index=movie_id_movie_keyword, left=mc.movie_id, right=movie_id)",
+        "index-nested-loop-join(on=mc.company_type_id = ct.id, index=~pk, left=mc.company_type_id, right=id, right-filter=ct.kind = 'production companies')",
+        "index-nested-loop-join(on=ml.movie_id = mc.movie_id AND t.id = mc.movie_id, index=movie_id_movie_companies, left=ml.movie_id, right=movie_id, right-filter=mc.note IS NULL)",
+        "index-nested-loop-join(on=ml.movie_id = t.id, index=~pk, left=ml.movie_id, right=id, right-filter=t.production_year = 1998 AND t.title LIKE '%Money%')",
+        "index-nested-loop-join(on=lt.id = ml.link_type_id, index=link_type_id_movie_link, left=lt.id, right=link_type_id)",
+        "table-scan(table=link_type)"
+      ]
+    },
+    {
+      "id": "11c",
+      "tags": [
+        "job",
+        "join",
+        "tables:8"
+      ],
+      "rows": 1,
+      "resultHash": "ed9153409275cfac",
+      "work": 7883,
+      "statementRowsRead": 3611,
+      "qErrorMedian": 10,
+      "qErrorMax": 79.67,
+      "joinOrder": "cost-based",
+      "joinStepsCosted": 255,
+      "plan": [
+        "index-nested-loop-join(on=lt.id = ml.link_type_id, index=~pk, left=ml.link_type_id, right=id)",
+        "index-nested-loop-join(on=mk.keyword_id = k.id, index=~pk, left=mk.keyword_id, right=id, right-filter=k.keyword IN (...))",
+        "index-nested-loop-join(on=mk.movie_id = mc.movie_id AND ml.movie_id = mk.movie_id AND t.id = mk.movie_id, index=movie_id_movie_keyword, left=mc.movie_id, right=movie_id)",
+        "index-nested-loop-join(on=mc.company_id = cn.id, index=~pk, left=mc.company_id, right=id, right-filter=cn.country_code <> '[pl]' AND (cn.name LIKE '20th Century Fox%' OR cn.name LIKE 'Twentieth Century Fox%'))",
+        "index-nested-loop-join(on=ml.movie_id = mc.movie_id AND ml.movie_id = t.id, index=movie_id_movie_link, left=mc.movie_id, right=movie_id)",
+        "index-nested-loop-join(on=t.id = mc.movie_id, index=~pk, left=mc.movie_id, right=id, right-filter=t.production_year > 1950)",
+        "index-nested-loop-join(on=mc.company_type_id = ct.id, index=company_type_id_movie_companies, left=ct.id, right=company_type_id, right-filter=mc.note IS NOT NULL)",
+        "table-scan(table=company_type)"
+      ]
+    },
+    {
+      "id": "11d",
+      "tags": [
+        "job",
+        "join",
+        "tables:8"
+      ],
+      "rows": 1,
+      "resultHash": "642cdbedeb5623e4",
+      "work": 34127,
+      "statementRowsRead": 16665,
+      "qErrorMedian": 63.75,
+      "qErrorMax": 1145.83,
+      "joinOrder": "cost-based",
+      "joinStepsCosted": 255,
+      "plan": [
+        "index-nested-loop-join(on=lt.id = ml.link_type_id, index=~pk, left=ml.link_type_id, right=id)",
+        "index-nested-loop-join(on=mk.keyword_id = k.id, index=~pk, left=mk.keyword_id, right=id, right-filter=k.keyword IN (...))",
+        "index-nested-loop-join(on=mk.movie_id = mc.movie_id AND ml.movie_id = mk.movie_id AND t.id = mk.movie_id, index=movie_id_movie_keyword, left=mc.movie_id, right=movie_id)",
+        "index-nested-loop-join(on=mc.company_id = cn.id, index=~pk, left=mc.company_id, right=id, right-filter=cn.country_code <> '[pl]')",
+        "index-nested-loop-join(on=ml.movie_id = mc.movie_id AND ml.movie_id = t.id, index=movie_id_movie_link, left=mc.movie_id, right=movie_id)",
+        "index-nested-loop-join(on=t.id = mc.movie_id, index=~pk, left=mc.movie_id, right=id, right-filter=t.production_year > 1950)",
+        "index-nested-loop-join(on=mc.company_type_id = ct.id, index=company_type_id_movie_companies, left=ct.id, right=company_type_id, right-filter=mc.note IS NOT NULL)",
+        "table-scan(table=company_type)"
+      ]
+    },
+    {
+      "id": "12a",
+      "tags": [
+        "job",
+        "join",
+        "tables:8"
+      ],
+      "rows": 1,
+      "resultHash": "a10ba77584364ca0",
+      "work": 1046,
+      "statementRowsRead": 520,
+      "qErrorMedian": 2.08,
+      "qErrorMax": 11,
+      "joinOrder": "cost-based",
+      "joinStepsCosted": 255,
+      "plan": [
+        "index-nested-loop-join(on=ct.id = mc.company_type_id, index=~pk, left=mc.company_type_id, right=id, right-filter=ct.kind = 'production companies')",
+        "index-nested-loop-join(on=cn.id = mc.company_id, index=~pk, left=mc.company_id, right=id, right-filter=cn.country_code = '[us]')",
+        "index-nested-loop-join(on=mc.movie_id = mi.movie_id AND mc.movie_id = mi_idx.movie_id AND t.id = mc.movie_id, index=movie_id_movie_companies, left=mi.movie_id, right=movie_id)",
+        "index-nested-loop-join(on=mi.info_type_id = it1.id, index=~pk, left=mi.info_type_id, right=id, right-filter=it1.info = 'genres')",
+        "index-nested-loop-join(on=mi.movie_id = mi_idx.movie_id AND t.id = mi.movie_id, index=movie_id_movie_info, left=mi_idx.movie_id, right=movie_id, right-filter=mi.info IN (...))",
+        "index-nested-loop-join(on=t.id = mi_idx.movie_id, index=~pk, left=mi_idx.movie_id, right=id, right-filter=t.production_year BETWEEN 2005 AND 2008)",
+        "index-nested-loop-join(on=mi_idx.info_type_id = it2.id, index=info_type_id_movie_info_idx, left=it2.id, right=info_type_id, right-filter=mi_idx.info > '8.0')",
+        "table-scan(table=info_type)"
+      ]
+    },
+    {
+      "id": "12b",
+      "tags": [
+        "job",
+        "join",
+        "tables:8"
+      ],
+      "rows": 1,
+      "resultHash": "f11b6a37f57bceaf",
+      "work": 675,
+      "statementRowsRead": 337,
+      "qErrorMedian": 5,
+      "qErrorMax": 24,
+      "joinOrder": "cost-based",
+      "joinStepsCosted": 255,
+      "plan": [
+        "index-nested-loop-join(on=mi.info_type_id = it1.id, index=~pk, left=mi.info_type_id, right=id, right-filter=it1.info = 'budget')",
+        "index-nested-loop-join(on=mc.movie_id = mi.movie_id AND mi.movie_id = mi_idx.movie_id AND t.id = mi.movie_id, index=movie_id_movie_info, left=mc.movie_id, right=movie_id)",
+        "index-nested-loop-join(on=cn.id = mc.company_id, index=~pk, left=mc.company_id, right=id, right-filter=cn.country_code = '[us]')",
+        "hash-join(on=mc.company_type_id=id, build=ct, build-filter=ct.kind IS NOT NULL AND (ct.kind = 'production companies' OR ct.kind = 'distributors'))",
+        "index-nested-loop-join(on=mc.movie_id = mi_idx.movie_id AND t.id = mc.movie_id, index=movie_id_movie_companies, left=mi_idx.movie_id, right=movie_id)",
+        "index-nested-loop-join(on=t.id = mi_idx.movie_id, index=~pk, left=mi_idx.movie_id, right=id, right-filter=t.production_year > 2000 AND (t.title LIKE 'Birdemic%' OR t.title LIKE '%Movie%'))",
+        "index-nested-loop-join(on=mi_idx.info_type_id = it2.id, index=info_type_id_movie_info_idx, left=it2.id, right=info_type_id)",
+        "table-scan(table=info_type)"
+      ]
+    },
+    {
+      "id": "12c",
+      "tags": [
+        "job",
+        "join",
+        "tables:8"
+      ],
+      "rows": 1,
+      "resultHash": "51edb3ebd39ea6f5",
+      "work": 901,
+      "statementRowsRead": 444,
+      "qErrorMedian": 3.88,
+      "qErrorMax": 44.5,
+      "joinOrder": "cost-based",
+      "joinStepsCosted": 255,
+      "plan": [
+        "index-nested-loop-join(on=mi.info_type_id = it1.id, index=~pk, left=mi.info_type_id, right=id, right-filter=it1.info = 'genres')",
+        "index-nested-loop-join(on=mc.movie_id = mi.movie_id AND mi.movie_id = mi_idx.movie_id AND t.id = mi.movie_id, index=movie_id_movie_info, left=mc.movie_id, right=movie_id, right-filter=mi.info IN (...))",
+        "index-nested-loop-join(on=ct.id = mc.company_type_id, index=~pk, left=mc.company_type_id, right=id, right-filter=ct.kind = 'production companies')",
+        "index-nested-loop-join(on=cn.id = mc.company_id, index=~pk, left=mc.company_id, right=id, right-filter=cn.country_code = '[us]')",
+        "index-nested-loop-join(on=mc.movie_id = mi_idx.movie_id AND t.id = mc.movie_id, index=movie_id_movie_companies, left=mi_idx.movie_id, right=movie_id)",
+        "index-nested-loop-join(on=t.id = mi_idx.movie_id, index=~pk, left=mi_idx.movie_id, right=id, right-filter=t.production_year BETWEEN 2000 AND 2010)",
+        "index-nested-loop-join(on=mi_idx.info_type_id = it2.id, index=info_type_id_movie_info_idx, left=it2.id, right=info_type_id, right-filter=mi_idx.info > '7.0')",
+        "table-scan(table=info_type)"
+      ]
+    },
+    {
+      "id": "13a",
+      "tags": [
+        "job",
+        "join",
+        "tables:9"
+      ],
+      "rows": 1,
+      "resultHash": "b5d210efe0f7599e",
+      "work": 17168,
+      "statementRowsRead": 8554,
+      "qErrorMedian": 11,
+      "qErrorMax": 772.6,
+      "joinOrder": "cost-based",
+      "joinStepsCosted": 406,
+      "plan": [
+        "index-nested-loop-join(on=it2.id = mi.info_type_id, index=~pk, left=mi.info_type_id, right=id, right-filter=it2.info = 'release dates')",
+        "index-nested-loop-join(on=mi.movie_id = mc.movie_id AND mi.movie_id = miidx.movie_id AND mi.movie_id = t.id, index=movie_id_movie_info, left=mc.movie_id, right=movie_id)",
+        "index-nested-loop-join(on=cn.id = mc.company_id, index=~pk, left=mc.company_id, right=id, right-filter=cn.country_code = '[de]')",
+        "hash-join(on=mc.company_type_id=id, build=ct, build-filter=ct.kind = 'production companies')",
+        "index-nested-loop-join(on=miidx.movie_id = mc.movie_id AND mc.movie_id = t.id, index=movie_id_movie_companies, left=miidx.movie_id, right=movie_id)",
+        "hash-join(on=t.kind_id=id, build=kt, build-filter=kt.kind = 'movie')",
+        "index-nested-loop-join(on=miidx.movie_id = t.id, index=~pk, left=miidx.movie_id, right=id)",
+        "index-nested-loop-join(on=it.id = miidx.info_type_id, index=info_type_id_movie_info_idx, left=it.id, right=info_type_id)",
+        "table-scan(table=info_type)"
+      ]
+    },
+    {
+      "id": "13b",
+      "tags": [
+        "job",
+        "join",
+        "tables:9"
+      ],
+      "rows": 1,
+      "resultHash": "cce05ecf6ef56b12",
+      "work": 650,
+      "statementRowsRead": 324,
+      "qErrorMedian": 8,
+      "qErrorMax": 31,
+      "joinOrder": "cost-based",
+      "joinStepsCosted": 406,
+      "plan": [
+        "index-nested-loop-join(on=it2.id = mi.info_type_id, index=~pk, left=mi.info_type_id, right=id, right-filter=it2.info = 'release dates')",
+        "index-nested-loop-join(on=mi.movie_id = mc.movie_id AND mi.movie_id = miidx.movie_id AND mi.movie_id = t.id, index=movie_id_movie_info, left=mc.movie_id, right=movie_id)",
+        "index-nested-loop-join(on=cn.id = mc.company_id, index=~pk, left=mc.company_id, right=id, right-filter=cn.country_code = '[us]')",
+        "hash-join(on=mc.company_type_id=id, build=ct, build-filter=ct.kind = 'production companies')",
+        "index-nested-loop-join(on=miidx.movie_id = mc.movie_id AND mc.movie_id = t.id, index=movie_id_movie_companies, left=miidx.movie_id, right=movie_id)",
+        "hash-join(on=t.kind_id=id, build=kt, build-filter=kt.kind = 'movie')",
+        "index-nested-loop-join(on=miidx.movie_id = t.id, index=~pk, left=miidx.movie_id, right=id, right-filter=t.title <> '' AND (t.title LIKE '%Champion%' OR t.title LIKE '%Loser%'))",
+        "index-nested-loop-join(on=it.id = miidx.info_type_id, index=info_type_id_movie_info_idx, left=it.id, right=info_type_id)",
+        "table-scan(table=info_type)"
+      ]
+    },
+    {
+      "id": "13c",
+      "tags": [
+        "job",
+        "join",
+        "tables:9"
+      ],
+      "rows": 1,
+      "resultHash": "cce05ecf6ef56b12",
+      "work": 650,
+      "statementRowsRead": 324,
+      "qErrorMedian": 8,
+      "qErrorMax": 31,
+      "joinOrder": "cost-based",
+      "joinStepsCosted": 406,
+      "plan": [
+        "index-nested-loop-join(on=it2.id = mi.info_type_id, index=~pk, left=mi.info_type_id, right=id, right-filter=it2.info = 'release dates')",
+        "index-nested-loop-join(on=mi.movie_id = mc.movie_id AND mi.movie_id = miidx.movie_id AND mi.movie_id = t.id, index=movie_id_movie_info, left=mc.movie_id, right=movie_id)",
+        "index-nested-loop-join(on=cn.id = mc.company_id, index=~pk, left=mc.company_id, right=id, right-filter=cn.country_code = '[us]')",
+        "hash-join(on=mc.company_type_id=id, build=ct, build-filter=ct.kind = 'production companies')",
+        "index-nested-loop-join(on=miidx.movie_id = mc.movie_id AND mc.movie_id = t.id, index=movie_id_movie_companies, left=miidx.movie_id, right=movie_id)",
+        "hash-join(on=t.kind_id=id, build=kt, build-filter=kt.kind = 'movie')",
+        "index-nested-loop-join(on=miidx.movie_id = t.id, index=~pk, left=miidx.movie_id, right=id, right-filter=t.title <> '' AND (t.title LIKE 'Champion%' OR t.title LIKE 'Loser%'))",
+        "index-nested-loop-join(on=it.id = miidx.info_type_id, index=info_type_id_movie_info_idx, left=it.id, right=info_type_id)",
+        "table-scan(table=info_type)"
+      ]
+    },
+    {
+      "id": "13d",
+      "tags": [
+        "job",
+        "join",
+        "tables:9"
+      ],
+      "rows": 1,
+      "resultHash": "710465d5ba0da342",
+      "work": 21410,
+      "statementRowsRead": 10676,
+      "qErrorMedian": 11,
+      "qErrorMax": 984.8,
+      "joinOrder": "cost-based",
+      "joinStepsCosted": 406,
+      "plan": [
+        "index-nested-loop-join(on=it2.id = mi.info_type_id, index=~pk, left=mi.info_type_id, right=id, right-filter=it2.info = 'release dates')",
+        "index-nested-loop-join(on=mi.movie_id = mc.movie_id AND mi.movie_id = miidx.movie_id AND mi.movie_id = t.id, index=movie_id_movie_info, left=mc.movie_id, right=movie_id)",
+        "index-nested-loop-join(on=cn.id = mc.company_id, index=~pk, left=mc.company_id, right=id, right-filter=cn.country_code = '[us]')",
+        "hash-join(on=mc.company_type_id=id, build=ct, build-filter=ct.kind = 'production companies')",
+        "index-nested-loop-join(on=miidx.movie_id = mc.movie_id AND mc.movie_id = t.id, index=movie_id_movie_companies, left=miidx.movie_id, right=movie_id)",
+        "hash-join(on=t.kind_id=id, build=kt, build-filter=kt.kind = 'movie')",
+        "index-nested-loop-join(on=miidx.movie_id = t.id, index=~pk, left=miidx.movie_id, right=id)",
+        "index-nested-loop-join(on=it.id = miidx.info_type_id, index=info_type_id_movie_info_idx, left=it.id, right=info_type_id)",
+        "table-scan(table=info_type)"
+      ]
+    },
+    {
+      "id": "14a",
+      "tags": [
+        "job",
+        "join",
+        "tables:8"
+      ],
+      "rows": 1,
+      "resultHash": "184df661924d4243",
+      "work": 2606,
+      "statementRowsRead": 1228,
+      "qErrorMedian": 3.97,
+      "qErrorMax": 26,
+      "joinOrder": "cost-based",
+      "joinStepsCosted": 216,
+      "plan": [
+        "index-nested-loop-join(on=k.id = mk.keyword_id, index=~pk, left=mk.keyword_id, right=id, right-filter=k.keyword IN (...))",
+        "index-nested-loop-join(on=mk.movie_id = mi.movie_id AND mk.movie_id = mi_idx.movie_id AND t.id = mk.movie_id, index=movie_id_movie_keyword, left=mi.movie_id, right=movie_id)",
+        "index-nested-loop-join(on=it1.id = mi.info_type_id, index=~pk, left=mi.info_type_id, right=id, right-filter=it1.info = 'countries')",
+        "index-nested-loop-join(on=mi.movie_id = mi_idx.movie_id AND t.id = mi.movie_id, index=movie_id_movie_info, left=mi_idx.movie_id, right=movie_id, right-filter=mi.info IN (...))",
+        "index-nested-loop-join(on=it2.id = mi_idx.info_type_id, index=~pk, left=mi_idx.info_type_id, right=id, right-filter=it2.info = 'rating')",
+        "index-nested-loop-join(on=t.id = mi_idx.movie_id, index=movie_id_movie_info_idx, left=t.id, right=movie_id, right-filter=mi_idx.info < '8.5')",
+        "index-nested-loop-join(on=kt.id = t.kind_id, index=kind_id_title, left=kt.id, right=kind_id, right-filter=t.production_year > 2010)",
+        "table-scan(table=kind_type)"
+      ]
+    },
+    {
+      "id": "14b",
+      "tags": [
+        "job",
+        "join",
+        "tables:8"
+      ],
+      "rows": 1,
+      "resultHash": "6e828d24c8f50a8b",
+      "work": 1990,
+      "statementRowsRead": 993,
+      "qErrorMedian": 1,
+      "qErrorMax": 12,
+      "joinOrder": "cost-based",
+      "joinStepsCosted": 216,
+      "plan": [
+        "index-nested-loop-join(on=it1.id = mi.info_type_id, index=~pk, left=mi.info_type_id, right=id, right-filter=it1.info = 'countries')",
+        "index-nested-loop-join(on=mi.movie_id = mi_idx.movie_id AND mk.movie_id = mi.movie_id AND t.id = mi.movie_id, index=movie_id_movie_info, left=mi_idx.movie_id, right=movie_id, right-filter=mi.info IN (...))",
+        "index-nested-loop-join(on=k.id = mk.keyword_id, index=~pk, left=mk.keyword_id, right=id, right-filter=k.keyword IN (...))",
+        "index-nested-loop-join(on=mk.movie_id = mi_idx.movie_id AND t.id = mk.movie_id, index=movie_id_movie_keyword, left=mi_idx.movie_id, right=movie_id)",
+        "index-nested-loop-join(on=it2.id = mi_idx.info_type_id, index=~pk, left=mi_idx.info_type_id, right=id, right-filter=it2.info = 'rating')",
+        "index-nested-loop-join(on=t.id = mi_idx.movie_id, index=movie_id_movie_info_idx, left=t.id, right=movie_id, right-filter=mi_idx.info > '6.0')",
+        "index-nested-loop-join(on=kt.id = t.kind_id, index=kind_id_title, left=kt.id, right=kind_id, right-filter=t.production_year > 2010 AND (t.title LIKE '%murder%' OR t.title LIKE '%Murder%' OR t.title LIKE '%Mord%'))",
+        "table-scan(table=kind_type)"
+      ]
+    },
+    {
+      "id": "14c",
+      "tags": [
+        "job",
+        "join",
+        "tables:8"
+      ],
+      "rows": 1,
+      "resultHash": "9eb57732401a697c",
+      "work": 5305,
+      "statementRowsRead": 2429,
+      "qErrorMedian": 12.93,
+      "qErrorMax": 62.5,
+      "joinOrder": "cost-based",
+      "joinStepsCosted": 216,
+      "plan": [
+        "index-nested-loop-join(on=k.id = mk.keyword_id, index=~pk, left=mk.keyword_id, right=id, right-filter=k.keyword IS NOT NULL AND k.keyword IN (...))",
+        "index-nested-loop-join(on=mk.movie_id = mi.movie_id AND mk.movie_id = mi_idx.movie_id AND t.id = mk.movie_id, index=movie_id_movie_keyword, left=mi.movie_id, right=movie_id)",
+        "index-nested-loop-join(on=it1.id = mi.info_type_id, index=~pk, left=mi.info_type_id, right=id, right-filter=it1.info = 'countries')",
+        "index-nested-loop-join(on=mi.movie_id = mi_idx.movie_id AND t.id = mi.movie_id, index=movie_id_movie_info, left=mi_idx.movie_id, right=movie_id, right-filter=mi.info IN (...))",
+        "index-nested-loop-join(on=it2.id = mi_idx.info_type_id, index=~pk, left=mi_idx.info_type_id, right=id, right-filter=it2.info = 'rating')",
+        "index-nested-loop-join(on=t.id = mi_idx.movie_id, index=movie_id_movie_info_idx, left=t.id, right=movie_id, right-filter=mi_idx.info < '8.5')",
+        "index-nested-loop-join(on=kt.id = t.kind_id, index=kind_id_title, left=kt.id, right=kind_id, right-filter=t.production_year > 2005)",
+        "table-scan(table=kind_type)"
+      ]
+    },
+    {
+      "id": "15a",
+      "tags": [
+        "job",
+        "join",
+        "tables:9"
+      ],
+      "rows": 1,
+      "resultHash": "7c7a5443e4a12183",
+      "work": 1154,
+      "statementRowsRead": 563,
+      "qErrorMedian": 1,
+      "qErrorMax": 26,
+      "joinOrder": "cost-based",
+      "joinStepsCosted": 599,
+      "plan": [
+        "index-nested-loop-join(on=k.id = mk.keyword_id, index=~pk, left=mk.keyword_id, right=id)",
+        "index-nested-loop-join(on=mk.movie_id = mi.movie_id AND mk.movie_id = mc.movie_id AND mk.movie_id = at.movie_id AND t.id = mk.movie_id, index=movie_id_movie_keyword, left=mi.movie_id, right=movie_id)",
+        "index-nested-loop-join(on=ct.id = mc.company_type_id, index=~pk, left=mc.company_type_id, right=id)",
+        "index-nested-loop-join(on=it1.id = mi.info_type_id, index=~pk, left=mi.info_type_id, right=id, right-filter=it1.info = 'release dates')",
+        "index-nested-loop-join(on=mi.movie_id = mc.movie_id AND mi.movie_id = at.movie_id AND t.id = mi.movie_id, index=movie_id_movie_info, left=mc.movie_id, right=movie_id, right-filter=mi.note LIKE '%internet%' AND mi.info LIKE 'USA:% 200%')",
+        "index-nested-loop-join(on=mc.movie_id = at.movie_id AND t.id = at.movie_id, index=movie_id_aka_title, left=mc.movie_id, right=movie_id)",
+        "index-nested-loop-join(on=t.id = mc.movie_id, index=~pk, left=mc.movie_id, right=id, right-filter=t.production_year > 2000)",
+        "index-nested-loop-join(on=cn.id = mc.company_id, index=company_id_movie_companies, left=cn.id, right=company_id, right-filter=mc.note LIKE '%(200%)%' AND mc.note LIKE '%(worldwide)%')",
+        "table-scan(table=company_name)"
+      ]
+    },
+    {
+      "id": "15b",
+      "tags": [
+        "job",
+        "join",
+        "tables:9"
+      ],
+      "rows": 1,
+      "resultHash": "ce2bb77794ea72ee",
+      "work": 468,
+      "statementRowsRead": 234,
+      "qErrorMedian": 1,
+      "qErrorMax": 2,
+      "joinOrder": "cost-based",
+      "joinStepsCosted": 599,
+      "plan": [
+        "index-nested-loop-join(on=k.id = mk.keyword_id, index=~pk, left=mk.keyword_id, right=id)",
+        "index-nested-loop-join(on=mk.movie_id = mi.movie_id AND mk.movie_id = mc.movie_id AND mk.movie_id = at.movie_id AND t.id = mk.movie_id, index=movie_id_movie_keyword, left=mi.movie_id, right=movie_id)",
+        "index-nested-loop-join(on=ct.id = mc.company_type_id, index=~pk, left=mc.company_type_id, right=id)",
+        "index-nested-loop-join(on=it1.id = mi.info_type_id, index=~pk, left=mi.info_type_id, right=id, right-filter=it1.info = 'release dates')",
+        "index-nested-loop-join(on=mi.movie_id = mc.movie_id AND mi.movie_id = at.movie_id AND t.id = mi.movie_id, index=movie_id_movie_info, left=mc.movie_id, right=movie_id, right-filter=mi.note LIKE '%internet%' AND mi.info LIKE 'USA:% 200%')",
+        "index-nested-loop-join(on=mc.movie_id = at.movie_id AND t.id = at.movie_id, index=movie_id_aka_title, left=mc.movie_id, right=movie_id)",
+        "index-nested-loop-join(on=t.id = mc.movie_id, index=~pk, left=mc.movie_id, right=id, right-filter=t.production_year BETWEEN 2005 AND 2010)",
+        "index-nested-loop-join(on=cn.id = mc.company_id, index=company_id_movie_companies, left=cn.id, right=company_id, right-filter=mc.note LIKE '%(200%)%' AND mc.note LIKE '%(worldwide)%')",
+        "table-scan(table=company_name)"
+      ]
+    },
+    {
+      "id": "15c",
+      "tags": [
+        "job",
+        "join",
+        "tables:9"
+      ],
+      "rows": 1,
+      "resultHash": "18a8f0dbcf05a7c2",
+      "work": 2392,
+      "statementRowsRead": 1192,
+      "qErrorMedian": 2,
+      "qErrorMax": 16,
+      "joinOrder": "cost-based",
+      "joinStepsCosted": 599,
+      "plan": [
+        "index-nested-loop-join(on=k.id = mk.keyword_id, index=~pk, left=mk.keyword_id, right=id)",
+        "index-nested-loop-join(on=mk.movie_id = mi.movie_id AND mk.movie_id = mc.movie_id AND mk.movie_id = at.movie_id AND t.id = mk.movie_id, index=movie_id_movie_keyword, left=mi.movie_id, right=movie_id)",
+        "index-nested-loop-join(on=ct.id = mc.company_type_id, index=~pk, left=mc.company_type_id, right=id)",
+        "index-nested-loop-join(on=cn.id = mc.company_id, index=~pk, left=mc.company_id, right=id, right-filter=cn.country_code = '[us]')",
+        "index-nested-loop-join(on=mc.movie_id = at.movie_id AND mi.movie_id = mc.movie_id AND t.id = mc.movie_id, index=movie_id_movie_companies, left=at.movie_id, right=movie_id)",
+        "index-nested-loop-join(on=mi.movie_id = at.movie_id AND t.id = at.movie_id, index=movie_id_aka_title, left=mi.movie_id, right=movie_id)",
+        "index-nested-loop-join(on=t.id = mi.movie_id, index=~pk, left=mi.movie_id, right=id, right-filter=t.production_year > 1990)",
+        "index-nested-loop-join(on=it1.id = mi.info_type_id, index=info_type_id_movie_info, left=it1.id, right=info_type_id, right-filter=mi.note LIKE '%internet%' AND mi.info IS NOT NULL AND (mi.info LIKE 'USA:% 199%' OR mi.info LIKE 'USA:% 200%'))",
+        "table-scan(table=info_type)"
+      ]
+    },
+    {
+      "id": "15d",
+      "tags": [
+        "job",
+        "join",
+        "tables:9"
+      ],
+      "rows": 1,
+      "resultHash": "bda43659174c4404",
+      "work": 5608,
+      "statementRowsRead": 2715,
+      "qErrorMedian": 22,
+      "qErrorMax": 441,
+      "joinOrder": "cost-based",
+      "joinStepsCosted": 599,
+      "plan": [
+        "index-nested-loop-join(on=k.id = mk.keyword_id, index=~pk, left=mk.keyword_id, right=id)",
+        "index-nested-loop-join(on=mk.movie_id = mi.movie_id AND mk.movie_id = mc.movie_id AND mk.movie_id = at.movie_id AND t.id = mk.movie_id, index=movie_id_movie_keyword, left=mi.movie_id, right=movie_id)",
+        "index-nested-loop-join(on=ct.id = mc.company_type_id, index=~pk, left=mc.company_type_id, right=id)",
+        "index-nested-loop-join(on=cn.id = mc.company_id, index=~pk, left=mc.company_id, right=id, right-filter=cn.country_code = '[us]')",
+        "index-nested-loop-join(on=mc.movie_id = at.movie_id AND mi.movie_id = mc.movie_id AND t.id = mc.movie_id, index=movie_id_movie_companies, left=at.movie_id, right=movie_id)",
+        "index-nested-loop-join(on=mi.movie_id = at.movie_id AND t.id = at.movie_id, index=movie_id_aka_title, left=mi.movie_id, right=movie_id)",
+        "index-nested-loop-join(on=t.id = mi.movie_id, index=~pk, left=mi.movie_id, right=id, right-filter=t.production_year > 1990)",
+        "index-nested-loop-join(on=it1.id = mi.info_type_id, index=info_type_id_movie_info, left=it1.id, right=info_type_id, right-filter=mi.note LIKE '%internet%')",
+        "table-scan(table=info_type)"
+      ]
+    },
+    {
+      "id": "16a",
+      "tags": [
+        "job",
+        "join",
+        "tables:8"
+      ],
+      "rows": 1,
+      "resultHash": "b414c1f1d9073bed",
+      "work": 1895,
+      "statementRowsRead": 926,
+      "qErrorMedian": 4.79,
+      "qErrorMax": 88,
+      "joinOrder": "cost-based",
+      "joinStepsCosted": 258,
+      "plan": [
+        "index-nested-loop-join(on=an.person_id = n.id AND n.id = ci.person_id, index=~pk, left=an.person_id, right=id)",
+        "index-nested-loop-join(on=an.person_id = ci.person_id, index=person_id_aka_name, left=ci.person_id, right=person_id)",
+        "index-nested-loop-join(on=ci.movie_id = mc.movie_id AND ci.movie_id = mk.movie_id AND ci.movie_id = t.id, index=movie_id_cast_info, left=mc.movie_id, right=movie_id)",
+        "index-nested-loop-join(on=mk.keyword_id = k.id, index=~pk, left=mk.keyword_id, right=id, right-filter=k.keyword = 'character-name-in-title')",
+        "index-nested-loop-join(on=mc.movie_id = mk.movie_id AND t.id = mk.movie_id, index=movie_id_movie_keyword, left=mc.movie_id, right=movie_id)",
+        "index-nested-loop-join(on=t.id = mc.movie_id, index=~pk, left=mc.movie_id, right=id, right-filter=t.episode_nr >= 50 AND t.episode_nr < 100)",
+        "index-nested-loop-join(on=mc.company_id = cn.id, index=company_id_movie_companies, left=cn.id, right=company_id)",
+        "table-scan(table=company_name)"
+      ]
+    },
+    {
+      "id": "16b",
+      "tags": [
+        "job",
+        "join",
+        "tables:8"
+      ],
+      "rows": 1,
+      "resultHash": "0e9163022e4bc8e4",
+      "work": 34259,
+      "statementRowsRead": 13403,
+      "qErrorMedian": 2.66,
+      "qErrorMax": 9.39,
+      "joinOrder": "cost-based",
+      "joinStepsCosted": 258,
+      "plan": [
+        "index-nested-loop-join(on=an.person_id = n.id AND n.id = ci.person_id, index=~pk, left=an.person_id, right=id)",
+        "index-nested-loop-join(on=an.person_id = ci.person_id, index=person_id_aka_name, left=ci.person_id, right=person_id)",
+        "index-nested-loop-join(on=ci.movie_id = mc.movie_id AND ci.movie_id = mk.movie_id AND ci.movie_id = t.id, index=movie_id_cast_info, left=mc.movie_id, right=movie_id)",
+        "index-nested-loop-join(on=t.id = mk.movie_id AND t.id = mc.movie_id, index=~pk, left=mk.movie_id, right=id)",
+        "hash-join(on=mk.keyword_id=id, build=k, build-filter=k.keyword = 'character-name-in-title')",
+        "index-nested-loop-join(on=mc.movie_id = mk.movie_id, index=movie_id_movie_keyword, left=mc.movie_id, right=movie_id)",
+        "index-nested-loop-join(on=mc.company_id = cn.id, index=company_id_movie_companies, left=cn.id, right=company_id)",
+        "table-scan(table=company_name)"
+      ]
+    },
+    {
+      "id": "16c",
+      "tags": [
+        "job",
+        "join",
+        "tables:8"
+      ],
+      "rows": 1,
+      "resultHash": "0e9163022e4bc8e4",
+      "work": 2744,
+      "statementRowsRead": 1275,
+      "qErrorMedian": 1.54,
+      "qErrorMax": 2,
+      "joinOrder": "cost-based",
+      "joinStepsCosted": 258,
+      "plan": [
+        "index-nested-loop-join(on=an.person_id = n.id AND n.id = ci.person_id, index=~pk, left=an.person_id, right=id)",
+        "index-nested-loop-join(on=an.person_id = ci.person_id, index=person_id_aka_name, left=ci.person_id, right=person_id)",
+        "index-nested-loop-join(on=ci.movie_id = mc.movie_id AND ci.movie_id = mk.movie_id AND ci.movie_id = t.id, index=movie_id_cast_info, left=mc.movie_id, right=movie_id)",
+        "index-nested-loop-join(on=mk.keyword_id = k.id, index=~pk, left=mk.keyword_id, right=id, right-filter=k.keyword = 'character-name-in-title')",
+        "index-nested-loop-join(on=mc.movie_id = mk.movie_id AND t.id = mk.movie_id, index=movie_id_movie_keyword, left=mc.movie_id, right=movie_id)",
+        "index-nested-loop-join(on=t.id = mc.movie_id, index=~pk, left=mc.movie_id, right=id, right-filter=t.episode_nr < 100)",
+        "index-nested-loop-join(on=mc.company_id = cn.id, index=company_id_movie_companies, left=cn.id, right=company_id)",
+        "table-scan(table=company_name)"
+      ]
+    },
+    {
+      "id": "16d",
+      "tags": [
+        "job",
+        "join",
+        "tables:8"
+      ],
+      "rows": 1,
+      "resultHash": "0e9163022e4bc8e4",
+      "work": 2709,
+      "statementRowsRead": 1259,
+      "qErrorMedian": 1.42,
+      "qErrorMax": 2,
+      "joinOrder": "cost-based",
+      "joinStepsCosted": 258,
+      "plan": [
+        "index-nested-loop-join(on=an.person_id = n.id AND n.id = ci.person_id, index=~pk, left=an.person_id, right=id)",
+        "index-nested-loop-join(on=an.person_id = ci.person_id, index=person_id_aka_name, left=ci.person_id, right=person_id)",
+        "index-nested-loop-join(on=ci.movie_id = mc.movie_id AND ci.movie_id = mk.movie_id AND ci.movie_id = t.id, index=movie_id_cast_info, left=mc.movie_id, right=movie_id)",
+        "index-nested-loop-join(on=mk.keyword_id = k.id, index=~pk, left=mk.keyword_id, right=id, right-filter=k.keyword = 'character-name-in-title')",
+        "index-nested-loop-join(on=mc.movie_id = mk.movie_id AND t.id = mk.movie_id, index=movie_id_movie_keyword, left=mc.movie_id, right=movie_id)",
+        "index-nested-loop-join(on=t.id = mc.movie_id, index=~pk, left=mc.movie_id, right=id, right-filter=t.episode_nr >= 5 AND t.episode_nr < 100)",
+        "index-nested-loop-join(on=mc.company_id = cn.id, index=company_id_movie_companies, left=cn.id, right=company_id)",
+        "table-scan(table=company_name)"
+      ]
+    },
+    {
+      "id": "17a",
+      "tags": [
+        "job",
+        "join",
+        "tables:7"
+      ],
+      "rows": 1,
+      "resultHash": "6bd1c35ef206b654",
+      "work": 34190,
+      "statementRowsRead": 16902,
+      "qErrorMedian": 2.1,
+      "qErrorMax": 8.04,
+      "joinOrder": "cost-based",
+      "joinStepsCosted": 134,
+      "plan": [
+        "index-nested-loop-join(on=n.id = ci.person_id, index=~pk, left=ci.person_id, right=id, right-filter=n.name LIKE 'B%')",
+        "index-nested-loop-join(on=ci.movie_id = mc.movie_id AND ci.movie_id = mk.movie_id AND ci.movie_id = t.id, index=movie_id_cast_info, left=mc.movie_id, right=movie_id)",
+        "index-nested-loop-join(on=t.id = mk.movie_id AND t.id = mc.movie_id, index=~pk, left=mk.movie_id, right=id)",
+        "hash-join(on=mk.keyword_id=id, build=k, build-filter=k.keyword = 'character-name-in-title')",
+        "index-nested-loop-join(on=mc.movie_id = mk.movie_id, index=movie_id_movie_keyword, left=mc.movie_id, right=movie_id)",
+        "index-nested-loop-join(on=mc.company_id = cn.id, index=company_id_movie_companies, left=cn.id, right=company_id)",
+        "table-scan(table=company_name)"
+      ]
+    },
+    {
+      "id": "17b",
+      "tags": [
+        "job",
+        "join",
+        "tables:7"
+      ],
+      "rows": 1,
+      "resultHash": "5c8ca892826a8612",
+      "work": 17940,
+      "statementRowsRead": 8876,
+      "qErrorMedian": 4.86,
+      "qErrorMax": 20,
+      "joinOrder": "cost-based",
+      "joinStepsCosted": 134,
+      "plan": [
+        "hash-join(on=mc.company_id=id, build=cn)",
+        "index-nested-loop-join(on=ci.movie_id = mc.movie_id AND mc.movie_id = mk.movie_id AND t.id = mc.movie_id, index=movie_id_movie_companies, left=ci.movie_id, right=movie_id)",
+        "hash-join(on=ci.person_id=id, build=n, build-filter=n.name LIKE 'Z%')",
+        "index-nested-loop-join(on=ci.movie_id = mk.movie_id AND ci.movie_id = t.id, index=movie_id_cast_info, left=mk.movie_id, right=movie_id)",
+        "index-nested-loop-join(on=t.id = mk.movie_id, index=~pk, left=mk.movie_id, right=id)",
+        "index-nested-loop-join(on=mk.keyword_id = k.id, index=keyword_id_movie_keyword, left=k.id, right=keyword_id)",
+        "table-scan(table=keyword)"
+      ]
+    },
+    {
+      "id": "17c",
+      "tags": [
+        "job",
+        "join",
+        "tables:7"
+      ],
+      "rows": 1,
+      "resultHash": "2c450db33b7cc5a6",
+      "work": 18173,
+      "statementRowsRead": 8981,
+      "qErrorMedian": 4.86,
+      "qErrorMax": 20,
+      "joinOrder": "cost-based",
+      "joinStepsCosted": 134,
+      "plan": [
+        "hash-join(on=mc.company_id=id, build=cn)",
+        "index-nested-loop-join(on=ci.movie_id = mc.movie_id AND mc.movie_id = mk.movie_id AND t.id = mc.movie_id, index=movie_id_movie_companies, left=ci.movie_id, right=movie_id)",
+        "hash-join(on=ci.person_id=id, build=n, build-filter=n.name LIKE 'X%')",
+        "index-nested-loop-join(on=ci.movie_id = mk.movie_id AND ci.movie_id = t.id, index=movie_id_cast_info, left=mk.movie_id, right=movie_id)",
+        "index-nested-loop-join(on=t.id = mk.movie_id, index=~pk, left=mk.movie_id, right=id)",
+        "index-nested-loop-join(on=mk.keyword_id = k.id, index=keyword_id_movie_keyword, left=k.id, right=keyword_id)",
+        "table-scan(table=keyword)"
+      ]
+    },
+    {
+      "id": "17d",
+      "tags": [
+        "job",
+        "join",
+        "tables:7"
+      ],
+      "rows": 1,
+      "resultHash": "ff24fd728bb11863",
+      "work": 17175,
+      "statementRowsRead": 8506,
+      "qErrorMedian": 4.86,
+      "qErrorMax": 20,
+      "joinOrder": "cost-based",
+      "joinStepsCosted": 134,
+      "plan": [
+        "hash-join(on=mc.company_id=id, build=cn)",
+        "index-nested-loop-join(on=ci.movie_id = mc.movie_id AND mc.movie_id = mk.movie_id AND t.id = mc.movie_id, index=movie_id_movie_companies, left=ci.movie_id, right=movie_id)",
+        "hash-join(on=ci.person_id=id, build=n, build-filter=n.name LIKE '%Bert%')",
+        "index-nested-loop-join(on=ci.movie_id = mk.movie_id AND ci.movie_id = t.id, index=movie_id_cast_info, left=mk.movie_id, right=movie_id)",
+        "index-nested-loop-join(on=t.id = mk.movie_id, index=~pk, left=mk.movie_id, right=id)",
+        "index-nested-loop-join(on=mk.keyword_id = k.id, index=keyword_id_movie_keyword, left=k.id, right=keyword_id)",
+        "table-scan(table=keyword)"
+      ]
+    },
+    {
+      "id": "17e",
+      "tags": [
+        "job",
+        "join",
+        "tables:7"
+      ],
+      "rows": 1,
+      "resultHash": "444c2a9cb9899de9",
+      "work": 34190,
+      "statementRowsRead": 16902,
+      "qErrorMedian": 2.1,
+      "qErrorMax": 8.04,
+      "joinOrder": "cost-based",
+      "joinStepsCosted": 134,
+      "plan": [
+        "index-nested-loop-join(on=n.id = ci.person_id, index=~pk, left=ci.person_id, right=id)",
+        "index-nested-loop-join(on=ci.movie_id = mc.movie_id AND ci.movie_id = mk.movie_id AND ci.movie_id = t.id, index=movie_id_cast_info, left=mc.movie_id, right=movie_id)",
+        "index-nested-loop-join(on=t.id = mk.movie_id AND t.id = mc.movie_id, index=~pk, left=mk.movie_id, right=id)",
+        "hash-join(on=mk.keyword_id=id, build=k, build-filter=k.keyword = 'character-name-in-title')",
+        "index-nested-loop-join(on=mc.movie_id = mk.movie_id, index=movie_id_movie_keyword, left=mc.movie_id, right=movie_id)",
+        "index-nested-loop-join(on=mc.company_id = cn.id, index=company_id_movie_companies, left=cn.id, right=company_id)",
+        "table-scan(table=company_name)"
+      ]
+    },
+    {
+      "id": "17f",
+      "tags": [
+        "job",
+        "join",
+        "tables:7"
+      ],
+      "rows": 1,
+      "resultHash": "f67f5c5403e228a8",
+      "work": 26966,
+      "statementRowsRead": 13248,
+      "qErrorMedian": 4.86,
+      "qErrorMax": 20,
+      "joinOrder": "cost-based",
+      "joinStepsCosted": 134,
+      "plan": [
+        "hash-join(on=mc.company_id=id, build=cn)",
+        "index-nested-loop-join(on=ci.movie_id = mc.movie_id AND mc.movie_id = mk.movie_id AND t.id = mc.movie_id, index=movie_id_movie_companies, left=ci.movie_id, right=movie_id)",
+        "hash-join(on=ci.person_id=id, build=n, build-filter=n.name LIKE '%B%')",
+        "index-nested-loop-join(on=ci.movie_id = mk.movie_id AND ci.movie_id = t.id, index=movie_id_cast_info, left=mk.movie_id, right=movie_id)",
+        "index-nested-loop-join(on=t.id = mk.movie_id, index=~pk, left=mk.movie_id, right=id)",
+        "index-nested-loop-join(on=mk.keyword_id = k.id, index=keyword_id_movie_keyword, left=k.id, right=keyword_id)",
+        "table-scan(table=keyword)"
+      ]
+    },
+    {
+      "id": "18a",
+      "tags": [
+        "job",
+        "join",
+        "tables:7"
+      ],
+      "rows": 1,
+      "resultHash": "a355a34d8a76621b",
+      "work": 12470,
+      "statementRowsRead": 6182,
+      "qErrorMedian": 2.64,
+      "qErrorMax": 19,
+      "joinOrder": "cost-based",
+      "joinStepsCosted": 134,
+      "plan": [
+        "index-nested-loop-join(on=t.id = mi.movie_id AND t.id = mi_idx.movie_id AND t.id = ci.movie_id, index=~pk, left=mi.movie_id, right=id)",
+        "hash-join(on=mi.info_type_id=id, build=it1, build-filter=it1.info = 'budget')",
+        "index-nested-loop-join(on=ci.movie_id = mi.movie_id AND mi.movie_id = mi_idx.movie_id, index=movie_id_movie_info, left=ci.movie_id, right=movie_id)",
+        "index-nested-loop-join(on=n.id = ci.person_id, index=~pk, left=ci.person_id, right=id, right-filter=n.gender = 'm' AND n.name LIKE '%Tim%')",
+        "index-nested-loop-join(on=ci.movie_id = mi_idx.movie_id, index=movie_id_cast_info, left=mi_idx.movie_id, right=movie_id, right-filter=ci.note IN (...))",
+        "index-nested-loop-join(on=it2.id = mi_idx.info_type_id, index=info_type_id_movie_info_idx, left=it2.id, right=info_type_id)",
+        "table-scan(table=info_type)"
+      ]
+    },
+    {
+      "id": "18b",
+      "tags": [
+        "job",
+        "join",
+        "tables:7"
+      ],
+      "rows": 1,
+      "resultHash": "de8d8dc81d51ecd5",
+      "work": 889,
+      "statementRowsRead": 440,
+      "qErrorMedian": 2,
+      "qErrorMax": 11,
+      "joinOrder": "cost-based",
+      "joinStepsCosted": 134,
+      "plan": [
+        "index-nested-loop-join(on=n.id = ci.person_id, index=~pk, left=ci.person_id, right=id, right-filter=n.gender IS NOT NULL AND n.gender = 'f')",
+        "index-nested-loop-join(on=ci.movie_id = mi.movie_id AND ci.movie_id = mi_idx.movie_id AND t.id = ci.movie_id, index=movie_id_cast_info, left=mi.movie_id, right=movie_id, right-filter=ci.note IN (...))",
+        "index-nested-loop-join(on=it1.id = mi.info_type_id, index=~pk, left=mi.info_type_id, right=id, right-filter=it1.info = 'genres')",
+        "index-nested-loop-join(on=mi.movie_id = mi_idx.movie_id AND t.id = mi.movie_id, index=movie_id_movie_info, left=mi_idx.movie_id, right=movie_id, right-filter=mi.info IN (...) AND mi.note IS NULL)",
+        "index-nested-loop-join(on=t.id = mi_idx.movie_id, index=~pk, left=mi_idx.movie_id, right=id, right-filter=t.production_year BETWEEN 2008 AND 2014)",
+        "index-nested-loop-join(on=it2.id = mi_idx.info_type_id, index=info_type_id_movie_info_idx, left=it2.id, right=info_type_id, right-filter=mi_idx.info > '8.0')",
+        "table-scan(table=info_type)"
+      ]
+    },
+    {
+      "id": "18c",
+      "tags": [
+        "job",
+        "join",
+        "tables:7"
+      ],
+      "rows": 1,
+      "resultHash": "de8d8dc81d51ecd5",
+      "work": 14796,
+      "statementRowsRead": 7334,
+      "qErrorMedian": 11,
+      "qErrorMax": 336,
+      "joinOrder": "cost-based",
+      "joinStepsCosted": 134,
+      "plan": [
+        "index-nested-loop-join(on=t.id = mi.movie_id AND t.id = mi_idx.movie_id AND t.id = ci.movie_id, index=~pk, left=mi.movie_id, right=id)",
+        "index-nested-loop-join(on=n.id = ci.person_id, index=~pk, left=ci.person_id, right=id, right-filter=n.gender = 'm')",
+        "index-nested-loop-join(on=ci.movie_id = mi.movie_id AND ci.movie_id = mi_idx.movie_id, index=movie_id_cast_info, left=mi.movie_id, right=movie_id, right-filter=ci.note IN (...))",
+        "hash-join(on=mi.info_type_id=id, build=it1, build-filter=it1.info = 'genres')",
+        "index-nested-loop-join(on=mi.movie_id = mi_idx.movie_id, index=movie_id_movie_info, left=mi_idx.movie_id, right=movie_id, right-filter=mi.info IN (...))",
+        "index-nested-loop-join(on=it2.id = mi_idx.info_type_id, index=info_type_id_movie_info_idx, left=it2.id, right=info_type_id)",
+        "table-scan(table=info_type)"
+      ]
+    },
+    {
+      "id": "19a",
+      "tags": [
+        "job",
+        "join",
+        "tables:10"
+      ],
+      "rows": 1,
+      "resultHash": "ad6bbb365f34f509",
+      "work": 1207,
+      "statementRowsRead": 589,
+      "qErrorMedian": 1,
+      "qErrorMax": 3,
+      "joinOrder": "cost-based",
+      "joinStepsCosted": 1160,
+      "plan": [
+        "index-nested-loop-join(on=chn.id = ci.person_role_id, index=~pk, left=ci.person_role_id, right=id)",
+        "index-nested-loop-join(on=ci.person_id = an.person_id AND n.id = an.person_id, index=person_id_aka_name, left=ci.person_id, right=person_id)",
+        "index-nested-loop-join(on=n.id = ci.person_id, index=~pk, left=ci.person_id, right=id, right-filter=n.gender = 'f' AND n.name LIKE '%Ang%')",
+        "index-nested-loop-join(on=rt.id = ci.role_id, index=~pk, left=ci.role_id, right=id, right-filter=rt.role = 'actress')",
+        "index-nested-loop-join(on=mc.movie_id = ci.movie_id AND mi.movie_id = ci.movie_id AND t.id = ci.movie_id, index=movie_id_cast_info, left=mc.movie_id, right=movie_id, right-filter=ci.note IN (...))",
+        "index-nested-loop-join(on=it.id = mi.info_type_id, index=~pk, left=mi.info_type_id, right=id, right-filter=it.info = 'release dates')",
+        "index-nested-loop-join(on=mc.movie_id = mi.movie_id AND t.id = mi.movie_id, index=movie_id_movie_info, left=mc.movie_id, right=movie_id, right-filter=mi.info IS NOT NULL AND (mi.info LIKE 'Japan:%200%' OR mi.info LIKE 'USA:%200%'))",
+        "index-nested-loop-join(on=t.id = mc.movie_id, index=~pk, left=mc.movie_id, right=id, right-filter=t.production_year BETWEEN 2005 AND 2009)",
+        "index-nested-loop-join(on=cn.id = mc.company_id, index=company_id_movie_companies, left=cn.id, right=company_id, right-filter=mc.note IS NOT NULL AND (mc.note LIKE '%(USA)%' OR mc.note LIKE '%(worldwide)%'))",
+        "table-scan(table=company_name)"
+      ]
+    },
+    {
+      "id": "19b",
+      "tags": [
+        "job",
+        "join",
+        "tables:10"
+      ],
+      "rows": 1,
+      "resultHash": "7790e9afe77f8efd",
+      "work": 1154,
+      "statementRowsRead": 563,
+      "qErrorMedian": 1,
+      "qErrorMax": 26,
+      "joinOrder": "cost-based",
+      "joinStepsCosted": 1160,
+      "plan": [
+        "index-nested-loop-join(on=chn.id = ci.person_role_id, index=~pk, left=ci.person_role_id, right=id)",
+        "index-nested-loop-join(on=ci.person_id = an.person_id AND n.id = an.person_id, index=person_id_aka_name, left=ci.person_id, right=person_id)",
+        "index-nested-loop-join(on=n.id = ci.person_id, index=~pk, left=ci.person_id, right=id, right-filter=n.gender = 'f' AND n.name LIKE '%Angel%')",
+        "index-nested-loop-join(on=rt.id = ci.role_id, index=~pk, left=ci.role_id, right=id, right-filter=rt.role = 'actress')",
+        "index-nested-loop-join(on=mc.movie_id = ci.movie_id AND mi.movie_id = ci.movie_id AND t.id = ci.movie_id, index=movie_id_cast_info, left=mc.movie_id, right=movie_id, right-filter=ci.note = '(voice)')",
+        "index-nested-loop-join(on=it.id = mi.info_type_id, index=~pk, left=mi.info_type_id, right=id, right-filter=it.info = 'release dates')",
+        "index-nested-loop-join(on=mc.movie_id = mi.movie_id AND t.id = mi.movie_id, index=movie_id_movie_info, left=mc.movie_id, right=movie_id, right-filter=mi.info IS NOT NULL AND (mi.info LIKE 'Japan:%2007%' OR mi.info LIKE 'USA:%2008%'))",
+        "index-nested-loop-join(on=t.id = mc.movie_id, index=~pk, left=mc.movie_id, right=id, right-filter=t.production_year BETWEEN 2007 AND 2008 AND t.title LIKE '%Kung%Fu%Panda%')",
+        "index-nested-loop-join(on=cn.id = mc.company_id, index=company_id_movie_companies, left=cn.id, right=company_id, right-filter=mc.note LIKE '%(200%)%' AND (mc.note LIKE '%(USA)%' OR mc.note LIKE '%(worldwide)%'))",
+        "table-scan(table=company_name)"
+      ]
+    },
+    {
+      "id": "19c",
+      "tags": [
+        "job",
+        "join",
+        "tables:10"
+      ],
+      "rows": 1,
+      "resultHash": "05c98405e13b6c2c",
+      "work": 4833,
+      "statementRowsRead": 2387,
+      "qErrorMedian": 5.51,
+      "qErrorMax": 12,
+      "joinOrder": "cost-based",
+      "joinStepsCosted": 1160,
+      "plan": [
+        "index-nested-loop-join(on=chn.id = ci.person_role_id, index=~pk, left=ci.person_role_id, right=id)",
+        "index-nested-loop-join(on=ci.person_id = an.person_id AND n.id = an.person_id, index=person_id_aka_name, left=ci.person_id, right=person_id)",
+        "index-nested-loop-join(on=n.id = ci.person_id, index=~pk, left=ci.person_id, right=id, right-filter=n.gender = 'f' AND n.name LIKE '%An%')",
+        "index-nested-loop-join(on=rt.id = ci.role_id, index=~pk, left=ci.role_id, right=id, right-filter=rt.role = 'actress')",
+        "index-nested-loop-join(on=mc.movie_id = ci.movie_id AND mi.movie_id = ci.movie_id AND t.id = ci.movie_id, index=movie_id_cast_info, left=mc.movie_id, right=movie_id, right-filter=ci.note IN (...))",
+        "index-nested-loop-join(on=cn.id = mc.company_id, index=~pk, left=mc.company_id, right=id, right-filter=cn.country_code = '[us]')",
+        "index-nested-loop-join(on=mc.movie_id = mi.movie_id AND t.id = mc.movie_id, index=movie_id_movie_companies, left=mi.movie_id, right=movie_id)",
+        "index-nested-loop-join(on=t.id = mi.movie_id, index=~pk, left=mi.movie_id, right=id, right-filter=t.production_year > 2000)",
+        "index-nested-loop-join(on=it.id = mi.info_type_id, index=info_type_id_movie_info, left=it.id, right=info_type_id, right-filter=mi.info IS NOT NULL AND (mi.info LIKE 'Japan:%200%' OR mi.info LIKE 'USA:%200%'))",
+        "table-scan(table=info_type)"
+      ]
+    },
+    {
+      "id": "19d",
+      "tags": [
+        "job",
+        "join",
+        "tables:10"
+      ],
+      "rows": 1,
+      "resultHash": "3f3d2dd242d1e3db",
+      "work": 10737,
+      "statementRowsRead": 5277,
+      "qErrorMedian": 4.52,
+      "qErrorMax": 36.5,
+      "joinOrder": "cost-based",
+      "joinStepsCosted": 1160,
+      "plan": [
+        "index-nested-loop-join(on=chn.id = ci.person_role_id, index=~pk, left=ci.person_role_id, right=id)",
+        "index-nested-loop-join(on=it.id = mi.info_type_id, index=~pk, left=mi.info_type_id, right=id, right-filter=it.info = 'release dates')",
+        "index-nested-loop-join(on=mc.movie_id = mi.movie_id AND mi.movie_id = ci.movie_id AND t.id = mi.movie_id, index=movie_id_movie_info, left=mc.movie_id, right=movie_id)",
+        "index-nested-loop-join(on=ci.person_id = an.person_id AND n.id = an.person_id, index=person_id_aka_name, left=ci.person_id, right=person_id)",
+        "index-nested-loop-join(on=n.id = ci.person_id, index=~pk, left=ci.person_id, right=id, right-filter=n.gender = 'f')",
+        "hash-join(on=ci.role_id=id, build=rt, build-filter=rt.role = 'actress')",
+        "index-nested-loop-join(on=mc.movie_id = ci.movie_id AND t.id = ci.movie_id, index=movie_id_cast_info, left=mc.movie_id, right=movie_id, right-filter=ci.note IN (...))",
+        "index-nested-loop-join(on=t.id = mc.movie_id, index=~pk, left=mc.movie_id, right=id, right-filter=t.production_year > 2000)",
+        "index-nested-loop-join(on=cn.id = mc.company_id, index=company_id_movie_companies, left=cn.id, right=company_id)",
+        "table-scan(table=company_name)"
+      ]
+    },
+    {
+      "id": "1a",
+      "tags": [
+        "job",
+        "join",
+        "tables:5"
+      ],
+      "rows": 1,
+      "resultHash": "e5c56c8a7efa5707",
+      "work": 2751,
+      "statementRowsRead": 1348,
+      "qErrorMedian": 1,
+      "qErrorMax": 1.4,
+      "joinOrder": "cost-based",
+      "joinStepsCosted": 32,
+      "plan": [
+        "index-nested-loop-join(on=t.id = mc.movie_id AND t.id = mi_idx.movie_id, index=~pk, left=mc.movie_id, right=id)",
+        "index-nested-loop-join(on=it.id = mi_idx.info_type_id, index=~pk, left=mi_idx.info_type_id, right=id, right-filter=it.info = 'top 250 rank')",
+        "index-nested-loop-join(on=mc.movie_id = mi_idx.movie_id, index=movie_id_movie_info_idx, left=mc.movie_id, right=movie_id)",
+        "index-nested-loop-join(on=ct.id = mc.company_type_id, index=company_type_id_movie_companies, left=ct.id, right=company_type_id, right-filter=NOT mc.note LIKE '%(as Metro-Goldwyn-Mayer Pictures)%' AND (mc.note LIKE '%(co-production)%' OR mc.note LIKE '%(presents)%'))",
+        "table-scan(table=company_type)"
+      ]
+    },
+    {
+      "id": "1b",
+      "tags": [
+        "job",
+        "join",
+        "tables:5"
+      ],
+      "rows": 1,
+      "resultHash": "a2d9298e20396903",
+      "work": 4595,
+      "statementRowsRead": 2243,
+      "qErrorMedian": 10.66,
+      "qErrorMax": 32,
+      "joinOrder": "cost-based",
+      "joinStepsCosted": 32,
+      "plan": [
+        "index-nested-loop-join(on=it.id = mi_idx.info_type_id, index=~pk, left=mi_idx.info_type_id, right=id, right-filter=it.info = 'bottom 10 rank')",
+        "index-nested-loop-join(on=mc.movie_id = mi_idx.movie_id AND t.id = mi_idx.movie_id, index=movie_id_movie_info_idx, left=mc.movie_id, right=movie_id)",
+        "index-nested-loop-join(on=t.id = mc.movie_id, index=~pk, left=mc.movie_id, right=id, right-filter=t.production_year BETWEEN 2005 AND 2010)",
+        "index-nested-loop-join(on=ct.id = mc.company_type_id, index=company_type_id_movie_companies, left=ct.id, right=company_type_id, right-filter=NOT mc.note LIKE '%(as Metro-Goldwyn-Mayer Pictures)%')",
+        "table-scan(table=company_type)"
+      ]
+    },
+    {
+      "id": "1c",
+      "tags": [
+        "job",
+        "join",
+        "tables:5"
+      ],
+      "rows": 1,
+      "resultHash": "625c0c6ff452cecf",
+      "work": 2417,
+      "statementRowsRead": 1206,
+      "qErrorMedian": 1,
+      "qErrorMax": 2.32,
+      "joinOrder": "cost-based",
+      "joinStepsCosted": 32,
+      "plan": [
+        "index-nested-loop-join(on=it.id = mi_idx.info_type_id, index=~pk, left=mi_idx.info_type_id, right=id, right-filter=it.info = 'top 250 rank')",
+        "index-nested-loop-join(on=mc.movie_id = mi_idx.movie_id AND t.id = mi_idx.movie_id, index=movie_id_movie_info_idx, left=mc.movie_id, right=movie_id)",
+        "index-nested-loop-join(on=t.id = mc.movie_id, index=~pk, left=mc.movie_id, right=id, right-filter=t.production_year > 2010)",
+        "index-nested-loop-join(on=ct.id = mc.company_type_id, index=company_type_id_movie_companies, left=ct.id, right=company_type_id, right-filter=NOT mc.note LIKE '%(as Metro-Goldwyn-Mayer Pictures)%' AND mc.note LIKE '%(co-production)%')",
+        "table-scan(table=company_type)"
+      ]
+    },
+    {
+      "id": "1d",
+      "tags": [
+        "job",
+        "join",
+        "tables:5"
+      ],
+      "rows": 1,
+      "resultHash": "2fc4b4f6746e34d1",
+      "work": 5410,
+      "statementRowsRead": 2571,
+      "qErrorMedian": 14,
+      "qErrorMax": 59.33,
+      "joinOrder": "cost-based",
+      "joinStepsCosted": 32,
+      "plan": [
+        "index-nested-loop-join(on=it.id = mi_idx.info_type_id, index=~pk, left=mi_idx.info_type_id, right=id, right-filter=it.info = 'bottom 10 rank')",
+        "index-nested-loop-join(on=mc.movie_id = mi_idx.movie_id AND t.id = mi_idx.movie_id, index=movie_id_movie_info_idx, left=mc.movie_id, right=movie_id)",
+        "index-nested-loop-join(on=t.id = mc.movie_id, index=~pk, left=mc.movie_id, right=id, right-filter=t.production_year > 2000)",
+        "index-nested-loop-join(on=ct.id = mc.company_type_id, index=company_type_id_movie_companies, left=ct.id, right=company_type_id, right-filter=NOT mc.note LIKE '%(as Metro-Goldwyn-Mayer Pictures)%')",
+        "table-scan(table=company_type)"
+      ]
+    },
+    {
+      "id": "20a",
+      "tags": [
+        "job",
+        "join",
+        "tables:10"
+      ],
+      "rows": 1,
+      "resultHash": "5613fedd03c744dd",
+      "work": 43059,
+      "statementRowsRead": 21067,
+      "qErrorMedian": 83,
+      "qErrorMax": 8100,
+      "joinOrder": "cost-based",
+      "joinStepsCosted": 752,
+      "plan": [
+        "index-nested-loop-join(on=k.id = mk.keyword_id, index=~pk, left=mk.keyword_id, right=id, right-filter=k.keyword IN (...))",
+        "index-nested-loop-join(on=mk.movie_id = ci.movie_id AND mk.movie_id = cc.movie_id AND t.id = mk.movie_id, index=movie_id_movie_keyword, left=ci.movie_id, right=movie_id)",
+        "index-nested-loop-join(on=n.id = ci.person_id, index=~pk, left=ci.person_id, right=id)",
+        "index-nested-loop-join(on=chn.id = ci.person_role_id, index=~pk, left=ci.person_role_id, right=id, right-filter=NOT chn.name LIKE '%Sherlock%' AND (chn.name LIKE '%Tony%Stark%' OR chn.name LIKE '%Iron%Man%'))",
+        "index-nested-loop-join(on=ci.movie_id = cc.movie_id AND t.id = ci.movie_id, index=movie_id_cast_info, left=cc.movie_id, right=movie_id)",
+        "index-nested-loop-join(on=cct2.id = cc.status_id, index=~pk, left=cc.status_id, right=id, right-filter=cct2.kind LIKE '%complete%')",
+        "index-nested-loop-join(on=cct1.id = cc.subject_id, index=~pk, left=cc.subject_id, right=id, right-filter=cct1.kind = 'cast')",
+        "index-nested-loop-join(on=t.id = cc.movie_id, index=movie_id_complete_cast, left=t.id, right=movie_id)",
+        "index-nested-loop-join(on=kt.id = t.kind_id, index=kind_id_title, left=kt.id, right=kind_id, right-filter=t.production_year > 1950)",
+        "table-scan(table=kind_type)"
+      ]
+    },
+    {
+      "id": "20b",
+      "tags": [
+        "job",
+        "join",
+        "tables:10"
+      ],
+      "rows": 1,
+      "resultHash": "5d9f1395eba9414a",
+      "work": 5166,
+      "statementRowsRead": 2386,
+      "qErrorMedian": 9.89,
+      "qErrorMax": 219,
+      "joinOrder": "cost-based",
+      "joinStepsCosted": 752,
+      "plan": [
+        "index-nested-loop-join(on=k.id = mk.keyword_id, index=~pk, left=mk.keyword_id, right=id, right-filter=k.keyword IN (...))",
+        "index-nested-loop-join(on=mk.movie_id = ci.movie_id AND mk.movie_id = cc.movie_id AND t.id = mk.movie_id, index=movie_id_movie_keyword, left=ci.movie_id, right=movie_id)",
+        "index-nested-loop-join(on=chn.id = ci.person_role_id, index=~pk, left=ci.person_role_id, right=id, right-filter=NOT chn.name LIKE '%Sherlock%' AND (chn.name LIKE '%Tony%Stark%' OR chn.name LIKE '%Iron%Man%'))",
+        "index-nested-loop-join(on=n.id = ci.person_id, index=~pk, left=ci.person_id, right=id, right-filter=n.name LIKE '%Downey%Robert%')",
+        "index-nested-loop-join(on=ci.movie_id = cc.movie_id AND t.id = ci.movie_id, index=movie_id_cast_info, left=cc.movie_id, right=movie_id)",
+        "index-nested-loop-join(on=cct2.id = cc.status_id, index=~pk, left=cc.status_id, right=id, right-filter=cct2.kind LIKE '%complete%')",
+        "index-nested-loop-join(on=cct1.id = cc.subject_id, index=~pk, left=cc.subject_id, right=id, right-filter=cct1.kind = 'cast')",
+        "index-nested-loop-join(on=t.id = cc.movie_id, index=movie_id_complete_cast, left=t.id, right=movie_id)",
+        "index-nested-loop-join(on=kt.id = t.kind_id, index=kind_id_title, left=kt.id, right=kind_id, right-filter=t.production_year > 2000)",
+        "table-scan(table=kind_type)"
+      ]
+    },
+    {
+      "id": "20c",
+      "tags": [
+        "job",
+        "join",
+        "tables:10"
+      ],
+      "rows": 1,
+      "resultHash": "ba668d25dd654f45",
+      "work": 11120,
+      "statementRowsRead": 5319,
+      "qErrorMedian": 52.5,
+      "qErrorMax": 1594,
+      "joinOrder": "cost-based",
+      "joinStepsCosted": 752,
+      "plan": [
+        "index-nested-loop-join(on=k.id = mk.keyword_id, index=~pk, left=mk.keyword_id, right=id, right-filter=k.keyword IN (...))",
+        "index-nested-loop-join(on=mk.movie_id = ci.movie_id AND mk.movie_id = cc.movie_id AND t.id = mk.movie_id, index=movie_id_movie_keyword, left=ci.movie_id, right=movie_id)",
+        "index-nested-loop-join(on=n.id = ci.person_id, index=~pk, left=ci.person_id, right=id)",
+        "index-nested-loop-join(on=chn.id = ci.person_role_id, index=~pk, left=ci.person_role_id, right=id, right-filter=chn.name IS NOT NULL AND (chn.name LIKE '%man%' OR chn.name LIKE '%Man%'))",
+        "index-nested-loop-join(on=ci.movie_id = cc.movie_id AND t.id = ci.movie_id, index=movie_id_cast_info, left=cc.movie_id, right=movie_id)",
+        "index-nested-loop-join(on=cct2.id = cc.status_id, index=~pk, left=cc.status_id, right=id, right-filter=cct2.kind LIKE '%complete%')",
+        "index-nested-loop-join(on=cct1.id = cc.subject_id, index=~pk, left=cc.subject_id, right=id, right-filter=cct1.kind = 'cast')",
+        "index-nested-loop-join(on=t.id = cc.movie_id, index=movie_id_complete_cast, left=t.id, right=movie_id)",
+        "index-nested-loop-join(on=kt.id = t.kind_id, index=kind_id_title, left=kt.id, right=kind_id, right-filter=t.production_year > 2000)",
+        "table-scan(table=kind_type)"
+      ]
+    },
+    {
+      "id": "21a",
+      "tags": [
+        "job",
+        "join",
+        "tables:9"
+      ],
+      "rows": 1,
+      "resultHash": "9078d4956c3c4feb",
+      "work": 116,
+      "statementRowsRead": 55,
+      "qErrorMedian": 1,
+      "qErrorMax": 4,
+      "joinOrder": "cost-based",
+      "joinStepsCosted": 599,
+      "plan": [
+        "index-nested-loop-join(on=mc.movie_id = mi.movie_id AND mk.movie_id = mi.movie_id AND ml.movie_id = mi.movie_id AND mi.movie_id = t.id, index=movie_id_movie_info, left=mc.movie_id, right=movie_id, right-filter=mi.info IN (...))",
+        "index-nested-loop-join(on=mc.company_id = cn.id, index=~pk, left=mc.company_id, right=id, right-filter=cn.country_code <> '[pl]' AND (cn.name LIKE '%Film%' OR cn.name LIKE '%Warner%'))",
+        "index-nested-loop-join(on=mk.keyword_id = k.id, index=~pk, left=mk.keyword_id, right=id, right-filter=k.keyword = 'sequel')",
+        "index-nested-loop-join(on=mk.movie_id = mc.movie_id AND ml.movie_id = mk.movie_id AND t.id = mk.movie_id, index=movie_id_movie_keyword, left=mc.movie_id, right=movie_id)",
+        "index-nested-loop-join(on=mc.company_type_id = ct.id, index=~pk, left=mc.company_type_id, right=id, right-filter=ct.kind = 'production companies')",
+        "index-nested-loop-join(on=ml.movie_id = mc.movie_id AND t.id = mc.movie_id, index=movie_id_movie_companies, left=ml.movie_id, right=movie_id, right-filter=mc.note IS NULL)",
+        "index-nested-loop-join(on=ml.movie_id = t.id, index=~pk, left=ml.movie_id, right=id, right-filter=t.production_year BETWEEN 1950 AND 2000)",
+        "index-nested-loop-join(on=lt.id = ml.link_type_id, index=link_type_id_movie_link, left=lt.id, right=link_type_id)",
+        "table-scan(table=link_type)"
+      ]
+    },
+    {
+      "id": "21b",
+      "tags": [
+        "job",
+        "join",
+        "tables:9"
+      ],
+      "rows": 1,
+      "resultHash": "f051bfa038adeb28",
+      "work": 99,
+      "statementRowsRead": 47,
+      "qErrorMedian": 1,
+      "qErrorMax": 3,
+      "joinOrder": "cost-based",
+      "joinStepsCosted": 599,
+      "plan": [
+        "index-nested-loop-join(on=mc.movie_id = mi.movie_id AND mk.movie_id = mi.movie_id AND ml.movie_id = mi.movie_id AND mi.movie_id = t.id, index=movie_id_movie_info, left=mc.movie_id, right=movie_id, right-filter=mi.info IN (...))",
+        "index-nested-loop-join(on=mc.company_id = cn.id, index=~pk, left=mc.company_id, right=id, right-filter=cn.country_code <> '[pl]' AND (cn.name LIKE '%Film%' OR cn.name LIKE '%Warner%'))",
+        "index-nested-loop-join(on=mk.keyword_id = k.id, index=~pk, left=mk.keyword_id, right=id, right-filter=k.keyword = 'sequel')",
+        "index-nested-loop-join(on=mk.movie_id = mc.movie_id AND ml.movie_id = mk.movie_id AND t.id = mk.movie_id, index=movie_id_movie_keyword, left=mc.movie_id, right=movie_id)",
+        "index-nested-loop-join(on=mc.company_type_id = ct.id, index=~pk, left=mc.company_type_id, right=id, right-filter=ct.kind = 'production companies')",
+        "index-nested-loop-join(on=ml.movie_id = mc.movie_id AND t.id = mc.movie_id, index=movie_id_movie_companies, left=ml.movie_id, right=movie_id, right-filter=mc.note IS NULL)",
+        "index-nested-loop-join(on=ml.movie_id = t.id, index=~pk, left=ml.movie_id, right=id, right-filter=t.production_year BETWEEN 2000 AND 2010)",
+        "index-nested-loop-join(on=lt.id = ml.link_type_id, index=link_type_id_movie_link, left=lt.id, right=link_type_id)",
+        "table-scan(table=link_type)"
+      ]
+    },
+    {
+      "id": "21c",
+      "tags": [
+        "job",
+        "join",
+        "tables:9"
+      ],
+      "rows": 1,
+      "resultHash": "9078d4956c3c4feb",
+      "work": 129,
+      "statementRowsRead": 60,
+      "qErrorMedian": 1,
+      "qErrorMax": 7,
+      "joinOrder": "cost-based",
+      "joinStepsCosted": 599,
+      "plan": [
+        "index-nested-loop-join(on=mc.movie_id = mi.movie_id AND mk.movie_id = mi.movie_id AND ml.movie_id = mi.movie_id AND mi.movie_id = t.id, index=movie_id_movie_info, left=mc.movie_id, right=movie_id, right-filter=mi.info IN (...))",
+        "index-nested-loop-join(on=mc.company_id = cn.id, index=~pk, left=mc.company_id, right=id, right-filter=cn.country_code <> '[pl]' AND (cn.name LIKE '%Film%' OR cn.name LIKE '%Warner%'))",
+        "index-nested-loop-join(on=mk.keyword_id = k.id, index=~pk, left=mk.keyword_id, right=id, right-filter=k.keyword = 'sequel')",
+        "index-nested-loop-join(on=mk.movie_id = mc.movie_id AND ml.movie_id = mk.movie_id AND t.id = mk.movie_id, index=movie_id_movie_keyword, left=mc.movie_id, right=movie_id)",
+        "index-nested-loop-join(on=mc.company_type_id = ct.id, index=~pk, left=mc.company_type_id, right=id, right-filter=ct.kind = 'production companies')",
+        "index-nested-loop-join(on=ml.movie_id = mc.movie_id AND t.id = mc.movie_id, index=movie_id_movie_companies, left=ml.movie_id, right=movie_id, right-filter=mc.note IS NULL)",
+        "index-nested-loop-join(on=ml.movie_id = t.id, index=~pk, left=ml.movie_id, right=id, right-filter=t.production_year BETWEEN 1950 AND 2010)",
+        "index-nested-loop-join(on=lt.id = ml.link_type_id, index=link_type_id_movie_link, left=lt.id, right=link_type_id)",
+        "table-scan(table=link_type)"
+      ]
+    },
+    {
+      "id": "22a",
+      "tags": [
+        "job",
+        "join",
+        "tables:11"
+      ],
+      "rows": 1,
+      "resultHash": "1b6d730790ec6b7c",
+      "work": 4175,
+      "statementRowsRead": 1931,
+      "qErrorMedian": 2,
+      "qErrorMax": 39,
+      "joinOrder": "cost-based",
+      "joinStepsCosted": 1486,
+      "plan": [
+        "index-nested-loop-join(on=ct.id = mc.company_type_id, index=~pk, left=mc.company_type_id, right=id)",
+        "index-nested-loop-join(on=k.id = mk.keyword_id, index=~pk, left=mk.keyword_id, right=id, right-filter=k.keyword IN (...))",
+        "index-nested-loop-join(on=mk.movie_id = mi.movie_id AND mk.movie_id = mi_idx.movie_id AND mk.movie_id = mc.movie_id AND t.id = mk.movie_id, index=movie_id_movie_keyword, left=mi.movie_id, right=movie_id)",
+        "index-nested-loop-join(on=cn.id = mc.company_id, index=~pk, left=mc.company_id, right=id, right-filter=cn.country_code <> '[us]')",
+        "index-nested-loop-join(on=it1.id = mi.info_type_id, index=~pk, left=mi.info_type_id, right=id, right-filter=it1.info = 'countries')",
+        "index-nested-loop-join(on=mi.movie_id = mc.movie_id AND mi.movie_id = mi_idx.movie_id AND t.id = mi.movie_id, index=movie_id_movie_info, left=mc.movie_id, right=movie_id, right-filter=mi.info IN (...))",
+        "index-nested-loop-join(on=mc.movie_id = mi_idx.movie_id AND t.id = mc.movie_id, index=movie_id_movie_companies, left=mi_idx.movie_id, right=movie_id, right-filter=NOT mc.note LIKE '%(USA)%' AND mc.note LIKE '%(200%)%')",
+        "index-nested-loop-join(on=it2.id = mi_idx.info_type_id, index=~pk, left=mi_idx.info_type_id, right=id, right-filter=it2.info = 'rating')",
+        "index-nested-loop-join(on=t.id = mi_idx.movie_id, index=movie_id_movie_info_idx, left=t.id, right=movie_id, right-filter=mi_idx.info < '7.0')",
+        "index-nested-loop-join(on=kt.id = t.kind_id, index=kind_id_title, left=kt.id, right=kind_id, right-filter=t.production_year > 2008)",
+        "table-scan(table=kind_type)"
+      ]
+    },
+    {
+      "id": "22b",
+      "tags": [
+        "job",
+        "join",
+        "tables:11"
+      ],
+      "rows": 1,
+      "resultHash": "1b6d730790ec6b7c",
+      "work": 3961,
+      "statementRowsRead": 1848,
+      "qErrorMedian": 1,
+      "qErrorMax": 30.5,
+      "joinOrder": "cost-based",
+      "joinStepsCosted": 1486,
+      "plan": [
+        "index-nested-loop-join(on=ct.id = mc.company_type_id, index=~pk, left=mc.company_type_id, right=id)",
+        "index-nested-loop-join(on=k.id = mk.keyword_id, index=~pk, left=mk.keyword_id, right=id, right-filter=k.keyword IN (...))",
+        "index-nested-loop-join(on=mk.movie_id = mi.movie_id AND mk.movie_id = mi_idx.movie_id AND mk.movie_id = mc.movie_id AND t.id = mk.movie_id, index=movie_id_movie_keyword, left=mi.movie_id, right=movie_id)",
+        "index-nested-loop-join(on=cn.id = mc.company_id, index=~pk, left=mc.company_id, right=id, right-filter=cn.country_code <> '[us]')",
+        "index-nested-loop-join(on=it1.id = mi.info_type_id, index=~pk, left=mi.info_type_id, right=id, right-filter=it1.info = 'countries')",
+        "index-nested-loop-join(on=mi.movie_id = mc.movie_id AND mi.movie_id = mi_idx.movie_id AND t.id = mi.movie_id, index=movie_id_movie_info, left=mc.movie_id, right=movie_id, right-filter=mi.info IN (...))",
+        "index-nested-loop-join(on=mc.movie_id = mi_idx.movie_id AND t.id = mc.movie_id, index=movie_id_movie_companies, left=mi_idx.movie_id, right=movie_id, right-filter=NOT mc.note LIKE '%(USA)%' AND mc.note LIKE '%(200%)%')",
+        "index-nested-loop-join(on=it2.id = mi_idx.info_type_id, index=~pk, left=mi_idx.info_type_id, right=id, right-filter=it2.info = 'rating')",
+        "index-nested-loop-join(on=t.id = mi_idx.movie_id, index=movie_id_movie_info_idx, left=t.id, right=movie_id, right-filter=mi_idx.info < '7.0')",
+        "index-nested-loop-join(on=kt.id = t.kind_id, index=kind_id_title, left=kt.id, right=kind_id, right-filter=t.production_year > 2009)",
+        "table-scan(table=kind_type)"
+      ]
+    },
+    {
+      "id": "22c",
+      "tags": [
+        "job",
+        "join",
+        "tables:11"
+      ],
+      "rows": 1,
+      "resultHash": "1b6d730790ec6b7c",
+      "work": 4639,
+      "statementRowsRead": 2097,
+      "qErrorMedian": 2,
+      "qErrorMax": 62.5,
+      "joinOrder": "cost-based",
+      "joinStepsCosted": 1486,
+      "plan": [
+        "index-nested-loop-join(on=ct.id = mc.company_type_id, index=~pk, left=mc.company_type_id, right=id)",
+        "index-nested-loop-join(on=k.id = mk.keyword_id, index=~pk, left=mk.keyword_id, right=id, right-filter=k.keyword IN (...))",
+        "index-nested-loop-join(on=mk.movie_id = mi.movie_id AND mk.movie_id = mi_idx.movie_id AND mk.movie_id = mc.movie_id AND t.id = mk.movie_id, index=movie_id_movie_keyword, left=mi.movie_id, right=movie_id)",
+        "index-nested-loop-join(on=it1.id = mi.info_type_id, index=~pk, left=mi.info_type_id, right=id, right-filter=it1.info = 'countries')",
+        "index-nested-loop-join(on=mi.movie_id = mc.movie_id AND mi.movie_id = mi_idx.movie_id AND t.id = mi.movie_id, index=movie_id_movie_info, left=mc.movie_id, right=movie_id, right-filter=mi.info IN (...))",
+        "index-nested-loop-join(on=cn.id = mc.company_id, index=~pk, left=mc.company_id, right=id, right-filter=cn.country_code <> '[us]')",
+        "index-nested-loop-join(on=mc.movie_id = mi_idx.movie_id AND t.id = mc.movie_id, index=movie_id_movie_companies, left=mi_idx.movie_id, right=movie_id, right-filter=NOT mc.note LIKE '%(USA)%' AND mc.note LIKE '%(200%)%')",
+        "index-nested-loop-join(on=it2.id = mi_idx.info_type_id, index=~pk, left=mi_idx.info_type_id, right=id, right-filter=it2.info = 'rating')",
+        "index-nested-loop-join(on=t.id = mi_idx.movie_id, index=movie_id_movie_info_idx, left=t.id, right=movie_id, right-filter=mi_idx.info < '8.5')",
+        "index-nested-loop-join(on=kt.id = t.kind_id, index=kind_id_title, left=kt.id, right=kind_id, right-filter=t.production_year > 2005)",
+        "table-scan(table=kind_type)"
+      ]
+    },
+    {
+      "id": "22d",
+      "tags": [
+        "job",
+        "join",
+        "tables:11"
+      ],
+      "rows": 1,
+      "resultHash": "fdad5f19a348b3d1",
+      "work": 5893,
+      "statementRowsRead": 2721,
+      "qErrorMedian": 54,
+      "qErrorMax": 104,
+      "joinOrder": "cost-based",
+      "joinStepsCosted": 1486,
+      "plan": [
+        "index-nested-loop-join(on=ct.id = mc.company_type_id, index=~pk, left=mc.company_type_id, right=id)",
+        "index-nested-loop-join(on=cn.id = mc.company_id, index=~pk, left=mc.company_id, right=id, right-filter=cn.country_code <> '[us]')",
+        "index-nested-loop-join(on=mi.movie_id = mc.movie_id AND mc.movie_id = mi_idx.movie_id AND mk.movie_id = mc.movie_id AND t.id = mc.movie_id, index=movie_id_movie_companies, left=mi.movie_id, right=movie_id)",
+        "index-nested-loop-join(on=k.id = mk.keyword_id, index=~pk, left=mk.keyword_id, right=id, right-filter=k.keyword IN (...))",
+        "index-nested-loop-join(on=mk.movie_id = mi.movie_id AND mk.movie_id = mi_idx.movie_id AND t.id = mk.movie_id, index=movie_id_movie_keyword, left=mi.movie_id, right=movie_id)",
+        "index-nested-loop-join(on=it1.id = mi.info_type_id, index=~pk, left=mi.info_type_id, right=id, right-filter=it1.info = 'countries')",
+        "index-nested-loop-join(on=mi.movie_id = mi_idx.movie_id AND t.id = mi.movie_id, index=movie_id_movie_info, left=mi_idx.movie_id, right=movie_id, right-filter=mi.info IN (...))",
+        "index-nested-loop-join(on=it2.id = mi_idx.info_type_id, index=~pk, left=mi_idx.info_type_id, right=id, right-filter=it2.info = 'rating')",
+        "index-nested-loop-join(on=t.id = mi_idx.movie_id, index=movie_id_movie_info_idx, left=t.id, right=movie_id, right-filter=mi_idx.info < '8.5')",
+        "index-nested-loop-join(on=kt.id = t.kind_id, index=kind_id_title, left=kt.id, right=kind_id, right-filter=t.production_year > 2005)",
+        "table-scan(table=kind_type)"
+      ]
+    },
+    {
+      "id": "23a",
+      "tags": [
+        "job",
+        "join",
+        "tables:11"
+      ],
+      "rows": 1,
+      "resultHash": "dd5f437a05cd8f74",
+      "work": 2949,
+      "statementRowsRead": 1277,
+      "qErrorMedian": 1,
+      "qErrorMax": 18,
+      "joinOrder": "cost-based",
+      "joinStepsCosted": 1486,
+      "plan": [
+        "index-nested-loop-join(on=k.id = mk.keyword_id, index=~pk, left=mk.keyword_id, right=id)",
+        "index-nested-loop-join(on=mk.movie_id = mi.movie_id AND mk.movie_id = mc.movie_id AND mk.movie_id = cc.movie_id AND t.id = mk.movie_id, index=movie_id_movie_keyword, left=mi.movie_id, right=movie_id)",
+        "index-nested-loop-join(on=ct.id = mc.company_type_id, index=~pk, left=mc.company_type_id, right=id)",
+        "index-nested-loop-join(on=cn.id = mc.company_id, index=~pk, left=mc.company_id, right=id, right-filter=cn.country_code = '[us]')",
+        "index-nested-loop-join(on=mc.movie_id = cc.movie_id AND mi.movie_id = mc.movie_id AND t.id = mc.movie_id, index=movie_id_movie_companies, left=cc.movie_id, right=movie_id)",
+        "index-nested-loop-join(on=it1.id = mi.info_type_id, index=~pk, left=mi.info_type_id, right=id, right-filter=it1.info = 'release dates')",
+        "index-nested-loop-join(on=mi.movie_id = cc.movie_id AND t.id = mi.movie_id, index=movie_id_movie_info, left=cc.movie_id, right=movie_id, right-filter=mi.note LIKE '%internet%' AND mi.info IS NOT NULL AND (mi.info LIKE 'USA:% 199%' OR mi.info LIKE 'USA:% 200%'))",
+        "index-nested-loop-join(on=cct1.id = cc.status_id, index=~pk, left=cc.status_id, right=id, right-filter=cct1.kind = 'complete+verified')",
+        "index-nested-loop-join(on=t.id = cc.movie_id, index=movie_id_complete_cast, left=t.id, right=movie_id)",
+        "index-nested-loop-join(on=kt.id = t.kind_id, index=kind_id_title, left=kt.id, right=kind_id, right-filter=t.production_year > 2000)",
+        "table-scan(table=kind_type)"
+      ]
+    },
+    {
+      "id": "23b",
+      "tags": [
+        "job",
+        "join",
+        "tables:11"
+      ],
+      "rows": 1,
+      "resultHash": "522910a2d6915b9a",
+      "work": 2949,
+      "statementRowsRead": 1277,
+      "qErrorMedian": 1,
+      "qErrorMax": 18,
+      "joinOrder": "cost-based",
+      "joinStepsCosted": 1486,
+      "plan": [
+        "index-nested-loop-join(on=ct.id = mc.company_type_id, index=~pk, left=mc.company_type_id, right=id)",
+        "index-nested-loop-join(on=k.id = mk.keyword_id, index=~pk, left=mk.keyword_id, right=id, right-filter=k.keyword IN (...))",
+        "index-nested-loop-join(on=mk.movie_id = mi.movie_id AND mk.movie_id = mc.movie_id AND mk.movie_id = cc.movie_id AND t.id = mk.movie_id, index=movie_id_movie_keyword, left=mi.movie_id, right=movie_id)",
+        "index-nested-loop-join(on=cn.id = mc.company_id, index=~pk, left=mc.company_id, right=id, right-filter=cn.country_code = '[us]')",
+        "index-nested-loop-join(on=mc.movie_id = cc.movie_id AND mi.movie_id = mc.movie_id AND t.id = mc.movie_id, index=movie_id_movie_companies, left=cc.movie_id, right=movie_id)",
+        "index-nested-loop-join(on=it1.id = mi.info_type_id, index=~pk, left=mi.info_type_id, right=id, right-filter=it1.info = 'release dates')",
+        "index-nested-loop-join(on=mi.movie_id = cc.movie_id AND t.id = mi.movie_id, index=movie_id_movie_info, left=cc.movie_id, right=movie_id, right-filter=mi.note LIKE '%internet%' AND mi.info LIKE 'USA:% 200%')",
+        "index-nested-loop-join(on=cct1.id = cc.status_id, index=~pk, left=cc.status_id, right=id, right-filter=cct1.kind = 'complete+verified')",
+        "index-nested-loop-join(on=t.id = cc.movie_id, index=movie_id_complete_cast, left=t.id, right=movie_id)",
+        "index-nested-loop-join(on=kt.id = t.kind_id, index=kind_id_title, left=kt.id, right=kind_id, right-filter=t.production_year > 2000)",
+        "table-scan(table=kind_type)"
+      ]
+    },
+    {
+      "id": "23c",
+      "tags": [
+        "job",
+        "join",
+        "tables:11"
+      ],
+      "rows": 1,
+      "resultHash": "dd5f437a05cd8f74",
+      "work": 5091,
+      "statementRowsRead": 2037,
+      "qErrorMedian": 1,
+      "qErrorMax": 41,
+      "joinOrder": "cost-based",
+      "joinStepsCosted": 1486,
+      "plan": [
+        "index-nested-loop-join(on=k.id = mk.keyword_id, index=~pk, left=mk.keyword_id, right=id)",
+        "index-nested-loop-join(on=mk.movie_id = mi.movie_id AND mk.movie_id = mc.movie_id AND mk.movie_id = cc.movie_id AND t.id = mk.movie_id, index=movie_id_movie_keyword, left=mi.movie_id, right=movie_id)",
+        "index-nested-loop-join(on=ct.id = mc.company_type_id, index=~pk, left=mc.company_type_id, right=id)",
+        "index-nested-loop-join(on=cn.id = mc.company_id, index=~pk, left=mc.company_id, right=id, right-filter=cn.country_code = '[us]')",
+        "index-nested-loop-join(on=mc.movie_id = cc.movie_id AND mi.movie_id = mc.movie_id AND t.id = mc.movie_id, index=movie_id_movie_companies, left=cc.movie_id, right=movie_id)",
+        "index-nested-loop-join(on=it1.id = mi.info_type_id, index=~pk, left=mi.info_type_id, right=id, right-filter=it1.info = 'release dates')",
+        "index-nested-loop-join(on=mi.movie_id = cc.movie_id AND t.id = mi.movie_id, index=movie_id_movie_info, left=cc.movie_id, right=movie_id, right-filter=mi.note LIKE '%internet%' AND mi.info IS NOT NULL AND (mi.info LIKE 'USA:% 199%' OR mi.info LIKE 'USA:% 200%'))",
+        "hash-join(on=cc.status_id=id, build=cct1, build-filter=cct1.kind = 'complete+verified')",
+        "index-nested-loop-join(on=t.id = cc.movie_id, index=movie_id_complete_cast, left=t.id, right=movie_id)",
+        "index-nested-loop-join(on=kt.id = t.kind_id, index=kind_id_title, left=kt.id, right=kind_id, right-filter=t.production_year > 1990)",
+        "table-scan(table=kind_type)"
+      ]
+    },
+    {
+      "id": "24a",
+      "tags": [
+        "job",
+        "join",
+        "tables:12"
+      ],
+      "rows": 1,
+      "resultHash": "d6908d91649b0dd5",
+      "work": 2477,
+      "statementRowsRead": 1235,
+      "qErrorMedian": 1,
+      "qErrorMax": 11,
+      "joinOrder": "cost-based",
+      "joinStepsCosted": 4082,
+      "plan": [
+        "index-nested-loop-join(on=chn.id = ci.person_role_id, index=~pk, left=ci.person_role_id, right=id)",
+        "index-nested-loop-join(on=k.id = mk.keyword_id, index=~pk, left=mk.keyword_id, right=id, right-filter=k.keyword IN (...))",
+        "index-nested-loop-join(on=mc.movie_id = mk.movie_id AND mi.movie_id = mk.movie_id AND ci.movie_id = mk.movie_id AND t.id = mk.movie_id, index=movie_id_movie_keyword, left=mc.movie_id, right=movie_id)",
+        "index-nested-loop-join(on=ci.person_id = an.person_id AND n.id = an.person_id, index=person_id_aka_name, left=ci.person_id, right=person_id)",
+        "index-nested-loop-join(on=n.id = ci.person_id, index=~pk, left=ci.person_id, right=id, right-filter=n.gender = 'f' AND n.name LIKE '%An%')",
+        "index-nested-loop-join(on=rt.id = ci.role_id, index=~pk, left=ci.role_id, right=id, right-filter=rt.role = 'actress')",
+        "index-nested-loop-join(on=mc.movie_id = ci.movie_id AND mi.movie_id = ci.movie_id AND t.id = ci.movie_id, index=movie_id_cast_info, left=mc.movie_id, right=movie_id, right-filter=ci.note IN (...))",
+        "index-nested-loop-join(on=cn.id = mc.company_id, index=~pk, left=mc.company_id, right=id, right-filter=cn.country_code = '[us]')",
+        "index-nested-loop-join(on=mc.movie_id = mi.movie_id AND t.id = mc.movie_id, index=movie_id_movie_companies, left=mi.movie_id, right=movie_id)",
+        "index-nested-loop-join(on=t.id = mi.movie_id, index=~pk, left=mi.movie_id, right=id, right-filter=t.production_year > 2010)",
+        "index-nested-loop-join(on=it.id = mi.info_type_id, index=info_type_id_movie_info, left=it.id, right=info_type_id, right-filter=mi.info IS NOT NULL AND (mi.info LIKE 'Japan:%201%' OR mi.info LIKE 'USA:%201%'))",
+        "table-scan(table=info_type)"
+      ]
+    },
+    {
+      "id": "24b",
+      "tags": [
+        "job",
+        "join",
+        "tables:12"
+      ],
+      "rows": 1,
+      "resultHash": "ed47f8231a74b2a4",
+      "work": 468,
+      "statementRowsRead": 234,
+      "qErrorMedian": 1,
+      "qErrorMax": 22,
+      "joinOrder": "cost-based",
+      "joinStepsCosted": 4082,
+      "plan": [
+        "index-nested-loop-join(on=chn.id = ci.person_role_id, index=~pk, left=ci.person_role_id, right=id)",
+        "index-nested-loop-join(on=k.id = mk.keyword_id, index=~pk, left=mk.keyword_id, right=id, right-filter=k.keyword IN (...))",
+        "index-nested-loop-join(on=mc.movie_id = mk.movie_id AND mi.movie_id = mk.movie_id AND ci.movie_id = mk.movie_id AND t.id = mk.movie_id, index=movie_id_movie_keyword, left=mc.movie_id, right=movie_id)",
+        "index-nested-loop-join(on=ci.person_id = an.person_id AND n.id = an.person_id, index=person_id_aka_name, left=ci.person_id, right=person_id)",
+        "index-nested-loop-join(on=n.id = ci.person_id, index=~pk, left=ci.person_id, right=id, right-filter=n.gender = 'f' AND n.name LIKE '%An%')",
+        "index-nested-loop-join(on=rt.id = ci.role_id, index=~pk, left=ci.role_id, right=id, right-filter=rt.role = 'actress')",
+        "index-nested-loop-join(on=mc.movie_id = ci.movie_id AND mi.movie_id = ci.movie_id AND t.id = ci.movie_id, index=movie_id_cast_info, left=mc.movie_id, right=movie_id, right-filter=ci.note IN (...))",
+        "index-nested-loop-join(on=it.id = mi.info_type_id, index=~pk, left=mi.info_type_id, right=id, right-filter=it.info = 'release dates')",
+        "index-nested-loop-join(on=mc.movie_id = mi.movie_id AND t.id = mi.movie_id, index=movie_id_movie_info, left=mc.movie_id, right=movie_id, right-filter=mi.info IS NOT NULL AND (mi.info LIKE 'Japan:%201%' OR mi.info LIKE 'USA:%201%'))",
+        "index-nested-loop-join(on=t.id = mc.movie_id, index=~pk, left=mc.movie_id, right=id, right-filter=t.production_year > 2010 AND t.title LIKE 'Kung Fu Panda%')",
+        "index-nested-loop-join(on=cn.id = mc.company_id, index=company_id_movie_companies, left=cn.id, right=company_id)",
+        "table-scan(table=company_name)"
+      ]
+    },
+    {
+      "id": "25a",
+      "tags": [
+        "job",
+        "join",
+        "tables:9"
+      ],
+      "rows": 1,
+      "resultHash": "b3266afb048f7647",
+      "work": 6021,
+      "statementRowsRead": 2957,
+      "qErrorMedian": 6,
+      "qErrorMax": 56,
+      "joinOrder": "cost-based",
+      "joinStepsCosted": 512,
+      "plan": [
+        "index-nested-loop-join(on=k.id = mk.keyword_id, index=~pk, left=mk.keyword_id, right=id, right-filter=k.keyword IN (...))",
+        "index-nested-loop-join(on=ci.movie_id = mk.movie_id AND mi.movie_id = mk.movie_id AND mi_idx.movie_id = mk.movie_id AND t.id = mk.movie_id, index=movie_id_movie_keyword, left=ci.movie_id, right=movie_id)",
+        "index-nested-loop-join(on=t.id = mi.movie_id AND t.id = mi_idx.movie_id AND t.id = ci.movie_id, index=~pk, left=mi.movie_id, right=id)",
+        "index-nested-loop-join(on=n.id = ci.person_id, index=~pk, left=ci.person_id, right=id, right-filter=n.gender = 'm')",
+        "index-nested-loop-join(on=ci.movie_id = mi.movie_id AND ci.movie_id = mi_idx.movie_id, index=movie_id_cast_info, left=mi.movie_id, right=movie_id, right-filter=ci.note IN (...))",
+        "index-nested-loop-join(on=it1.id = mi.info_type_id, index=~pk, left=mi.info_type_id, right=id, right-filter=it1.info = 'genres')",
+        "index-nested-loop-join(on=mi.movie_id = mi_idx.movie_id, index=movie_id_movie_info, left=mi_idx.movie_id, right=movie_id, right-filter=mi.info = 'Horror')",
+        "index-nested-loop-join(on=it2.id = mi_idx.info_type_id, index=info_type_id_movie_info_idx, left=it2.id, right=info_type_id)",
+        "table-scan(table=info_type)"
+      ]
+    },
+    {
+      "id": "25b",
+      "tags": [
+        "job",
+        "join",
+        "tables:9"
+      ],
+      "rows": 1,
+      "resultHash": "b3266afb048f7647",
+      "work": 639,
+      "statementRowsRead": 319,
+      "qErrorMedian": 1.3,
+      "qErrorMax": 13,
+      "joinOrder": "cost-based",
+      "joinStepsCosted": 512,
+      "plan": [
+        "index-nested-loop-join(on=k.id = mk.keyword_id, index=~pk, left=mk.keyword_id, right=id, right-filter=k.keyword IN (...))",
+        "index-nested-loop-join(on=ci.movie_id = mk.movie_id AND mi.movie_id = mk.movie_id AND mi_idx.movie_id = mk.movie_id AND t.id = mk.movie_id, index=movie_id_movie_keyword, left=ci.movie_id, right=movie_id)",
+        "index-nested-loop-join(on=n.id = ci.person_id, index=~pk, left=ci.person_id, right=id, right-filter=n.gender = 'm')",
+        "index-nested-loop-join(on=ci.movie_id = mi.movie_id AND ci.movie_id = mi_idx.movie_id AND t.id = ci.movie_id, index=movie_id_cast_info, left=mi.movie_id, right=movie_id, right-filter=ci.note IN (...))",
+        "index-nested-loop-join(on=it1.id = mi.info_type_id, index=~pk, left=mi.info_type_id, right=id, right-filter=it1.info = 'genres')",
+        "index-nested-loop-join(on=mi.movie_id = mi_idx.movie_id AND t.id = mi.movie_id, index=movie_id_movie_info, left=mi_idx.movie_id, right=movie_id, right-filter=mi.info = 'Horror')",
+        "index-nested-loop-join(on=t.id = mi_idx.movie_id, index=~pk, left=mi_idx.movie_id, right=id, right-filter=t.production_year > 2010 AND t.title LIKE 'Vampire%')",
+        "index-nested-loop-join(on=it2.id = mi_idx.info_type_id, index=info_type_id_movie_info_idx, left=it2.id, right=info_type_id)",
+        "table-scan(table=info_type)"
+      ]
+    },
+    {
+      "id": "25c",
+      "tags": [
+        "job",
+        "join",
+        "tables:9"
+      ],
+      "rows": 1,
+      "resultHash": "b3266afb048f7647",
+      "work": 14796,
+      "statementRowsRead": 7334,
+      "qErrorMedian": 34,
+      "qErrorMax": 336,
+      "joinOrder": "cost-based",
+      "joinStepsCosted": 512,
+      "plan": [
+        "index-nested-loop-join(on=k.id = mk.keyword_id, index=~pk, left=mk.keyword_id, right=id, right-filter=k.keyword IN (...))",
+        "index-nested-loop-join(on=ci.movie_id = mk.movie_id AND mi.movie_id = mk.movie_id AND mi_idx.movie_id = mk.movie_id AND t.id = mk.movie_id, index=movie_id_movie_keyword, left=ci.movie_id, right=movie_id)",
+        "index-nested-loop-join(on=t.id = mi.movie_id AND t.id = mi_idx.movie_id AND t.id = ci.movie_id, index=~pk, left=mi.movie_id, right=id)",
+        "index-nested-loop-join(on=n.id = ci.person_id, index=~pk, left=ci.person_id, right=id, right-filter=n.gender = 'm')",
+        "index-nested-loop-join(on=ci.movie_id = mi.movie_id AND ci.movie_id = mi_idx.movie_id, index=movie_id_cast_info, left=mi.movie_id, right=movie_id, right-filter=ci.note IN (...))",
+        "hash-join(on=mi.info_type_id=id, build=it1, build-filter=it1.info = 'genres')",
+        "index-nested-loop-join(on=mi.movie_id = mi_idx.movie_id, index=movie_id_movie_info, left=mi_idx.movie_id, right=movie_id, right-filter=mi.info IN (...))",
+        "index-nested-loop-join(on=it2.id = mi_idx.info_type_id, index=info_type_id_movie_info_idx, left=it2.id, right=info_type_id)",
+        "table-scan(table=info_type)"
+      ]
+    },
+    {
+      "id": "26a",
+      "tags": [
+        "job",
+        "join",
+        "tables:12"
+      ],
+      "rows": 1,
+      "resultHash": "a959db095f507f0e",
+      "work": 16314,
+      "statementRowsRead": 7929,
+      "qErrorMedian": 33.97,
+      "qErrorMax": 2800,
+      "joinOrder": "cost-based",
+      "joinStepsCosted": 2702,
+      "plan": [
+        "index-nested-loop-join(on=k.id = mk.keyword_id, index=~pk, left=mk.keyword_id, right=id, right-filter=k.keyword IN (...))",
+        "index-nested-loop-join(on=mk.movie_id = ci.movie_id AND mk.movie_id = cc.movie_id AND mk.movie_id = mi_idx.movie_id AND t.id = mk.movie_id, index=movie_id_movie_keyword, left=ci.movie_id, right=movie_id)",
+        "index-nested-loop-join(on=n.id = ci.person_id, index=~pk, left=ci.person_id, right=id)",
+        "index-nested-loop-join(on=chn.id = ci.person_role_id, index=~pk, left=ci.person_role_id, right=id, right-filter=chn.name IS NOT NULL AND (chn.name LIKE '%man%' OR chn.name LIKE '%Man%'))",
+        "index-nested-loop-join(on=ci.movie_id = cc.movie_id AND ci.movie_id = mi_idx.movie_id AND t.id = ci.movie_id, index=movie_id_cast_info, left=cc.movie_id, right=movie_id)",
+        "index-nested-loop-join(on=cct2.id = cc.status_id, index=~pk, left=cc.status_id, right=id, right-filter=cct2.kind LIKE '%complete%')",
+        "index-nested-loop-join(on=cct1.id = cc.subject_id, index=~pk, left=cc.subject_id, right=id, right-filter=cct1.kind = 'cast')",
+        "index-nested-loop-join(on=cc.movie_id = mi_idx.movie_id AND t.id = cc.movie_id, index=movie_id_complete_cast, left=mi_idx.movie_id, right=movie_id)",
+        "index-nested-loop-join(on=it2.id = mi_idx.info_type_id, index=~pk, left=mi_idx.info_type_id, right=id, right-filter=it2.info = 'rating')",
+        "index-nested-loop-join(on=t.id = mi_idx.movie_id, index=movie_id_movie_info_idx, left=t.id, right=movie_id, right-filter=mi_idx.info > '7.0')",
+        "index-nested-loop-join(on=kt.id = t.kind_id, index=kind_id_title, left=kt.id, right=kind_id, right-filter=t.production_year > 2000)",
+        "table-scan(table=kind_type)"
+      ]
+    },
+    {
+      "id": "26b",
+      "tags": [
+        "job",
+        "join",
+        "tables:12"
+      ],
+      "rows": 1,
+      "resultHash": "632d781d692808ee",
+      "work": 5003,
+      "statementRowsRead": 2369,
+      "qErrorMedian": 6.04,
+      "qErrorMax": 626,
+      "joinOrder": "cost-based",
+      "joinStepsCosted": 2702,
+      "plan": [
+        "index-nested-loop-join(on=n.id = ci.person_id, index=~pk, left=ci.person_id, right=id)",
+        "index-nested-loop-join(on=chn.id = ci.person_role_id, index=~pk, left=ci.person_role_id, right=id, right-filter=chn.name IS NOT NULL AND (chn.name LIKE '%man%' OR chn.name LIKE '%Man%'))",
+        "index-nested-loop-join(on=ci.movie_id = cc.movie_id AND ci.movie_id = mi_idx.movie_id AND mk.movie_id = ci.movie_id AND t.id = ci.movie_id, index=movie_id_cast_info, left=cc.movie_id, right=movie_id)",
+        "index-nested-loop-join(on=k.id = mk.keyword_id, index=~pk, left=mk.keyword_id, right=id, right-filter=k.keyword IN (...))",
+        "index-nested-loop-join(on=mk.movie_id = cc.movie_id AND mk.movie_id = mi_idx.movie_id AND t.id = mk.movie_id, index=movie_id_movie_keyword, left=cc.movie_id, right=movie_id)",
+        "index-nested-loop-join(on=cct2.id = cc.status_id, index=~pk, left=cc.status_id, right=id, right-filter=cct2.kind LIKE '%complete%')",
+        "index-nested-loop-join(on=cct1.id = cc.subject_id, index=~pk, left=cc.subject_id, right=id, right-filter=cct1.kind = 'cast')",
+        "index-nested-loop-join(on=cc.movie_id = mi_idx.movie_id AND t.id = cc.movie_id, index=movie_id_complete_cast, left=mi_idx.movie_id, right=movie_id)",
+        "index-nested-loop-join(on=it2.id = mi_idx.info_type_id, index=~pk, left=mi_idx.info_type_id, right=id, right-filter=it2.info = 'rating')",
+        "index-nested-loop-join(on=t.id = mi_idx.movie_id, index=movie_id_movie_info_idx, left=t.id, right=movie_id, right-filter=mi_idx.info > '8.0')",
+        "index-nested-loop-join(on=kt.id = t.kind_id, index=kind_id_title, left=kt.id, right=kind_id, right-filter=t.production_year > 2005)",
+        "table-scan(table=kind_type)"
+      ]
+    },
+    {
+      "id": "26c",
+      "tags": [
+        "job",
+        "join",
+        "tables:12"
+      ],
+      "rows": 1,
+      "resultHash": "3748e12a7ab5d4e8",
+      "work": 22546,
+      "statementRowsRead": 11022,
+      "qErrorMedian": 22,
+      "qErrorMax": 4200,
+      "joinOrder": "cost-based",
+      "joinStepsCosted": 2702,
+      "plan": [
+        "index-nested-loop-join(on=k.id = mk.keyword_id, index=~pk, left=mk.keyword_id, right=id, right-filter=k.keyword IN (...))",
+        "index-nested-loop-join(on=mk.movie_id = ci.movie_id AND mk.movie_id = cc.movie_id AND mk.movie_id = mi_idx.movie_id AND t.id = mk.movie_id, index=movie_id_movie_keyword, left=ci.movie_id, right=movie_id)",
+        "index-nested-loop-join(on=n.id = ci.person_id, index=~pk, left=ci.person_id, right=id)",
+        "index-nested-loop-join(on=chn.id = ci.person_role_id, index=~pk, left=ci.person_role_id, right=id, right-filter=chn.name IS NOT NULL AND (chn.name LIKE '%man%' OR chn.name LIKE '%Man%'))",
+        "index-nested-loop-join(on=ci.movie_id = cc.movie_id AND ci.movie_id = mi_idx.movie_id AND t.id = ci.movie_id, index=movie_id_cast_info, left=cc.movie_id, right=movie_id)",
+        "index-nested-loop-join(on=it2.id = mi_idx.info_type_id, index=~pk, left=mi_idx.info_type_id, right=id, right-filter=it2.info = 'rating')",
+        "index-nested-loop-join(on=cc.movie_id = mi_idx.movie_id AND t.id = mi_idx.movie_id, index=movie_id_movie_info_idx, left=cc.movie_id, right=movie_id)",
+        "index-nested-loop-join(on=cct2.id = cc.status_id, index=~pk, left=cc.status_id, right=id, right-filter=cct2.kind LIKE '%complete%')",
+        "index-nested-loop-join(on=cct1.id = cc.subject_id, index=~pk, left=cc.subject_id, right=id, right-filter=cct1.kind = 'cast')",
+        "index-nested-loop-join(on=t.id = cc.movie_id, index=movie_id_complete_cast, left=t.id, right=movie_id)",
+        "index-nested-loop-join(on=kt.id = t.kind_id, index=kind_id_title, left=kt.id, right=kind_id, right-filter=t.production_year > 2000)",
+        "table-scan(table=kind_type)"
+      ]
+    },
+    {
+      "id": "27a",
+      "tags": [
+        "job",
+        "join",
+        "tables:12"
+      ],
+      "rows": 1,
+      "resultHash": "581d2c639869488c",
+      "work": 116,
+      "statementRowsRead": 55,
+      "qErrorMedian": 1,
+      "qErrorMax": 4,
+      "joinOrder": "cost-based",
+      "joinStepsCosted": 3900,
+      "plan": [
+        "index-nested-loop-join(on=mc.movie_id = mi.movie_id AND mi.movie_id = cc.movie_id AND mk.movie_id = mi.movie_id AND ml.movie_id = mi.movie_id AND mi.movie_id = t.id, index=movie_id_movie_info, left=mc.movie_id, right=movie_id, right-filter=mi.info IN (...))",
+        "index-nested-loop-join(on=mc.company_id = cn.id, index=~pk, left=mc.company_id, right=id, right-filter=cn.country_code <> '[pl]' AND (cn.name LIKE '%Film%' OR cn.name LIKE '%Warner%'))",
+        "index-nested-loop-join(on=mk.keyword_id = k.id, index=~pk, left=mk.keyword_id, right=id, right-filter=k.keyword = 'sequel')",
+        "index-nested-loop-join(on=mk.movie_id = mc.movie_id AND mk.movie_id = cc.movie_id AND ml.movie_id = mk.movie_id AND t.id = mk.movie_id, index=movie_id_movie_keyword, left=mc.movie_id, right=movie_id)",
+        "index-nested-loop-join(on=cct2.id = cc.status_id, index=~pk, left=cc.status_id, right=id, right-filter=cct2.kind = 'complete')",
+        "index-nested-loop-join(on=cct1.id = cc.subject_id, index=~pk, left=cc.subject_id, right=id, right-filter=cct1.kind IN (...))",
+        "index-nested-loop-join(on=mc.movie_id = cc.movie_id AND ml.movie_id = cc.movie_id AND t.id = cc.movie_id, index=movie_id_complete_cast, left=mc.movie_id, right=movie_id)",
+        "index-nested-loop-join(on=mc.company_type_id = ct.id, index=~pk, left=mc.company_type_id, right=id, right-filter=ct.kind = 'production companies')",
+        "index-nested-loop-join(on=ml.movie_id = mc.movie_id AND t.id = mc.movie_id, index=movie_id_movie_companies, left=ml.movie_id, right=movie_id, right-filter=mc.note IS NULL)",
+        "index-nested-loop-join(on=ml.movie_id = t.id, index=~pk, left=ml.movie_id, right=id, right-filter=t.production_year BETWEEN 1950 AND 2000)",
+        "index-nested-loop-join(on=lt.id = ml.link_type_id, index=link_type_id_movie_link, left=lt.id, right=link_type_id)",
+        "table-scan(table=link_type)"
+      ]
+    },
+    {
+      "id": "27b",
+      "tags": [
+        "job",
+        "join",
+        "tables:12"
+      ],
+      "rows": 1,
+      "resultHash": "581d2c639869488c",
+      "work": 86,
+      "statementRowsRead": 42,
+      "qErrorMedian": 1,
+      "qErrorMax": 2,
+      "joinOrder": "cost-based",
+      "joinStepsCosted": 3900,
+      "plan": [
+        "index-nested-loop-join(on=mc.movie_id = mi.movie_id AND mi.movie_id = cc.movie_id AND mk.movie_id = mi.movie_id AND ml.movie_id = mi.movie_id AND mi.movie_id = t.id, index=movie_id_movie_info, left=mc.movie_id, right=movie_id, right-filter=mi.info IN (...))",
+        "index-nested-loop-join(on=mc.company_id = cn.id, index=~pk, left=mc.company_id, right=id, right-filter=cn.country_code <> '[pl]' AND (cn.name LIKE '%Film%' OR cn.name LIKE '%Warner%'))",
+        "index-nested-loop-join(on=mk.keyword_id = k.id, index=~pk, left=mk.keyword_id, right=id, right-filter=k.keyword = 'sequel')",
+        "index-nested-loop-join(on=mk.movie_id = mc.movie_id AND mk.movie_id = cc.movie_id AND ml.movie_id = mk.movie_id AND t.id = mk.movie_id, index=movie_id_movie_keyword, left=mc.movie_id, right=movie_id)",
+        "index-nested-loop-join(on=cct2.id = cc.status_id, index=~pk, left=cc.status_id, right=id, right-filter=cct2.kind = 'complete')",
+        "index-nested-loop-join(on=cct1.id = cc.subject_id, index=~pk, left=cc.subject_id, right=id, right-filter=cct1.kind IN (...))",
+        "index-nested-loop-join(on=mc.movie_id = cc.movie_id AND ml.movie_id = cc.movie_id AND t.id = cc.movie_id, index=movie_id_complete_cast, left=mc.movie_id, right=movie_id)",
+        "index-nested-loop-join(on=mc.company_type_id = ct.id, index=~pk, left=mc.company_type_id, right=id, right-filter=ct.kind = 'production companies')",
+        "index-nested-loop-join(on=ml.movie_id = mc.movie_id AND t.id = mc.movie_id, index=movie_id_movie_companies, left=ml.movie_id, right=movie_id, right-filter=mc.note IS NULL)",
+        "index-nested-loop-join(on=ml.movie_id = t.id, index=~pk, left=ml.movie_id, right=id, right-filter=t.production_year = 1998)",
+        "index-nested-loop-join(on=lt.id = ml.link_type_id, index=link_type_id_movie_link, left=lt.id, right=link_type_id)",
+        "table-scan(table=link_type)"
+      ]
+    },
+    {
+      "id": "27c",
+      "tags": [
+        "job",
+        "join",
+        "tables:12"
+      ],
+      "rows": 1,
+      "resultHash": "581d2c639869488c",
+      "work": 129,
+      "statementRowsRead": 60,
+      "qErrorMedian": 1,
+      "qErrorMax": 7,
+      "joinOrder": "cost-based",
+      "joinStepsCosted": 3900,
+      "plan": [
+        "index-nested-loop-join(on=mc.movie_id = mi.movie_id AND mi.movie_id = cc.movie_id AND mk.movie_id = mi.movie_id AND ml.movie_id = mi.movie_id AND mi.movie_id = t.id, index=movie_id_movie_info, left=mc.movie_id, right=movie_id, right-filter=mi.info IN (...))",
+        "index-nested-loop-join(on=mc.company_id = cn.id, index=~pk, left=mc.company_id, right=id, right-filter=cn.country_code <> '[pl]' AND (cn.name LIKE '%Film%' OR cn.name LIKE '%Warner%'))",
+        "index-nested-loop-join(on=mk.keyword_id = k.id, index=~pk, left=mk.keyword_id, right=id, right-filter=k.keyword = 'sequel')",
+        "index-nested-loop-join(on=mk.movie_id = mc.movie_id AND mk.movie_id = cc.movie_id AND ml.movie_id = mk.movie_id AND t.id = mk.movie_id, index=movie_id_movie_keyword, left=mc.movie_id, right=movie_id)",
+        "index-nested-loop-join(on=cct2.id = cc.status_id, index=~pk, left=cc.status_id, right=id, right-filter=cct2.kind LIKE 'complete%')",
+        "index-nested-loop-join(on=cct1.id = cc.subject_id, index=~pk, left=cc.subject_id, right=id, right-filter=cct1.kind = 'cast')",
+        "index-nested-loop-join(on=mc.movie_id = cc.movie_id AND ml.movie_id = cc.movie_id AND t.id = cc.movie_id, index=movie_id_complete_cast, left=mc.movie_id, right=movie_id)",
+        "index-nested-loop-join(on=mc.company_type_id = ct.id, index=~pk, left=mc.company_type_id, right=id, right-filter=ct.kind = 'production companies')",
+        "index-nested-loop-join(on=ml.movie_id = mc.movie_id AND t.id = mc.movie_id, index=movie_id_movie_companies, left=ml.movie_id, right=movie_id, right-filter=mc.note IS NULL)",
+        "index-nested-loop-join(on=ml.movie_id = t.id, index=~pk, left=ml.movie_id, right=id, right-filter=t.production_year BETWEEN 1950 AND 2010)",
+        "index-nested-loop-join(on=lt.id = ml.link_type_id, index=link_type_id_movie_link, left=lt.id, right=link_type_id)",
+        "table-scan(table=link_type)"
+      ]
+    },
+    {
+      "id": "28a",
+      "tags": [
+        "job",
+        "join",
+        "tables:14",
+        "over-dp-limit"
+      ],
+      "rows": 1,
+      "resultHash": "f32425ba56c6b9c8",
+      "work": 23838,
+      "statementRowsRead": 11919,
+      "qErrorMedian": 364,
+      "qErrorMax": 1254,
+      "joinOrder": "heuristic",
+      "joinStepsCosted": 0,
+      "plan": [
+        "hash-join(on=t.kind_id=id, build=kt, build-filter=kt.kind IN (...))",
+        "hash-join(on=mi.movie_id=id, mk.movie_id=id, mi_idx.movie_id=id, mc.movie_id=id, cc.movie_id=id, build=t, build-filter=t.production_year > 2000)",
+        "hash-join(on=mk.keyword_id=id, build=k, build-filter=k.keyword IN (...))",
+        "hash-join(on=mi.movie_id=movie_id, mi_idx.movie_id=movie_id, mc.movie_id=movie_id, cc.movie_id=movie_id, build=mk)",
+        "hash-join(on=mi_idx.info_type_id=id, build=it2, build-filter=it2.info = 'rating')",
+        "hash-join(on=mi.movie_id=movie_id, mc.movie_id=movie_id, cc.movie_id=movie_id, build=mi_idx, build-filter=mi_idx.info < '8.5')",
+        "hash-join(on=mi.info_type_id=id, build=it1, build-filter=it1.info = 'countries')",
+        "index-nested-loop-join(on=mi.movie_id = mc.movie_id AND mi.movie_id = cc.movie_id, index=movie_id_movie_info, left=mc.movie_id, right=movie_id, right-filter=mi.info IN (...))",
+        "hash-join(on=mc.company_type_id=id, build=ct)",
+        "hash-join(on=mc.company_id=id, build=cn, build-filter=cn.country_code <> '[us]')",
+        "hash-join(on=cc.movie_id=movie_id, build=mc, build-filter=NOT mc.note LIKE '%(USA)%' AND mc.note LIKE '%(200%)%')",
+        "hash-join(on=cc.status_id=id, build=cct2, build-filter=cct2.kind <> 'complete+verified')",
+        "hash-join(on=cc.subject_id=id, build=cct1, build-filter=cct1.kind = 'crew')",
+        "table-scan(table=complete_cast)"
+      ]
+    },
+    {
+      "id": "28b",
+      "tags": [
+        "job",
+        "join",
+        "tables:14",
+        "over-dp-limit"
+      ],
+      "rows": 1,
+      "resultHash": "f32425ba56c6b9c8",
+      "work": 53508,
+      "statementRowsRead": 26754,
+      "qErrorMedian": 2175,
+      "qErrorMax": 7500,
+      "joinOrder": "heuristic",
+      "joinStepsCosted": 0,
+      "plan": [
+        "hash-join(on=t.kind_id=id, build=kt, build-filter=kt.kind IN (...))",
+        "hash-join(on=mi.movie_id=id, mk.movie_id=id, mi_idx.movie_id=id, mc.movie_id=id, cc.movie_id=id, build=t, build-filter=t.production_year > 2005)",
+        "hash-join(on=mk.keyword_id=id, build=k, build-filter=k.keyword IN (...))",
+        "hash-join(on=mi.movie_id=movie_id, mi_idx.movie_id=movie_id, mc.movie_id=movie_id, cc.movie_id=movie_id, build=mk)",
+        "hash-join(on=mi_idx.info_type_id=id, build=it2, build-filter=it2.info = 'rating')",
+        "hash-join(on=mi.movie_id=movie_id, mc.movie_id=movie_id, cc.movie_id=movie_id, build=mi_idx, build-filter=mi_idx.info > '6.5')",
+        "hash-join(on=mi.info_type_id=id, build=it1, build-filter=it1.info = 'countries')",
+        "hash-join(on=mc.movie_id=movie_id, cc.movie_id=movie_id, build=mi, build-filter=mi.info IN (...))",
+        "hash-join(on=mc.company_type_id=id, build=ct)",
+        "hash-join(on=mc.company_id=id, build=cn, build-filter=cn.country_code <> '[us]')",
+        "hash-join(on=cc.movie_id=movie_id, build=mc, build-filter=NOT mc.note LIKE '%(USA)%' AND mc.note LIKE '%(200%)%')",
+        "hash-join(on=cc.status_id=id, build=cct2, build-filter=cct2.kind <> 'complete+verified')",
+        "hash-join(on=cc.subject_id=id, build=cct1, build-filter=cct1.kind = 'crew')",
+        "table-scan(table=complete_cast)"
+      ]
+    },
+    {
+      "id": "28c",
+      "tags": [
+        "job",
+        "join",
+        "tables:14",
+        "over-dp-limit"
+      ],
+      "rows": 1,
+      "resultHash": "f32425ba56c6b9c8",
+      "work": 25695,
+      "statementRowsRead": 12844,
+      "qErrorMedian": 16.13,
+      "qErrorMax": 1254,
+      "joinOrder": "heuristic",
+      "joinStepsCosted": 0,
+      "plan": [
+        "hash-join(on=t.kind_id=id, build=kt, build-filter=kt.kind IN (...))",
+        "hash-join(on=mi.movie_id=id, mk.movie_id=id, mi_idx.movie_id=id, mc.movie_id=id, cc.movie_id=id, build=t, build-filter=t.production_year > 2005)",
+        "hash-join(on=mk.keyword_id=id, build=k, build-filter=k.keyword IN (...))",
+        "hash-join(on=mi.movie_id=movie_id, mi_idx.movie_id=movie_id, mc.movie_id=movie_id, cc.movie_id=movie_id, build=mk)",
+        "hash-join(on=mi_idx.info_type_id=id, build=it2, build-filter=it2.info = 'rating')",
+        "hash-join(on=mi.movie_id=movie_id, mc.movie_id=movie_id, cc.movie_id=movie_id, build=mi_idx, build-filter=mi_idx.info < '8.5')",
+        "hash-join(on=mi.info_type_id=id, build=it1, build-filter=it1.info = 'countries')",
+        "index-nested-loop-join(on=mi.movie_id = mc.movie_id AND mi.movie_id = cc.movie_id, index=movie_id_movie_info, left=mc.movie_id, right=movie_id, right-filter=mi.info IN (...))",
+        "hash-join(on=mc.company_type_id=id, build=ct)",
+        "hash-join(on=mc.company_id=id, build=cn, build-filter=cn.country_code <> '[us]')",
+        "hash-join(on=cc.movie_id=movie_id, build=mc, build-filter=NOT mc.note LIKE '%(USA)%' AND mc.note LIKE '%(200%)%')",
+        "hash-join(on=cc.status_id=id, build=cct2, build-filter=cct2.kind = 'complete')",
+        "hash-join(on=cc.subject_id=id, build=cct1, build-filter=cct1.kind = 'cast')",
+        "table-scan(table=complete_cast)"
+      ]
+    },
+    {
+      "id": "29a",
+      "tags": [
+        "job",
+        "join",
+        "tables:17",
+        "over-dp-limit"
+      ],
+      "rows": 1,
+      "resultHash": "48227ac3239d4f3c",
+      "work": 145502,
+      "statementRowsRead": 72732,
+      "qErrorMedian": 77.5,
+      "qErrorMax": 23579,
+      "joinOrder": "heuristic",
+      "joinStepsCosted": 0,
+      "plan": [
+        "hash-join(on=mi.movie_id=id, mc.movie_id=id, ci.movie_id=id, mk.movie_id=id, cc.movie_id=id, build=t, build-filter=t.title = 'Shrek 2' AND t.production_year BETWEEN 2000 AND 2010)",
+        "hash-join(on=ci.role_id=id, build=rt, build-filter=rt.role = 'actress')",
+        "hash-join(on=pi.info_type_id=id, build=it3, build-filter=it3.info = 'trivia')",
+        "hash-join(on=n.id=person_id, ci.person_id=person_id, build=pi)",
+        "hash-join(on=ci.person_id=id, an.person_id=id, build=n, build-filter=n.gender = 'f' AND n.name LIKE '%An%')",
+        "hash-join(on=mk.keyword_id=id, build=k, build-filter=k.keyword = 'computer-animation')",
+        "hash-join(on=mc.movie_id=movie_id, mi.movie_id=movie_id, ci.movie_id=movie_id, cc.movie_id=movie_id, build=mk)",
+        "hash-join(on=mi.info_type_id=id, build=it, build-filter=it.info = 'release dates')",
+        "hash-join(on=mc.movie_id=movie_id, ci.movie_id=movie_id, cc.movie_id=movie_id, build=mi, build-filter=mi.info IS NOT NULL AND (mi.info LIKE 'Japan:%200%' OR mi.info LIKE 'USA:%200%'))",
+        "hash-join(on=mc.company_id=id, build=cn, build-filter=cn.country_code = '[us]')",
+        "hash-join(on=ci.movie_id=movie_id, cc.movie_id=movie_id, build=mc)",
+        "hash-join(on=ci.person_role_id=id, build=chn, build-filter=chn.name = 'Queen')",
+        "hash-join(on=cc.status_id=id, build=cct2, build-filter=cct2.kind = 'complete+verified')",
+        "hash-join(on=cc.subject_id=id, build=cct1, build-filter=cct1.kind = 'cast')",
+        "hash-join(on=ci.movie_id=movie_id, build=cc)",
+        "merge-join(on=an.person_id=person_id, right-order=forced-index=person_id_cast_info, right-filter=ci.note IN (...))",
+        "table-scan(table=aka_name, forced-index=person_id_aka_name)"
+      ]
+    },
+    {
+      "id": "29b",
+      "tags": [
+        "job",
+        "join",
+        "tables:17",
+        "over-dp-limit"
+      ],
+      "rows": 1,
+      "resultHash": "48227ac3239d4f3c",
+      "work": 145502,
+      "statementRowsRead": 72732,
+      "qErrorMedian": 94.08,
+      "qErrorMax": 23579,
+      "joinOrder": "heuristic",
+      "joinStepsCosted": 0,
+      "plan": [
+        "hash-join(on=mi.movie_id=id, mc.movie_id=id, ci.movie_id=id, mk.movie_id=id, cc.movie_id=id, build=t, build-filter=t.title = 'Shrek 2' AND t.production_year BETWEEN 2000 AND 2005)",
+        "hash-join(on=ci.role_id=id, build=rt, build-filter=rt.role = 'actress')",
+        "hash-join(on=pi.info_type_id=id, build=it3, build-filter=it3.info = 'height')",
+        "hash-join(on=n.id=person_id, ci.person_id=person_id, build=pi)",
+        "hash-join(on=ci.person_id=id, an.person_id=id, build=n, build-filter=n.gender = 'f' AND n.name LIKE '%An%')",
+        "hash-join(on=mk.keyword_id=id, build=k, build-filter=k.keyword = 'computer-animation')",
+        "hash-join(on=mc.movie_id=movie_id, mi.movie_id=movie_id, ci.movie_id=movie_id, cc.movie_id=movie_id, build=mk)",
+        "hash-join(on=mi.info_type_id=id, build=it, build-filter=it.info = 'release dates')",
+        "hash-join(on=mc.movie_id=movie_id, ci.movie_id=movie_id, cc.movie_id=movie_id, build=mi, build-filter=mi.info LIKE 'USA:%200%')",
+        "hash-join(on=mc.company_id=id, build=cn, build-filter=cn.country_code = '[us]')",
+        "hash-join(on=ci.movie_id=movie_id, cc.movie_id=movie_id, build=mc)",
+        "hash-join(on=ci.person_role_id=id, build=chn, build-filter=chn.name = 'Queen')",
+        "hash-join(on=cc.status_id=id, build=cct2, build-filter=cct2.kind = 'complete+verified')",
+        "hash-join(on=cc.subject_id=id, build=cct1, build-filter=cct1.kind = 'cast')",
+        "hash-join(on=ci.movie_id=movie_id, build=cc)",
+        "merge-join(on=an.person_id=person_id, right-order=forced-index=person_id_cast_info, right-filter=ci.note IN (...))",
+        "table-scan(table=aka_name, forced-index=person_id_aka_name)"
+      ]
+    },
+    {
+      "id": "29c",
+      "tags": [
+        "job",
+        "join",
+        "tables:17",
+        "over-dp-limit"
+      ],
+      "rows": 1,
+      "resultHash": "48227ac3239d4f3c",
+      "work": 145502,
+      "statementRowsRead": 72732,
+      "qErrorMedian": 6.45,
+      "qErrorMax": 23579,
+      "joinOrder": "heuristic",
+      "joinStepsCosted": 0,
+      "plan": [
+        "hash-join(on=mi.movie_id=id, mc.movie_id=id, ci.movie_id=id, mk.movie_id=id, cc.movie_id=id, build=t, build-filter=t.production_year BETWEEN 2000 AND 2010)",
+        "hash-join(on=ci.role_id=id, build=rt, build-filter=rt.role = 'actress')",
+        "hash-join(on=pi.info_type_id=id, build=it3, build-filter=it3.info = 'trivia')",
+        "hash-join(on=n.id=person_id, ci.person_id=person_id, build=pi)",
+        "hash-join(on=ci.person_id=id, an.person_id=id, build=n, build-filter=n.gender = 'f' AND n.name LIKE '%An%')",
+        "hash-join(on=mk.keyword_id=id, build=k, build-filter=k.keyword = 'computer-animation')",
+        "hash-join(on=mc.movie_id=movie_id, mi.movie_id=movie_id, ci.movie_id=movie_id, cc.movie_id=movie_id, build=mk)",
+        "hash-join(on=mi.info_type_id=id, build=it, build-filter=it.info = 'release dates')",
+        "hash-join(on=mc.movie_id=movie_id, ci.movie_id=movie_id, cc.movie_id=movie_id, build=mi, build-filter=mi.info IS NOT NULL AND (mi.info LIKE 'Japan:%200%' OR mi.info LIKE 'USA:%200%'))",
+        "hash-join(on=mc.company_id=id, build=cn, build-filter=cn.country_code = '[us]')",
+        "hash-join(on=ci.movie_id=movie_id, cc.movie_id=movie_id, build=mc)",
+        "hash-join(on=ci.person_role_id=id, build=chn)",
+        "hash-join(on=cc.status_id=id, build=cct2, build-filter=cct2.kind = 'complete+verified')",
+        "hash-join(on=cc.subject_id=id, build=cct1, build-filter=cct1.kind = 'cast')",
+        "hash-join(on=ci.movie_id=movie_id, build=cc)",
+        "merge-join(on=an.person_id=person_id, right-order=forced-index=person_id_cast_info, right-filter=ci.note IN (...))",
+        "table-scan(table=aka_name, forced-index=person_id_aka_name)"
+      ]
+    },
+    {
+      "id": "2a",
+      "tags": [
+        "job",
+        "join",
+        "tables:5"
+      ],
+      "rows": 1,
+      "resultHash": "4805cc35c95feea5",
+      "work": 5189,
+      "statementRowsRead": 2441,
+      "qErrorMedian": 2.79,
+      "qErrorMax": 3.05,
+      "joinOrder": "cost-based",
+      "joinStepsCosted": 32,
+      "plan": [
+        "index-nested-loop-join(on=mc.movie_id = t.id AND t.id = mk.movie_id, index=~pk, left=mc.movie_id, right=id)",
+        "hash-join(on=mk.keyword_id=id, build=k, build-filter=k.keyword = 'character-name-in-title')",
+        "index-nested-loop-join(on=mc.movie_id = mk.movie_id, index=movie_id_movie_keyword, left=mc.movie_id, right=movie_id)",
+        "index-nested-loop-join(on=cn.id = mc.company_id, index=company_id_movie_companies, left=cn.id, right=company_id)",
+        "table-scan(table=company_name)"
+      ]
+    },
+    {
+      "id": "2b",
+      "tags": [
+        "job",
+        "join",
+        "tables:5"
+      ],
+      "rows": 1,
+      "resultHash": "192be6ebd6e8828a",
+      "work": 3943,
+      "statementRowsRead": 1857,
+      "qErrorMedian": 1.95,
+      "qErrorMax": 2.54,
+      "joinOrder": "cost-based",
+      "joinStepsCosted": 32,
+      "plan": [
+        "index-nested-loop-join(on=mc.movie_id = t.id AND t.id = mk.movie_id, index=~pk, left=mc.movie_id, right=id)",
+        "hash-join(on=mk.keyword_id=id, build=k, build-filter=k.keyword = 'character-name-in-title')",
+        "index-nested-loop-join(on=mc.movie_id = mk.movie_id, index=movie_id_movie_keyword, left=mc.movie_id, right=movie_id)",
+        "index-nested-loop-join(on=cn.id = mc.company_id, index=company_id_movie_companies, left=cn.id, right=company_id)",
+        "table-scan(table=company_name)"
+      ]
+    },
+    {
+      "id": "2c",
+      "tags": [
+        "job",
+        "join",
+        "tables:5"
+      ],
+      "rows": 1,
+      "resultHash": "c89dae4e982437ff",
+      "work": 2846,
+      "statementRowsRead": 1335,
+      "qErrorMedian": 1.61,
+      "qErrorMax": 8.71,
+      "joinOrder": "cost-based",
+      "joinStepsCosted": 32,
+      "plan": [
+        "index-nested-loop-join(on=mc.movie_id = t.id AND t.id = mk.movie_id, index=~pk, left=mc.movie_id, right=id)",
+        "hash-join(on=mk.keyword_id=id, build=k, build-filter=k.keyword = 'character-name-in-title')",
+        "index-nested-loop-join(on=mc.movie_id = mk.movie_id, index=movie_id_movie_keyword, left=mc.movie_id, right=movie_id)",
+        "index-nested-loop-join(on=cn.id = mc.company_id, index=company_id_movie_companies, left=cn.id, right=company_id)",
+        "table-scan(table=company_name)"
+      ]
+    },
+    {
+      "id": "2d",
+      "tags": [
+        "job",
+        "join",
+        "tables:5"
+      ],
+      "rows": 1,
+      "resultHash": "192be6ebd6e8828a",
+      "work": 5893,
+      "statementRowsRead": 2768,
+      "qErrorMedian": 2.1,
+      "qErrorMax": 3.22,
+      "joinOrder": "cost-based",
+      "joinStepsCosted": 32,
+      "plan": [
+        "index-nested-loop-join(on=mc.movie_id = t.id AND t.id = mk.movie_id, index=~pk, left=mc.movie_id, right=id)",
+        "hash-join(on=mk.keyword_id=id, build=k, build-filter=k.keyword = 'character-name-in-title')",
+        "index-nested-loop-join(on=mc.movie_id = mk.movie_id, index=movie_id_movie_keyword, left=mc.movie_id, right=movie_id)",
+        "index-nested-loop-join(on=cn.id = mc.company_id, index=company_id_movie_companies, left=cn.id, right=company_id)",
+        "table-scan(table=company_name)"
+      ]
+    },
+    {
+      "id": "30a",
+      "tags": [
+        "job",
+        "join",
+        "tables:12"
+      ],
+      "rows": 1,
+      "resultHash": "205061b9c75d49a7",
+      "work": 1491,
+      "statementRowsRead": 726,
+      "qErrorMedian": 1,
+      "qErrorMax": 38,
+      "joinOrder": "cost-based",
+      "joinStepsCosted": 3375,
+      "plan": [
+        "index-nested-loop-join(on=k.id = mk.keyword_id, index=~pk, left=mk.keyword_id, right=id, right-filter=k.keyword IN (...))",
+        "index-nested-loop-join(on=ci.movie_id = mk.movie_id AND mi.movie_id = mk.movie_id AND mi_idx.movie_id = mk.movie_id AND mk.movie_id = cc.movie_id AND t.id = mk.movie_id, index=movie_id_movie_keyword, left=ci.movie_id, right=movie_id)",
+        "index-nested-loop-join(on=n.id = ci.person_id, index=~pk, left=ci.person_id, right=id, right-filter=n.gender = 'm')",
+        "index-nested-loop-join(on=ci.movie_id = cc.movie_id AND ci.movie_id = mi.movie_id AND ci.movie_id = mi_idx.movie_id AND t.id = ci.movie_id, index=movie_id_cast_info, left=cc.movie_id, right=movie_id, right-filter=ci.note IN (...))",
+        "index-nested-loop-join(on=it2.id = mi_idx.info_type_id, index=~pk, left=mi_idx.info_type_id, right=id, right-filter=it2.info = 'votes')",
+        "index-nested-loop-join(on=mi.movie_id = mi_idx.movie_id AND mi_idx.movie_id = cc.movie_id AND t.id = mi_idx.movie_id, index=movie_id_movie_info_idx, left=mi.movie_id, right=movie_id)",
+        "index-nested-loop-join(on=it1.id = mi.info_type_id, index=~pk, left=mi.info_type_id, right=id, right-filter=it1.info = 'genres')",
+        "index-nested-loop-join(on=mi.movie_id = cc.movie_id AND t.id = mi.movie_id, index=movie_id_movie_info, left=cc.movie_id, right=movie_id, right-filter=mi.info IN (...))",
+        "index-nested-loop-join(on=t.id = cc.movie_id, index=~pk, left=cc.movie_id, right=id, right-filter=t.production_year > 2000)",
+        "hash-join(on=cc.status_id=id, build=cct2, build-filter=cct2.kind = 'complete+verified')",
+        "hash-join(on=cct1.id=subject_id, build=cct1)",
+        "table-scan(table=comp_cast_type)"
+      ]
+    },
+    {
+      "id": "30b",
+      "tags": [
+        "job",
+        "join",
+        "tables:12"
+      ],
+      "rows": 1,
+      "resultHash": "2be451a490820de5",
+      "work": 618,
+      "statementRowsRead": 309,
+      "qErrorMedian": 1,
+      "qErrorMax": 7.77,
+      "joinOrder": "cost-based",
+      "joinStepsCosted": 3375,
+      "plan": [
+        "index-nested-loop-join(on=k.id = mk.keyword_id, index=~pk, left=mk.keyword_id, right=id, right-filter=k.keyword IN (...))",
+        "index-nested-loop-join(on=ci.movie_id = mk.movie_id AND mi.movie_id = mk.movie_id AND mi_idx.movie_id = mk.movie_id AND mk.movie_id = cc.movie_id AND t.id = mk.movie_id, index=movie_id_movie_keyword, left=ci.movie_id, right=movie_id)",
+        "index-nested-loop-join(on=n.id = ci.person_id, index=~pk, left=ci.person_id, right=id, right-filter=n.gender = 'm')",
+        "index-nested-loop-join(on=ci.movie_id = cc.movie_id AND ci.movie_id = mi.movie_id AND ci.movie_id = mi_idx.movie_id AND t.id = ci.movie_id, index=movie_id_cast_info, left=cc.movie_id, right=movie_id, right-filter=ci.note IN (...))",
+        "index-nested-loop-join(on=it2.id = mi_idx.info_type_id, index=~pk, left=mi_idx.info_type_id, right=id, right-filter=it2.info = 'votes')",
+        "index-nested-loop-join(on=mi.movie_id = mi_idx.movie_id AND mi_idx.movie_id = cc.movie_id AND t.id = mi_idx.movie_id, index=movie_id_movie_info_idx, left=mi.movie_id, right=movie_id)",
+        "index-nested-loop-join(on=it1.id = mi.info_type_id, index=~pk, left=mi.info_type_id, right=id, right-filter=it1.info = 'genres')",
+        "index-nested-loop-join(on=mi.movie_id = cc.movie_id AND t.id = mi.movie_id, index=movie_id_movie_info, left=cc.movie_id, right=movie_id, right-filter=mi.info IN (...))",
+        "index-nested-loop-join(on=t.id = cc.movie_id, index=~pk, left=cc.movie_id, right=id, right-filter=t.production_year > 2000 AND (t.title LIKE '%Freddy%' OR t.title LIKE '%Jason%' OR t.title LIKE 'Saw%'))",
+        "hash-join(on=cc.status_id=id, build=cct2, build-filter=cct2.kind = 'complete+verified')",
+        "hash-join(on=cct1.id=subject_id, build=cct1)",
+        "table-scan(table=comp_cast_type)"
+      ]
+    },
+    {
+      "id": "30c",
+      "tags": [
+        "job",
+        "join",
+        "tables:12"
+      ],
+      "rows": 1,
+      "resultHash": "205061b9c75d49a7",
+      "work": 9134,
+      "statementRowsRead": 4530,
+      "qErrorMedian": 2.63,
+      "qErrorMax": 17,
+      "joinOrder": "cost-based",
+      "joinStepsCosted": 3375,
+      "plan": [
+        "index-nested-loop-join(on=k.id = mk.keyword_id, index=~pk, left=mk.keyword_id, right=id, right-filter=k.keyword IN (...))",
+        "index-nested-loop-join(on=ci.movie_id = mk.movie_id AND mi.movie_id = mk.movie_id AND mi_idx.movie_id = mk.movie_id AND mk.movie_id = cc.movie_id AND t.id = mk.movie_id, index=movie_id_movie_keyword, left=ci.movie_id, right=movie_id)",
+        "index-nested-loop-join(on=t.id = mi.movie_id AND t.id = mi_idx.movie_id AND t.id = ci.movie_id AND t.id = cc.movie_id, index=~pk, left=mi.movie_id, right=id)",
+        "index-nested-loop-join(on=n.id = ci.person_id, index=~pk, left=ci.person_id, right=id, right-filter=n.gender = 'm')",
+        "index-nested-loop-join(on=ci.movie_id = cc.movie_id AND ci.movie_id = mi.movie_id AND ci.movie_id = mi_idx.movie_id, index=movie_id_cast_info, left=cc.movie_id, right=movie_id, right-filter=ci.note IN (...))",
+        "index-nested-loop-join(on=it1.id = mi.info_type_id, index=~pk, left=mi.info_type_id, right=id, right-filter=it1.info = 'genres')",
+        "index-nested-loop-join(on=mi.movie_id = cc.movie_id AND mi.movie_id = mi_idx.movie_id, index=movie_id_movie_info, left=cc.movie_id, right=movie_id, right-filter=mi.info IN (...))",
+        "index-nested-loop-join(on=it2.id = mi_idx.info_type_id, index=~pk, left=mi_idx.info_type_id, right=id, right-filter=it2.info = 'votes')",
+        "index-nested-loop-join(on=mi_idx.movie_id = cc.movie_id, index=movie_id_movie_info_idx, left=cc.movie_id, right=movie_id)",
+        "hash-join(on=cc.status_id=id, build=cct2, build-filter=cct2.kind = 'complete+verified')",
+        "hash-join(on=cct1.id=subject_id, build=cct1)",
+        "table-scan(table=comp_cast_type)"
+      ]
+    },
+    {
+      "id": "31a",
+      "tags": [
+        "job",
+        "join",
+        "tables:11"
+      ],
+      "rows": 1,
+      "resultHash": "484f865af2ecb088",
+      "work": 8564,
+      "statementRowsRead": 4224,
+      "qErrorMedian": 2,
+      "qErrorMax": 20,
+      "joinOrder": "cost-based",
+      "joinStepsCosted": 1862,
+      "plan": [
+        "index-nested-loop-join(on=k.id = mk.keyword_id, index=~pk, left=mk.keyword_id, right=id, right-filter=k.keyword IN (...))",
+        "index-nested-loop-join(on=ci.movie_id = mk.movie_id AND mi.movie_id = mk.movie_id AND mi_idx.movie_id = mk.movie_id AND mk.movie_id = mc.movie_id AND t.id = mk.movie_id, index=movie_id_movie_keyword, left=ci.movie_id, right=movie_id)",
+        "index-nested-loop-join(on=t.id = mi.movie_id AND t.id = mi_idx.movie_id AND t.id = ci.movie_id AND t.id = mc.movie_id, index=~pk, left=mi.movie_id, right=id)",
+        "index-nested-loop-join(on=n.id = ci.person_id, index=~pk, left=ci.person_id, right=id, right-filter=n.gender = 'm')",
+        "index-nested-loop-join(on=ci.movie_id = mc.movie_id AND ci.movie_id = mi.movie_id AND ci.movie_id = mi_idx.movie_id, index=movie_id_cast_info, left=mc.movie_id, right=movie_id, right-filter=ci.note IN (...))",
+        "index-nested-loop-join(on=cn.id = mc.company_id, index=~pk, left=mc.company_id, right=id, right-filter=cn.name LIKE 'Lionsgate%')",
+        "index-nested-loop-join(on=mi.movie_id = mc.movie_id AND mi_idx.movie_id = mc.movie_id, index=movie_id_movie_companies, left=mi.movie_id, right=movie_id)",
+        "hash-join(on=mi.info_type_id=id, build=it1, build-filter=it1.info = 'genres')",
+        "index-nested-loop-join(on=mi.movie_id = mi_idx.movie_id, index=movie_id_movie_info, left=mi_idx.movie_id, right=movie_id, right-filter=mi.info IN (...))",
+        "index-nested-loop-join(on=it2.id = mi_idx.info_type_id, index=info_type_id_movie_info_idx, left=it2.id, right=info_type_id)",
+        "table-scan(table=info_type)"
+      ]
+    },
+    {
+      "id": "31b",
+      "tags": [
+        "job",
+        "join",
+        "tables:11"
+      ],
+      "rows": 1,
+      "resultHash": "484f865af2ecb088",
+      "work": 483,
+      "statementRowsRead": 241,
+      "qErrorMedian": 1,
+      "qErrorMax": 26,
+      "joinOrder": "cost-based",
+      "joinStepsCosted": 1862,
+      "plan": [
+        "index-nested-loop-join(on=k.id = mk.keyword_id, index=~pk, left=mk.keyword_id, right=id, right-filter=k.keyword IN (...))",
+        "index-nested-loop-join(on=ci.movie_id = mk.movie_id AND mi.movie_id = mk.movie_id AND mi_idx.movie_id = mk.movie_id AND mk.movie_id = mc.movie_id AND t.id = mk.movie_id, index=movie_id_movie_keyword, left=ci.movie_id, right=movie_id)",
+        "index-nested-loop-join(on=n.id = ci.person_id, index=~pk, left=ci.person_id, right=id, right-filter=n.gender = 'm')",
+        "index-nested-loop-join(on=ci.movie_id = mc.movie_id AND ci.movie_id = mi.movie_id AND ci.movie_id = mi_idx.movie_id AND t.id = ci.movie_id, index=movie_id_cast_info, left=mc.movie_id, right=movie_id, right-filter=ci.note IN (...))",
+        "index-nested-loop-join(on=it1.id = mi.info_type_id, index=~pk, left=mi.info_type_id, right=id, right-filter=it1.info = 'genres')",
+        "index-nested-loop-join(on=mi.movie_id = mc.movie_id AND mi.movie_id = mi_idx.movie_id AND t.id = mi.movie_id, index=movie_id_movie_info, left=mc.movie_id, right=movie_id, right-filter=mi.info IN (...))",
+        "index-nested-loop-join(on=it2.id = mi_idx.info_type_id, index=~pk, left=mi_idx.info_type_id, right=id, right-filter=it2.info = 'votes')",
+        "index-nested-loop-join(on=mi_idx.movie_id = mc.movie_id AND t.id = mi_idx.movie_id, index=movie_id_movie_info_idx, left=mc.movie_id, right=movie_id)",
+        "index-nested-loop-join(on=t.id = mc.movie_id, index=~pk, left=mc.movie_id, right=id, right-filter=t.production_year > 2000 AND (t.title LIKE '%Freddy%' OR t.title LIKE '%Jason%' OR t.title LIKE 'Saw%'))",
+        "index-nested-loop-join(on=cn.id = mc.company_id, index=company_id_movie_companies, left=cn.id, right=company_id, right-filter=mc.note LIKE '%(Blu-ray)%')",
+        "table-scan(table=company_name)"
+      ]
+    },
+    {
+      "id": "31c",
+      "tags": [
+        "job",
+        "join",
+        "tables:11"
+      ],
+      "rows": 1,
+      "resultHash": "484f865af2ecb088",
+      "work": 60859,
+      "statementRowsRead": 30354,
+      "qErrorMedian": 2.86,
+      "qErrorMax": 101,
+      "joinOrder": "cost-based",
+      "joinStepsCosted": 1862,
+      "plan": [
+        "index-nested-loop-join(on=n.id = ci.person_id, index=~pk, left=ci.person_id, right=id)",
+        "index-nested-loop-join(on=ci.movie_id = mc.movie_id AND ci.movie_id = mi.movie_id AND ci.movie_id = mi_idx.movie_id AND ci.movie_id = mk.movie_id AND t.id = ci.movie_id, index=movie_id_cast_info, left=mc.movie_id, right=movie_id, right-filter=ci.note IN (...))",
+        "index-nested-loop-join(on=k.id = mk.keyword_id, index=~pk, left=mk.keyword_id, right=id, right-filter=k.keyword IN (...))",
+        "index-nested-loop-join(on=mi.movie_id = mk.movie_id AND mi_idx.movie_id = mk.movie_id AND mk.movie_id = mc.movie_id AND t.id = mk.movie_id, index=movie_id_movie_keyword, left=mi.movie_id, right=movie_id)",
+        "index-nested-loop-join(on=t.id = mi.movie_id AND t.id = mi_idx.movie_id AND t.id = mc.movie_id, index=~pk, left=mi.movie_id, right=id)",
+        "index-nested-loop-join(on=it1.id = mi.info_type_id, index=~pk, left=mi.info_type_id, right=id, right-filter=it1.info = 'genres')",
+        "index-nested-loop-join(on=mi.movie_id = mc.movie_id AND mi.movie_id = mi_idx.movie_id, index=movie_id_movie_info, left=mc.movie_id, right=movie_id, right-filter=mi.info IN (...))",
+        "hash-join(on=mc.company_id=id, build=cn, build-filter=cn.name LIKE 'Lionsgate%')",
+        "index-nested-loop-join(on=mi_idx.movie_id = mc.movie_id, index=movie_id_movie_companies, left=mi_idx.movie_id, right=movie_id)",
+        "index-nested-loop-join(on=it2.id = mi_idx.info_type_id, index=info_type_id_movie_info_idx, left=it2.id, right=info_type_id)",
+        "table-scan(table=info_type)"
+      ]
+    },
+    {
+      "id": "32a",
+      "tags": [
+        "job",
+        "join",
+        "tables:6"
+      ],
+      "rows": 1,
+      "resultHash": "b5cb3dbf66b331af",
+      "work": 3901,
+      "statementRowsRead": 1842,
+      "qErrorMedian": 1.33,
+      "qErrorMax": 2.5,
+      "joinOrder": "cost-based",
+      "joinStepsCosted": 39,
+      "plan": [
+        "index-nested-loop-join(on=ml.linked_movie_id = t2.id, index=~pk, left=ml.linked_movie_id, right=id)",
+        "hash-join(on=mk.keyword_id=id, build=k, build-filter=k.keyword = '10,000-mile-club')",
+        "index-nested-loop-join(on=t1.id = mk.movie_id AND mk.movie_id = t1.id, index=movie_id_movie_keyword, left=t1.id, right=movie_id)",
+        "index-nested-loop-join(on=ml.movie_id = t1.id, index=~pk, left=ml.movie_id, right=id)",
+        "index-nested-loop-join(on=lt.id = ml.link_type_id, index=link_type_id_movie_link, left=lt.id, right=link_type_id)",
+        "table-scan(table=link_type)"
+      ]
+    },
+    {
+      "id": "32b",
+      "tags": [
+        "job",
+        "join",
+        "tables:6"
+      ],
+      "rows": 1,
+      "resultHash": "0b0d225a9e06d523",
+      "work": 3869,
+      "statementRowsRead": 1826,
+      "qErrorMedian": 1.75,
+      "qErrorMax": 3.69,
+      "joinOrder": "cost-based",
+      "joinStepsCosted": 39,
+      "plan": [
+        "index-nested-loop-join(on=ml.linked_movie_id = t2.id, index=~pk, left=ml.linked_movie_id, right=id)",
+        "hash-join(on=mk.keyword_id=id, build=k, build-filter=k.keyword = 'character-name-in-title')",
+        "index-nested-loop-join(on=t1.id = mk.movie_id AND mk.movie_id = t1.id, index=movie_id_movie_keyword, left=t1.id, right=movie_id)",
+        "index-nested-loop-join(on=ml.movie_id = t1.id, index=~pk, left=ml.movie_id, right=id)",
+        "index-nested-loop-join(on=lt.id = ml.link_type_id, index=link_type_id_movie_link, left=lt.id, right=link_type_id)",
+        "table-scan(table=link_type)"
+      ]
+    },
+    {
+      "id": "33a",
+      "tags": [
+        "job",
+        "join",
+        "tables:14",
+        "over-dp-limit"
+      ],
+      "rows": 1,
+      "resultHash": "01563d31dd37763a",
+      "work": 23388,
+      "statementRowsRead": 11680,
+      "qErrorMedian": 41,
+      "qErrorMax": 59,
+      "joinOrder": "heuristic",
+      "joinStepsCosted": 0,
+      "plan": [
+        "hash-join(on=t2.kind_id=id, build=kt2, build-filter=kt2.kind IN (...))",
+        "hash-join(on=ml.linked_movie_id=id, mi_idx2.movie_id=id, mc2.movie_id=id, build=t2, build-filter=t2.production_year BETWEEN 2005 AND 2008)",
+        "hash-join(on=t1.kind_id=id, build=kt1, build-filter=kt1.kind IN (...))",
+        "hash-join(on=ml.movie_id=id, mi_idx1.movie_id=id, mc1.movie_id=id, build=t1)",
+        "hash-join(on=mi_idx2.info_type_id=id, build=it2, build-filter=it2.info = 'rating')",
+        "hash-join(on=mc2.movie_id=movie_id, ml.linked_movie_id=movie_id, build=mi_idx2, build-filter=mi_idx2.info < '3.0')",
+        "hash-join(on=mc2.company_id=id, build=cn2)",
+        "hash-join(on=ml.linked_movie_id=movie_id, build=mc2)",
+        "hash-join(on=ml.link_type_id=id, build=lt, build-filter=lt.link IN (...))",
+        "hash-join(on=mi_idx1.movie_id=movie_id, mc1.movie_id=movie_id, build=ml)",
+        "hash-join(on=mi_idx1.info_type_id=id, build=it1, build-filter=it1.info = 'rating')",
+        "hash-join(on=mc1.movie_id=movie_id, build=mi_idx1)",
+        "index-nested-loop-join(on=cn1.id = mc1.company_id, index=company_id_movie_companies, left=cn1.id, right=company_id)",
+        "table-scan(table=company_name)"
+      ]
+    },
+    {
+      "id": "33b",
+      "tags": [
+        "job",
+        "join",
+        "tables:14",
+        "over-dp-limit"
+      ],
+      "rows": 1,
+      "resultHash": "01563d31dd37763a",
+      "work": 23136,
+      "statementRowsRead": 11556,
+      "qErrorMedian": 41,
+      "qErrorMax": 59,
+      "joinOrder": "heuristic",
+      "joinStepsCosted": 0,
+      "plan": [
+        "hash-join(on=t2.kind_id=id, build=kt2, build-filter=kt2.kind IN (...))",
+        "hash-join(on=ml.linked_movie_id=id, mi_idx2.movie_id=id, mc2.movie_id=id, build=t2, build-filter=t2.production_year = 2007)",
+        "hash-join(on=t1.kind_id=id, build=kt1, build-filter=kt1.kind IN (...))",
+        "hash-join(on=ml.movie_id=id, mi_idx1.movie_id=id, mc1.movie_id=id, build=t1)",
+        "hash-join(on=mi_idx2.info_type_id=id, build=it2, build-filter=it2.info = 'rating')",
+        "hash-join(on=mc2.movie_id=movie_id, ml.linked_movie_id=movie_id, build=mi_idx2, build-filter=mi_idx2.info < '3.0')",
+        "hash-join(on=mc2.company_id=id, build=cn2)",
+        "hash-join(on=ml.linked_movie_id=movie_id, build=mc2)",
+        "hash-join(on=ml.link_type_id=id, build=lt, build-filter=lt.link LIKE '%follow%')",
+        "hash-join(on=mi_idx1.movie_id=movie_id, mc1.movie_id=movie_id, build=ml)",
+        "hash-join(on=mi_idx1.info_type_id=id, build=it1, build-filter=it1.info = 'rating')",
+        "hash-join(on=mc1.movie_id=movie_id, build=mi_idx1)",
+        "index-nested-loop-join(on=cn1.id = mc1.company_id, index=company_id_movie_companies, left=cn1.id, right=company_id)",
+        "table-scan(table=company_name)"
+      ]
+    },
+    {
+      "id": "33c",
+      "tags": [
+        "job",
+        "join",
+        "tables:14",
+        "over-dp-limit"
+      ],
+      "rows": 1,
+      "resultHash": "01563d31dd37763a",
+      "work": 26525,
+      "statementRowsRead": 13176,
+      "qErrorMedian": 133,
+      "qErrorMax": 575,
+      "joinOrder": "heuristic",
+      "joinStepsCosted": 0,
+      "plan": [
+        "hash-join(on=t2.kind_id=id, build=kt2, build-filter=kt2.kind IN (...))",
+        "hash-join(on=ml.linked_movie_id=id, mi_idx2.movie_id=id, mc2.movie_id=id, build=t2, build-filter=t2.production_year BETWEEN 2000 AND 2010)",
+        "hash-join(on=t1.kind_id=id, build=kt1, build-filter=kt1.kind IN (...))",
+        "hash-join(on=ml.movie_id=id, mi_idx1.movie_id=id, mc1.movie_id=id, build=t1)",
+        "hash-join(on=mi_idx2.info_type_id=id, build=it2, build-filter=it2.info = 'rating')",
+        "hash-join(on=mc2.movie_id=movie_id, ml.linked_movie_id=movie_id, build=mi_idx2, build-filter=mi_idx2.info < '3.5')",
+        "hash-join(on=mc2.company_id=id, build=cn2)",
+        "hash-join(on=ml.linked_movie_id=movie_id, build=mc2)",
+        "hash-join(on=ml.link_type_id=id, build=lt, build-filter=lt.link IN (...))",
+        "hash-join(on=mi_idx1.movie_id=movie_id, mc1.movie_id=movie_id, build=ml)",
+        "hash-join(on=mi_idx1.info_type_id=id, build=it1, build-filter=it1.info = 'rating')",
+        "hash-join(on=mc1.movie_id=movie_id, build=mi_idx1)",
+        "index-nested-loop-join(on=cn1.id = mc1.company_id, index=company_id_movie_companies, left=cn1.id, right=company_id)",
+        "table-scan(table=company_name)"
+      ]
+    },
+    {
+      "id": "3a",
+      "tags": [
+        "job",
+        "join",
+        "tables:4"
+      ],
+      "rows": 1,
+      "resultHash": "7c053f1d47bd6147",
+      "work": 2182,
+      "statementRowsRead": 1068,
+      "qErrorMedian": 2.66,
+      "qErrorMax": 10,
+      "joinOrder": "cost-based",
+      "joinStepsCosted": 18,
+      "plan": [
+        "index-nested-loop-join(on=mk.movie_id = mi.movie_id AND t.id = mi.movie_id, index=movie_id_movie_info, left=mk.movie_id, right=movie_id, right-filter=mi.info IN (...))",
+        "index-nested-loop-join(on=t.id = mk.movie_id, index=~pk, left=mk.movie_id, right=id, right-filter=t.production_year > 2005)",
+        "index-nested-loop-join(on=k.id = mk.keyword_id, index=keyword_id_movie_keyword, left=k.id, right=keyword_id)",
+        "table-scan(table=keyword)"
+      ]
+    },
+    {
+      "id": "3b",
+      "tags": [
+        "job",
+        "join",
+        "tables:4"
+      ],
+      "rows": 1,
+      "resultHash": "6ba79752a0d712d6",
+      "work": 1530,
+      "statementRowsRead": 752,
+      "qErrorMedian": 3.44,
+      "qErrorMax": 10,
+      "joinOrder": "cost-based",
+      "joinStepsCosted": 18,
+      "plan": [
+        "index-nested-loop-join(on=mk.movie_id = mi.movie_id AND t.id = mi.movie_id, index=movie_id_movie_info, left=mk.movie_id, right=movie_id, right-filter=mi.info IN (...))",
+        "index-nested-loop-join(on=t.id = mk.movie_id, index=~pk, left=mk.movie_id, right=id, right-filter=t.production_year > 2010)",
+        "index-nested-loop-join(on=k.id = mk.keyword_id, index=keyword_id_movie_keyword, left=k.id, right=keyword_id)",
+        "table-scan(table=keyword)"
+      ]
+    },
+    {
+      "id": "3c",
+      "tags": [
+        "job",
+        "join",
+        "tables:4"
+      ],
+      "rows": 1,
+      "resultHash": "7c053f1d47bd6147",
+      "work": 3513,
+      "statementRowsRead": 1703,
+      "qErrorMedian": 2.67,
+      "qErrorMax": 10,
+      "joinOrder": "cost-based",
+      "joinStepsCosted": 18,
+      "plan": [
+        "index-nested-loop-join(on=mk.movie_id = mi.movie_id AND t.id = mi.movie_id, index=movie_id_movie_info, left=mk.movie_id, right=movie_id, right-filter=mi.info IN (...))",
+        "index-nested-loop-join(on=t.id = mk.movie_id, index=~pk, left=mk.movie_id, right=id, right-filter=t.production_year > 1990)",
+        "index-nested-loop-join(on=k.id = mk.keyword_id, index=keyword_id_movie_keyword, left=k.id, right=keyword_id)",
+        "table-scan(table=keyword)"
+      ]
+    },
+    {
+      "id": "4a",
+      "tags": [
+        "job",
+        "join",
+        "tables:5"
+      ],
+      "rows": 1,
+      "resultHash": "a4ad3505491f3e06",
+      "work": 1160,
+      "statementRowsRead": 571,
+      "qErrorMedian": 11,
+      "qErrorMax": 49.33,
+      "joinOrder": "cost-based",
+      "joinStepsCosted": 32,
+      "plan": [
+        "index-nested-loop-join(on=k.id = mk.keyword_id, index=~pk, left=mk.keyword_id, right=id, right-filter=k.keyword LIKE '%sequel%')",
+        "index-nested-loop-join(on=mk.movie_id = mi_idx.movie_id AND t.id = mk.movie_id, index=movie_id_movie_keyword, left=mi_idx.movie_id, right=movie_id)",
+        "index-nested-loop-join(on=t.id = mi_idx.movie_id, index=~pk, left=mi_idx.movie_id, right=id, right-filter=t.production_year > 2005)",
+        "index-nested-loop-join(on=it.id = mi_idx.info_type_id, index=info_type_id_movie_info_idx, left=it.id, right=info_type_id, right-filter=mi_idx.info > '5.0')",
+        "table-scan(table=info_type)"
+      ]
+    },
+    {
+      "id": "4b",
+      "tags": [
+        "job",
+        "join",
+        "tables:5"
+      ],
+      "rows": 1,
+      "resultHash": "b95e11e1845adb92",
+      "work": 529,
+      "statementRowsRead": 262,
+      "qErrorMedian": 2.69,
+      "qErrorMax": 11,
+      "joinOrder": "cost-based",
+      "joinStepsCosted": 32,
+      "plan": [
+        "index-nested-loop-join(on=k.id = mk.keyword_id, index=~pk, left=mk.keyword_id, right=id, right-filter=k.keyword LIKE '%sequel%')",
+        "index-nested-loop-join(on=mk.movie_id = mi_idx.movie_id AND t.id = mk.movie_id, index=movie_id_movie_keyword, left=mi_idx.movie_id, right=movie_id)",
+        "index-nested-loop-join(on=t.id = mi_idx.movie_id, index=~pk, left=mi_idx.movie_id, right=id, right-filter=t.production_year > 2010)",
+        "index-nested-loop-join(on=it.id = mi_idx.info_type_id, index=info_type_id_movie_info_idx, left=it.id, right=info_type_id, right-filter=mi_idx.info > '9.0')",
+        "table-scan(table=info_type)"
+      ]
+    },
+    {
+      "id": "4c",
+      "tags": [
+        "job",
+        "join",
+        "tables:5"
+      ],
+      "rows": 1,
+      "resultHash": "5898842db9138333",
+      "work": 1758,
+      "statementRowsRead": 852,
+      "qErrorMedian": 11,
+      "qErrorMax": 92,
+      "joinOrder": "cost-based",
+      "joinStepsCosted": 32,
+      "plan": [
+        "index-nested-loop-join(on=k.id = mk.keyword_id, index=~pk, left=mk.keyword_id, right=id, right-filter=k.keyword LIKE '%sequel%')",
+        "index-nested-loop-join(on=mk.movie_id = mi_idx.movie_id AND t.id = mk.movie_id, index=movie_id_movie_keyword, left=mi_idx.movie_id, right=movie_id)",
+        "index-nested-loop-join(on=t.id = mi_idx.movie_id, index=~pk, left=mi_idx.movie_id, right=id, right-filter=t.production_year > 1990)",
+        "index-nested-loop-join(on=it.id = mi_idx.info_type_id, index=info_type_id_movie_info_idx, left=it.id, right=info_type_id, right-filter=mi_idx.info > '2.0')",
+        "table-scan(table=info_type)"
+      ]
+    },
+    {
+      "id": "5a",
+      "tags": [
+        "job",
+        "join",
+        "tables:5"
+      ],
+      "rows": 1,
+      "resultHash": "d251b5d4fdfbf3c6",
+      "work": 2333,
+      "statementRowsRead": 1166,
+      "qErrorMedian": 31,
+      "qErrorMax": 65,
+      "joinOrder": "cost-based",
+      "joinStepsCosted": 32,
+      "plan": [
+        "index-nested-loop-join(on=it.id = mi.info_type_id, index=~pk, left=mi.info_type_id, right=id)",
+        "index-nested-loop-join(on=mc.movie_id = mi.movie_id AND t.id = mi.movie_id, index=movie_id_movie_info, left=mc.movie_id, right=movie_id, right-filter=mi.info IN (...))",
+        "index-nested-loop-join(on=t.id = mc.movie_id, index=~pk, left=mc.movie_id, right=id, right-filter=t.production_year > 2005)",
+        "index-nested-loop-join(on=ct.id = mc.company_type_id, index=company_type_id_movie_companies, left=ct.id, right=company_type_id, right-filter=mc.note LIKE '%(theatrical)%' AND mc.note LIKE '%(France)%')",
+        "table-scan(table=company_type)"
+      ]
+    },
+    {
+      "id": "5b",
+      "tags": [
+        "job",
+        "join",
+        "tables:5"
+      ],
+      "rows": 1,
+      "resultHash": "c5975e6485be650e",
+      "work": 2333,
+      "statementRowsRead": 1166,
+      "qErrorMedian": 8,
+      "qErrorMax": 65,
+      "joinOrder": "cost-based",
+      "joinStepsCosted": 32,
+      "plan": [
+        "index-nested-loop-join(on=it.id = mi.info_type_id, index=~pk, left=mi.info_type_id, right=id)",
+        "index-nested-loop-join(on=mc.movie_id = mi.movie_id AND t.id = mi.movie_id, index=movie_id_movie_info, left=mc.movie_id, right=movie_id, right-filter=mi.info IN (...))",
+        "index-nested-loop-join(on=t.id = mc.movie_id, index=~pk, left=mc.movie_id, right=id, right-filter=t.production_year > 2010)",
+        "index-nested-loop-join(on=ct.id = mc.company_type_id, index=company_type_id_movie_companies, left=ct.id, right=company_type_id, right-filter=mc.note LIKE '%(VHS)%' AND mc.note LIKE '%(USA)%' AND mc.note LIKE '%(1994)%')",
+        "table-scan(table=company_type)"
+      ]
+    },
+    {
+      "id": "5c",
+      "tags": [
+        "job",
+        "join",
+        "tables:5"
+      ],
+      "rows": 1,
+      "resultHash": "9fa4c3e536f661b8",
+      "work": 2960,
+      "statementRowsRead": 1470,
+      "qErrorMedian": 1.08,
+      "qErrorMax": 3.17,
+      "joinOrder": "cost-based",
+      "joinStepsCosted": 32,
+      "plan": [
+        "index-nested-loop-join(on=it.id = mi.info_type_id, index=~pk, left=mi.info_type_id, right=id)",
+        "index-nested-loop-join(on=mc.movie_id = mi.movie_id AND t.id = mi.movie_id, index=movie_id_movie_info, left=mc.movie_id, right=movie_id, right-filter=mi.info IN (...))",
+        "index-nested-loop-join(on=t.id = mc.movie_id, index=~pk, left=mc.movie_id, right=id, right-filter=t.production_year > 1990)",
+        "index-nested-loop-join(on=ct.id = mc.company_type_id, index=company_type_id_movie_companies, left=ct.id, right=company_type_id, right-filter=NOT mc.note LIKE '%(TV)%' AND mc.note LIKE '%(USA)%')",
+        "table-scan(table=company_type)"
+      ]
+    },
+    {
+      "id": "6a",
+      "tags": [
+        "job",
+        "join",
+        "tables:5"
+      ],
+      "rows": 1,
+      "resultHash": "a240dfa916fe542f",
+      "work": 1904,
+      "statementRowsRead": 944,
+      "qErrorMedian": 4.61,
+      "qErrorMax": 20,
+      "joinOrder": "cost-based",
+      "joinStepsCosted": 32,
+      "plan": [
+        "index-nested-loop-join(on=n.id = ci.person_id, index=~pk, left=ci.person_id, right=id, right-filter=n.name LIKE '%Downey%Robert%')",
+        "index-nested-loop-join(on=ci.movie_id = mk.movie_id AND t.id = ci.movie_id, index=movie_id_cast_info, left=mk.movie_id, right=movie_id)",
+        "index-nested-loop-join(on=t.id = mk.movie_id, index=~pk, left=mk.movie_id, right=id, right-filter=t.production_year > 2010)",
+        "index-nested-loop-join(on=k.id = mk.keyword_id, index=keyword_id_movie_keyword, left=k.id, right=keyword_id)",
+        "table-scan(table=keyword)"
+      ]
+    },
+    {
+      "id": "6b",
+      "tags": [
+        "job",
+        "join",
+        "tables:5"
+      ],
+      "rows": 1,
+      "resultHash": "a32b788e11e6bd44",
+      "work": 8521,
+      "statementRowsRead": 4221,
+      "qErrorMedian": 10.59,
+      "qErrorMax": 51.6,
+      "joinOrder": "cost-based",
+      "joinStepsCosted": 32,
+      "plan": [
+        "hash-join(on=mk.keyword_id=id, build=k, build-filter=k.keyword IN (...))",
+        "index-nested-loop-join(on=ci.movie_id = mk.movie_id AND t.id = mk.movie_id, index=movie_id_movie_keyword, left=ci.movie_id, right=movie_id)",
+        "index-nested-loop-join(on=n.id = ci.person_id, index=~pk, left=ci.person_id, right=id, right-filter=n.name LIKE '%Downey%Robert%')",
+        "index-nested-loop-join(on=t.id = ci.movie_id, index=movie_id_cast_info, left=t.id, right=movie_id)",
+        "table-scan(table=title)"
+      ]
+    },
+    {
+      "id": "6c",
+      "tags": [
+        "job",
+        "join",
+        "tables:5"
+      ],
+      "rows": 1,
+      "resultHash": "9fdcc636c4971fa2",
+      "work": 864,
+      "statementRowsRead": 430,
+      "qErrorMedian": 20,
+      "qErrorMax": 65,
+      "joinOrder": "cost-based",
+      "joinStepsCosted": 32,
+      "plan": [
+        "index-nested-loop-join(on=n.id = ci.person_id, index=~pk, left=ci.person_id, right=id, right-filter=n.name LIKE '%Downey%Robert%')",
+        "index-nested-loop-join(on=ci.movie_id = mk.movie_id AND t.id = ci.movie_id, index=movie_id_cast_info, left=mk.movie_id, right=movie_id)",
+        "index-nested-loop-join(on=t.id = mk.movie_id, index=~pk, left=mk.movie_id, right=id, right-filter=t.production_year > 2014)",
+        "index-nested-loop-join(on=k.id = mk.keyword_id, index=keyword_id_movie_keyword, left=k.id, right=keyword_id)",
+        "table-scan(table=keyword)"
+      ]
+    },
+    {
+      "id": "6d",
+      "tags": [
+        "job",
+        "join",
+        "tables:5"
+      ],
+      "rows": 1,
+      "resultHash": "e8214a3f6067d057",
+      "work": 63737,
+      "statementRowsRead": 31231,
+      "qErrorMedian": 2.61,
+      "qErrorMax": 3.75,
+      "joinOrder": "cost-based",
+      "joinStepsCosted": 32,
+      "plan": [
+        "hash-join(on=mk.keyword_id=id, build=k, build-filter=k.keyword IN (...))",
+        "index-nested-loop-join(on=ci.movie_id = mk.movie_id AND t.id = mk.movie_id, index=movie_id_movie_keyword, left=ci.movie_id, right=movie_id)",
+        "index-nested-loop-join(on=n.id = ci.person_id, index=~pk, left=ci.person_id, right=id, right-filter=n.name LIKE '%Downey%Robert%')",
+        "index-nested-loop-join(on=t.id = ci.movie_id, index=movie_id_cast_info, left=t.id, right=movie_id)",
+        "table-scan(table=title)"
+      ]
+    },
+    {
+      "id": "6e",
+      "tags": [
+        "job",
+        "join",
+        "tables:5"
+      ],
+      "rows": 1,
+      "resultHash": "91571ef7ec8e9416",
+      "work": 4918,
+      "statementRowsRead": 2440,
+      "qErrorMedian": 2.6,
+      "qErrorMax": 20,
+      "joinOrder": "cost-based",
+      "joinStepsCosted": 32,
+      "plan": [
+        "index-nested-loop-join(on=n.id = ci.person_id, index=~pk, left=ci.person_id, right=id, right-filter=n.name LIKE '%Downey%Robert%')",
+        "index-nested-loop-join(on=ci.movie_id = mk.movie_id AND t.id = ci.movie_id, index=movie_id_cast_info, left=mk.movie_id, right=movie_id)",
+        "index-nested-loop-join(on=t.id = mk.movie_id, index=~pk, left=mk.movie_id, right=id, right-filter=t.production_year > 2000)",
+        "index-nested-loop-join(on=k.id = mk.keyword_id, index=keyword_id_movie_keyword, left=k.id, right=keyword_id)",
+        "table-scan(table=keyword)"
+      ]
+    },
+    {
+      "id": "6f",
+      "tags": [
+        "job",
+        "join",
+        "tables:5"
+      ],
+      "rows": 1,
+      "resultHash": "1110860529ad1a95",
+      "work": 31474,
+      "statementRowsRead": 15155,
+      "qErrorMedian": 1.6,
+      "qErrorMax": 3.72,
+      "joinOrder": "cost-based",
+      "joinStepsCosted": 32,
+      "plan": [
+        "hash-join(on=ci.person_id=id, build=n)",
+        "index-nested-loop-join(on=ci.movie_id = mk.movie_id AND t.id = ci.movie_id, index=movie_id_cast_info, left=mk.movie_id, right=movie_id)",
+        "hash-join(on=mk.keyword_id=id, build=k, build-filter=k.keyword IN (...))",
+        "index-nested-loop-join(on=t.id = mk.movie_id, index=movie_id_movie_keyword, left=t.id, right=movie_id)",
+        "table-scan(table=title)"
+      ]
+    },
+    {
+      "id": "7a",
+      "tags": [
+        "job",
+        "join",
+        "tables:8"
+      ],
+      "rows": 1,
+      "resultHash": "82cff9af5514008f",
+      "work": 103,
+      "statementRowsRead": 47,
+      "qErrorMedian": 1,
+      "qErrorMax": 2.29,
+      "joinOrder": "cost-based",
+      "joinStepsCosted": 244,
+      "plan": [
+        "index-nested-loop-join(on=it.id = pi.info_type_id, index=~pk, left=pi.info_type_id, right=id, right-filter=it.info = 'mini biography')",
+        "index-nested-loop-join(on=n.id = pi.person_id AND pi.person_id = an.person_id AND pi.person_id = ci.person_id, index=person_id_person_info, left=n.id, right=person_id, right-filter=pi.note = 'Volker Boehm')",
+        "index-nested-loop-join(on=n.id = an.person_id AND ci.person_id = n.id, index=~pk, left=an.person_id, right=id, right-filter=n.name_pcode_cf BETWEEN 'A' AND 'F' AND (n.gender = 'm' OR n.gender = 'f' AND n.name LIKE 'B%'))",
+        "index-nested-loop-join(on=an.person_id = ci.person_id, index=person_id_aka_name, left=ci.person_id, right=person_id, right-filter=an.name LIKE '%a%')",
+        "index-nested-loop-join(on=ci.movie_id = ml.linked_movie_id AND t.id = ci.movie_id, index=movie_id_cast_info, left=ml.linked_movie_id, right=movie_id)",
+        "index-nested-loop-join(on=ml.linked_movie_id = t.id, index=~pk, left=ml.linked_movie_id, right=id, right-filter=t.production_year BETWEEN 1980 AND 1995)",
+        "index-nested-loop-join(on=lt.id = ml.link_type_id, index=link_type_id_movie_link, left=lt.id, right=link_type_id)",
+        "table-scan(table=link_type)"
+      ]
+    },
+    {
+      "id": "7b",
+      "tags": [
+        "job",
+        "join",
+        "tables:8"
+      ],
+      "rows": 1,
+      "resultHash": "82cff9af5514008f",
+      "work": 73,
+      "statementRowsRead": 36,
+      "qErrorMedian": 1,
+      "qErrorMax": 16,
+      "joinOrder": "cost-based",
+      "joinStepsCosted": 244,
+      "plan": [
+        "index-nested-loop-join(on=it.id = pi.info_type_id, index=~pk, left=pi.info_type_id, right=id, right-filter=it.info = 'mini biography')",
+        "index-nested-loop-join(on=n.id = pi.person_id AND pi.person_id = an.person_id AND pi.person_id = ci.person_id, index=person_id_person_info, left=n.id, right=person_id, right-filter=pi.note = 'Volker Boehm')",
+        "index-nested-loop-join(on=n.id = an.person_id AND ci.person_id = n.id, index=~pk, left=an.person_id, right=id, right-filter=n.name_pcode_cf LIKE 'D%' AND n.gender = 'm')",
+        "index-nested-loop-join(on=an.person_id = ci.person_id, index=person_id_aka_name, left=ci.person_id, right=person_id, right-filter=an.name LIKE '%a%')",
+        "index-nested-loop-join(on=ci.movie_id = ml.linked_movie_id AND t.id = ci.movie_id, index=movie_id_cast_info, left=ml.linked_movie_id, right=movie_id)",
+        "index-nested-loop-join(on=ml.linked_movie_id = t.id, index=~pk, left=ml.linked_movie_id, right=id, right-filter=t.production_year BETWEEN 1980 AND 1984)",
+        "index-nested-loop-join(on=lt.id = ml.link_type_id, index=link_type_id_movie_link, left=lt.id, right=link_type_id)",
+        "table-scan(table=link_type)"
+      ]
+    },
+    {
+      "id": "7c",
+      "tags": [
+        "job",
+        "join",
+        "tables:8"
+      ],
+      "rows": 1,
+      "resultHash": "9fd1e2a8d1b06e17",
+      "work": 994,
+      "statementRowsRead": 432,
+      "qErrorMedian": 3.07,
+      "qErrorMax": 32,
+      "joinOrder": "cost-based",
+      "joinStepsCosted": 244,
+      "plan": [
+        "index-nested-loop-join(on=lt.id = ml.link_type_id, index=~pk, left=ml.link_type_id, right=id, right-filter=lt.link IN (...))",
+        "index-nested-loop-join(on=t.id = ci.movie_id AND ml.linked_movie_id = t.id, index=~pk, left=ci.movie_id, right=id, right-filter=t.production_year BETWEEN 1980 AND 2010)",
+        "index-nested-loop-join(on=ci.movie_id = ml.linked_movie_id, index=linked_movie_id_movie_link, left=ci.movie_id, right=linked_movie_id)",
+        "index-nested-loop-join(on=an.person_id = ci.person_id AND ci.person_id = n.id AND pi.person_id = ci.person_id, index=person_id_cast_info, left=an.person_id, right=person_id)",
+        "index-nested-loop-join(on=n.id = an.person_id AND n.id = pi.person_id, index=~pk, left=an.person_id, right=id, right-filter=n.name_pcode_cf BETWEEN 'A' AND 'F' AND (n.gender = 'm' OR n.gender = 'f' AND n.name LIKE 'A%'))",
+        "index-nested-loop-join(on=pi.person_id = an.person_id, index=person_id_aka_name, left=pi.person_id, right=person_id, right-filter=an.name IS NOT NULL AND (an.name LIKE '%a%' OR an.name LIKE 'A%'))",
+        "index-nested-loop-join(on=it.id = pi.info_type_id, index=info_type_id_person_info, left=it.id, right=info_type_id, right-filter=pi.note IS NOT NULL)",
+        "table-scan(table=info_type)"
+      ]
+    },
+    {
+      "id": "8a",
+      "tags": [
+        "job",
+        "join",
+        "tables:7"
+      ],
+      "rows": 1,
+      "resultHash": "3be2c053304ed056",
+      "work": 2122,
+      "statementRowsRead": 1033,
+      "qErrorMedian": 1.5,
+      "qErrorMax": 2.18,
+      "joinOrder": "cost-based",
+      "joinStepsCosted": 145,
+      "plan": [
+        "index-nested-loop-join(on=ci.movie_id = t.id AND t.id = mc.movie_id, index=~pk, left=ci.movie_id, right=id)",
+        "index-nested-loop-join(on=an1.person_id = ci.person_id AND an1.person_id = n1.id, index=person_id_aka_name, left=ci.person_id, right=person_id)",
+        "index-nested-loop-join(on=n1.id = ci.person_id, index=~pk, left=ci.person_id, right=id, right-filter=n1.name LIKE '%Yo%' AND NOT n1.name LIKE '%Yu%')",
+        "hash-join(on=ci.role_id=id, build=rt, build-filter=rt.role = 'actress')",
+        "index-nested-loop-join(on=ci.movie_id = mc.movie_id, index=movie_id_cast_info, left=mc.movie_id, right=movie_id, right-filter=ci.note = '(voice: English version)')",
+        "index-nested-loop-join(on=mc.company_id = cn.id, index=company_id_movie_companies, left=cn.id, right=company_id, right-filter=mc.note LIKE '%(Japan)%' AND NOT mc.note LIKE '%(USA)%')",
+        "table-scan(table=company_name)"
+      ]
+    },
+    {
+      "id": "8b",
+      "tags": [
+        "job",
+        "join",
+        "tables:7"
+      ],
+      "rows": 1,
+      "resultHash": "6cd6a3b276561df9",
+      "work": 1396,
+      "statementRowsRead": 678,
+      "qErrorMedian": 1.74,
+      "qErrorMax": 26,
+      "joinOrder": "cost-based",
+      "joinStepsCosted": 145,
+      "plan": [
+        "index-nested-loop-join(on=an.person_id = ci.person_id AND an.person_id = n.id, index=person_id_aka_name, left=ci.person_id, right=person_id)",
+        "index-nested-loop-join(on=n.id = ci.person_id, index=~pk, left=ci.person_id, right=id, right-filter=n.name LIKE '%Yo%' AND NOT n.name LIKE '%Yu%')",
+        "index-nested-loop-join(on=ci.role_id = rt.id, index=~pk, left=ci.role_id, right=id, right-filter=rt.role = 'actress')",
+        "index-nested-loop-join(on=ci.movie_id = mc.movie_id AND ci.movie_id = t.id, index=movie_id_cast_info, left=mc.movie_id, right=movie_id, right-filter=ci.note = '(voice: English version)')",
+        "index-nested-loop-join(on=t.id = mc.movie_id, index=~pk, left=mc.movie_id, right=id, right-filter=t.production_year BETWEEN 2006 AND 2007 AND (t.title LIKE 'One Piece%' OR t.title LIKE 'Dragon Ball Z%'))",
+        "index-nested-loop-join(on=mc.company_id = cn.id, index=company_id_movie_companies, left=cn.id, right=company_id, right-filter=mc.note LIKE '%(Japan)%' AND NOT mc.note LIKE '%(USA)%' AND (mc.note LIKE '%(2006)%' OR mc.note LIKE '%(2007)%'))",
+        "table-scan(table=company_name)"
+      ]
+    },
+    {
+      "id": "8c",
+      "tags": [
+        "job",
+        "join",
+        "tables:7"
+      ],
+      "rows": 1,
+      "resultHash": "cb52d9e5f23211d4",
+      "work": 35589,
+      "statementRowsRead": 16822,
+      "qErrorMedian": 5.18,
+      "qErrorMax": 5.86,
+      "joinOrder": "cost-based",
+      "joinStepsCosted": 145,
+      "plan": [
+        "index-nested-loop-join(on=ci.movie_id = t.id AND t.id = mc.movie_id, index=~pk, left=ci.movie_id, right=id)",
+        "index-nested-loop-join(on=a1.person_id = n1.id AND n1.id = ci.person_id, index=~pk, left=a1.person_id, right=id)",
+        "index-nested-loop-join(on=a1.person_id = ci.person_id, index=person_id_aka_name, left=ci.person_id, right=person_id)",
+        "hash-join(on=ci.role_id=id, build=rt, build-filter=rt.role = 'writer')",
+        "index-nested-loop-join(on=ci.movie_id = mc.movie_id, index=movie_id_cast_info, left=mc.movie_id, right=movie_id)",
+        "index-nested-loop-join(on=mc.company_id = cn.id, index=company_id_movie_companies, left=cn.id, right=company_id)",
+        "table-scan(table=company_name)"
+      ]
+    },
+    {
+      "id": "8d",
+      "tags": [
+        "job",
+        "join",
+        "tables:7"
+      ],
+      "rows": 1,
+      "resultHash": "78ed34cc695278f5",
+      "work": 33990,
+      "statementRowsRead": 16423,
+      "qErrorMedian": 3.85,
+      "qErrorMax": 4.1,
+      "joinOrder": "cost-based",
+      "joinStepsCosted": 145,
+      "plan": [
+        "index-nested-loop-join(on=ci.movie_id = t.id AND t.id = mc.movie_id, index=~pk, left=ci.movie_id, right=id)",
+        "index-nested-loop-join(on=an1.person_id = n1.id AND n1.id = ci.person_id, index=~pk, left=an1.person_id, right=id)",
+        "index-nested-loop-join(on=an1.person_id = ci.person_id, index=person_id_aka_name, left=ci.person_id, right=person_id)",
+        "hash-join(on=ci.role_id=id, build=rt, build-filter=rt.role = 'costume designer')",
+        "index-nested-loop-join(on=ci.movie_id = mc.movie_id, index=movie_id_cast_info, left=mc.movie_id, right=movie_id)",
+        "index-nested-loop-join(on=mc.company_id = cn.id, index=company_id_movie_companies, left=cn.id, right=company_id)",
+        "table-scan(table=company_name)"
+      ]
+    },
+    {
+      "id": "9a",
+      "tags": [
+        "job",
+        "join",
+        "tables:8"
+      ],
+      "rows": 1,
+      "resultHash": "f0eb6eb0082290c1",
+      "work": 1249,
+      "statementRowsRead": 610,
+      "qErrorMedian": 1.13,
+      "qErrorMax": 3.75,
+      "joinOrder": "cost-based",
+      "joinStepsCosted": 322,
+      "plan": [
+        "index-nested-loop-join(on=chn.id = ci.person_role_id, index=~pk, left=ci.person_role_id, right=id)",
+        "index-nested-loop-join(on=an.person_id = ci.person_id AND an.person_id = n.id, index=person_id_aka_name, left=ci.person_id, right=person_id)",
+        "index-nested-loop-join(on=n.id = ci.person_id, index=~pk, left=ci.person_id, right=id, right-filter=n.gender = 'f' AND n.name LIKE '%Ang%')",
+        "hash-join(on=ci.role_id=id, build=rt, build-filter=rt.role = 'actress')",
+        "index-nested-loop-join(on=ci.movie_id = mc.movie_id AND ci.movie_id = t.id, index=movie_id_cast_info, left=mc.movie_id, right=movie_id, right-filter=ci.note IN (...))",
+        "index-nested-loop-join(on=t.id = mc.movie_id, index=~pk, left=mc.movie_id, right=id, right-filter=t.production_year BETWEEN 2005 AND 2015)",
+        "index-nested-loop-join(on=mc.company_id = cn.id, index=company_id_movie_companies, left=cn.id, right=company_id, right-filter=mc.note IS NOT NULL AND (mc.note LIKE '%(USA)%' OR mc.note LIKE '%(worldwide)%'))",
+        "table-scan(table=company_name)"
+      ]
+    },
+    {
+      "id": "9b",
+      "tags": [
+        "job",
+        "join",
+        "tables:8"
+      ],
+      "rows": 1,
+      "resultHash": "bc826918fa92b4c6",
+      "work": 1154,
+      "statementRowsRead": 563,
+      "qErrorMedian": 1.13,
+      "qErrorMax": 26,
+      "joinOrder": "cost-based",
+      "joinStepsCosted": 322,
+      "plan": [
+        "index-nested-loop-join(on=chn.id = ci.person_role_id, index=~pk, left=ci.person_role_id, right=id)",
+        "index-nested-loop-join(on=an.person_id = ci.person_id AND an.person_id = n.id, index=person_id_aka_name, left=ci.person_id, right=person_id)",
+        "index-nested-loop-join(on=n.id = ci.person_id, index=~pk, left=ci.person_id, right=id, right-filter=n.gender = 'f' AND n.name LIKE '%Angel%')",
+        "index-nested-loop-join(on=ci.role_id = rt.id, index=~pk, left=ci.role_id, right=id, right-filter=rt.role = 'actress')",
+        "index-nested-loop-join(on=ci.movie_id = mc.movie_id AND ci.movie_id = t.id, index=movie_id_cast_info, left=mc.movie_id, right=movie_id, right-filter=ci.note = '(voice)')",
+        "index-nested-loop-join(on=t.id = mc.movie_id, index=~pk, left=mc.movie_id, right=id, right-filter=t.production_year BETWEEN 2007 AND 2010)",
+        "index-nested-loop-join(on=mc.company_id = cn.id, index=company_id_movie_companies, left=cn.id, right=company_id, right-filter=mc.note LIKE '%(200%)%' AND (mc.note LIKE '%(USA)%' OR mc.note LIKE '%(worldwide)%'))",
+        "table-scan(table=company_name)"
+      ]
+    },
+    {
+      "id": "9c",
+      "tags": [
+        "job",
+        "join",
+        "tables:8"
+      ],
+      "rows": 1,
+      "resultHash": "3811773c0a060e16",
+      "work": 32249,
+      "statementRowsRead": 15945,
+      "qErrorMedian": 2.64,
+      "qErrorMax": 6,
+      "joinOrder": "cost-based",
+      "joinStepsCosted": 322,
+      "plan": [
+        "index-nested-loop-join(on=ci.movie_id = t.id AND t.id = mc.movie_id, index=~pk, left=ci.movie_id, right=id)",
+        "index-nested-loop-join(on=chn.id = ci.person_role_id, index=~pk, left=ci.person_role_id, right=id)",
+        "index-nested-loop-join(on=an.person_id = ci.person_id AND an.person_id = n.id, index=person_id_aka_name, left=ci.person_id, right=person_id)",
+        "index-nested-loop-join(on=n.id = ci.person_id, index=~pk, left=ci.person_id, right=id, right-filter=n.gender = 'f' AND n.name LIKE '%An%')",
+        "hash-join(on=ci.role_id=id, build=rt, build-filter=rt.role = 'actress')",
+        "index-nested-loop-join(on=ci.movie_id = mc.movie_id, index=movie_id_cast_info, left=mc.movie_id, right=movie_id, right-filter=ci.note IN (...))",
+        "index-nested-loop-join(on=mc.company_id = cn.id, index=company_id_movie_companies, left=cn.id, right=company_id)",
+        "table-scan(table=company_name)"
+      ]
+    },
+    {
+      "id": "9d",
+      "tags": [
+        "job",
+        "join",
+        "tables:8"
+      ],
+      "rows": 1,
+      "resultHash": "60dd4ae0e925339d",
+      "work": 32624,
+      "statementRowsRead": 16075,
+      "qErrorMedian": 6.02,
+      "qErrorMax": 18.33,
+      "joinOrder": "cost-based",
+      "joinStepsCosted": 322,
+      "plan": [
+        "index-nested-loop-join(on=ci.movie_id = t.id AND t.id = mc.movie_id, index=~pk, left=ci.movie_id, right=id)",
+        "index-nested-loop-join(on=chn.id = ci.person_role_id, index=~pk, left=ci.person_role_id, right=id)",
+        "index-nested-loop-join(on=an.person_id = ci.person_id AND an.person_id = n.id, index=person_id_aka_name, left=ci.person_id, right=person_id)",
+        "index-nested-loop-join(on=n.id = ci.person_id, index=~pk, left=ci.person_id, right=id, right-filter=n.gender = 'f')",
+        "hash-join(on=ci.role_id=id, build=rt, build-filter=rt.role = 'actress')",
+        "index-nested-loop-join(on=ci.movie_id = mc.movie_id, index=movie_id_cast_info, left=mc.movie_id, right=movie_id, right-filter=ci.note IN (...))",
+        "index-nested-loop-join(on=mc.company_id = cn.id, index=company_id_movie_companies, left=cn.id, right=company_id)",
+        "table-scan(table=company_name)"
+      ]
+    }
+  ]
+}

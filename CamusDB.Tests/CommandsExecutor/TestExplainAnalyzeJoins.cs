@@ -669,6 +669,79 @@ public sealed class TestExplainAnalyzeJoins : SharedNodeBaseTest
     }
 
     /// <summary>
+    /// The plan-info row of EXPLAIN (ANALYZE) shows the planning time and how the join order was
+    /// chosen. With statistics loaded the dynamic program chose it, so the row says cost-based and
+    /// counts the steps it costed. The count repeats between runs, which is why a regression check
+    /// can compare it where it cannot compare a time. Plain EXPLAIN shows none of it.
+    /// </summary>
+    [Test]
+    public async Task CostBasedJoin_PlanInfoShowsPlanningTimeAndTheSearch()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupCustomersOrders();
+
+        await RunAsync(executor, database, dbname, "ANALYZE customers");
+        await RunAsync(executor, database, dbname, "ANALYZE orders");
+
+        List<QueryResultRow> first = await RunAsync(executor, database, dbname, "EXPLAIN (ANALYZE) " + InnerJoinSql);
+        string info = Detail(Single(first, "plan-info"));
+
+        Assert.That(info, Does.Match(@"planning-ms=\d+(\.\d+)?"), Dump(first));
+        Assert.That(info, Does.Contain("join-order=cost-based"), Dump(first));
+
+        long steps = StepsCosted(info);
+        Assert.That(steps, Is.GreaterThan(0), Dump(first));
+
+        List<QueryResultRow> second = await RunAsync(executor, database, dbname, "EXPLAIN (ANALYZE) " + InnerJoinSql);
+        Assert.AreEqual(steps, StepsCosted(Detail(Single(second, "plan-info"))), "the step count must repeat between runs");
+
+        List<QueryResultRow> plain = await RunAsync(executor, database, dbname, "EXPLAIN " + InnerJoinSql);
+        string plainInfo = Detail(Single(plain, "plan-info"));
+        Assert.That(plainInfo, Does.Not.Contain("planning-ms"));
+        Assert.That(plainInfo, Does.Not.Contain("join-order="));
+    }
+
+    /// <summary>
+    /// With the cost-based join order off, the heuristic chooses the order and no step is costed.
+    /// </summary>
+    [Test]
+    public async Task HeuristicJoin_PlanInfoShowsNoCostedSteps()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) =
+            await SetupCustomersOrders(Options with { CostBasedJoinOrderEnabled = false });
+
+        await RunAsync(executor, database, dbname, "ANALYZE customers");
+        await RunAsync(executor, database, dbname, "ANALYZE orders");
+
+        List<QueryResultRow> rows = await RunAsync(executor, database, dbname, "EXPLAIN (ANALYZE) " + InnerJoinSql);
+        string info = Detail(Single(rows, "plan-info"));
+
+        Assert.That(info, Does.Contain("join-order=heuristic"), Dump(rows));
+        Assert.AreEqual(0, StepsCosted(info), Dump(rows));
+    }
+
+    /// <summary>A single-table plan has a planning time but no join-order search.</summary>
+    [Test]
+    public async Task SingleTablePlan_PlanInfoShowsPlanningTimeOnly()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupCustomersOrders();
+
+        List<QueryResultRow> rows = await RunAsync(executor, database, dbname,
+            "EXPLAIN (ANALYZE) SELECT total FROM orders WHERE total > 20");
+        string info = Detail(Single(rows, "plan-info"));
+
+        Assert.That(info, Does.Match(@"planning-ms=\d+(\.\d+)?"), Dump(rows));
+        Assert.That(info, Does.Not.Contain("join-order="), Dump(rows));
+    }
+
+    private static long StepsCosted(string planInfo)
+    {
+        System.Text.RegularExpressions.Match match =
+            System.Text.RegularExpressions.Regex.Match(planInfo, @"join-steps-costed=(\d+)");
+        Assert.IsTrue(match.Success, $"no join-steps-costed in: {planInfo}");
+        return long.Parse(match.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture);
+    }
+
+    /// <summary>
     /// A three-table chain: every node of the left chain has its own counters, so the actual rows
     /// can be read step by step, which is what the join-order estimates are judged against.
     /// </summary>

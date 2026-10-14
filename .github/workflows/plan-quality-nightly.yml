@@ -1,0 +1,139 @@
+name: plan-quality-nightly
+
+# Nightly + manual dispatch: the large tier of the plan-quality harness (docs/plan-quality-harness.md).
+#
+#   - small-tier-large-scale: the small tier's corpus on the retail data set at scale 4, against
+#     Baselines/small-sf4.json. More rows expose wrong index choices that scale 1 hides.
+#   - job: the 113 Join Order Benchmark queries on synthetic IMDB data, against
+#     Baselines/job-sf<scale>.json and against SQLite on the same rows.
+#
+# Both gate on result hashes and on counters that repeat between runs. Wall time and planning time
+# are in the report but are not graded: a hosted runner's speed says nothing about the change. A red
+# run means "download the report and look". To update a baseline, run the tier locally with
+# PLAN_QUALITY_UPDATE_BASELINE=1 and commit the file with the planner change.
+on:
+  schedule:
+    # 06:30 UTC nightly, after the Caraxes runs.
+    - cron: '30 6 * * *'
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Git ref to test'
+        default: 'main'
+
+concurrency:
+  group: plan-quality-nightly-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # The JOB scale of the nightly run. Baselines/job-sf<JOB_SCALE>.json must exist for it. 0.003 is
+  # about 225,000 rows: locally it loads in 92 s and runs the 113 queries in 124 s. At 0.01 (about
+  # 750,000 rows) the in-memory load alone took more than 11 minutes.
+  JOB_SCALE: '0.003'
+
+jobs:
+  small-tier-large-scale:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Check out repository code
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+
+      - name: Install .NET
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Cache NuGet packages
+        uses: actions/cache@v5
+        with:
+          path: ~/.nuget/packages
+          key: ${{ runner.os }}-nuget-${{ hashFiles('**/*.csproj') }}
+          restore-keys: |
+            ${{ runner.os }}-nuget-
+
+      - name: Build
+        run: dotnet build CamusDB.PlanQuality.Tests/CamusDB.PlanQuality.Tests.csproj --configuration Debug
+
+      - name: Run the small tier at scale 4
+        timeout-minutes: 35
+        env:
+          PLAN_QUALITY_SCALE: '4'
+          PLAN_QUALITY_REPORT_DIR: ${{ github.workspace }}/artifacts/plan-quality
+        run: |
+          dotnet test CamusDB.PlanQuality.Tests/CamusDB.PlanQuality.Tests.csproj \
+            --no-build \
+            --configuration Debug \
+            --filter "FullyQualifiedName~SmallTierGate" \
+            --logger "console;verbosity=normal"
+
+      - name: Upload the report
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: plan-quality-small-sf4-${{ github.run_attempt }}
+          path: artifacts/plan-quality/
+          retention-days: 14
+          if-no-files-found: warn
+
+  job:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Check out repository code
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+
+      - name: Install .NET
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '10.0.x'
+
+      # The generator draws every value from Python's seeded random module; one pinned version keeps
+      # the rows, and so the baseline, the same on every run.
+      - name: Install Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Cache NuGet packages
+        uses: actions/cache@v5
+        with:
+          path: ~/.nuget/packages
+          key: ${{ runner.os }}-nuget-${{ hashFiles('**/*.csproj') }}
+          restore-keys: |
+            ${{ runner.os }}-nuget-
+
+      - name: Prepare the JOB data set and the SQLite oracle
+        timeout-minutes: 15
+        run: scripts/plan-quality/job/prepare.sh "$RUNNER_TEMP/job" "$JOB_SCALE"
+
+      - name: Build
+        run: dotnet build CamusDB.PlanQuality.Tests/CamusDB.PlanQuality.Tests.csproj --configuration Debug
+
+      - name: Run the JOB tier
+        timeout-minutes: 40
+        env:
+          JOB_DIR: ${{ runner.temp }}/job
+          PLAN_QUALITY_QUERY_TIMEOUT_SEC: '120'
+          PLAN_QUALITY_REPORT_DIR: ${{ github.workspace }}/artifacts/plan-quality
+        run: |
+          dotnet test CamusDB.PlanQuality.Tests/CamusDB.PlanQuality.Tests.csproj \
+            --no-build \
+            --configuration Debug \
+            --filter "FullyQualifiedName~JobTierGate" \
+            --logger "console;verbosity=normal"
+
+      - name: Upload the report
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: plan-quality-job-${{ github.run_attempt }}
+          path: |
+            artifacts/plan-quality/
+            ${{ runner.temp }}/job/data/sqlite_results.json
+          retention-days: 14
+          if-no-files-found: warn

@@ -25,6 +25,9 @@ CamusDB.Workload/bin
 CamusDB.Workload/obj
 CamusDB.Workload.Tests/bin
 CamusDB.Workload.Tests/obj
+CamusDB.PlanQuality.Tests/bin
+CamusDB.PlanQuality.Tests/obj
+CamusDB.PlanQuality.Tests/TestResults
 CamusDB.Core\SQLParser.Language.analyzer.lst
 CamusDB.Core\sqlParser.Language.grammar.lst
 BenchmarkDotNet.Artifacts/

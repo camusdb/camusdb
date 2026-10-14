@@ -77,12 +77,20 @@ internal readonly record struct JoinStepEstimate(
 /// <see cref="JoinSource"/> instance, not by value). The filter belongs to the tree: a tree built
 /// through <see cref="JoinGraph"/> already evaluates the <c>WHERE</c> conjuncts it took, so the
 /// filter must not contain them again.
+///
+/// <para><see cref="CostedJoinSteps"/> is the number of join steps that the dynamic program of
+/// <see cref="JoinEnumerator"/> costed to make this choice, and 0 when the program did not run. A
+/// choice from the heuristic after the program found no order keeps the count of the program, so
+/// the count shows the search work also when the cost-based order was not used. The count decides
+/// nothing; EXPLAIN (ANALYZE) prints it, because it repeats between runs and planning time does
+/// not.</para>
 /// </summary>
 internal sealed record JoinOrderChoice(
     QuerySource Source,
     JoinBuildMode Mode,
     NodeAst? PostJoinFilter,
-    IReadOnlyDictionary<JoinSource, JoinStepEstimate>? StepEstimates = null)
+    IReadOnlyDictionary<JoinSource, JoinStepEstimate>? StepEstimates = null,
+    long CostedJoinSteps = 0)
 {
     public static JoinOrderChoice WholePredicate(QuerySource source, JoinPredicatePushdown.Result pushdown) =>
         new(source, JoinBuildMode.WholePredicate, pushdown.PostJoinFilter);
@@ -93,6 +101,20 @@ internal sealed record JoinOrderChoice(
     public static JoinOrderChoice CostBased(
         QuerySource source,
         JoinGraph graph,
-        IReadOnlyDictionary<JoinSource, JoinStepEstimate> steps) =>
-        new(source, JoinBuildMode.CostBased, graph.RemainingPostJoinFilter, steps);
+        IReadOnlyDictionary<JoinSource, JoinStepEstimate> steps,
+        long costedJoinSteps) =>
+        new(source, JoinBuildMode.CostBased, graph.RemainingPostJoinFilter, steps, costedJoinSteps);
 }
+
+/// <summary>
+/// How the planner chose the join order of one plan, for EXPLAIN (ANALYZE) and the plan-quality
+/// harness. <see cref="Path"/> is <c>cost-based</c> when the dynamic program of
+/// <see cref="JoinEnumerator"/> chose the order; <c>heuristic</c> when it did not, so that
+/// <see cref="JoinOrderOptimizer"/> chose the order or the declared tree stayed (the cost-based
+/// search is off, statistics are not loaded, the join has more than
+/// <see cref="JoinEnumerator.MaxTablesForEnumeration"/> tables, or no order avoids a cross
+/// product); and <c>cached</c> when a plan-cache hit replayed an earlier order.
+/// <see cref="CostedJoinSteps"/> is <see cref="JoinOrderChoice.CostedJoinSteps"/>; a cache hit
+/// costs no step.
+/// </summary>
+internal sealed record JoinOrderSearchSummary(string Path, long CostedJoinSteps);

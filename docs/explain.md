@@ -132,6 +132,17 @@ its own estimate (`join-order-est-rows`). The two models can disagree. With both
 A node can run more than one time in one statement. A hash join fallback reads its build input
 again, for example. The counters add up over each run, which is the work the statement did.
 
+The `plan-info` row of `EXPLAIN (ANALYZE)` also shows how long planning took and, on a join plan,
+how the join order was chosen. Plain `EXPLAIN` does not show these values.
+
+| Suffix | Meaning |
+|--------|---------|
+| `planning-ms=<ms>` | The time of the bind and plan stages. It includes the subqueries that the bind stage runs to fold into literals. |
+| `join-order=cost-based` | The cost-based search chose the join order. |
+| `join-order=heuristic` | The cost-based search did not choose the order. The cause is one of these: the search is off, the statistics are not loaded, the join has more than 12 tables, or no order avoids a cross product. |
+| `join-order=cached` | A plan-cache hit replayed an earlier join order. |
+| `join-steps-costed=<n>` | The number of join steps that the cost-based search costed. It is 0 when the search did not run. For the same query and the same statistics, the count is the same on each run, so you can compare it between versions. You cannot do that with a time. |
+
 A `broadcast-span` row has the same columns as a `gather-span` row (see the distributed section
 below). The node that owns the probe input counts each probe row that this node decoded, from a
 local span or shipped from a peer: the left leaf for a right build, or the join row for a left

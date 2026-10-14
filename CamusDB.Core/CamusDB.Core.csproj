@@ -24,6 +24,7 @@
     <InternalsVisibleTo Include="CamusDB.Tests" />
     <InternalsVisibleTo Include="CamusDB.Cluster.Tests" />
     <InternalsVisibleTo Include="CamusDB.MicroBenchmarks" />
+    <InternalsVisibleTo Include="CamusDB.PlanQuality.Tests" />
     <!-- The API host's response sinks (gRPC value codec) serialize directly from the internal
          ValueSlot pipeline cell so a projected cell never materializes a ColumnValue on its way
          to the wire. ColumnValue remains the public contract for everything else. -->

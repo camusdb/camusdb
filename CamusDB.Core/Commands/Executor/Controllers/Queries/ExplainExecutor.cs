@@ -241,16 +241,25 @@ internal sealed class ExplainExecutor
                 "EXPLAIN (ANALYZE) is not supported for a FROM-less SELECT (there is no table access to measure). " +
                 "Use plain EXPLAIN to inspect the plan.");
 
+        // Bind and plan, timed together: the planning time a client waits for before the first row.
+        Stopwatch planning = Stopwatch.StartNew();
         QueryPlan plan = await BuildPlanAsync(database, selectAst, ticket).ConfigureAwait(false);
+        planning.Stop();
 
-        return RunAnalyzedPlan(plan);
+        return RunAnalyzedPlan(plan, planning.Elapsed.TotalMilliseconds);
     }
 
     /// <summary>
     /// Executes an already-built plan to completion with runtime stats on, then yields one row per
     /// node. The plan carries its resolved tables, so nothing here resolves one.
     /// </summary>
-    private async IAsyncEnumerable<QueryResultRow> RunAnalyzedPlan(QueryPlan plan)
+    /// <param name="plan">The plan to run.</param>
+    /// <param name="planningMs">
+    /// The time of the bind and plan stages, printed on the plan-info row. It includes the subqueries
+    /// that the bind stage runs to fold them into literals (see the class summary), because a client
+    /// waits for them before the first row too.
+    /// </param>
+    private async IAsyncEnumerable<QueryResultRow> RunAnalyzedPlan(QueryPlan plan, double planningMs)
     {
         plan.CollectRuntimeStats = true;
 
@@ -364,7 +373,8 @@ internal sealed class ExplainExecutor
             {
                 { "stage",           new ColumnValue(ColumnType.String, "analyze") },
                 { "node",            new ColumnValue(ColumnType.String, "plan-info") },
-                { "detail",          new ColumnValue(ColumnType.String, $"shape={plan.QueryShapeId}, schema-deps={schemaDepsStr}") },
+                { "detail",          new ColumnValue(ColumnType.String,
+                    $"shape={plan.QueryShapeId}, schema-deps={schemaDepsStr}" + DescribePlanning(plan, planningMs)) },
                 { "estimated_rows",  ColumnValue.Null },
                 { "estimated_cost",  ColumnValue.Null },
                 { "actual_rows",     ColumnValue.Null },
@@ -374,6 +384,25 @@ internal sealed class ExplainExecutor
                 { "kv_scan_entries", ColumnValue.Null },
             });
         }
+    }
+
+    /// <summary>
+    /// The planning facts that only EXPLAIN (ANALYZE) appends to the plan-info row:
+    /// <c>planning-ms=</c>, the bind and plan time, and on a join plan <c>join-order=</c> (how the
+    /// order was chosen, see <see cref="JoinOrderSearchSummary"/>) and <c>join-steps-costed=</c>.
+    /// The step count repeats between runs of the same query on the same statistics, so a
+    /// regression check can compare it where it cannot compare a time. Plain EXPLAIN output stays
+    /// unchanged.
+    /// </summary>
+    private static string DescribePlanning(QueryPlan plan, double planningMs)
+    {
+        string detail = ", planning-ms=" + planningMs.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture);
+
+        if (plan.JoinOrderSearch is { } search)
+            detail += ", join-order=" + search.Path
+                + ", join-steps-costed=" + search.CostedJoinSteps.ToString(System.Globalization.CultureInfo.InvariantCulture);
+
+        return detail;
     }
 
     /// <summary>
