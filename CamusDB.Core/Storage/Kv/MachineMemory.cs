@@ -89,10 +89,20 @@ internal static class MachineMemory
     /// and v1 second. Returns 0 when no limit is set or none can be read.
     /// </summary>
     internal static long ReadLinuxCgroupLimit(Func<string, string?> readFile)
+        => ResolveLinuxCgroupLimit(readFile).Limit;
+
+    /// <summary>
+    /// The same resolution as <see cref="ReadLinuxCgroupLimit"/>, plus where the binding limit was
+    /// found: the cgroup directory that holds it, and whether it is a v2 (unified) hierarchy. A reader
+    /// of the cgroup's <em>usage</em> needs that directory, because usage must be read at the level
+    /// whose limit binds — a child that sets no limit of its own reports only its own share. Returns
+    /// a limit of 0 and a null directory when no limit is set or none can be read.
+    /// </summary>
+    internal static (long Limit, string? Directory, bool IsV2) ResolveLinuxCgroupLimit(Func<string, string?> readFile)
     {
         string? membership = readFile("/proc/self/cgroup");
         if (membership is null)
-            return 0;
+            return (0, null, false);
 
         string? v2Path = null;
         string? v1Path = null;
@@ -120,26 +130,31 @@ internal static class MachineMemory
 
         if (v2Path is not null)
         {
-            long limit = SmallestLimitOnPath(readFile, CgroupRoot, v2Path, "memory.max");
+            (long limit, string? directory) = SmallestLimitOnPath(readFile, CgroupRoot, v2Path, "memory.max");
             if (limit > 0)
-                return limit;
+                return (limit, directory, true);
         }
 
         if (v1Path is not null)
-            return SmallestLimitOnPath(readFile, CgroupRoot + "/memory", v1Path, "memory.limit_in_bytes");
+        {
+            (long limit, string? directory) = SmallestLimitOnPath(readFile, CgroupRoot + "/memory", v1Path, "memory.limit_in_bytes");
+            if (limit > 0)
+                return (limit, directory, false);
+        }
 
-        return 0;
+        return (0, null, false);
     }
 
     /// <summary>
     /// Walks from <c>{mount}{cgroupPath}</c> up to <c>{mount}</c>, reading <paramref name="file"/>
     /// at each level, and returns the smallest numeric limit found (a parent's limit binds a child
-    /// that sets none). Inside a cgroup namespace the process path is <c>/</c> and only the mount
-    /// root is read.
+    /// that sets none), together with the directory it was read from. Inside a cgroup namespace the
+    /// process path is <c>/</c> and only the mount root is read.
     /// </summary>
-    private static long SmallestLimitOnPath(Func<string, string?> readFile, string mount, string cgroupPath, string file)
+    private static (long Limit, string? Directory) SmallestLimitOnPath(Func<string, string?> readFile, string mount, string cgroupPath, string file)
     {
         long smallest = 0;
+        string? smallestDirectory = null;
 
         // A path that climbs out of the namespace ("/../..") names a directory this mount cannot
         // show; read the mount root only rather than resolve it against the wrong hierarchy.
@@ -147,12 +162,16 @@ internal static class MachineMemory
 
         while (true)
         {
-            long limit = ParseCgroupLimit(readFile(mount + relative + "/" + file));
+            string directory = mount + relative;
+            long limit = ParseCgroupLimit(readFile(directory + "/" + file));
             if (limit > 0 && (smallest == 0 || limit < smallest))
+            {
                 smallest = limit;
+                smallestDirectory = directory;
+            }
 
             if (relative.Length == 0)
-                return smallest;
+                return (smallest, smallestDirectory);
 
             int slash = relative.LastIndexOf('/');
             relative = slash <= 0 ? "" : relative[..slash];
@@ -176,7 +195,13 @@ internal static class MachineMemory
     }
 
     /// <summary>Parses <c>MemTotal:  N kB</c> out of <c>/proc/meminfo</c>; 0 when absent or malformed.</summary>
-    internal static long ParseMemTotalBytes(string? meminfo)
+    internal static long ParseMemTotalBytes(string? meminfo) => ParseMeminfoBytes(meminfo, "MemTotal:");
+
+    /// <summary>
+    /// Parses one <c>Field:  N kB</c> line out of <c>/proc/meminfo</c> and returns it in bytes;
+    /// 0 when the field is absent or malformed. <paramref name="field"/> includes the colon.
+    /// </summary>
+    internal static long ParseMeminfoBytes(string? meminfo, string field)
     {
         if (meminfo is null)
             return 0;
@@ -184,10 +209,10 @@ internal static class MachineMemory
         foreach (string rawLine in meminfo.Split('\n'))
         {
             ReadOnlySpan<char> line = rawLine.AsSpan();
-            if (!line.StartsWith("MemTotal:", StringComparison.Ordinal))
+            if (!line.StartsWith(field, StringComparison.Ordinal))
                 continue;
 
-            ReadOnlySpan<char> rest = line["MemTotal:".Length..].Trim();
+            ReadOnlySpan<char> rest = line[field.Length..].Trim();
             int space = rest.IndexOf(' ');
             ReadOnlySpan<char> number = space < 0 ? rest : rest[..space];
 
@@ -199,7 +224,7 @@ internal static class MachineMemory
         return 0;
     }
 
-    private static string? TryReadFile(string path)
+    internal static string? TryReadFile(string path)
     {
         try
         {
@@ -211,11 +236,18 @@ internal static class MachineMemory
         }
     }
 
-    private static long ReadDarwinMemSize()
+    private static long ReadDarwinMemSize() => ReadDarwinSysctl("hw.memsize");
+
+    /// <summary>
+    /// Reads a numeric <c>sysctl</c> by name on macOS; 0 when the call fails. A 32-bit value (such as
+    /// <c>kern.memorystatus_level</c>) fills the low half of the zeroed buffer, which is the same
+    /// number on the little-endian processors macOS runs on.
+    /// </summary>
+    internal static long ReadDarwinSysctl(string name)
     {
         long value = 0;
         nint size = sizeof(long);
-        return sysctlbyname("hw.memsize", ref value, ref size, IntPtr.Zero, 0) == 0 ? value : 0;
+        return sysctlbyname(name, ref value, ref size, IntPtr.Zero, 0) == 0 ? value : 0;
     }
 
     [DllImport("libc", EntryPoint = "sysctlbyname")]

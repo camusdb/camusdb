@@ -207,6 +207,15 @@ public sealed class CommandExecutor : IAsyncDisposable
     /// <summary>Configuration for this engine, for the controllers and stores it owns.</summary>
     internal CamusDBOptions Options => options;
 
+    /// <summary>
+    /// The node's data-volume monitor: the one cache behind every opened database's write-admission
+    /// gate and behind the node stats call. Sharing it is what makes the stats call's
+    /// <c>below_watermark</c> the gate's own answer instead of a second probe that can disagree near
+    /// the threshold. Watches <see cref="CamusDBOptions.DataDirectory"/>, which is restart-class, so it
+    /// is built once with the engine.
+    /// </summary>
+    public Storage.DiskSpaceMonitor DiskSpace { get; }
+
     /// <summary>Unhooks this executor from the options holder on dispose; null when none was given.</summary>
     private readonly IDisposable? optionsSubscription;
 
@@ -389,6 +398,8 @@ public sealed class CommandExecutor : IAsyncDisposable
     /// supplied, its current snapshot overrides <paramref name="options"/> and every subsequent
     /// <see cref="CamusDBOptionsHolder.Publish"/> is fanned out to this engine's controllers, open
     /// databases, and table stores. When null the engine keeps <paramref name="options"/> for life.</param>
+    /// <param name="diskSpace">Optional data-volume monitor (a test seam for an injected free-space
+    /// probe). When null the engine watches <see cref="CamusDBOptions.DataDirectory"/>.</param>
     public CommandExecutor(
         CommandValidator validator,
         CatalogsManager catalogs,
@@ -402,7 +413,8 @@ public sealed class CommandExecutor : IAsyncDisposable
         CamusDBOptionsHolder? optionsHolder = null,
         ClusterSettingsService? clusterSettings = null,
         IQueryFragmentTransport? fragmentTransport = null,
-        Diagnostics.IClusterActivityTransport? activityTransport = null)
+        Diagnostics.IClusterActivityTransport? activityTransport = null,
+        Storage.DiskSpaceMonitor? diskSpace = null)
     {
         this.validator = validator;
         this.catalogs = catalogs;
@@ -433,6 +445,8 @@ public sealed class CommandExecutor : IAsyncDisposable
             backupManager = new BackupManager(sharedNode, logger);
         }
 
+        DiskSpace = diskSpace ?? new Storage.DiskSpaceMonitor(options.DataDirectory, logger);
+
         databaseDescriptors = new();
         statisticsManager = new(logger);
         databaseOpener = new(
@@ -445,7 +459,8 @@ public sealed class CommandExecutor : IAsyncDisposable
             registryTask, 
             isClusterMode, 
             cache,
-            statisticsManager.EvictTableStats
+            statisticsManager.EvictTableStats,
+            DiskSpace
         );
         databaseCloser = new(databaseDescriptors, logger);
         databaseEvictor = new(databaseDescriptors, statisticsManager, logger, options.DatabaseIdleEvictionMs);

@@ -75,6 +75,8 @@ internal sealed class SQLExecutorGrantCreator : SQLExecutorBaseCreator
         "index" => Privilege.Index,
         "create" => Privilege.Create,
         "all" => Privilege.All,
+        // Not a keyword: MONITOR reaches here through the identifier leaf of the privilege rule.
+        "monitor" => Privilege.Monitor,
         _ => throw new CamusDBException(CamusDBErrorCodes.InvalidPrivilege, "Unknown privilege: " + rawToken),
     };
     }

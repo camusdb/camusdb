@@ -63,11 +63,16 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
     private readonly IHostApplicationLifetime appLifetime;
     private readonly ForegroundRequestGauge loadGauge;
     private readonly Core.Routing.StatementRoutingResolver? routing;
+    private readonly NodeStatsCollector? nodeStats;
 
     /// <param name="routing">
     /// Optional and last so the many positional construction sites (tests included) stay valid;
     /// null means this service never emits routing metadata, which is also the correct behavior
     /// for a harness that did not register the resolver.
+    /// </param>
+    /// <param name="nodeStats">
+    /// Builds the <see cref="GetNodeStats"/> answer. Optional for the same reason as
+    /// <paramref name="routing"/>; without it the call reports that node stats are unavailable.
     /// </param>
     public CamusSqlService(
         CommandExecutor executor,
@@ -76,7 +81,8 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
         IHostApplicationLifetime appLifetime,
         ForegroundRequestGauge loadGauge,
         CamusDBOptions options,
-        Core.Routing.StatementRoutingResolver? routing = null)
+        Core.Routing.StatementRoutingResolver? routing = null,
+        NodeStatsCollector? nodeStats = null)
     {
         this.executor     = executor;
         this.transactions = transactions;
@@ -85,6 +91,7 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
         this.loadGauge    = loadGauge;
         this.options      = options;
         this.routing      = routing;
+        this.nodeStats    = nodeStats;
     }
 
     /// <summary>
@@ -2087,6 +2094,24 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
     /// <summary>Health-check ping.</summary>
     public override Task<PingReply> Ping(PingRequest request, ServerCallContext context)
         => Task.FromResult(new PingReply { Message = "pong" });
+
+    /// <summary>
+    /// The receiving node's disk, CPU and memory (see <see cref="NodeStatsCollector"/>). With
+    /// authentication on, the caller must be a superuser or hold MONITOR on <c>*.*</c>; anyone else is
+    /// refused with <see cref="CamusDBErrorCodes.InsufficientPrivilege"/>. Reads two bounded caches and
+    /// the sampler's last tick, so it is safe to poll.
+    /// </summary>
+    public override Task<NodeStatsReply> GetNodeStats(NodeStatsRequest request, ServerCallContext context)
+        => InvokeAsync(async () =>
+        {
+            Principal? principal = await ResolvePrincipalAsync(context).ConfigureAwait(false);
+            NodeStatsCollector.EnsureAuthorized(principal, options.AuthenticationEnabled);
+
+            if (nodeStats is null)
+                throw new CamusDBException(CamusDBErrorCodes.FeatureNotSupported, "Node stats are not available on this server");
+
+            return NodeStatsWire.ToReply(nodeStats.Collect());
+        });
 
     // ─── RPC boundary: domain-error → RpcException mapping ─────────────────────
 

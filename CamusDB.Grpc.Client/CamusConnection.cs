@@ -390,6 +390,50 @@ public sealed class CamusConnection : IAsyncDisposable
             new SqlRequest { Database = database, Sql = sql }, cancellationToken: cancellationToken).ResponseAsync.ConfigureAwait(false);
     }
 
+    // ─── Node stats ───────────────────────────────────────────────────────────
+
+    /// <summary>The configured endpoint addresses, in pool order; the first is the bootstrap address.</summary>
+    public IReadOnlyList<string> EndpointAddresses => Array.ConvertAll(endpoints, static e => e.Address);
+
+    /// <summary>
+    /// The disk, CPU and memory of the node at the first configured address (the <c>GetNodeStats</c>
+    /// RPC). The answer is for the node that receives the call, not the cluster; use the
+    /// <see cref="GetNodeStatsAsync(string, CancellationToken)"/> overload to ask each node. A value the
+    /// node cannot read is -1 and has an entry in <c>Errors</c>. Not batched: it is a unary call, like
+    /// DDL. Requires a real connection.
+    /// </summary>
+    public async Task<NodeStatsReply> GetNodeStatsAsync(CancellationToken cancellationToken = default)
+    {
+        if (unaryClient is null)
+            throw new InvalidOperationException("This connection has no unary client for node stats");
+
+        return await unaryClient.GetNodeStatsAsync(new NodeStatsRequest(), cancellationToken: cancellationToken)
+            .ResponseAsync.ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// The disk, CPU and memory of the node at <paramref name="address"/>, which must be one of
+    /// <see cref="EndpointAddresses"/>. Monitoring a cluster means one call per node, because each node
+    /// answers only for itself.
+    /// </summary>
+    public async Task<NodeStatsReply> GetNodeStatsAsync(string address, CancellationToken cancellationToken = default)
+    {
+        foreach (RoutedEndpoint endpoint in endpoints)
+        {
+            if (!string.Equals(endpoint.Address, address, StringComparison.Ordinal))
+                continue;
+
+            if (endpoint.OwnedChannel is null)
+                throw new InvalidOperationException($"Endpoint '{address}' has no channel for node stats");
+
+            CamusSql.CamusSqlClient client = new(endpoint.OwnedChannel);
+            return await client.GetNodeStatsAsync(new NodeStatsRequest(), cancellationToken: cancellationToken)
+                .ResponseAsync.ConfigureAwait(false);
+        }
+
+        throw new ArgumentException($"'{address}' is not an endpoint of this connection", nameof(address));
+    }
+
     // ─── Transactions ─────────────────────────────────────────────────────────
 
     /// <summary>

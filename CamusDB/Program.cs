@@ -485,6 +485,21 @@ builder.Services.AddHostedService<ExpiredSessionReaper>();
 // handle has no such event, so an idle timeout is what keeps abandoned ones from accumulating.
 builder.Services.AddHostedService<PreparedStatementReaper>();
 
+// Node stats (GetNodeStats, GET /v1/admin/stats): the sampler measures CPU, load, host memory and the
+// engine's on-disk size on a background tick, and the collector answers from that plus the engine's
+// shared data-volume monitor, so a call never probes more than the write gate already does.
+builder.Services.AddSingleton<CamusDB.Core.Diagnostics.NodeResourceSampler>(services =>
+    new CamusDB.Core.Diagnostics.NodeResourceSampler(
+        CamusDB.Core.Diagnostics.NodeStoragePaths.From(camusOptions, services.GetRequiredService<EmbeddedKahuna>().Options),
+        services.GetRequiredService<ILogger<CamusDB.Core.Diagnostics.NodeResourceSampler>>()));
+builder.Services.AddSingleton<CamusDB.Core.Diagnostics.NodeStatsCollector>(services =>
+    new CamusDB.Core.Diagnostics.NodeStatsCollector(
+        services.GetRequiredService<CommandExecutor>(),
+        services.GetRequiredService<EmbeddedKahuna>(),
+        services.GetRequiredService<CamusDB.Core.Diagnostics.NodeResourceSampler>(),
+        CamusDB.App.Controllers.VersionController.VersionOf(typeof(CamusDB.App.Controllers.VersionController).Assembly)));
+builder.Services.AddHostedService<CamusDB.App.Services.NodeResourceSamplerService>();
+
 if (config.IsClusterMode)
 {
     // Kahuna 1.8.1: the node-only gRPC surfaces (MapGrpcKahunaRoutes) are guarded by the same trust policy

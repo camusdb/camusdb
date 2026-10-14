@@ -1131,11 +1131,17 @@ internal sealed class SchemaQuerier
         }
     }
 
-    /// <summary>Renders a privilege bitmask as an uppercase, comma-separated list (<c>ALL PRIVILEGES</c> when complete).</summary>
+    /// <summary>
+    /// Renders a privilege bitmask as an uppercase, comma-separated list: <c>ALL PRIVILEGES</c> when
+    /// every object privilege is held, followed by <c>MONITOR</c> when the server-level bit is held too
+    /// (it is outside <see cref="Privilege.All"/>, so "ALL PRIVILEGES" alone would hide it).
+    /// </summary>
     private static string FormatPrivileges(Privilege privileges)
     {
-        if (privileges == Privilege.All)
-            return "ALL PRIVILEGES";
+        bool monitor = (privileges & Privilege.Monitor) != 0;
+
+        if ((privileges & Privilege.All) == Privilege.All)
+            return monitor ? "ALL PRIVILEGES, MONITOR" : "ALL PRIVILEGES";
 
         List<string> names = [];
         if (privileges.HasFlag(Privilege.Select)) names.Add("SELECT");
@@ -1147,6 +1153,7 @@ internal sealed class SchemaQuerier
         if (privileges.HasFlag(Privilege.Alter)) names.Add("ALTER");
         if (privileges.HasFlag(Privilege.Index)) names.Add("INDEX");
         if (privileges.HasFlag(Privilege.Create)) names.Add("CREATE");
+        if (monitor) names.Add("MONITOR");
         return string.Join(", ", names);
     }
 

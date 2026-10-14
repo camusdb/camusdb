@@ -81,6 +81,32 @@ public sealed class Principal
     public bool CanAdministerUsers => IsSuperuser;
 
     /// <summary>
+    /// True when this principal may read the node's own resource state (<c>GetNodeStats</c>,
+    /// <c>GET /v1/admin/stats</c>): a superuser, or a holder of <see cref="Privilege.Monitor"/>.
+    ///
+    /// <para>Only a global grant counts. The grant validator refuses MONITOR at any narrower scope, so
+    /// a database- or table-scoped grant that carries the bit can exist only if a record was written
+    /// by something other than <c>GRANT</c>; ignoring it keeps the rule "MONITOR is on <c>*.*</c>"
+    /// true at the point of use, not only at the point of grant.</para>
+    /// </summary>
+    public bool CanMonitorNode
+    {
+        get
+        {
+            if (IsSuperuser)
+                return true;
+
+            foreach (GrantRecord grant in grants)
+            {
+                if (grant.Scope.Kind == GrantScopeKind.Global && (grant.Privileges & Privilege.Monitor) != 0)
+                    return true;
+            }
+
+            return false;
+        }
+    }
+
+    /// <summary>
     /// True when this principal holds <b>at least one</b> privilege on the object identified by
     /// <paramref name="databaseId"/> / <paramref name="tableId"/>. This is the visibility test used by
     /// the catalog-listing surfaces (<c>SHOW TABLES</c>): a name is listed when the caller could do
@@ -100,7 +126,9 @@ public sealed class Principal
 
         foreach (GrantRecord grant in grants)
         {
-            if (grant.Privileges == Privilege.None)
+            // Only object privileges make an object visible. A MONITOR-only grant on *.* reads node
+            // resource state and must not make every table listable.
+            if ((grant.Privileges & Privilege.All) == Privilege.None)
                 continue;
 
             switch (grant.Scope.Kind)
@@ -139,7 +167,8 @@ public sealed class Principal
 
         foreach (GrantRecord grant in grants)
         {
-            if (grant.Privileges == Privilege.None)
+            // As in HasAnyPrivilege: MONITOR alone reveals no database.
+            if ((grant.Privileges & Privilege.All) == Privilege.None)
                 continue;
 
             if (grant.Scope.Kind == GrantScopeKind.Global)

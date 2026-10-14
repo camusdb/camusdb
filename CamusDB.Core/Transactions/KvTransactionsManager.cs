@@ -136,7 +136,8 @@ public sealed class KvTransactionsManager : IDisposable
         CamusDBOptions options,
         Func<Kommander.Time.HLCTimestamp?, Kommander.Time.HLCTimestamp>? mintLocalT = null,
         ILogger<ICamusDB>? logger = null,
-        IQueryResultCache? cache = null)
+        IQueryResultCache? cache = null,
+        DiskSpaceMonitor? diskSpace = null)
     {
         ArgumentNullException.ThrowIfNull(kahuna);
         this.kahuna = kahuna;
@@ -144,7 +145,7 @@ public sealed class KvTransactionsManager : IDisposable
         this.mintLocalT = mintLocalT;
         this.logger = logger ?? NullLogger<ICamusDB>.Instance;
         _cache = cache;
-        diskSpace = new DiskSpaceMonitor(options.DataDirectory, this.logger);
+        this.diskSpace = diskSpace ?? new DiskSpaceMonitor(options.DataDirectory, this.logger);
     }
 
     /// <summary>
@@ -152,6 +153,11 @@ public sealed class KvTransactionsManager : IDisposable
     /// the write-admission gate. The data directory is <see cref="ConfigMutability.Restart"/>-class,
     /// so latching it here at construction is correct; the watermark itself is read from the live
     /// <see cref="options"/> snapshot on every check.
+    ///
+    /// <para>A database opened by the engine receives the node's shared monitor, the one the node
+    /// stats call also reads, so the stats call's <c>below_watermark</c> is this gate's own answer.
+    /// A manager built without one (the registry's, tests) watches the same volume with its own
+    /// cache.</para>
     /// </summary>
     private readonly DiskSpaceMonitor diskSpace;
 

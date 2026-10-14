@@ -229,7 +229,24 @@ and tables it reaches, and whether it is a superuser. `SHOW VARIABLES`, `SHOW EN
 
 Privileges: `SELECT`, `INSERT`, `UPDATE`, `DELETE` (DML); `CREATE TABLE`, `DROP`, `ALTER`, `INDEX`,
 `CREATE` (DDL); `ALL [PRIVILEGES]` (the union at grant time — it does **not** silently widen when new
-privileges are added later).
+privileges are added later); `MONITOR` (server-level, see below).
+
+**`MONITOR`** lets an account read the node's own disk, CPU and memory through the node stats call
+(gRPC `GetNodeStats`, REST `GET /v1/admin/stats` — see [node-stats.md](node-stats.md)) without being a
+superuser:
+
+```sql
+GRANT MONITOR ON *.* TO monitoring;
+REVOKE MONITOR ON *.* FROM monitoring;
+```
+
+- It is valid on `*.*` only. `GRANT` or `REVOKE` of `MONITOR` on `db.*` or `db.table` is refused with
+  `InvalidPrivilege` (`CADB0515`).
+- It is not part of `ALL PRIVILEGES`. Grant it by name. `REVOKE ALL PRIVILEGES ON *.*` leaves it in
+  place, and `REVOKE MONITOR ON *.*` removes it.
+- It gives no data access and no catalog visibility. An account that holds only `MONITOR` cannot read
+  a table, and `SHOW DATABASES` and `SHOW TABLES` list nothing for it.
+- `SHOW GRANTS` shows it as `MONITOR`, or as `ALL PRIVILEGES, MONITOR` next to a full grant.
 
 **Scopes**, broadest to narrowest, with precedence `*.* ⊃ db.* ⊃ db.table`:
 

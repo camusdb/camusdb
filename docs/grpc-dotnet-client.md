@@ -111,6 +111,26 @@ await conn.ExecuteDdlAsync("", "CREATE DATABASE mydb");
 await conn.ExecuteDdlAsync("mydb", "CREATE TABLE items (id oid PRIMARY KEY, name string(100))");
 ```
 
+## Node stats
+
+`GetNodeStatsAsync` returns the disk, CPU and memory of one node (the `GetNodeStats` RPC; see
+[node-stats.md](node-stats.md) for every field). It is a unary call, like DDL:
+
+```csharp
+NodeStatsReply stats = await conn.GetNodeStatsAsync();            // the first configured address
+DiskVolumeStats data = stats.Disks[0];                            // role "data"
+Console.WriteLine($"{data.AvailableBytes} bytes free, below watermark: {data.BelowWatermark}");
+
+foreach (string address in conn.EndpointAddresses)                // one call per node of a cluster
+{
+    NodeStatsReply node = await conn.GetNodeStatsAsync(address);
+    Console.WriteLine($"{node.Node.Endpoint}: {node.Cpu.ProcessCpuPercent:F1}% CPU");
+}
+```
+
+Each node answers only for itself. A value the node cannot read is `-1`, and `stats.Errors` names the
+field and the reason.
+
 ## Transactions
 
 ```csharp

@@ -44,14 +44,18 @@ internal sealed class TestServerCallContext : ServerCallContext
 {
     private readonly CancellationToken ct;
 
-    public TestServerCallContext(CancellationToken ct = default)
+    private readonly string method;
+
+    /// <param name="method">The gRPC method path the call reports, for an interceptor that branches on it.</param>
+    public TestServerCallContext(CancellationToken ct = default, string method = "/camus.CamusSql/Test")
     {
         this.ct             = ct;
+        this.method         = method;
         RequestHeadersCore  = new Metadata();
         ResponseTrailersCore = new Metadata();
     }
 
-    protected override string          MethodCore           => "/camus.CamusSql/Test";
+    protected override string          MethodCore           => method;
     protected override string          HostCore             => "localhost";
     protected override string          PeerCore             => "localhost";
     protected override DateTime        DeadlineCore         => DateTime.MaxValue;

@@ -25,9 +25,16 @@ namespace CamusDB.App.Grpc;
 /// across many statements, so counting the stream itself would pin the gauge above zero for as long
 /// as any client holds it open. That path counts each batched op individually instead (see
 /// <see cref="CamusSqlService"/>), which is the correct granularity.</para>
+///
+/// <para><c>GetNodeStats</c> is not counted either. It is a monitor's poll, not foreground work, and a
+/// monitor that counted as load would make the node it watches back off its own maintenance — the
+/// same reason the dashboard's REST routes stay outside the HTTP gauge.</para>
 /// </summary>
 public sealed class ForegroundRequestGaugeInterceptor : Interceptor
 {
+    /// <summary>The gRPC method path of the node stats call (the proto declares no package).</summary>
+    private const string NodeStatsMethod = "/CamusSql/GetNodeStats";
+
     private readonly ForegroundRequestGauge gauge;
 
     public ForegroundRequestGaugeInterceptor(ForegroundRequestGauge gauge)
@@ -40,6 +47,9 @@ public sealed class ForegroundRequestGaugeInterceptor : Interceptor
         ServerCallContext context,
         UnaryServerMethod<TRequest, TResponse> continuation)
     {
+        if (string.Equals(context.Method, NodeStatsMethod, StringComparison.Ordinal))
+            return await continuation(request, context).ConfigureAwait(false);
+
         gauge.Increment();
         try
         {

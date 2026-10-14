@@ -63,6 +63,13 @@ internal sealed class DatabaseOpener
     /// <summary>Evicts a relation's cached statistics; supplied by the engine that owns them.</summary>
     private readonly Action<DatabaseDescriptor, string>? evictTableStatistics;
 
+    /// <summary>
+    /// The node's shared data-volume monitor, handed to every database's transaction manager so all
+    /// write gates and the node stats call answer from one cache. Null leaves each manager to build its
+    /// own.
+    /// </summary>
+    private readonly Storage.DiskSpaceMonitor? diskSpace;
+
     public DatabaseOpener(
         CommandExecutor commandExecutor,
         DatabaseDescriptors databaseDescriptors,
@@ -73,7 +80,8 @@ internal sealed class DatabaseOpener
         Task<DatabaseRegistry> registryTask,
         bool isClusterMode = false,
         IQueryResultCache? cache = null,
-        Action<DatabaseDescriptor, string>? evictTableStatistics = null)
+        Action<DatabaseDescriptor, string>? evictTableStatistics = null,
+        Storage.DiskSpaceMonitor? diskSpace = null)
     {
         this.commandExecutor = commandExecutor;
         this.options = options;
@@ -119,6 +127,7 @@ internal sealed class DatabaseOpener
         this.registryTask = registryTask;
         this.cache = cache;
         this.evictTableStatistics = evictTableStatistics;
+        this.diskSpace = diskSpace;
     }
 
     public async ValueTask<DatabaseDescriptor> Open(string name, bool recoveryMode = false)
@@ -202,7 +211,7 @@ internal sealed class DatabaseOpener
             return sharedNode.Raft.HybridLogicalClock.SendOrLocalEvent(sharedNode.Raft.GetLocalNodeId());
         }
 
-        KvTransactionsManager transactions = new(sharedNode.Kahuna, options, (Func<HLCTimestamp?, HLCTimestamp>)mintLocalT, logger, cache);
+        KvTransactionsManager transactions = new(sharedNode.Kahuna, options, (Func<HLCTimestamp?, HLCTimestamp>)mintLocalT, logger, cache, diskSpace);
         ConcurrentDictionary<string, AsyncLazy<TableDescriptor>> tableDescriptors = new(StringComparer.OrdinalIgnoreCase);
 
         BranchSnapshotHoldGuard? snapshotProtection = ancestors.Count > 0

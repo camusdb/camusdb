@@ -244,6 +244,7 @@ locking fields on the request are **ignored** — the transaction's properties w
 | `CommitTransaction(TxnHandle) → CommitReply` | unary | Commit by handle. |
 | `RollbackTransaction(TxnHandle) → RollbackReply` | unary | Rollback by handle. |
 | `Ping(PingRequest) → PingReply` | unary | Liveness / round-trip check. |
+| `GetNodeStats(NodeStatsRequest) → NodeStatsReply` | unary | Disk, CPU and memory of the node that receives the call. Needs a superuser or `MONITOR` when authentication is on. See [node-stats.md](node-stats.md). |
 
 `SqlRequest.parameters` is a `map<string, Value>` for bound parameters — prefer it over string
 interpolation to avoid injection and to carry typed values (dates, uuids, bytes) losslessly.
@@ -744,3 +745,4 @@ Use this as an acceptance list when building a client:
 - The retry contract the error model mirrors: [serializable-retry-contract.md](serializable-retry-contract.md)
 - Transaction coordinator internals: [kahuna-transaction-coordinator.md](kahuna-transaction-coordinator.md)
 - Server configuration (`grpc_*` keys): [configuration.md](configuration.md)
+- Node resource state (`GetNodeStats`, the `MONITOR` privilege): [node-stats.md](node-stats.md)

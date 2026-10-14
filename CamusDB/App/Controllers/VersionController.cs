@@ -71,7 +71,7 @@ public sealed class VersionController : ControllerBase
     /// (<c>1.4.14</c>), over the assembly version, which is usually rounded to the major (<c>1.0.0.0</c>)
     /// and so cannot distinguish two builds a benchmark must not compare.
     /// </summary>
-    private static string VersionOf(Assembly assembly)
+    internal static string VersionOf(Assembly assembly)
     {
         string? informational = assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion;
         if (!string.IsNullOrWhiteSpace(informational))
