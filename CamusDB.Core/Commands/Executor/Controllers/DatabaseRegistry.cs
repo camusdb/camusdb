@@ -9,6 +9,7 @@
 using System.Collections.Concurrent;
 using System.Diagnostics;
 using CamusDB.Core.Catalogs;
+using CamusDB.Core.Catalogs.Meta;
 using CamusDB.Core.Util;
 using CamusDB.Core.Util.Diagnostics;
 using CamusDB.Core.CommandsExecutor.Models;
@@ -2037,55 +2038,18 @@ public sealed class DatabaseRegistry : IAsyncDisposable
     /// Takes the exclusive lock on registry key <paramref name="key"/> inside <paramref name="tx"/>,
     /// with a short bounded retry.
     ///
-    /// <para>The lock is registered with the transaction coordinator under an operation id, and Kahuna
-    /// answers a repeated id with the outcome it cached for that id. That is what a retry wants after
-    /// <c>MustRetry</c>: the first attempt may still be pending, and the replay folds it once. It is not
-    /// what a retry wants after <c>AlreadyLocked</c>: that attempt is finished, so the same id only replays
-    /// the denial, and the retry never sees the holder commit and leave. A fresh id is minted for the next
-    /// attempt after every <c>AlreadyLocked</c>. Two creates of one name on different nodes depend on
-    /// this: the loser must get the lock after the winner commits, read the winner's entry and report
-    /// <c>DatabaseAlreadyExists</c>.</para>
+    /// <para>A key another transaction holds is retried until that holder commits; see
+    /// <see cref="CatalogKeyLock"/> for why each retry after <c>AlreadyLocked</c> needs a fresh operation
+    /// id. Two creates of one name on different nodes depend on this: the loser must get the lock after
+    /// the winner commits, read the winner's entry and report <c>DatabaseAlreadyExists</c>.</para>
     ///
     /// <para>A lock still contended when the budget runs out is reported as
     /// <see cref="CamusDBErrorCodes.TransactionMustRetry"/>, because another writer holds it and nothing is
     /// wrong with the store. Any other refusal is unexpected for a registry key and keeps
     /// <see cref="CamusDBErrorCodes.SystemSpaceCorrupt"/>. Both are thrown before a commit request.</para>
     /// </summary>
-    private async Task AcquireRegistryKeyLockAsync(KvTransaction tx, string key)
-    {
-        KeyValueResponseType lockType;
-        int lockRetries = 0;
-        TransactionOperationId lockOperationId = TransactionOperationId.NewRandom();
-
-        do
-        {
-            if (lockRetries > 0)
-                await Task.Delay(lockRetries * 10).ConfigureAwait(false);
-
-            (lockType, _, _, _) = await kahuna.LocateAndTryAcquireExclusiveLock(
-                tx.TransactionId, key, 0,
-                KeyValueDurability.Persistent, CancellationToken.None,
-                coordinatorKey: tx.CoordinatorKey, operationId: lockOperationId
-            ).ConfigureAwait(false);
-
-            if (lockType == KeyValueResponseType.AlreadyLocked)
-                lockOperationId = TransactionOperationId.NewRandom();
-        }
-        while (lockType is KeyValueResponseType.AlreadyLocked or KeyValueResponseType.MustRetry
-               && ++lockRetries < MaxRetries);
-
-        if (lockType == KeyValueResponseType.Locked)
-            return;
-
-        if (lockType is KeyValueResponseType.AlreadyLocked or KeyValueResponseType.MustRetry)
-            throw new CamusDBException(
-                CamusDBErrorCodes.TransactionMustRetry,
-                $"Registry key '{key}' is still locked by another transaction after {MaxRetries} attempts ({lockType}); retry the statement");
-
-        throw new CamusDBException(
-            CamusDBErrorCodes.SystemSpaceCorrupt,
-            $"Failed to lock registry key '{key}': {lockType}");
-    }
+    private Task AcquireRegistryKeyLockAsync(KvTransaction tx, string key) =>
+        CatalogKeyLock.AcquireExclusiveAsync(kahuna, tx, key, MaxRetries, "registry");
 
     private async Task DeleteRegistryKey(KvTransaction tx, string key)
     {

@@ -113,6 +113,13 @@ reuses it across its own transient retries (a stable id = idempotent replay). A 
 that resends only the still-pending subset mints a **fresh** id per attempt, because a shrunken
 batch is genuinely different work. When in doubt: one logical operation, one operation id.
 
+**The replay includes a failure.** The cached completion is whatever the first attempt returned,
+so a lock attempt that got `AlreadyLocked` replays `AlreadyLocked` (with an unknown holder) for as
+long as the same id is sent, even after the holder commits and leaves. A retry that waits for a
+holder is therefore new work: mint a fresh id after `AlreadyLocked`, and keep the id only after
+`MustRetry`, where the first attempt can still be pending. `CatalogKeyLock.AcquireExclusiveAsync`
+does this for every catalog, registry and auth key lock.
+
 ---
 
 ## 5. Pessimistic vs optimistic locking

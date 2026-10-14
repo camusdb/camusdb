@@ -10,6 +10,7 @@ using System.Diagnostics;
 using System.Linq;
 using System.Runtime.CompilerServices;
 using CamusDB.Core.Catalogs;
+using CamusDB.Core.Catalogs.Meta;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.Storage.Kv;
 using CamusDB.Core.Transactions;
@@ -1342,26 +1343,14 @@ public sealed class AuthCatalog
         tx.TrackModified(key, KeyValueDurability.Persistent);
     }
 
-    private async Task AcquireKeyLock(KvTransaction tx, string key)
-    {
-        KeyValueResponseType lockType;
-        int lockRetries = 0;
-        TransactionOperationId lockOperationId = TransactionOperationId.NewRandom();
-
-        do
-        {
-            if (lockRetries > 0)
-                await Task.Delay(lockRetries * 10).ConfigureAwait(false);
-
-            (lockType, _, _, _) = await kahuna.LocateAndTryAcquireExclusiveLock(
-                tx.TransactionId, key, 0,
-                KeyValueDurability.Persistent, CancellationToken.None,
-                coordinatorKey: tx.CoordinatorKey, operationId: lockOperationId).ConfigureAwait(false);
-        }
-        while (lockType is KeyValueResponseType.AlreadyLocked or KeyValueResponseType.MustRetry
-               && ++lockRetries < MaxRetries);
-
-        if (lockType != KeyValueResponseType.Locked)
-            throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, $"Failed to lock auth key '{key}': {lockType}");
-    }
+    /// <summary>
+    /// Takes the exclusive lock on auth key <paramref name="key"/> inside <paramref name="tx"/>. A key
+    /// another transaction holds is retried until that holder commits, and a lock still held when the
+    /// budget runs out is reported as the retryable <see cref="CamusDBErrorCodes.TransactionMustRetry"/>;
+    /// see <see cref="CatalogKeyLock"/> for why each retry after <c>AlreadyLocked</c> needs a fresh
+    /// operation id. Every user and grant change takes the generation key's lock, so two concurrent
+    /// account statements depend on this wait.
+    /// </summary>
+    private Task AcquireKeyLock(KvTransaction tx, string key) =>
+        CatalogKeyLock.AcquireExclusiveAsync(kahuna, tx, key, MaxRetries, "auth");
 }
