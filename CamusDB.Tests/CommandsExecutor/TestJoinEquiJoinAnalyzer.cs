@@ -69,6 +69,28 @@ public sealed class TestJoinEquiJoinAnalyzer
     }
 
     [Test]
+    public void TryMatch_PrefersTheUniqueIndex_OverANonUniqueOneWrittenFirst()
+    {
+        // The ON names the non-unique user_id index first and the primary key second. A probe of
+        // the primary key returns one row; a probe of user_id returns every post of the user.
+        BoundTableSource users = MakeBoundSource("app_users", "u", [("id", ColumnType.Id), ("last_post_id", ColumnType.Id)]);
+        BoundTableSource posts = MakeBoundSource("posts", "p", [("id", ColumnType.Id), ("user_id", ColumnType.Id)], IndexType.Multi, "user_id");
+        posts.Table.Indexes["~pk"] = new TableIndexSchema("~pk", ["id"], IndexType.Unique, SchemaElementState.Public);
+
+        List<BoundTableSource> sources = [users, posts];
+        SelectQuery query = new SelectQueryCreator().CreateSelectQuery(
+            SQLParserProcessor.Parse(
+                "SELECT u.email FROM app_users u JOIN posts p ON p.user_id = u.id AND p.id = u.last_post_id"));
+        BoundSelectQuery bound = new(query, sources, new QueryRowNameResolver(sources));
+
+        Assert.IsTrue(JoinEquiJoinAnalyzer.TryMatch(posts, ((JoinSource)query.Source).OnPredicate, bound, out JoinEquiJoinIndexMatch match));
+
+        Assert.AreEqual("id", match.RightIndexColumn);
+        Assert.AreEqual("u.last_post_id", match.LeftLookupColumn);
+        Assert.IsTrue(match.UseUniqueLookup);
+    }
+
+    [Test]
     public void TryMatch_IgnoresIndexStillBeingBuiltOnline()
     {
         // A WriteOnly index is mid-backfill: probing it would silently miss rows inserted

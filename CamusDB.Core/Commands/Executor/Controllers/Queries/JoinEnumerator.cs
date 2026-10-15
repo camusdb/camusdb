@@ -120,7 +120,7 @@ internal static class JoinEnumerator
         /// same bit for bit.
         /// </summary>
         public double RowsOf(int mask) =>
-            SubsetRows is { } dense ? dense[mask] : EstimateMaskRows(mask, LeafRows, Selectivity, []);
+            SubsetRows is { } dense ? dense[mask] : EstimateMaskRows(mask, LeafRows, Selectivity, [], []);
     }
 
     /// <summary>
@@ -460,9 +460,15 @@ internal static class JoinEnumerator
     /// A set of equal columns: the columns that the equi-conjuncts of the pool join, closed over
     /// shared columns (<c>a.x = b.x</c> and <c>b.x = c.x</c> put <c>a.x</c>, <c>b.x</c> and
     /// <c>c.x</c> in one class). <see cref="Leaves"/> has one entry for each leaf with a column in
-    /// the class, in leaf order, with that column's distinct count (null when unknown).
+    /// the class, in leaf order, with that column's distinct count (null when unknown) and whether
+    /// its value distribution has heavy values. <see cref="PairSelectivity"/> is the skew-aware
+    /// selectivity of each pair of members (<see cref="JoinKeyDistribution.JoinSelectivity"/>),
+    /// indexed by position in <see cref="Leaves"/>; null when some member has no distribution, in
+    /// which case the class uses the distinct counts alone.
     /// </summary>
-    private sealed record EquivalenceClass(IReadOnlyList<(int Leaf, long? DistinctCount)> Leaves);
+    private sealed record EquivalenceClass(
+        IReadOnlyList<(int Leaf, long? DistinctCount, bool Skewed)> Leaves,
+        double[,]? PairSelectivity);
 
     /// <summary>
     /// Returns one row estimate for each subset of the leaves, indexed by leaf mask. The estimate
@@ -478,11 +484,22 @@ internal static class JoinEnumerator
     ///   join of <c>k</c> tables on one value, when the smaller value sets are contained in the
     ///   larger). Without classes, a query that names one movie through six columns and writes all
     ///   fifteen equalities multiplies fifteen selectivities where five describe the result, and
-    ///   every join of the plan looks almost empty.</item>
+    ///   every join of the plan looks almost empty. When every column of the class has a value
+    ///   distribution (<see cref="CardinalityEstimator.EstimateJoinKeyDistribution"/>) and one of
+    ///   the subset's columns has heavy values, the <c>k − 1</c> factors are instead the skew-aware
+    ///   pair selectivities (<see cref="JoinKeyDistribution.JoinSelectivity"/>) between an
+    ///   <b>anchor</b>, the skewed column with the fewest distinct values, and each other column:
+    ///   values common in the anchor and in another column multiply as they do in the data. The
+    ///   distinct-count factors are the special case with no heavy value. One pair at a time, never
+    ///   the sum over the product of every column's frequency: the mean of a product of several
+    ///   heavy-tailed frequencies is dominated by the few most common values, and a leaf filter
+    ///   that excludes them (one keyword, one company) makes that estimate wrong by orders of
+    ///   magnitude, which turned cheap index lookups into whole-table hash joins on the Join
+    ///   Order Benchmark cliques.</item>
     ///   <item>The equi-conjuncts <c>x.c = y.d</c> whose class has those two columns only form one
     ///   <b>pair group</b> for each pair of tables, with one selectivity
     ///   (<see cref="CardinalityEstimator.EstimateEquiJoinSelectivity"/>), so a composite key uses
-    ///   its composite distinct-value count.</item>
+    ///   its composite distinct-value count and a skewed single-column key uses its histogram.</item>
     ///   <item>Every other edge (non-equi, an expression, three or more tables) is its own group with
     ///   <see cref="CardinalityEstimator.FallbackSelectivity"/>. Single-table conjuncts and constants
     ///   are not counted.</item>
@@ -515,9 +532,10 @@ internal static class JoinEnumerator
     {
         double[] rows = new double[1 << n];
         List<long?> counts = [];
+        List<int> members = [];
 
         for (int mask = 1; mask < rows.Length; mask++)
-            rows[mask] = EstimateMaskRows(mask, leafRows, selectivity, counts);
+            rows[mask] = EstimateMaskRows(mask, leafRows, selectivity, counts, members);
 
         return rows;
     }
@@ -527,9 +545,15 @@ internal static class JoinEnumerator
     /// leaf rows, then the selectivity of each group inside it, then the factor of each column
     /// class over its leaves. It reads no other subset, so any subset can be computed alone. The
     /// order of the products is fixed; the dense array and a single-mask call give the same double.
-    /// <paramref name="counts"/> is scratch space, reused across calls by a caller that loops.
+    /// <paramref name="counts"/> and <paramref name="members"/> are scratch space, reused across
+    /// calls by a caller that loops.
     /// </summary>
-    private static double EstimateMaskRows(int mask, IReadOnlyList<double> leafRows, SelectivityModel selectivity, List<long?> counts)
+    private static double EstimateMaskRows(
+        int mask,
+        IReadOnlyList<double> leafRows,
+        SelectivityModel selectivity,
+        List<long?> counts,
+        List<int> members)
     {
         double estimate = 1.0;
 
@@ -548,27 +572,64 @@ internal static class JoinEnumerator
         foreach (EquivalenceClass equivalence in selectivity.Classes)
         {
             counts.Clear();
-            foreach ((int leaf, long? distinct) in equivalence.Leaves)
+            members.Clear();
+
+            for (int member = 0; member < equivalence.Leaves.Count; member++)
             {
-                if ((mask & (1 << leaf)) != 0)
-                    counts.Add(distinct);
+                (int leaf, long? distinct, _) = equivalence.Leaves[member];
+                if ((mask & (1 << leaf)) == 0)
+                    continue;
+
+                counts.Add(distinct);
+                members.Add(member);
             }
 
-            estimate *= ClassFactor(counts);
+            estimate *= ClassFactor(equivalence, members, counts);
         }
 
         return estimate;
     }
 
     /// <summary>
-    /// The selectivity of one column class over the tables of a subset, given their distinct
-    /// counts: <c>1 / d</c> for each table except the one with the smallest count. See
-    /// <see cref="EstimateSubsetRows"/>.
+    /// The selectivity of one column class over the tables of a subset (<paramref name="members"/>
+    /// are their positions in the class, <paramref name="counts"/> their distinct counts, in the
+    /// same order). With the pair selectivities of the class and a skewed column in the subset, it
+    /// is the product of the pair selectivity between the anchor, the skewed column with the
+    /// fewest distinct values, and each other column. Otherwise it is <c>1 / d</c> for each column
+    /// except the one with the smallest count. See <see cref="EstimateSubsetRows"/>.
     /// </summary>
-    private static double ClassFactor(List<long?> counts)
+    private static double ClassFactor(EquivalenceClass equivalence, List<int> members, List<long?> counts)
     {
         if (counts.Count < 2)
             return 1.0;
+
+        if (equivalence.PairSelectivity is { } pairs)
+        {
+            int anchor = -1;
+            long anchorDistinct = long.MaxValue;
+
+            for (int i = 0; i < members.Count; i++)
+            {
+                long distinct = counts[i] is { } c && c > 0 ? c : long.MaxValue;
+                if (equivalence.Leaves[members[i]].Skewed && distinct < anchorDistinct)
+                {
+                    anchor = i;
+                    anchorDistinct = distinct;
+                }
+            }
+
+            if (anchor >= 0)
+            {
+                double anchored = 1.0;
+                for (int i = 0; i < members.Count; i++)
+                {
+                    if (i != anchor)
+                        anchored *= pairs[members[anchor], members[i]];
+                }
+
+                return anchored;
+            }
+        }
 
         long? smallestKnown = null;
         foreach (long? count in counts)
@@ -723,7 +784,7 @@ internal static class JoinEnumerator
             if (members.Count <= 2)
                 continue;
 
-            SortedDictionary<int, long?> byLeaf = [];
+            SortedDictionary<int, (long? DistinctCount, JoinKeyDistribution? Distribution)> byLeaf = [];
             foreach (int member in members)
             {
                 (int leaf, string column) = nodes[member];
@@ -731,14 +792,57 @@ internal static class JoinEnumerator
                     continue;
 
                 TableDescriptor? table = FindTableDescriptor(graph.Leaves[leaf].Alias, bound);
-                byLeaf[leaf] = CardinalityEstimator.EstimateKeyDistinctCount(
-                    table, [column], TableRows(table, database, stats), database, stats);
+                long tableRows = TableRows(table, database, stats);
+                byLeaf[leaf] = (
+                    CardinalityEstimator.EstimateKeyDistinctCount(table, [column], tableRows, database, stats),
+                    CardinalityEstimator.EstimateJoinKeyDistribution(table, column, tableRows, database, stats));
             }
 
-            classes.Add(new EquivalenceClass(byLeaf.Select(kv => (kv.Key, kv.Value)).ToList()));
+            List<(int Leaf, long? DistinctCount, bool Skewed)> classLeaves = new(byLeaf.Count);
+            List<JoinKeyDistribution?> distributions = new(byLeaf.Count);
+            foreach ((int leaf, (long? distinct, JoinKeyDistribution? distribution)) in byLeaf)
+            {
+                classLeaves.Add((leaf, distinct, distribution is { HeavyValues.Count: > 0 }));
+                distributions.Add(distribution);
+            }
+
+            classes.Add(new EquivalenceClass(classLeaves, PairSelectivities(distributions, classLeaves)));
         }
 
         return (groups, classes);
+    }
+
+    /// <summary>
+    /// The skew-aware selectivity of each pair of class members, or null when a member has no
+    /// distribution. A pair whose distributions cannot be compared (heavy values of two types)
+    /// takes the textbook <c>1 / max(d)</c>.
+    /// </summary>
+    private static double[,]? PairSelectivities(
+        IReadOnlyList<JoinKeyDistribution?> distributions,
+        IReadOnlyList<(int Leaf, long? DistinctCount, bool Skewed)> leaves)
+    {
+        int count = distributions.Count;
+        double[,] pairs = new double[count, count];
+
+        for (int i = 0; i < count; i++)
+        {
+            if (distributions[i] is null)
+                return null;
+        }
+
+        for (int i = 0; i < count; i++)
+        {
+            for (int j = i + 1; j < count; j++)
+            {
+                double selectivity = JoinKeyDistribution.JoinSelectivity(distributions[i]!, distributions[j]!)
+                    ?? 1.0 / Math.Max(Math.Max(leaves[i].DistinctCount ?? 1L, leaves[j].DistinctCount ?? 1L), 1L);
+
+                pairs[i, j] = selectivity;
+                pairs[j, i] = selectivity;
+            }
+        }
+
+        return pairs;
     }
 
     private static long TableRows(TableDescriptor? table, DatabaseDescriptor database, StatisticsManager? stats) =>

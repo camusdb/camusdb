@@ -460,7 +460,11 @@ in `SQLExecutorBaseCreator.EvalComparison`, `EvalAnd` and `EvalOr`, which every 
      and `JoinQueryPlanner` for algorithm selection. Every physical join node carries the
      `JoinKind` (`Inner` or `LeftOuter`); the same operators serve both kinds, because in each of
      them the left input is the preserved side:
-     - Right join key has a single-column index → `IndexNestedLoopJoinNode` (INLJ); unless…
+     - Right join key has a single-column index → `IndexNestedLoopJoinNode` (INLJ). When several
+       `ON` conjuncts could drive the lookup, one on a unique index wins over one on a non-unique
+       index, whatever their order in the `ON`: a unique probe returns one row, a non-unique probe
+       returns every row with the value, and a popular value can mean thousands of them per left
+       row; unless…
      - Both sides have free index ordering (secondary index prefix covers the join key) **and** the
        outer side is large (> 100 rows estimated) → `MergeJoinNode` (streaming merge join); or…
      - Equi-join with stats available and hash preferred over INLJ → `HashJoinNode` (build =
@@ -605,7 +609,9 @@ contains a subquery does read storage for the inner query. The outer query is ne
 
 `EXPLAIN (ANALYZE) SELECT …` actually executes the query, drains the cursor, and adds **actual** runtime
 counters per node. Counters live in `PlanNodeStats` (`Models/Plans/PlanNodeStats.cs`):
-`RowsRead`, `RowsEmitted`, `KvPointLookups`, `KvScanEntries`, and `ElapsedMs` (root-only).
+`RowsRead`, `RowsEmitted`, `KvPointLookups`, `KvScanEntries`, `ElapsedMs` (root-only), `RanAs` (the
+strategy a hash join actually ran, when it differs from the plan) and `BroadcastSpans` (per-span actuals
+of a broadcast probe).
 Extra result columns: `actual_rows`, `rows_read`, `actual_time_ms` (NULL on non-root nodes),
 `kv_lookups`, `kv_scan_entries`.
 
@@ -615,8 +621,15 @@ Design points worth knowing:
   is set (only EXPLAIN ANALYZE sets it). Normal `SELECT` pays nothing.
 - **Filter rows are folded into the scan.** A `filter` row reports `actual_rows` from the child scan's
   post-filter emit count; its KV counters are 0 (storage cost is charged to the scan).
-- **Joins are not yet supported under ANALYZE** — it throws `InvalidInput`, because the linear executor it
-  uses emits no step for join nodes. Use plain `EXPLAIN` for joins. (Join instrumentation is future work.)
+- **Join plans are instrumented too.** A join plan runs through `QueryJoinExecutor.ExecuteJoinPlan`;
+  `ExplainExecutor` attaches a `PlanNodeStats` to every node before the cursor opens, because the join
+  executor allocates none. A join node has one plan input, its left side, so its storage counters
+  (`rows_read`, `kv_lookups`, `kv_scan_entries`) count the reads of its right side, and `actual_rows`
+  counts the rows the join produced. The row's detail adds `ran=` when a hash join changed strategy at
+  run time. See [`docs/explain.md`](./explain.md) for the per-operator rules.
+- **Partial aggregation is off under ANALYZE.** The gather branch in `QueryExecutor` takes the
+  partial-aggregate path only when runtime stats are not collected, so `EXPLAIN (ANALYZE)` of a
+  distributed `COUNT`/`SUM`/`MIN`/`MAX` measures the row-gather path, not the plan a plain `SELECT` runs.
 
 ---
 
@@ -813,10 +826,23 @@ an estimated row fraction/count. Falls back to the fixed constants above when no
 |A ⋈ B| ≈ |A| · |B| / max(NDV_A.key, NDV_B.key)
 ```
 
-with one refinement — **FK-aware uniqueness**: if the join key *contains every column* of a unique index
-on one side (`IsJoinKeyUnique`, set-containment, **not** prefix-match — a join on `tenant_id` alone of a
-`UNIQUE(tenant_id, email)` is *not* unique), that side contributes ≤1 match per row and the result is the
-other side's row count. Multi-column join keys use `KeyNdv`; single-column keys use `ColumnNdv`.
+with two refinements:
+
+- **FK-aware uniqueness**: if the join key *contains every column* of a unique index
+  on one side (`IsJoinKeyUnique`, set-containment, **not** prefix-match — a join on `tenant_id` alone of a
+  `UNIQUE(tenant_id, email)` is *not* unique), that side contributes ≤1 match per row and the result is the
+  other side's row count. Multi-column join keys use `KeyNdv`; single-column keys use `ColumnNdv`.
+- **Skew-aware keys** (`JoinKeyDistribution`): a single-column key that is unique on neither side and has
+  a histogram on both is estimated from the two value distributions, `|A| · |B| · Σ_v f_A(v) · f_B(v)`.
+  The textbook formula assumes every value is as common as every other; when both sides concentrate on
+  the same values (customers and stores both in the popular cities) the true join is many times larger.
+  The **heavy values** of a column are the values that fill whole buckets of its equi-depth histogram
+  (`DistinctInBucket = 1`), with the rows of those buckets as their frequency; the rest of the rows are
+  the **residual**, spread evenly over the rest of the distinct values. The sum runs over the heavy
+  values of either side (a value heavy on one side only meets the other side's residual at its average
+  frequency), plus the two residuals joined with the textbook formula. With no heavy value on either
+  side this is exactly the textbook estimate. ANALYZE builds histograms for indexed columns only, so
+  the refinement applies to indexed join keys.
 
 ## Network & distribution cost
 
@@ -1026,7 +1052,21 @@ rows[S] = Π leafRows[t ∈ S] × Π selectivity(g ⊆ S) × Π classFactor(C, S
 - **Pair groups.** The equi-conjuncts `x.c = y.d` whose class has only those two columns form one group for
   each pair of tables, with one selectivity, `CardinalityEstimator.EstimateEquiJoinSelectivity`:
   `1 / max(ndvX, ndvY)`; `FallbackSelectivity` (0.1) when neither side has a count. A composite key uses its
-  composite NDV.
+  composite NDV. A single-column key, unique on neither side, with a histogram on both, uses the
+  skew-aware selectivity of `JoinKeyDistribution` (see *Join cardinality* above).
+- **Skewed classes.** When every column of a class has a value distribution
+  (`CardinalityEstimator.EstimateJoinKeyDistribution`: uniform over the row count for a unique key, the
+  histogram's heavy values plus a uniform residual for an indexed column, uniform over the NDV for a
+  column with a count and no histogram) and a column of the subset has heavy values, the `k − 1` factors
+  are the skew-aware pair selectivities between an **anchor**, the skewed column of the subset with the
+  fewest distinct values, and each other column. The distinct-count factors are the special case with no
+  heavy value. This is what makes the cycle `customers ⋈ orders ⋈ stores ⋈ cities`, where customers and
+  stores both concentrate in the popular cities, estimate at the size the data has instead of 1/20 of it.
+  The factor is deliberately **one pair at a time**, never the sum over the product of every column's
+  frequency: the mean of a product of five or six heavy-tailed frequencies is dominated by the few most
+  common values, and a leaf filter that excludes them (one keyword, one company) makes that estimate wrong
+  by orders of magnitude; on the Join Order Benchmark cliques it turned cheap index lookups into
+  whole-table hash joins.
 - The distinct count of a column is its **table row count** when it covers a unique index, else its column
   or composite-key NDV. The conjunct's own alias gives the table of each column, so a unique key is
   recognized wherever its table sits in the tree.
@@ -1067,7 +1107,12 @@ current query.
 > - `EXPLAIN` estimates come from `CostEstimator.AnnotatePlan`, not from the DP. For a join over a join they
 >   resolve the table of the left key from its alias qualifier and use that key's distinct count — never
 >   the unique-key shortcut, because an earlier join can repeat a key that is unique in its table — but the
->   two estimates can still differ.
+>   two estimates can still differ. Both use the skew-aware pair estimate, so they agree on a join of two
+>   skewed columns; the anchored pairs of a class of three or more columns are modeled by the DP only.
+> - a cross-table correlation that no column statistic shows: in the retail data set eight orders in ten
+>   go to a store in the customer's own city, so `o.store_id = st.id AND st.city_id = c.city_id` keeps
+>   far more rows than the product of the two selectivities. The skew-aware estimate closes most of the
+>   gap on that cycle (an estimate of 1/176 of the rows became 1/10), not all of it.
 
 ## Config flags summary
 

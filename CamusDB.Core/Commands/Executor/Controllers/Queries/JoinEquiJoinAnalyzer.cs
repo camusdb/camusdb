@@ -138,6 +138,15 @@ internal static class JoinEquiJoinAnalyzer
         return true;
     }
 
+    /// <summary>
+    /// Finds the conjunct of <paramref name="onPredicate"/> that can drive an index lookup into
+    /// <paramref name="rightSource"/>. When several can, a conjunct on a unique index wins over
+    /// one on a non-unique index, whatever their order in the <c>ON</c>: a unique index returns at
+    /// most one row for each probe, while a non-unique index returns every row with the value,
+    /// and a popular value (the busiest city, in a join on <c>city_id</c>) can mean thousands of
+    /// rows for each left row. Among conjuncts of one kind the first in the <c>ON</c> wins, as
+    /// before.
+    /// </summary>
     public static bool TryMatch(
         BoundTableSource rightSource,
         NodeAst onPredicate,
@@ -151,14 +160,19 @@ internal static class JoinEquiJoinAnalyzer
 
         foreach (NodeAst conjunct in conjuncts)
         {
-            if (TryMatchConjunct(conjunct, rightSource, bound, out JoinEquiJoinIndexMatch? conjunctMatch))
+            if (!TryMatchConjunct(conjunct, rightSource, bound, out JoinEquiJoinIndexMatch? conjunctMatch))
+                continue;
+
+            if (conjunctMatch.Index.Type == IndexType.Unique)
             {
                 match = conjunctMatch;
                 return true;
             }
+
+            match ??= conjunctMatch;
         }
 
-        return false;
+        return match is not null;
     }
 
     private static bool TryMatchConjunct(

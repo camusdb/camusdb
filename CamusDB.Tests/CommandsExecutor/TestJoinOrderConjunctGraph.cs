@@ -513,6 +513,94 @@ public sealed class TestJoinOrderConjunctGraph : BaseTest
         Assert.AreEqual(1e6 / 1e2, estimates["a,b"], 1e-6);
     }
 
+    // ─── Skewed join keys: the histograms, not the distinct counts alone ─────
+
+    /// <summary>
+    /// Rows of the skewed join of <see cref="CreateSkewedTables"/>, counted by hand: 500 × 400 on the
+    /// value 1, then the residual values 2..60, where a holds 6 rows of each of 2..6 and 5 of the
+    /// rest, and b holds 11 rows of each of 2..11 and 10 of the rest.
+    /// </summary>
+    private const long SkewedJoinRows = 500 * 400 + 6 * 11 * 5 + 5 * 11 * 5 + 5 * 10 * 49;
+
+    [Test]
+    public async Task SubsetEstimate_SkewedKeysOnBothSides_UseTheHistograms()
+    {
+        Db db = await CreateSkewedTables();
+
+        const string sql = "SELECT a.id FROM a JOIN b ON a.x = b.x";
+        Dictionary<string, double> estimates = await SubsetEstimates(db, sql);
+
+        // The distinct counts alone give 1000 × 1000 / 100 = 10,000; the value 1, which half of a
+        // and 40% of b hold, makes the join twenty times that. The histograms show it: 50 and 40
+        // buckets of one value, so the estimate is 0.5 × 0.4 + 0.5 × 0.6 / 99 of a million.
+        Assert.AreEqual(SkewedJoinRows, (await QueryRows(db.Executor, db, sql)).Count);
+        Assert.AreEqual(SkewedJoinRows, estimates["a,b"], SkewedJoinRows * 0.01);
+    }
+
+    [Test]
+    public async Task SubsetEstimate_ClassWithAUniqueKeyAndTwoSkewedColumns_UsesTheHistograms()
+    {
+        Db db = await CreateSkewedTables();
+        await Ddl(db, "CREATE TABLE ci (id int64 primary key)");
+        await Exec(db, "INSERT INTO ci (id) VALUES " + string.Join(", ", Enumerable.Range(1, 100).Select(i => $"({i})")));
+        await Analyze(db, "ci");
+
+        // One class of three columns: ci.id is unique, a.x and b.x are skewed on the value 1.
+        Dictionary<string, double> estimates = await SubsetEstimates(db,
+            "SELECT a.id FROM a, b, ci WHERE a.x = ci.id AND b.x = ci.id");
+
+        // Each value of a and b is one row of ci, so the three-way join has the rows of a ⋈ b, and
+        // the pair {a, b} inside the class gets the same estimate as the pair group would.
+        Assert.AreEqual(SkewedJoinRows, estimates["a,b,ci"], SkewedJoinRows * 0.01);
+        Assert.AreEqual(SkewedJoinRows, estimates["a,b"], SkewedJoinRows * 0.01);
+        Assert.AreEqual(1000, estimates["a,ci"], 1e-6);
+    }
+
+    [Test]
+    public async Task Explain_SkewedEquiJoin_ShowsTheHistogramEstimate()
+    {
+        Db db = await CreateSkewedTables();
+
+        List<QueryResultRow> rows = await Explain(db, "SELECT a.id FROM a JOIN b ON a.x = b.x");
+
+        Assert.AreEqual(SkewedJoinRows, TopJoinEstimate(rows), SkewedJoinRows * 0.01, RenderExplain(rows));
+    }
+
+    /// <summary>
+    /// a and b with 1,000 rows each and 100 distinct values of x: half of a and 40% of b hold
+    /// x = 1; the other rows of a cycle through 2..100 and those of b through 2..60. x is indexed
+    /// on both, because ANALYZE builds histograms for indexed columns only (100 buckets of 10
+    /// rows, so the value 1 fills 50 and 40 of them).
+    /// </summary>
+    private async Task<Db> CreateSkewedTables()
+    {
+        Db db = await CreateDb(DpOn);
+        await Ddl(db, "CREATE TABLE a (id int64 primary key, x int64)");
+        await Ddl(db, "CREATE TABLE b (id int64 primary key, x int64)");
+        await Ddl(db, "CREATE INDEX a_x ON a (x)");
+        await Ddl(db, "CREATE INDEX b_x ON b (x)");
+
+        await InsertSkewed(db, "a", heavyRows: 500, residualValues: 99);
+        await InsertSkewed(db, "b", heavyRows: 400, residualValues: 59);
+        await Analyze(db, "a");
+        await Analyze(db, "b");
+
+        return db;
+    }
+
+    private static async Task InsertSkewed(Db db, string table, int heavyRows, int residualValues)
+    {
+        List<string> values = new(1000);
+        for (int id = 1; id <= 1000; id++)
+        {
+            long x = id <= heavyRows ? 1 : 2 + (id - heavyRows - 1) % residualValues;
+            values.Add($"({id}, {x})");
+        }
+
+        for (int start = 0; start < values.Count; start += 250)
+            await Exec(db, $"INSERT INTO {table} (id, x) VALUES " + string.Join(", ", values.Skip(start).Take(250)));
+    }
+
     private const string UniqueKeyChainSql =
         "SELECT a.id AS ia, b.id AS ib, c.id AS ic, d.id AS id2 FROM a JOIN b ON a.x = b.x JOIN c ON c.bid = b.id JOIN d ON d.k = a.k";
 
@@ -1105,6 +1193,16 @@ public sealed class TestJoinOrderConjunctGraph : BaseTest
     {
         KvTransaction txn = await db.Database.Transactions.BeginAsync();
         await db.Executor.ExecuteNonSQLQuery(new ExecuteSQLTicket(txnState: txn, database: db.Name, sql: sql, parameters: null));
+        await db.Database.Transactions.CommitAsync(txn);
+    }
+
+    /// <summary>Runs <c>ANALYZE</c> on <paramref name="table"/>, so its histograms and distinct counts exist.</summary>
+    private static async Task Analyze(Db db, string table)
+    {
+        KvTransaction txn = await db.Database.Transactions.BeginAsync();
+        (_, IAsyncEnumerable<QueryResultRow> cursor) = await db.Executor.ExecuteSQLQuery(
+            new ExecuteSQLTicket(txnState: txn, database: db.Name, sql: "ANALYZE " + table, parameters: null));
+        await foreach (QueryResultRow _ in cursor) { }
         await db.Database.Transactions.CommitAsync(txn);
     }
 

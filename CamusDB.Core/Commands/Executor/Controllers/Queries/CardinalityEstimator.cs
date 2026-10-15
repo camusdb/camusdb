@@ -280,7 +280,10 @@ internal static class CardinalityEstimator
     /// FK-aware: when the join key is unique on one side that side contributes ≤1 match per row
     /// on the other side → cardinality ≈ the other side's row count.  Uniqueness is detected
     /// from the table's index descriptors (<see cref="IndexType.Unique"/>; covers both PK and UNIQUE).
-    /// Falls back to |A| × |B| × <see cref="FallbackSelectivity"/> when no stats are available.
+    /// A single-column key with a histogram on both sides, unique on neither, uses the value
+    /// distributions (<see cref="JoinKeyDistribution"/>), so two columns skewed on the same values
+    /// multiply as they do in the data. Falls back to |A| × |B| × <see cref="FallbackSelectivity"/>
+    /// when no stats are available.
     /// </summary>
     /// <param name="leftRows">Estimated row count of the left (probe) input.</param>
     /// <param name="rightRows">Estimated row count of the right (build/inner) input.</param>
@@ -324,6 +327,20 @@ internal static class CardinalityEstimator
             long? ndvLeft  = leftIsJoinResult
                 ? KeyDistinctCount(leftTable, leftKeyColumns, TableRowCount(leftTable, database, stats), database, stats)
                 : GetJoinKeyNdv(database, leftTable, leftKeyColumns, stats);
+
+            // Neither key is unique (both shortcuts above failed), so a single-column key on each
+            // side with a histogram gets the skew-aware estimate, the same one the join-order
+            // search uses, so that EXPLAIN and the search agree on a join of two skewed columns.
+            if (ndvLeft is { } left && ndvRight is { } right
+                && leftKeyColumns.Count == 1 && rightKeyColumns.Count == 1
+                && leftTable is not null && rightTable is not null
+                && SkewedDistribution(leftTable, leftKeyColumns[0], left, database, stats) is { } leftDistribution
+                && SkewedDistribution(rightTable, rightKeyColumns[0], right, database, stats) is { } rightDistribution
+                && JoinKeyDistribution.JoinSelectivity(leftDistribution, rightDistribution) is { } selectivity)
+            {
+                return Math.Max(1, (long)((double)leftRows * rightRows * selectivity));
+            }
+
             long maxNdv = Math.Max(ndvLeft ?? 0L, ndvRight ?? 0L);
             if (maxNdv > 0)
                 return Math.Max(1, (long)((double)leftRows * rightRows / maxNdv));
@@ -338,6 +355,12 @@ internal static class CardinalityEstimator
     /// <c>1 / max(ndvLeft, ndvRight)</c>, or <see cref="FallbackSelectivity"/> when neither side
     /// has a count. The distinct-value count of a side is its table row count when its key
     /// columns cover a unique index, else its column or composite-key NDV.
+    ///
+    /// <para>A single-column key with a histogram on both sides, unique on neither, is estimated
+    /// from the two value distributions instead (<see cref="JoinKeyDistribution.JoinSelectivity"/>):
+    /// the values common on both sides multiply, which the distinct counts alone cannot show.
+    /// A unique side needs no histogram, because each of its values matches once whatever the
+    /// skew of the other side; the distinct-count formula is then exact.</para>
     ///
     /// <para>The inputs are the tables and columns that the conjuncts name, never the shape of a
     /// join tree, so every plan for one set of tables gets the same estimate. The join-order
@@ -365,9 +388,65 @@ internal static class CardinalityEstimator
     {
         long? ndvLeft = KeyDistinctCount(leftTable, leftKeyColumns, leftTableRows, database, stats);
         long? ndvRight = KeyDistinctCount(rightTable, rightKeyColumns, rightTableRows, database, stats);
+
+        if (ndvLeft is { } left && ndvRight is { } right
+            && leftKeyColumns.Count == 1 && rightKeyColumns.Count == 1
+            && leftTable is not null && rightTable is not null
+            && !IsJoinKeyUnique(leftTable, leftKeyColumns) && !IsJoinKeyUnique(rightTable, rightKeyColumns)
+            && SkewedDistribution(leftTable, leftKeyColumns[0], left, database, stats) is { } leftDistribution
+            && SkewedDistribution(rightTable, rightKeyColumns[0], right, database, stats) is { } rightDistribution
+            && JoinKeyDistribution.JoinSelectivity(leftDistribution, rightDistribution) is { } selectivity)
+        {
+            return selectivity;
+        }
+
         long maxNdv = Math.Max(ndvLeft ?? 0L, ndvRight ?? 0L);
 
         return maxNdv > 0 ? 1.0 / maxNdv : FallbackSelectivity;
+    }
+
+    /// <summary>
+    /// The value distribution of one join-key column, for an estimate that multiplies the
+    /// distributions of several equal columns (<see cref="JoinKeyDistribution"/>): uniform over
+    /// the table rows for a unique key, the histogram's heavy values plus a uniform residual for
+    /// a column with a histogram and a distinct count, uniform over the distinct count for a
+    /// column with a count and no histogram, and null when the column has no count at all.
+    /// </summary>
+    internal static JoinKeyDistribution? EstimateJoinKeyDistribution(
+        TableDescriptor? table,
+        string keyColumn,
+        long tableRows,
+        DatabaseDescriptor database,
+        StatisticsManager? stats)
+    {
+        if (table is null)
+            return null;
+
+        if (IsJoinKeyUnique(table, [keyColumn]))
+            return JoinKeyDistribution.Uniform(Math.Max(1L, tableRows));
+
+        long? distinct = stats is null ? null : GetJoinKeyNdv(database, table, [keyColumn], stats);
+        if (distinct is not { } d || d <= 0)
+            return null;
+
+        return SkewedDistribution(table, keyColumn, d, database, stats) ?? JoinKeyDistribution.Uniform(d);
+    }
+
+    /// <summary>
+    /// The histogram-based distribution of a non-unique column, or null when the column has no
+    /// histogram. A column whose histogram shows no heavy value gets a distribution too: its
+    /// join with a skewed column still differs from the textbook estimate, because the heavy
+    /// values of the other side meet its residual at an average frequency.
+    /// </summary>
+    private static JoinKeyDistribution? SkewedDistribution(
+        TableDescriptor table,
+        string keyColumn,
+        long distinct,
+        DatabaseDescriptor database,
+        StatisticsManager? stats)
+    {
+        ColumnHistogram? histogram = stats?.GetColumnHistogram(database, table, keyColumn);
+        return histogram is null ? null : JoinKeyDistribution.FromHistogram(histogram, distinct);
     }
 
     /// <summary>

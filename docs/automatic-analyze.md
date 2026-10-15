@@ -180,5 +180,11 @@ keeps things fresh between manual runs.
   count to the shared statistics blob (last-writer-wins), so the cluster-wide count can undercount.
   This only *delays* a refresh; it never corrupts data. A durable per-table counter is a possible
   future improvement.
-- **Cached query plans are not invalidated by fresh statistics.** A plan already in the plan cache
-  keeps running until it is re-planned for other reasons; auto-analyze does not force re-planning.
+- **Fresh statistics reach other nodes only on a reload.** On the node that published them, every
+  publish, manual or background, bumps the table's analyze generation. The plan cache stores that
+  generation with each cached decision, so the next lookup of an affected query shape misses and the
+  statement is planned again against the new statistics. A statement that is already running keeps
+  its plan. Another node loads a table's statistics once and keeps them in memory until the entry is
+  evicted (a drop, a materialized-view refresh, or the node stops hosting the database) or the node
+  restarts. Until then it plans with the older statistics, and its cached plans agree with the plans
+  it would build fresh.
