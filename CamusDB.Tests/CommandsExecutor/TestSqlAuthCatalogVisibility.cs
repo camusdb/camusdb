@@ -416,4 +416,121 @@ internal sealed class TestSqlAuthCatalogVisibility : BaseTest
         CollectionAssert.AreEquivalent(new[] { "t1", "t2", "t3" }, await ShowTables(unauthenticated, db, null));
         Assert.IsTrue((await ShowDatabases(unauthenticated, db, null)).Contains(db));
     }
+    /// <summary>
+    /// Runs <c>SHOW TABLES FROM</c> the way every transport runs a server-level query: with no
+    /// transaction, and with <paramref name="contextDb"/> as the ticket's database.
+    /// </summary>
+    private static Task<List<string>> ShowTablesFrom(CommandExecutor ex, string contextDb, string sql, Principal? p)
+        => ListAsync(ex, contextDb, sql, "tables", p, inTransaction: false);
+
+    /// <summary>Creates a second database that holds one table, <c>other1</c>.</summary>
+    private async Task<string> CreateOtherDatabase(CommandExecutor ex, Principal root)
+    {
+        string other = "visother" + Guid.NewGuid().ToString("n");
+        await ex.CreateDatabase(new CreateDatabaseTicket(name: other, ifNotExists: false));
+        TrackDatabase(other, ex);
+        await TxnDdl(ex, other, "CREATE TABLE other1 (id int64 PRIMARY KEY NOT NULL)", root);
+        return other;
+    }
+
+    [Test]
+    public async Task ShowTablesFrom_TableGrant_ListsOnlyGrantedTables()
+    {
+        (string db, CommandExecutor ex, Principal root) = await Setup();
+        string other = await CreateOtherDatabase(ex, root);
+        await ServerDdl(ex, "CREATE USER u IDENTIFIED BY 'pw'", root);
+        await ServerDdl(ex, $"GRANT SELECT ON {db}.t1 TO u", root);
+        await ServerDdl(ex, $"GRANT SELECT ON {other}.* TO u", root);
+        Principal u = await Login(ex, "u", "pw");
+
+        // The context database is the other one: the listing must come from the named database and
+        // must apply the same per-table filter as SHOW TABLES run inside it.
+        List<string> listed = await ShowTablesFrom(ex, other, $"SHOW TABLES FROM {db}", u);
+        CollectionAssert.AreEquivalent(new[] { "t1" }, listed);
+        CollectionAssert.AreEquivalent(await ShowTables(ex, db, u), listed);
+    }
+
+    [Test]
+    public async Task ShowTablesFrom_LikePatternAndVisibilityBothApply()
+    {
+        (string db, CommandExecutor ex, Principal root) = await Setup();
+        await ServerDdl(ex, "CREATE USER u IDENTIFIED BY 'pw'", root);
+        await ServerDdl(ex, $"GRANT SELECT ON {db}.t1 TO u", root);
+        await ServerDdl(ex, $"GRANT SELECT ON {db}.t2 TO u", root);
+        Principal u = await Login(ex, "u", "pw");
+
+        foreach (string pattern in new[] { "t%", "t2", "x%" })
+            CollectionAssert.AreEquivalent(
+                await ShowTables(ex, db, u, $"SHOW TABLES LIKE '{pattern}'"),
+                await ShowTablesFrom(ex, "", $"SHOW TABLES IN {db} LIKE '{pattern}'", u),
+                pattern);
+    }
+
+    [Test]
+    public async Task ShowTablesFrom_InvisibleTarget_SameErrorAsUnknownName()
+    {
+        (string db, CommandExecutor ex, Principal root) = await Setup();
+        string other = await CreateOtherDatabase(ex, root);
+        await ServerDdl(ex, "CREATE USER u IDENTIFIED BY 'pw'", root);
+        await ServerDdl(ex, $"GRANT SELECT ON {other}.* TO u", root);
+        Principal u = await Login(ex, "u", "pw");
+
+        string missing = "visnone" + Guid.NewGuid().ToString("n");
+
+        // The caller holds no grant on db. An answer that differs from the one for a name that is
+        // not registered would confirm that db exists, so the code and the message must both match.
+        CamusDBException hidden = Assert.ThrowsAsync<CamusDBException>(
+            async () => await ShowTablesFrom(ex, other, $"SHOW TABLES FROM {db}", u))!;
+        CamusDBException unknown = Assert.ThrowsAsync<CamusDBException>(
+            async () => await ShowTablesFrom(ex, other, $"SHOW TABLES FROM {missing}", u))!;
+
+        Assert.AreEqual(CamusDBErrorCodes.DatabaseDoesntExist, hidden.Code);
+        Assert.AreEqual(CamusDBErrorCodes.DatabaseDoesntExist, unknown.Code);
+        Assert.AreEqual(unknown.Message.Replace(missing, "<name>"), hidden.Message.Replace(db, "<name>"));
+    }
+
+    [Test]
+    public async Task ShowTablesFrom_InvisibleContextDatabase_StillListsVisibleTarget()
+    {
+        (string db, CommandExecutor ex, Principal root) = await Setup();
+        string other = await CreateOtherDatabase(ex, root);
+        await ServerDdl(ex, "CREATE USER u IDENTIFIED BY 'pw'", root);
+        await ServerDdl(ex, $"GRANT SELECT ON {other}.* TO u", root);
+        Principal u = await Login(ex, "u", "pw");
+
+        // The ticket names db, which u cannot see. The statement ignores its context database, so
+        // the gate on the context database must not refuse it.
+        CollectionAssert.AreEquivalent(
+            new[] { "other1" }, await ShowTablesFrom(ex, db, $"SHOW TABLES FROM {other}", u));
+
+        // The same context database refuses an ordinary SHOW TABLES, which proves the gate is live.
+        CamusDBException refused = Assert.ThrowsAsync<CamusDBException>(
+            async () => await ShowTablesFrom(ex, db, "SHOW TABLES", u))!;
+        Assert.AreEqual(CamusDBErrorCodes.DatabaseDoesntExist, refused.Code);
+    }
+
+    [Test]
+    public async Task ShowTablesFrom_DatabaseGrantAndSuperuser_ListEveryTable()
+    {
+        (string db, CommandExecutor ex, Principal root) = await Setup();
+        await ServerDdl(ex, "CREATE USER u IDENTIFIED BY 'pw'", root);
+        await ServerDdl(ex, $"GRANT SELECT ON {db}.* TO u", root);
+        Principal u = await Login(ex, "u", "pw");
+
+        CollectionAssert.AreEquivalent(new[] { "t1", "t2", "t3" }, await ShowTablesFrom(ex, "", $"SHOW TABLES FROM {db}", u));
+        CollectionAssert.AreEquivalent(new[] { "t1", "t2", "t3" }, await ShowTablesFrom(ex, "", $"SHOW TABLES FROM {db}", root));
+    }
+
+    [Test]
+    public async Task ShowTablesFrom_AuthenticationDisabled_ListsEverything()
+    {
+        (string db, CommandExecutor ex, _) = await Setup();
+
+        // A second executor built with authentication off: an engine fixes its configuration when it
+        // is constructed.
+        CommandExecutor unauthenticated = CreateCommandExecutor(Options with { AuthenticationEnabled = false });
+
+        CollectionAssert.AreEquivalent(
+            new[] { "t1", "t2", "t3" }, await ShowTablesFrom(unauthenticated, "", $"SHOW TABLES FROM {db}", null));
+    }
 }

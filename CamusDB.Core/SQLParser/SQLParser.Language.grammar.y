@@ -906,6 +906,14 @@ opt_table_settings : { $$.n = null; }
 show_stmt : TSHOW TCOLUMNS TFROM any_identifier { $$.n = new(NodeType.ShowColumns, $4.n, null, null, null, null, null, null, null); }
           | TSHOW TTABLES { $$.n = NodeAst.ShowTables; }
           | TSHOW TTABLES TLIKE string { $$.n = new(NodeType.ShowTables, $4.n, null, null, null, null, null, null, null); }
+          /* The FROM and IN forms name their own database, so they get their own node type: the
+             transports route a statement by its root type only, and this one must run with no
+             context database and no transaction. leftAst = pattern (as for SHOW TABLES),
+             rightAst = database. */
+          | TSHOW TTABLES TFROM any_identifier { $$.n = new(NodeType.ShowTablesFrom, null, $4.n, null, null, null, null, null, null); }
+          | TSHOW TTABLES TIN any_identifier { $$.n = new(NodeType.ShowTablesFrom, null, $4.n, null, null, null, null, null, null); }
+          | TSHOW TTABLES TFROM any_identifier TLIKE string { $$.n = new(NodeType.ShowTablesFrom, $6.n, $4.n, null, null, null, null, null, null); }
+          | TSHOW TTABLES TIN any_identifier TLIKE string { $$.n = new(NodeType.ShowTablesFrom, $6.n, $4.n, null, null, null, null, null, null); }
           | TDESCRIBE any_identifier { $$.n = new(NodeType.ShowColumns, $2.n, null, null, null, null, null, null, null); }
           | TDESC any_identifier { $$.n = new(NodeType.ShowColumns, $2.n, null, null, null, null, null, null, null); }
           | TSHOW TCREATE TTABLE any_identifier { $$.n = new(NodeType.ShowCreateTable, $4.n, null, null, null, null, null, null, null); }

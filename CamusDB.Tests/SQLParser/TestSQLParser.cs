@@ -1500,6 +1500,46 @@ public class TestSQLParser
         Assert.AreEqual("'orders_%'", ast.leftAst.yytext);
     }
 
+    [TestCase("SHOW TABLES FROM shop", "shop")]
+    [TestCase("SHOW TABLES IN shop", "shop")]
+    [TestCase("show tables in shop", "shop")]
+    [TestCase("SHOW TABLES FROM `shop`", "shop")]
+    [TestCase("SHOW TABLES IN `my_db`", "my_db")]
+    public void TestParseShowTablesFrom(string sql, string database)
+    {
+        NodeAst ast = SQLParserProcessor.Parse(sql);
+
+        Assert.AreEqual(NodeType.ShowTablesFrom, ast.nodeType);
+        Assert.IsNull(ast.leftAst);
+        Assert.AreEqual(database, ast.rightAst!.yytext);
+    }
+
+    [TestCase("SHOW TABLES FROM shop LIKE 'order%'", "shop")]
+    [TestCase("SHOW TABLES IN shop LIKE 'order%'", "shop")]
+    [TestCase("SHOW TABLES IN `shop` LIKE 'order%'", "shop")]
+    public void TestParseShowTablesFromLike(string sql, string database)
+    {
+        NodeAst ast = SQLParserProcessor.Parse(sql);
+
+        Assert.AreEqual(NodeType.ShowTablesFrom, ast.nodeType);
+        Assert.AreEqual(NodeType.String, ast.leftAst!.nodeType);
+        Assert.AreEqual("'order%'", ast.leftAst.yytext);
+        Assert.AreEqual(database, ast.rightAst!.yytext);
+    }
+
+    [TestCase("SHOW TABLES FROM")]
+    [TestCase("SHOW TABLES IN")]
+    [TestCase("SHOW TABLES FROM LIKE 'a%'")]
+    [TestCase("SHOW TABLES FROM select")]
+    [TestCase("SHOW TABLES IN table")]
+    [TestCase("SHOW TABLES FROM shop LIKE")]
+    // A double-quoted text is a string, not an identifier, in every statement of this dialect.
+    [TestCase("SHOW TABLES FROM \"shop\"")]
+    public void TestParseShowTablesFromRejectsMalformed(string sql)
+    {
+        Assert.Throws<CamusDBException>(() => SQLParserProcessor.Parse(sql), sql);
+    }
+
     [Test]
     public void TestParseShowDatabasesLike()
     {

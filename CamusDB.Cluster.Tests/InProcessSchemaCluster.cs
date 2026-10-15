@@ -304,14 +304,22 @@ public sealed class InProcessSchemaCluster : IAsyncDisposable
     }
 
     /// <summary>
-    /// The key the engine actually partitions schema state by: the database's opaque Id once
-    /// the database is open on any node, else the user-facing name. Every schema-leader check
-    /// in this harness must use this — the executor keys <c>AmISchemaLeaderAsync</c> by
-    /// <c>database.Id</c>, and the name generally hashes to a different partition. On old
-    /// Kommander versions every partition happened to share one leader, which masked
-    /// name-keyed lookups; leader balancing spreads partition leaderships and unmasks them.
+    /// The key the engine actually partitions schema state by: the database's opaque Id, taken from
+    /// the node that holds it open, else from the registry; the user-facing name only when the
+    /// registry does not know it (a name that was never created, or a caller that already passed an
+    /// id). Every schema-leader check in this harness must use this — the executor keys
+    /// <c>AmISchemaLeaderAsync</c> by <c>database.Id</c>, and the name generally hashes to a
+    /// different partition. On old Kommander versions every partition happened to share one leader,
+    /// which masked name-keyed lookups; leader balancing spreads partition leaderships and unmasks
+    /// them.
+    ///
+    /// <para>The registry fallback matters for a forwarded DDL on a database no node holds as its
+    /// <see cref="Node.Database"/>: the forwarder resolves the leader by the ticket's database name,
+    /// and a name-keyed lookup sent the ticket to the leader of the wrong partition. That node then
+    /// ran the DDL as a non-leader through the entry forwarder and waited on its own, ack-less gate,
+    /// which is what the 20-second timeouts on a cold database's first DDL were.</para>
     /// </summary>
-    private string SchemaKeyFor(string databaseName)
+    private async ValueTask<string> SchemaKeyForAsync(string databaseName)
     {
         foreach (Node node in Nodes)
         {
@@ -319,12 +327,15 @@ public sealed class InProcessSchemaCluster : IAsyncDisposable
                 return db.Id;
         }
 
-        return databaseName;
+        CamusDB.Core.CommandsExecutor.Controllers.DatabaseRegistry registry =
+            await Nodes[0].Executor.GetDatabaseRegistryAsync().ConfigureAwait(false);
+
+        return await registry.TryResolveIdAsync(databaseName).ConfigureAwait(false) ?? databaseName;
     }
 
     public async Task<Node> WaitForSchemaLeaderNodeAsync(string databaseName, TimeSpan? timeout = null)
     {
-        string schemaKey = SchemaKeyFor(databaseName);
+        string schemaKey = await SchemaKeyForAsync(databaseName).ConfigureAwait(false);
         int partitionId = Nodes[0].Kahuna.SchemaLogPartition(schemaKey);
 
         // Raft answers per-partition questions only on a node that hosts the partition; under
@@ -574,7 +585,7 @@ public sealed class InProcessSchemaCluster : IAsyncDisposable
         TimeSpan? timeout = null)
     {
         TimeSpan searchTimeout = timeout ?? TimeSpan.FromSeconds(15);
-        string schemaKey = SchemaKeyFor(databaseName);
+        string schemaKey = await SchemaKeyForAsync(databaseName).ConfigureAwait(false);
 
         Node currentLeader = await WaitForSchemaLeaderNodeAsync(databaseName, searchTimeout).ConfigureAwait(false);
         string targetEndpoint = targetNode.Kahuna.Raft.GetLocalEndpoint();
@@ -633,7 +644,7 @@ public sealed class InProcessSchemaCluster : IAsyncDisposable
                 using CancellationTokenSource cts = new(TimeSpan.FromMilliseconds(200));
                 try
                 {
-                    if (await node.Kahuna.AmISchemaLeaderAsync(SchemaKeyFor(databaseName), cts.Token).ConfigureAwait(false))
+                    if (await node.Kahuna.AmISchemaLeaderAsync(await SchemaKeyForAsync(databaseName).ConfigureAwait(false), cts.Token).ConfigureAwait(false))
                         return node;
                 }
                 catch (OperationCanceledException) { }

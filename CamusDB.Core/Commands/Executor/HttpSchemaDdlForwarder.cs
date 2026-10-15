@@ -21,8 +21,8 @@ namespace CamusDB.Core.CommandsExecutor;
 /// schema leader's <c>/internal/schema-ddl/*</c> HTTP endpoints.
 ///
 /// Also implements <see cref="ISchemaAckSender"/> so that <see cref="EmbeddedKahuna"/>
-/// can deliver follower schema-apply acknowledgements to the leader over the same
-/// HTTP channel without a second transport dependency.
+/// can deliver follower schema-apply acknowledgements to the leader, and ask a peer for its
+/// applied version, over the same HTTP channel without a second transport dependency.
 ///
 /// <paramref name="endpointResolver"/> maps a Raft leader endpoint string
 /// (e.g. <c>"node1:7070"</c>) to the CamusDB HTTP base URI
@@ -252,6 +252,66 @@ public sealed class HttpSchemaDdlForwarder : ISchemaDdlForwarder, ISchemaAckSend
         {
             Log.LogSchemaAckFailed(logger, ex, endpoint);
             return SchemaAckDelivery.Failed;
+        }
+        finally
+        {
+            response?.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// Asks a peer's <c>/internal/schema-ddl/schema-applied</c> endpoint for its applied version of a
+    /// database. Every transport failure, timeout and malformed answer is reported as
+    /// <see cref="SchemaAppliedProbeOutcome.Unreachable"/> and logged at Debug; the gate then keeps
+    /// what it already knows about the peer, so a probe can never make the gate wait for less than it
+    /// did before probing existed.
+    /// </summary>
+    async Task<SchemaAppliedProbe> ISchemaAckSender.ProbeSchemaAppliedAsync(
+        string nodeEndpoint,
+        string database,
+        CancellationToken cancellationToken)
+    {
+        SchemaAppliedProbeRequest request = new() { Database = database };
+
+        Uri baseUri = endpointResolver(nodeEndpoint);
+        Uri endpoint = new(baseUri, "/internal/schema-ddl/schema-applied");
+
+        HttpResponseMessage? response = null;
+        try
+        {
+            response = await httpClient.PostAsJsonAsync(endpoint, request, JsonOptions, cancellationToken).ConfigureAwait(false);
+
+            SchemaAppliedProbeResponse? body = response.IsSuccessStatusCode
+                ? await response.Content.ReadFromJsonAsync<SchemaAppliedProbeResponse>(JsonOptions, cancellationToken).ConfigureAwait(false)
+                : null;
+
+            if (body is null || !string.Equals(body.Status, "ok", StringComparison.Ordinal))
+            {
+                Log.LogSchemaAppliedProbeRejected(logger, endpoint, (int)response.StatusCode, body?.Status);
+                return SchemaAppliedProbe.Unreachable;
+            }
+
+            return body.Open ? SchemaAppliedProbe.OpenAt(body.AppliedSchemaVersion) : SchemaAppliedProbe.NotOpen;
+        }
+        catch (HttpRequestException ex)
+        {
+            Log.LogSchemaAppliedProbeFailed(logger, ex, endpoint);
+            return SchemaAppliedProbe.Unreachable;
+        }
+        catch (TaskCanceledException ex) when (!cancellationToken.IsCancellationRequested)
+        {
+            Log.LogSchemaAppliedProbeFailed(logger, ex, endpoint);
+            return SchemaAppliedProbe.Unreachable;
+        }
+        catch (OperationCanceledException)
+        {
+            // The gate ended and cancelled its probes; nothing to report.
+            return SchemaAppliedProbe.Unreachable;
+        }
+        catch (System.Text.Json.JsonException ex)
+        {
+            Log.LogSchemaAppliedProbeFailed(logger, ex, endpoint);
+            return SchemaAppliedProbe.Unreachable;
         }
         finally
         {

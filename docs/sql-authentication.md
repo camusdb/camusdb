@@ -305,15 +305,15 @@ With auth enabled, every statement is checked before it runs:
   answers would let a caller test whether a database exists. A grant reaches into the database when
   it is global, on the database, or on any single table inside it. With such a grant, a statement
   that needs more than it gives is refused with `403 Insufficient privilege` as usual. Statements
-  that ignore the current database (`SHOW DATABASES`, `SHOW GRANTS`, `CREATE USER`, …) are not
-  affected by it.
+  that ignore the current database (`SHOW DATABASES`, `SHOW TABLES FROM db`, `SHOW GRANTS`,
+  `CREATE USER`, …) are not affected by it.
 - **Database-level reads** — `SHOW DATABASE` (name and comment) and `SHOW ORPHAN TABLES` (the tables
   dropped from the database) open no table, so they need `SELECT` at database scope: a `db.*` or `*.*`
   grant, or superuser. A grant on one table makes the database visible but does not satisfy this.
   `SHOW CREATE MATERIALIZED VIEW` needs `SELECT` on the materialized view, as reading it would.
-- **Catalog visibility** — `SHOW TABLES`, `SHOW DATABASES`, `SHOW BRANCHES`, `SHOW ANCESTORS` and
-  `SHOW ORPHAN DATABASES` are *filtered*, not rejected: they list only the objects the caller can
-  reach, so a name is never disclosed to someone who holds no grant on it. `SHOW DATABASES` and
+- **Catalog visibility** — `SHOW TABLES` (with or without `FROM db`), `SHOW DATABASES`,
+  `SHOW BRANCHES`, `SHOW ANCESTORS` and `SHOW ORPHAN DATABASES` are *filtered*, not rejected: they
+  list only the objects the caller can reach, so a name is never disclosed to someone who holds no grant on it. `SHOW DATABASES` and
   `SHOW ORPHAN DATABASES` give a caller with no grants an empty result rather than an error. A
   dropped database is listed by `SHOW ORPHAN DATABASES` under the same rule as a live one, by its id.
   - A **table** is listed when the caller holds *any* privilege on it — `INSERT`-only is enough to see
@@ -322,6 +322,11 @@ With auth enabled, every statement is checked before it runs:
     or on any single table inside it. Seeing the database name does not widen what `SHOW TABLES` then
     lists inside it.
   - A `LIKE` pattern and the visibility filter both apply — the pattern never widens the result.
+  - `SHOW TABLES FROM db` (or `IN db`) lists the tables of the named database, not of the current
+    one, so it works when the current database is missing, invisible or not set. A **target** the
+    caller cannot see is reported as `DatabaseDoesntExist`, with the same message as a name that is
+    not registered. The rows are then filtered exactly as `SHOW TABLES` run inside that database
+    filters them: a caller with a grant on one table sees that table only.
   - `SHOW BRANCHES FROM db` / `SHOW ANCESTORS FROM db` name an arbitrary database, so a **target** the
     caller cannot see is reported as `DatabaseDoesntExist` — the same error as a name that really is
     unregistered, rather than a privilege error that would confirm it exists. The listed rows are then
@@ -329,7 +334,7 @@ With auth enabled, every statement is checked before it runs:
     the `parent` column when the parent database is not visible. Depths stay the true position in the
     real branch tree, so a filtered level shows up as a gap in the sequence rather than renumbering the
     surviving rows.
-  - With authentication disabled all four statements list everything, as before.
+  - With authentication disabled all of these statements list everything, as before.
 
 ### Known behaviors and limitations (all fail-closed)
 
@@ -548,10 +553,10 @@ Expect these, so they do not read as breakage:
 - **Operator dashboard.** With authentication off it serves loopback only, because there is no
   principal to gate its panels on. With authentication on it moves to a session cookie on its own
   routes, so your access path to it changes. See `docs/operator-dashboard.md`.
-- **Catalog listings become filtered.** `SHOW TABLES`, `SHOW DATABASES`, `SHOW BRANCHES` and
-  `SHOW ANCESTORS` list only what the caller can reach. `SHOW DATABASES` gives a caller with no
-  grants an empty result, not an error — an empty list after the migration means "no grants yet",
-  not "no databases".
+- **Catalog listings become filtered.** `SHOW TABLES`, `SHOW TABLES FROM db`, `SHOW DATABASES`,
+  `SHOW BRANCHES` and `SHOW ANCESTORS` list only what the caller can reach. `SHOW DATABASES` gives
+  a caller with no grants an empty result, not an error — an empty list after the migration means
+  "no grants yet", not "no databases".
 - **A database with no grant reads as missing.** Every statement in a database the caller holds no
   grant on fails with `DatabaseDoesntExist`, the same error an unregistered name gets. After the
   migration, that error for a database you know exists means "no grant on it yet".

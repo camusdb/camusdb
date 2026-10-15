@@ -31,7 +31,8 @@ public delegate ValueTask<CommandExecutor> InProcessDdlLeaderResolver(
 /// forwarder does: a node needs one object for both directions of the schema conversation, and
 /// <see cref="EmbeddedKahuna.SetSchemaAckForwarder"/> takes the forwarder and casts it. The ack is
 /// delivered by calling the leader's <see cref="EmbeddedKahuna.RecordRemoteSchemaAck"/> before this
-/// method returns, so the leader's tracker is already updated when its next ack poll runs.</para>
+/// method returns, so the leader's tracker is already updated when its next ack poll runs. The pull
+/// probe reads the asked node's <see cref="EmbeddedKahuna.GetLocalSchemaApplied"/> the same way.</para>
 ///
 /// <para>There is no operation-id de-duplication here, because nothing retries: the call never
 /// crosses a wire, so it cannot be delivered twice. The leader executor's own schema-leader check
@@ -136,6 +137,23 @@ public sealed class InProcessSchemaDdlForwarder : ISchemaDdlForwarder, ISchemaAc
         return await target.Node.AmISchemaLeaderAsync(database, cancellationToken).ConfigureAwait(false)
             ? SchemaAckDelivery.Accepted
             : SchemaAckDelivery.NotLeader;
+    }
+
+    /// <summary>
+    /// Reads the asked node's own applied version straight from its tracker, exactly what the HTTP
+    /// endpoint answers from. A node that is no longer registered counts as unreachable.
+    /// </summary>
+    Task<SchemaAppliedProbe> ISchemaAckSender.ProbeSchemaAppliedAsync(
+        string nodeEndpoint,
+        string database,
+        CancellationToken cancellationToken)
+    {
+        if (!nodes.TryGet(nodeEndpoint, out InProcessClusterNode? target))
+            return Task.FromResult(SchemaAppliedProbe.Unreachable);
+
+        long? applied = target.Node.GetLocalSchemaApplied(database);
+
+        return Task.FromResult(applied is null ? SchemaAppliedProbe.NotOpen : SchemaAppliedProbe.OpenAt(applied.Value));
     }
 
     private ValueTask<CommandExecutor> LeaderAsync(string leaderEndpoint, string databaseName, CancellationToken cancellationToken)

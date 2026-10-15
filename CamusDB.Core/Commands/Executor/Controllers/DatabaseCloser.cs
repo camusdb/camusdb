@@ -48,6 +48,20 @@ internal sealed class DatabaseCloser : IAsyncDisposable
 
         databaseDescriptor.Dispose();
 
+        // The schema-ack tracker is a process-wide map keyed by database, outside the descriptor. Its
+        // record for the local node is what a peer's applied-version probe reads as "open here, at
+        // this version"; left behind, it would make a DDL proposer wait for an ack this node can no
+        // longer give. Best-effort: the probe answer is the only consumer, and a stale record costs a
+        // backstop wait, not correctness.
+        try
+        {
+            databaseDescriptor.Kahuna.ForgetSchemaAcks(databaseDescriptor.Id);
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Could not release schema-ack state for database '{Db}'", databaseDescriptor.Name);
+        }
+
         Log.LogDatabaseClosed(logger, databaseDescriptor.Name);
     }
 

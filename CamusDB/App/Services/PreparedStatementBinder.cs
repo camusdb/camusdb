@@ -49,6 +49,7 @@ public static class PreparedStatementBinder
         NodeType.Delete or
         NodeType.ShowColumns or
         NodeType.ShowTables or
+        NodeType.ShowTablesFrom or
         NodeType.ShowCreateTable or
         NodeType.ShowDatabase or
         NodeType.ShowDatabases or

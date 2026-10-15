@@ -491,6 +491,28 @@ internal sealed class SelectStatementExecutor
             return (null!, schemaQuerier.ShowAncestors(target, allEntries, branchPrincipal));
         }
 
+        // SHOW TABLES FROM|IN db lists the tables of the database it names, never of the context
+        // database, and starts no transaction: the listing reads only the in-memory schema. The
+        // opener is the visibility gate. A database the caller has no grant on fails there with the
+        // same error as a name that is not registered, so the statement cannot probe for a name.
+        // The rows are then filtered per table, exactly as SHOW TABLES filters them.
+        //
+        // Returns no descriptor, like every other server-level query: the transports run these
+        // outside any transaction because of that classification, and a descriptor here would invite
+        // a caller to commit against a database the statement never began a transaction on.
+        if (ast.nodeType == NodeType.ShowTablesFrom)
+        {
+            DatabaseDescriptor target;
+            using (Diagnostics.QueryStageProfile.Measure(Diagnostics.QueryStage.DbOpen))
+                target = await context.DatabaseOpener.Open(ast.rightAst!.yytext!).ConfigureAwait(false);
+
+            if (schemaOut is not null)
+                schemaOut.Schema = DerivedTableSchemaBuilder.ShowTablesSchema;
+
+            return (null!, schemaQuerier.ShowTables(
+                target, UnquoteLikePattern(ast.leftAst?.yytext), statementAuthorizer.VisibilityPrincipal(ticket)));
+        }
+
         // SHOW GRANTS reads the server-level auth catalog — no database context.
         if (ast.nodeType == NodeType.ShowGrants)
         {

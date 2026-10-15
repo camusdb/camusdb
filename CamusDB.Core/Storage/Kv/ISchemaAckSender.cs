@@ -30,10 +30,12 @@ internal enum SchemaAckDelivery
 }
 
 /// <summary>
-/// Sends a schema-apply acknowledgement from a follower to the schema-partition leader. The
-/// leader records the ack in its <see cref="SchemaAckTracker"/> so that
-/// <c>WaitForAllLiveAsync</c> observes real follower progress rather than only the local node's
-/// own apply.
+/// Carries the schema-ack conversation between nodes in both directions: a follower pushes its
+/// applied version to the schema-partition leader, and a DDL proposer pulls the applied version
+/// from a node it has not heard from. The leader records the pushed ack in its
+/// <see cref="SchemaAckTracker"/> so that <c>WaitForAllLiveAsync</c> observes real follower
+/// progress rather than only the local node's own apply; the pull is
+/// <see cref="ProbeSchemaAppliedAsync"/>.
 ///
 /// <para>An implementation must not throw on a transport failure; it answers
 /// <see cref="SchemaAckDelivery.Failed"/> instead, and the sender retries. It must answer
@@ -55,4 +57,53 @@ internal interface ISchemaAckSender
         long schemaVersion,
         CancellationToken cancellationToken
     );
+
+    /// <summary>
+    /// Asks <paramref name="nodeEndpoint"/> which schema version of <paramref name="database"/> it
+    /// has applied, or whether it holds the database open at all. The DDL proposer's gate uses this
+    /// pull path next to the pushed acks: it is how the gate learns about a node whose ack never
+    /// arrived (a lost send, a leader change that redirected the acks, a node that opened the
+    /// database a moment ago) and about a node that Raft activity on the proposer never shows
+    /// (under replica placement a node that shares no partition with the proposer). An
+    /// implementation must not throw on a transport failure; it answers
+    /// <see cref="SchemaAppliedProbeOutcome.Unreachable"/> instead.
+    /// </summary>
+    /// <param name="nodeEndpoint">Raft endpoint of the node to ask.</param>
+    /// <param name="database">Database id whose applied schema version is asked for.</param>
+    Task<SchemaAppliedProbe> ProbeSchemaAppliedAsync(
+        string nodeEndpoint,
+        string database,
+        CancellationToken cancellationToken
+    );
+}
+
+/// <summary>
+/// What a node answered when asked for its applied schema version of a database.
+/// </summary>
+internal enum SchemaAppliedProbeOutcome
+{
+    /// <summary>The node holds the database open; <see cref="SchemaAppliedProbe.Version"/> is the version it has applied.</summary>
+    Open,
+
+    /// <summary>
+    /// The node does not hold the database open. It cannot be behind on a schema it does not serve,
+    /// so the gate stops waiting for it; a record the gate still held for it is stale and is dropped.
+    /// </summary>
+    NotOpen,
+
+    /// <summary>The node did not answer. The gate keeps whatever it already knows about the node.</summary>
+    Unreachable,
+}
+
+/// <summary>
+/// The answer to <see cref="ISchemaAckSender.ProbeSchemaAppliedAsync"/>. <see cref="Version"/> is
+/// meaningful only when <see cref="Outcome"/> is <see cref="SchemaAppliedProbeOutcome.Open"/>.
+/// </summary>
+internal readonly record struct SchemaAppliedProbe(SchemaAppliedProbeOutcome Outcome, long Version)
+{
+    public static SchemaAppliedProbe OpenAt(long version) => new(SchemaAppliedProbeOutcome.Open, version);
+
+    public static readonly SchemaAppliedProbe NotOpen = new(SchemaAppliedProbeOutcome.NotOpen, 0);
+
+    public static readonly SchemaAppliedProbe Unreachable = new(SchemaAppliedProbeOutcome.Unreachable, 0);
 }

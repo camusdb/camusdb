@@ -1434,11 +1434,13 @@ public sealed class TestInProcessSchemaCluster
         Assert.IsTrue(allAcked, "Gate must release once all follower acks are relayed to the leader");
     }
 
-    // Each node's SchemaAckTracker is independent — a follower's per-instance
-    // tracker is not visible to the leader's tracker without the relay. This test
-    // verifies that the per-instance isolation is real (no shared static remains).
+    // Each node's SchemaAckTracker is independent — a follower's per-instance tracker is not
+    // visible to the leader's tracker without a message (no shared static remains). The gate
+    // nonetheless learns a follower's progress when no ack was pushed, because it asks the
+    // follower directly: that pull is the recovery for a lost ack and for an ack that went to a
+    // previous leader.
     [Test]
-    public async Task AckTransport_PerInstanceTrackerIsolation()
+    public async Task AckTransport_PerInstanceTrackerIsolation_AndTheGatePullsWhatWasNotPushed()
     {
         await using InProcessSchemaCluster cluster = await InProcessSchemaCluster.StartAsync(nodeCount: 3);
         string db = cluster.NextSchemaLogDatabaseName();
@@ -1458,13 +1460,34 @@ public sealed class TestInProcessSchemaCluster
             if (n.Index == leader.Index)
                 continue;
             n.Kahuna.RecordLocalSchemaApplied(dbId, 1);
+
+            long? seenByLeader = leader.Kahuna.GetRecordedSchemaAck(dbId, n.Kahuna.Raft.GetLocalEndpoint());
+            Assert.That(seenByLeader, Is.Null.Or.LessThan(1),
+                "A follower's local record must not bleed into the leader's per-instance tracker");
         }
 
-        // Leader has not acked yet, and follower acks did not reach the leader's tracker.
+        // The leader itself has not applied version 1: the gate blocks on the leader's own record,
+        // whatever it learns about the followers.
         bool gateResult = await leader.Kahuna.WaitForSchemaAcksAsync(
             dbId, 1, TimeSpan.FromMilliseconds(100), cancellationToken: CancellationToken.None);
-        Assert.IsFalse(gateResult,
-            "Gate must still block: follower local acks must not bleed into the leader's per-instance tracker");
+        Assert.IsFalse(gateResult, "Gate must block while the leader's own record is behind");
+
+        // Once the leader is at version 1, the followers' versions are learned by asking them, with
+        // no pushed ack: the gate converges, and the leader's tracker now holds their answers.
+        leader.Kahuna.RecordLocalSchemaApplied(dbId, 1);
+
+        bool pulled = await leader.Kahuna.WaitForSchemaAcksAsync(
+            dbId, 1, TimeSpan.FromSeconds(5), cancellationToken: CancellationToken.None);
+        Assert.IsTrue(pulled, "The gate must learn a follower's applied version by probing it when no ack was pushed");
+        Assert.AreEqual(SchemaAckOutcome.FullConvergence, leader.Kahuna.LastGateOutcome);
+
+        foreach (InProcessSchemaCluster.Node n in cluster.Nodes)
+        {
+            if (n.Index == leader.Index)
+                continue;
+            Assert.AreEqual(1, leader.Kahuna.GetRecordedSchemaAck(dbId, n.Kahuna.Raft.GetLocalEndpoint()),
+                "The probed answer must be recorded on the leader like a pushed ack");
+        }
     }
 
     // The gate proceeds on timeout when an ack is dropped (no relay for one follower).

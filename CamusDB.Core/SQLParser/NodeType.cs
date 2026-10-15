@@ -961,4 +961,17 @@ public enum NodeType
     /// <see cref="ExprShiftLeft"/>.
     /// </summary>
     ExprShiftRight,
+
+    /// <summary>
+    /// <c>SHOW TABLES FROM|IN db [LIKE 'pattern']</c>: the tables of a named database, whatever the
+    /// context database is. <c>leftAst</c> = the pattern, or null; <c>rightAst</c> = the database
+    /// identifier.
+    ///
+    /// <para>A separate member, not a slot on <see cref="ShowTables"/>, because every transport and
+    /// classifier routes a statement by its root type only. This form is a server-level query
+    /// (<see cref="StatementScope.IsServerLevelQuery"/>): it needs no context database and no
+    /// transaction, and a flag inside the tree would be invisible to those checks. Appended at the
+    /// end because <see cref="NodeAstWireCodec"/> sends the member's number between nodes.</para>
+    /// </summary>
+    ShowTablesFrom,
 }

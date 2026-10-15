@@ -75,7 +75,8 @@ misspelling should not quietly become a wrong answer.
 
 `SELECT`, `INSERT`, `UPDATE`, `DELETE`, and the `SHOW …` statements — every `SHOW` the grammar has,
 including the node-scoped ones (`SHOW ENGINE STATS`, `SHOW VARIABLES`, `SHOW CLUSTER SETTINGS`) that
-run against no database at all.
+run against no database at all, and the ones that name their own database (`SHOW TABLES FROM db`,
+`SHOW BRANCHES FROM db`), which run the same way whatever database the handle was prepared in.
 
 Schema and database/user administration cannot be prepared: those statements are one-shot, several
 return no database descriptor, and nothing about them benefits from a handle. `/execute-sql-ddl` and

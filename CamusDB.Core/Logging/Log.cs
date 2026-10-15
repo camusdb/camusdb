@@ -146,6 +146,12 @@ internal static partial class Log
     [LoggerMessage(Level = LogLevel.Debug, Message = "Schema ack to {Endpoint} answered HTTP {StatusCode} with status '{Status}'; will resolve the leader again and retry")]
     public static partial void LogSchemaAckRejected(ILogger logger, Uri endpoint, int statusCode, string? status);
 
+    [LoggerMessage(Level = LogLevel.Debug, Message = "Schema applied-version probe to {Endpoint} failed; the gate keeps what it knows about the peer")]
+    public static partial void LogSchemaAppliedProbeFailed(ILogger logger, Exception ex, Uri endpoint);
+
+    [LoggerMessage(Level = LogLevel.Debug, Message = "Schema applied-version probe to {Endpoint} answered HTTP {StatusCode} with status '{Status}'; the gate keeps what it knows about the peer")]
+    public static partial void LogSchemaAppliedProbeRejected(ILogger logger, Uri endpoint, int statusCode, string? status);
+
     [LoggerMessage(Level = LogLevel.Debug, Message = "Forwarding DDL {Operation} to {Endpoint}")]
     public static partial void LogForwardingDdl(ILogger logger, string operation, Uri endpoint);
 

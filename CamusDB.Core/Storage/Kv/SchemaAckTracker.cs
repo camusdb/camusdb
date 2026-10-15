@@ -42,6 +42,17 @@ internal enum SchemaAckOutcome
 /// is infinite, so production blocks on every member until a real heartbeat is supplied.
 ///
 /// <para>
+/// <b>Records arrive on two paths.</b> A node pushes its applied version after every apply
+/// (<see cref="RecordApplied"/> through the ack transport), and the proposer pulls it from any
+/// member it has no fresh record for while the gate waits (<c>SchemaAckProber</c>, which also
+/// calls <see cref="RecordApplied"/>, or <see cref="RecordClosed"/> when the member answers that
+/// it does not hold the database open). The tracker itself does not know which path a record came
+/// from; the pull exists because the push alone leaves two holes the gate cannot see: a member
+/// whose ack was lost or sent to a previous leader looks exactly like a member that never opened
+/// the database, and both are skipped.
+/// </para>
+///
+/// <para>
 /// <b>Quorum backstop:</b> when <c>quorumBackstopDelay</c> is finite, the gate also accepts
 /// once a majority (⌊N/2⌋+1) of live members have acked and the backstop delay has elapsed.
 /// This bounds DDL latency to <c>quorumBackstopDelay</c> even when minority followers are slow
@@ -194,6 +205,29 @@ internal sealed class SchemaAckTracker
     }
 
     /// <summary>
+    /// Drops the record of one node for one database, because that node answered that it does not
+    /// hold the database open. A record outlives the open it describes whenever the node closes or
+    /// evicts the database without the proposer hearing of it; a gate that kept it would wait for an
+    /// ack from a node that has no schema to apply, until the quorum backstop or the timeout. The
+    /// waiters are woken so a gate blocked on exactly this node re-evaluates at once.
+    /// </summary>
+    public void RecordClosed(string database, string node)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(database);
+        ArgumentException.ThrowIfNullOrWhiteSpace(node);
+
+        if (!databases.TryGetValue(database, out DatabaseAcks? acks))
+            return;
+
+        bool removed;
+        lock (acks.Sync)
+            removed = acks.Nodes.Remove(node);
+
+        if (removed)
+            acks.SignalAck();
+    }
+
+    /// <summary>
     /// Drops all ack state for a database this node is no longer holding open.
     ///
     /// <para>The map is keyed by database and only ever grows: every database that has had a single
@@ -239,8 +273,14 @@ internal sealed class SchemaAckTracker
         {
             if (acks is null || !acks.Nodes.TryGetValue(node, out NodeAck ack))
             {
-                // A node with no ack record for this database hasn't opened it yet and isn't
-                // serving it. When it does open, it loads the durable checkpoint the proposer
+                // A node with no ack record for this database is taken as not holding it open.
+                // That reading is only as good as the records: a node whose ack was lost, or went
+                // to a previous leader, has no record either. The proposer therefore asks every
+                // live member it holds no record for before and while this gate runs
+                // (SchemaAckProber); a member that answers with a version gets a record here and
+                // is waited for, and one that answers "not open" is genuinely skippable. A member
+                // that does not answer is skipped as before, with Raft liveness as the only guard.
+                // When a skipped node does open, it loads the durable checkpoint the proposer
                 // persisted, and the freshness probes (open-time, miss-triggered, periodic sweep)
                 // repair the case where the checkpoint had not yet landed at load time — the
                 // committed delta itself is delivered only to registered subscribers, so an
@@ -248,7 +288,7 @@ internal sealed class SchemaAckTracker
                 // - schemaVersion == 0: the cluster is at version 0 (pre-first-DDL); all nodes
                 //   are implicitly at 0 even without a record — gate must not block.
                 // - acks != null: at least one node has opened the database and recorded an ack,
-                //   so the node in question simply hasn't opened it yet — skip it.
+                //   so the node in question is taken as not holding it open — skip it.
                 // - acks == null && schemaVersion > 0: shouldn't happen in normal operation (the
                 //   proposing leader always acks before calling the gate), but return false as a
                 //   conservative fallback so we don't silently pass a corrupted state.
@@ -347,9 +387,11 @@ internal sealed class SchemaAckTracker
 
     /// <summary>
     /// The highest schema version <paramref name="node"/> acknowledged for <paramref name="database"/>
-    /// on this tracker, or null when it never acknowledged anything here. A test seam: the gate alone
-    /// cannot show that an ack from a node outside the schema partition's replica set reached the
-    /// leader, because it skips a live member that has no record at all.
+    /// on this tracker, or null when it never acknowledged anything here. Read for the local node it
+    /// answers a peer's pull probe: the local record is written when the database is registered for
+    /// schema apply and dropped when it is closed or evicted, so "no record" means "not open here".
+    /// Read for a remote node it is a test seam: the gate alone cannot show that an ack from a node
+    /// outside the schema partition's replica set reached the leader.
     /// </summary>
     public long? TryGetAckedVersion(string database, string node)
     {

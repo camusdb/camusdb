@@ -113,6 +113,9 @@ public static class StatementScope
         NodeType.ShowBranches or
         NodeType.ShowAncestors or
         NodeType.ShowOrphanDatabases or
+        // Names its own target database and reads only that database's in-memory schema, so the
+        // context database and a transaction on it play no part.
+        NodeType.ShowTablesFrom or
         // Grants live in the shared auth keyspace, not in any database. So do the accounts themselves
         // and the all-account grant listing.
         NodeType.ShowGrants or

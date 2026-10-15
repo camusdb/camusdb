@@ -319,6 +319,250 @@ public sealed class TestClusterPartialPlacement
         }
     }
 
+    /// <summary>
+    /// Runs <c>SHOW TABLES FROM</c> on <paramref name="node"/> the way a transport runs a server-level
+    /// query: no transaction, and <paramref name="contextDb"/> as the ticket's database.
+    /// </summary>
+    private static async Task<List<string>> ShowTablesFromAsync(InProcessSchemaCluster.Node node, string contextDb, string target)
+    {
+        (_, IAsyncEnumerable<QueryResultRow> cursor) = await node.Executor.ExecuteSQLQuery(
+            new ExecuteSQLTicket(txnState: null!, database: contextDb, sql: $"SHOW TABLES FROM {target}", parameters: null));
+
+        List<string> tables = [];
+        await foreach (QueryResultRow row in cursor)
+            tables.Add(row.Row["tables"].StrValue!);
+        return tables;
+    }
+
+    private static CreateTableTicket PlainTable(string db, string table) => new(
+        databaseName: db,
+        tableName: table,
+        columns: [new ColumnInfo("id", ColumnType.Id)],
+        constraints: [new ConstraintInfo(ConstraintType.PrimaryKey, "~pk", [new ColumnIndexInfo("id", OrderType.Ascending)])],
+        ifNotExists: false);
+
+    /// <summary>
+    /// <c>SHOW TABLES FROM</c> reads the in-memory schema of the node that runs it and forwards
+    /// nowhere, so it has the freshness of plain <c>SHOW TABLES</c> on that node: at once on a
+    /// replica of the schema-log partition, within the checkpoint probe on a node outside that
+    /// replica set, and at once on a node that opens the database cold, because the checkpoint is
+    /// persisted before the DDL returns. A drop on one node must make the listing on every node fail
+    /// as a missing database, not return the stale table list.
+    /// </summary>
+    [Test]
+    public async Task ShowTablesFrom_ListsDdlFromAnotherNode_OnEveryNode()
+    {
+        (InProcessSchemaCluster cluster, CapturingLoggerProvider logs) = await StartClusterAsync();
+
+        try
+        {
+            await WaitForLeaderHintsAsync(cluster);
+
+            string context = cluster.NextSchemaLogDatabaseName();
+            string target = cluster.NextSchemaLogDatabaseName();
+            await cluster.OpenDatabaseOnAllNodesAsync(context);
+            await cluster.OpenDatabaseOnAllNodesAsync(target);
+
+            // The target was opened last, so it is each node's Database. Its schema-log partition
+            // decides which nodes follow its checkpoint instead of receiving its log; the split
+            // asserts that two such nodes exist, so the scenario is not vacuous.
+            Assert.AreEqual(target, cluster.Nodes[0].Database!.Name);
+            (List<InProcessSchemaCluster.Node> hosting, List<InProcessSchemaCluster.Node> outsiders) =
+                SplitByHosting(cluster, cluster.Nodes[0].Database!.SchemaLogPartition);
+
+            InProcessSchemaCluster.Node targetLeader = await cluster.WaitForSchemaLeaderNodeAsync(target);
+
+            foreach (InProcessSchemaCluster.Node node in cluster.Nodes)
+                Assert.IsEmpty(await ShowTablesFromAsync(node, context, target));
+
+            await targetLeader.Executor.CreateTable(PlainTable(target, "robots")).WaitAsync(ConvergenceTimeout);
+
+            // A replica of the schema-log partition applies the delta before the DDL returns, so it
+            // lists the table at once.
+            foreach (InProcessSchemaCluster.Node node in hosting)
+            {
+                CollectionAssert.AreEquivalent(new[] { "robots" }, await ShowTablesFromAsync(node, context, target),
+                    $"{node.Kahuna.Raft.GetLocalNodeName()} must list the table once the DDL has returned");
+                CollectionAssert.AreEquivalent(new[] { "robots" }, await ShowTablesFromAsync(node, "", target),
+                    $"{node.Kahuna.Raft.GetLocalNodeName()} must list the table with no context database");
+            }
+
+            // A node outside that replica set learns the table from the checkpoint follow, and the
+            // post-commit ack gate waits for it too: the DDL does not return until every node that
+            // holds the database open has applied it, so the listing there is read-your-writes as
+            // well, the same as plain SHOW TABLES on that node.
+            foreach (InProcessSchemaCluster.Node node in outsiders)
+            {
+                CollectionAssert.AreEquivalent(new[] { "robots" }, await ShowTablesFromAsync(node, context, target),
+                    $"{node.Kahuna.Raft.GetLocalNodeName()} holds the database open, so the DDL must not return before it applied the table");
+                CollectionAssert.AreEquivalent(new[] { "robots" }, await ShowTablesFromAsync(node, "", target));
+            }
+
+            // A database that only its creator has opened: every other node opens it cold, from the
+            // registry and the persisted schema, when the listing names it. The DDL is issued on the
+            // creator, which forwards it to a schema leader that has not opened the database yet.
+            string cold = cluster.NextSchemaLogDatabaseName();
+            await cluster.Nodes[0].Executor.CreateDatabase(new CreateDatabaseTicket(cold, ifNotExists: false));
+            await cluster.Nodes[0].Executor.CreateTable(PlainTable(cold, "gears")).WaitAsync(ConvergenceTimeout);
+
+            foreach (InProcessSchemaCluster.Node node in cluster.Nodes)
+                CollectionAssert.AreEquivalent(new[] { "gears" }, await ShowTablesFromAsync(node, context, cold),
+                    $"{node.Kahuna.Raft.GetLocalNodeName()} must list a database it never opened before");
+
+            // Drop on one node, list on every other node: each must answer as for a missing database.
+            await cluster.Nodes[0].Executor.DropDatabase(new DropDatabaseTicket(cold, ifExists: false, force: true));
+
+            foreach (InProcessSchemaCluster.Node node in cluster.Nodes)
+            {
+                CamusDBException dropped = Assert.ThrowsAsync<CamusDBException>(
+                    async () => await ShowTablesFromAsync(node, context, cold),
+                    $"{node.Kahuna.Raft.GetLocalNodeName()} listed a dropped database")!;
+                Assert.AreEqual(CamusDBErrorCodes.DatabaseDoesntExist, dropped.Code);
+            }
+
+            AssertNoNotHostedErrors(logs);
+        }
+        finally
+        {
+            await cluster.DisposeAsync();
+        }
+    }
+
+    /// <summary>
+    /// The post-commit ack gate must wait for every node that holds the database open, including the
+    /// nodes the schema leader never hears from over Raft. Under replica placement the leader's Raft
+    /// activity view lists only the followers of the partitions it leads, so a node outside the
+    /// schema partition's replica set that shares no other partition with the leader is absent from
+    /// it; and a node whose version-0 ack had not landed yet has no record on the leader. Either made
+    /// the DDL return before such a node applied it. Both user partitions are exercised, since which
+    /// leader sees whom depends on which partitions each node happens to lead.
+    /// </summary>
+    [Test]
+    public async Task Ddl_ReturnsOnlyAfterEveryNodeHoldingTheDatabaseOpenAppliedIt()
+    {
+        (InProcessSchemaCluster cluster, CapturingLoggerProvider logs) = await StartClusterAsync();
+
+        try
+        {
+            await WaitForLeaderHintsAsync(cluster);
+
+            HashSet<int> partitionsCovered = [];
+            int databases = 0;
+
+            // Enough databases to land a schema log on each user partition; names hash to partitions.
+            while (partitionsCovered.Count < Partitions && databases < 8)
+            {
+                string db = cluster.NextSchemaLogDatabaseName();
+                await cluster.OpenDatabaseOnAllNodesAsync(db);
+                databases++;
+
+                int partition = cluster.Nodes[0].Database!.SchemaLogPartition;
+                partitionsCovered.Add(partition);
+                (_, List<InProcessSchemaCluster.Node> outsiders) = SplitByHosting(cluster, partition);
+
+                InProcessSchemaCluster.Node leader = await cluster.WaitForSchemaLeaderNodeAsync(db);
+
+                // Diagnostic only: which outsiders the leader's Raft view misses. Not asserted, because
+                // it depends on the election outcome; the read-your-writes assertion below is the contract.
+                IReadOnlyList<string> raftActive = leader.Kahuna.Raft.GetActiveNodes(leader.Kahuna.SchemaAckLiveNodeLease);
+                foreach (InProcessSchemaCluster.Node outsider in outsiders)
+                {
+                    string endpoint = outsider.Kahuna.Raft.GetLocalEndpoint();
+                    TestContext.Progress.WriteLine(
+                        $"db {db} partition {partition}: leader {leader.Kahuna.Raft.GetLocalNodeName()} " +
+                        $"{(raftActive.Contains(endpoint) ? "sees" : "does not see")} outsider {outsider.Kahuna.Raft.GetLocalNodeName()} over Raft");
+                }
+
+                string table = $"t{databases}";
+                await leader.Executor.CreateTable(PlainTable(db, table)).WaitAsync(ConvergenceTimeout);
+                long version = leader.Database!.Schema.SchemaVersion;
+
+                Assert.AreEqual(SchemaAckOutcome.FullConvergence, leader.Kahuna.LastGateOutcome,
+                    $"Every node holds {db} open and is live, so the gate must converge fully, not through the backstop");
+
+                foreach (InProcessSchemaCluster.Node node in cluster.Nodes)
+                {
+                    Assert.GreaterOrEqual(node.Database!.Schema.SchemaVersion, version,
+                        $"{node.Kahuna.Raft.GetLocalNodeName()} holds {db} open, so the DDL must not return before it reached version {version}");
+                    Assert.IsTrue(node.Database!.Schema.Tables.ContainsKey(table),
+                        $"{node.Kahuna.Raft.GetLocalNodeName()} must see {table} once the DDL has returned");
+                }
+            }
+
+            Assert.AreEqual(Partitions, partitionsCovered.Count, "Both user partitions must have carried a schema log");
+            AssertNoNotHostedErrors(logs);
+        }
+        finally
+        {
+            await cluster.DisposeAsync();
+        }
+    }
+
+    /// <summary>
+    /// A node that closed the database must not hold a DDL: the leader still has the version-0 record
+    /// the node acknowledged at open, and without asking the node the gate would wait for an ack that
+    /// node can no longer give, until the quorum backstop. The gate asks, learns the database is not
+    /// open there, drops the record and converges fully.
+    /// </summary>
+    [Test]
+    public async Task Ddl_IsNotHeldByANodeThatClosedTheDatabase()
+    {
+        (InProcessSchemaCluster cluster, CapturingLoggerProvider logs) = await StartClusterAsync();
+
+        try
+        {
+            await WaitForLeaderHintsAsync(cluster);
+
+            string db = cluster.NextSchemaLogDatabaseName();
+            await cluster.OpenDatabaseOnAllNodesAsync(db);
+
+            (_, List<InProcessSchemaCluster.Node> outsiders) =
+                SplitByHosting(cluster, cluster.Nodes[0].Database!.SchemaLogPartition);
+            InProcessSchemaCluster.Node leader = await cluster.WaitForSchemaLeaderNodeAsync(db);
+            string dbId = leader.Database!.Id;
+
+            InProcessSchemaCluster.Node closer = outsiders[0];
+            string closerEndpoint = closer.Kahuna.Raft.GetLocalEndpoint();
+
+            // Precondition: the leader holds the closer's open-time record, so the gate has something
+            // stale to be misled by once the database is closed there.
+            long deadline = Environment.TickCount64 + (long)ConvergenceTimeout.TotalMilliseconds;
+            while (leader.Kahuna.GetRecordedSchemaAck(dbId, closerEndpoint) is null && Environment.TickCount64 < deadline)
+                await Task.Delay(25);
+            Assert.IsNotNull(leader.Kahuna.GetRecordedSchemaAck(dbId, closerEndpoint),
+                "The open-time acknowledgement must have reached the leader before the close");
+
+            await closer.Executor.CloseDatabase(new CloseDatabaseTicket(db));
+            closer.Database = null;
+            Assert.IsNull(closer.Kahuna.GetLocalSchemaApplied(dbId), "Closing must drop the node's own record");
+
+            long started = Environment.TickCount64;
+            await leader.Executor.CreateTable(PlainTable(db, "robots")).WaitAsync(ConvergenceTimeout);
+            long elapsedMs = Environment.TickCount64 - started;
+
+            Assert.AreEqual(SchemaAckOutcome.FullConvergence, leader.Kahuna.LastGateOutcome,
+                "The closed node must be dropped from the gate, not waited for until the quorum backstop");
+            Assert.Less(elapsedMs, leader.Kahuna.SchemaAckQuorumBackstopDelay.TotalMilliseconds,
+                "The DDL must return before the backstop would have fired");
+            Assert.IsNull(leader.Kahuna.GetRecordedSchemaAck(dbId, closerEndpoint),
+                "The stale record must be gone from the leader's tracker");
+
+            foreach (InProcessSchemaCluster.Node node in cluster.Nodes)
+            {
+                if (node.Index == closer.Index)
+                    continue;
+                Assert.IsTrue(node.Database!.Schema.Tables.ContainsKey("robots"),
+                    $"{node.Kahuna.Raft.GetLocalNodeName()} must see the table once the DDL has returned");
+            }
+
+            AssertNoNotHostedErrors(logs);
+        }
+        finally
+        {
+            await cluster.DisposeAsync();
+        }
+    }
+
     [Test]
     public async Task KeyedSingletonLeadership_IsHeldByExactlyOneNode_AndNeverThrows()
     {

@@ -1443,6 +1443,16 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
     internal long? GetRecordedSchemaAck(string db, string nodeEndpoint) => schemaAcks.TryGetAckedVersion(db, nodeEndpoint);
 
     /// <summary>
+    /// The schema version this node has applied for <paramref name="db"/>, or null when this node does
+    /// not hold the database open. This is what a peer's pull probe
+    /// (<see cref="ISchemaAckSender.ProbeSchemaAppliedAsync"/>) answers with. The local record is
+    /// written when the database is registered for schema apply and after every apply, and dropped by
+    /// <see cref="ForgetSchemaAcks"/> when the database is closed or evicted, so its absence is the
+    /// "not open" answer rather than a gap.
+    /// </summary>
+    internal long? GetLocalSchemaApplied(string db) => schemaAcks.TryGetAckedVersion(db, Raft.GetLocalEndpoint());
+
+    /// <summary>
     /// The set of nodes the schema ack gate must wait on. Always includes the local node.
     /// In cluster mode: local endpoint plus every active peer. In standalone mode: only the
     /// local endpoint — <c>GetNodes()</c> returns phantom witness nodes used by the embedded
@@ -1461,7 +1471,19 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
     /// schema leader (the proposer), so <c>GetActiveNodes</c> reflects its follower reachability.
     /// </para>
     /// </summary>
-    private IReadOnlyCollection<string> GetLiveSchemaNodes()
+    private IReadOnlyCollection<string> GetLiveSchemaNodes() => GetLiveSchemaNodes(reached: null);
+
+    /// <summary>
+    /// The live set, widened by the peers that answered a pull probe during the current gate.
+    ///
+    /// <para><b>Why the Raft view alone is not enough.</b> <see cref="Kommander.IRaft.GetActiveNodes"/>
+    /// is built from the replication acks this node receives as a leader, so it lists the followers
+    /// of the partitions this node leads and nothing else. Under replica placement a peer that shares
+    /// no partition with this node is absent from it however alive it is, and a gate that trusted the
+    /// view alone returned before such a peer had applied the DDL. A peer that answered a probe is
+    /// live by direct evidence and is a member for the rest of this gate.</para>
+    /// </summary>
+    private IReadOnlyCollection<string> GetLiveSchemaNodes(IReadOnlyCollection<string>? reached)
     {
         if (!isClusterMode)
             return [Raft.GetLocalEndpoint()];
@@ -1478,12 +1500,59 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
             members.AddRange(Raft.GetActiveNodes(SchemaAckLiveNodeLease));
         }
 
+        if (reached is not null)
+        {
+            foreach (string peer in reached)
+            {
+                if (!members.Contains(peer))
+                    members.Add(peer);
+            }
+        }
+
         return members;
     }
 
+    /// <summary>Every configured peer except the local node; the universe a gate may discover members in.</summary>
+    private IReadOnlyList<string> GetRosterPeers()
+    {
+        string localEndpoint = Raft.GetLocalEndpoint();
+        IList<RaftNode> nodes = Raft.GetNodes();
+        List<string> peers = new(nodes.Count);
+
+        foreach (RaftNode peer in nodes)
+        {
+            if (!string.Equals(peer.Endpoint, localEndpoint, StringComparison.Ordinal))
+                peers.Add(peer.Endpoint);
+        }
+
+        return peers;
+    }
+
+    private IReadOnlyCollection<string> GetRaftActivePeers()
+        => SchemaAckLiveNodeLease == Timeout.InfiniteTimeSpan
+            ? GetRosterPeers()
+            : Raft.GetActiveNodes(SchemaAckLiveNodeLease);
+
     /// <summary>
-    /// Waits until <paramref name="schemaVersion"/> has been applied on all live schema nodes,
-    /// with an H5 quorum backstop as a liveness escape hatch.
+    /// How long one pull probe may take before the peer counts as unreachable for that round. Bounds
+    /// the discovery round that runs before the gate first evaluates, so a dead peer delays a DDL by
+    /// at most this once.
+    /// </summary>
+    private static readonly TimeSpan SchemaAckProbeTimeout = TimeSpan.FromSeconds(2);
+
+    /// <summary>
+    /// Cadence at which a waiting gate asks the members still behind for their applied version. The
+    /// same resolution as the tracker's liveness re-check; a pushed ack wakes the gate sooner.
+    /// </summary>
+    private static readonly TimeSpan SchemaAckProbeInterval = TimeSpan.FromMilliseconds(250);
+
+    /// <summary>
+    /// Waits until <paramref name="schemaVersion"/> has been applied on all live schema nodes, with
+    /// the quorum backstop as a liveness escape hatch. "Live" is the union of this node's Raft
+    /// activity view and the peers that answer a direct probe during the gate, and "applied" is
+    /// learned from pushed acks and from those probes alike — see <see cref="SchemaAckProber"/> for
+    /// why both halves are needed. Correct on any node, not only the schema leader: a node that
+    /// proposed through the entry forwarder receives no pushed acks, and the probes carry it.
     /// </summary>
     /// <param name="enforceFullConvergence">
     /// When <see langword="true"/> the quorum backstop is disabled — the gate waits for every
@@ -1507,7 +1576,23 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
             ? Timeout.InfiniteTimeSpan
             : SchemaAckQuorumBackstopDelay;
 
-        IReadOnlyCollection<string> liveMembers = GetLiveSchemaNodes();
+        // The pull half of the gate. Pushed acks alone leave the gate blind to a peer whose ack was
+        // lost or went to a previous leader, and to a peer that Raft activity on this node never
+        // shows; the prober asks such peers directly. See SchemaAckProber for the full reasoning.
+        // Standalone has no peers, and a node without an ack transport has no way to ask.
+        ISchemaAckSender? sender = isClusterMode ? schemaAckSender : null;
+        SchemaAckProber? prober = sender is null
+            ? null
+            : new SchemaAckProber(
+                sender, schemaAcks, db, schemaVersion, Raft.GetLocalEndpoint(),
+                GetRosterPeers, GetRaftActivePeers, SchemaAckProbeTimeout);
+
+        if (prober is not null)
+            await prober.DiscoverAsync(cancellationToken).ConfigureAwait(false);
+
+        IReadOnlyCollection<string> LiveMembers() => GetLiveSchemaNodes(prober?.Reached);
+
+        IReadOnlyCollection<string> liveMembers = LiveMembers();
 
         if (Diagnostics.SchemaDiag.Enabled)
             Diagnostics.SchemaDiag.Log(
@@ -1516,25 +1601,40 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
                 $"backstopMs={(backstopDelay == Timeout.InfiniteTimeSpan ? "∞" : ((long)backstopDelay.TotalMilliseconds).ToString())} " +
                 $"liveMembers=[{string.Join(",", liveMembers)}]");
 
-        SchemaAckOutcome outcome = await schemaAcks.WaitForAllLiveAsync(
-            db,
-            schemaVersion,
-            timeout,
-            GetLiveSchemaNodes,
-            // Liveness is carried by membership (GetLiveSchemaNodes filters dead peers out of
-            // the set via Raft activity). The tracker must NOT also expire members on its
-            // apply-derived LastSeen — that would false-evict a Raft-alive node that is merely slow
-            // to apply a schema delta. So the tracker waits for every live member to ack, with the
-            // quorum backstop as the liveness escape hatch (post-commit gate only).
-            Timeout.InfiniteTimeSpan,
-            backstopDelay,
-            cancellationToken
-        ).ConfigureAwait(false);
+        using CancellationTokenSource probing = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        Task probeLoop = prober is null
+            ? Task.CompletedTask
+            : prober.RunUntilCancelledAsync(LiveMembers, SchemaAckProbeInterval, probing.Token);
+
+        SchemaAckOutcome outcome;
+        try
+        {
+            outcome = await schemaAcks.WaitForAllLiveAsync(
+                db,
+                schemaVersion,
+                timeout,
+                LiveMembers,
+                // Liveness is carried by membership (GetLiveSchemaNodes filters dead peers out of
+                // the set via Raft activity, and adds the peers that answered a probe). The tracker
+                // must NOT also expire members on its apply-derived LastSeen — that would false-evict
+                // a Raft-alive node that is merely slow to apply a schema delta. So the tracker waits
+                // for every live member to ack, with the quorum backstop as the liveness escape
+                // hatch (post-commit gate only).
+                Timeout.InfiniteTimeSpan,
+                backstopDelay,
+                cancellationToken
+            ).ConfigureAwait(false);
+        }
+        finally
+        {
+            probing.Cancel();
+            await probeLoop.ConfigureAwait(false);
+        }
 
         if (Diagnostics.SchemaDiag.Enabled)
             Diagnostics.SchemaDiag.Log(
                 $"GATE-{outcome.ToString().ToUpperInvariant()} leader={Raft.GetLocalEndpoint()} db={db} ver={schemaVersion} " +
-                $"liveMembers=[{string.Join(",", GetLiveSchemaNodes())}]");
+                $"liveMembers=[{string.Join(",", LiveMembers())}]");
 
         LastGateOutcome = outcome;
 
@@ -1546,7 +1646,7 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
         }
         else
         {
-            LastGateLaggards = schemaAcks.GetLaggingNodes(db, schemaVersion, GetLiveSchemaNodes());
+            LastGateLaggards = schemaAcks.GetLaggingNodes(db, schemaVersion, LiveMembers());
 
             if (outcome == SchemaAckOutcome.QuorumBackstop)
                 Diagnostics.SchemaMetrics.RecordQuorumBackstop();

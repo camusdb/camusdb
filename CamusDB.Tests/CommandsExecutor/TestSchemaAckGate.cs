@@ -289,6 +289,55 @@ public sealed class TestSchemaAckGate
             "The gate must re-resolve the rebuilt entry promptly, not at its overall timeout");
     }
 
+    // ── A member that answers "not open" ─────────────────────────────────────────────────────
+
+    /// <summary>
+    /// A record outlives the open it describes when a node closes or evicts the database without the
+    /// proposer hearing of it. When the node then answers a probe with "not open", its record is
+    /// dropped and a gate blocked on exactly that node returns at once, instead of waiting for an ack
+    /// the node can no longer give.
+    /// </summary>
+    [Test]
+    public async Task AMemberThatClosedTheDatabaseStopsBlockingOnceItSaysSo()
+    {
+        SchemaAckTracker tracker = new();
+        tracker.RecordApplied("db", "A", 5);
+        tracker.RecordApplied("db", "B", 4); // B closed the database after acking 4; its record is stale
+
+        Task<SchemaAckOutcome> gate = tracker.WaitForAllLiveAsync(
+            "db", 5, TimeSpan.FromSeconds(10), Members("A", "B"), NoLease, NoBackstop, CancellationToken.None);
+
+        await Task.Delay(100);
+        Assert.IsFalse(gate.IsCompleted, "B's stale record must hold the gate until B is heard from");
+
+        Stopwatch watch = Stopwatch.StartNew();
+        tracker.RecordClosed("db", "B");
+
+        SchemaAckOutcome outcome = await gate;
+        watch.Stop();
+
+        Assert.AreEqual(SchemaAckOutcome.FullConvergence, outcome);
+        Assert.Less(watch.ElapsedMilliseconds, 1_000, "Dropping the record must wake the gate, not leave it to its timeout");
+        Assert.IsNull(tracker.TryGetAckedVersion("db", "B"), "The stale record must be gone");
+    }
+
+    /// <summary>
+    /// Dropping a record that does not exist, or for a database the tracker never saw, is a no-op: the
+    /// probe answers for nodes the gate skipped as well as for ones it waited on.
+    /// </summary>
+    [Test]
+    public void RecordClosedForAnUnknownNodeOrDatabaseIsANoOp()
+    {
+        SchemaAckTracker tracker = new();
+        tracker.RecordApplied("db", "A", 5);
+
+        tracker.RecordClosed("db", "B");
+        tracker.RecordClosed("other", "A");
+
+        Assert.AreEqual(5, tracker.TryGetAckedVersion("db", "A"));
+        Assert.IsNull(tracker.TryGetAckedVersion("other", "A"));
+    }
+
     /// <summary>Cancelling the gate propagates, rather than running to its timeout.</summary>
     [Test]
     public void CancellationPropagates()

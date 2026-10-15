@@ -260,9 +260,11 @@ internal sealed class StatementAuthorizer
             or NodeType.ShowConnections or NodeType.ShowClusterConnections or NodeType.CancelQuery)
             return;
 
-        // Server-level introspection: any authenticated caller may run these.
+        // Server-level introspection: any authenticated caller may run these. SHOW TABLES FROM is
+        // gated on its target database instead, by the database opener, and its rows are filtered
+        // per table, as SHOW TABLES is.
         if (ast.nodeType is NodeType.ShowDatabases or NodeType.ShowBranches or NodeType.ShowAncestors
-            or NodeType.ShowOrphanDatabases)
+            or NodeType.ShowOrphanDatabases or NodeType.ShowTablesFrom)
             return;
 
         // CREATE TABLE is checked at DATABASE scope here — the table does not exist yet, so it cannot
@@ -529,7 +531,7 @@ internal sealed class StatementAuthorizer
             or NodeType.AlterTableAddPrimaryKey or NodeType.AlterTableDropPrimaryKey
             or NodeType.AlterTableSetSetting or NodeType.AlterTableResetSetting or NodeType.AnalyzeTable
             or NodeType.CommentOnTable or NodeType.CommentOnColumn or NodeType.CommentOnIndex => Privilege.Alter,
-        NodeType.ShowTables or NodeType.ShowColumns or NodeType.ShowIndexes or NodeType.ShowCreateTable
+        NodeType.ShowTables or NodeType.ShowTablesFrom or NodeType.ShowColumns or NodeType.ShowIndexes or NodeType.ShowCreateTable
             or NodeType.ShowDatabase or NodeType.ShowOrphanTables => Privilege.Select,
         // Statistics report bounds drawn from real column values, so reading them is a read of the
         // table's data — the same bar as selecting from it, and deliberately not a superuser gate.

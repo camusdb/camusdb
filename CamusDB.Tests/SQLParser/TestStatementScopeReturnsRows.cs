@@ -20,6 +20,8 @@ public sealed class TestStatementScopeReturnsRows
     [TestCase("SELECT 1")]
     [TestCase("SELECT a FROM t WHERE a > 1 ORDER BY a LIMIT 3")]
     [TestCase("SHOW TABLES")]
+    [TestCase("SHOW TABLES FROM d")]
+    [TestCase("SHOW TABLES IN d LIKE 'a%'")]
     [TestCase("SHOW COLUMNS FROM t")]
     [TestCase("SHOW INDEXES FROM t")]
     [TestCase("SHOW CREATE TABLE t")]

@@ -423,6 +423,7 @@ internal sealed class TestShowGrantsTransports : BaseTest
             (NodeType.ShowDatabases,       "SHOW DATABASES"),
             (NodeType.ShowBranches,        $"SHOW BRANCHES FROM {db}"),
             (NodeType.ShowAncestors,       $"SHOW ANCESTORS FROM {db}"),
+            (NodeType.ShowTablesFrom,      $"SHOW TABLES FROM {db}"),
             (NodeType.ShowOrphanDatabases, "SHOW ORPHAN DATABASES"),
             (NodeType.ShowGrants,          $"SHOW GRANTS FOR {user}"),
             (NodeType.ShowAllGrants,       "SHOW GRANTS FOR *"),

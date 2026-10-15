@@ -59,8 +59,13 @@ public abstract class KeyRangeSplitFixture : BaseTest
     // Setup
     // -----------------------------------------------------------------------
 
+    /// <summary>
+    /// Creates the <c>readings</c> table and seeds it with <paramref name="rowCount"/> rows, which
+    /// default to <see cref="RowCount"/>. A fixture that needs the row space to sit on one side of
+    /// Kahuna's sampling floor (<c>2 x range_split_min_range_size</c> keys) passes its own count.
+    /// </summary>
     protected async Task<(string db, CommandExecutor executor, TableDescriptor table, List<string> ids)>
-        SetupTableAsync()
+        SetupTableAsync(int rowCount = RowCount)
     {
         (string db, DatabaseDescriptor _, CommandExecutor executor) = await CreateDatabase();
 
@@ -85,7 +90,7 @@ public abstract class KeyRangeSplitFixture : BaseTest
             ifNotExists: false
         ));
 
-        List<string> ids = await InsertRowsAsync(db, executor, RowCount);
+        List<string> ids = await InsertRowsAsync(db, executor, rowCount);
 
         TableDescriptor table = await executor.OpenTable(new OpenTableTicket(db, "readings"));
 

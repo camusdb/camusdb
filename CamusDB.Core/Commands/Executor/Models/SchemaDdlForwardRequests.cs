@@ -252,3 +252,26 @@ public sealed class SchemaAckRequest
     public string NodeEndpoint { get; set; } = "";
     public long AppliedSchemaVersion { get; set; }
 }
+
+/// <summary>
+/// Payload of the proposer→peer pull probe. A DDL proposer posts this to a peer's
+/// <c>/internal/schema-ddl/schema-applied</c> endpoint to learn which schema version of the
+/// database that peer has applied, when no pushed ack from it has arrived.
+/// </summary>
+public sealed class SchemaAppliedProbeRequest
+{
+    public string Database { get; set; } = "";
+}
+
+/// <summary>
+/// Answer to <see cref="SchemaAppliedProbeRequest"/>. <see cref="Open"/> is false when the answering
+/// node does not hold the database open, in which case <see cref="AppliedSchemaVersion"/> is 0 and
+/// meaningless. <see cref="Status"/> is <c>"ok"</c> when the node answered for itself and
+/// <c>"failed"</c> when it could not (no cluster node in the process).
+/// </summary>
+public sealed class SchemaAppliedProbeResponse
+{
+    public string Status { get; set; } = "";
+    public bool Open { get; set; }
+    public long AppliedSchemaVersion { get; set; }
+}

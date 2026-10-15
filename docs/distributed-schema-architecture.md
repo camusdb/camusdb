@@ -280,11 +280,16 @@ Inside `CatalogsManager.AlterTableReplicatedAsync`:
         && WasSchemaDeltaApplied(schema, entry)
 
  4. WaitForSchemaAcksAsync(entry.ToVersion)                 ← wait for all live nodes
-        to ack the NEW version before returning to the client
+        that hold the database open to ack the NEW version
+        before returning to the client
 ```
 
 So when an `ALTER` returns successfully to the client, the change is (a) committed in Raft,
-(b) applied locally, and (c) acknowledged-applied by every live node.
+(b) applied locally, and (c) acknowledged-applied by every live node that holds the database open,
+including a node outside the schema partition's replica set, which reaches the version through the
+durable checkpoint (§6.5). The gate learns a node's progress from the ack the node pushes after each
+apply and, when no ack has arrived, by asking the node directly (§6.2, "pull probes"). A read on any
+node that held the database open before the DDL returned therefore sees the change.
 
 ---
 
@@ -484,12 +489,18 @@ signal it uses:
   `GetNodes()` returns phantom witness endpoints that would otherwise wedge the gate forever.
 - **Cluster mode, finite lease (default — 30 s):** the local endpoint plus the peers in
   `Raft.GetActiveNodes(lease)` — the leader's **real per-follower liveness** view (Kommander
-  tracks each follower's last `AppendLogs` response). A peer the leader has not heard from within
-  the lease is presumed dead and dropped from the gate, so DDL completes without it; a
+  tracks each follower's last `AppendLogs` response) — plus every peer that answered a pull probe
+  during this gate (below). A peer the leader has not heard from within the lease, and that does
+  not answer a probe, is presumed dead and dropped from the gate, so DDL completes without it; a
   **slow-but-alive** peer (still answering Raft, even if it has applied no schema delta) stays in
-  the active set and must still ack. The gate runs on the schema leader (the proposer), so
-  `GetActiveNodes` reflects its follower reachability. 30 s is well above the Raft heartbeat
-  interval, so a healthy-but-idle follower is never false-evicted.
+  the active set and must still ack. 30 s is well above the Raft heartbeat interval, so a
+  healthy-but-idle follower is never false-evicted.
+
+  The Raft view alone is not enough under replica placement: `GetActiveNodes` is built from the
+  replication acks this node receives as a leader, so it lists the followers of the partitions this
+  node leads and nothing else. A node that shares no partition with the proposer is absent from it
+  however alive it is, and a gate that trusted the view alone returned before such a node had
+  applied the DDL. The probes close that gap.
 - **Cluster mode, infinite lease (strict, opt-in via config `-1`):** the local endpoint plus every
   peer from `Raft.GetNodes()` — the gate waits for **every configured** member. Strictest (never
   false-evicts) but a crashed-but-configured node freezes DDL until `SchemaAckWaitTimeout`.
@@ -508,14 +519,29 @@ lease that waits on every configured node). Both it and `SchemaAckWaitTimeout` a
 `EmbeddedKahuna` and via the `schema_ack_live_node_lease_ms` / `schema_ack_wait_timeout_ms` config
 keys (validated at startup).
 
-> **Ack transport.** `SchemaAckTracker` is a per-`EmbeddedKahuna` instance field (no
+> **Ack transport — push.** `SchemaAckTracker` is a per-`EmbeddedKahuna` instance field (no
 > `static`). After each local apply, `RecordAndPublishSchemaApplied` records the ack locally and
 > fires a best-effort notification to the current schema-partition leader via `ISchemaAckSender`
-> (`HttpSchemaDdlForwarder` in production, `InProcessSchemaAckRelay` in tests). The leader records
-> the remote ack via `RecordRemoteSchemaAck`, so `WaitForAllLiveAsync` observes real follower
-> progress in multi-process deployments. The in-process fixture exercises the same transport path
-> through `InProcessSchemaAckRelay` rather than relying on co-location. The gate's existing
-> timeout remains the correctness backstop for dropped acks (leader change, network loss).
+> (`HttpSchemaDdlForwarder` in production, `InProcessSchemaDdlForwarder` in the in-process cluster
+> and the browser playground). The leader records the remote ack via `RecordRemoteSchemaAck`, so
+> `WaitForAllLiveAsync` observes real follower progress in multi-process deployments.
+>
+> **Ack transport — pull probes.** A member the gate holds no record for is skipped as "never opened
+> the database". Pushed acks alone make that reading unsafe: a node whose ack was lost, or whose ack
+> went to a previous leader, has no record either, and a node that opened the database a moment ago
+> may have its version-0 ack still in flight. So the proposer also asks
+> (`SchemaAckProber`, through `ISchemaAckSender.ProbeSchemaAppliedAsync`, served by the
+> `/internal/schema-ddl/schema-applied` endpoint): before the gate first evaluates, every roster peer
+> the Raft view does not show is asked once, in parallel and bounded by one probe timeout (2 s); then,
+> while the gate waits, every member still behind is asked again every 250 ms. A node answers from
+> its own tracker record, which is written when the database is registered for schema apply and
+> dropped when it is closed or evicted. A version answer is recorded exactly like a pushed ack; a
+> "not open" answer drops the member's record (`SchemaAckTracker.RecordClosed`), so a node that
+> closed the database no longer holds the gate to its backstop; no answer changes nothing. In a
+> healthy, fully replicated cluster the pushed acks land before the first probe interval elapses and
+> no probe is sent. Because the probes do not depend on who the acks were sent to, the gate is
+> correct on a node that proposed through the entry forwarder as well as on the leader. The gate's
+> timeout and quorum backstop remain the liveness backstops for a node that neither acks nor answers.
 
 ### 6.3 DDL liveness under a slow/partitioned node — quorum backstop + catch-up fence
 
@@ -669,7 +695,11 @@ persists `{db}/meta/*` after every committed delta and before it answers a forwa
   schema partition this node does not host, through the same reconciler as §6.4. Each install
   acknowledges the reached version to the schema leader, so the ack gate (§6.2) keeps waiting for
   such a node and a staged change (§8) does not advance past it. The open path acknowledges the
-  loaded version for the same reason.
+  loaded version for the same reason. The leader does not depend on those acks alone: such a node
+  is usually absent from the leader's Raft activity view (it follows none of the partitions the
+  leader leads), so the gate asks it directly before it first evaluates and while it waits (§6.2,
+  pull probes). A DDL therefore returns only after every node that holds the database open has
+  applied it, on a replica through the log and on an outsider through the checkpoint.
 - `DdlForwardingCoordinator.WaitForForwardedSchemaApplyAsync` reloads the checkpoint instead of
   polling for a Raft delivery that cannot come, so the forwarding node still reads its own write.
 - **The ack walks the replica set too.** The node's acknowledgement goes to the leader it can
@@ -685,8 +715,10 @@ persists `{db}/meta/*` after every committed delta and before it answers a forwa
 - `ClusterSettingsService` probes the settings generation stamp on the same cadence and re-scans
   the per-key checkpoint when it moved; a forwarded change re-scans on return.
 
-The staleness bound of such a node is the probe interval plus one key-value round trip, where a
-replica's bound is the replication latency. A node that hosts every partition pays nothing beyond
+The staleness bound of such a node, for a change it did not wait for as a DDL client, is the
+probe interval plus one key-value round trip, where a replica's bound is the replication latency;
+for the client that issued the DDL there is no staleness on any node that held the database open,
+because the DDL did not return before those nodes applied it. A node that hosts every partition pays nothing beyond
 the hosted check. A node opened against a database logs which replicas carry its schema partition
 (`LogSchemaLogNotHosted`), so an operator can see where that database's DDL is routed.
 

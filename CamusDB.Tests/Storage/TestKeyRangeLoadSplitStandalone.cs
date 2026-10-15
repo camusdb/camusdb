@@ -305,47 +305,150 @@ public sealed class TestKeyRangeLoadSplitStandalone : KeyRangeLoadSplitFixture
 }
 
 /// <summary>
-/// Proves that load concentrated on a single key ends in refusal, not in an endless split chain.
+/// Proves that load concentrated on a single key ends in refusal, not in a split, and that the
+/// refusal reaches the counter an operator reads.
 ///
 /// <para>A split moves a boundary. When one key carries the whole write rate, no boundary puts less
-/// than all of it on one child, so a split adds a Raft group and relieves nothing. Kahuna's
-/// imbalance guard refuses that shape, and its counter is what tells an operator the workload — not
-/// the configuration — is why nothing is splitting.</para>
+/// than all of it on one child, so a split adds a Raft group and relieves nothing. Kahuna refuses
+/// that shape in two places, and the fixture proves each on the path that owns it:</para>
+/// <list type="bullet">
+///   <item>A range below the sampling floor (<c>2 x range_split_min_range_size</c> keys) can never
+///   yield a split key, so the load checker reports it through the hot-key concentration probe.
+///   <see cref="LoadOnASingleKey_IsRefusedAsIndivisible"/> seeds such a range.</item>
+///   <item>A range above the floor yields a candidate boundary, and the imbalance guard refuses it
+///   when the best boundary still leaves more than the configured share of the writes on one child.
+///   <see cref="LoadOnASingleKey_AboveTheSamplingFloor_IsRefusedWithoutASplit"/> drives that path.</item>
+/// </list>
 ///
-/// <para>The road to the refusal depends on machine speed, and the test accepts both routes. The
-/// seeded rows enter the write histogram with a weight of one each, so the hot key must outweigh
-/// them four to one before the guard sees the range as indivisible. On a fast machine that happens
-/// inside the first debounce window and the very first attempt refuses. On a slow machine the first
-/// attempts see a still-balanced histogram and legitimately divide the range along it — until the
-/// hot child is either dominated by its key or too small to divide, both of which Kahuna reports as
-/// an indivisible refusal. The assertions therefore come in two phases: first drive load until the
-/// counter moves at all, then prove the steady state — more load brings more refusals and the
-/// boundaries stay exactly where the first refusal found them.</para>
+/// <para>Neither test lets the checker attempt a real split on the way to the refusal. An earlier
+/// shape of this fixture seeded a range above the floor and hammered it from a balanced histogram,
+/// accepting that the first attempts would divide the range before the hot key outweighed the seed
+/// rows. That is a race against machine speed. On a fast machine the first attempt fails cheaply
+/// (an indeterminate probe, a quiesce lock already held) and the next one refuses. On a slow one
+/// the attempt reaches the quiesced drain, and a drain that is refused there puts the range into a
+/// backoff whose base is the node's collection interval: a full minute by default, longer than any
+/// budget this test can afford, during which the load branch skips the range and the counter stays
+/// silent. The two tests below remove the attempt instead of racing it. The first keeps the range
+/// too small to divide; the second makes the hot key dominate the histogram before the range grows
+/// past the floor, so the very first attempt already refuses.</para>
 /// </summary>
 [TestFixture]
 [NonParallelizable]
 public sealed class TestKeyRangeHotKeyRefusalStandalone : KeyRangeLoadSplitFixture
 {
     /// <summary>
-    /// Ceiling on the drive-until-refused phase. Sized for a badly degraded CI runner: the slowest
-    /// route needs roughly 160 committed single-row updates before the hot key outweighs the seeded
-    /// histogram, and a runner that cannot commit three per second has no business running this
-    /// suite at all.
+    /// Rows seeded for the below-the-floor test. The test asserts this against the node's actual
+    /// <c>range_split_min_range_size</c>, so a changed default fails loudly instead of silently
+    /// reopening the split route.
+    /// </summary>
+    private const int BelowFloorRowCount = 10;
+
+    /// <summary>
+    /// Committed updates of the hot key before the above-the-floor range is grown to
+    /// <see cref="KeyRangeSplitFixture.RowCount"/> keys. Every seed row enters the histogram with a
+    /// weight of one, and the guard refuses once the best boundary still leaves 80 % of the writes
+    /// on one child. With the default minimum child size of ten keys, that needs the hot key to carry
+    /// roughly three times the seeds' total weight; 200 is nearly twice the amount needed, so the
+    /// margin does not depend on how many histogram records one commit produces beyond its one.
+    /// </summary>
+    private const int DominanceCommits = 200;
+
+    /// <summary>
+    /// Ceiling on the single-key phase. A runner that cannot commit three single-row updates per
+    /// second has no business running this suite at all, and the test says so rather than timing out.
+    /// </summary>
+    private static readonly TimeSpan DominanceBudget = TimeSpan.FromSeconds(90);
+
+    /// <summary>
+    /// Ceiling on the drive-until-refused phase. The below-the-floor route needs about forty
+    /// committed updates before the hot key carries 80 % of the sampled writes; the above-the-floor
+    /// route refuses on its first attempt, within one debounce window of the first write.
     /// </summary>
     private static readonly TimeSpan ConvergenceBudget = TimeSpan.FromSeconds(60);
+
+    protected override void ConfigureNodeOptions(EmbeddedKahunaOptions options)
+    {
+        base.ConfigureNodeOptions(options);
+
+        // Every write-frequency histogram halves on each collection pass. The above-the-floor test
+        // establishes the hot key's dominance by count and then relies on it, and a pass between the
+        // count and the first attempt would halve the hot key's weight while the seed rows keep
+        // theirs — enough to hand the checker a balanced histogram again and reopen the split route.
+        // Ten minutes puts the first pass beyond any run of this fixture. Nothing else here depends
+        // on the pass: the count branch is off, and no transaction lives long enough to meet the
+        // reapers the same interval paces.
+        options.CollectionInterval = TimeSpan.FromMinutes(10);
+    }
 
     [Test]
     public async Task LoadOnASingleKey_IsRefusedAsIndivisible()
     {
-        (string db, CommandExecutor executor, TableDescriptor table, List<string> _) = await SetupTableAsync();
+        int minRangeSize = TestNode!.Options.RangeSplitMinRangeSize;
+
+        Assert.That(BelowFloorRowCount, Is.LessThan(2 * minRangeSize),
+            $"The seeded range must sit below the sampling floor of {2 * minRangeSize} keys, or the " +
+            "checker can compute a split key for it and this test is racing a real split again");
+
+        (string db, CommandExecutor executor, TableDescriptor table, List<string> _) =
+            await SetupTableAsync(rowCount: BelowFloorRowCount);
 
         string keySpace = table.Store.RowKeySpace;
 
+        Assert.That(Descriptors(keySpace), Has.Count.EqualTo(1),
+            "A freshly registered space starts as one whole-space range");
+
+        await AssertHotKeyIsRefusedAndNeverSplitAsync(db, executor, keySpace);
+    }
+
+    [Test]
+    public async Task LoadOnASingleKey_AboveTheSamplingFloor_IsRefusedWithoutASplit()
+    {
+        int minRangeSize = TestNode!.Options.RangeSplitMinRangeSize;
+
+        Assert.That(RowCount, Is.GreaterThanOrEqualTo(2 * minRangeSize),
+            $"The grown range must reach the sampling floor of {2 * minRangeSize} keys, or the " +
+            "imbalance guard is never consulted and this test proves the same probe as its sibling");
+
+        // The table starts as the hot row alone. While the range holds one key it cannot be
+        // divided, so the checker can only refuse it, and every commit here lands on the key the
+        // histogram will be asked about once the range has grown.
+        (string db, CommandExecutor executor, TableDescriptor table, List<string> _) =
+            await SetupTableAsync(rowCount: 1);
+
+        string keySpace = table.Store.RowKeySpace;
+
+        int committed = await HammerOneRowAsync(db, executor, DominanceBudget, untilCommitted: DominanceCommits);
+
+        Assert.That(committed, Is.GreaterThanOrEqualTo(DominanceCommits),
+            $"Only {committed} of {DominanceCommits} single-row updates committed within " +
+            $"{DominanceBudget.TotalSeconds:F0} s, so the hot key's dominance cannot be established " +
+            "and nothing below would prove anything");
+
+        // One commit takes the range past the floor. Each new row enters the histogram with a
+        // weight of one, far below the hot key's, so the first attempt that samples the grown range
+        // already finds every candidate boundary lopsided.
+        await InsertRowsAsync(db, executor, count: RowCount - 1, startingAt: 1);
+
+        Assert.That(Descriptors(keySpace), Has.Count.EqualTo(1),
+            "A single-key range cannot be divided, so the space must still be one range when it grows");
+
+        await AssertHotKeyIsRefusedAndNeverSplitAsync(db, executor, keySpace);
+    }
+
+    /// <summary>
+    /// The shared proof: load on the hot key moves the refusal counter, keeps moving it, and never
+    /// moves a boundary of <paramref name="keySpace"/>.
+    ///
+    /// <para>The counter is read between bursts rather than concurrently, because attempts only fire
+    /// while the load predicate holds; the bursts are what create the attempts. Once the guard has
+    /// refused, the hot key's dominance only grows, so further load must keep producing refusals
+    /// and must not move a single boundary.</para>
+    /// </summary>
+    private async Task AssertHotKeyIsRefusedAndNeverSplitAsync(string db, CommandExecutor executor, string keySpace)
+    {
+        int descriptorsBefore = Descriptors(keySpace).Count;
         double refusalsBefore = await ReadCounterTotalAsync(executor, db, IndivisibleRefusalsMetric);
 
-        // Phase 1: hammer in short bursts until the guard voices a refusal. The counter is read
-        // between bursts rather than concurrently, because attempts only fire while the load
-        // predicate holds — the bursts are what create the attempts.
         double refusals = refusalsBefore;
         Stopwatch elapsed = Stopwatch.StartNew();
 
@@ -357,12 +460,7 @@ public sealed class TestKeyRangeHotKeyRefusalStandalone : KeyRangeLoadSplitFixtu
 
         Assert.That(refusals, Is.GreaterThan(refusalsBefore),
             $"'{IndivisibleRefusalsMetric}' never moved. A range whose writes all land on one key must " +
-            "end in the imbalance guard's refusal — directly, or after the checker has divided away " +
-            "the cold remainder — yet the guard stayed silent for the whole budget.");
-
-        // Phase 2: the steady state. Once the guard has refused, the hot key's dominance only grows,
-        // so further load must keep producing refusals and must not move a single boundary.
-        int descriptorsAtRefusal = Descriptors(keySpace).Count;
+            "end in a refusal, yet the guard stayed silent for the whole budget.");
 
         await HammerOneRowAsync(db, executor, LoadDuration);
 
@@ -374,21 +472,25 @@ public sealed class TestKeyRangeHotKeyRefusalStandalone : KeyRangeLoadSplitFixtu
             "guard must keep refusing for as long as the hot key dominates, or an operator watching " +
             "the counter would conclude the workload changed when it did not.");
 
-        Assert.That(Descriptors(keySpace), Has.Count.EqualTo(descriptorsAtRefusal),
-            "Concentrated load must not divide the range once the guard has refused it: a split " +
-            "cannot relieve a single hot key, so the boundaries must stay where the refusal found them");
+        Assert.That(Descriptors(keySpace), Has.Count.EqualTo(descriptorsBefore),
+            "Concentrated load must not divide the range: a split cannot relieve a single hot key, " +
+            "so the boundaries must stay where the refusal found them");
     }
 
     /// <summary>
-    /// Rewrites the same row for the whole budget, so the write-frequency histogram collapses onto one
-    /// key and every candidate boundary becomes maximally lopsided.
+    /// Rewrites the same row until <paramref name="budget"/> runs out, or until
+    /// <paramref name="untilCommitted"/> updates committed when a count is given, and returns the
+    /// number that committed. The write-frequency histogram collapses onto one key as it runs, so
+    /// every candidate boundary becomes maximally lopsided.
     /// </summary>
-    private static async Task HammerOneRowAsync(string db, CommandExecutor executor, TimeSpan budget)
+    private static async Task<int> HammerOneRowAsync(
+        string db, CommandExecutor executor, TimeSpan budget, int? untilCommitted = null)
     {
         DatabaseDescriptor database = await executor.OpenDatabase(db);
         Stopwatch elapsed = Stopwatch.StartNew();
+        int committed = 0;
 
-        for (long value = 0; elapsed.Elapsed < budget; value++)
+        for (long value = 0; elapsed.Elapsed < budget && committed < (untilCommitted ?? int.MaxValue); value++)
         {
             KvTransaction? tx = null;
 
@@ -400,6 +502,7 @@ public sealed class TestKeyRangeHotKeyRefusalStandalone : KeyRangeLoadSplitFixtu
                     tx, db, $"UPDATE readings SET amount = {value} WHERE label = 'reading-0'", null));
 
                 await database.Transactions.CommitAsync(tx);
+                committed++;
             }
             catch (CamusDBException)
             {
@@ -411,5 +514,7 @@ public sealed class TestKeyRangeHotKeyRefusalStandalone : KeyRangeLoadSplitFixtu
                     await database.Transactions.RollbackIfNotCompletedAsync(tx);
             }
         }
+
+        return committed;
     }
 }

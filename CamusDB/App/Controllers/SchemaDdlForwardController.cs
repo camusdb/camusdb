@@ -301,6 +301,45 @@ public sealed class SchemaDdlForwardController : CommandsController
         return new JsonResult(new SchemaDdlForwardResponse { Status = "ok" });
     }
 
+    /// <summary>
+    /// Answers a DDL proposer's pull probe with this node's own applied schema version of a database,
+    /// or that this node does not hold the database open. The proposer asks when it holds no pushed
+    /// ack from this node, which happens when the ack was lost or went to a previous leader, when this
+    /// node opened the database a moment ago, and under replica placement when this node shares no
+    /// partition with the proposer so its Raft activity never shows it. No leader check: the question
+    /// is about this node alone, and any node may ask it.
+    /// </summary>
+    [HttpPost]
+    [Route("/internal/schema-ddl/schema-applied")]
+    public async Task<JsonResult> ProbeSchemaApplied()
+    {
+        SchemaAppliedProbeRequest? req;
+        try
+        {
+            req = await ReadJsonBodyAsync<SchemaAppliedProbeRequest>().ConfigureAwait(false);
+            if (req is null || string.IsNullOrEmpty(req.Database))
+                return new JsonResult(new SchemaAppliedProbeResponse { Status = "failed" }) { StatusCode = (int)HttpStatusCode.BadRequest };
+        }
+        catch (Exception e)
+        {
+            logger.LogError("{Name}: {Message}", e.GetType().Name, e.Message);
+            return new JsonResult(new SchemaAppliedProbeResponse { Status = "failed" }) { StatusCode = (int)HttpStatusCode.BadRequest };
+        }
+
+        EmbeddedKahuna? clusterNode = HttpContext.RequestServices.GetService<EmbeddedKahuna>();
+        if (clusterNode is null)
+            return new JsonResult(new SchemaAppliedProbeResponse { Status = "failed" }) { StatusCode = (int)HttpStatusCode.ServiceUnavailable };
+
+        long? applied = clusterNode.GetLocalSchemaApplied(req.Database);
+
+        return new JsonResult(new SchemaAppliedProbeResponse
+        {
+            Status = "ok",
+            Open = applied is not null,
+            AppliedSchemaVersion = applied ?? 0,
+        });
+    }
+
     [HttpPost]
     [Route("/internal/schema-ddl/rename-table")]
     public async Task<JsonResult> ForwardRenameTable()

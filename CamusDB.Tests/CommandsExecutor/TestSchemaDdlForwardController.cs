@@ -192,6 +192,73 @@ public sealed class TestSchemaDdlForwardController
         Assert.AreEqual("not-leader", ExtractResponse(result)!.Status);
     }
 
+    // ── Applied-version probe endpoint ───────────────────────────────────────
+
+    /// <summary>
+    /// A node that holds the database open answers with the version it has applied, read from its own
+    /// tracker record, which registration for schema apply writes at open.
+    /// </summary>
+    [Test]
+    public async Task ProbeSchemaApplied_ForAnOpenDatabase_AnswersTheAppliedVersion()
+    {
+        string dbname = await CreateTestDatabaseAsync();
+        try
+        {
+            DatabaseDescriptor database = await executor!.OpenDatabase(dbname);
+            string body = JsonSerializer.Serialize(new SchemaAppliedProbeRequest { Database = database.Id }, JsonOpts);
+
+            JsonResult result = await BuildController(body, clusterNode: node).ProbeSchemaApplied();
+            SchemaAppliedProbeResponse answer = (SchemaAppliedProbeResponse)result.Value!;
+
+            Assert.AreEqual("ok", answer.Status);
+            Assert.IsTrue(answer.Open, "An open database must be reported as open");
+            Assert.AreEqual(database.Schema.SchemaVersion, answer.AppliedSchemaVersion);
+        }
+        finally
+        {
+            await DropTestDatabaseAsync(dbname);
+        }
+    }
+
+    /// <summary>
+    /// A database this node does not hold open is reported as not open, so the asking gate stops
+    /// waiting for this node; the same answer after a close, because closing drops the record.
+    /// </summary>
+    [Test]
+    public async Task ProbeSchemaApplied_ForADatabaseNotOpenHere_AnswersNotOpen()
+    {
+        string body = JsonSerializer.Serialize(new SchemaAppliedProbeRequest { Database = "never-opened" }, JsonOpts);
+
+        JsonResult result = await BuildController(body, clusterNode: node).ProbeSchemaApplied();
+        SchemaAppliedProbeResponse answer = (SchemaAppliedProbeResponse)result.Value!;
+
+        Assert.AreEqual("ok", answer.Status);
+        Assert.IsFalse(answer.Open);
+
+        string dbname = await CreateTestDatabaseAsync();
+        DatabaseDescriptor database = await executor!.OpenDatabase(dbname);
+        Assert.IsNotNull(node!.GetLocalSchemaApplied(database.Id), "Opening must write the local record the probe reads");
+
+        await DropTestDatabaseAsync(dbname);
+
+        body = JsonSerializer.Serialize(new SchemaAppliedProbeRequest { Database = database.Id }, JsonOpts);
+        answer = (SchemaAppliedProbeResponse)(await BuildController(body, clusterNode: node).ProbeSchemaApplied()).Value!;
+
+        Assert.IsFalse(answer.Open, "Closing the database must drop the record, so a later probe answers not open");
+    }
+
+    /// <summary>Without a cluster node the endpoint cannot answer for itself; the asker treats it as unreachable.</summary>
+    [Test]
+    public async Task ProbeSchemaApplied_WithoutAClusterNode_AnswersFailed()
+    {
+        string body = JsonSerializer.Serialize(new SchemaAppliedProbeRequest { Database = "1" }, JsonOpts);
+
+        JsonResult result = await BuildController(body, clusterNode: null).ProbeSchemaApplied();
+
+        Assert.AreEqual((int)System.Net.HttpStatusCode.ServiceUnavailable, result.StatusCode);
+        Assert.AreEqual("failed", ((SchemaAppliedProbeResponse)result.Value!).Status);
+    }
+
     // ── Leader gate ───────────────────────────────────────────────────────────
 
     [Test]
