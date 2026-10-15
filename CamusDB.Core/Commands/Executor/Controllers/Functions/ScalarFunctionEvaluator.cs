@@ -28,6 +28,12 @@ internal static class ScalarFunctionEvaluator
 
         if (!Registry.TryGet(functionName, out ScalarFunctionDescriptor? descriptor))
         {
+            // SELECT generate_series(1, 3): a set-returning function in the select list.
+            if (TableFunctionRegistry.IsTableFunction(functionName))
+                throw new CamusDBException(
+                    CamusDBErrorCodes.FeatureNotSupported,
+                    $"The set-returning function '{functionName}' is supported only in FROM, as in SELECT ... FROM {functionName}(...)");
+
             throw new CamusDBException(
                 CamusDBErrorCodes.InvalidAstStmt,
                 "Function not found '" + functionName + "'");
@@ -121,8 +127,9 @@ internal static class ScalarFunctionEvaluator
     /// Returns <c>true</c> if <paramref name="ast"/> or any descendant contains a call to a
     /// volatile scalar function (one whose result changes across evaluations: <c>random</c>,
     /// <c>now</c>/<c>current_timestamp</c>, <c>statement_timestamp</c>, <c>clock_timestamp</c>,
-    /// <c>current_date</c>, <c>unix_timestamp</c>, <c>gen_id</c>). The clock functions are fixed
-    /// within a transaction or a statement, but not between two, so they are volatile here too.
+    /// <c>current_date</c>, <c>unix_timestamp</c>, <c>unix_timestamp_ms</c>, <c>gen_id</c>). The clock
+    /// functions are fixed within a transaction or a statement, but not between two, so they are
+    /// volatile here too.
     /// Used to gate cache eligibility: a query whose projection, WHERE,
     /// HAVING, or GROUP BY contains a volatile call must bypass the result cache.
     ///

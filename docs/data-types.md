@@ -422,11 +422,16 @@ work with function results.
 | `CURRENT_DATE()` | `date` | UTC date of the start of the transaction |
 | `DATE_ADD(temporal, n, unit)` | `datetime` | See promotion rule below |
 | `DATE_TRUNC(unit, temporal)` | `datetime` | Always yields datetime (Postgres-compatible) |
-| `FROM_UNIXTIME(seconds)` | `datetime` | Unix epoch seconds → UTC datetime |
+| `FROM_UNIXTIME(seconds)` | `datetime` | Unix epoch seconds → UTC datetime. A fraction rounds to the nearest microsecond |
 | `DATE_DIFF(a, b, unit)` | `int64` | Difference in `unit` units (unchanged) |
 | `DATE_PART(unit, temporal)` | `int64` | Extracts calendar component (unchanged) |
 | `EXTRACT(unit FROM temporal)` | `int64` | SQL-standard form of `DATE_PART(unit, temporal)` |
 | `UNIX_TIMESTAMP([temporal])` | `int64` | UTC seconds since epoch. With no argument, of the start of the transaction |
+| `UNIX_TIMESTAMP_MS([temporal])` | `int64` | UTC milliseconds since epoch, rounded down. With no argument, of the start of the transaction |
+| `MAKE_DATE(year, month, day)` | `date` | Integer parts. See [Date constructors](#date-constructors) |
+| `MAKE_TIMESTAMP(year, month, day, hour, minute, second)` | `datetime` | UTC. `second` can be fractional |
+| `MAKEDATE(year, dayofyear)` | `date` | MySQL. Day 1 is January 1 |
+| `LAST_DAY(temporal)` | `date` | MySQL. The last day of the UTC month of the argument |
 | `YEAR`, `MONTH`, `DAY` / `DAYOFMONTH`, `HOUR`, `MINUTE`, `SECOND`, `QUARTER`, `DAYOFYEAR` `(temporal)` | `int64` | MySQL shortcuts: the same value as `DATE_PART` with that unit |
 | `DAYOFWEEK(temporal)` | `int64` | MySQL rule: 1 = Sunday ... 7 = Saturday |
 | `WEEKDAY(temporal)` | `int64` | MySQL rule: 0 = Monday ... 6 = Sunday |
@@ -437,13 +442,48 @@ work with function results.
 | `TO_DATE(text, pattern)` | `date` | Strict parse with a PostgreSQL template, date only. `TO_DATE(x)` with one argument is still the cast to `date` |
 | `TO_TIMESTAMP(seconds)` | `datetime` | The PostgreSQL spelling of `FROM_UNIXTIME(seconds)` |
 
+### Date constructors
+
+`MAKE_DATE`, `MAKE_TIMESTAMP`, `MAKEDATE` and `LAST_DAY` are deterministic. A `CHECK` can call them, and
+a `DEFAULT` that calls them is evaluated once, when the table is created. A NULL argument gives NULL.
+
+An invalid part raises `InvalidInput` (`CADB0400`), and the message names the part:
+
+| Call | Result |
+|------|--------|
+| `MAKE_DATE(2024, 2, 29)` | `2024-02-29` |
+| `MAKE_DATE(2023, 2, 29)` | Error: `day 29 is out of range 1-28 for 2023-02` |
+| `MAKE_DATE(2026, 13, 1)` | Error: `month 13 is out of range 1-12` |
+| `MAKE_TIMESTAMP(2026, 1, 1, 0, 0, 0.123)` | `2026-01-01T00:00:00.1230000Z` |
+| `MAKE_TIMESTAMP(2026, 12, 31, 23, 59, 59.9999999)` | `2027-01-01T00:00:00.0000000Z` |
+| `MAKEDATE(2024, 60)` | `2024-02-29` |
+| `MAKEDATE(2011, 366)` | `2012-01-01` |
+| `LAST_DAY('2024-02-10')` | `2024-02-29` |
+
+The rules:
+
+- The year must be 1-9999. PostgreSQL reads a negative year as a year BC. CamusDB has no BC dates, so it rejects it.
+- `MAKE_TIMESTAMP` accepts an integer, float or NUMERIC second that is at least 0 and less than 60. The
+  fraction rounds to the nearest microsecond, as in PostgreSQL. A second that rounds up to 60 moves into
+  the next minute.
+- `MAKEDATE` follows MySQL when the day of the year is past the end of the year: the date moves into the
+  next year. MySQL returns NULL for a day of the year below 1, and CamusDB raises an error. MySQL reads
+  a two-digit year as 1970-2069, and CamusDB reads every year as written.
+- `LAST_DAY` reads the month of the UTC value, so an offset can move the value into another month first.
+
+`UNIX_TIMESTAMP_MS` gives the millisecond epoch that JavaScript uses (`Date.now()`). Neither PostgreSQL
+nor MySQL has this function. The name adds the unit to `UNIX_TIMESTAMP` and keeps its arity and clock
+rule. `FROM_UNIXTIME(UNIX_TIMESTAMP_MS(t) / 1000.0)` equals `DATE_TRUNC('millisecond', t)` up to about
+the year 2255. After that year, a float cannot hold each microsecond. Use a NUMERIC divisor for later
+dates: `FROM_UNIXTIME(UNIX_TIMESTAMP_MS(t) / NUMERIC '1000')`.
+
 ### Current time
 
 Each function that reports the current time reads one of three clocks:
 
 | Function | Value | Same value for |
 |----------|-------|----------------|
-| `NOW()`, `CURRENT_TIMESTAMP()`, `TRANSACTION_TIMESTAMP()`, `CURRENT_DATE()`, `UNIX_TIMESTAMP()` | Start of the transaction | Every row and every statement of the transaction |
+| `NOW()`, `CURRENT_TIMESTAMP()`, `TRANSACTION_TIMESTAMP()`, `CURRENT_DATE()`, `UNIX_TIMESTAMP()`, `UNIX_TIMESTAMP_MS()` | Start of the transaction | Every row and every statement of the transaction |
 | `STATEMENT_TIMESTAMP()` | Start of the statement | Every row of the statement |
 | `CLOCK_TIMESTAMP()`, `SYSDATE()` | The clock when the call runs | Nothing. Each call reads the clock again |
 

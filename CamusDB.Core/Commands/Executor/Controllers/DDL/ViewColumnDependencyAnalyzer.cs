@@ -115,6 +115,13 @@ internal static class ViewColumnDependencyAnalyzer
                 Register(schema, from.leftAst?.yytext, from.rightAst?.yytext ?? from.leftAst?.yytext, scope);
                 return;
 
+            case NodeType.TableFunctionReference:
+                // A function in FROM is a relation with no table behind it. Its name must still be
+                // known here, or a qualified reference to it (s.n) would fall through to an outer
+                // relation that happens to share the alias.
+                scope.NonTables.Add(from.extendedOne?.yytext ?? from.leftAst?.yytext ?? "");
+                return;
+
             case NodeType.DerivedTableReference:
                 if (from.rightAst?.yytext is { Length: > 0 } derivedAlias)
                     scope.NonTables.Add(derivedAlias);

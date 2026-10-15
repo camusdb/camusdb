@@ -129,15 +129,17 @@ internal sealed class JoinQueryPlanner
 
         QuerySource orderedSource = choice.Source;
 
-        QueryPlan plan = new(database, ResolvePlanTable(bound), ticket)
-        {
-            BoundQuery = bound,
-            PredicateAnalysis = PredicateAnalyzer.Analyze(ticket.Where, ticket.Parameters),
-            // The filter that goes with the tree: a conjunct-mode tree already evaluates the WHERE
-            // conjuncts it moved into its joins.
-            ExecutionFilter = choice.PostJoinFilter,
-            Root = BuildJoinTree(orderedSource, bound, pushdown, database, _stats, choice.StepEstimates, clockValues),
-        };
+        // A query over functions only (FROM generate_series(1, 3)) has no base table at any depth.
+        QueryPlan plan = TryResolvePlanTable(bound) is { } planTable
+            ? new QueryPlan(database, planTable, ticket)
+            : QueryPlan.WithoutTable(database, ticket);
+
+        plan.BoundQuery = bound;
+        plan.PredicateAnalysis = PredicateAnalyzer.Analyze(ticket.Where, ticket.Parameters);
+        // The filter that goes with the tree: a conjunct-mode tree already evaluates the WHERE
+        // conjuncts it moved into its joins.
+        plan.ExecutionFilter = choice.PostJoinFilter;
+        plan.Root = BuildJoinTree(orderedSource, bound, pushdown, database, _stats, choice.StepEstimates, clockValues);
 
         plan.JoinOrderSearch = new JoinOrderSearchSummary(
             fromCache ? "cached" : choice.Mode == JoinBuildMode.CostBased ? "cost-based" : "heuristic",
@@ -1158,7 +1160,8 @@ internal sealed class JoinQueryPlanner
     }
 
     /// <summary>
-    /// Picks a representative real table for the plan's metadata.
+    /// Picks a representative real table for the plan's metadata, or null when no leaf at any depth
+    /// reads a table (every leaf is a function in <c>FROM</c>).
     /// </summary>
     /// <remarks>
     /// The descent is recursive because derived tables nest: a query whose only source is a derived
@@ -1169,18 +1172,6 @@ internal sealed class JoinQueryPlanner
     /// for the shallow cases — the first real table found is the same one — it only stops giving up
     /// early on the deep ones.
     /// </remarks>
-    private static TableDescriptor ResolvePlanTable(BoundSelectQuery bound)
-    {
-        TableDescriptor? found = TryResolvePlanTable(bound);
-
-        if (found is not null)
-            return found;
-
-        throw new CamusDBException(
-            CamusDBErrorCodes.InvalidInternalOperation,
-            "Could not resolve plan table metadata for derived-only query");
-    }
-
     private static TableDescriptor? TryResolvePlanTable(BoundSelectQuery bound)
     {
         if (bound.Sources.Count > 0)

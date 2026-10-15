@@ -974,4 +974,13 @@ public enum NodeType
     /// end because <see cref="NodeAstWireCodec"/> sends the member's number between nodes.</para>
     /// </summary>
     ShowTablesFrom,
+
+    /// <summary>
+    /// A function call used as a relation in <c>FROM</c>: <c>generate_series(1, 10) AS i</c>.
+    /// <c>leftAst</c> = the function name identifier, <c>rightAst</c> = the argument list (null when
+    /// empty), <c>extendedOne</c> = the alias identifier or null, <c>extendedTwo</c> = the column-alias
+    /// list of <c>AS t(n)</c> or null. Appended at the end because <see cref="NodeAstWireCodec"/>
+    /// sends the member's number between nodes.
+    /// </summary>
+    TableFunctionReference,
 }

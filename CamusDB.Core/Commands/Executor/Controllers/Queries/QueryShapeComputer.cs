@@ -113,6 +113,19 @@ internal static class QueryShapeComputer
                 AppendExpr(js.OnPredicate, sb);
                 break;
 
+            case TableFunctionSource tf:
+                // Arguments are literal-abstracted like any expression, so generate_series(1, 3) and
+                // generate_series(1, 10) share one shape, as WHERE id = 1 and WHERE id = 2 do.
+                sb.Append("FUNCTION:").Append(tf.FunctionName).Append('(');
+                for (int i = 0; i < tf.Arguments.Count; i++)
+                {
+                    if (i > 0)
+                        sb.Append(',');
+                    AppendExpr(tf.Arguments[i], sb);
+                }
+                sb.Append(") COLUMN ").Append(tf.ColumnName);
+                break;
+
             case DerivedTableSource dt:
                 sb.Append("DERIVED(");
                 AppendQuery(dt.Query, sb);

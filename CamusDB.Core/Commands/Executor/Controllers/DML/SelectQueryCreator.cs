@@ -8,6 +8,7 @@
 
 using CamusDB.Core;
 using CamusDB.Core.Cache;
+using CamusDB.Core.CommandsExecutor.Controllers.Functions;
 using CamusDB.Core.CommandsExecutor.Controllers.Queries;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Queries;
@@ -80,7 +81,7 @@ internal sealed class SelectQueryCreator
     private static bool IsCrossJoinOnlyTree(NodeAst ast)
     {
         if (ast.nodeType != NodeType.Join)
-            return ast.nodeType is NodeType.TableReference or NodeType.DerivedTableReference;
+            return ast.nodeType is NodeType.TableReference or NodeType.DerivedTableReference or NodeType.TableFunctionReference;
 
         return JoinAstKind.Read(ast) == JoinAstKind.Kind.Cross
             && IsCrossJoinOnlyTree(ast.leftAst!)
@@ -104,6 +105,7 @@ internal sealed class SelectQueryCreator
         {
             NodeType.TableReference => CreateTableSource(tableAst),
             NodeType.DerivedTableReference => CreateDerivedTableSource(tableAst),
+            NodeType.TableFunctionReference => CreateTableFunctionSource(tableAst),
             _ => throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Invalid comma join table reference"),
         };
 
@@ -113,6 +115,7 @@ internal sealed class SelectQueryCreator
         {
             NodeType.TableReference => CreateTableSource(fromAst),
             NodeType.DerivedTableReference => CreateDerivedTableSource(fromAst),
+            NodeType.TableFunctionReference => CreateTableFunctionSource(fromAst),
             NodeType.Join => CreateJoinSource(fromAst),
             NodeType.Identifier => new TableSource(fromAst.yytext!),
             NodeType.IdentifierWithOpts => new TableSource(
@@ -146,7 +149,7 @@ internal sealed class SelectQueryCreator
                     joinAst.extendedOne!);
 
             case JoinAstKind.Kind.Right:
-                if (leftAst.nodeType is not (NodeType.TableReference or NodeType.DerivedTableReference))
+                if (leftAst.nodeType is not (NodeType.TableReference or NodeType.DerivedTableReference or NodeType.TableFunctionReference))
                 {
                     throw new CamusDBException(
                         CamusDBErrorCodes.FeatureNotSupported,
@@ -222,6 +225,129 @@ internal sealed class SelectQueryCreator
         string? ownerName = derivedAst.extendedTwo?.leftAst?.yytext;
 
         return new DerivedTableSource(innerQuery, derivedAst.rightAst.yytext, cacheHint, ownerName, ownerId);
+    }
+
+    /// <summary>
+    /// Turns <c>FROM fn(args) [AS alias[(column)]]</c> into a derived table over a
+    /// <see cref="TableFunctionSource"/> (see that type for why it is not a relation kind of its own).
+    ///
+    /// <para><b>Alias rule.</b> A function with one output column names both the relation and the
+    /// column after its alias, as PostgreSQL does: <c>generate_series(1, 3) AS i</c> exposes the column
+    /// <c>i</c>, reachable as <c>i</c> or <c>i.i</c>. With no alias, both take the function's name.
+    /// <c>AS t(n)</c> names the relation <c>t</c> and the column <c>n</c>.</para>
+    ///
+    /// <para><b>Arguments read no column.</b> An argument that names a column would have to read a row
+    /// of another relation in the same <c>FROM</c>, which is <c>LATERAL</c>; that, and a subquery
+    /// argument, are refused here. Everything else — literals, parameters, operators, scalar function
+    /// calls — is evaluated once, before the first row.</para>
+    /// </summary>
+    private static DerivedTableSource CreateTableFunctionSource(NodeAst functionAst)
+    {
+        string name = functionAst.leftAst!.yytext!;
+
+        List<NodeAst> arguments = new();
+        CollectFunctionArguments(functionAst.rightAst, arguments);
+
+        TableFunction function = TableFunctionRegistry.Resolve(name, arguments.Count);
+
+        foreach (NodeAst argument in arguments)
+            RejectNonConstantArgument(function.Name, argument);
+
+        string? alias = functionAst.extendedOne?.yytext;
+
+        List<NodeAst> columnAliases = new();
+        CollectFunctionArguments(functionAst.extendedTwo, columnAliases, NodeType.IdentifierList);
+
+        if (columnAliases.Count > 1)
+        {
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInput,
+                $"{function.Name} returns 1 column, but the alias names {columnAliases.Count} columns");
+        }
+
+        string relationName = alias ?? function.Name;
+        string columnName = columnAliases.Count == 1 ? columnAliases[0].yytext! : relationName;
+
+        TableFunctionSource call = new(function.Name, arguments, columnName);
+        NodeAst columnAst = new(NodeType.Identifier, null, null, null, null, null, null, null, columnName);
+
+        SelectQuery shell = new(call, [new ProjectionItem(columnAst, columnName)]);
+        return new DerivedTableSource(shell, relationName);
+    }
+
+    /// <summary>
+    /// Flattens a left-recursive list (<paramref name="listType"/> nodes whose left child is the rest of
+    /// the list) into call order. Iterative, because the spine is one node deep per element.
+    /// </summary>
+    private static void CollectFunctionArguments(
+        NodeAst? listAst,
+        List<NodeAst> output,
+        NodeType listType = NodeType.ExprArgumentList)
+    {
+        NodeAst? node = listAst;
+
+        while (node is not null && node.nodeType == listType)
+        {
+            output.Add(node.rightAst!);
+            node = node.leftAst;
+        }
+
+        if (node is not null)
+            output.Add(node);
+
+        output.Reverse();
+    }
+
+    private static void RejectNonConstantArgument(string functionName, NodeAst argument)
+    {
+        Stack<NodeAst> pending = new();
+        pending.Push(argument);
+
+        while (pending.Count > 0)
+        {
+            NodeAst node = pending.Pop();
+
+            switch (node.nodeType)
+            {
+                case NodeType.Identifier:
+                    throw new CamusDBException(
+                        CamusDBErrorCodes.FeatureNotSupported,
+                        $"An argument of {functionName} in FROM references the column '{node.yytext}'; " +
+                        "arguments that read another relation (LATERAL) are not supported");
+
+                case NodeType.ExprScalarSubquery or NodeType.ExprExistsSubquery or NodeType.ExprInSubquery
+                    or NodeType.ExprNotInSubquery or NodeType.Select:
+                    throw new CamusDBException(
+                        CamusDBErrorCodes.FeatureNotSupported,
+                        $"An argument of {functionName} in FROM cannot be a subquery");
+
+                case NodeType.ExprFuncCall:
+                    // The left child is the function's own name, not a column.
+                    PushChild(pending, node.rightAst);
+                    continue;
+
+                case NodeType.ExprCast:
+                    // The right child is the target type, which may be an identifier node.
+                    PushChild(pending, node.leftAst);
+                    continue;
+            }
+
+            PushChild(pending, node.leftAst);
+            PushChild(pending, node.rightAst);
+            PushChild(pending, node.extendedOne);
+            PushChild(pending, node.extendedTwo);
+            PushChild(pending, node.extendedThree);
+            PushChild(pending, node.extendedFour);
+            PushChild(pending, node.extendedFive);
+            PushChild(pending, node.extendedSix);
+            PushChild(pending, node.extendedSeven);
+        }
+    }
+
+    private static void PushChild(Stack<NodeAst> pending, NodeAst? child)
+    {
+        if (child is not null)
+            pending.Push(child);
     }
 
     private static string? GetForcedIndex(NodeAst rightAst)

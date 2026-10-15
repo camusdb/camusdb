@@ -19,6 +19,9 @@ LEFT JOIN c ON c.b_id = b.id
 JOIN d ON d.a_id = a.id;
 ```
 
+A set-returning function such as `generate_series` may also stand on either side of any join, as
+a relation with one column. See [`set-returning-functions.md`](./set-returning-functions.md).
+
 A derived table may stand on either side of any join:
 
 ```sql

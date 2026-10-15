@@ -764,9 +764,10 @@ internal static class JoinEnumerator
     {
         TableDescriptor? table = FindTableDescriptor(alias, bound);
 
+        // A function in FROM has no statistics, but with constant arguments its count is exact.
         long tableRows = (table is not null
             ? stats.GetRowCountEstimate(database, table)
-            : null) ?? CostEstimator.DefaultTableRowCount;
+            : FindFunctionRows(alias, bound)) ?? CostEstimator.DefaultTableRowCount;
 
         pushdown.ScanFiltersByAlias.TryGetValue(alias, out NodeAst? filter);
 
@@ -893,6 +894,15 @@ internal static class JoinEnumerator
     }
 
     // ─── Helpers ─────────────────────────────────────────────────────────────
+
+    private static long? FindFunctionRows(string alias, BoundSelectQuery bound)
+    {
+        foreach (BoundDerivedTableSource src in bound.DerivedSources)
+            if (src.Alias == alias)
+                return TableFunctionEvaluation.TryCountRows(src);
+
+        return null;
+    }
 
     private static TableDescriptor? FindTableDescriptor(string alias, BoundSelectQuery bound)
     {

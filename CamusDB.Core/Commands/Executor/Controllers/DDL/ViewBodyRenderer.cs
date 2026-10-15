@@ -276,6 +276,34 @@ internal sealed class ViewBodyRenderer : SqlAstRenderer
     /// made once, against statistics that have since moved. A view body carrying a hint is rejected
     /// at CREATE time rather than silently stripped here.
     /// </remarks>
+    /// <summary>
+    /// Renders a left-recursive list (<paramref name="listType"/> nodes whose left child holds the
+    /// earlier elements) in call order, comma-separated. Iterative: the spine is one node per element.
+    /// </summary>
+    private void RenderFunctionArguments(StringBuilder sb, NodeAst? list, NodeType listType = NodeType.ExprArgumentList)
+    {
+        if (list is null)
+            return;
+
+        List<NodeAst> items = new();
+        NodeAst node = list;
+
+        while (node.nodeType == listType)
+        {
+            items.Add(node.rightAst!);
+            node = node.leftAst!;
+        }
+
+        items.Add(node);
+
+        for (int i = items.Count - 1; i >= 0; i--)
+        {
+            RenderNode(sb, items[i]);
+            if (i > 0)
+                sb.Append(", ");
+        }
+    }
+
     private void RenderFrom(StringBuilder sb, NodeAst from)
     {
         switch (from.nodeType)
@@ -293,6 +321,21 @@ internal sealed class ViewBodyRenderer : SqlAstRenderer
                         CamusDBErrorCodes.InvalidInput,
                         "A view body may not carry an index or cache hint: a hint pins a plan choice " +
                         "into the stored definition, where it would outlive the statistics it was made against");
+                return;
+
+            case NodeType.TableFunctionReference:
+                // fn(args) [AS alias[(column)]]: re-parses to the same relation and column names.
+                sb.Append(from.leftAst!.yytext).Append('(');
+                RenderFunctionArguments(sb, from.rightAst);
+                sb.Append(')');
+                if (from.extendedOne?.yytext is not null)
+                    sb.Append(" AS ").Append(from.extendedOne.yytext);
+                if (from.extendedTwo is not null)
+                {
+                    sb.Append('(');
+                    RenderFunctionArguments(sb, from.extendedTwo, NodeType.IdentifierList);
+                    sb.Append(')');
+                }
                 return;
 
             case NodeType.DerivedTableReference:

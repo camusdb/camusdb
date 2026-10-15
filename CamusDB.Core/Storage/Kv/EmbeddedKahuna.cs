@@ -700,7 +700,8 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
         catch (Exception ex)
         {
             Volatile.Write(ref bootstrapState, BootstrapFailed);
-            logger?.LogCritical(ex, "Backup bootstrap from {LeafBackupId} failed; the node will not start", leafBackupId);
+            if (logger is not null && logger.IsEnabled(LogLevel.Critical))
+                logger.LogCritical(ex, "Backup bootstrap from {LeafBackupId} failed; the node will not start", leafBackupId);
 
             if (ex is CamusDBException)
                 throw;
@@ -717,9 +718,10 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
 
         Volatile.Write(ref bootstrapState, BootstrapCompleted);
 
-        logger?.LogInformation(
-            "Seeded the node from backup {LeafBackupId} (target {TargetTimeMs} ms, 0 = latest); it joins at the restored index",
-            leafBackupId, targetTimeMs);
+        if (logger is not null && logger.IsEnabled(LogLevel.Information))
+            logger.LogInformation(
+                "Seeded the node from backup {LeafBackupId} (target {TargetTimeMs} ms, 0 = latest); it joins at the restored index",
+                leafBackupId, targetTimeMs);
     }
 
     /// <summary>

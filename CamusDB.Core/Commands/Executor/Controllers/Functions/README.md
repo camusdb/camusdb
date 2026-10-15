@@ -12,7 +12,8 @@ Built-in function groups. Each lowercase name in the second column is a register
 | `StringScalarFunctions` | `length`, `lower`, `upper`, `trim`, `ltrim`, `rtrim`, `substring`, `strpos`, `replace`, `contains`, `starts_with`, `ends_with`, `concat` — `length`, `substring`, the trims, `strpos` and the three predicates also take bytes; `POSITION(x IN y)` parses to `strpos(y, x)` (`PositionCall`) |
 | `HashScalarFunctions` | `md5`, `sha1`, `sha256`, `sha512` — lowercase hex digest of a string (UTF-8) or bytes value; not for security. `digest`, `hmac` — the digest or HMAC as bytes; `crc32` |
 | `BytesScalarFunctions` | `encode`, `decode`, `hex`, `unhex`, `to_base64`, `from_base64`, `convert_to`, `convert_from`, `get_byte`, `set_byte`, `get_bit`, `set_bit`, `bit_length`, `bit_count`, `gen_random_bytes` — see `docs/bytes-functions.md` |
-| `DateTimeScalarFunctions` | `current_timestamp` / `now`, `current_date`, `date_part`, `date_trunc`, `date_add`, `date_diff`, `unix_timestamp`, `from_unixtime` |
+| `DateTimeScalarFunctions` | `current_timestamp` / `now`, `current_date`, `date_part`, `date_trunc`, `date_add`, `date_diff`, `unix_timestamp`, `unix_timestamp_ms`, `from_unixtime` |
+| `DateConstructorScalarFunctions` | `make_date`, `make_timestamp`, `makedate`, `last_day` — build a date or a datetime from its parts; an invalid part is an error that names the part |
 | `DateTimeScalarFunctions` (MySQL shortcuts) | `year`, `month`, `day` / `dayofmonth`, `hour`, `minute`, `second`, `quarter`, `week`, `dayofweek`, `weekday`, `dayofyear`, `dayname`, `monthname` |
 | `DateTimeScalarFunctions` (SQL standard) | `EXTRACT(field FROM x)` — the parser turns it into a call to `extract`, an alias of `date_part` |
 | `DatePatternScalarFunctions` | `to_char`, `to_timestamp`, `date_format`, `str_to_date` — format and strictly parse a date with a pattern (`DatePattern`); the two-argument `to_date(text, pattern)` is registered with the casts |
@@ -29,6 +30,10 @@ Built-in function groups. Each lowercase name in the second column is a register
 | `QuantifierScalarFunctions` | `any`, `some`, `all` — stubs that reject a call; the parser rewrites `x = ANY (a)` and `x <> ALL (a)` before evaluation |
 
 The date units (`'week'`, `'quarter'`, `'dow'`, `'epoch'`, ...) and the functions that accept each one are listed in `docs/data-types.md`, section "Temporal functions". The pattern tokens of `to_char` / `date_format` and the parse rules are in `docs/date-patterns.md`.
+
+## Table functions
+
+A function that returns rows, not one value, is a table function. It is valid only as a relation in `FROM`, and it is not in the scalar registry above: `TableFunctionRegistry` resolves it. The only one is `generate_series` (`GenerateSeriesTableFunction`). A `TableFunction` yields its output lazily and must be pure, because the join leaf scanner streams it and generates it again when a join reads it again. A scalar name in `FROM`, or a table function in the select list, is an error that says so. See `docs/set-returning-functions.md`.
 
 `ScalarFunctionDescriptor` carries the function name(s), arity constraints, and the delegate that implements the function.
 `ScalarFunctionArguments` is the helper that evaluates argument expressions before passing them to the function delegate.

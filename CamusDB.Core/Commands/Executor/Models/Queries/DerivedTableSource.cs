@@ -34,4 +34,13 @@ public sealed record DerivedTableSource(
     string Alias,
     CacheHintOptions? CacheHint = null,
     string? OwnerName = null,
-    string? OwnerId = null) : QuerySource;
+    string? OwnerId = null) : QuerySource
+{
+    /// <summary>
+    /// The set-returning function this derived table stands for, or null for a subquery or an
+    /// expanded view. When it is set, <see cref="Query"/> is the inner shell
+    /// <c>SELECT column FROM function(...)</c>: it is never bound or executed as a query, and the
+    /// leaf scanner streams the function's rows directly (see <see cref="TableFunctionSource"/>).
+    /// </summary>
+    public TableFunctionSource? Function => Query.Source as TableFunctionSource;
+}

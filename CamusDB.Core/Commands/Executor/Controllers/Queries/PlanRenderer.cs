@@ -349,8 +349,15 @@ public static class PlanRenderer
         _ => "",
     };
 
-    private static string RenderDerivedTableScan(DerivedTableScanNode node) =>
-        $"derived-table-scan(alias={node.BoundSource.Alias})";
+    private static string RenderDerivedTableScan(DerivedTableScanNode node)
+    {
+        if (node.BoundSource.Source.Function is not { } call)
+            return $"derived-table-scan(alias={node.BoundSource.Alias})";
+
+        // A function in FROM streams computed rows, so it is named for what it is, with its arguments.
+        string arguments = string.Join(", ", call.Arguments.Select(RenderExpr));
+        return $"function-scan({call.FunctionName}({arguments}), alias={node.BoundSource.Alias}, column={call.ColumnName})";
+    }
 
     private static string RenderSemiJoin(SemiJoinNode node)
     {

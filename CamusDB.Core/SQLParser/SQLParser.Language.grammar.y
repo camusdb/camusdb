@@ -1211,8 +1211,35 @@ join_op : TINNER TJOIN { $$.s = JoinAstKind.Write(JoinAstKind.Kind.Inner); }
 /* .s carries the bare implicit alias word (see explicit_join_from), null for every other form. */
 table_reference : table_name opt_table_alias opt_table_hint
                 { $$.n = new(NodeType.TableReference, $1.n, $2.n, $3.n, null, null, null, null, null); $$.s = $2.s; }
+                | table_function_reference { $$.n = $1.n; $$.s = $1.s; }
                 | derived_table_reference { $$.n = $1.n; $$.s = $1.s; }
                 ;
+
+/* A function call in FROM (generate_series(1, 10) AS i). The parenthesis after the name is what
+   tells it apart from a table name: a table reference is never followed by one. The function name is
+   a plain identifier and is resolved later, by TableFunctionRegistry. leftAst = the name, rightAst =
+   the argument list (null for an empty list), extendedOne = the alias, extendedTwo = the column-alias
+   list of AS t(n), or null. */
+table_function_reference : identifier LPAREN fcall_argument_list RPAREN table_function_alias
+                         { $$.n = new(NodeType.TableFunctionReference, $1.n, $3.n, $5.n, $5.n?.leftAst, null, null, null, null); $$.s = $5.s; }
+                         | identifier LPAREN RPAREN table_function_alias
+                         { $$.n = new(NodeType.TableFunctionReference, $1.n, null, $4.n, $4.n?.leftAst, null, null, null, null); $$.s = $4.s; }
+                         ;
+
+/* The alias of a table function. AS t(n) names the relation t and its column n; the column list hangs
+   off the alias node's leftAst, which an identifier never otherwise uses, and the reference above
+   lifts it into its own slot. */
+table_function_alias : opt_table_alias { $$.n = $1.n; $$.s = $1.s; }
+                     | TAS any_identifier LPAREN table_function_column_list RPAREN
+                     { $$.n = new(NodeType.Identifier, $4.n, null, null, null, null, null, null, $2.n.yytext); $$.s = null; }
+                     | identifier LPAREN table_function_column_list RPAREN
+                     { $$.n = new(NodeType.Identifier, $3.n, null, null, null, null, null, null, $1.n.yytext); $$.s = $1.n.yytext; }
+                     ;
+
+table_function_column_list : table_function_column_list TCOMMA any_identifier
+                           { $$.n = new(NodeType.IdentifierList, $1.n, $3.n, null, null, null, null, null, null); }
+                           | any_identifier { $$.n = $1.n; $$.s = $1.s; }
+                           ;
 
 derived_table_reference : query_expr derived_table_alias
                 { $$.n = new(NodeType.DerivedTableReference, $1.n, $2.n, null, null, null, null, null, null); $$.s = $2.s; }

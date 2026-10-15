@@ -8,6 +8,7 @@
 using System.Runtime.CompilerServices;
 using CamusDB.Core.Cache;
 using CamusDB.Core.Catalogs.Models;
+using CamusDB.Core.CommandsExecutor.Controllers.Functions;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Plans;
 using CamusDB.Core.CommandsExecutor.Models.Queries;
@@ -373,6 +374,17 @@ internal sealed class JoinLeafScanner
         QueryPlan plan,
         [EnumeratorCancellation] CancellationToken ct = default)
     {
+        // A function in FROM is streamed, never materialized: its rows cost no I/O to make again,
+        // and a series can be far larger than memory (LIMIT 10 over a billion-row series must return
+        // at once). A join that re-reads it simply generates it again.
+        if (source.Source.Function is { } call)
+        {
+            await foreach (QueryResultRow row in ScanTableFunction(source, call, executionFilter, plan, ct).ConfigureAwait(false))
+                yield return row;
+
+            yield break;
+        }
+
         if (!plan.DerivedMaterializations.TryGetValue(source, out SpillableRowList? rows))
         {
             rows = await derivedTableExecutor
@@ -384,6 +396,64 @@ internal sealed class JoinLeafScanner
         await foreach (QueryResultRow row in rows.EnumerateAsync(ct).ConfigureAwait(false))
             yield return row;
     }
+
+    /// <summary>
+    /// Streams the rows of a function in <c>FROM</c> (see <see cref="TableFunctionSource"/>). The
+    /// arguments are evaluated once, with the statement's parameters, before the first row. Nothing
+    /// here touches storage, so the scan takes no lock and records nothing in the read set.
+    /// <para>The pushed-down filter is applied per row the same way a materialized derived table
+    /// applies it, so a predicate on the series column filters before the join sees the row.
+    /// Cancellation is checked every <see cref="CancellationCheckInterval"/> rows, because a filter that
+    /// rejects every row would otherwise loop without ever reaching a consumer that checks it.</para>
+    /// </summary>
+    private async IAsyncEnumerable<QueryResultRow> ScanTableFunction(
+        BoundDerivedTableSource source,
+        TableFunctionSource call,
+        NodeAst? executionFilter,
+        QueryPlan plan,
+        [EnumeratorCancellation] CancellationToken ct)
+    {
+        TableFunction function = TableFunctionRegistry.Resolve(call.FunctionName, call.Arguments.Count);
+
+        ColumnValue[] arguments = TableFunctionEvaluation.EvaluateArguments(call, plan.Ticket.Parameters);
+
+        RowLayout layout = RowLayout.ForColumns([call.ColumnName]);
+
+        bool qualifyForFilter = executionFilter is not null
+                                && plan.Ticket.RowNameResolver is { } resolver
+                                && resolver.UsesQualifiedRowKeys();
+        RowLayout? qualifiedLayout = qualifyForFilter ? QueryRowMerger.BuildQualifiedLayout(layout, source.Alias) : null;
+
+        CancellationToken statementToken = plan.Ticket.CancellationToken;
+        int untilCheck = CancellationCheckInterval;
+
+        foreach (ColumnValue value in function.Generate(arguments))
+        {
+            if (--untilCheck == 0)
+            {
+                untilCheck = CancellationCheckInterval;
+                statementToken.ThrowIfCancellationRequested();
+                ct.ThrowIfCancellationRequested();
+            }
+
+            QueryRow row = new(default, layout, [value]);
+
+            if (executionFilter is not null)
+            {
+                IReadOnlyDictionary<string, ColumnValue> evalRow = qualifiedLayout is not null
+                    ? QueryRowMerger.QualifyRowAsQueryRow(row, qualifiedLayout)
+                    : row;
+
+                if (!await services.Filterer.MeetWhereAsync(executionFilter, evalRow, plan.Ticket, plan.Database).ConfigureAwait(false))
+                    continue;
+            }
+
+            yield return new QueryResultRow(default, row);
+        }
+    }
+
+    /// <summary>How many generated rows a function scan produces between two cancellation checks.</summary>
+    private const int CancellationCheckInterval = 1024;
 
     /// <summary>
     /// Fetches a single right-side row by its row id, applies the residual execution filter

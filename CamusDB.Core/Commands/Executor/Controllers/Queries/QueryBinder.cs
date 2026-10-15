@@ -6,6 +6,7 @@
  * file that was distributed with this source code.
  */
 
+using CamusDB.Core.CommandsExecutor.Controllers.Functions;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Queries;
 using CamusDB.Core.SQLParser;
@@ -135,6 +136,20 @@ internal sealed class QueryBinder
                     throw new CamusDBException(
                         CamusDBErrorCodes.InvalidInput,
                         $"Duplicate alias '{derivedSource.Alias}'");
+                }
+
+                // A function in FROM has no inner query to bind: its one column and type come from
+                // the function, and it opens no table, so there is nothing to authorize.
+                if (derivedSource.Function is { } call)
+                {
+                    TableFunction function = TableFunctionRegistry.Resolve(call.FunctionName, call.Arguments.Count);
+
+                    derivedSources.Add(new BoundDerivedTableSource(
+                        derivedSource,
+                        derivedSource.Alias,
+                        [new DerivedColumnSchema(call.ColumnName, function.OutputType)],
+                        new BoundSelectQuery(derivedSource.Query, [], new QueryRowNameResolver([]))));
+                    return;
                 }
 
                 // An expanded view's body binds as its OWNER, not as the caller. That is what a view

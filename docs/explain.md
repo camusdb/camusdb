@@ -108,7 +108,9 @@ reports a join row this way:
 - A leaf row (`table-scan`, `index-range-scan`, `index-in-list`) counts its own reads, as on a
   single-table plan. A `derived-table-scan` row counts the rows of its materialized result. Its
   inner query has no rows here, so its `rows_read` is `0`. A derived table on the right side
-  adds nothing to the join's `rows_read`.
+  adds nothing to the join's `rows_read`. A `function-scan` row reads nothing from storage: its
+  `rows_read`, `kv_lookups` and `kv_scan_entries` are `0`, and `actual_rows` counts the rows it
+  generated.
 - `actual_time_ms` is on the root row only, as on a single-table plan.
 
 The work after the last join is not a plan node for a join query: the filter that runs after the
@@ -175,6 +177,7 @@ One row is emitted per physical plan node, in depth-first order (parent before c
 | `hash-join`              | Equi-join using an in-memory hash table; chosen over INLJ when the outer side is large relative to the inner | `on=<left>=<right>, build=<alias>` (build-filter appended when a pushed-down filter is present) |
 | `merge-join`             | Equi-join using a streaming two-pointer merge; chosen when both sides have free index ordering on the join key | `on=<left>=<right>, right-order=forced-index=<name>\|sort` (right-filter appended when present) |
 | `derived-table-scan`     | Subquery in the `FROM` clause | `alias=<alias>` |
+| `function-scan`          | A set-returning function in the `FROM` clause, such as `generate_series` (no table access). With constant arguments, `estimated_rows` is the exact row count | `<function>(<args>), alias=<alias>, column=<column>` |
 | `constant-source`        | The single synthetic row of a **FROM-less** `SELECT` (no table access) | `1 row` |
 
 Notes:

@@ -17,7 +17,8 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Functions;
 /// The date and time scalar functions: <c>date_part</c> (and <c>EXTRACT</c>, which the parser turns
 /// into a call to it), <c>date_trunc</c>, <c>date_add</c>, <c>date_diff</c>, the MySQL one-argument
 /// shortcuts (<c>year(x)</c>, <c>dayofweek(x)</c>, ...), and the unix-time functions. The functions
-/// that report the current time are in <see cref="ClockScalarFunctions"/>.
+/// that report the current time are in <see cref="ClockScalarFunctions"/>, and the functions that
+/// build a date from its parts are in <see cref="DateConstructorScalarFunctions"/>.
 /// </summary>
 /// <remarks>
 /// <para>Every unit is computed on the UTC value. A string argument must carry an explicit offset,
@@ -83,6 +84,23 @@ internal static class DateTimeScalarFunctions
             ReadsStatementClock = true,
             StatementEvaluator = EvaluateUnixTimestamp,
             Evaluator = static (calledName, arguments) => EvaluateUnixTimestamp(calledName, arguments, null),
+            InferReturnType = _ => ColumnType.Integer64,
+        });
+
+        // The millisecond epoch that JavaScript clients use (Date.now()). Neither PostgreSQL nor MySQL
+        // has one, so the name extends unix_timestamp with its unit: same arity, same clock rule, and a
+        // reader who knows one can guess the other. DuckDB's epoch_ms is not used because DuckDB
+        // overloads it both ways (an integer argument returns a timestamp), which this function does
+        // not do; from_unixtime(ms / 1000.0) is the reverse direction.
+        registry.Register(new ScalarFunctionDescriptor
+        {
+            Name = "unix_timestamp_ms",
+            MinArity = 0,
+            MaxArity = 1,
+            IsVolatile = true,
+            ReadsStatementClock = true,
+            StatementEvaluator = EvaluateUnixTimestampMs,
+            Evaluator = static (calledName, arguments) => EvaluateUnixTimestampMs(calledName, arguments, null),
             InferReturnType = _ => ColumnType.Integer64,
         });
 
@@ -375,6 +393,36 @@ internal static class DateTimeScalarFunctions
         return new ColumnValue(ColumnType.Integer64, value.ToUnixTimeSeconds());
     }
 
+    /// <summary>
+    /// Whole milliseconds since 1970-01-01 UTC, rounded down, so the result is the epoch of
+    /// <c>date_trunc('millisecond', x)</c> also before 1970. With no argument it reports the start of
+    /// the transaction, as <c>now()</c> and <c>unix_timestamp()</c> do.
+    /// </summary>
+    private static ColumnValue EvaluateUnixTimestampMs(
+        string calledName, IReadOnlyList<ColumnValue> arguments, Dictionary<string, ColumnValue>? parameters)
+    {
+        if (arguments.Count == 0)
+        {
+            DateTime transactionStart = ClockScalarFunctions.ReadTransactionTime(calledName, parameters);
+            return new ColumnValue(ColumnType.Integer64, new DateTimeOffset(transactionStart).ToUnixTimeMilliseconds());
+        }
+
+        if (PropagateNull(arguments) is ColumnValue nullResult)
+            return nullResult;
+
+        DateTimeOffset value = ReadTemporal(calledName, 0, arguments[0]);
+        return new ColumnValue(ColumnType.Integer64, value.ToUnixTimeMilliseconds());
+    }
+
+    /// <summary>
+    /// The UTC datetime <paramref name="arguments"/>[0] seconds after 1970-01-01. An integer is exact.
+    /// A fraction rounds to the nearest microsecond, the precision of PostgreSQL <c>to_timestamp</c>
+    /// and MySQL <c>FROM_UNIXTIME</c>: most decimal fractions have no exact float form, so a conversion
+    /// to the 100 ns tick would turn <c>1.001</c> into <c>1.0009999</c> and
+    /// <c>from_unixtime(unix_timestamp_ms(t) / 1000.0)</c> would miss <c>t</c>'s millisecond. A
+    /// NUMERIC argument is rounded from its exact value. A float holds a microsecond only up to about
+    /// 2^53 microseconds (the year 2255); later values keep the float's own precision.
+    /// </summary>
     internal static ColumnValue EvaluateFromUnixtime(string calledName, IReadOnlyList<ColumnValue> arguments)
     {
         if (PropagateNull(arguments) is ColumnValue nullResult)
@@ -382,17 +430,48 @@ internal static class DateTimeScalarFunctions
 
         ScalarFunctionArguments.RequireNumeric(calledName, 0, arguments[0]);
 
-        double seconds = ScalarFunctionArguments.ToDouble(arguments[0]);
+        ColumnValue argument = arguments[0];
+        long minOffsetTicks = -DateTimeOffset.UnixEpoch.Ticks;
+        long maxOffsetTicks = DateTime.MaxValue.Ticks - DateTimeOffset.UnixEpoch.Ticks;
 
-        try
+        long offsetTicks;
+
+        switch (argument.Type)
         {
-            DateTimeOffset value = DateTimeOffset.UnixEpoch.AddSeconds(seconds);
-            return MakeDateTime(value);
+            case ColumnType.Integer64:
+                if (argument.LongValue < minOffsetTicks / TimeSpan.TicksPerSecond
+                    || argument.LongValue > maxOffsetTicks / TimeSpan.TicksPerSecond)
+                    throw InvalidUnixTimestamp(calledName, argument.LongValue.ToString(CultureInfo.InvariantCulture));
+
+                offsetTicks = argument.LongValue * TimeSpan.TicksPerSecond;
+                break;
+
+            case ColumnType.Numeric:
+                // NUMERIC holds nanoseconds (scale 9). Round half away from zero to the microsecond.
+                Int128 unscaled = argument.NumericUnscaled;
+                Int128 micros = (unscaled >= 0 ? unscaled + 500 : unscaled - 500) / 1000;
+
+                if (micros < minOffsetTicks / TimeSpan.TicksPerMicrosecond
+                    || micros > maxOffsetTicks / TimeSpan.TicksPerMicrosecond)
+                    throw InvalidUnixTimestamp(calledName, NumericMath.Format(unscaled));
+
+                offsetTicks = (long)micros * TimeSpan.TicksPerMicrosecond;
+                break;
+
+            default:
+                double seconds = ScalarFunctionArguments.ToDouble(argument);
+                double roundedMicros = Math.Round(seconds * 1_000_000, MidpointRounding.AwayFromZero);
+
+                // A NaN fails both comparisons, so it is rejected here too.
+                if (!(roundedMicros >= minOffsetTicks / TimeSpan.TicksPerMicrosecond
+                      && roundedMicros <= maxOffsetTicks / TimeSpan.TicksPerMicrosecond))
+                    throw InvalidUnixTimestamp(calledName, seconds.ToString(CultureInfo.InvariantCulture));
+
+                offsetTicks = (long)roundedMicros * TimeSpan.TicksPerMicrosecond;
+                break;
         }
-        catch (ArgumentOutOfRangeException)
-        {
-            throw InvalidUnixTimestamp(calledName, seconds);
-        }
+
+        return new ColumnValue(ColumnType.DateTime, DateTimeOffset.UnixEpoch.Ticks + offsetTicks);
     }
 
     internal static DateTimeOffset ReadTemporal(string calledName, int argIndex, ColumnValue arg)
@@ -643,10 +722,10 @@ internal static class DateTimeScalarFunctions
             CamusDBErrorCodes.InvalidInput,
             $"Function '{calledName}' expects a supported date/time unit but received '{unit}'");
 
-    private static CamusDBException InvalidUnixTimestamp(string calledName, double seconds)
+    private static CamusDBException InvalidUnixTimestamp(string calledName, string seconds)
         => new(
             CamusDBErrorCodes.InvalidInput,
-            $"Function '{calledName}' unix timestamp out of range: {seconds.ToString(CultureInfo.InvariantCulture)}");
+            $"Function '{calledName}' unix timestamp out of range: {seconds}");
 
     private static void RequireString(string calledName, int argumentIndex, ColumnValue argument)
         => ScalarFunctionArguments.RequireString(calledName, argumentIndex, argument);

@@ -235,6 +235,10 @@ internal static class CostEstimator
         if (node is IndexInListScanNode { BoundSource: { } inListBoundSource })
             return stats?.GetRowCountEstimate(database, inListBoundSource.Table);
 
+        // A function in FROM: the exact count when its arguments are constants.
+        if (node is DerivedTableScanNode { BoundSource: { } derivedSource })
+            return TableFunctionEvaluation.TryCountRows(derivedSource);
+
         return null;
     }
 

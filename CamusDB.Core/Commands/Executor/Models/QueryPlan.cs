@@ -73,6 +73,11 @@ public sealed class QueryPlan
 
 	public DatabaseDescriptor Database { get; }
 
+    /// <summary>
+    /// The base table of a single-table plan, or the first base table found in a join plan. Null only
+    /// on a plan built by <see cref="WithoutTable"/>, whose leaves read no table; such a plan is only
+    /// ever a join plan, and nothing on the join path reads this property.
+    /// </summary>
 	public TableDescriptor Table { get; }
 
 	public QueryTicket Ticket { get; }
@@ -182,5 +187,21 @@ public sealed class QueryPlan
 		Table = table;
 		Ticket = ticket;
         TableSchemaVersion = table.Schema.Version;
-	}    
+	}
+
+    private QueryPlan(DatabaseDescriptor database, QueryTicket ticket)
+    {
+        Database = database;
+        Table = null!;
+        Ticket = ticket;
+    }
+
+    /// <summary>
+    /// Builds a join plan for a query whose every leaf is computed rather than read — a function in
+    /// <c>FROM</c>, alone or under derived tables (<c>SELECT * FROM generate_series(1, 3)</c>). There is
+    /// no base table to name, so <see cref="Table"/> is null and <see cref="TableSchemaVersion"/> is 0.
+    /// Only <c>JoinQueryPlanner</c> may call this: the single-table scan operators read
+    /// <see cref="Table"/> unconditionally.
+    /// </summary>
+    internal static QueryPlan WithoutTable(DatabaseDescriptor database, QueryTicket ticket) => new(database, ticket);
 }

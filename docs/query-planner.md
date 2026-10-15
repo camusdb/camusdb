@@ -575,7 +575,7 @@ the stable vocabulary reused everywhere:
 ```
 table-scan, index-lookup, index-range-scan, index-in-list, filter, having-filter, aggregate, sort,
 limit, project, distinct, semi-join, anti-join, null-aware-anti-join, nested-loop-join,
-index-nested-loop-join, hash-join, merge-join, derived-table-scan
+index-nested-loop-join, hash-join, merge-join, derived-table-scan, function-scan
 ```
 
 `PlanRenderer.Render(plan, includeRequiredColumns, includeDistributedProperties)` produces the string
