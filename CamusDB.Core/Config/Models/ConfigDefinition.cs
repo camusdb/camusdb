@@ -579,6 +579,36 @@ public class ConfigDefinition
     public bool PeerTlsEnabled { get; set; } = false;
 
     /// <summary>
+    /// Whether node-to-node Raft and Kahuna traffic authenticates each peer by a client certificate
+    /// (mutual TLS). Default <c>false</c>. It applies in cluster mode only.
+    ///
+    /// <para>When on, the Raft port asks every caller for a client certificate and accepts it only if it
+    /// chains to <see cref="RaftPeerCa"/> and allows client authentication. This node presents
+    /// <see cref="RaftCertificate"/> as its own client certificate when it dials a peer, so that file
+    /// must allow client authentication as well as server authentication.</para>
+    ///
+    /// <para>It is what lets authentication and a multi-node cluster work together. The Raft and Kahuna
+    /// gRPC services carry no user token, so with authentication on the HTTP authentication layer has
+    /// no way to admit them except by a verified peer certificate. Without it a node refuses its peers'
+    /// consensus traffic and the cluster never forms; startup refuses that combination
+    /// (<see cref="CamusDB.Core.Config.ClusterAuthenticationStartupCheck"/>).</para>
+    ///
+    /// <para>Read once when the listener binds and the Raft transport is built, so a change takes a
+    /// restart. So does a new certificate: Kommander loads the client certificate once.</para>
+    /// </summary>
+    public bool RaftMutualTlsEnabled { get; set; } = false;
+
+    /// <summary>
+    /// Path to a PEM file with the CA certificate(s) that peer client certificates must chain to when
+    /// <see cref="RaftMutualTlsEnabled"/> is on. Empty by default.
+    ///
+    /// <para>Use a CA that issues certificates for this cluster's nodes only. Every certificate that
+    /// chains to it is accepted as a peer, so a CA shared with other clusters or services lets their
+    /// certificates in too. The system trust store is never consulted, for the same reason.</para>
+    /// </summary>
+    public string RaftPeerCa { get; set; } = "";
+
+    /// <summary>
     /// When authentication is enabled, refuse credential-bearing requests arriving over a plaintext
     /// (non-TLS) connection — a bearer token or password on the wire is trivially stolen. Loopback
     /// peers are exempt either way, so single-host development needs no certificate. Default
@@ -1668,6 +1698,21 @@ public class ConfigDefinition
 
         if (PitrBootstrapTargetTimeMs != 0 && PitrBootstrapFrom is null)
             throw Invalid("'pitr_bootstrap_target_time_ms' is set but 'pitr_bootstrap_from' is not; it has no effect alone");
+
+        // Mutual TLS needs a certificate to present and a CA to check peers against. Without either, the
+        // node would start and then fail every peer handshake, which reads as a network fault.
+        if (RaftMutualTlsEnabled && IsClusterMode)
+        {
+            if (string.IsNullOrWhiteSpace(RaftCertificate))
+                throw Invalid(
+                    "'raft_mutual_tls_enabled' requires 'raft_certificate': it is the certificate the Raft port " +
+                    "serves and the client certificate this node presents to its peers");
+
+            if (string.IsNullOrWhiteSpace(RaftPeerCa))
+                throw Invalid(
+                    "'raft_mutual_tls_enabled' requires 'raft_peer_ca': the PEM file with the CA that peer " +
+                    "certificates must chain to");
+        }
     }
 
     private static void ValidateHostPort(string value, string field)

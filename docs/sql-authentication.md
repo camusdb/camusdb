@@ -541,6 +541,11 @@ Audit what each application actually reads and writes before you write the `GRAN
   `CAMUSDB_AUTH_ENABLED=true`, it keeps serving unauthenticated requests on its own ports. Either
   restart the fleet together, or block client traffic to the not-yet-restarted nodes for the duration.
   Treat a half-migrated cluster as still unauthenticated.
+- **Peers need certificates.** Raft and Kahuna traffic between nodes carries no user token. With
+  authentication on, a node admits that traffic only from a peer that shows a client certificate
+  signed by the cluster CA. Set `raft_mutual_tls_enabled: true` and `raft_peer_ca` on every node; a
+  node with authentication on and peers refuses to start without them. See
+  [Node-to-node authentication](configuration.md#node-to-node-authentication).
 - **Concurrent startups are safe.** The bootstrap is a transactional create-if-absent: several nodes
   starting at once yield one winner, and a node that loses does not overwrite the winner's password.
 - **Set `require_tls_when_auth_enabled` deliberately** (§2, TLS) — a cluster usually sits behind an

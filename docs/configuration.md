@@ -57,6 +57,8 @@ Example: YAML `mode: cluster` with `--mode standalone` starts in standalone mode
 | `https_certificate` | `--https-certificate` | `""` |
 | `http3_enabled` | — | `false` (`true` also serves HTTP/3 over QUIC on `https_port`; see below) |
 | `raft_certificate` | `--raft-certificate` | `""` |
+| `raft_mutual_tls_enabled` | — | `false` (authenticates peers by client certificate on the Raft port; see [Node-to-node authentication](#node-to-node-authentication)) |
+| `raft_peer_ca` | — | `""` (PEM CA file that peer certificates must chain to) |
 | `grpc_enabled` | — | `true` |
 | `grpc_port` | — | `5096` |
 | `grpc_certificate` | — | `""` (falls back to `raft_certificate`) |
@@ -148,6 +150,36 @@ http3_enabled: true
 When the setting is on but HTTP/3 cannot start (no certificate, or no QUIC library), the node still
 starts and logs a warning that names the cause. `SHOW CONNECTIONS` lists HTTP/3 connections with the
 protocol `HTTP/3`.
+
+### Node-to-node authentication
+
+`raft_mutual_tls_enabled: true` makes each node prove its identity to its peers with a client
+certificate (mutual TLS). It is off by default and takes effect at restart.
+
+```yaml
+mode: cluster
+raft_certificate: /etc/camusdb/tls/node.pfx
+raft_mutual_tls_enabled: true
+raft_peer_ca: /etc/camusdb/tls/ca.crt
+```
+
+- The Raft port requires a client certificate. It accepts one only when the certificate chains to a
+  CA in `raft_peer_ca`, is inside its validity window, and allows client authentication. The system
+  trust store is not used, and revocation is not checked.
+- Each node presents `raft_certificate` as its client certificate. That certificate must allow both
+  server and client authentication (extended key usages `serverAuth` and `clientAuth`, or no
+  extended key usage at all). The PKCS#12 file has no password.
+- Use a CA that issues certificates for this cluster's nodes only. Every certificate it signed is
+  accepted as a peer.
+- The Kommander and Kahuna gRPC services (`Rafter`, `KeyValuer`, `Locker`, `Sequencer`, `Cluster`
+  and `Backups`) then answer only a verified peer on the Raft port. This holds whether user
+  authentication is on or off. A user token never opens them.
+- A new certificate takes a restart: the node loads its client certificate once.
+
+**It is required for a multi-node cluster with authentication on.** The Raft and Kahuna services
+carry no user token, so with authentication on a verified peer certificate is the only credential
+they can show. A node with `CAMUSDB_AUTH_ENABLED=true`, at least one entry in `peers`, and this
+setting off refuses to start. A single-node cluster is not affected.
 
 ## Kahuna engine section
 

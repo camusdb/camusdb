@@ -213,6 +213,7 @@ public sealed class TestSchemaDdlForwarding
         HttpSchemaDdlForwarder forwarder = new(
             new HttpClient(handler),
             raftEndpoint => endpointMap[raftEndpoint],
+            nodeSecret: "",
             NullLogger<ICamusDB>.Instance
         );
 

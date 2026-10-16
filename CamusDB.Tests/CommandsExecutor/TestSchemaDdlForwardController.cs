@@ -412,7 +412,7 @@ public sealed class TestSchemaDdlForwardController
                 CamusDB.Core.SQLParser.SQLParserProcessor.Parse(childSql));
 
             CapturingHandler handler = new();
-            HttpSchemaDdlForwarder forwarder = new(new System.Net.Http.HttpClient(handler), _ => new Uri("http://leader:5095"), NullLogger<ICamusDB>.Instance);
+            HttpSchemaDdlForwarder forwarder = new(new System.Net.Http.HttpClient(handler), _ => new Uri("http://leader:5095"), nodeSecret: "", NullLogger<ICamusDB>.Instance);
             await forwarder.ForwardCreateTableAsync("leader:7070", ticket, Guid.NewGuid().ToString("N"), CancellationToken.None);
 
             SchemaDdlForwardController ctrl = BuildController(handler.Body!, clusterNode: node);
@@ -649,7 +649,7 @@ public sealed class TestSchemaDdlForwardController
                     CamusDB.Core.Catalogs.Models.ForeignKeyMatch.Simple, false, false));
 
             CapturingHandler handler = new();
-            HttpSchemaDdlForwarder forwarder = new(new System.Net.Http.HttpClient(handler), _ => new Uri("http://leader:5095"), NullLogger<ICamusDB>.Instance);
+            HttpSchemaDdlForwarder forwarder = new(new System.Net.Http.HttpClient(handler), _ => new Uri("http://leader:5095"), nodeSecret: "", NullLogger<ICamusDB>.Instance);
             await forwarder.ForwardAlterConstraintAsync("leader:7070", ticket, Guid.NewGuid().ToString("N"), CancellationToken.None);
 
             SchemaDdlForwardController ctrl = BuildController(handler.Body!, clusterNode: node);

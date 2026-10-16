@@ -175,6 +175,16 @@ Func<CamusDBOptions, CamusDBOptions> applyEnvironmentSecrets = resolved =>
 
 camusOptions = applyEnvironmentSecrets(camusOptions);
 
+// Authentication arrives from the environment, so this is the first point where it can be checked
+// against the cluster's peer authentication. See ClusterAuthenticationStartupCheck.
+ClusterAuthenticationStartupCheck.Validate(config, camusOptions.AuthenticationEnabled);
+
+// Loaded before the listeners bind, so an unreadable CA stops the node here rather than failing each
+// peer handshake. Null when peers are not authenticated by certificate.
+CamusDB.App.Middleware.RaftPeerTrust? raftPeerTrust = config.IsClusterMode && config.RaftMutualTlsEnabled
+    ? CamusDB.App.Middleware.RaftPeerTrust.Load(config.RaftPeerCa, config.RaftPort)
+    : null;
+
 CamusDBConfig.SetAmbient(camusOptions);
 
 // The swappable source of configuration snapshots. Seeded with the scrubbed record (the bootstrap
@@ -240,11 +250,18 @@ builder.WebHost.ConfigureKestrel(kestrel =>
         });
     if (config.IsClusterMode)
     {
+        // With mutual TLS on, this is the only listener that asks for a client certificate, and it
+        // accepts only one that chains to raft_peer_ca. The authentication middleware relies on both.
         kestrel.ListenAnyIP(config.RaftPort, o =>
         {
             o.Protocols = HttpProtocols.Http2;
-            if (!string.IsNullOrEmpty(config.RaftCertificate))
+            if (string.IsNullOrEmpty(config.RaftCertificate))
+                return;
+
+            if (raftPeerTrust is null)
                 o.UseHttps(config.RaftCertificate);
+            else
+                o.UseHttps(config.RaftCertificate, password: null, raftPeerTrust.ConfigureListener);
         });
     }
     // Dedicated client-facing gRPC port — HTTP/2 only. Plaintext (h2c) is fine for local dev; set
@@ -319,11 +336,12 @@ if (config.IsClusterMode)
         CamusDB.Core.Config.PeerEndpointResolver resolver =
             services.GetRequiredService<CamusDB.Core.Config.PeerEndpointResolver>();
         return new HttpSchemaDdlForwarder(
-            new HttpClient(), resolver.Resolve, services.GetRequiredService<ILogger<ICamusDB>>());
+            new HttpClient(), resolver.Resolve, camusOptions.NodeSecret,
+            services.GetRequiredService<ILogger<ICamusDB>>());
     });
 
-    // Unlike the DDL forwarder, the settings forwarder attaches the node secret, without
-    // which an auth-enabled receiving node refuses /internal/*.
+    // Like the DDL forwarder, the settings forwarder attaches the node secret, without which an
+    // auth-enabled receiving node refuses /internal/*.
     builder.Services.AddSingleton<CamusDB.Core.Config.IClusterSettingsForwarder>(services =>
     {
         CamusDB.Core.Config.PeerEndpointResolver resolver =
@@ -505,6 +523,11 @@ if (config.IsClusterMode)
     // Kahuna 1.8.1: the node-only gRPC surfaces (MapGrpcKahunaRoutes) are guarded by the same trust policy
     // Raft applies; the gate must be registered or the route mapping fails at startup.
     builder.Services.AddNodeTransportGate();
+
+    // The authentication middleware finds the peer policy here; its absence means peers are not
+    // authenticated by certificate.
+    if (raftPeerTrust is not null)
+        builder.Services.AddSingleton(raftPeerTrust);
 
     builder.Services.AddSingleton<EmbeddedKahuna>(services =>
     {

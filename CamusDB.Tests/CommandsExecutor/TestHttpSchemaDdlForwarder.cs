@@ -23,6 +23,7 @@ using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
+using CamusDB.Core.Storage.Kv;
 
 namespace CamusDB.Tests.CommandsExecutor;
 
@@ -39,11 +40,11 @@ public sealed class TestHttpSchemaDdlForwarder
 
     private const string StableOperationId = "aabbccdd11223344aabbccdd11223344";
 
-    private static HttpSchemaDdlForwarder BuildForwarder(HttpMessageHandler handler, Uri? resolvedUri = null)
+    private static HttpSchemaDdlForwarder BuildForwarder(HttpMessageHandler handler, Uri? resolvedUri = null, string nodeSecret = "")
     {
         Uri baseUri = resolvedUri ?? new Uri("http://fake-leader:5095");
         HttpClient client = new(handler);
-        return new HttpSchemaDdlForwarder(client, _ => baseUri, Logger);
+        return new HttpSchemaDdlForwarder(client, _ => baseUri, nodeSecret, Logger);
     }
 
     private static StringContent OkResponse(bool applied) =>
@@ -63,6 +64,55 @@ public sealed class TestHttpSchemaDdlForwarder
             new SchemaDdlForwardResponse { Status = "failed", Code = code, Message = message },
             JsonOptions),
             Encoding.UTF8, "application/json");
+
+    // ── Node secret ───────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Every request carries the node secret. A peer with authentication on refuses an
+    /// <c>/internal/*</c> request without it, so a forwarder that left it out passed every test here
+    /// and failed each forwarded DDL statement, schema ack and applied-version probe in production.
+    /// </summary>
+    [Test]
+    public async Task EveryRequest_CarriesTheNodeSecret()
+    {
+        const string secret = "node-secret-padded-to-meet-the-32-byte-floor";
+
+        FakeMessageHandler ddl = new(OkResponse(true));
+        await BuildForwarder(ddl, nodeSecret: secret).ForwardCreateTableAsync(
+            "leader:7070",
+            new CreateTableTicket(databaseName: "mydb", tableName: "robots", columns: [new ColumnInfo("id", ColumnType.Id)], constraints: [], ifNotExists: false),
+            StableOperationId,
+            CancellationToken.None);
+        Assert.AreEqual(secret, SecretOf(ddl.LastRequest));
+
+        FakeMessageHandler ack = new(OkResponse(true));
+        await ((ISchemaAckSender)BuildForwarder(ack, nodeSecret: secret)).SendSchemaAckAsync(
+            "leader:7070", "mydb", "node2:7070", 3, CancellationToken.None);
+        Assert.AreEqual(secret, SecretOf(ack.LastRequest));
+
+        FakeMessageHandler probe = new(new StringContent("{\"status\":\"ok\",\"open\":true,\"appliedSchemaVersion\":3}", Encoding.UTF8, "application/json"));
+        await ((ISchemaAckSender)BuildForwarder(probe, nodeSecret: secret)).ProbeSchemaAppliedAsync(
+            "node2:7070", "mydb", CancellationToken.None);
+        Assert.AreEqual(secret, SecretOf(probe.LastRequest));
+    }
+
+    [Test]
+    public async Task NoNodeSecret_SendsNoHeader()
+    {
+        FakeMessageHandler handler = new(OkResponse(true));
+        await BuildForwarder(handler).ForwardCreateTableAsync(
+            "leader:7070",
+            new CreateTableTicket(databaseName: "mydb", tableName: "robots", columns: [new ColumnInfo("id", ColumnType.Id)], constraints: [], ifNotExists: false),
+            StableOperationId,
+            CancellationToken.None);
+
+        Assert.IsNull(SecretOf(handler.LastRequest));
+    }
+
+    private static string? SecretOf(HttpRequestMessage? request) =>
+        request is not null && request.Headers.TryGetValues("X-Camus-Node-Secret", out IEnumerable<string>? values)
+            ? string.Join(",", values)
+            : null;
 
     // ── ForwardCreateTableAsync ────────────────────────────────────────────────
 

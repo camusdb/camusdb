@@ -33,6 +33,14 @@ namespace CamusDB.App.Middleware;
 /// <para>Node-to-node cluster forwarding (<c>/internal/*</c>) is authenticated by a shared
 /// <see cref="CamusDBOptions.NodeSecret"/> header, not a public user token; with auth on and no node
 /// secret configured those routes are refused (fail-closed).</para>
+///
+/// <para>The node-to-node gRPC services that Kommander and Kahuna map (<see cref="NodeServicePrefixes"/>)
+/// never accept a user token. With <c>raft_mutual_tls_enabled</c> on, they admit a caller only when
+/// <see cref="RaftPeerTrust"/> confirms a verified peer certificate, whether authentication is on or off.
+/// With it off, they are open while authentication is off, as before, and refused while it is on. A user
+/// token must not open them: Kahuna's key/value and lock services read and write raw rows below the SQL
+/// layer, so any signed-in user could skip every table privilege, and most of their methods do not
+/// check the caller themselves.</para>
 /// </summary>
 public sealed class AuthenticationMiddleware
 {
@@ -51,6 +59,16 @@ public sealed class AuthenticationMiddleware
         "/CamusAuth/Login", "/CamusAuth/Logout",
         "/v1/cluster/health",
     };
+
+    // The gRPC services mapped by MapGrpcRaftRoutes (Kommander) and MapGrpcKahunaRoutes (Kahuna), for
+    // node-to-node traffic. Their protos declare no package either, so each method path starts with
+    // "/{service}/". Endpoint routing matches paths without regard to case, so the prefixes do too. A
+    // service either library adds later must be listed here, or it falls through to the user-token path
+    // below; TestRaftPeerAuthentication fails until it is.
+    internal static readonly string[] NodeServicePrefixes =
+    [
+        "/Rafter/", "/Locker/", "/KeyValuer/", "/Sequencer/", "/Cluster/", "/Backups/",
+    ];
 
     // Database lifecycle requires the superuser attribute. Closing belongs here with create and drop: a
     // close tears down the node's descriptor and rolls back every transaction still active in that
@@ -75,13 +93,33 @@ public sealed class AuthenticationMiddleware
 
     public async Task Invoke(HttpContext context, CommandExecutor executor, CamusDBOptions options)
     {
+        string path = context.Request.Path.Value ?? "";
+
+        // Before the authentication switch: when mutual TLS is on, a peer certificate is required on
+        // these services even while user authentication is off.
+        if (IsNodeServicePath(path))
+        {
+            RaftPeerTrust? peerTrust = context.RequestServices?.GetService<RaftPeerTrust>();
+
+            bool admitted = peerTrust is not null
+                ? peerTrust.IsTrustedPeer(context)
+                : !options.AuthenticationEnabled;
+
+            if (!admitted)
+            {
+                await WriteErrorAsync(context, CamusDBErrorCodes.AuthenticationFailed, "Node authentication required").ConfigureAwait(false);
+                return;
+            }
+
+            await next(context).ConfigureAwait(false);
+            return;
+        }
+
         if (!options.AuthenticationEnabled)
         {
             await next(context).ConfigureAwait(false);
             return;
         }
-
-        string path = context.Request.Path.Value ?? "";
 
         if (Exempt.Contains(path))
         {
@@ -172,6 +210,18 @@ public sealed class AuthenticationMiddleware
     {
         string? token = context.Request.Cookies[DashboardSession.CookieName];
         return string.IsNullOrWhiteSpace(token) ? null : token;
+    }
+
+    /// <summary>True when <paramref name="path"/> is a method of a node-to-node gRPC service.</summary>
+    internal static bool IsNodeServicePath(string path)
+    {
+        foreach (string prefix in NodeServicePrefixes)
+        {
+            if (path.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+                return true;
+        }
+
+        return false;
     }
 
     private static string? ExtractBearer(HttpContext context)

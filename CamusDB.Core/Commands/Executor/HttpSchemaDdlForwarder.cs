@@ -38,17 +38,42 @@ public sealed class HttpSchemaDdlForwarder : ISchemaDdlForwarder, ISchemaAckSend
         PropertyNameCaseInsensitive = true,
     };
 
+    private const string NodeSecretHeader = "X-Camus-Node-Secret";
+
     private readonly HttpClient httpClient;
-    
+
     private readonly Func<string, Uri> endpointResolver;
-    
+
+    private readonly string nodeSecret;
+
     private readonly ILogger<ICamusDB> logger;
 
-    public HttpSchemaDdlForwarder(HttpClient httpClient, Func<string, Uri> endpointResolver, ILogger<ICamusDB> logger)
+    /// <param name="nodeSecret">
+    /// The shared node secret, sent on every request. A peer with authentication on refuses any
+    /// <c>/internal/*</c> request without it, so leaving it out works in development and fails every
+    /// forwarded DDL statement, schema ack and applied-version probe in production. Empty sends no header.
+    /// </param>
+    public HttpSchemaDdlForwarder(HttpClient httpClient, Func<string, Uri> endpointResolver, string nodeSecret, ILogger<ICamusDB> logger)
     {
         this.httpClient = httpClient;
         this.endpointResolver = endpointResolver;
+        this.nodeSecret = nodeSecret;
         this.logger = logger;
+    }
+
+    private async Task<HttpResponseMessage> PostJsonAsync<TRequest>(Uri endpoint, TRequest body, CancellationToken cancellationToken)
+    {
+        // Not disposed here, as PostAsJsonAsync did not dispose it: disposing it would dispose the body
+        // too, and the request holds nothing unmanaged once it is sent.
+        HttpRequestMessage request = new(HttpMethod.Post, endpoint)
+        {
+            Content = JsonContent.Create(body, options: JsonOptions),
+        };
+
+        if (!string.IsNullOrEmpty(nodeSecret))
+            request.Headers.TryAddWithoutValidation(NodeSecretHeader, nodeSecret);
+
+        return await httpClient.SendAsync(request, cancellationToken).ConfigureAwait(false);
     }
 
     public async Task<bool?> ForwardCreateTableAsync(string leader, CreateTableTicket ticket, string operationId, CancellationToken cancellationToken)
@@ -216,7 +241,7 @@ public sealed class HttpSchemaDdlForwarder : ISchemaDdlForwarder, ISchemaAckSend
         HttpResponseMessage? response = null;
         try
         {
-            response = await httpClient.PostAsJsonAsync(endpoint, request, JsonOptions, cancellationToken).ConfigureAwait(false);
+            response = await PostJsonAsync(endpoint, request, cancellationToken).ConfigureAwait(false);
 
             // The ack endpoint answers 503 not-leader like the DDL endpoints do, so the sender can
             // walk the replica set; any other failure is retried after the leader is resolved again.
@@ -279,7 +304,7 @@ public sealed class HttpSchemaDdlForwarder : ISchemaDdlForwarder, ISchemaAckSend
         HttpResponseMessage? response = null;
         try
         {
-            response = await httpClient.PostAsJsonAsync(endpoint, request, JsonOptions, cancellationToken).ConfigureAwait(false);
+            response = await PostJsonAsync(endpoint, request, cancellationToken).ConfigureAwait(false);
 
             SchemaAppliedProbeResponse? body = response.IsSuccessStatusCode
                 ? await response.Content.ReadFromJsonAsync<SchemaAppliedProbeResponse>(JsonOptions, cancellationToken).ConfigureAwait(false)
@@ -338,7 +363,7 @@ public sealed class HttpSchemaDdlForwarder : ISchemaDdlForwarder, ISchemaAckSend
         HttpResponseMessage? response = null;
         try
         {
-            response = await httpClient.PostAsJsonAsync(endpoint, request, JsonOptions, cancellationToken).ConfigureAwait(false);
+            response = await PostJsonAsync(endpoint, request, cancellationToken).ConfigureAwait(false);
 
             if (response.StatusCode == HttpStatusCode.ServiceUnavailable)
                 return null;

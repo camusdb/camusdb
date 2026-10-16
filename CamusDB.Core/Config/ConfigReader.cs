@@ -79,6 +79,8 @@ public class ConfigReader
         "grpc_certificate",
         "grpc_tls_enabled",
         "peer_tls_enabled",
+        "raft_mutual_tls_enabled",
+        "raft_peer_ca",
         "require_tls_when_auth_enabled",
         "grpc_enabled",
         "grpc_port",

@@ -156,6 +156,18 @@ initial_partitions: 1      # Raft partition count (>= 1). Unset, it is 1 in stan
 #   exposed cluster running without it is reported at startup.
 # peer_tls_enabled: false
 #
+# raft_mutual_tls_enabled: authenticate every peer by a client certificate on the Raft port. The
+#   Raft port then requires a client certificate that chains to raft_peer_ca and allows client
+#   authentication, and this node presents raft_certificate as its own (so that file must allow client
+#   authentication too). Required for a multi-node cluster with authentication on: Raft and Kahuna
+#   traffic carries no user token, and a node with authentication on, peers, and this setting off
+#   refuses to start. Requires raft_certificate and raft_peer_ca.
+# raft_mutual_tls_enabled: false
+#
+# raft_peer_ca: PEM file with the CA certificate(s) peer certificates must chain to. Use a CA that
+#   issues certificates for this cluster's nodes only; every certificate it signed is a peer.
+# raft_peer_ca: /etc/camusdb/tls/ca.crt
+#
 # join_existing: join a RUNNING cluster as a new node instead of bootstrapping one, with peers acting
 #   as the seed list. The node enters as a learner and is promoted to voter once caught up. It is never
 #   guessed: a joiner started without it forms a separate cluster (split brain), and a founding node

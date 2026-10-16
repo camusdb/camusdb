@@ -9,6 +9,7 @@
 using CamusDB.Core.Config;
 using CamusDB.Core.Config.Models;
 using Kahuna;
+using Kommander;
 
 namespace CamusDB.Core.Storage.Kv;
 
@@ -36,6 +37,31 @@ public static class EmbeddedKahunaOptionsBuilder
 
     /// <summary>The revision the grouped key layout replaced; named so startup can warn when its directory is still present.</summary>
     public const string PreviousStorageRevision = "v1";
+
+    /// <summary>
+    /// The node-to-node transport security Kommander and Kahuna dial peers with, or null for their
+    /// default (no node authentication).
+    ///
+    /// <para>With <see cref="ConfigDefinition.RaftMutualTlsEnabled"/> on, both present
+    /// <see cref="ConfigDefinition.RaftCertificate"/> as a client certificate, and Kommander's
+    /// <c>RaftService</c> and Kahuna's node transport gate require one from every caller. Neither keeps a
+    /// thumbprint allow-list here: with an empty list Kommander accepts any certificate that completed the
+    /// handshake, which is safe only because the Raft listener checks the chain against
+    /// <see cref="ConfigDefinition.RaftPeerCa"/> during that handshake (see <c>RaftPeerTrust</c> in the
+    /// host). The archive has no password, as the listener loads the same file without one.</para>
+    /// </summary>
+    internal static RaftTransportSecurityOptions? PeerTransportSecurity(ConfigDefinition config)
+    {
+        if (!config.RaftMutualTlsEnabled)
+            return null;
+
+        return new RaftTransportSecurityOptions
+        {
+            NodeAuthenticationMode = RaftNodeAuthenticationMode.MutualTls,
+            ClientCertificatePath = config.RaftCertificate,
+            RequireTls = true,
+        };
+    }
 
     /// <summary>
     /// Baseline cluster options. Uses RocksDB for both KV and WAL — the same default backend as the
@@ -69,6 +95,7 @@ public static class EmbeddedKahunaOptionsBuilder
             NodeId = config.RaftNodeId,
             Host = config.RaftHost,
             Port = config.RaftPort,
+            TransportSecurity = PeerTransportSecurity(config),
             InitialPartitions = config.InitialPartitions,
             Storage = "rocksdb",
             StoragePath = Path.Combine(dataDir, "kv"),
