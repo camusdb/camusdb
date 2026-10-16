@@ -68,6 +68,38 @@ internal sealed class IndexNestedLoopJoinOperator
         internal Dictionary<string, int>? RightOrdinalMap;
     }
 
+    /// <summary>
+    /// The rows a join's probe memo may hold in all, an empty result counting as one. An outer
+    /// stream often repeats a key (every cast row of one movie probes the same movie id), and a
+    /// repeated probe would read the same entries and rows again at the full cost of a probe. The
+    /// memo keeps the right rows of each key for the rest of the join; the cap bounds the memory
+    /// of a join whose keys do not repeat, which gains nothing from it.
+    /// </summary>
+    internal const int ProbeMemoMaxRows = 65_536;
+
+    /// <summary>
+    /// The right rows of each probe key the join has seen, after the right-side filter and before
+    /// the <c>ON</c> predicate, which is evaluated for each pair because it can name left columns.
+    /// Valid for the whole join: the join reads at one snapshot, and the right rows of a key are the
+    /// same for every outer row that carries the key. A probe is memoized only when it ran to its
+    /// end; a consumer that stops reading in the middle of a probe leaves no partial entry.
+    /// </summary>
+    private sealed class ProbeMemo(int capacity)
+    {
+        private readonly Dictionary<ColumnValue, List<QueryResultRow>> rows = new(SqlColumnValueComparer.Instance);
+        private int held;
+
+        public bool TryGet(ColumnValue key, out List<QueryResultRow> result) => rows.TryGetValue(key, out result!);
+
+        public bool HasRoom => held < capacity;
+
+        public void Add(ColumnValue key, List<QueryResultRow> result)
+        {
+            rows[key] = result;
+            held += Math.Max(1, result.Count);
+        }
+    }
+
     internal async IAsyncEnumerable<QueryResultRow> ExecuteIndexNestedLoopJoin(
         IndexNestedLoopJoinNode joinNode,
         QueryPlan plan)
@@ -94,6 +126,9 @@ internal sealed class IndexNestedLoopJoinOperator
         // round trips for a key with many entries.
         ColumnType[] keyTypes = JoinAliasMetadata.GetIndexColumnTypes(joinNode.RightSource.Table, joinNode.Index);
         int probePageSize = KvStoreConstants.DefaultPageSize;
+
+        int memoCapacity = services.Statistics?.IndexProbeMemoCapacityForTesting ?? ProbeMemoMaxRows;
+        ProbeMemo? memo = memoCapacity > 0 ? new ProbeMemo(memoCapacity) : null;
 
         await foreach (QueryResultRow leftRow in tree.ExecuteNode(joinNode.Input!, plan).ConfigureAwait(false))
         {
@@ -132,6 +167,34 @@ internal sealed class IndexNestedLoopJoinOperator
             CompositeColumnValue lookupKey = new(new[] { lookupValue });
             bool matched = false;
 
+            if (memo is not null && memo.TryGet(lookupValue, out List<QueryResultRow> remembered))
+            {
+                // A key an earlier outer row probed: its right rows come from the memo, and the store
+                // reads nothing. The ON predicate still runs for each pair, as it does below.
+                if (joinNode.Stats is { } hitStats)
+                    hitStats.ProbeMemoHits++;
+
+                foreach (QueryResultRow rightRow in remembered)
+                {
+                    QueryRow? merged = await PairIfAccepted(pairing, joinNode, plan, leftQualified, rightRow.Row, rightAlias).ConfigureAwait(false);
+
+                    if (merged is null)
+                        continue;
+
+                    matched = true;
+                    yield return new QueryResultRow(default(ObjectIdValue), merged);
+                }
+
+                if (padding is not null && !matched)
+                    yield return new QueryResultRow(default(ObjectIdValue), padding.Pad(leftQualified));
+
+                continue;
+            }
+
+            // The rows this probe returns, kept for the memo while it has room. Filled only when the
+            // probe runs to its end, so an outer enumeration that stops early leaves no partial entry.
+            List<QueryResultRow>? collected = memo is { HasRoom: true } ? [] : null;
+
             if (joinNode.UseUniqueLookup)
             {
                 // A unique index answers with at most one row, so the probe is one awaited call and
@@ -140,6 +203,7 @@ internal sealed class IndexNestedLoopJoinOperator
 
                 if (rightRow is { } found)
                 {
+                    collected?.Add(found);
                     QueryRow? merged = await PairIfAccepted(pairing, joinNode, plan, leftQualified, found.Row, rightAlias).ConfigureAwait(false);
 
                     if (merged is not null)
@@ -154,6 +218,7 @@ internal sealed class IndexNestedLoopJoinOperator
                 await foreach (QueryResultRow rightRow in ScanMultiIndexRightRows(
                     joinNode, lookupKey, plan, probePage!, keyTypes, probePageSize).ConfigureAwait(false))
                 {
+                    collected?.Add(rightRow);
                     QueryRow? merged = await PairIfAccepted(pairing, joinNode, plan, leftQualified, rightRow.Row, rightAlias).ConfigureAwait(false);
 
                     if (merged is null)
@@ -163,6 +228,9 @@ internal sealed class IndexNestedLoopJoinOperator
                     yield return new QueryResultRow(default(ObjectIdValue), merged);
                 }
             }
+
+            if (collected is not null)
+                memo!.Add(lookupValue, collected);
 
             if (padding is not null && !matched)
                 yield return new QueryResultRow(default(ObjectIdValue), padding.Pad(leftQualified));

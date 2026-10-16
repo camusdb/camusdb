@@ -58,6 +58,15 @@ public sealed class PlanNodeStats
     public long KvScanEntries;
 
     /// <summary>
+    /// Probes of an index nested-loop join that the join answered from its memo of earlier probes
+    /// instead of the store: an outer row whose key an earlier outer row already probed. Each hit
+    /// is a probe that read nothing, so <see cref="KvPointLookups"/>, <see cref="KvScanEntries"/>
+    /// and <see cref="RowsRead"/> count the distinct keys only. EXPLAIN ANALYZE prints it as
+    /// <c>probe-memo-hits=</c> when it is above zero.
+    /// </summary>
+    public long ProbeMemoHits;
+
+    /// <summary>
     /// The strategy the operator actually ran, when it is not the one the plan names; null when
     /// the operator ran as planned. A hash join decides two things only after its build exists: a
     /// build that outgrows its cap runs as a Grace hash join (<c>grace-hash</c>) or a nested-loop

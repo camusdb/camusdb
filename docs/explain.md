@@ -98,7 +98,9 @@ reports a join row this way:
   - `index-nested-loop-join` over a unique index adds one `kv_lookups` for each probe with a
     non-NULL key. Over a non-unique index, it adds one `kv_scan_entries` for each index entry it
     visits; the probe scan is bounded at the key, so no entry past it is visited. `rows_read`
-    counts the right rows it fetched, before the right-side filter.
+    counts the right rows it fetched, before the right-side filter. A key that an earlier outer
+    row probed is answered from the join's memo and adds nothing to these counters
+    (`probe-memo-hits=`).
   - `hash-join` reads its right side one time, as the build or as the probe.
   - A `hash-join` or `nested-loop-join` whose right table has a pushed filter on an indexed column
     reads that table through the index; the detail shows `right-index=<name>` (or
@@ -125,6 +127,7 @@ A join row's detail can also show two values that only execution knows:
 | `ran=nested-loop-fallback` | The hash build was larger than `HashJoinMaxBuildRows` with spilling off, so the join ran as a nested-loop join. |
 | `ran=nested-loop-rescan` | The nested-loop join read its right side again for every left row, instead of one time (see above). |
 | `ran=broadcast` | The build was small enough to ship, so the join probed the other side span by span. One `broadcast-span` row follows for each span. |
+| `probe-memo-hits=<n>` | The index nested-loop join answered `n` probes from its memo of earlier probes: outer rows whose key an earlier outer row had already probed. A hit reads nothing, so `kv_lookups`, `kv_scan_entries` and `rows_read` count the distinct keys only. The marker appears only when `n` is above zero. |
 | `join-order-est-rows=<n>` | The join-order search's estimate of the rows of this join. It appears only when the search costed the order (statistics loaded, cost-based join order on). |
 
 `estimated_rows` comes from the plan annotation, and the join-order search chose the order with

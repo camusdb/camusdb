@@ -468,8 +468,11 @@ in `SQLExecutorBaseCreator.EvalComparison`, `EvalAnd` and `EvalOr`, which every 
        `[v, v + sentinel]` in the index's own direction holds exactly the entries of the key, so
        the scan returns their row ids without decoding a key. The probe asks for the store's
        default page: the store stops a bounded scan at the key, so a page costs the entries of the
-       key only, and the largest page is the fewest round trips for a key with many entries;
-       unless…
+       key only, and the largest page is the fewest round trips for a key with many entries. The
+       join keeps the right rows of each probed key in a memo for the rest of the join (up to
+       65,536 rows), so an outer stream that repeats a key, every cast row of one movie for
+       example, probes the store once per distinct key; the `ON` predicate still runs for each
+       pair; unless…
      - Both sides have free index ordering (secondary index prefix covers the join key) **and** the
        outer side is large (> 100 rows estimated) → `MergeJoinNode` (streaming merge join); or…
      - Equi-join with stats available and hash preferred over INLJ → `HashJoinNode` (build =

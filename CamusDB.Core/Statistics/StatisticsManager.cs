@@ -1982,6 +1982,14 @@ public sealed class StatisticsManager
     internal long? JoinSearchStepBudgetForTesting { get; set; }
 
     /// <summary>
+    /// When set, the probe memo of an index nested-loop join holds at most this many rows instead
+    /// of <c>IndexNestedLoopJoinOperator.ProbeMemoMaxRows</c>; zero turns the memo off. Intended
+    /// for unit tests only: a differential test runs a join with and without the memo, and a cap
+    /// test shows the memo stops growing at its limit.
+    /// </summary>
+    internal int? IndexProbeMemoCapacityForTesting { get; set; }
+
+    /// <summary>
     /// Counts how many times the Grace hash join has fallen back to nested-loop for a single
     /// skewed partition that could not be split below the threshold within the recursion depth
     /// limit. Incremented by <c>GraceHashJoinOperator.JoinPartitionAsync</c>. Test-only; not thread-safe.
