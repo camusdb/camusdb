@@ -50,6 +50,24 @@ internal static class QueryRowMerger
     public static RowLayout BuildQualifiedLayout(RowLayout sourceLayout, string alias)
     {
         string[] names = sourceLayout.OutputNames;
+
+        // A layout whose every name is already qualified (the output of an earlier join) is returned
+        // as it is, bare aliases included: QualifyRowAsQueryRow then hands back the row itself, so the
+        // left row of the second and later joins of a chain costs no new row, and a pair row is never
+        // materialized only to carry the same names.
+        bool anyBare = false;
+        foreach (string name in names)
+        {
+            if (!IsQualifiedKey(name))
+            {
+                anyBare = true;
+                break;
+            }
+        }
+
+        if (!anyBare)
+            return sourceLayout;
+
         List<string> qualifiedNames = new(names.Length);
         foreach (string name in names)
             qualifiedNames.Add(IsQualifiedKey(name) ? name : QueryRowNameResolver.FormatQualifiedKey(alias, name));
@@ -75,8 +93,9 @@ internal static class QueryRowMerger
     /// </summary>
     public static QueryRow QualifyRowAsQueryRow(QueryRow source, RowLayout qualifiedLayout) =>
         // WithLayout preserves the slot backing (no whole-row materialization) when the source is a
-        // freshly decoded scan row; requalifying only changes column names, not values.
-        source.WithLayout(qualifiedLayout);
+        // freshly decoded scan row; requalifying only changes column names, not values. The layout
+        // of a row that is already qualified is its own qualified layout, and the row comes back as it is.
+        ReferenceEquals(source.Layout, qualifiedLayout) ? source : source.WithLayout(qualifiedLayout);
 
     /// <summary>
     /// Precomputes a mapping from each key in <paramref name="rightRow"/> — exactly as

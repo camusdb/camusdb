@@ -225,6 +225,47 @@ internal sealed class KahunaRetryPolicy
     }
 
     /// <summary>
+    /// The get retry with the arguments of the call passed as <paramref name="state"/> to a static
+    /// <paramref name="fn"/>: the per-read form of <see cref="RetryOnMustRetry(Func{Task{ValueTuple{KeyValueResponseType, ReadOnlyKeyValueEntry}}}, CancellationToken)"/>,
+    /// with the same retry contract. A point read on a hot path then allocates no closure and no
+    /// delegate per call, a read Kahuna answers synchronously (a published head record) completes
+    /// without a task object, and a read that suspends boxes one state machine here, not two: the
+    /// transport guard of <see cref="InvokeOrTransient{T}"/> is inlined around each attempt.
+    /// </summary>
+    internal static async ValueTask<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> RetryOnMustRetry<TState>(
+        Func<TState, Task<(KeyValueResponseType, ReadOnlyKeyValueEntry?)>> fn,
+        TState state,
+        CancellationToken ct)
+    {
+        KeyValueResponseType type;
+        ReadOnlyKeyValueEntry? entry;
+        int retries = 0;
+
+        do
+        {
+            try
+            {
+                using QueryStageProfile.KahunaScope kahunaCall = QueryStageProfile.MeasureKahuna(KahunaCallKind.KeyValue);
+                (type, entry) = await fn(state).ConfigureAwait(false);
+            }
+            catch (RpcException ex) when (IsTransientTransportFailure(ex, ct))
+            {
+                ServerDiagnostics.AddKvRetryWait("transport_unreachable");
+                (type, entry) = (KeyValueResponseType.MustRetry, null);
+            }
+
+            if (type is KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication)
+            {
+                ServerDiagnostics.AddKvRetryWait("mustretry_2560");
+                await Task.Delay(RetryDelayMs(retries), ct).ConfigureAwait(false);
+            }
+        }
+        while (type is KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication && ++retries < MaxKahunaRetries);
+
+        return (type, entry);
+    }
+
+    /// <summary>
     /// Retries a Kahuna set/delete call that returns <see cref="KeyValueResponseType.MustRetry"/>.
     /// </summary>
     internal static async Task<(KeyValueResponseType, long, HLCTimestamp)> RetryOnMustRetry(

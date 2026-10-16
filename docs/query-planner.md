@@ -464,7 +464,12 @@ in `SQLExecutorBaseCreator.EvalComparison`, `EvalAnd` and `EvalOr`, which every 
        `ON` conjuncts could drive the lookup, one on a unique index wins over one on a non-unique
        index, whatever their order in the `ON`: a unique probe returns one row, a non-unique probe
        returns every row with the value, and a popular value can mean thousands of them per left
-       row; unless…
+       row. A non-unique probe walks the store's equality scan: the raw window
+       `[v, v + sentinel]` in the index's own direction holds exactly the entries of the key, so
+       the scan returns their row ids without decoding a key. The probe asks for the store's
+       default page: the store stops a bounded scan at the key, so a page costs the entries of the
+       key only, and the largest page is the fewest round trips for a key with many entries;
+       unless…
      - Both sides have free index ordering (secondary index prefix covers the join key) **and** the
        outer side is large (> 100 rows estimated) → `MergeJoinNode` (streaming merge join); or…
      - Equi-join with stats available and hash preferred over INLJ → `HashJoinNode` (build =
@@ -733,7 +738,7 @@ when stats are missing, so the optimizer is strictly additive.
 | **Join-order heuristics** | `JoinOrderOptimizer` | Reorder inner-join sources before tree construction (scan-selectivity scoring, left-deep). The default when the join-order flag is off. |
 | **Cost-based scan veto** | `CostEstimator.ShouldPreferFullScan` | Always-on: replace a predicate-driven index range scan with a full table scan when it would touch too much of the table. Selectivity is histogram → min/max → fixed-constant. |
 | **Cost-based access-path selection** | `IndexScanSelector.EnumerateViableSteps` + `QueryPlanner.PickCheapestIndexOrFullScan` | Flag `cost_based_access_path_enabled`: enumerate *every* viable index for the predicate plus the full-scan baseline, cost each, pick the cheapest — subsuming the rule-scored "first viable index" pick and the veto above. |
-| **Cost-based join-order enumeration** | `JoinEnumerator` (System-R DP) over `JoinGraph` | Flag `cost_based_join_order_enabled`: bottom-up dynamic program over table subsets that memoizes the cheapest left-deep sub-plan, replacing the scan-selectivity heuristic. Tables connect through `ON` and `WHERE` conjuncts, a step pays for its intermediate input, and each table set has one row estimate. Falls back to the heuristic (with its cross-product repair) for >12 tables; a tree with an outer join keeps its declared order under both. |
+| **Cost-based join-order enumeration** | `JoinEnumerator` (System-R DP) over `JoinGraph` | Flag `cost_based_join_order_enabled`: bottom-up dynamic program over table subsets that memoizes the cheapest left-deep sub-plan, replacing the scan-selectivity heuristic. Tables connect through `ON` and `WHERE` conjuncts, a step pays for its intermediate input, and each table set has one row estimate. The search visits only the table sets an order can reach, stops at a step budget and then takes a greedy order; it falls back to the heuristic (with its cross-product repair) above 30 tables, and a tree with an outer join keeps its declared order under both. |
 | **Semi-/anti-join rewrite** | `SemiJoinAnalyzer` + `SemiJoinExecutor` | Rewrite eligible uncorrelated `IN`/`NOT IN` into an index-probing semi/anti/null-aware-anti join (instead of materializing), but only when the inner column is indexed; otherwise fall back to materialization. |
 | **DISTINCT streaming** | `QueryDistincter` + `IndexScanSelector` | When the `DISTINCT` columns form an index set-prefix and are all NOT NULL, and the index holds every row (any non-unique index; a unique index only when *all* of its key columns are NOT NULL), scan in index order and dedup by comparing adjacent rows (O(1) memory) instead of a hash set. The same condition gates streaming `GROUP BY`. |
 | **Value-list `IN` → index seeks** | `PredicateAnalyzer` + `QueryPlanner` + `IndexInListScanNode` | Turn `x IN (v1, v2, …)` on an indexed column into one index seek per value (point lookup for a unique index, equality range for a non-unique one), unioned and row-id-deduped, instead of a full scan + residual membership filter. Cost-gated, and cost-compared against a competing range scan so a selective unique `IN` wins. Falls back to a residual filter when the column is unindexed or the list is too large. |
@@ -997,9 +1002,22 @@ subsets of the graph. `dp[mask]` is the cheapest left-deep plan that joins exact
      step = CostEstimator.JoinStepCost(rows[leftMask], leafRows[bit], scanCost[bit], equiKey, indexLookup)
 ```
 
-Subsets of each size are walked with **Gosper's hack**. Only connected splits are candidates, so the DP
-never costs a cross product; a query that needs one goes to the heuristic. The winning order is rebuilt
-through `JoinGraph.BuildTree`. The search is **capped at 12 tables** (`MaxTablesForEnumeration`).
+The DP visits **only the subsets an order can reach**: a subset of size `k` is a candidate when some
+reachable subset of size `k − 1` extends it through an edge, so the work is the number of connected
+(left set, right table) pairs, not `n · 2^n`, and a sparse join graph of 17 tables costs about half a
+million steps. The candidates of a size are costed in ascending mask order and the tables of each from
+the last declared to the first, so the declared order wins a tie. Only connected splits are candidates,
+so the DP never costs a cross product; a query that needs one goes to the heuristic. Up to 12 tables the
+row estimate of every subset is computed up front; above that each subset is estimated when it is
+reached. The winning order is rebuilt through `JoinGraph.BuildTree`.
+
+The search has two bounds. It plans at most **30 tables** (`MaxTablesForEnumeration`, the width of the
+subset masks); a wider join takes the heuristic. And it costs at most **2,000,000 steps**
+(`MaxCostedStepsForEnumeration`); past that it stops and a **greedy order** plans the join: the table
+with the fewest rows after its filter first, then at each step the connected table that gives the
+smallest estimated result (the cheaper step on a tie, then the first declared). The greedy tree is
+built and costed like a searched one, and `EXPLAIN (ANALYZE)` reports it as `join-order=greedy`. The
+step count depends only on the join graph, so the same query takes the same path every time.
 
 **The step cost** is one function, `CostEstimator.JoinStepCost`, with the operator that the builder
 selects for the conjuncts that the step attaches. The checks are the builder's own
@@ -1096,7 +1114,8 @@ current query.
 > - "interesting orders/distributions" (keeping a costlier sub-plan that provides an ordering a parent
 >   needs), and merge join in the DP — the builder can select a merge join that the DP did not cost;
 > - bushy plans (left-deep only), and a component-by-component plan for a query that needs a cross product;
-> - more than 12 tables (the heuristic plans them, with the repair);
+> - more than 30 tables (the heuristic plans them, with the repair), and a join past the step budget gets
+>   the greedy order, which is not guaranteed cheapest;
 > - implied join edges: the column classes fix the estimate of `a.x = b.x AND b.x = c.x AND a.x = c.x`, but
 >   when the query writes only `a.x = b.x AND b.x = c.x`, no edge joins `a` and `c` directly;
 > - index-lookup fan-out: `2 · leftRows` assumes one match per left row, and a non-unique index can return
@@ -1223,7 +1242,7 @@ These are the meaningful missing pieces and where new work fits.
 | **Cardinality estimator** | **Done** | `CardinalityEstimator`: histogram/NDV filter selectivity, IN-list, composite-key correlation, and FK-aware join cardinality (`|A||B|/max(NDV)`). |
 | **Cost model + network** | **Done** | `PlanCost`/`CostEstimator` populate `EstimatedCardinality`/`Cost` incl. a real `NetworkFactor` (`DataDistribution` + `PlacementReader` + `RowWidthEstimator`); always-on vetoes (range-vs-scan, join algorithm) plus the two flagged passes below. |
 | **Cost-based access-path selection** | **Done** | `cost_based_access_path_enabled`: enumerate + cost all index candidates per table, pick cheapest. On by default; off → heuristic. |
-| **Cost-based join-order enumeration** | **Done (opt-in)** | `cost_based_join_order_enabled`: System-R DP over table subsets (`JoinEnumerator`) of the conjunct graph (`JoinGraph`), capped at 12 tables, inner-joins-only, falls back to the heuristic with its cross-product repair. On by default; off → heuristic. |
+| **Cost-based join-order enumeration** | **Done (opt-in)** | `cost_based_join_order_enabled`: System-R DP over the reachable table subsets (`JoinEnumerator`) of the conjunct graph (`JoinGraph`), up to 30 tables and a budget of 2,000,000 costed steps with a greedy order past it, inner-joins-only, falls back to the heuristic with its cross-product repair. On by default; off → heuristic. |
 | **Plan-cache hooks** | **Partial** | Plans record `TableSchemaVersion`; no stable query-shape identifier yet. No plan reuse. The next phase — caching optimized plans keyed by query shape — is unbuilt. |
 | **Interesting orders in the join DP** | **Missing** | The DP costs by scan/join cost only; it does not keep a costlier sub-plan that supplies an ordering/distribution a parent needs (would avoid a later sort/exchange). |
 | **Semi-/anti-join rewrite** | **Done** | Eligible uncorrelated `IN`/`NOT IN` over an **indexed** inner column rewrite to semi / anti / null-aware-anti join (`SemiJoinAnalyzer`/`SemiJoinExecutor`); non-indexed falls back to materialization. Three-valued `NOT IN` semantics preserved. |

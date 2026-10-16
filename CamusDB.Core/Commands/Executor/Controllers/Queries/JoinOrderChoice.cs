@@ -90,7 +90,8 @@ internal sealed record JoinOrderChoice(
     JoinBuildMode Mode,
     NodeAst? PostJoinFilter,
     IReadOnlyDictionary<JoinSource, JoinStepEstimate>? StepEstimates = null,
-    long CostedJoinSteps = 0)
+    long CostedJoinSteps = 0,
+    bool Greedy = false)
 {
     public static JoinOrderChoice WholePredicate(QuerySource source, JoinPredicatePushdown.Result pushdown) =>
         new(source, JoinBuildMode.WholePredicate, pushdown.PostJoinFilter);
@@ -98,20 +99,26 @@ internal sealed record JoinOrderChoice(
     public static JoinOrderChoice Conjunct(QuerySource source, JoinGraph graph) =>
         new(source, JoinBuildMode.Conjunct, graph.RemainingPostJoinFilter);
 
+    /// <param name="greedy">
+    /// True when the order is the greedy one of <see cref="JoinEnumerator"/>, taken because the
+    /// search passed its step budget; the tree is built and costed like a searched one.
+    /// </param>
     public static JoinOrderChoice CostBased(
         QuerySource source,
         JoinGraph graph,
         IReadOnlyDictionary<JoinSource, JoinStepEstimate> steps,
-        long costedJoinSteps) =>
-        new(source, JoinBuildMode.CostBased, graph.RemainingPostJoinFilter, steps, costedJoinSteps);
+        long costedJoinSteps,
+        bool greedy = false) =>
+        new(source, JoinBuildMode.CostBased, graph.RemainingPostJoinFilter, steps, costedJoinSteps, greedy);
 }
 
 /// <summary>
 /// How the planner chose the join order of one plan, for EXPLAIN (ANALYZE) and the plan-quality
 /// harness. <see cref="Path"/> is <c>cost-based</c> when the dynamic program of
-/// <see cref="JoinEnumerator"/> chose the order; <c>heuristic</c> when it did not, so that
-/// <see cref="JoinOrderOptimizer"/> chose the order or the declared tree stayed (the cost-based
-/// search is off, statistics are not loaded, the join has more than
+/// <see cref="JoinEnumerator"/> chose the order; <c>greedy</c> when the program passed its step
+/// budget and the greedy order of the enumerator was costed instead; <c>heuristic</c> when
+/// neither ran, so that <see cref="JoinOrderOptimizer"/> chose the order or the declared tree
+/// stayed (the cost-based search is off, statistics are not loaded, the join has more than
 /// <see cref="JoinEnumerator.MaxTablesForEnumeration"/> tables, or no order avoids a cross
 /// product); and <c>cached</c> when a plan-cache hit replayed an earlier order.
 /// <see cref="CostedJoinSteps"/> is <see cref="JoinOrderChoice.CostedJoinSteps"/>; a cache hit

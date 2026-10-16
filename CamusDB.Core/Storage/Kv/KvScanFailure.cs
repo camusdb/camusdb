@@ -23,9 +23,10 @@ namespace CamusDB.Core.Storage.Kv;
 /// endpoints, and on the write-side paths that catch <c>Aborted</c> it used to be reported with a
 /// message written for a batched write. Neither is right for a read: nothing was applied, the scan is
 /// idempotent, and the caller's correct move is to retry the statement from <c>BEGIN</c>. Every scan
-/// the table store issues therefore streams through <see cref="Translate{T}"/>, which maps the
-/// exception to <see cref="CamusDBErrorCodes.TransactionMustRetry"/> with a message naming the scan
-/// and Kahuna's own response type.</para>
+/// the table store issues therefore streams through <see cref="Translate{T}"/>, or advances its
+/// Kahuna enumerator through <see cref="MoveNextAsync{T}"/>, which map the exception to
+/// <see cref="CamusDBErrorCodes.TransactionMustRetry"/> with a message naming the scan and Kahuna's
+/// own response type.</para>
 ///
 /// <para>A page whose forward the partition leader's dead process refused is the other way a scan ends
 /// without answering: Kahuna's routed scan waits out a page that answers <c>MustRetry</c> but lets 
@@ -47,30 +48,32 @@ internal static class KvScanFailure
         string what,
         [EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
-        // The catch sits around MoveNextAsync alone: C# forbids a yield inside a try block that has a
-        // catch, so the element is handed out after the guarded advance.
         await using IAsyncEnumerator<T> enumerator = source.GetAsyncEnumerator(cancellationToken);
 
-        while (true)
-        {
-            bool moved;
-            try
-            {
-                moved = await enumerator.MoveNextAsync().ConfigureAwait(false);
-            }
-            catch (KahunaServerException ex)
-            {
-                throw Describe(ex, what);
-            }
-            catch (RpcException ex) when (KahunaRetryPolicy.IsTransientTransportFailure(ex, cancellationToken))
-            {
-                throw KahunaRetryPolicy.ToMustRetry(ex, what);
-            }
-
-            if (!moved)
-                yield break;
-
+        while (await MoveNextAsync(enumerator, what, cancellationToken).ConfigureAwait(false))
             yield return enumerator.Current;
+    }
+
+    /// <summary>
+    /// One guarded advance of a Kahuna scan enumerator: the two translations of <see cref="Translate{T}"/>
+    /// around one <c>MoveNextAsync</c>, for a caller that holds the enumerator itself and so needs no
+    /// wrapper enumerator of its own. An index probe opens one scan per outer row, which made the
+    /// wrapper a per-row allocation. The catch sits around the advance alone: C# forbids a yield inside
+    /// a try block that has a catch, so the caller hands the element out after this returns.
+    /// </summary>
+    internal static async ValueTask<bool> MoveNextAsync<T>(IAsyncEnumerator<T> enumerator, string what, CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await enumerator.MoveNextAsync().ConfigureAwait(false);
+        }
+        catch (KahunaServerException ex)
+        {
+            throw Describe(ex, what);
+        }
+        catch (RpcException ex) when (KahunaRetryPolicy.IsTransientTransportFailure(ex, cancellationToken))
+        {
+            throw KahunaRetryPolicy.ToMustRetry(ex, what);
         }
     }
 

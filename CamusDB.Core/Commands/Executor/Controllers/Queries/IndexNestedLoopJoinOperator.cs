@@ -29,8 +29,11 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 /// probe. The page is flushed before each probe returns, so it never spans two left rows.</para>
 ///
 /// <para>One <see cref="RightDecodeState"/> is created per execution and threaded through every
-/// probe, so the join owns exactly one row-decode plan and one alias-qualified layout no matter
-/// which fetch path a row takes.</para>
+/// probe, so the join owns exactly one row-decode plan, one alias-qualified layout and one
+/// large-value fetch no matter which fetch path a row takes. Everything else a probe needs that is
+/// fixed for the join (the key column types, the stop direction) is resolved once
+/// before the outer loop: a join runs one probe per outer row, and the per-probe allocation is
+/// what sets its cost on a large join.</para>
 ///
 /// <para>A NULL lookup value is never probed: NULL = NULL is unknown, and a non-unique index walk
 /// from a NULL key would otherwise pair the row with every NULL-keyed right row. An inner join
@@ -52,16 +55,26 @@ internal sealed class IndexNestedLoopJoinOperator
         this.scanner = scanner;
     }
 
+    /// <summary>
+    /// What the pairing of a left row with a right row needs and keeps for the whole join: the pairer,
+    /// and the join layout and right ordinal map built from the first pair (or bound per left row by
+    /// the outer-join padding). Held in one object so the unique and the non-unique probe share one
+    /// pairing routine without copying these back into the outer loop.
+    /// </summary>
+    private sealed class PairState
+    {
+        internal readonly JoinRowPairer Pairer = new();
+        internal RowLayout? JoinLayout;
+        internal Dictionary<string, int>? RightOrdinalMap;
+    }
+
     internal async IAsyncEnumerable<QueryResultRow> ExecuteIndexNestedLoopJoin(
         IndexNestedLoopJoinNode joinNode,
         QueryPlan plan)
     {
-        QueryTicket ticket = plan.Ticket;
         string rightAlias = joinNode.RightSource.Alias;
-        RowLayout? joinLayout = null;
         RowLayout? qualifiedLeftLayout = null;
-        Dictionary<string, int>? rightOrdinalMap = null;
-        JoinRowPairer pairer = new();
+        PairState pairing = new();
         RightDecodeState rightDecodeState = new();
         OuterJoinPadding? padding = joinNode.Kind == JoinKind.LeftOuter
             ? await OuterJoinPadding.CreateAsync(BoundJoinRightSource.FromTable(joinNode.RightSource), plan).ConfigureAwait(false)
@@ -74,6 +87,13 @@ internal sealed class IndexNestedLoopJoinOperator
         JoinLeafRowPage? probePage = joinNode.UseUniqueLookup
             ? null
             : new JoinLeafRowPage(services, plan, joinNode.RightSource, joinNode.RightExecutionFilter, rightDecodeState, joinNode.Stats);
+
+        // Fixed for the whole join, so resolved once and not per outer row: the column types of the
+        // index key. A probe asks for the store's default page: the store stops a bounded scan at
+        // the key, so a page costs the entries of the key only, and the largest page is the fewest
+        // round trips for a key with many entries.
+        ColumnType[] keyTypes = JoinAliasMetadata.GetIndexColumnTypes(joinNode.RightSource.Table, joinNode.Index);
+        int probePageSize = KvStoreConstants.DefaultPageSize;
 
         await foreach (QueryResultRow leftRow in tree.ExecuteNode(joinNode.Input!, plan).ConfigureAwait(false))
         {
@@ -99,7 +119,7 @@ internal sealed class IndexNestedLoopJoinOperator
             }
 
             if (padding is not null)
-                (joinLayout, rightOrdinalMap) = padding.Bind(leftQualified);
+                (pairing.JoinLayout, pairing.RightOrdinalMap) = padding.Bind(leftQualified);
 
             if (lookupValue.Type == ColumnType.Null)
             {
@@ -112,22 +132,36 @@ internal sealed class IndexNestedLoopJoinOperator
             CompositeColumnValue lookupKey = new(new[] { lookupValue });
             bool matched = false;
 
-            await foreach (QueryResultRow rightRow in ProbeRightIndex(
-                joinNode,
-                lookupKey,
-                plan,
-                rightDecodeState,
-                probePage).ConfigureAwait(false))
+            if (joinNode.UseUniqueLookup)
             {
-                joinLayout      ??= QueryRowMerger.BuildJoinLayout(leftQualified, rightRow.Row, rightAlias);
-                rightOrdinalMap ??= QueryRowMerger.BuildRightKeyOrdinalMap(rightRow.Row, rightAlias, joinLayout);
-                QueryRow merged  = pairer.Pair(leftQualified, rightRow.Row, joinLayout, rightOrdinalMap);
+                // A unique index answers with at most one row, so the probe is one awaited call and
+                // not an enumeration of its own per outer row.
+                QueryResultRow? rightRow = await LookupUniqueRightRow(joinNode, lookupKey, plan, rightDecodeState).ConfigureAwait(false);
 
-                if (!await services.Filterer.MeetWhereAsync(joinNode.OnPredicate, merged, ticket, plan.Database).ConfigureAwait(false))
-                    continue;
+                if (rightRow is { } found)
+                {
+                    QueryRow? merged = await PairIfAccepted(pairing, joinNode, plan, leftQualified, found.Row, rightAlias).ConfigureAwait(false);
 
-                matched = true;
-                yield return new QueryResultRow(default(ObjectIdValue), merged);
+                    if (merged is not null)
+                    {
+                        matched = true;
+                        yield return new QueryResultRow(default(ObjectIdValue), merged);
+                    }
+                }
+            }
+            else
+            {
+                await foreach (QueryResultRow rightRow in ScanMultiIndexRightRows(
+                    joinNode, lookupKey, plan, probePage!, keyTypes, probePageSize).ConfigureAwait(false))
+                {
+                    QueryRow? merged = await PairIfAccepted(pairing, joinNode, plan, leftQualified, rightRow.Row, rightAlias).ConfigureAwait(false);
+
+                    if (merged is null)
+                        continue;
+
+                    matched = true;
+                    yield return new QueryResultRow(default(ObjectIdValue), merged);
+                }
             }
 
             if (padding is not null && !matched)
@@ -136,38 +170,37 @@ internal sealed class IndexNestedLoopJoinOperator
     }
 
     /// <summary>
-    /// Resolves the right-side rows for one outer row. A unique index answers with at most one row
-    /// through <see cref="LookupUniqueRightRow"/>; a non-unique index walks its equality range through
-    /// <see cref="ScanMultiIndexRightRows"/>, which needs the join-wide <paramref name="probePage"/>
-    /// (never null for a non-unique probe, see <see cref="ExecuteIndexNestedLoopJoin"/>).
+    /// Pairs one left row with one right row and evaluates the <c>ON</c> predicate on the pair: the
+    /// joined row when the predicate accepts it, null when it rejects it. The join layout and the
+    /// right ordinal map are built from the first pair and kept in <paramref name="pairing"/>. The
+    /// predicate evaluation completes synchronously unless it holds a correlated subquery, and then
+    /// this method completes without a task of its own.
     /// </summary>
-    internal async IAsyncEnumerable<QueryResultRow> ProbeRightIndex(
+    private async ValueTask<QueryRow?> PairIfAccepted(
+        PairState pairing,
         IndexNestedLoopJoinNode joinNode,
-        CompositeColumnValue lookupKey,
         QueryPlan plan,
-        RightDecodeState decodeState,
-        JoinLeafRowPage? probePage)
+        IReadOnlyDictionary<string, ColumnValue> leftQualified,
+        IReadOnlyDictionary<string, ColumnValue> rightRow,
+        string rightAlias)
     {
-        if (joinNode.UseUniqueLookup)
-        {
-            await foreach (QueryResultRow row in LookupUniqueRightRow(joinNode, lookupKey, plan, decodeState).ConfigureAwait(false))
-                yield return row;
+        pairing.JoinLayout      ??= QueryRowMerger.BuildJoinLayout(leftQualified, rightRow, rightAlias);
+        pairing.RightOrdinalMap ??= QueryRowMerger.BuildRightKeyOrdinalMap(rightRow, rightAlias, pairing.JoinLayout);
+        QueryRow merged = pairing.Pairer.Pair(leftQualified, rightRow, pairing.JoinLayout, pairing.RightOrdinalMap);
 
-            yield break;
-        }
+        if (!await services.Filterer.MeetWhereAsync(joinNode.OnPredicate, merged, plan.Ticket, plan.Database).ConfigureAwait(false))
+            return null;
 
-        if (probePage is null)
-        {
-            throw new CamusDBException(
-                CamusDBErrorCodes.InvalidInternalOperation,
-                "A non-unique index nested-loop probe requires a row page");
-        }
-
-        await foreach (QueryResultRow row in ScanMultiIndexRightRows(joinNode, lookupKey, plan, probePage).ConfigureAwait(false))
-            yield return row;
+        return merged;
     }
 
-    private async IAsyncEnumerable<QueryResultRow> LookupUniqueRightRow(
+    /// <summary>
+    /// Unique index probe for one outer row: one point read of the index entry and, when it exists,
+    /// one row read through <see cref="JoinLeafScanner.LoadRightRow"/>. Returns null when the key has
+    /// no entry or the row fails the residual filter. The common case allocates only what the store
+    /// needs: no enumerator, and no task when Kahuna answers synchronously.
+    /// </summary>
+    private async ValueTask<QueryResultRow?> LookupUniqueRightRow(
         IndexNestedLoopJoinNode joinNode,
         CompositeColumnValue lookupKey,
         QueryPlan plan,
@@ -175,7 +208,6 @@ internal sealed class IndexNestedLoopJoinOperator
     {
         BoundTableSource source = joinNode.RightSource;
         TableDescriptor table = source.Table;
-        HLCTimestamp txId = plan.Ticket.TxnState.TransactionId;
         QueryDependencyCollector? deps = plan.DepCollector;
 
         // Unique index probe: record the index bucket range (membership check) and schema.
@@ -188,27 +220,28 @@ internal sealed class IndexNestedLoopJoinOperator
             stats.KvPointLookups++;
 
         if (rowId is null)
-            yield break;
+            return null;
 
         // Record the row point dep whether or not it passes the execution filter — a later
         // update to a non-indexed column could change what the join returns.
         deps?.RecordPoint(table.Store.RowPointKey(rowId.Value));
 
-        QueryResultRow? row = await scanner.LoadRightRow(source, rowId.Value, joinNode.RightExecutionFilter, plan, decodeState, joinNode.Stats).ConfigureAwait(false);
-
-        if (row is QueryResultRow loadedRow)
-            yield return loadedRow;
+        return await scanner.LoadRightRow(source, rowId.Value, joinNode.RightExecutionFilter, plan, decodeState, joinNode.Stats).ConfigureAwait(false);
     }
 
     /// <summary>
-    /// Non-unique index probe for one outer row: walks the index equality range for the lookup key
-    /// and fetches the matching primary rows one page at a time through <paramref name="probePage"/>
-    /// instead of one round trip per index entry.
+    /// Non-unique index probe for one outer row: walks the entries of the lookup key through the
+    /// store's equality scan (<see cref="KvTableStore.ScanIndexEquality"/>), which bounds the scan at
+    /// the key in either index direction and decodes no entry, and fetches the matching primary rows
+    /// one page at a time through <paramref name="probePage"/> instead of one round trip per entry.
     /// <para>
     /// The page is owned by the whole join execution, but it is flushed before this method returns,
     /// so a page never spans two outer rows and the rows of one outer row still stream in index order.
-    /// The first-key comparison and the ASC/DESC stop rule run before an id is buffered, and the row
-    /// point dependency is recorded before the fetch, exactly as the per-entry fetch did.
+    /// The row point dependency is recorded before the fetch, exactly as the per-entry fetch did.
+    /// </para>
+    /// <para>
+    /// <paramref name="keyTypes"/> and <paramref name="pageSize"/> are properties of the join,
+    /// resolved once by the caller: a probe runs per outer row and must not rebuild them.
     /// </para>
     /// <para>
     /// Cancellation is checked on every index entry here and on every row inside the page flush,
@@ -219,12 +252,12 @@ internal sealed class IndexNestedLoopJoinOperator
         IndexNestedLoopJoinNode joinNode,
         CompositeColumnValue lookupKey,
         QueryPlan plan,
-        JoinLeafRowPage probePage)
+        JoinLeafRowPage probePage,
+        ColumnType[] keyTypes,
+        int pageSize)
     {
         BoundTableSource source = joinNode.RightSource;
         TableDescriptor table = source.Table;
-        ColumnType[] keyTypes = JoinAliasMetadata.GetIndexColumnTypes(table, joinNode.Index);
-        ColumnValue lookupValue = lookupKey.Values[0];
         QueryDependencyCollector? deps = plan.DepCollector;
         CancellationToken cancellationToken = plan.Ticket.CancellationToken;
 
@@ -233,32 +266,18 @@ internal sealed class IndexNestedLoopJoinOperator
         deps?.RecordRange(table.Store.IndexKeySpace(joinNode.Index.KvId));
         deps?.RecordSchema(table.Id, JoinAliasMetadata.GetTableSchemaVersionForAlias(plan, source.Alias), table.Schema.ContentsGeneration);
 
-        // The probe reads its stop rule from the index's DECODED order: an ascending first column
-        // streams ascending (past = greater), a descending one streams descending (past = smaller).
-        // Breaking on `> 0` for a DESC column would never fire, silently downgrading every probe to
-        // a full index-tail walk.
-        bool firstColumnDescending = joinNode.Index.DirectionAt(0) == OrderType.Descending;
-
-        await foreach ((CompositeColumnValue key, ObjectIdValue rowId, ReadOnlyMemory<byte> _) in table.Store.ScanIndex(
+        await foreach ((ObjectIdValue rowId, ReadOnlyMemory<byte> _) in table.Store.ScanIndexEquality(
             plan.Ticket.TxnState,
             joinNode.Index.KvId,
             keyTypes,
             lookupKey,
-            to: null,
-            unique: false, cancellationToken: cancellationToken).ConfigureAwait(false))
+            pageSize,
+            cancellationToken).ConfigureAwait(false))
         {
             cancellationToken.ThrowIfCancellationRequested();
 
             if (joinNode.Stats is { } stats)
                 stats.KvScanEntries++;
-
-            int cmp = key.Values[0].CompareTo(lookupValue);
-
-            if (firstColumnDescending ? cmp < 0 : cmp > 0)
-                break;
-
-            if (cmp != 0)
-                continue;
 
             // Recorded before the fetch, per row id: a later update to a non-indexed projected column
             // must invalidate this result even if the residual filter later rejects the row.

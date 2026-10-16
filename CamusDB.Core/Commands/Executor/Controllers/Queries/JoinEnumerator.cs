@@ -59,9 +59,12 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 ///   <see cref="JoinOrderOptimizer"/> plans it with whole predicates.</item>
 ///   <item>A volatile <c>ON</c> conjunct sets an order boundary: no order joins another table
 ///   between the tables of its scope (see <see cref="JoinGraph"/>).</item>
-///   <item>At most <see cref="MaxTablesForEnumeration"/> tables. A wider join, and a query whose
-///   predicates need a cross product, also go to the heuristic, which repairs an avoidable cross
-///   product (<see cref="JoinOrderOptimizer.ChooseWithGraph"/>).</item>
+///   <item>At most <see cref="MaxTablesForEnumeration"/> tables, and at most
+///   <see cref="MaxCostedStepsForEnumeration"/> costed steps: the search visits only the subsets
+///   an order can reach, and a join whose reachable subsets exceed the budget gets the greedy
+///   order of <see cref="GreedyOrder"/> instead. A wider join, and a query whose predicates need a
+///   cross product, go to the heuristic, which repairs an avoidable cross product
+///   (<see cref="JoinOrderOptimizer.ChooseWithGraph"/>).</item>
 ///   <item>Merge join and interesting orders are not modeled.</item>
 /// </list>
 ///
@@ -70,7 +73,28 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 /// </summary>
 internal static class JoinEnumerator
 {
-    internal const int MaxTablesForEnumeration = 12;
+    /// <summary>
+    /// The widest join the search plans: the subset masks of the row estimates are <c>int</c>s,
+    /// so a leaf is a bit below the sign. A wider join takes the heuristic order.
+    /// </summary>
+    internal const int MaxTablesForEnumeration = 30;
+
+    /// <summary>
+    /// Up to this many leaves the row estimate of every subset is computed up front, 2^n values
+    /// in one array: cheaper than estimating the reachable subsets one by one while the array is
+    /// small. Above it the search estimates each subset when it first reaches it.
+    /// </summary>
+    private const int MaxTablesForDenseEstimates = 12;
+
+    /// <summary>
+    /// The join steps the dynamic program may cost for one query before it stops and the greedy
+    /// order of <see cref="GreedyOrder"/> takes over. The count depends only on the join graph,
+    /// so the same query takes the same path every time. A step costs well under a microsecond;
+    /// the budget keeps the search at tens of milliseconds on the widest joins. A star of 17
+    /// tables around one center reaches about 65,000 subsets and costs about half a million
+    /// steps, inside the budget; a star of 20 would not be.
+    /// </summary>
+    internal const long MaxCostedStepsForEnumeration = 2_000_000;
 
     /// <summary>
     /// One edge that names a table, seen from that table as the right input of a step: whether
@@ -121,6 +145,23 @@ internal static class JoinEnumerator
         /// </summary>
         public double RowsOf(int mask) =>
             SubsetRows is { } dense ? dense[mask] : EstimateMaskRows(mask, LeafRows, Selectivity, [], []);
+
+        /// <summary><see cref="RowsOf(int)"/> with scratch lists a caller that loops reuses.</summary>
+        public double RowsOf(int mask, List<long?> counts, List<int> members) =>
+            SubsetRows is { } dense ? dense[mask] : EstimateMaskRows(mask, LeafRows, Selectivity, counts, members);
+    }
+
+    /// <summary>
+    /// The cheapest plan the search found for one reachable subset, with the subset's row
+    /// estimate, computed once when the subset is first reached and read by every step that
+    /// extends it.
+    /// </summary>
+    private struct Subplan
+    {
+        public double Cost;
+        public int BackLeft;
+        public int BackLeaf;
+        public double Rows;
     }
 
     /// <summary>
@@ -132,7 +173,9 @@ internal static class JoinEnumerator
 
     /// <summary>
     /// Returns the cheapest left-deep join tree for <paramref name="root"/>, the filter that stays
-    /// after its last join, and the estimates of each join for the builder. Falls back to
+    /// after its last join, and the estimates of each join for the builder. When the search
+    /// exceeds <see cref="MaxCostedStepsForEnumeration"/> steps, the tree is the greedy order of
+    /// <see cref="GreedyOrder"/>, costed the same way. Falls back to
     /// <see cref="JoinOrderOptimizer"/> when the graph refuses the tree, when it has more than
     /// <see cref="MaxTablesForEnumeration"/> tables, or when no order avoids a cross product.
     /// </summary>
@@ -161,8 +204,17 @@ internal static class JoinEnumerator
         if (graph.LeafCount > MaxTablesForEnumeration)
             return JoinOrderOptimizer.ChooseWithGraph(root, bound, pushdown, graph);
 
-        CostInputs inputs = ComputeCostInputs(graph, bound, pushdown, database, stats, options, clockValues);
-        int[]? order = FindCheapestOrder(graph, inputs, out long costedSteps);
+        CostInputs inputs = ComputeCostInputs(graph, bound, pushdown, database, stats, options, clockValues,
+            denseSubsets: graph.LeafCount <= MaxTablesForDenseEstimates);
+        long budget = stats.JoinSearchStepBudgetForTesting ?? MaxCostedStepsForEnumeration;
+        int[]? order = FindCheapestOrder(graph, inputs, budget, out long costedSteps, out bool overBudget);
+        bool greedy = false;
+
+        if (overBudget)
+        {
+            order = GreedyOrder(graph, inputs, ref costedSteps);
+            greedy = order is not null;
+        }
 
         // The fallbacks keep the count: the search ran, and its work is what the count reports.
         if (order is null)
@@ -174,7 +226,7 @@ internal static class JoinEnumerator
 
         return tree is null
             ? JoinOrderChoice.WholePredicate(root, pushdown) with { CostedJoinSteps = costedSteps }
-            : JoinOrderChoice.CostBased(tree, graph, EstimateSteps(graph, order, tree, inputs), costedSteps);
+            : JoinOrderChoice.CostBased(tree, graph, EstimateSteps(graph, order, tree, inputs), costedSteps, greedy);
     }
 
     /// <summary>
@@ -298,44 +350,70 @@ internal static class JoinEnumerator
         DatabaseDescriptor database,
         StatisticsManager stats,
         CamusDBOptions options) =>
-        FindCheapestOrder(graph, ComputeCostInputs(graph, bound, pushdown, database, stats, options), out _);
+        FindCheapestOrder(graph, ComputeCostInputs(graph, bound, pushdown, database, stats, options), MaxCostedStepsForEnumeration, out _, out _);
 
     /// <summary>
-    /// The dynamic program over left-deep orders. <paramref name="costedSteps"/> is the number of
-    /// join steps it costed, one for each (left subset, right leaf) pair that passes the boundary
-    /// and connectivity checks. The count depends only on the graph, so it repeats between runs of
-    /// the same query.
+    /// The dynamic program over left-deep orders, over the subsets an order can reach only: a
+    /// subset of size <c>k</c> is a candidate when some reachable subset of size <c>k − 1</c>
+    /// extends it through an edge, so the work is the number of (left subset, right leaf) pairs
+    /// that connect, not <c>n · 2^n</c>. The candidates of a size are costed in ascending mask
+    /// order and the leaves of each from the last declared to the first, with a strict comparison,
+    /// so the declared order is the first candidate of each set and wins a tie; that is the order
+    /// of a walk over all masks, so the plan is the one that walk would find. <paramref
+    /// name="costedSteps"/> is the number of join steps costed, which depends only on the graph and
+    /// so repeats between runs of the same query. The search stops and sets <paramref
+    /// name="overBudget"/> when the count passes <paramref name="maxCostedSteps"/>; null then, as
+    /// when no order avoids a cross product. A subset that breaks an order boundary of the graph
+    /// (<see cref="JoinGraph.RespectsBoundaries"/>) is never a plan, so no order crosses one.
     /// </summary>
-    private static int[]? FindCheapestOrder(JoinGraph graph, CostInputs inputs, out long costedSteps)
+    private static int[]? FindCheapestOrder(JoinGraph graph, CostInputs inputs, long maxCostedSteps, out long costedSteps, out bool overBudget)
     {
         costedSteps = 0;
+        overBudget = false;
         int n = graph.LeafCount;
-        int size = 1 << n;
-        double[] cost = new double[size];
-        int[] backLeft = new int[size];
-        int[] backLeaf = new int[size];
-
-        Array.Fill(cost, double.PositiveInfinity);
+        Dictionary<int, Subplan> best = new();
+        List<int> level = new(n);
+        List<int> nextLevel = [];
+        HashSet<int> reached = [];
+        List<long?> counts = [];
+        List<int> members = [];
 
         for (int i = 0; i < n; i++)
         {
             if (!graph.RespectsBoundaries(1UL << i))
                 continue;
 
-            cost[1 << i] = inputs.FirstLeafCost[i];
-            backLeaf[1 << i] = i;
+            int mask = 1 << i;
+            best[mask] = new Subplan { Cost = inputs.FirstLeafCost[i], BackLeaf = i, Rows = inputs.RowsOf(mask, counts, members) };
+            level.Add(mask);
         }
 
         for (int k = 2; k <= n; k++)
         {
-            // Gosper's hack walks every mask with k bits in ascending order.
-            for (int mask = (1 << k) - 1; mask < size; mask = NextWithSameBitCount(mask))
-            {
-                if (!graph.RespectsBoundaries((ulong)mask))
-                    continue;
+            reached.Clear();
 
-                // From the last declared table to the first: the declared order is the first
-                // candidate of each prefix set, and the strict comparison keeps it on a tie.
+            foreach (int left in level)
+            {
+                for (int bit = 0; bit < n; bit++)
+                {
+                    int leafBit = 1 << bit;
+                    if ((left & leafBit) != 0 || !graph.Connects((ulong)left, bit))
+                        continue;
+
+                    int mask = left | leafBit;
+                    if (graph.RespectsBoundaries((ulong)mask))
+                        reached.Add(mask);
+                }
+            }
+
+            nextLevel.Clear();
+            nextLevel.AddRange(reached);
+            nextLevel.Sort();
+
+            foreach (int mask in nextLevel)
+            {
+                Subplan plan = new() { Cost = double.PositiveInfinity };
+
                 for (int bit = n - 1; bit >= 0; bit--)
                 {
                     int leafBit = 1 << bit;
@@ -343,7 +421,7 @@ internal static class JoinEnumerator
                         continue;
 
                     int left = mask ^ leafBit;
-                    if (double.IsPositiveInfinity(cost[left]))
+                    if (!best.TryGetValue(left, out Subplan leftPlan))
                         continue;
 
                     if (!graph.Connects((ulong)left, bit))
@@ -351,43 +429,131 @@ internal static class JoinEnumerator
 
                     (bool equiKey, bool indexLookup) = StepOperators(inputs.StepEdges[bit], (ulong)mask);
                     costedSteps++;
+                    double total = leftPlan.Cost + CostEstimator.JoinStepCost(
+                        leftPlan.Rows, inputs.LeafRows[bit], inputs.RightScanCost[bit], equiKey, indexLookup);
 
-                    double total = cost[left] + CostEstimator.JoinStepCost(
-                        inputs.SubsetRows![left], inputs.LeafRows[bit], inputs.RightScanCost[bit], equiKey, indexLookup);
-
-                    if (total < cost[mask])
+                    if (total < plan.Cost)
                     {
-                        cost[mask] = total;
-                        backLeft[mask] = left;
-                        backLeaf[mask] = bit;
+                        plan.Cost = total;
+                        plan.BackLeft = left;
+                        plan.BackLeaf = bit;
                     }
                 }
+
+                // Every reached mask has a reachable left that connects, so the cost is finite.
+                plan.Rows = inputs.RowsOf(mask, counts, members);
+                best[mask] = plan;
+
+                if (costedSteps > maxCostedSteps)
+                {
+                    overBudget = true;
+                    return null;
+                }
             }
+
+            (level, nextLevel) = (nextLevel, level);
         }
 
-        int full = size - 1;
-        if (double.IsPositiveInfinity(cost[full]))
+        int full = (1 << n) - 1;
+        if (!best.TryGetValue(full, out Subplan root))
             return null;
 
         int[] order = new int[n];
         int current = full;
+        Subplan step = root;
 
         for (int position = n - 1; position >= 1; position--)
         {
-            order[position] = backLeaf[current];
-            current = backLeft[current];
+            order[position] = step.BackLeaf;
+            current = step.BackLeft;
+            step = best[current];
         }
 
-        order[0] = backLeaf[current];
+        order[0] = step.BackLeaf;
         return order;
     }
 
-    /// <summary>The next integer with the same number of set bits (Gosper's hack).</summary>
-    private static int NextWithSameBitCount(int mask)
+    /// <summary>
+    /// A left-deep order built one table at a time, for a join whose search passed its step
+    /// budget: the first table is the one with the fewest rows after its filter, and each step
+    /// adds the connected table that gives the smallest estimated result, on a tie the cheaper
+    /// step, on a tie the first declared. A selective table joins early and the intermediate
+    /// results stay small, which is what the full search optimizes for; the order it finds is not
+    /// guaranteed cheapest. A start that reaches a dead end (an order boundary, or an edge of
+    /// three tables that no remaining table satisfies) is given up for the next smallest start.
+    /// Null when no start reaches every table: no order avoids a cross product. Each candidate it
+    /// weighs is one costed step, added to <paramref name="costedSteps"/>.
+    /// </summary>
+    private static int[]? GreedyOrder(JoinGraph graph, CostInputs inputs, ref long costedSteps)
     {
-        int lowest = mask & -mask;
-        int ripple = mask + lowest;
-        return (((ripple ^ mask) >> 2) / lowest) | ripple;
+        int n = graph.LeafCount;
+        List<long?> counts = [];
+        List<int> members = [];
+
+        int[] starts = new int[n];
+        double[] startRows = new double[n];
+        for (int i = 0; i < n; i++)
+        {
+            starts[i] = i;
+            startRows[i] = inputs.LeafRows[i];
+        }
+        // Fewest rows first; Array.Sort is not stable, so the declared index breaks the tie.
+        Array.Sort(starts, (a, b) => startRows[a] != startRows[b] ? startRows[a].CompareTo(startRows[b]) : a.CompareTo(b));
+
+        int[] order = new int[n];
+
+        foreach (int start in starts)
+        {
+            if (!graph.RespectsBoundaries(1UL << start))
+                continue;
+
+            int mask = 1 << start;
+            order[0] = start;
+            int count = 1;
+            double rows = inputs.RowsOf(mask, counts, members);
+
+            while (count < n)
+            {
+                int bestLeaf = -1;
+                double bestRows = double.PositiveInfinity;
+                double bestCost = double.PositiveInfinity;
+
+                for (int leaf = 0; leaf < n; leaf++)
+                {
+                    int leafBit = 1 << leaf;
+                    if ((mask & leafBit) != 0 || !graph.Connects((ulong)mask, leaf))
+                        continue;
+
+                    int union = mask | leafBit;
+                    if (!graph.RespectsBoundaries((ulong)union))
+                        continue;
+
+                    (bool equiKey, bool indexLookup) = StepOperators(inputs.StepEdges[leaf], (ulong)union);
+                    costedSteps++;
+                    double stepCost = CostEstimator.JoinStepCost(rows, inputs.LeafRows[leaf], inputs.RightScanCost[leaf], equiKey, indexLookup);
+                    double resultRows = inputs.RowsOf(union, counts, members);
+
+                    if (resultRows < bestRows || (resultRows == bestRows && stepCost < bestCost))
+                    {
+                        bestLeaf = leaf;
+                        bestRows = resultRows;
+                        bestCost = stepCost;
+                    }
+                }
+
+                if (bestLeaf < 0)
+                    break;
+
+                mask |= 1 << bestLeaf;
+                order[count++] = bestLeaf;
+                rows = bestRows;
+            }
+
+            if (count == n)
+                return order;
+        }
+
+        return null;
     }
 
     /// <summary>

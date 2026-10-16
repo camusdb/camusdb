@@ -353,7 +353,7 @@ public sealed class TestSerializableReadWrite
         // and Kahuna's TryAcquireRangeLock returns AlreadyLocked (X∩S incompatible).
         KvTransaction txB = await mgr.BeginAsync(CamusIsolationLevel.Serializable, CamusTransactionMode.ReadWrite);
         CamusDBException? ex = Assert.ThrowsAsync<CamusDBException>(
-            () => store.GetRow(txB, rowId));
+            () => store.GetRow(txB, rowId).AsTask());
         Assert.AreEqual(CamusDBErrorCodes.TransactionConflict, ex?.Code,
             "A new Serializable+RW reader must not be able to acquire Shared on K while A holds Exclusive after upgrade");
 

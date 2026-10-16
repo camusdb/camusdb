@@ -97,8 +97,8 @@ reports a join row this way:
     `HashJoinMaxBuildRows`.
   - `index-nested-loop-join` over a unique index adds one `kv_lookups` for each probe with a
     non-NULL key. Over a non-unique index, it adds one `kv_scan_entries` for each index entry it
-    visits, including the one entry past the key that ends each probe. `rows_read` counts the
-    right rows it fetched, before the right-side filter.
+    visits; the probe scan is bounded at the key, so no entry past it is visited. `rows_read`
+    counts the right rows it fetched, before the right-side filter.
   - `hash-join` reads its right side one time, as the build or as the probe.
   - A `hash-join` or `nested-loop-join` whose right table has a pushed filter on an indexed column
     reads that table through the index; the detail shows `right-index=<name>` (or
@@ -141,7 +141,8 @@ how the join order was chosen. Plain `EXPLAIN` does not show these values.
 |--------|---------|
 | `planning-ms=<ms>` | The time of the bind and plan stages. It includes the subqueries that the bind stage runs to fold into literals. |
 | `join-order=cost-based` | The cost-based search chose the join order. |
-| `join-order=heuristic` | The cost-based search did not choose the order. The cause is one of these: the search is off, the statistics are not loaded, the join has more than 12 tables, or no order avoids a cross product. |
+| `join-order=greedy` | The cost-based search passed its step budget, and the greedy order of the enumerator was built and costed instead: the smallest table first, then at each step the connected table with the smallest estimated result. |
+| `join-order=heuristic` | The cost-based search did not choose the order. The cause is one of these: the search is off, the statistics are not loaded, the join has more than 30 tables, or no order avoids a cross product. |
 | `join-order=cached` | A plan-cache hit replayed an earlier join order. |
 | `join-steps-costed=<n>` | The number of join steps that the cost-based search costed. It is 0 when the search did not run. For the same query and the same statistics, the count is the same on each run, so you can compare it between versions. You cannot do that with a time. |
 

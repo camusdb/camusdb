@@ -469,7 +469,7 @@ internal sealed class JoinLeafScanner
     /// <see cref="QueryRowMerger.QualifyRow"/>.
     /// </para>
     /// </summary>
-    internal async Task<QueryResultRow?> LoadRightRow(
+    internal async ValueTask<QueryResultRow?> LoadRightRow(
         BoundTableSource source,
         ObjectIdValue rowId,
         NodeAst? executionFilter,
@@ -477,9 +477,13 @@ internal sealed class JoinLeafScanner
         RightDecodeState? decodeState = null,
         PlanNodeStats? stats = null)
     {
+        IReadOnlySet<string>? required = JoinAliasMetadata.GetRequiredColumnsForAlias(plan, source.Alias);
+        LargeValueFetch? fetch = decodeState is not null
+            ? decodeState.FetchFor(source.Table.Schema, required)
+            : LargeValueFetch.Columns(source.Table.Schema, required);
+
         ReadOnlyMemory<byte>? dataOpt = await source.Table.Store.GetRow(
-            plan.Ticket.TxnState, rowId, plan.Ticket.CancellationToken,
-            LargeValueFetch.Columns(source.Table.Schema, JoinAliasMetadata.GetRequiredColumnsForAlias(plan, source.Alias))).ConfigureAwait(false);
+            plan.Ticket.TxnState, rowId, plan.Ticket.CancellationToken, fetch).ConfigureAwait(false);
 
         if (dataOpt is null || dataOpt.Value.Length == 0)
             return null;
@@ -491,7 +495,7 @@ internal sealed class JoinLeafScanner
             rowId,
             data,
             services.Options,
-            JoinAliasMetadata.GetRequiredColumnsForAlias(plan, source.Alias),
+            required,
             JoinAliasMetadata.GetTableSchemaVersionForAlias(plan, source.Alias),
             decodeState?.DecodeState).ConfigureAwait(false);
 

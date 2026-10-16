@@ -633,7 +633,8 @@ public sealed class TestJoinOrderConjunctGraph : BaseTest
     public async Task SubsetEstimate_TwelveTableChainOfLargeTablesDoesNotOverflow()
     {
         Db db = await CreateDb(DpOn);
-        string[] tables = Enumerable.Range(0, JoinEnumerator.MaxTablesForEnumeration).Select(i => $"t{i}").ToArray();
+        // Twelve tables: the widest join whose subsets are all estimated up front, 4,096 of them.
+        string[] tables = Enumerable.Range(0, 12).Select(i => $"t{i}").ToArray();
         await CreateTables(db, tables);
         await Seed(db, tables.Select(t => (t, 1_000_000L)).ToArray());
 
@@ -647,6 +648,77 @@ public sealed class TestJoinOrderConjunctGraph : BaseTest
         foreach (double estimate in (await SubsetEstimates(db, sql)).Values)
             Assert.IsTrue(double.IsFinite(estimate) && estimate > 0, $"estimate {estimate}");
     }
+
+    // ─── Joins wider than the dense estimate array ───────────────────────────
+
+    /// <summary>
+    /// Fourteen tables in a chain, declared largest first with the ten-row table last. The search
+    /// visits the subsets an order can reach, so it plans the chain and starts from the small table;
+    /// the heuristic would keep the declared order, because no table has a pushed predicate.
+    /// </summary>
+    [Test]
+    public async Task WideJoin_FourteenTableChain_IsPlannedByTheSearch_FromTheSmallestTable()
+    {
+        Db db = await CreateDb(DpOn);
+        string[] tables = Enumerable.Range(0, 14).Select(i => $"t{i}").ToArray();
+        await CreateTables(db, tables);
+        await Seed(db, tables.Select(t => (t, t == "t13" ? 10L : 1_000_000L)).ToArray());
+
+        QueryPlan plan = await Plan(db, ChainSql(tables), DpOn);
+        string rendered = PlanRenderer.Render(plan);
+
+        Assert.AreEqual("cost-based", plan.JoinOrderSearch?.Path, rendered);
+        Assert.Greater(plan.JoinOrderSearch!.CostedJoinSteps, 0);
+        CollectionAssert.AreEqual(tables.Reverse(), JoinOrder(plan.Root), rendered);
+        StringAssert.DoesNotContain("on=true", rendered);
+    }
+
+    /// <summary>
+    /// With a step budget of one the search stops at once and the greedy order plans the join:
+    /// the table with the fewest rows first, then the one connected table each step. The plan
+    /// reports <c>greedy</c>, so EXPLAIN (ANALYZE) and the harness can tell it from a search.
+    /// </summary>
+    [Test]
+    public async Task WideJoin_PastTheStepBudget_TakesTheGreedyOrder()
+    {
+        Db db = await CreateDb(DpOn);
+        string[] tables = Enumerable.Range(0, 14).Select(i => $"t{i}").ToArray();
+        await CreateTables(db, tables);
+        await Seed(db, tables.Select(t => (t, t == "t13" ? 10L : 1_000_000L)).ToArray());
+        db.Executor.Statistics.JoinSearchStepBudgetForTesting = 1;
+
+        QueryPlan plan = await Plan(db, ChainSql(tables), DpOn);
+        string rendered = PlanRenderer.Render(plan);
+
+        Assert.AreEqual("greedy", plan.JoinOrderSearch?.Path, rendered);
+        CollectionAssert.AreEqual(tables.Reverse(), JoinOrder(plan.Root), rendered);
+        StringAssert.DoesNotContain("on=true", rendered);
+    }
+
+    /// <summary>
+    /// The greedy order starts from the smallest table and, when that table joins two
+    /// candidates, takes the one that gives the smaller result: a star with the ten-row center
+    /// and satellites of 1,000 and 1,000,000 rows joins the small satellite first.
+    /// </summary>
+    [Test]
+    public async Task GreedyOrder_PrefersTheStepWithTheSmallerResult()
+    {
+        Db db = await CreateDb(DpOn);
+        await CreateTables(db, "hub", "big", "small");
+        await Seed(db, ("hub", 10), ("big", 1_000_000), ("small", 1_000));
+        db.Executor.Statistics.JoinSearchStepBudgetForTesting = 1;
+
+        QueryPlan plan = await Plan(db, "SELECT hub.id FROM big JOIN hub ON big.a = hub.a JOIN small ON hub.b = small.b", DpOn);
+        string rendered = PlanRenderer.Render(plan);
+
+        Assert.AreEqual("greedy", plan.JoinOrderSearch?.Path, rendered);
+        CollectionAssert.AreEqual(new[] { "hub", "small", "big" }, JoinOrder(plan.Root), rendered);
+    }
+
+    /// <summary><c>SELECT t0.id FROM t0 JOIN t1 ON t0.a = t1.a JOIN t2 ON t1.a = t2.a …</c> over <paramref name="tables"/>.</summary>
+    private static string ChainSql(string[] tables) =>
+        $"SELECT {tables[0]}.id FROM {tables[0]}" + string.Concat(
+            Enumerable.Range(1, tables.Length - 1).Select(i => $" JOIN {tables[i]} ON {tables[i - 1]}.a = {tables[i]}.a"));
 
     // ─── Heuristic cross-product repair ──────────────────────────────────────
 
@@ -676,10 +748,10 @@ public sealed class TestJoinOrderConjunctGraph : BaseTest
     }
 
     [Test]
-    public async Task CommaJoinAboveTheEnumerationCap_IsRepaired()
+    public async Task CommaJoinOfThirteenTables_HasNoCrossProduct_OnAndOff()
     {
         Db db = await CreateDb(DpOn);
-        int n = JoinEnumerator.MaxTablesForEnumeration + 1;
+        const int n = 13;
         string[] tables = Enumerable.Range(0, n).Select(i => $"t{i}").ToArray();
         await CreateTables(db, tables);
         await Seed(db, tables.Select(t => (t, 1000L)).ToArray());

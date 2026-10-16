@@ -122,7 +122,7 @@ internal sealed class KvBranchReader
     /// and answered as <see cref="BranchKvValue.Miss"/>, which the caller must not use: it tests
     /// <see cref="RetryableAbortSink.HasAbort"/> first. See <see cref="RetryableAbortSink"/>.</para>
     /// </summary>
-    internal async Task<BranchKvValue> ProbeRaw(
+    internal async ValueTask<BranchKvValue> ProbeRaw(
         HLCTimestamp txId,
         HLCTimestamp readTimestamp,
         string key,
@@ -132,8 +132,14 @@ internal sealed class KvBranchReader
     {
         TransactionOperationId operationId = coordinatorKey.Length == 0 ? default : TransactionOperationId.NewRandom();
 
+        // The arguments travel as a tuple state to a static lambda: a probe is the inner step of every
+        // unique index lookup and every single-row read, and a capturing lambda cost a closure and a
+        // delegate per call.
         (KeyValueResponseType type, ReadOnlyKeyValueEntry? entry) = await KahunaRetryPolicy.RetryOnMustRetry(
-            () => kahuna.LocateAndTryGetValue(txId, key, -1, readTimestamp, KeyValueDurability.Persistent, cancellationToken, coordinatorKey: coordinatorKey, operationId: operationId),
+            static state => state.kahuna.LocateAndTryGetValue(
+                state.txId, state.key, -1, state.readTimestamp, KeyValueDurability.Persistent, state.cancellationToken,
+                coordinatorKey: state.coordinatorKey, operationId: state.operationId),
+            (kahuna, txId, key, readTimestamp, cancellationToken, coordinatorKey, operationId),
             cancellationToken
         ).ConfigureAwait(false);
 

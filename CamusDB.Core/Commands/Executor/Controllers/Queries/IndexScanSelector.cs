@@ -854,8 +854,10 @@ internal static class IndexScanSelector
     /// <summary>
     /// Returns the end bound of an executor seek for one key value: <paramref name="lookupKey"/> holds
     /// the leading key columns of <paramref name="index"/>, and the scan starts inclusive at that key.
-    /// Every executor path that seeks a single value (IN-list seeks, join-leaf IN lists, semi-join
-    /// probes, non-unique lookups) must take its range from here.
+    /// Every executor path that seeks a single value through <see cref="KvIndexAccessor.ScanIndex"/>
+    /// (IN-list seeks, join-leaf IN lists, semi-join probes) must take its range from here. The
+    /// non-unique probe of an index nested-loop join uses <see cref="KvIndexAccessor.ScanIndexEquality"/>
+    /// instead, whose window is <c>[v, v + sentinel]</c> in the index's own direction.
     /// <para>The exclusive successor bound <c>[v, next(v))</c> is used only when the last bound column
     /// is ascending and its type has a successor. <see cref="KvIndexAccessor.ScanIndex"/> encodes the
     /// bounds in the index's own direction, so on a descending column <c>next(v)</c> encodes

@@ -5,6 +5,7 @@
  * file that was distributed with this source code.
  */
 
+using System.Collections.Concurrent;
 using System.Runtime.CompilerServices;
 using System.Text;
 using Kahuna;
@@ -52,6 +53,10 @@ internal sealed class KvIndexAccessor
     private readonly KahunaRetryPolicy retry;
     private readonly UniqueRowIdCache? rowIdCache;
 
+    // The wording of a failed scan of each index, built once: every probe of the index hands it to
+    // the failure translator, which reads it only when a scan fails.
+    private readonly ConcurrentDictionary<string, string> scanDescriptions = new();
+
     internal KvIndexAccessor(
         IKahuna kahuna,
         KvKeyBuilder keys,
@@ -85,6 +90,11 @@ internal sealed class KvIndexAccessor
         return rowIdCache.TryGet(built, out rowId);
     }
 
+    private string ScanDescription(string indexId)
+        => scanDescriptions.TryGetValue(indexId, out string? cached)
+            ? cached
+            : scanDescriptions.GetOrAdd(indexId, static (id, table) => $"index scan of {table}.{id}", keys.DisplayTableName);
+
     /// <summary>Forgets a remembered key → row-id mapping (the row it named is gone).</summary>
     internal void EvictCachedUniqueRowId(string kvKey) => rowIdCache?.Remove(kvKey);
 
@@ -99,7 +109,7 @@ internal sealed class KvIndexAccessor
     /// entry before the read and held until commit, preventing a concurrent writer from
     /// inserting or deleting the same index key while this transaction is live.
     /// </summary>
-    internal async Task<ObjectIdValue?> LookupUnique(
+    internal async ValueTask<ObjectIdValue?> LookupUnique(
         KvTransaction tx,
         string indexId,
         CompositeColumnValue key,
@@ -472,6 +482,97 @@ internal sealed class KvIndexAccessor
     }
 
     /// <summary>
+    /// Equality probe of a non-unique index: the row id and include tuple of every entry whose key
+    /// equals <paramref name="key"/> on its leading columns, in index order. The probe of an index
+    /// nested-loop join runs this once per outer row, which is why it decodes no entry.
+    ///
+    /// <para><b>Why the raw window is exact.</b> The encoding of a key column is order-preserving
+    /// and prefix-free: a numeric column has a fixed width, and a String or Id column ends with a
+    /// terminator that sorts below every code unit. So the stored keys that start with the encoded
+    /// key are exactly the keys equal to it on the bound columns, and they all sit in
+    /// <c>[{bucket}/{encoded}, {bucket}/{encoded}{sentinel}]</c>: every stored key extends the
+    /// encoded value (its row-id suffix, the trailing columns of a composite index), and a stored
+    /// key of another value differs from it inside the encoded width. A stored NULL carries another
+    /// marker character, so it never matches. The per-entry prefix check stays as the guard of the
+    /// window; the decoded prefix filter of <see cref="ScanIndex"/> would reject nothing more.</para>
+    ///
+    /// <para>Same session, scan identity, snapshot and read-folding rules as <see cref="ScanIndex"/>.
+    /// On a branch database the general scan runs instead, with the inclusive bound
+    /// <c>[key, key]</c>, whose decoded prefix filter yields the same rows.</para>
+    /// </summary>
+    internal async IAsyncEnumerable<(ObjectIdValue rowId, ReadOnlyMemory<byte> includeTuple)> ScanIndexEquality(
+        KvTransaction tx,
+        string indexId,
+        ColumnType[] keyTypes,
+        CompositeColumnValue key,
+        int pageSize,
+        [EnumeratorCancellation] CancellationToken cancellationToken = default)
+    {
+        if (branch.IsBranch)
+        {
+            await foreach ((CompositeColumnValue _, ObjectIdValue rowId, ReadOnlyMemory<byte> includeTuple) in ScanIndex(
+                tx, indexId, keyTypes, key, key, unique: false, cancellationToken: cancellationToken, pageSize: pageSize).ConfigureAwait(false))
+            {
+                yield return (rowId, includeTuple);
+            }
+
+            yield break;
+        }
+
+        await tx.EnsureSessionStartedAsync(cancellationToken, keys.TableKeyPrefix).ConfigureAwait(false);
+
+        string bucketPrefix = keys.BuildIndexBucketPrefix(indexId);
+        // "{bucket}/{encoded}": a stored key matches when it starts with the whole start key.
+        string startKey = keys.BuildIndexScanBound(indexId, key, withSentinel: false);
+        string endKey = keys.BuildIndexScanBound(indexId, key, withSentinel: true);
+        int matchLength = startKey.Length + KvStoreConstants.RowIdHexLength;
+
+        string scanCoordinatorKey = tx.FoldReads ? tx.CoordinatorKey : "";
+        TransactionOperationId scanOperationId = scanCoordinatorKey.Length == 0 ? default : TransactionOperationId.NewRandom();
+        long entriesRead = 0;
+
+        try
+        {
+            await using IAsyncEnumerator<(string Key, ReadOnlyKeyValueEntry Entry)> entries = kahuna.LocateAndScanRange(
+                tx.RangeScanIdentityFor(bucketPrefix),
+                bucketPrefix,
+                startKey, true,
+                endKey, true,
+                pageSize,
+                tx.ReadTimestamp,
+                KeyValueDurability.Persistent,
+                cancellationToken,
+                scanCoordinatorKey,
+                scanOperationId).GetAsyncEnumerator(cancellationToken);
+            string scanDescription = ScanDescription(indexId);
+
+            while (await KvScanFailure.MoveNextAsync(entries, scanDescription, cancellationToken).ConfigureAwait(false))
+            {
+                (string kvKey, ReadOnlyKeyValueEntry entry) = entries.Current;
+                entriesRead++;
+
+                if (entry.Value is null)
+                    continue;
+
+                BranchKvValue scanDecoded = BranchKvCodec.Decode(entry.Value);
+                if (scanDecoded.Kind == BranchKvKind.Tombstone)
+                    continue;
+
+                // Non-unique: the stored key is {startKey}{encoded trailing columns}{rowIdHex24}.
+                if (kvKey.Length < matchLength || !kvKey.StartsWith(startKey, StringComparison.Ordinal))
+                    continue;
+
+                ObjectIdValue rowId = ObjectId.ToValue(kvKey.AsSpan(kvKey.Length - KvStoreConstants.RowIdHexLength));
+                yield return (rowId, IncludeTupleFromPayload(scanDecoded.Payload));
+            }
+        }
+        finally
+        {
+            ServerDiagnostics.AddKvScanEntries(index: true, entriesRead);
+        }
+    }
+
+    /// <summary>
     /// Ordered scan over a secondary index within optional inclusive bounds [from, to].
     /// Yields (decodedKey, rowId, includeTuple) triples in ascending encoded-key order.
     ///
@@ -518,14 +619,11 @@ internal sealed class KvIndexAccessor
 
         long emitted = 0;
         string bucketPrefix = keys.BuildIndexBucketPrefix(indexId);
-        string keyPrefix    = bucketPrefix + "/";
-        int prefixLen = keyPrefix.Length;
+        // A stored key is "{bucketPrefix}/{suffix}": the suffix starts after the slash.
+        int prefixLen = bucketPrefix.Length + 1;
 
         OrderType[]? directions = keys.DirectionsOf(indexId);
         OrderType[]? boundDirections = boundsInIndexOrder ? directions : null;
-
-        string? fromEncoded = from is not null ? KeyEncoder.Encode(from, directions) : null;
-        string? toEncoded   = to   is not null ? KeyEncoder.Encode(to, directions)   : null;
 
         // Push bounds into the scan. The end key needs IndexKeySentinel whenever a stored key can
         // extend *past* the encoded bound, which happens two ways:
@@ -552,11 +650,14 @@ internal sealed class KvIndexAccessor
         // the start past every extension of the bound value — the exact rule
         // <see cref="KvRangeLockManager.AcquireBoundedIndexRangeLockAsync"/> applies to the lock's own
         // start bound — so the raw scan window is as disjoint as the lock that protects it.
-        string? startKey = fromEncoded is not null
-            ? ((unique && !fromIsPrefixBound) || fromInclusive ? keyPrefix + fromEncoded : keyPrefix + fromEncoded + KvStoreConstants.IndexKeySentinel)
+        // Each bound is composed straight into its final string (bucket, slash, encoded key, sentinel
+        // when needed): a probe runs this per outer row, so the encoded key is never a string of its
+        // own that a concatenation then copies.
+        string? startKey = from is not null
+            ? keys.BuildIndexScanBound(indexId, from, withSentinel: !((unique && !fromIsPrefixBound) || fromInclusive))
             : null;
-        string? endKey   = toEncoded   is not null
-            ? (unique && !toIsPrefixBound ? keyPrefix + toEncoded : keyPrefix + toEncoded + KvStoreConstants.IndexKeySentinel)
+        string? endKey   = to is not null
+            ? keys.BuildIndexScanBound(indexId, to, withSentinel: !(unique && !toIsPrefixBound))
             : null;
 
         if (!branch.IsBranch)
@@ -574,7 +675,9 @@ internal sealed class KvIndexAccessor
 
             try
             {
-                await foreach ((string kvKey, ReadOnlyKeyValueEntry entry) in KvScanFailure.Translate(kahuna.LocateAndScanRange(
+                // The Kahuna enumerator is advanced directly through the failure translator's one-step
+                // form, not through its wrapper enumerator: a probe opens one scan per outer row.
+                await using IAsyncEnumerator<(string Key, ReadOnlyKeyValueEntry Entry)> entries = kahuna.LocateAndScanRange(
                     tx.RangeScanIdentityFor(bucketPrefix),
                     bucketPrefix,
                     startKey, fromInclusive,
@@ -584,8 +687,12 @@ internal sealed class KvIndexAccessor
                     KeyValueDurability.Persistent,
                     cancellationToken,
                     scanCoordinatorKey,
-                    scanOperationId), $"index scan of {keys.DisplayTableName}.{indexId}", cancellationToken).ConfigureAwait(false))
+                    scanOperationId).GetAsyncEnumerator(cancellationToken);
+                string scanDescription = ScanDescription(indexId);
+
+                while (await KvScanFailure.MoveNextAsync(entries, scanDescription, cancellationToken).ConfigureAwait(false))
                 {
+                    (string kvKey, ReadOnlyKeyValueEntry entry) = entries.Current;
                     entriesRead++;
 
                     if (entry.Value is null)
@@ -595,12 +702,13 @@ internal sealed class KvIndexAccessor
                     if (scanDecoded.Kind == BranchKvKind.Tombstone)
                         continue;
 
-                    if (!kvKey.StartsWith(keyPrefix, StringComparison.Ordinal))
+                    if (kvKey.Length < prefixLen || kvKey[prefixLen - 1] != '/' || !kvKey.StartsWith(bucketPrefix, StringComparison.Ordinal))
                         continue;
 
                     ReadOnlySpan<char> suffix = kvKey.AsSpan(prefixLen);
 
-                    string encodedKey;
+                    // The encoded key is decoded in place from the stored key; it is never copied out.
+                    ReadOnlySpan<char> encodedKey;
                     ObjectIdValue rowId;
 
                     if (unique)
@@ -611,7 +719,7 @@ internal sealed class KvIndexAccessor
                         if (!scanDecoded.HasPayload)
                             continue;
 
-                        encodedKey = suffix.ToString();
+                        encodedKey = suffix;
                         rowId = RowIdFromPayload(scanDecoded.Payload.Span);
                     }
                     else
@@ -620,7 +728,7 @@ internal sealed class KvIndexAccessor
                         if (suffix.Length < KvStoreConstants.RowIdHexLength)
                             continue;
 
-                        encodedKey = suffix[..^KvStoreConstants.RowIdHexLength].ToString();
+                        encodedKey = suffix[..^KvStoreConstants.RowIdHexLength];
                         rowId = ObjectId.ToValue(suffix[^KvStoreConstants.RowIdHexLength..]);
                     }
 
@@ -670,6 +778,9 @@ internal sealed class KvIndexAccessor
             // toEncoded) are pushed into the per-level scans by ScanIndexRawAsync so Kahuna
             // itself skips out-of-range pages.  The decoded-key in-range check below is a
             // second filter for the ComparePrefix edge cases documented on the root path above.
+
+            string? fromEncoded = from is not null ? KeyEncoder.Encode(from, directions) : null;
+            string? toEncoded   = to   is not null ? KeyEncoder.Encode(to, directions)   : null;
 
             BranchLevel[] levels = branch.Levels;
             int levelCount = 1 + levels.Length;

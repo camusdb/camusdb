@@ -142,7 +142,7 @@ internal sealed class JoinQueryPlanner
         plan.Root = BuildJoinTree(orderedSource, bound, pushdown, database, _stats, choice.StepEstimates, clockValues);
 
         plan.JoinOrderSearch = new JoinOrderSearchSummary(
-            fromCache ? "cached" : choice.Mode == JoinBuildMode.CostBased ? "cost-based" : "heuristic",
+            fromCache ? "cached" : choice.Mode != JoinBuildMode.CostBased ? "heuristic" : choice.Greedy ? "greedy" : "cost-based",
             choice.CostedJoinSteps);
 
         foreach (BoundTableSource source in bound.Sources)

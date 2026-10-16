@@ -54,7 +54,7 @@ public sealed class TestScanIdentity
         public override IAsyncEnumerable<(string Key, ReadOnlyKeyValueEntry Entry)> LocateAndScanRange(
             HLCTimestamp txId, string prefix, string? startKey, bool startInclusive, string? endKey, bool endInclusive,
             int pageSize, HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken ct,
-            string coordinatorKey = "", TransactionOperationId operationId = default)
+            string coordinatorKey = "", TransactionOperationId operationId = default, KeyValueScanObservationSink? observations = null)
         {
             ScanIdentities.Add(txId);
             ScanCoordinatorKeys.Add(coordinatorKey);
@@ -62,7 +62,7 @@ public sealed class TestScanIdentity
             if (FailScansWith is KeyValueResponseType type)
                 return FailingScan(prefix, type, ct);
 
-            return inner.LocateAndScanRange(txId, prefix, startKey, startInclusive, endKey, endInclusive, pageSize, readTimestamp, durability, ct, coordinatorKey, operationId);
+            return inner.LocateAndScanRange(txId, prefix, startKey, startInclusive, endKey, endInclusive, pageSize, readTimestamp, durability, ct, coordinatorKey, operationId, observations);
         }
 
         private static async IAsyncEnumerable<(string Key, ReadOnlyKeyValueEntry Entry)> FailingScan(

@@ -287,6 +287,31 @@ internal sealed class KvKeyBuilder
         });
     }
 
+    /// <summary>
+    /// <c>{bucket}/{encodedKey}</c>, or <c>{bucket}/{encodedKey}{sentinel}</c> with
+    /// <paramref name="withSentinel"/>: one bound of an index range scan, composed straight into its
+    /// final string. An index probe runs this twice per outer row, so the encoded key is never a
+    /// string of its own that a concatenation then copies. The sentinel pushes a bound past every
+    /// stored key that extends the encoded value (a row-id suffix, the remaining columns under a
+    /// prefix bound); <c>KvIndexAccessor.ScanIndex</c> says when a bound needs it.
+    /// </summary>
+    internal string BuildIndexScanBound(string indexId, CompositeColumnValue key, bool withSentinel)
+    {
+        string bucket = BuildIndexBucketPrefix(indexId);
+        OrderType[]? directions = DirectionsOf(indexId);
+        int encodedLen = KeyEncoder.Measure(key, directions);
+        int length = bucket.Length + 1 + encodedLen + (withSentinel ? 1 : 0);
+        return string.Create(length, (bucket, key, directions, withSentinel), static (span, state) =>
+        {
+            state.bucket.CopyTo(span);
+            span[state.bucket.Length] = '/';
+            int pos = state.bucket.Length + 1;
+            KeyEncoder.Write(span, ref pos, state.key, state.directions);
+            if (state.withSentinel)
+                span[pos] = KvStoreConstants.IndexKeySentinel;
+        });
+    }
+
     // Read-path variant: returns false when the key cannot be encoded (an invalid Id value that no
     // stored row can equal), so a point lookup treats it as a miss instead of throwing. Validation is
     // allocation-free and the key is composed by BuildUniqueIndexKey in a single string.Create — no

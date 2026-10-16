@@ -343,7 +343,7 @@ public sealed partial class KvTableStore
     /// retryable abort is recorded there instead of thrown and the answer is a null the caller must not
     /// use (see <see cref="RetryableAbortSink"/>).
     /// </summary>
-    public async Task<ReadOnlyMemory<byte>?> GetRow(KvTransaction tx, ObjectIdValue rowId, CancellationToken cancellationToken = default, LargeValueFetch? largeValues = null, RetryableAbortSink? aborts = null)
+    public async ValueTask<ReadOnlyMemory<byte>?> GetRow(KvTransaction tx, ObjectIdValue rowId, CancellationToken cancellationToken = default, LargeValueFetch? largeValues = null, RetryableAbortSink? aborts = null)
     {
         ReadOnlyMemory<byte>? row = await rows.GetRow(tx, rowId, cancellationToken, aborts).ConfigureAwait(false);
         if (row is not { } data || !RowStorageForms.HasTrailer(data.Span) || largeValues is { IsRaw: true })
@@ -567,7 +567,7 @@ public sealed partial class KvTableStore
     // -----------------------------------------------------------------------
 
     /// <inheritdoc cref="KvIndexAccessor.LookupUnique"/>
-    public Task<ObjectIdValue?> LookupUnique(KvTransaction tx, string indexId, CompositeColumnValue key, CancellationToken cancellationToken = default)
+    public ValueTask<ObjectIdValue?> LookupUnique(KvTransaction tx, string indexId, CompositeColumnValue key, CancellationToken cancellationToken = default)
         => indexes.LookupUnique(tx, indexId, key, cancellationToken);
 
     /// <summary>Whether this store remembers key → row-id mappings for its unique lookups (root database, feature on).</summary>
@@ -637,6 +637,16 @@ public sealed partial class KvTableStore
         CancellationToken cancellationToken = default,
         bool boundsInIndexOrder = false)
         => indexes.ScanIndex(tx, indexId, keyTypes, from, to, unique, fromInclusive, toInclusive, maxRows, cancellationToken, boundsInIndexOrder: boundsInIndexOrder);
+
+    /// <inheritdoc cref="KvIndexAccessor.ScanIndexEquality"/>
+    public IAsyncEnumerable<(ObjectIdValue rowId, ReadOnlyMemory<byte> includeTuple)> ScanIndexEquality(
+        KvTransaction tx,
+        string indexId,
+        ColumnType[] keyTypes,
+        CompositeColumnValue key,
+        int pageSize,
+        CancellationToken cancellationToken = default)
+        => indexes.ScanIndexEquality(tx, indexId, keyTypes, key, pageSize, cancellationToken);
 
     /// <inheritdoc cref="KvIndexAccessor.PutIndexEntry"/>
     public Task PutIndexEntry(

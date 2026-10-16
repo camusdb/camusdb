@@ -886,11 +886,11 @@ internal sealed class TestDatabaseRegistry
             HLCTimestamp txId, string prefix, string? startKey, bool startInclusive, string? endKey, bool endInclusive,
             int pageSize, HLCTimestamp readTimestamp, KeyValueDurability durability,
             [EnumeratorCancellation] CancellationToken ct,
-            string coordinatorKey = "", TransactionOperationId operationId = default)
+            string coordinatorKey = "", TransactionOperationId operationId = default, KeyValueScanObservationSink? observations = null)
         {
             await foreach ((string key, ReadOnlyKeyValueEntry entry) in base.LocateAndScanRange(
                 txId, prefix, startKey, startInclusive, endKey, endInclusive, pageSize, readTimestamp,
-                durability, ct, coordinatorKey, operationId))
+                durability, ct, coordinatorKey, operationId, observations))
             {
                 // The inner scan already read this entry; the pause sits between that read and the
                 // registry consuming it.

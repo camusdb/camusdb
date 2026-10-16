@@ -6,6 +6,7 @@
  * file that was distributed with this source code.
  */
 
+using System.Buffers;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.Util.ObjectIds;
@@ -494,7 +495,7 @@ public static class KeyEncoder
     /// the inverse of <see cref="WriteBase125"/>. Rejects malformed keys (short, or a code unit that
     /// is not a valid ordered-alphabet rank).
     /// </summary>
-    private static UInt128 ReadBase125(string key, ref int pos, int digits, int field)
+    private static UInt128 ReadBase125(ReadOnlySpan<char> key, ref int pos, int digits, int field)
     {
         if (pos + digits > key.Length)
             throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Truncated base-125 field at field {field}");
@@ -543,10 +544,27 @@ public static class KeyEncoder
     public static CompositeColumnValue Decode(string key, ColumnType[] types, OrderType[]? directions = null)
     {
         ArgumentNullException.ThrowIfNull(key);
+        return Decode(key.AsSpan(), types, directions);
+    }
+
+    /// <summary>
+    /// Longest string field decoded on the stack; a longer field rents a pooled buffer. One scratch
+    /// serves every string field of the key in turn.
+    /// </summary>
+    private const int StringDecodeScratchChars = 256;
+
+    /// <summary>
+    /// Decodes a composite key from the characters of a stored key. An index scan hands over the
+    /// slice between the bucket prefix and the row-id suffix, so no entry needs a string of its own
+    /// before it is decoded; the string overload is this one over the whole string.
+    /// </summary>
+    public static CompositeColumnValue Decode(ReadOnlySpan<char> key, ColumnType[] types, OrderType[]? directions = null)
+    {
         ArgumentNullException.ThrowIfNull(types);
 
         ColumnValue[] values = new ColumnValue[types.Length];
         int pos = 0;
+        Span<char> scratch = stackalloc char[StringDecodeScratchChars];
 
         for (int i = 0; i < types.Length; i++)
         {
@@ -573,7 +591,7 @@ public static class KeyEncoder
             {
                 case ColumnType.Integer64:
                 {
-                    ulong stored = ulong.Parse(key.AsSpan(pos, 16), System.Globalization.NumberStyles.HexNumber);
+                    ulong stored = ulong.Parse(key.Slice(pos, 16), System.Globalization.NumberStyles.HexNumber);
                     ulong ordered = descending ? ~stored : stored;
                     long longValue = (long)(ordered ^ 0x8000_0000_0000_0000UL);
                     values[i] = new ColumnValue(ColumnType.Integer64, longValue);
@@ -583,7 +601,7 @@ public static class KeyEncoder
 
                 case ColumnType.Float64:
                 {
-                    ulong stored = ulong.Parse(key.AsSpan(pos, 16), System.Globalization.NumberStyles.HexNumber);
+                    ulong stored = ulong.Parse(key.Slice(pos, 16), System.Globalization.NumberStyles.HexNumber);
                     if (descending) stored = ~stored;
                     long storedBits = (long)stored;
                     // Reverse the order-preserving transform:
@@ -599,7 +617,7 @@ public static class KeyEncoder
 
                 case ColumnType.Float32:
                 {
-                    uint stored = uint.Parse(key.AsSpan(pos, 8), System.Globalization.NumberStyles.HexNumber);
+                    uint stored = uint.Parse(key.Slice(pos, 8), System.Globalization.NumberStyles.HexNumber);
                     if (descending) stored = ~stored;
                     int storedBits = (int)stored;
                     int originalBits = storedBits < 0
@@ -613,7 +631,7 @@ public static class KeyEncoder
 
                 case ColumnType.Date:
                 {
-                    ulong stored = ulong.Parse(key.AsSpan(pos, 16), System.Globalization.NumberStyles.HexNumber);
+                    ulong stored = ulong.Parse(key.Slice(pos, 16), System.Globalization.NumberStyles.HexNumber);
                     ulong ordered = descending ? ~stored : stored;
                     long ticks = (long)(ordered ^ 0x8000_0000_0000_0000UL);
                     values[i] = new ColumnValue(ColumnType.Date, ticks);
@@ -623,7 +641,7 @@ public static class KeyEncoder
 
                 case ColumnType.DateTime:
                 {
-                    ulong stored = ulong.Parse(key.AsSpan(pos, 16), System.Globalization.NumberStyles.HexNumber);
+                    ulong stored = ulong.Parse(key.Slice(pos, 16), System.Globalization.NumberStyles.HexNumber);
                     ulong ordered = descending ? ~stored : stored;
                     long ticks = (long)(ordered ^ 0x8000_0000_0000_0000UL);
                     values[i] = new ColumnValue(ColumnType.DateTime, ticks);
@@ -657,7 +675,7 @@ public static class KeyEncoder
                     int hexLen = scan - pos; // even by construction (each step consumes a 2-char group)
                     byte[] decoded = new byte[hexLen / 2];
                     for (int b = 0; b < decoded.Length; b++)
-                        decoded[b] = byte.Parse(key.AsSpan(pos + (b * 2), 2), System.Globalization.NumberStyles.HexNumber);
+                        decoded[b] = byte.Parse(key.Slice(pos + (b * 2), 2), System.Globalization.NumberStyles.HexNumber);
 
                     // Consume the two-char terminator.
                     pos = scan + 1;
@@ -731,16 +749,33 @@ public static class KeyEncoder
                         charCount++;
                     }
 
-                    // Build the decoded string in one allocation, writing directly into its
-                    // backing buffer — no StringBuilder intermediate.
-                    string decoded = charCount == 0
-                        ? ""
-                        : string.Create(charCount, (key, bodyStart, field: i), static (span, state) =>
+                    // The code units are written to a scratch buffer and the string is built from it
+                    // in one allocation. The key is a span, which string.Create cannot carry as state,
+                    // so a field longer than the scratch rents a pooled buffer instead.
+                    string decoded;
+                    if (charCount == 0)
+                    {
+                        decoded = "";
+                    }
+                    else
+                    {
+                        char[]? rented = null;
+                        Span<char> buffer = charCount <= scratch.Length
+                            ? scratch
+                            : (rented = ArrayPool<char>.Shared.Rent(charCount));
+                        try
                         {
-                            int p = state.bodyStart;
-                            for (int ci = 0; ci < span.Length; ci++)
-                                span[ci] = ReadStringCodeUnit(state.key, ref p, state.field);
-                        });
+                            int p = bodyStart;
+                            for (int ci = 0; ci < charCount; ci++)
+                                buffer[ci] = ReadStringCodeUnit(key, ref p, i);
+                            decoded = new string(buffer[..charCount]);
+                        }
+                        finally
+                        {
+                            if (rented is not null)
+                                ArrayPool<char>.Shared.Return(rented);
+                        }
+                    }
 
                     values[i] = new ColumnValue(types[i], decoded);
                     break;
@@ -758,7 +793,7 @@ public static class KeyEncoder
     /// Reads one prefix-free String/Id code word and rejects ranks that are not assigned by the
     /// encoder. Strict validation keeps malformed keys from consuming a following field as payload.
     /// </summary>
-    private static char ReadStringCodeUnit(string key, ref int pos, int field)
+    private static char ReadStringCodeUnit(ReadOnlySpan<char> key, ref int pos, int field)
     {
         if (pos >= key.Length)
             throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Truncated string code unit at field {field}");
@@ -795,7 +830,7 @@ public static class KeyEncoder
     }
 
     /// <summary>Reads one validated base-125 digit without crossing the end of a malformed key.</summary>
-    private static int ReadStringAlphabetRank(string key, ref int pos, int field)
+    private static int ReadStringAlphabetRank(ReadOnlySpan<char> key, ref int pos, int field)
     {
         if (pos >= key.Length)
             throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Truncated string code unit at field {field}");

@@ -157,7 +157,8 @@ internal sealed partial class JobDataSet
 
     /// <summary>
     /// The 113 queries in benchmark order (1a, 1b, …, 33c), tagged <c>job</c>, <c>tables:N</c> and,
-    /// above the 12-table limit of the join-order search, <c>over-dp-limit</c>.
+    /// for a join wider than twelve tables, <c>over-dp-limit</c>: the join-order search estimates
+    /// those subset by subset instead of all at once, and they are the widest plans of the corpus.
     /// </summary>
     public List<CorpusQuery> Queries()
     {

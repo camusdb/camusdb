@@ -1975,6 +1975,13 @@ public sealed class StatisticsManager
     internal bool ForceIndexNestedLoopForTesting { get; set; }
 
     /// <summary>
+    /// When set, the join-order search stops after this many costed steps instead of
+    /// <c>JoinEnumerator.MaxCostedStepsForEnumeration</c>, so a test can drive a small join into
+    /// the greedy order. Intended for unit tests only.
+    /// </summary>
+    internal long? JoinSearchStepBudgetForTesting { get; set; }
+
+    /// <summary>
     /// Counts how many times the Grace hash join has fallen back to nested-loop for a single
     /// skewed partition that could not be split below the threshold within the recursion depth
     /// limit. Incremented by <c>GraceHashJoinOperator.JoinPartitionAsync</c>. Test-only; not thread-safe.

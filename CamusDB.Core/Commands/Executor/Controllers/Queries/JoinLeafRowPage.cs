@@ -123,7 +123,7 @@ internal sealed class JoinLeafRowPage
             TableDescriptor table = source.Table;
 
             ReadOnlyMemory<byte>?[] batch = await table.Store.GetRowsBatchLockedForMutation(
-                plan.Ticket.TxnState, rowIds, cancellationToken, LargeValueFetch.Columns(table.Schema, required)).ConfigureAwait(false);
+                plan.Ticket.TxnState, rowIds, cancellationToken, decode.FetchFor(table.Schema, required)).ConfigureAwait(false);
 
             for (int i = 0; i < rowIds.Count; i++)
             {
@@ -183,8 +183,8 @@ internal sealed class JoinLeafRowPage
 ///   rather than once per row.</item>
 /// </list>
 /// One instance is created per <see cref="IndexNestedLoopJoinOperator.ExecuteIndexNestedLoopJoin"/>
-/// call and passed through <see cref="IndexNestedLoopJoinOperator.ProbeRightIndex"/> into
-/// <see cref="JoinLeafScanner.LoadRightRow"/>. The one instance serves every right row of the join
+/// call and passed into <see cref="JoinLeafScanner.LoadRightRow"/> and <see cref="JoinLeafRowPage"/>.
+/// The one instance serves every right row of the join
 /// node, whether the row is loaded one at a time through
 /// <see cref="JoinLeafScanner.LoadRightRow"/> or a page at a time through
 /// <see cref="JoinLeafRowPage"/>, so the decode plan and the qualified layout are built once per
@@ -194,4 +194,23 @@ internal sealed class RightDecodeState
 {
     internal readonly RowEncoder.RowDecodeState DecodeState = new();
     internal RowLayout? QualifiedLayout;
+
+    private LargeValueFetch? fetch;
+    private bool fetchBuilt;
+
+    /// <summary>
+    /// The large-value fetch of the right rows, built on the first call and reused by every later one.
+    /// One state serves one join node, so the schema and the required set never change. A fetch per
+    /// row was the largest allocation of a unique probe, paid by rows that hold no large value.
+    /// </summary>
+    internal LargeValueFetch? FetchFor(TableSchema schema, IReadOnlySet<string>? required)
+    {
+        if (!fetchBuilt)
+        {
+            fetch = LargeValueFetch.Columns(schema, required);
+            fetchBuilt = true;
+        }
+
+        return fetch;
+    }
 }

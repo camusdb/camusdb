@@ -31,7 +31,13 @@ public sealed class LargeValueFetch
 {
     private readonly TableSchema? schema;
     private readonly IReadOnlySet<string>? requiredColumns;
-    private readonly ConcurrentDictionary<int, bool[]> requiredByVersion = new();
+
+    // Created on the first row that actually points at an out-of-line cell. A fetch is built per
+    // read on hot paths, and most rows carry no large value, so an eager dictionary (its bucket
+    // array, its lock objects) was the largest allocation of a point read that resolved nothing.
+    // Two readers that race on the first use each build a dictionary; the loser keeps its own and
+    // computes the same mask, so the race costs one cache miss and nothing else.
+    private ConcurrentDictionary<int, bool[]>? requiredByVersion;
 
     /// <summary>True for the <see cref="Raw"/> instance: no cell is resolved.</summary>
     internal bool IsRaw { get; }
@@ -64,7 +70,8 @@ public sealed class LargeValueFetch
     /// </summary>
     internal async ValueTask<bool[]> RequiredVariableOrdinalsAsync(HLCTimestamp txId, int storedVersion)
     {
-        if (requiredByVersion.TryGetValue(storedVersion, out bool[]? cached))
+        ConcurrentDictionary<int, bool[]> byVersion = requiredByVersion ??= new();
+        if (byVersion.TryGetValue(storedVersion, out bool[]? cached))
             return cached;
 
         TableSchemaHistory history = await schema!.GetSchemaHistoryAsync(txId, storedVersion).ConfigureAwait(false);
@@ -78,6 +85,6 @@ public sealed class LargeValueFetch
         }
 
         bool[] mask = required.ToArray();
-        return requiredByVersion.GetOrAdd(storedVersion, mask);
+        return byVersion.GetOrAdd(storedVersion, mask);
     }
 }

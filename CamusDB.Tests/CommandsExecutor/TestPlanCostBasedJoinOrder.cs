@@ -193,12 +193,12 @@ public sealed class TestPlanCostBasedJoinOrder : BaseTest
     }
 
     [Test]
-    public async Task FlagOn_WideJoin_FallsBackToHeuristic()
+    public async Task FlagOn_WideJoinWithoutStatistics_FallsBackToHeuristic()
     {
-        // N=13 > MaxTablesForEnumeration=12 → DP falls back to JoinOrderOptimizer.
-        // Plans produced with flag on and off must be identical for wide joins
-        // (same leftmost scan alias, same join depth = N-1 joins).
-        const int n = JoinEnumerator.MaxTablesForEnumeration + 1; // 13
+        // No row count is loaded for the thirteen tables, so the cost-based search cannot run and
+        // the planner takes the heuristic with either flag: plans produced with the flag on and off
+        // must be identical (same leftmost scan alias, same join depth = N-1 joins).
+        const int n = 13;
 
         CommandExecutor executor = CreateCommandExecutor();
         CatalogsManager catalogs = executor.Catalogs;

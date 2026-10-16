@@ -52,6 +52,10 @@ internal sealed class KvRowAccessor
     private long pointReadCalls;
     private long batchReadCalls;
 
+    // The wording of a failed row scan, built on the first scan: every scan hands it to the failure
+    // translator, which reads it only when a scan fails.
+    private string? rowScanDescription;
+
     /// <summary>
     /// How many single-row primary reads (<see cref="GetRow"/>) this accessor issued since it was
     /// built. An observability counter for the fetch shape of a query path; it counts calls, not
@@ -88,7 +92,7 @@ internal sealed class KvRowAccessor
     /// With <paramref name="aborts"/>, a read Kahuna aborted is recorded there and answered as
     /// <c>null</c>, which the caller must not take for a miss (see <see cref="RetryableAbortSink"/>).
     /// </summary>
-    internal async Task<ReadOnlyMemory<byte>?> GetRow(KvTransaction tx, ObjectIdValue rowId, CancellationToken cancellationToken = default, RetryableAbortSink? aborts = null)
+    internal async ValueTask<ReadOnlyMemory<byte>?> GetRow(KvTransaction tx, ObjectIdValue rowId, CancellationToken cancellationToken = default, RetryableAbortSink? aborts = null)
     {
         Interlocked.Increment(ref pointReadCalls);
 
@@ -397,7 +401,7 @@ internal sealed class KvRowAccessor
                         cancellationToken,
                         scanCoordinatorKey,
                         scanOperationId), 
-                    $"row scan of table {keys.DisplayTableName}", 
+                    rowScanDescription ??= $"row scan of table {keys.DisplayTableName}", 
                     cancellationToken
                 ).ConfigureAwait(false);
                 
