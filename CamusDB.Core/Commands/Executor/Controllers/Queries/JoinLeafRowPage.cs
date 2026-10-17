@@ -20,7 +20,9 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 /// <summary>
 /// Buffers the row ids an index walk produces and resolves each full page with one batch fetch,
 /// instead of one round trip per index entry. Used by the three join leaf scans and by the
-/// non-unique probe of an index nested-loop join (<see cref="IndexNestedLoopJoinOperator.ScanMultiIndexRightRows"/>).
+/// non-unique probe of an index nested-loop join (<see cref="IndexNestedLoopJoinOperator.ScanMultiIndexRightRows"/>);
+/// the join's unique probe fetches the rows of a probe batch through <see cref="FetchAsync"/>, which
+/// answers by position and does not use the buffer.
 /// <para>
 /// Index order survives the paging: the page is filled in scan order and the batch result is read
 /// positionally, so rows decode and yield in scan order, and a row the batch reports as absent is
@@ -120,51 +122,93 @@ internal sealed class JoinLeafRowPage
 
         try
         {
-            TableDescriptor table = source.Table;
-
-            ReadOnlyMemory<byte>?[] batch = await table.Store.GetRowsBatchLockedForMutation(
-                plan.Ticket.TxnState, rowIds, cancellationToken, decode.FetchFor(table.Schema, required)).ConfigureAwait(false);
+            ReadOnlyMemory<byte>?[] batch = await FetchBytesAsync(rowIds, cancellationToken).ConfigureAwait(false);
 
             for (int i = 0; i < rowIds.Count; i++)
             {
                 cancellationToken.ThrowIfCancellationRequested();
 
-                ObjectIdValue rowId = rowIds[i];
-                ReadOnlyMemory<byte>? dataOpt = batch[i];
+                QueryResultRow? row = await DecodeAcceptedAsync(rowIds[i], batch[i]).ConfigureAwait(false);
 
-                if (dataOpt is null || dataOpt.Value.Length == 0)
-                    continue;
-
-                QueryRow row = await RowEncoder.DecodeToQueryRowAsync(
-                    table.Schema,
-                    txId,
-                    rowId,
-                    dataOpt.Value,
-                    options,
-                    required,
-                    schemaVersion,
-                    decode.DecodeState).ConfigureAwait(false);
-
-                plan.Ticket.Probe?.AddRowRead();
-                if (stats is not null)
-                    stats.RowsRead++;
-
-                if (executionFilter is not null)
-                {
-                    decode.QualifiedLayout ??= QueryRowMerger.BuildQualifiedLayout(row.Layout, source.Alias);
-                    IReadOnlyDictionary<string, ColumnValue> qualified = QueryRowMerger.QualifyRowAsQueryRow(row, decode.QualifiedLayout);
-
-                    if (!await services.Filterer.MeetWhereAsync(executionFilter, qualified, plan.Ticket, plan.Database).ConfigureAwait(false))
-                        continue;
-                }
-
-                yield return new QueryResultRow(rowId, row);
+                if (row is { } accepted)
+                    yield return accepted;
             }
         }
         finally
         {
             rowIds.Clear();
         }
+    }
+
+    /// <summary>
+    /// Fetches <paramref name="ids"/> in one call and answers one slot per id, in input order: the
+    /// decoded row when the store holds it and the residual filter accepts it, null otherwise. The
+    /// batched unique probe of an index nested-loop join uses it: the ids of a probe batch belong to
+    /// distinct index keys, and each row must go back to its key, which a stream of the surviving rows
+    /// cannot tell. The page's own buffer is not touched, so a caller may use both in one join.
+    /// </summary>
+    internal async Task<QueryResultRow?[]> FetchAsync(IReadOnlyList<ObjectIdValue> ids, CancellationToken cancellationToken)
+    {
+        QueryResultRow?[] rows = new QueryResultRow?[ids.Count];
+
+        if (ids.Count == 0)
+            return rows;
+
+        ReadOnlyMemory<byte>?[] batch = await FetchBytesAsync(ids, cancellationToken).ConfigureAwait(false);
+
+        for (int i = 0; i < ids.Count; i++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            rows[i] = await DecodeAcceptedAsync(ids[i], batch[i]).ConfigureAwait(false);
+        }
+
+        return rows;
+    }
+
+    private Task<ReadOnlyMemory<byte>?[]> FetchBytesAsync(IReadOnlyList<ObjectIdValue> ids, CancellationToken cancellationToken)
+    {
+        TableDescriptor table = source.Table;
+
+        return table.Store.GetRowsBatchLockedForMutation(
+            plan.Ticket.TxnState, ids, cancellationToken, decode.FetchFor(table.Schema, required));
+    }
+
+    /// <summary>
+    /// Decodes one fetched row and applies the residual filter: the row when the store answered bytes
+    /// and the filter accepts it, null otherwise. Every row the store answered counts as read, whether or
+    /// not the filter keeps it.
+    /// </summary>
+    private async ValueTask<QueryResultRow?> DecodeAcceptedAsync(ObjectIdValue rowId, ReadOnlyMemory<byte>? dataOpt)
+    {
+        if (dataOpt is null || dataOpt.Value.Length == 0)
+            return null;
+
+        TableDescriptor table = source.Table;
+
+        QueryRow row = await RowEncoder.DecodeToQueryRowAsync(
+            table.Schema,
+            txId,
+            rowId,
+            dataOpt.Value,
+            options,
+            required,
+            schemaVersion,
+            decode.DecodeState).ConfigureAwait(false);
+
+        plan.Ticket.Probe?.AddRowRead();
+        if (stats is not null)
+            stats.RowsRead++;
+
+        if (executionFilter is not null)
+        {
+            decode.QualifiedLayout ??= QueryRowMerger.BuildQualifiedLayout(row.Layout, source.Alias);
+            IReadOnlyDictionary<string, ColumnValue> qualified = QueryRowMerger.QualifyRowAsQueryRow(row, decode.QualifiedLayout);
+
+            if (!await services.Filterer.MeetWhereAsync(executionFilter, qualified, plan.Ticket, plan.Database).ConfigureAwait(false))
+                return null;
+        }
+
+        return new QueryResultRow(rowId, row);
     }
 }
 
@@ -183,12 +227,11 @@ internal sealed class JoinLeafRowPage
 ///   rather than once per row.</item>
 /// </list>
 /// One instance is created per <see cref="IndexNestedLoopJoinOperator.ExecuteIndexNestedLoopJoin"/>
-/// call and passed into <see cref="JoinLeafScanner.LoadRightRow"/> and <see cref="JoinLeafRowPage"/>.
-/// The one instance serves every right row of the join
-/// node, whether the row is loaded one at a time through
-/// <see cref="JoinLeafScanner.LoadRightRow"/> or a page at a time through
-/// <see cref="JoinLeafRowPage"/>, so the decode plan and the qualified layout are built once per
-/// join node and not once per fetch path.
+/// call and passed into the join's <see cref="JoinLeafRowPage"/>. The one instance serves every
+/// right row of the join node, whether the row comes from a unique probe batch
+/// (<see cref="JoinLeafRowPage.FetchAsync"/>) or from a non-unique probe's page
+/// (<see cref="JoinLeafRowPage.FlushAsync"/>), so the decode plan and the qualified layout are built
+/// once per join node and not once per fetch path.
 /// </summary>
 internal sealed class RightDecodeState
 {

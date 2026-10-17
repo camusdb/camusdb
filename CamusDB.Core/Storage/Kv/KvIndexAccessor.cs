@@ -187,6 +187,42 @@ internal sealed class KvIndexAccessor
     }
 
     /// <summary>
+    /// The batch form of <see cref="LookupUnique"/>: answers, for each key, the row id its unique index
+    /// entry maps to, or null when the index holds no entry for it or the key cannot be encoded. The
+    /// keys are read with one batched probe of the index space, one actor turn per partition instead of
+    /// one per key, then, on a branch, one batched read per ancestry level for the keys still unanswered.
+    ///
+    /// <para>Locks, snapshot and ancestry are those of <see cref="LookupUnique"/>. Under Serializable
+    /// read-write the shared point lock on each encoded key is taken before the read, one acquire per key
+    /// the transaction does not hold yet, so the lock set after the call is exactly what the same lookups
+    /// one at a time would leave. A level-0 hit is remembered in the row-id cache as a single lookup
+    /// remembers it. The index nested-loop join probes a page of outer keys through this.</para>
+    /// </summary>
+    internal async Task<ObjectIdValue?[]> LookupUniqueRowIdsAsync(
+        KvTransaction tx,
+        string indexId,
+        IReadOnlyList<CompositeColumnValue> lookupKeys,
+        CancellationToken cancellationToken = default)
+    {
+        await tx.EnsureSessionStartedAsync(cancellationToken, keys.TableKeyPrefix).ConfigureAwait(false);
+
+        string?[] kvKeys = EncodeUniqueKeys(indexId, lookupKeys);
+
+        if (KvRangeLockManager.IsSerializableReadWrite(tx))
+        {
+            string indexBucketPrefix = keys.BuildIndexBucketPrefix(indexId);
+
+            for (int i = 0; i < kvKeys.Length; i++)
+            {
+                if (kvKeys[i] is { } kvKey)
+                    await locks.AcquireSharedPointLockAsync(tx, indexBucketPrefix, kvKey, cancellationToken).ConfigureAwait(false);
+            }
+        }
+
+        return await ProbeUniqueRowIdsAsync(tx, indexId, lookupKeys, kvKeys, rememberRowIds: true, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
     /// The child side of a foreign key: takes the rendezvous lock on each referenced parent key, then
     /// reads each key. Encodes each key once for both steps.
     ///
@@ -291,7 +327,10 @@ internal sealed class KvIndexAccessor
         return kvKeys;
     }
 
-    /// <summary>Level-0 batch read of <paramref name="kvKeys"/>, then one batch per ancestry level for the misses.</summary>
+    /// <summary>
+    /// Level-0 batch read of <paramref name="kvKeys"/>, then one batch per ancestry level for the misses,
+    /// answered as presence: the foreign-key form of <see cref="ProbeUniqueRowIdsAsync"/>.
+    /// </summary>
     private async Task<bool[]> ProbeUniqueKeysAsync(
         KvTransaction tx,
         string indexId,
@@ -300,6 +339,43 @@ internal sealed class KvIndexAccessor
         CancellationToken cancellationToken)
     {
         bool[] found = new bool[kvKeys.Length];
+
+        int probed = 0;
+        for (int i = 0; i < kvKeys.Length; i++)
+        {
+            if (kvKeys[i] is not null)
+                probed++;
+        }
+
+        if (probed == 0)
+            return found;
+
+        ServerDiagnostics.AddForeignKeyOperation(ServerDiagnostics.ForeignKeyOperation.ChildProbeBatch);
+        ServerDiagnostics.AddForeignKeyOperation(ServerDiagnostics.ForeignKeyOperation.ChildProbeKey, probed);
+
+        ObjectIdValue?[] rowIds = await ProbeUniqueRowIdsAsync(tx, indexId, lookupKeys, kvKeys, rememberRowIds: false, cancellationToken).ConfigureAwait(false);
+
+        for (int i = 0; i < rowIds.Length; i++)
+            found[i] = rowIds[i] is not null;
+
+        return found;
+    }
+
+    /// <summary>
+    /// Level-0 batch read of <paramref name="kvKeys"/>, then one batch per ancestry level for the misses.
+    /// Answers one row id per key, in input order; null for a key with no entry at any level, a tombstone
+    /// at the nearest level that holds one, or no encoding. With <paramref name="rememberRowIds"/> a
+    /// level-0 hit is remembered in the row-id cache, as <see cref="LookupUnique"/> remembers its hit.
+    /// </summary>
+    private async Task<ObjectIdValue?[]> ProbeUniqueRowIdsAsync(
+        KvTransaction tx,
+        string indexId,
+        IReadOnlyList<CompositeColumnValue> lookupKeys,
+        string?[] kvKeys,
+        bool rememberRowIds,
+        CancellationToken cancellationToken)
+    {
+        ObjectIdValue?[] rowIds = new ObjectIdValue?[kvKeys.Length];
 
         List<int> positions = new(kvKeys.Length);
         List<string> probeKeys = new(kvKeys.Length);
@@ -313,17 +389,14 @@ internal sealed class KvIndexAccessor
         }
 
         if (probeKeys.Count == 0)
-            return found;
-
-        ServerDiagnostics.AddForeignKeyOperation(ServerDiagnostics.ForeignKeyOperation.ChildProbeBatch);
-        ServerDiagnostics.AddForeignKeyOperation(ServerDiagnostics.ForeignKeyOperation.ChildProbeKey, probeKeys.Count);
+            return rowIds;
 
         BranchKvValue[] level0 = await branch.ProbeManyRaw(
             tx.TransactionId,
             tx.ReadTimestamp,
             probeKeys,
             tx.ReadRegistrationKey(probeKeys),
-            "fk_unique_lookup_batch",
+            "unique_lookup_batch",
             cancellationToken).ConfigureAwait(false);
 
         List<int>? pending = null;
@@ -337,7 +410,14 @@ internal sealed class KvIndexAccessor
 
             if (value.HasPayload)
             {
-                found[positions[i]] = true;
+                ObjectIdValue rowId = RowIdFromPayload(value.Payload.Span);
+                rowIds[positions[i]] = rowId;
+
+                // Only a level-0 hit is remembered, for the reason LookupUnique gives: the root store
+                // owns the cache and the entry is this table's own.
+                if (rememberRowIds)
+                    rowIdCache?.Set(probeKeys[i], rowId);
+
                 continue;
             }
 
@@ -346,7 +426,7 @@ internal sealed class KvIndexAccessor
         }
 
         if (pending is null)
-            return found;
+            return rowIds;
 
         // Nearest ancestor first. A level that answers a key — with a value or with a tombstone —
         // removes it before the next level runs, so a nearer tombstone hides an older value.
@@ -367,7 +447,7 @@ internal sealed class KvIndexAccessor
                 forkTimestamp,
                 ancestorProbeKeys,
                 coordinatorKey: "",
-                "fk_ancestor_unique_lookup_batch",
+                "ancestor_unique_lookup_batch",
                 cancellationToken).ConfigureAwait(false);
 
             List<int>? next = null;
@@ -381,7 +461,7 @@ internal sealed class KvIndexAccessor
 
                 if (value.HasPayload)
                 {
-                    found[pending[i]] = true;
+                    rowIds[pending[i]] = RowIdFromPayload(value.Payload.Span);
                     continue;
                 }
 
@@ -394,7 +474,7 @@ internal sealed class KvIndexAccessor
             pending = next;
         }
 
-        return found;
+        return rowIds;
     }
 
     /// <summary>

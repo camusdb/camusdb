@@ -153,6 +153,65 @@ public static partial class PlaygroundEngine
         }
     }
 
+    /// <summary>
+    /// Starts a placed cluster whose membership can grow and shrink in the elastic playground.
+    /// </summary>
+    [JSExport]
+    public static async Task<string> StartElasticClusterAsync(int nodeCount)
+    {
+        await gate.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            if (cluster is not null)
+                await cluster.DisposeAsync().ConfigureAwait(false);
+
+            cluster = null;
+            cluster = await ClusterSession.StartAsync(nodeCount, elastic: true).ConfigureAwait(false);
+
+            return await cluster.StatusJsonAsync().ConfigureAwait(false);
+        }
+        finally
+        {
+            gate.Release();
+        }
+    }
+
+    /// <summary>Adds one voter to a running elastic cluster.</summary>
+    [JSExport]
+    public static async Task<string> AddClusterNodeAsync()
+    {
+        await gate.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            ClusterSession running = RequireCluster();
+            await running.AddNodeAsync().ConfigureAwait(false);
+
+            return await running.StatusJsonAsync().ConfigureAwait(false);
+        }
+        finally
+        {
+            gate.Release();
+        }
+    }
+
+    /// <summary>Drains and removes the last voter from a running elastic cluster.</summary>
+    [JSExport]
+    public static async Task<string> RemoveClusterNodeAsync()
+    {
+        await gate.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            ClusterSession running = RequireCluster();
+            await running.RemoveNodeAsync().ConfigureAwait(false);
+
+            return await running.StatusJsonAsync().ConfigureAwait(false);
+        }
+        finally
+        {
+            gate.Release();
+        }
+    }
+
     /// <summary>Stops every node of the cluster and frees it. Doing it twice is not an error.</summary>
     [JSExport]
     public static async Task StopClusterAsync()

@@ -322,9 +322,9 @@
       "joinOrder": "cost-based",
       "joinStepsCosted": 30,
       "plan": [
-        "index-nested-loop-join(on=parent.id = cat.parent_id, index=~pk, left=cat.parent_id, right=id, probe-memo-hits=1743)",
-        "index-nested-loop-join(on=cat.id = p.category_id, index=~pk, left=p.category_id, right=id, probe-memo-hits=1719)",
-        "index-nested-loop-join(on=p.id = i.product_id, index=~pk, left=i.product_id, right=id, probe-memo-hits=1310)",
+        "index-nested-loop-join(on=parent.id = cat.parent_id, index=~pk, left=cat.parent_id, right=id, probe-memo-hits=1743, probe-batches=1)",
+        "index-nested-loop-join(on=cat.id = p.category_id, index=~pk, left=p.category_id, right=id, probe-memo-hits=1719, probe-batches=7)",
+        "index-nested-loop-join(on=p.id = i.product_id, index=~pk, left=i.product_id, right=id, probe-memo-hits=1310, probe-batches=28)",
         "index-nested-loop-join(on=i.order_id = o.id, index=order_items_order_idx, left=o.id, right=order_id)",
         "index-nested-loop-join(on=o.customer_id = c.id, index=orders_customer_idx, left=c.id, right=customer_id)",
         "table-scan(table=customers)"
@@ -349,10 +349,10 @@
       "joinStepsCosted": 42,
       "plan": [
         "hash-join(on=co.region_id=id, build=r)",
-        "index-nested-loop-join(on=co.id = ci.country_id, index=~pk, left=ci.country_id, right=id, probe-memo-hits=24)",
-        "index-nested-loop-join(on=ci.id = c.city_id, index=~pk, left=c.city_id, right=id, probe-memo-hits=15)",
-        "index-nested-loop-join(on=c.id = o.customer_id, index=~pk, left=o.customer_id, right=id, probe-memo-hits=6)",
-        "index-nested-loop-join(on=o.id = i.order_id, index=~pk, left=i.order_id, right=id)",
+        "index-nested-loop-join(on=co.id = ci.country_id, index=~pk, left=ci.country_id, right=id, probe-memo-hits=24, probe-batches=1)",
+        "index-nested-loop-join(on=ci.id = c.city_id, index=~pk, left=c.city_id, right=id, probe-memo-hits=15, probe-batches=1)",
+        "index-nested-loop-join(on=c.id = o.customer_id, index=~pk, left=o.customer_id, right=id, probe-memo-hits=6, probe-batches=1)",
+        "index-nested-loop-join(on=o.id = i.order_id, index=~pk, left=i.order_id, right=id, probe-batches=1)",
         "index-nested-loop-join(on=i.product_id = p.id, index=order_items_product_idx, left=p.id, right=product_id)",
         "table-scan(table=products)"
       ]
@@ -375,10 +375,10 @@
       "joinStepsCosted": 42,
       "plan": [
         "hash-join(on=co.region_id=id, build=r)",
-        "index-nested-loop-join(on=ci.country_id = co.id, index=~pk, left=ci.country_id, right=id, probe-memo-hits=24)",
-        "index-nested-loop-join(on=c.city_id = ci.id, index=~pk, left=c.city_id, right=id, probe-memo-hits=15)",
-        "index-nested-loop-join(on=o.customer_id = c.id, index=~pk, left=o.customer_id, right=id, probe-memo-hits=6)",
-        "index-nested-loop-join(on=i.order_id = o.id, index=~pk, left=i.order_id, right=id)",
+        "index-nested-loop-join(on=ci.country_id = co.id, index=~pk, left=ci.country_id, right=id, probe-memo-hits=24, probe-batches=1)",
+        "index-nested-loop-join(on=c.city_id = ci.id, index=~pk, left=c.city_id, right=id, probe-memo-hits=15, probe-batches=1)",
+        "index-nested-loop-join(on=o.customer_id = c.id, index=~pk, left=o.customer_id, right=id, probe-memo-hits=6, probe-batches=1)",
+        "index-nested-loop-join(on=i.order_id = o.id, index=~pk, left=i.order_id, right=id, probe-batches=1)",
         "index-nested-loop-join(on=p.id = i.product_id, index=order_items_product_idx, left=p.id, right=product_id)",
         "table-scan(table=products)"
       ]
@@ -401,9 +401,9 @@
       "plan": [
         "hash-join(on=co.region_id=id, build=r)",
         "hash-join(on=ci.country_id=id, build=co)",
-        "index-nested-loop-join(on=c.city_id = ci.id, index=~pk, left=c.city_id, right=id, probe-memo-hits=925)",
-        "index-nested-loop-join(on=o.customer_id = c.id, index=~pk, left=o.customer_id, right=id, probe-memo-hits=652)",
-        "index-nested-loop-join(on=i.order_id = o.id, index=~pk, left=i.order_id, right=id, probe-memo-hits=83)",
+        "index-nested-loop-join(on=c.city_id = ci.id, index=~pk, left=c.city_id, right=id, probe-memo-hits=925, probe-batches=16)",
+        "index-nested-loop-join(on=o.customer_id = c.id, index=~pk, left=o.customer_id, right=id, probe-memo-hits=652, probe-batches=17)",
+        "index-nested-loop-join(on=i.order_id = o.id, index=~pk, left=i.order_id, right=id, probe-memo-hits=83, probe-batches=17)",
         "index-nested-loop-join(on=p.id = i.product_id, index=order_items_product_idx, left=p.id, right=product_id)",
         "index-nested-loop-join(on=b.id = p.brand_id, index=products_brand_idx, left=b.id, right=brand_id)",
         "table-scan(table=brands)"
@@ -621,7 +621,7 @@
       "joinStepsCosted": 28,
       "plan": [
         "index-nested-loop-join(on=pa.order_id = i.order_id AND i.order_id = sh.order_id AND i.order_id = o.id, index=order_items_order_idx, left=pa.order_id, right=order_id, probe-memo-hits=1)",
-        "index-nested-loop-join(on=pa.order_id = o.id AND sh.order_id = o.id, index=~pk, left=pa.order_id, right=id, probe-memo-hits=1)",
+        "index-nested-loop-join(on=pa.order_id = o.id AND sh.order_id = o.id, index=~pk, left=pa.order_id, right=id, probe-memo-hits=1, probe-batches=2)",
         "merge-join(on=sh.order_id=order_id, right-order=forced-index=payments_order_idx, right-filter=pa.method = 'voucher')",
         "table-scan(table=shipments, forced-index=shipments_order_idx)"
       ]
@@ -707,9 +707,9 @@
       "joinOrder": "cost-based",
       "joinStepsCosted": 36,
       "plan": [
-        "index-nested-loop-join(on=o.employee_id = e.id, index=~pk, left=o.employee_id, right=id)",
-        "index-nested-loop-join(on=o.customer_id = c.id, index=~pk, left=o.customer_id, right=id, right-filter=c.tier = 'gold', probe-memo-hits=45)",
-        "index-nested-loop-join(on=o.day_id = d.id, index=~pk, left=o.day_id, right=id, right-filter=d.weekday = 0, probe-memo-hits=407)",
+        "index-nested-loop-join(on=o.employee_id = e.id, index=~pk, left=o.employee_id, right=id, probe-batches=1)",
+        "index-nested-loop-join(on=o.customer_id = c.id, index=~pk, left=o.customer_id, right=id, right-filter=c.tier = 'gold', probe-memo-hits=45, probe-batches=2)",
+        "index-nested-loop-join(on=o.day_id = d.id, index=~pk, left=o.day_id, right=id, right-filter=d.weekday = 0, probe-memo-hits=407, probe-batches=15)",
         "index-nested-loop-join(on=o.store_id = st.id, index=orders_store_idx, left=st.id, right=store_id)",
         "table-scan(table=stores)"
       ]
@@ -731,8 +731,8 @@
       "joinStepsCosted": 36,
       "plan": [
         "index-nested-loop-join(on=p.id = i.product_id, index=order_items_product_idx, left=p.id, right=product_id)",
-        "index-nested-loop-join(on=b.id = p.brand_id, index=~pk, left=p.brand_id, right=id, probe-memo-hits=26)",
-        "index-nested-loop-join(on=su.id = p.supplier_id, index=~pk, left=p.supplier_id, right=id, right-filter=su.rating = 5, probe-memo-hits=103)",
+        "index-nested-loop-join(on=b.id = p.brand_id, index=~pk, left=p.brand_id, right=id, probe-memo-hits=26, probe-batches=1)",
+        "index-nested-loop-join(on=su.id = p.supplier_id, index=~pk, left=p.supplier_id, right=id, right-filter=su.rating = 5, probe-memo-hits=103, probe-batches=4)",
         "index-nested-loop-join(on=cat.id = p.category_id, index=products_category_idx, left=cat.id, right=category_id)",
         "index-range-scan(index=categories_parent_idx, from>=2, to<3)"
       ]
@@ -753,8 +753,8 @@
       "joinOrder": "cost-based",
       "joinStepsCosted": 15,
       "plan": [
-        "index-nested-loop-join(on=e.id = o.employee_id, index=~pk, left=o.employee_id, right=id)",
-        "index-nested-loop-join(on=d.id = o.day_id, index=~pk, left=o.day_id, right=id, right-filter=d.cal_month = 12 AND d.cal_year = 2025, probe-memo-hits=2)",
+        "index-nested-loop-join(on=e.id = o.employee_id, index=~pk, left=o.employee_id, right=id, probe-batches=1)",
+        "index-nested-loop-join(on=d.id = o.day_id, index=~pk, left=o.day_id, right=id, right-filter=d.cal_month = 12 AND d.cal_year = 2025, probe-memo-hits=2, probe-batches=2)",
         "index-nested-loop-join(on=st.id = o.store_id, index=orders_store_idx, left=st.id, right=store_id)",
         "table-scan(table=stores)"
       ]
@@ -775,10 +775,10 @@
       "joinOrder": "cost-based",
       "joinStepsCosted": 59,
       "plan": [
-        "index-nested-loop-join(on=st.id = o.store_id, index=~pk, left=o.store_id, right=id, probe-memo-hits=10)",
+        "index-nested-loop-join(on=st.id = o.store_id, index=~pk, left=o.store_id, right=id, probe-memo-hits=10, probe-batches=1)",
         "hash-join(on=c.segment_id=id, build=seg)",
-        "index-nested-loop-join(on=c.id = o.customer_id, index=~pk, left=o.customer_id, right=id, probe-memo-hits=13)",
-        "index-nested-loop-join(on=e.id = o.employee_id, index=~pk, left=o.employee_id, right=id, right-filter=e.salary > 100000, probe-memo-hits=42)",
+        "index-nested-loop-join(on=c.id = o.customer_id, index=~pk, left=o.customer_id, right=id, probe-memo-hits=13, probe-batches=1)",
+        "index-nested-loop-join(on=e.id = o.employee_id, index=~pk, left=o.employee_id, right=id, right-filter=e.salary > 100000, probe-memo-hits=42, probe-batches=4)",
         "index-nested-loop-join(on=d.id = o.day_id, index=orders_day_idx, left=d.id, right=day_id)",
         "table-scan(table=days)"
       ]
@@ -844,7 +844,7 @@
       "joinOrder": "cost-based",
       "joinStepsCosted": 15,
       "plan": [
-        "index-nested-loop-join(on=o.id = sh.order_id, index=~pk, left=sh.order_id, right=id)",
+        "index-nested-loop-join(on=o.id = sh.order_id, index=~pk, left=sh.order_id, right=id, probe-batches=7)",
         "hash-join(on=sh.carrier_id=id, build=ca)",
         "hash-join(on=d.id=day_id, build=d)",
         "table-scan(table=days)"
@@ -866,13 +866,13 @@
       "joinOrder": "cost-based",
       "joinStepsCosted": 175,
       "plan": [
-        "index-nested-loop-join(on=b.id = p.brand_id, index=~pk, left=p.brand_id, right=id, probe-memo-hits=141)",
+        "index-nested-loop-join(on=b.id = p.brand_id, index=~pk, left=p.brand_id, right=id, probe-memo-hits=141, probe-batches=3)",
         "hash-join(on=co.region_id=id, build=r)",
-        "index-nested-loop-join(on=co.id = ci.country_id, index=~pk, left=ci.country_id, right=id, probe-memo-hits=160)",
-        "index-nested-loop-join(on=ci.id = c.city_id, index=~pk, left=c.city_id, right=id, probe-memo-hits=137)",
-        "index-nested-loop-join(on=c.id = o.customer_id, index=~pk, left=o.customer_id, right=id, probe-memo-hits=98)",
+        "index-nested-loop-join(on=co.id = ci.country_id, index=~pk, left=ci.country_id, right=id, probe-memo-hits=160, probe-batches=2)",
+        "index-nested-loop-join(on=ci.id = c.city_id, index=~pk, left=c.city_id, right=id, probe-memo-hits=137, probe-batches=3)",
+        "index-nested-loop-join(on=c.id = o.customer_id, index=~pk, left=o.customer_id, right=id, probe-memo-hits=98, probe-batches=3)",
         "hash-join(on=p.category_id=id, build=cat, build-filter=cat.parent_id = 1, right-index=categories_parent_idx)",
-        "index-nested-loop-join(on=p.id = i.product_id, index=~pk, left=i.product_id, right=id, probe-memo-hits=400)",
+        "index-nested-loop-join(on=p.id = i.product_id, index=~pk, left=i.product_id, right=id, probe-memo-hits=400, probe-batches=10)",
         "index-nested-loop-join(on=o.id = i.order_id, index=order_items_order_idx, left=o.id, right=order_id)",
         "index-nested-loop-join(on=d.id = o.day_id, index=orders_day_idx, left=d.id, right=day_id)",
         "table-scan(table=days)"
@@ -896,14 +896,14 @@
       "plan": [
         "hash-join(on=p.brand_id=id, build=b)",
         "hash-join(on=p.category_id=id, build=cat)",
-        "index-nested-loop-join(on=p.id = i.product_id, index=~pk, left=i.product_id, right=id, probe-memo-hits=401)",
+        "index-nested-loop-join(on=p.id = i.product_id, index=~pk, left=i.product_id, right=id, probe-memo-hits=401, probe-batches=10)",
         "index-nested-loop-join(on=o.id = i.order_id, index=order_items_order_idx, left=o.id, right=order_id)",
-        "index-nested-loop-join(on=st.id = o.store_id, index=~pk, left=o.store_id, right=id, probe-memo-hits=184)",
+        "index-nested-loop-join(on=st.id = o.store_id, index=~pk, left=o.store_id, right=id, probe-memo-hits=184, probe-batches=4)",
         "hash-join(on=co.region_id=id, build=r)",
         "hash-join(on=ci.country_id=id, build=co)",
-        "index-nested-loop-join(on=ci.id = c.city_id, index=~pk, left=c.city_id, right=id, probe-memo-hits=192)",
-        "index-nested-loop-join(on=c.id = o.customer_id, index=~pk, left=o.customer_id, right=id, probe-memo-hits=99)",
-        "index-nested-loop-join(on=e.id = o.employee_id, index=~pk, left=o.employee_id, right=id, right-filter=e.salary >= 110000, probe-memo-hits=2267)",
+        "index-nested-loop-join(on=ci.id = c.city_id, index=~pk, left=c.city_id, right=id, probe-memo-hits=192, probe-batches=4)",
+        "index-nested-loop-join(on=c.id = o.customer_id, index=~pk, left=o.customer_id, right=id, probe-memo-hits=99, probe-batches=4)",
+        "index-nested-loop-join(on=e.id = o.employee_id, index=~pk, left=o.employee_id, right=id, right-filter=e.salary >= 110000, probe-memo-hits=2267, probe-batches=48)",
         "index-nested-loop-join(on=d.id = o.day_id, index=orders_day_idx, left=d.id, right=day_id)",
         "table-scan(table=days)"
       ]
@@ -925,16 +925,16 @@
       "joinOrder": "cost-based",
       "joinStepsCosted": 831,
       "plan": [
-        "index-nested-loop-join(on=e.id = o.employee_id, index=~pk, left=o.employee_id, right=id, probe-memo-hits=78)",
-        "index-nested-loop-join(on=st.id = o.store_id, index=~pk, left=o.store_id, right=id, probe-memo-hits=172)",
-        "index-nested-loop-join(on=d.id = o.day_id, index=~pk, left=o.day_id, right=id, probe-memo-hits=58)",
+        "index-nested-loop-join(on=e.id = o.employee_id, index=~pk, left=o.employee_id, right=id, probe-memo-hits=78, probe-batches=5)",
+        "index-nested-loop-join(on=st.id = o.store_id, index=~pk, left=o.store_id, right=id, probe-memo-hits=172, probe-batches=5)",
+        "index-nested-loop-join(on=d.id = o.day_id, index=~pk, left=o.day_id, right=id, probe-memo-hits=58, probe-batches=5)",
         "hash-join(on=co.region_id=id, build=r)",
-        "index-nested-loop-join(on=ci.country_id = co.id, index=~pk, left=ci.country_id, right=id, probe-memo-hits=270)",
-        "index-nested-loop-join(on=c.city_id = ci.id, index=~pk, left=c.city_id, right=id, probe-memo-hits=224)",
-        "index-nested-loop-join(on=o.customer_id = c.id, index=~pk, left=o.customer_id, right=id, probe-memo-hits=124)",
-        "index-nested-loop-join(on=i.order_id = o.id, index=~pk, left=i.order_id, right=id, probe-memo-hits=3)",
+        "index-nested-loop-join(on=ci.country_id = co.id, index=~pk, left=ci.country_id, right=id, probe-memo-hits=270, probe-batches=5)",
+        "index-nested-loop-join(on=c.city_id = ci.id, index=~pk, left=c.city_id, right=id, probe-memo-hits=224, probe-batches=5)",
+        "index-nested-loop-join(on=o.customer_id = c.id, index=~pk, left=o.customer_id, right=id, probe-memo-hits=124, probe-batches=5)",
+        "index-nested-loop-join(on=i.order_id = o.id, index=~pk, left=i.order_id, right=id, probe-memo-hits=3, probe-batches=5)",
         "index-nested-loop-join(on=p.id = i.product_id, index=order_items_product_idx, left=p.id, right=product_id)",
-        "index-nested-loop-join(on=b.id = p.brand_id, index=~pk, left=p.brand_id, right=id)",
+        "index-nested-loop-join(on=b.id = p.brand_id, index=~pk, left=p.brand_id, right=id, probe-batches=1)",
         "index-nested-loop-join(on=cat.id = p.category_id, index=products_category_idx, left=cat.id, right=category_id, right-filter=p.id = 7)",
         "table-scan(table=categories)"
       ]
@@ -958,10 +958,10 @@
       "plan": [
         "hash-join(on=p.brand_id=id, build=b)",
         "hash-join(on=p.category_id=id, build=cat)",
-        "index-nested-loop-join(on=p.id = i.product_id, index=~pk, left=i.product_id, right=id, probe-memo-hits=86)",
+        "index-nested-loop-join(on=p.id = i.product_id, index=~pk, left=i.product_id, right=id, probe-memo-hits=86, probe-batches=3)",
         "index-nested-loop-join(on=o.id = i.order_id, index=order_items_order_idx, left=o.id, right=order_id)",
-        "index-nested-loop-join(on=e.id = o.employee_id, index=~pk, left=o.employee_id, right=id, probe-memo-hits=4)",
-        "index-nested-loop-join(on=st.id = o.store_id, index=~pk, left=o.store_id, right=id, probe-memo-hits=27)",
+        "index-nested-loop-join(on=e.id = o.employee_id, index=~pk, left=o.employee_id, right=id, probe-memo-hits=4, probe-batches=1)",
+        "index-nested-loop-join(on=st.id = o.store_id, index=~pk, left=o.store_id, right=id, probe-memo-hits=27, probe-batches=1)",
         "hash-join(on=c.segment_id=id, build=seg)",
         "hash-join(on=o.day_id=id, build=d, build-filter=d.cal_month = 7)",
         "index-nested-loop-join(on=c.id = o.customer_id, index=orders_customer_idx, left=c.id, right=customer_id)",
@@ -991,10 +991,10 @@
       "plan": [
         "hash-join(on=p.category_id=id, build=cat)",
         "hash-join(on=p.brand_id=id, build=b)",
-        "index-nested-loop-join(on=p.id = i.product_id, index=~pk, left=i.product_id, right=id, probe-memo-hits=86)",
+        "index-nested-loop-join(on=p.id = i.product_id, index=~pk, left=i.product_id, right=id, probe-memo-hits=86, probe-batches=3)",
         "index-nested-loop-join(on=o.id = i.order_id, index=order_items_order_idx, left=o.id, right=order_id)",
-        "index-nested-loop-join(on=e.id = o.employee_id, index=~pk, left=o.employee_id, right=id, probe-memo-hits=4)",
-        "index-nested-loop-join(on=st.id = o.store_id, index=~pk, left=o.store_id, right=id, probe-memo-hits=27)",
+        "index-nested-loop-join(on=e.id = o.employee_id, index=~pk, left=o.employee_id, right=id, probe-memo-hits=4, probe-batches=1)",
+        "index-nested-loop-join(on=st.id = o.store_id, index=~pk, left=o.store_id, right=id, probe-memo-hits=27, probe-batches=1)",
         "hash-join(on=c.segment_id=id, build=seg)",
         "hash-join(on=o.day_id=id, build=d, build-filter=d.cal_month = 7)",
         "index-nested-loop-join(on=c.id = o.customer_id, index=orders_customer_idx, left=c.id, right=customer_id)",
@@ -1024,14 +1024,14 @@
         "hash-join(on=p.supplier_id=id, build=su)",
         "hash-join(on=p.brand_id=id, build=b)",
         "hash-join(on=p.category_id=id, build=cat)",
-        "index-nested-loop-join(on=p.id = i.product_id, index=~pk, left=i.product_id, right=id, probe-memo-hits=111)",
+        "index-nested-loop-join(on=p.id = i.product_id, index=~pk, left=i.product_id, right=id, probe-memo-hits=111, probe-batches=4)",
         "index-nested-loop-join(on=o.id = i.order_id, index=order_items_order_idx, left=o.id, right=order_id)",
-        "index-nested-loop-join(on=e.id = o.employee_id, index=~pk, left=o.employee_id, right=id, probe-memo-hits=9)",
-        "index-nested-loop-join(on=st.id = o.store_id, index=~pk, left=o.store_id, right=id, probe-memo-hits=33)",
-        "index-nested-loop-join(on=d.id = o.day_id, index=~pk, left=o.day_id, right=id, probe-memo-hits=5)",
+        "index-nested-loop-join(on=e.id = o.employee_id, index=~pk, left=o.employee_id, right=id, probe-memo-hits=9, probe-batches=2)",
+        "index-nested-loop-join(on=st.id = o.store_id, index=~pk, left=o.store_id, right=id, probe-memo-hits=33, probe-batches=2)",
+        "index-nested-loop-join(on=d.id = o.day_id, index=~pk, left=o.day_id, right=id, probe-memo-hits=5, probe-batches=2)",
         "hash-join(on=co.region_id=id, build=r)",
         "hash-join(on=ci.country_id=id, build=co)",
-        "index-nested-loop-join(on=ci.id = c.city_id, index=~pk, left=c.city_id, right=id, probe-memo-hits=67)",
+        "index-nested-loop-join(on=ci.id = c.city_id, index=~pk, left=c.city_id, right=id, probe-memo-hits=67, probe-batches=2)",
         "hash-join(on=o.promotion_id=id, build=pr, build-filter=pr.discount_pct >= 45)",
         "index-nested-loop-join(on=c.id = o.customer_id, index=orders_customer_idx, left=c.id, right=customer_id)",
         "index-nested-loop-join(on=seg.id = c.segment_id, index=customers_segment_idx, left=seg.id, right=segment_id)",
@@ -1056,18 +1056,18 @@
       "joinStepsCosted": 22929,
       "plan": [
         "hash-join(on=o.promotion_id=id, build=pr)",
-        "index-nested-loop-join(on=e.id = o.employee_id, index=~pk, left=o.employee_id, right=id, probe-memo-hits=286)",
-        "index-nested-loop-join(on=st.id = o.store_id, index=~pk, left=o.store_id, right=id, probe-memo-hits=522)",
-        "index-nested-loop-join(on=su.id = p.supplier_id, index=~pk, left=p.supplier_id, right=id, probe-memo-hits=575)",
+        "index-nested-loop-join(on=e.id = o.employee_id, index=~pk, left=o.employee_id, right=id, probe-memo-hits=286, probe-batches=11)",
+        "index-nested-loop-join(on=st.id = o.store_id, index=~pk, left=o.store_id, right=id, probe-memo-hits=522, probe-batches=10)",
+        "index-nested-loop-join(on=su.id = p.supplier_id, index=~pk, left=p.supplier_id, right=id, probe-memo-hits=575, probe-batches=11)",
         "hash-join(on=p.brand_id=id, build=b)",
         "hash-join(on=sh.carrier_id=id, build=ca)",
         "hash-join(on=co.region_id=id, build=r)",
         "hash-join(on=ci.country_id=id, build=co)",
-        "index-nested-loop-join(on=ci.id = c.city_id, index=~pk, left=c.city_id, right=id, probe-memo-hits=558)",
+        "index-nested-loop-join(on=ci.id = c.city_id, index=~pk, left=c.city_id, right=id, probe-memo-hits=558, probe-batches=10)",
         "hash-join(on=c.segment_id=id, build=seg)",
-        "index-nested-loop-join(on=c.id = o.customer_id, index=~pk, left=o.customer_id, right=id, probe-memo-hits=374)",
+        "index-nested-loop-join(on=c.id = o.customer_id, index=~pk, left=o.customer_id, right=id, probe-memo-hits=374, probe-batches=11)",
         "hash-join(on=p.category_id=id, build=cat, build-filter=cat.parent_id = 3, right-index=categories_parent_idx)",
-        "index-nested-loop-join(on=p.id = i.product_id, index=~pk, left=i.product_id, right=id, probe-memo-hits=5137)",
+        "index-nested-loop-join(on=p.id = i.product_id, index=~pk, left=i.product_id, right=id, probe-memo-hits=5137, probe-batches=94)",
         "index-nested-loop-join(on=o.id = i.order_id, index=order_items_order_idx, left=o.id, right=order_id)",
         "index-nested-loop-join(on=sh.order_id = o.id, index=shipments_order_idx, left=o.id, right=order_id)",
         "index-nested-loop-join(on=d.id = o.day_id, index=orders_day_idx, left=d.id, right=day_id)",
@@ -1115,7 +1115,7 @@
       "joinOrder": "cost-based",
       "joinStepsCosted": 20,
       "plan": [
-        "index-nested-loop-join(on=c.city_id = ci.id AND o.customer_id = c.id, index=~pk, left=o.customer_id, right=id, probe-memo-hits=1560)",
+        "index-nested-loop-join(on=c.city_id = ci.id AND o.customer_id = c.id, index=~pk, left=o.customer_id, right=id, probe-memo-hits=1560, probe-batches=36)",
         "index-nested-loop-join(on=st.id = o.store_id, index=orders_store_idx, left=st.id, right=store_id)",
         "index-nested-loop-join(on=st.city_id = ci.id, index=stores_city_idx, left=ci.id, right=city_id)",
         "index-range-scan(index=~pk, to<=3)"
@@ -1140,7 +1140,7 @@
       "plan": [
         "hash-join(on=o.customer_id=id, ci.id=city_id, build=c)",
         "index-nested-loop-join(on=st.id = o.store_id, index=orders_store_idx, left=st.id, right=store_id)",
-        "index-nested-loop-join(on=ci.id = st.city_id, index=~pk, left=st.city_id, right=id, probe-memo-hits=91)",
+        "index-nested-loop-join(on=ci.id = st.city_id, index=~pk, left=st.city_id, right=id, probe-memo-hits=91, probe-batches=3)",
         "table-scan(table=stores)"
       ]
     },

@@ -13,7 +13,9 @@ using Kahuna;
 using Kahuna.Server.Communication.Internode;
 using Kommander;
 using Kommander.Communication.Memory;
+using Kommander.Data;
 using Kommander.Discovery;
+using Kommander.System;
 using Microsoft.Extensions.Logging.Abstractions;
 
 using CamusDB.Core;
@@ -51,13 +53,19 @@ internal sealed class ClusterSession : IAsyncDisposable
     public const string DatabaseName = "playground";
 
     /// <summary>The page offers at most this many nodes, so one visitor cannot exhaust the tab.</summary>
-    public const int MaxNodeCount = 5;
+    public const int MaxNodeCount = 9;
+
+    private const int MinElasticNodeCount = 4;
 
     /// <summary>The first member's port. The others count up from it; nothing binds it.</summary>
     private const int BasePort = 7000;
 
     /// <summary>Partitions each node hosts, not counting the meta partition 0.</summary>
-    private const int DataPartitions = 1;
+    private const int FixedDataPartitions = 1;
+
+    private const int ElasticDataPartitions = 8;
+
+    private const int ElasticReplicationFactor = 3;
 
     /// <summary>
     /// How long a leader poll waits before it gives up. Generous next to an election timeout of
@@ -78,16 +86,22 @@ internal sealed class ClusterSession : IAsyncDisposable
 
     private readonly InProcessClusterActivityTransport activityTransport;
 
-    private readonly EmbeddedKahunaOptions[] nodeOptions;
+    private EmbeddedKahunaOptions[] nodeOptions;
 
-    private readonly string[] endpoints;
+    private string[] endpoints;
 
-    private readonly Member?[] members;
+    private Member?[] members;
+
+    private readonly bool elastic;
+
+    private readonly int dataPartitions;
 
     private readonly CamusDBOptions options;
 
-    private ClusterSession(EmbeddedKahunaOptions[] nodeOptions, string[] endpoints, CamusDBOptions options)
+    private ClusterSession(EmbeddedKahunaOptions[] nodeOptions, string[] endpoints, CamusDBOptions options, bool elastic)
     {
+        this.elastic = elastic;
+        dataPartitions = elastic ? ElasticDataPartitions : FixedDataPartitions;
         this.nodeOptions = nodeOptions;
         this.endpoints = endpoints;
         this.options = options;
@@ -102,14 +116,21 @@ internal sealed class ClusterSession : IAsyncDisposable
     public int NodeCount => members.Length;
 
     /// <summary>Partitions every node hosts, including the meta partition 0.</summary>
-    public int PartitionCount => DataPartitions + 1;
+    public int PartitionCount => dataPartitions + 1;
 
     /// <summary>
     /// Builds <paramref name="nodeCount"/> nodes, starts them together, waits until every
     /// partition has a leader, and creates the <see cref="DatabaseName"/> database.
     /// </summary>
-    public static async Task<ClusterSession> StartAsync(int nodeCount, CancellationToken cancellationToken = default)
+    public static async Task<ClusterSession> StartAsync(
+        int nodeCount,
+        CancellationToken cancellationToken = default,
+        bool elastic = false
+    )
     {
+        if (elastic && nodeCount < MinElasticNodeCount)
+            throw new ArgumentOutOfRangeException(nameof(nodeCount), $"Placed clusters start with at least {MinElasticNodeCount} nodes.");
+
         if (nodeCount < 1 || nodeCount > MaxNodeCount)
             throw new ArgumentOutOfRangeException(nameof(nodeCount), nodeCount, $"The playground cluster runs 1 to {MaxNodeCount} nodes.");
 
@@ -131,7 +152,14 @@ internal sealed class ClusterSession : IAsyncDisposable
                 Port = BasePort + i,
                 Storage = "memory",
                 WalStorage = "memory",
-                InitialPartitions = DataPartitions,
+                InitialPartitions = elastic ? ElasticDataPartitions : FixedDataPartitions,
+                ReplicationFactor = elastic ? ElasticReplicationFactor : 0,
+                EnablePlacementRebalancer = elastic,
+                ReplicaCountDeadband = elastic ? 0 : 1,
+                StartElectionTimeout = elastic ? 1500 : 500,
+                EndElectionTimeout = elastic ? 3000 : 1500,
+                PlacementPassInterval = TimeSpan.FromSeconds(2),
+                EnableLoadReports = elastic,
             };
 
             endpoints[i] = nodeOptions[i].Host + ":" + nodeOptions[i].Port;
@@ -145,7 +173,7 @@ internal sealed class ClusterSession : IAsyncDisposable
             MinFreeDiskBytes = 0,
         };
 
-        ClusterSession cluster = new(nodeOptions, endpoints, options);
+        ClusterSession cluster = new(nodeOptions, endpoints, options, elastic);
 
         try
         {
@@ -232,6 +260,58 @@ internal sealed class ClusterSession : IAsyncDisposable
         {
             writer.WriteStartObject();
             writer.WriteNumber("partitionCount", PartitionCount);
+            writer.WriteNumber("replicationFactor", elastic ? ElasticReplicationFactor : 0);
+            writer.WriteNumber("maxNodes", MaxNodeCount);
+
+            Member? source = members.FirstOrDefault(member =>
+                member is not null && member.Node.Raft.LocalRole.ToString() == "Voter"
+            ) ?? members.FirstOrDefault(member => member is not null);
+
+            if (source is not null)
+            {
+                foreach (Member? candidate in members)
+                {
+                    if (candidate is not null && await LeadsAsync(candidate, 0, cancellationToken).ConfigureAwait(false))
+                    {
+                        source = candidate;
+                        break;
+                    }
+                }
+
+                ClusterMembership membership = source.Node.Raft.GetMembership();
+                writer.WriteNumber("membershipVersion", membership.MembershipVersion);
+                writer.WriteStartArray("members");
+                foreach (ClusterMember member in membership.Members)
+                {
+                    writer.WriteStartObject();
+                    writer.WriteString("endpoint", member.Endpoint);
+                    writer.WriteString("role", member.Role.ToString());
+                    writer.WriteEndObject();
+                }
+                writer.WriteEndArray();
+
+                writer.WriteStartArray("partitions");
+                foreach (RaftPartitionRange partition in source.Node.Raft.GetPartitionMap())
+                {
+                    writer.WriteStartObject();
+                    writer.WriteNumber("id", partition.PartitionId);
+                    writer.WriteString("state", partition.State.ToString());
+                    writer.WriteNumber("generation", partition.Generation);
+                    writer.WriteStartArray("replicas");
+                    foreach (RaftReplica replica in partition.Replicas)
+                    {
+                        writer.WriteStartObject();
+                        writer.WriteNumber("index", Array.IndexOf(endpoints, replica.Endpoint));
+                        writer.WriteString("endpoint", replica.Endpoint);
+                        writer.WriteString("role", replica.Role.ToString());
+                        writer.WriteEndObject();
+                    }
+                    writer.WriteEndArray();
+                    writer.WriteEndObject();
+                }
+                writer.WriteEndArray();
+            }
+
             writer.WriteStartArray("nodes");
 
             for (int i = 0; i < members.Length; i++)
@@ -241,6 +321,19 @@ internal sealed class ClusterSession : IAsyncDisposable
                 writer.WriteString("name", nodeOptions[i].NodeName);
                 writer.WriteString("endpoint", endpoints[i]);
                 writer.WriteBoolean("running", members[i] is not null);
+                writer.WriteString("role", members[i]?.Node.Raft.LocalRole.ToString() ?? "Stopped");
+
+                writer.WriteStartArray("hosts");
+                Member? host = members[i];
+                if (host is not null)
+                {
+                    for (int partitionId = 0; partitionId < PartitionCount; partitionId++)
+                    {
+                        if (host.Node.Raft.HostsPartition(partitionId))
+                            writer.WriteNumberValue(partitionId);
+                    }
+                }
+                writer.WriteEndArray();
 
                 writer.WriteStartArray("leads");
                 Member? member = members[i];
@@ -359,6 +452,13 @@ internal sealed class ClusterSession : IAsyncDisposable
         if (members[index] is not null)
             throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, $"Node {index + 1} is already running.");
 
+        if (elastic)
+        {
+            nodeOptions[index].JoinExistingSeeds = endpoints
+                .Where((_, peerIndex) => peerIndex != index && members[peerIndex] is not null)
+                .ToList();
+        }
+
         members[index] = BuildNode(index);
         PublishRoutes();
         raftTransport.HealPartition(endpoints[index]);
@@ -380,6 +480,91 @@ internal sealed class ClusterSession : IAsyncDisposable
                 await failed.DisposeAsync().ConfigureAwait(false);
 
             throw;
+        }
+    }
+
+    /// <summary>Adds a voter and lets the placement rebalancer assign replicas to it.</summary>
+    public async Task AddNodeAsync(CancellationToken cancellationToken = default)
+    {
+        RequireElasticHealthy();
+
+        if (NodeCount >= MaxNodeCount)
+            throw new InvalidOperationException($"This tab supports at most {MaxNodeCount} nodes.");
+
+        int index = NodeCount;
+        string[] seeds = endpoints.ToArray();
+
+        Array.Resize(ref nodeOptions, index + 1);
+        Array.Resize(ref endpoints, index + 1);
+        Array.Resize(ref members, index + 1);
+
+        nodeOptions[index] = new()
+        {
+            NodeName = $"camusdb-playground-{index + 1}",
+            NodeId = index + 1,
+            Host = "localhost",
+            Port = BasePort + index,
+            Storage = "memory",
+            WalStorage = "memory",
+            InitialPartitions = dataPartitions,
+            ReplicationFactor = ElasticReplicationFactor,
+            EnablePlacementRebalancer = true,
+            PlacementPassInterval = TimeSpan.FromSeconds(2),
+            EnableLoadReports = true,
+            ReplicaCountDeadband = 0,
+            StartElectionTimeout = 1500,
+            EndElectionTimeout = 3000,
+            JoinExistingSeeds = seeds.ToList(),
+        };
+
+        endpoints[index] = $"localhost:{BasePort + index}";
+        members[index] = BuildNode(index);
+        PublishRoutes();
+
+        await StartNodeEngineAsync(index, cancellationToken).ConfigureAwait(false);
+        AttachExecutor(index);
+    }
+
+    /// <summary>Drains and removes the last voter from an elastic cluster.</summary>
+    public async Task RemoveNodeAsync(CancellationToken cancellationToken = default)
+    {
+        RequireElasticHealthy();
+
+        if (NodeCount <= MinElasticNodeCount)
+            throw new InvalidOperationException($"Keep at least {MinElasticNodeCount} nodes in this placed cluster.");
+
+        int index = NodeCount - 1;
+        Member member = MemberAt(index);
+        LeaveClusterResult result = await member.Node.Raft.RequestLeaveAsync(cancellationToken).ConfigureAwait(false);
+
+        if (!result.Left)
+            throw new InvalidOperationException($"Node was not removed: {result.Outcome}. Retry after placement converges.");
+
+        registry.Unregister(endpoints[index]);
+        members[index] = null;
+        await member.DisposeAsync().ConfigureAwait(false);
+
+        Array.Resize(ref members, index);
+        Array.Resize(ref endpoints, index);
+        Array.Resize(ref nodeOptions, index);
+        PublishRoutes();
+    }
+
+    private void RequireElasticHealthy()
+    {
+        if (!elastic)
+            throw new InvalidOperationException("Start an elastic cluster to change membership.");
+
+        if (members.Any(member => member is null || member.Node.Raft.LocalRole.ToString() != "Voter"))
+            throw new InvalidOperationException("Restore nodes and wait for voter promotion before changing membership.");
+
+        for (int from = 0; from < NodeCount; from++)
+        {
+            for (int to = 0; to < NodeCount; to++)
+            {
+                if (from != to && raftTransport.IsDeliveryBlocked(endpoints[from], endpoints[to]))
+                    throw new InvalidOperationException("Restore peer links before changing membership.");
+            }
         }
     }
 

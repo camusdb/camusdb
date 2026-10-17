@@ -67,6 +67,14 @@ public sealed class PlanNodeStats
     public long ProbeMemoHits;
 
     /// <summary>
+    /// Batched probes an index nested-loop join over a unique index issued: each one answers the
+    /// distinct keys of a page of outer rows with one index read and one row read, instead of two reads
+    /// per outer row. <see cref="KvPointLookups"/> still counts the keys, so the ratio of the two is the
+    /// keys per batch. EXPLAIN ANALYZE prints it as <c>probe-batches=</c> when it is above zero.
+    /// </summary>
+    public long ProbeBatches;
+
+    /// <summary>
     /// The strategy the operator actually ran, when it is not the one the plan names; null when
     /// the operator ran as planned. A hash join decides two things only after its build exists: a
     /// build that outgrows its cap runs as a Grace hash join (<c>grace-hash</c>) or a nested-loop

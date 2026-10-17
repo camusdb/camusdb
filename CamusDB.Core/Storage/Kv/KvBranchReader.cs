@@ -184,23 +184,29 @@ internal sealed class KvBranchReader
     /// single-key probe returns, so a caller treats it as "not at this level, keep walking".
     ///
     /// <para>
-    /// <c>LocateAndTryGetManyValues</c> fans keys out across leader nodes and returns results in
-    /// leader-group order, not input order, so results are matched by key and then projected back
-    /// positionally. A repeated key therefore resolves once and answers every position that holds it.
+    /// The read is <c>LocateAndTryProbeMany</c>: the keys of one key space are answered in one actor
+    /// turn on their partition, in input order, and the keys the actor does not hold are loaded from the
+    /// backend as one batch. Kahuna takes one key space per call and at most
+    /// <see cref="KvStoreConstants.ProbeBatchMaxKeys"/> keys, so the distinct keys are grouped by key
+    /// space (the text before the last <c>/</c>) and split to that size. Every caller today passes keys
+    /// of one key space, so the grouping is one comparison per key that allocates nothing. A repeated
+    /// key is sent once and answers every position that holds it.
     /// </para>
     ///
     /// <para>
     /// MustRetry / WaitingForReplication mean a partition is not yet ready: only the affected subset is
     /// retried, with exponential back-off, up to <see cref="KahunaRetryPolicy.MaxKahunaRetries"/>. Any
     /// other non-confirmed response, and an exhausted retry budget, throw
-    /// <see cref="CamusDBErrorCodes.TransactionMustRetry"/> rather than decoding as an absence.
+    /// <see cref="CamusDBErrorCodes.TransactionMustRetry"/> rather than decoding as an absence. A batch
+    /// Kahuna refuses as malformed is a bug in the caller, not a transient, and throws
+    /// <see cref="CamusDBErrorCodes.InvalidInternalOperation"/>.
     /// </para>
     ///
     /// <para>
-    /// A non-empty <paramref name="coordinatorKey"/> registers the read for commit-time validation. One
-    /// operation id is bound to the pending declaration: it is reused while the pending set is unchanged
-    /// (an ack-loss resend of the identical batch, which the coordinator can only replay idempotently
-    /// under the same id) and a fresh id is minted only when the set shrinks. Unregistered reads — every
+    /// A non-empty <paramref name="coordinatorKey"/> registers the read for commit-time validation. Each
+    /// batch Kahuna receives is one operation: its id is reused while its pending set is unchanged (an
+    /// ack-loss resend of the identical batch, which the coordinator can only replay idempotently under
+    /// the same id) and a fresh id is minted only when the set shrinks. Unregistered reads — every
     /// ancestor snapshot probe — carry the default id, so the identity is immaterial there.
     /// </para>
     ///
@@ -222,91 +228,35 @@ internal sealed class KvBranchReader
         if (probeKeys.Count == 0)
             return [];
 
-        List<(string key, long revision, KeyValueDurability durability)> requested = new(probeKeys.Count);
+        // The distinct keys in first-seen order, and the distinct slot of every input position.
+        int[] slotOf = new int[probeKeys.Count];
+        List<string> distinct = new(probeKeys.Count);
+        Dictionary<string, int> slots = new(probeKeys.Count, StringComparer.Ordinal);
+
         for (int i = 0; i < probeKeys.Count; i++)
-            requested.Add((probeKeys[i], -1, KeyValueDurability.Persistent));
-
-        Dictionary<string, (KeyValueResponseType responseType, ReadOnlyKeyValueEntry? entry)> byKey =
-            new(probeKeys.Count, StringComparer.Ordinal);
-
-        List<(string key, long revision, KeyValueDurability durability)> pending = requested;
-        int retries = 0;
-
-        TransactionOperationId operationId = coordinatorKey.Length == 0 ? default : TransactionOperationId.NewRandom();
-
-        while (pending.Count > 0)
         {
-            // null: the forward was refused by the dead partition leader, so no key was answered — every
-            // pending key stays pending and the unchanged batch is resent under the same id.
-            List<(KeyValueResponseType responseType, string key, KeyValueDurability durability, ReadOnlyKeyValueEntry? entry)>? results =
-                await KahunaRetryPolicy.InvokeOrUnanswered(
-                    () => kahuna.LocateAndTryGetManyValues(
-                        txId,
-                        readTimestamp,
-                        pending,
-                        cancellationToken,
-                        coordinatorKey,
-                        operationId),
-                    cancellationToken).ConfigureAwait(false);
+            string key = probeKeys[i];
 
-            List<(string key, long revision, KeyValueDurability durability)>? nextPending = results is null ? new(pending) : null;
-
-            foreach ((KeyValueResponseType responseType, string key, _, ReadOnlyKeyValueEntry? entry) in results ?? [])
+            if (!slots.TryGetValue(key, out int slot))
             {
-                if (responseType == KeyValueResponseType.Aborted)
-                {
-                    RetryableAbortSink.Raise(aborts,
-                        new CamusDBException(CamusDBErrorCodes.TransactionMustRetry,
-                            $"Batch read of key {key} was aborted by Kahuna — retry the operation from BeginAsync"),
-                        ServerDiagnostics.Tags.AbortSite.ReadMany);
-                    return AllMisses(probeKeys.Count);
-                }
-
-                if (responseType is KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication)
-                {
-                    nextPending ??= [];
-                    nextPending.Add((key, -1, KeyValueDurability.Persistent));
-                    continue;
-                }
-
-                // Same rule as ProbeRaw: only a confirmed answer may reach the decode loop below,
-                // which treats every unmatched key as an absent row. A per-key Errored (a dropped
-                // actor response) that lands in byKey decodes as Miss — an unknown converted into a
-                // definitive absence, with no folded observation for commit validation to catch.
-                if (responseType is not (KeyValueResponseType.Get or KeyValueResponseType.DoesNotExist))
-                {
-                    RetryableAbortSink.Raise(aborts,
-                        new CamusDBException(CamusDBErrorCodes.TransactionMustRetry,
-                            $"Batch read of key {key} returned {responseType} — retry the operation from BeginAsync"),
-                        ServerDiagnostics.Tags.AbortSite.ReadMany);
-                    return AllMisses(probeKeys.Count);
-                }
-
-                byKey[key] = (responseType, entry);
+                slot = distinct.Count;
+                slots[key] = slot;
+                distinct.Add(key);
             }
 
-            if (nextPending is null)
-                break;
+            slotOf[i] = slot;
+        }
 
-            if (++retries >= KahunaRetryPolicy.MaxKahunaRetries)
-            {
-                RetryableAbortSink.Raise(aborts,
-                    new CamusDBException(CamusDBErrorCodes.TransactionMustRetry,
-                        $"Batch read was not ready after {KahunaRetryPolicy.MaxKahunaRetries} retries — retry the operation from BeginAsync"),
-                    ServerDiagnostics.Tags.AbortSite.ReadMany);
+        KeyValueProbeResult[] answers = new KeyValueProbeResult[distinct.Count];
+
+        foreach ((int[]? members, int offset, int count) in ProbeBatches(distinct))
+        {
+            bool confirmed = await ProbeBatchAsync(
+                txId, readTimestamp, distinct, members, offset, count, answers,
+                coordinatorKey, retryDiagnosticLabel, cancellationToken, aborts).ConfigureAwait(false);
+
+            if (!confirmed)
                 return AllMisses(probeKeys.Count);
-            }
-
-            ServerDiagnostics.AddKvRetryWait(retryDiagnosticLabel);
-            await Task.Delay(KahunaRetryPolicy.RetryDelayMs(retries), cancellationToken).ConfigureAwait(false);
-
-            // Shrinking set (some reads confirmed) → new, smaller declaration under a fresh id on the
-            // registered path. Unchanged set (every key transient) → identical resend of a lost ack →
-            // keep the same id so the coordinator replays the read observation idempotently.
-            if (coordinatorKey.Length != 0 && nextPending.Count != pending.Count)
-                operationId = TransactionOperationId.NewRandom();
-
-            pending = nextPending;
         }
 
         // Same rule as ProbeRaw: on an ancestor level, a batch full of confirmed misses is exactly
@@ -317,13 +267,207 @@ internal sealed class KvBranchReader
 
         for (int i = 0; i < probeKeys.Count; i++)
         {
-            decoded[i] = byKey.TryGetValue(probeKeys[i], out (KeyValueResponseType responseType, ReadOnlyKeyValueEntry? entry) res)
-                         && res is { responseType: KeyValueResponseType.Get, entry: not null }
-                ? BranchKvCodec.Decode(res.entry.Value)
+            KeyValueProbeResult answer = answers[slotOf[i]];
+            decoded[i] = answer is { Type: KeyValueResponseType.Get, Entry: not null }
+                ? BranchKvCodec.Decode(answer.Entry.Value)
                 : BranchKvValue.Miss;
         }
 
         return decoded;
+    }
+
+    /// <summary>The key space of a key: the text before its last <c>/</c>, or the whole key when it has none.</summary>
+    private static ReadOnlySpan<char> KeySpaceOf(string key)
+    {
+        int separator = key.LastIndexOf('/');
+        return separator < 0 ? key.AsSpan() : key.AsSpan(0, separator);
+    }
+
+    /// <summary>
+    /// Splits the distinct keys into the batches one Kahuna call accepts: one key space per batch and at
+    /// most <see cref="KvStoreConstants.ProbeBatchMaxKeys"/> keys, each key once, in input order. A batch
+    /// is the slots at <c>members</c>, or, when <c>members</c> is null, the <c>count</c> slots from
+    /// <c>offset</c>. The common call, one key space and a page of keys, is one batch of every key that
+    /// allocates only the list.
+    /// </summary>
+    private static List<(int[]? Members, int Offset, int Count)> ProbeBatches(List<string> keys)
+    {
+        List<(int[]? Members, int Offset, int Count)> batches = [];
+        Dictionary<string, List<int>>? bySpace = null;
+
+        for (int i = 1; i < keys.Count; i++)
+        {
+            if (bySpace is null)
+            {
+                if (KeySpaceOf(keys[i]).SequenceEqual(KeySpaceOf(keys[0])))
+                    continue;
+
+                // The first key of another space: from here on, every key goes to its space's group. The
+                // keys before it are all of the first key's space.
+                bySpace = new(StringComparer.Ordinal);
+                List<int> first = new(i);
+                for (int j = 0; j < i; j++)
+                    first.Add(j);
+                bySpace[KeySpaceOf(keys[0]).ToString()] = first;
+            }
+
+            string space = KeySpaceOf(keys[i]).ToString();
+            if (!bySpace.TryGetValue(space, out List<int>? group))
+                bySpace[space] = group = [];
+            group.Add(i);
+        }
+
+        if (bySpace is null)
+        {
+            for (int offset = 0; offset < keys.Count; offset += KvStoreConstants.ProbeBatchMaxKeys)
+                batches.Add((null, offset, Math.Min(KvStoreConstants.ProbeBatchMaxKeys, keys.Count - offset)));
+
+            return batches;
+        }
+
+        foreach (List<int> group in bySpace.Values)
+        {
+            int[] members = [.. group];
+            for (int offset = 0; offset < members.Length; offset += KvStoreConstants.ProbeBatchMaxKeys)
+                batches.Add((members, offset, Math.Min(KvStoreConstants.ProbeBatchMaxKeys, members.Length - offset)));
+        }
+
+        return batches;
+    }
+
+    /// <summary>
+    /// One batch of <see cref="ProbeManyRaw"/>: asks Kahuna for its keys, resends the keys that answered
+    /// a transient until every key is confirmed, and writes each confirmed answer to the key's slot of
+    /// <paramref name="answers"/>. False when the batch was aborted or never confirmed; the abort is then
+    /// recorded in <paramref name="aborts"/> (or thrown) and no slot of the batch may be read.
+    /// </summary>
+    private async Task<bool> ProbeBatchAsync(
+        HLCTimestamp txId,
+        HLCTimestamp readTimestamp,
+        List<string> keys,
+        int[]? members,
+        int offset,
+        int count,
+        KeyValueProbeResult[] answers,
+        string coordinatorKey,
+        string retryDiagnosticLabel,
+        CancellationToken cancellationToken,
+        RetryableAbortSink? aborts)
+    {
+        // The slots still to ask. Null on the first attempt: the whole batch.
+        List<int>? pending = null;
+        int pendingCount = count;
+        int retries = 0;
+
+        TransactionOperationId operationId = coordinatorKey.Length == 0 ? default : TransactionOperationId.NewRandom();
+
+        while (true)
+        {
+            string[] request = new string[pendingCount];
+            for (int j = 0; j < pendingCount; j++)
+                request[j] = keys[SlotAt(j)];
+
+            // null: the forward was refused by the dead partition leader, so no key was answered — every
+            // pending key stays pending and the unchanged batch is resent under the same id.
+            KeyValueProbeResult[]? results = await KahunaRetryPolicy.InvokeOrUnanswered(
+                () => kahuna.LocateAndTryProbeMany(
+                    txId,
+                    readTimestamp,
+                    request,
+                    KeyValueProbeLock.None,
+                    0,
+                    KeyValueDurability.Persistent,
+                    cancellationToken,
+                    coordinatorKey,
+                    operationId),
+                cancellationToken).ConfigureAwait(false);
+
+            List<int>? next = null;
+
+            if (results is null)
+            {
+                next = new(pendingCount);
+                for (int j = 0; j < pendingCount; j++)
+                    next.Add(SlotAt(j));
+            }
+            else
+            {
+                if (results.Length != pendingCount)
+                    throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation,
+                        $"Batched probe of {pendingCount} keys answered {results.Length} results");
+
+                for (int j = 0; j < pendingCount; j++)
+                {
+                    KeyValueProbeResult result = results[j];
+                    int slot = SlotAt(j);
+
+                    switch (result.Type)
+                    {
+                        case KeyValueResponseType.Get:
+                        case KeyValueResponseType.DoesNotExist:
+                            answers[slot] = result;
+                            break;
+
+                        case KeyValueResponseType.MustRetry:
+                        case KeyValueResponseType.WaitingForReplication:
+                            (next ??= []).Add(slot);
+                            break;
+
+                        case KeyValueResponseType.Aborted:
+                            RetryableAbortSink.Raise(aborts,
+                                new CamusDBException(CamusDBErrorCodes.TransactionMustRetry,
+                                    $"Batch read of key {keys[slot]} was aborted by Kahuna — retry the operation from BeginAsync"),
+                                ServerDiagnostics.Tags.AbortSite.ReadMany);
+                            return false;
+
+                        case KeyValueResponseType.InvalidInput:
+                            // The batch was malformed (too many keys, or keys of several key spaces): a
+                            // caller bug that a retry cannot fix.
+                            throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation,
+                                $"Kahuna refused a batched probe of {pendingCount} keys starting at {keys[SlotAt(0)]}: " +
+                                $"a batch holds keys of one key space, at most {KvStoreConstants.ProbeBatchMaxKeys} of them");
+
+                        default:
+                            // Same rule as ProbeRaw: only a confirmed answer may reach the decode loop,
+                            // which treats every unanswered key as an absent row. A per-key Errored (a
+                            // dropped actor response) that reached a slot would decode as Miss — an unknown
+                            // converted into a definitive absence, with no folded observation for commit
+                            // validation to catch.
+                            RetryableAbortSink.Raise(aborts,
+                                new CamusDBException(CamusDBErrorCodes.TransactionMustRetry,
+                                    $"Batch read of key {keys[slot]} returned {result.Type} — retry the operation from BeginAsync"),
+                                ServerDiagnostics.Tags.AbortSite.ReadMany);
+                            return false;
+                    }
+                }
+            }
+
+            if (next is null)
+                return true;
+
+            if (++retries >= KahunaRetryPolicy.MaxKahunaRetries)
+            {
+                RetryableAbortSink.Raise(aborts,
+                    new CamusDBException(CamusDBErrorCodes.TransactionMustRetry,
+                        $"Batch read was not ready after {KahunaRetryPolicy.MaxKahunaRetries} retries — retry the operation from BeginAsync"),
+                    ServerDiagnostics.Tags.AbortSite.ReadMany);
+                return false;
+            }
+
+            ServerDiagnostics.AddKvRetryWait(retryDiagnosticLabel);
+            await Task.Delay(KahunaRetryPolicy.RetryDelayMs(retries), cancellationToken).ConfigureAwait(false);
+
+            // Shrinking set (some reads confirmed) → new, smaller declaration under a fresh id on the
+            // registered path. Unchanged set (every key transient) → identical resend of a lost ack →
+            // keep the same id so the coordinator replays the read observation idempotently.
+            if (coordinatorKey.Length != 0 && next.Count != pendingCount)
+                operationId = TransactionOperationId.NewRandom();
+
+            pending = next;
+            pendingCount = next.Count;
+        }
+
+        int SlotAt(int j) => pending is not null ? pending[j] : members is not null ? members[offset + j] : offset + j;
     }
 
     /// <summary>The neutral answer a batch read leaves behind when it records an abort: one miss per position.</summary>

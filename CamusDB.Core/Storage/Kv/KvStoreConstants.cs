@@ -26,6 +26,13 @@ internal static class KvStoreConstants
     internal const int DefaultPageSize = 512;
 
     /// <summary>
+    /// The most keys one batched point probe sends to Kahuna in one call. Kahuna answers the whole batch
+    /// in one actor turn and refuses a larger one, so the batch reader splits above it. The value is
+    /// Kahuna's default <c>MaxProbeBatchSize</c>, which CamusDB does not change.
+    /// </summary>
+    internal const int ProbeBatchMaxKeys = 512;
+
+    /// <summary>
     /// Page size of a foreign-key existence probe. The probe stops at the first live entry, so a full
     /// page would transfer up to <see cref="DefaultPageSize"/> keys to answer one yes-or-no question
     /// for every parent that has many children. A small page keeps that cost flat; entries the page

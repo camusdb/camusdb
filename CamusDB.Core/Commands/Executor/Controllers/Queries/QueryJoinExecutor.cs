@@ -95,7 +95,7 @@ internal sealed class QueryJoinExecutor : IJoinNodeExecutor
         derivedTableExecutor = new DerivedTableExecutor(queryExecutor, this);
         leafScanner = new JoinLeafScanner(services, derivedTableExecutor);
         nestedLoopJoin = new NestedLoopJoinOperator(services, this, leafScanner);
-        indexNestedLoopJoin = new IndexNestedLoopJoinOperator(services, this, leafScanner);
+        indexNestedLoopJoin = new IndexNestedLoopJoinOperator(services, this);
         mergeJoin = new MergeJoinOperator(services, this, leafScanner);
         fragmentProbe = new JoinFragmentProbeExecutor(services);
 

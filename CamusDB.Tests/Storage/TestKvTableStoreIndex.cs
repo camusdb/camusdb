@@ -1071,4 +1071,60 @@ public sealed class TestKvTableStoreIndex
             await transactions.CommitAsync(txA);
         }
     }
+
+    // ---- LookupUniqueRowIdsAsync ------------------------------------------
+
+    /// <summary>
+    /// The batch form of the unique lookup answers by position: a present key gives its row id, a
+    /// missing key null, a repeated key the same id at each position, and a key that cannot be encoded
+    /// (an Id column probed with text) null, all in one call.
+    /// </summary>
+    [Test]
+    public async Task LookupUniqueRowIdsAsync_AnswersEveryKeyInInputOrder()
+    {
+        (EmbeddedKahuna node, KvTableStore store) = await CreateStoreAsync("u-many");
+        await using EmbeddedKahuna __ = node;
+
+        ObjectIdValue[] rowIds = [new(1, 0, 1), new(2, 0, 2), new(3, 0, 3)];
+
+        KvTransaction tx = await BeginTransaction(node.Kahuna, "u-many-put");
+        for (int i = 0; i < rowIds.Length; i++)
+            await store.PutIndexEntry(tx, "idx_age", CV(new ColumnValue(ColumnType.Integer64, i + 1)), rowIds[i], unique: true);
+        await CommitTransaction(node.Kahuna, tx);
+
+        CompositeColumnValue[] keys =
+        [
+            CV(new ColumnValue(ColumnType.Integer64, 2L)),
+            CV(new ColumnValue(ColumnType.Integer64, 9L)),
+            CV(new ColumnValue(ColumnType.Integer64, 1L)),
+            CV(new ColumnValue(ColumnType.Integer64, 2L)),
+            CV(new ColumnValue(ColumnType.Integer64, 3L)),
+        ];
+
+        ObjectIdValue?[] found = await store.LookupUniqueRowIdsAsync(KvTransaction.CreateReadOnly(), "idx_age", keys);
+
+        Assert.AreEqual(5, found.Length);
+        Assert.AreEqual(rowIds[1].ToString(), found[0]!.Value.ToString());
+        Assert.IsNull(found[1], "a key with no entry answers null");
+        Assert.AreEqual(rowIds[0].ToString(), found[2]!.Value.ToString());
+        Assert.AreEqual(rowIds[1].ToString(), found[3]!.Value.ToString(), "a repeated key answers at every position");
+        Assert.AreEqual(rowIds[2].ToString(), found[4]!.Value.ToString());
+
+        for (int i = 0; i < rowIds.Length; i++)
+        {
+            ObjectIdValue? single = await store.LookupUnique(KvTransaction.CreateReadOnly(), "idx_age", CV(new ColumnValue(ColumnType.Integer64, i + 1)));
+            Assert.AreEqual(single!.Value.ToString(), rowIds[i].ToString(), "the batch agrees with the single lookup");
+        }
+    }
+
+    [Test]
+    public async Task LookupUniqueRowIdsAsync_EmptyBatch_AnswersEmpty()
+    {
+        (EmbeddedKahuna node, KvTableStore store) = await CreateStoreAsync("u-many-empty");
+        await using EmbeddedKahuna __ = node;
+
+        ObjectIdValue?[] found = await store.LookupUniqueRowIdsAsync(KvTransaction.CreateReadOnly(), "idx_age", []);
+
+        Assert.AreEqual(0, found.Length);
+    }
 }

@@ -34,7 +34,7 @@ namespace CamusDB.Tests.CommandsExecutor;
 ///   <item><description>
 ///     <b>Cross-path parity.</b> The residual predicate on a right-table non-key column must
 ///     produce identical results whether the right side is reached through the index-nested-loop
-///     row fetch (<c>LoadRightRow</c>) or the full nested-loop scan (<c>ScanBoundTable</c>).
+///     row fetch (<c>JoinLeafRowPage.FetchAsync</c>) or the full nested-loop scan (<c>ScanBoundTable</c>).
 ///   </description></item>
 ///   <item><description>
 ///     <b>Mixed schema versions.</b> The single cached qualified layout is built once from the
@@ -51,7 +51,7 @@ public sealed class TestJoinRightSideResidual : SharedNodeBaseTest
     /// <summary>
     /// Creates orders / line_items. <paramref name="indexOrderId"/> chooses whether the join key
     /// on the right table is indexed, which (with cost-based planning off) selects
-    /// index-nested-loop vs plain nested-loop — i.e. the <c>LoadRightRow</c> vs <c>ScanBoundTable</c>
+    /// index-nested-loop vs plain nested-loop — i.e. the <c>JoinLeafRowPage.FetchAsync</c> vs <c>ScanBoundTable</c>
     /// right-side path.
     /// </summary>
     private async Task<Fixture> Setup(bool indexOrderId)
@@ -129,7 +129,7 @@ public sealed class TestJoinRightSideResidual : SharedNodeBaseTest
     /// <summary>
     /// A residual predicate on a right-table non-key column (<c>li.product &lt;&gt; "Doohickey"</c>)
     /// must produce identical rows through both right-side paths: index-nested-loop (indexed
-    /// <c>order_id</c> → <c>LoadRightRow</c>) and nested-loop (unindexed → <c>ScanBoundTable</c>).
+    /// <c>order_id</c> → <c>JoinLeafRowPage.FetchAsync</c>) and nested-loop (unindexed → <c>ScanBoundTable</c>).
     /// Also asserts the residual actually removed a row (3 of the 4 join pairs survive), so the
     /// test would fail if the filter were silently dropped rather than merely evaluated identically.
     /// </summary>
@@ -174,7 +174,7 @@ public sealed class TestJoinRightSideResidual : SharedNodeBaseTest
     /// layout must read the correct per-row value for both the defaulted old-version rows and the
     /// explicit new-version rows: the residual must exclude the defaulted rows, and a projection of
     /// the new column must show the default for old rows and the stored value for new rows.
-    /// Exercises the index-nested-loop right path (<c>LoadRightRow</c>), whose cached qualified
+    /// Exercises the index-nested-loop right path (<c>JoinLeafRowPage.FetchAsync</c>), whose cached qualified
     /// layout persists across every left row of the join.
     /// </summary>
     [Test]

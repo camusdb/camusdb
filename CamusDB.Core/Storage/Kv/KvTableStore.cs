@@ -599,6 +599,10 @@ public sealed partial class KvTableStore
     internal Task<bool[]> LookupUniqueManyAsync(KvTransaction tx, string indexId, IReadOnlyList<CompositeColumnValue> keys, CancellationToken cancellationToken = default)
         => indexes.LookupUniqueManyAsync(tx, indexId, keys, cancellationToken);
 
+    /// <inheritdoc cref="KvIndexAccessor.LookupUniqueRowIdsAsync"/>
+    internal Task<ObjectIdValue?[]> LookupUniqueRowIdsAsync(KvTransaction tx, string indexId, IReadOnlyList<CompositeColumnValue> keys, CancellationToken cancellationToken = default)
+        => indexes.LookupUniqueRowIdsAsync(tx, indexId, keys, cancellationToken);
+
     /// <inheritdoc cref="KvIndexAccessor.LockAndLookupUniqueManyAsync"/>
     internal Task<bool[]> LockAndLookupUniqueManyAsync(KvTransaction tx, string indexId, IReadOnlyList<CompositeColumnValue> keys, CancellationToken cancellationToken = default)
         => indexes.LockAndLookupUniqueManyAsync(tx, indexId, keys, cancellationToken);

@@ -22,11 +22,13 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 /// Joins by probing an index on the right table once per left row, instead of re-scanning it.
 /// The planner picks it when the join key is the leading column of a right-side index.
 ///
-/// <para>Two probe shapes share one outer loop. A unique index answers with at most one row and
-/// needs no buffer. A non-unique index walks an equality range, and its row fetches are paged
-/// through one <see cref="JoinLeafRowPage"/> that lives for the whole join: rebuilding the buffer
-/// and its decode plan for every outer row would be pure overhead on the common one-match
-/// probe. The page is flushed before each probe returns, so it never spans two left rows.</para>
+/// <para>Two probe shapes share one outer loop. A unique index answers with at most one row per
+/// key, so the join collects a page of outer rows and probes their distinct keys with two batched
+/// reads, one of the index space and one of the row space, instead of two reads per outer row
+/// (<see cref="UniqueProbeBatch"/>). A non-unique index walks an equality range per outer row, and
+/// its row fetches are paged through one <see cref="JoinLeafRowPage"/> that lives for the whole join:
+/// rebuilding the buffer and its decode plan for every outer row would be pure overhead on the common
+/// one-match probe. The page is flushed before each probe returns, so it never spans two left rows.</para>
 ///
 /// <para>One <see cref="RightDecodeState"/> is created per execution and threaded through every
 /// probe, so the join owns exactly one row-decode plan, one alias-qualified layout and one
@@ -46,13 +48,10 @@ internal sealed class IndexNestedLoopJoinOperator
 
     private readonly IJoinNodeExecutor tree;
 
-    private readonly JoinLeafScanner scanner;
-
-    public IndexNestedLoopJoinOperator(JoinExecutionServices services, IJoinNodeExecutor tree, JoinLeafScanner scanner)
+    public IndexNestedLoopJoinOperator(JoinExecutionServices services, IJoinNodeExecutor tree)
     {
         this.services = services;
         this.tree = tree;
-        this.scanner = scanner;
     }
 
     /// <summary>
@@ -100,6 +99,80 @@ internal sealed class IndexNestedLoopJoinOperator
         }
     }
 
+    /// <summary>
+    /// A page of outer rows of a unique-index probe, kept in outer order until their keys are probed
+    /// together. Each outer row records what it needs: a NULL key (never probed), the rows the memo
+    /// answered, or the slot of its key among the batch's distinct keys. A key that repeats inside the
+    /// batch takes the slot of its first outer row, so the batch probes each distinct key once; the
+    /// repeat counts as a memo hit, because the probe is shared exactly as the memo would share it one
+    /// batch later. The page size bounds both the outer rows held and the keys of one store call.
+    /// </summary>
+    private sealed class UniqueProbeBatch(int capacity)
+    {
+        /// <summary>
+        /// One outer row of the batch: <see cref="Rows"/> when the memo answered it, else the key's
+        /// <see cref="Slot"/>, or -1 for a NULL key.
+        /// </summary>
+        internal readonly record struct Outer(IReadOnlyDictionary<string, ColumnValue> Left, List<QueryResultRow>? Rows, int Slot);
+
+        internal readonly List<Outer> Outers = new(capacity);
+
+        /// <summary>The distinct keys to probe, in the form the store takes and in the form the memo keys them.</summary>
+        internal readonly List<CompositeColumnValue> Keys = new(capacity);
+
+        internal readonly List<ColumnValue> KeyValues = new(capacity);
+
+        private readonly Dictionary<ColumnValue, int> slotOf = new(capacity, SqlColumnValueComparer.Instance);
+
+        internal int Count => Outers.Count;
+
+        internal bool IsFull => Outers.Count >= capacity;
+
+        internal void Add(IReadOnlyDictionary<string, ColumnValue> left, ColumnValue lookupValue, ProbeMemo? memo, PlanNodeStats? stats)
+        {
+            if (lookupValue.Type == ColumnType.Null)
+            {
+                Outers.Add(new(left, null, -1));
+                return;
+            }
+
+            if (memo is not null && memo.TryGet(lookupValue, out List<QueryResultRow> remembered))
+            {
+                if (stats is not null)
+                    stats.ProbeMemoHits++;
+
+                Outers.Add(new(left, remembered, -1));
+                return;
+            }
+
+            if (slotOf.TryGetValue(lookupValue, out int slot))
+            {
+                if (stats is not null)
+                    stats.ProbeMemoHits++;
+
+                Outers.Add(new(left, null, slot));
+                return;
+            }
+
+            slot = Keys.Count;
+            slotOf[lookupValue] = slot;
+            Keys.Add(new CompositeColumnValue(new[] { lookupValue }));
+            KeyValues.Add(lookupValue);
+            Outers.Add(new(left, null, slot));
+        }
+
+        internal void Clear()
+        {
+            Outers.Clear();
+            Keys.Clear();
+            KeyValues.Clear();
+            slotOf.Clear();
+        }
+    }
+
+    /// <summary>The rows of a key with no row, shared by every such key: a memo entry reads it and never writes it.</summary>
+    private static readonly List<QueryResultRow> NoRows = [];
+
     internal async IAsyncEnumerable<QueryResultRow> ExecuteIndexNestedLoopJoin(
         IndexNestedLoopJoinNode joinNode,
         QueryPlan plan)
@@ -112,13 +185,12 @@ internal sealed class IndexNestedLoopJoinOperator
             ? await OuterJoinPadding.CreateAsync(BoundJoinRightSource.FromTable(joinNode.RightSource), plan).ConfigureAwait(false)
             : null;
 
-        // A non-unique probe pages its primary-row fetches through one buffer that lives for the whole
-        // join, not one per outer row: the buffer and its decode plan would otherwise be rebuilt for
-        // every probe, which is pure overhead for the common one-match probe. The page shares
-        // rightDecodeState so the join owns exactly one decode plan and one qualified layout.
-        JoinLeafRowPage? probePage = joinNode.UseUniqueLookup
-            ? null
-            : new JoinLeafRowPage(services, plan, joinNode.RightSource, joinNode.RightExecutionFilter, rightDecodeState, joinNode.Stats);
+        // Both probe shapes fetch their primary rows through one page that lives for the whole join, not
+        // one per outer row: the page and its decode plan would otherwise be rebuilt for every probe,
+        // which is pure overhead for the common one-match probe. A non-unique probe streams through the
+        // page's buffer; a unique probe batch fetches by position. The page shares rightDecodeState so
+        // the join owns exactly one decode plan and one qualified layout.
+        JoinLeafRowPage probePage = new(services, plan, joinNode.RightSource, joinNode.RightExecutionFilter, rightDecodeState, joinNode.Stats);
 
         // Fixed for the whole join, so resolved once and not per outer row: the column types of the
         // index key. A probe asks for the store's default page: the store stops a bounded scan at
@@ -129,6 +201,13 @@ internal sealed class IndexNestedLoopJoinOperator
 
         int memoCapacity = services.Statistics?.IndexProbeMemoCapacityForTesting ?? ProbeMemoMaxRows;
         ProbeMemo? memo = memoCapacity > 0 ? new ProbeMemo(memoCapacity) : null;
+
+        // A unique probe collects a page of outer rows and probes their distinct keys with two batched
+        // reads. The page is the one every paged row fetch uses, so one store call never carries more
+        // keys than one row page.
+        UniqueProbeBatch? batch = joinNode.UseUniqueLookup
+            ? new UniqueProbeBatch(Math.Max(1, services.Options.IndexScanFetchBatchSize))
+            : null;
 
         await foreach (QueryResultRow leftRow in tree.ExecuteNode(joinNode.Input!, plan).ConfigureAwait(false))
         {
@@ -151,6 +230,19 @@ internal sealed class IndexNestedLoopJoinOperator
                 throw new CamusDBException(
                     CamusDBErrorCodes.InvalidInternalOperation,
                     $"Join lookup column '{joinNode.LeftLookupColumn}' is missing from left row");
+            }
+
+            if (batch is not null)
+            {
+                batch.Add(leftQualified, lookupValue, memo, joinNode.Stats);
+
+                if (batch.IsFull)
+                {
+                    await foreach (QueryResultRow joined in FlushUniqueBatch(batch, joinNode, plan, pairing, padding, rightAlias, memo, probePage).ConfigureAwait(false))
+                        yield return joined;
+                }
+
+                continue;
             }
 
             if (padding is not null)
@@ -195,31 +287,66 @@ internal sealed class IndexNestedLoopJoinOperator
             // probe runs to its end, so an outer enumeration that stops early leaves no partial entry.
             List<QueryResultRow>? collected = memo is { HasRoom: true } ? [] : null;
 
-            if (joinNode.UseUniqueLookup)
+            await foreach (QueryResultRow rightRow in ScanMultiIndexRightRows(
+                joinNode, lookupKey, plan, probePage, keyTypes, probePageSize).ConfigureAwait(false))
             {
-                // A unique index answers with at most one row, so the probe is one awaited call and
-                // not an enumeration of its own per outer row.
-                QueryResultRow? rightRow = await LookupUniqueRightRow(joinNode, lookupKey, plan, rightDecodeState).ConfigureAwait(false);
+                collected?.Add(rightRow);
+                QueryRow? merged = await PairIfAccepted(pairing, joinNode, plan, leftQualified, rightRow.Row, rightAlias).ConfigureAwait(false);
 
-                if (rightRow is { } found)
-                {
-                    collected?.Add(found);
-                    QueryRow? merged = await PairIfAccepted(pairing, joinNode, plan, leftQualified, found.Row, rightAlias).ConfigureAwait(false);
+                if (merged is null)
+                    continue;
 
-                    if (merged is not null)
-                    {
-                        matched = true;
-                        yield return new QueryResultRow(default(ObjectIdValue), merged);
-                    }
-                }
+                matched = true;
+                yield return new QueryResultRow(default(ObjectIdValue), merged);
             }
-            else
+
+            if (collected is not null)
+                memo!.Add(lookupValue, collected);
+
+            if (padding is not null && !matched)
+                yield return new QueryResultRow(default(ObjectIdValue), padding.Pad(leftQualified));
+        }
+
+        if (batch is { Count: > 0 })
+        {
+            await foreach (QueryResultRow joined in FlushUniqueBatch(batch, joinNode, plan, pairing, padding, rightAlias, memo, probePage).ConfigureAwait(false))
+                yield return joined;
+        }
+    }
+
+    /// <summary>
+    /// Probes the distinct keys of a unique probe batch and pairs every outer row of the batch, in outer
+    /// order, with the row its key found: one index read and one row read for the batch, then the
+    /// <c>ON</c> predicate per pair, and outer-join padding for an outer row no pair satisfies. The
+    /// batch is emptied for the next page of outer rows.
+    /// </summary>
+    private async IAsyncEnumerable<QueryResultRow> FlushUniqueBatch(
+        UniqueProbeBatch batch,
+        IndexNestedLoopJoinNode joinNode,
+        QueryPlan plan,
+        PairState pairing,
+        OuterJoinPadding? padding,
+        string rightAlias,
+        ProbeMemo? memo,
+        JoinLeafRowPage page)
+    {
+        List<QueryResultRow>?[]? probed = batch.Keys.Count > 0
+            ? await ProbeUniqueKeys(batch, joinNode, plan, page, memo).ConfigureAwait(false)
+            : null;
+
+        foreach (UniqueProbeBatch.Outer outer in batch.Outers)
+        {
+            if (padding is not null)
+                (pairing.JoinLayout, pairing.RightOrdinalMap) = padding.Bind(outer.Left);
+
+            List<QueryResultRow>? rows = outer.Rows ?? (outer.Slot >= 0 ? probed![outer.Slot] : null);
+            bool matched = false;
+
+            if (rows is not null)
             {
-                await foreach (QueryResultRow rightRow in ScanMultiIndexRightRows(
-                    joinNode, lookupKey, plan, probePage!, keyTypes, probePageSize).ConfigureAwait(false))
+                foreach (QueryResultRow rightRow in rows)
                 {
-                    collected?.Add(rightRow);
-                    QueryRow? merged = await PairIfAccepted(pairing, joinNode, plan, leftQualified, rightRow.Row, rightAlias).ConfigureAwait(false);
+                    QueryRow? merged = await PairIfAccepted(pairing, joinNode, plan, outer.Left, rightRow.Row, rightAlias).ConfigureAwait(false);
 
                     if (merged is null)
                         continue;
@@ -229,12 +356,83 @@ internal sealed class IndexNestedLoopJoinOperator
                 }
             }
 
-            if (collected is not null)
-                memo!.Add(lookupValue, collected);
-
             if (padding is not null && !matched)
-                yield return new QueryResultRow(default(ObjectIdValue), padding.Pad(leftQualified));
+                yield return new QueryResultRow(default(ObjectIdValue), padding.Pad(outer.Left));
         }
+
+        batch.Clear();
+    }
+
+    /// <summary>
+    /// The two store reads of a unique probe batch: the row id of every distinct key with one batched
+    /// index read, then the rows found with one batched row fetch through <paramref name="page"/>,
+    /// which applies the right-side filter. Answers the rows of each key by slot: one row, or none when
+    /// the key has no entry or the filter rejects its row. Each key's answer enters the memo while the
+    /// memo has room, as a single probe's answer does. The batch counts one probe per distinct key in
+    /// <see cref="PlanNodeStats.KvPointLookups"/> and one call in <see cref="PlanNodeStats.ProbeBatches"/>.
+    /// </summary>
+    private static async Task<List<QueryResultRow>?[]> ProbeUniqueKeys(
+        UniqueProbeBatch batch,
+        IndexNestedLoopJoinNode joinNode,
+        QueryPlan plan,
+        JoinLeafRowPage page,
+        ProbeMemo? memo)
+    {
+        BoundTableSource source = joinNode.RightSource;
+        TableDescriptor table = source.Table;
+        QueryDependencyCollector? deps = plan.DepCollector;
+        int count = batch.Keys.Count;
+
+        // Unique index probe: record the index bucket range (membership check) and schema.
+        deps?.RecordRange(table.Store.IndexKeySpace(joinNode.Index.KvId));
+        deps?.RecordSchema(table.Id, JoinAliasMetadata.GetTableSchemaVersionForAlias(plan, source.Alias), table.Schema.ContentsGeneration);
+
+        if (joinNode.Stats is { } stats)
+        {
+            stats.KvPointLookups += count;
+            stats.ProbeBatches++;
+        }
+
+        ObjectIdValue?[] rowIds = await table.Store.LookupUniqueRowIdsAsync(
+            plan.Ticket.TxnState, joinNode.Index.KvId, batch.Keys, plan.Ticket.CancellationToken).ConfigureAwait(false);
+
+        List<ObjectIdValue> found = new(count);
+        List<int> foundSlot = new(count);
+
+        for (int slot = 0; slot < count; slot++)
+        {
+            if (rowIds[slot] is not { } rowId)
+                continue;
+
+            // Record the row point dep whether or not it passes the execution filter — a later
+            // update to a non-indexed column could change what the join returns.
+            deps?.RecordPoint(table.Store.RowPointKey(rowId));
+            found.Add(rowId);
+            foundSlot.Add(slot);
+        }
+
+        List<QueryResultRow>?[] rowsOf = new List<QueryResultRow>?[count];
+
+        if (found.Count > 0)
+        {
+            QueryResultRow?[] fetched = await page.FetchAsync(found, plan.Ticket.CancellationToken).ConfigureAwait(false);
+
+            for (int j = 0; j < found.Count; j++)
+            {
+                if (fetched[j] is { } row)
+                    rowsOf[foundSlot[j]] = [row];
+            }
+        }
+
+        for (int slot = 0; slot < count; slot++)
+        {
+            rowsOf[slot] ??= NoRows;
+
+            if (memo is { HasRoom: true })
+                memo.Add(batch.KeyValues[slot], rowsOf[slot]!);
+        }
+
+        return rowsOf;
     }
 
     /// <summary>
@@ -260,41 +458,6 @@ internal sealed class IndexNestedLoopJoinOperator
             return null;
 
         return merged;
-    }
-
-    /// <summary>
-    /// Unique index probe for one outer row: one point read of the index entry and, when it exists,
-    /// one row read through <see cref="JoinLeafScanner.LoadRightRow"/>. Returns null when the key has
-    /// no entry or the row fails the residual filter. The common case allocates only what the store
-    /// needs: no enumerator, and no task when Kahuna answers synchronously.
-    /// </summary>
-    private async ValueTask<QueryResultRow?> LookupUniqueRightRow(
-        IndexNestedLoopJoinNode joinNode,
-        CompositeColumnValue lookupKey,
-        QueryPlan plan,
-        RightDecodeState decodeState)
-    {
-        BoundTableSource source = joinNode.RightSource;
-        TableDescriptor table = source.Table;
-        QueryDependencyCollector? deps = plan.DepCollector;
-
-        // Unique index probe: record the index bucket range (membership check) and schema.
-        deps?.RecordRange(table.Store.IndexKeySpace(joinNode.Index.KvId));
-        deps?.RecordSchema(table.Id, JoinAliasMetadata.GetTableSchemaVersionForAlias(plan, source.Alias), table.Schema.ContentsGeneration);
-
-        ObjectIdValue? rowId = await table.Store.LookupUnique(plan.Ticket.TxnState, joinNode.Index.KvId, lookupKey, plan.Ticket.CancellationToken).ConfigureAwait(false);
-
-        if (joinNode.Stats is { } stats)
-            stats.KvPointLookups++;
-
-        if (rowId is null)
-            return null;
-
-        // Record the row point dep whether or not it passes the execution filter — a later
-        // update to a non-indexed column could change what the join returns.
-        deps?.RecordPoint(table.Store.RowPointKey(rowId.Value));
-
-        return await scanner.LoadRightRow(source, rowId.Value, joinNode.RightExecutionFilter, plan, decodeState, joinNode.Stats).ConfigureAwait(false);
     }
 
     /// <summary>

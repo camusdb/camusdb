@@ -464,15 +464,18 @@ in `SQLExecutorBaseCreator.EvalComparison`, `EvalAnd` and `EvalOr`, which every 
        `ON` conjuncts could drive the lookup, one on a unique index wins over one on a non-unique
        index, whatever their order in the `ON`: a unique probe returns one row, a non-unique probe
        returns every row with the value, and a popular value can mean thousands of them per left
-       row. A non-unique probe walks the store's equality scan: the raw window
+       row. A unique probe runs a page of left rows at a time (`IndexScanFetchBatchSize` rows): the
+       distinct keys of the page are read with one batched index read and the rows found with one
+       batched row read, so a page costs two store calls instead of two per left row, and the rows
+       still come out in left-row order. A non-unique probe walks the store's equality scan: the raw window
        `[v, v + sentinel]` in the index's own direction holds exactly the entries of the key, so
        the scan returns their row ids without decoding a key. The probe asks for the store's
        default page: the store stops a bounded scan at the key, so a page costs the entries of the
        key only, and the largest page is the fewest round trips for a key with many entries. The
        join keeps the right rows of each probed key in a memo for the rest of the join (up to
        65,536 rows), so an outer stream that repeats a key, every cast row of one movie for
-       example, probes the store once per distinct key; the `ON` predicate still runs for each
-       pair; unless…
+       example, probes the store once per distinct key, and a key that repeats inside one page of a
+       unique probe shares the page's probe; the `ON` predicate still runs for each pair; unless…
      - Both sides have free index ordering (secondary index prefix covers the join key) **and** the
        outer side is large (> 100 rows estimated) → `MergeJoinNode` (streaming merge join); or…
      - Equi-join with stats available and hash preferred over INLJ → `HashJoinNode` (build =

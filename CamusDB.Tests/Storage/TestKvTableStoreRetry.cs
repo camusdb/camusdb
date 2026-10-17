@@ -127,6 +127,27 @@ public sealed class TestKvTableStoreRetry
         // ---- intercepted: batch get, whole batch Aborted (a lost optimistic read) ----
         public int InjectGetManyAbortedFaults;
 
+        // ---- intercepted: batched probe, the read every batch point read issues ----
+        // The same faults as the batch get, so a test of a batch read path injects one set of counters
+        // whichever Kahuna call the path issues.
+        public override Task<KeyValueProbeResult[]> LocateAndTryProbeMany(
+            HLCTimestamp txId, HLCTimestamp readTimestamp, IReadOnlyList<string> keys, KeyValueProbeLock lockMode, int expiresMs,
+            KeyValueDurability durability, CancellationToken ct, string coordinatorKey = "", TransactionOperationId operationId = default)
+        {
+            GetManyCalls++;
+
+            if (InjectGetManyMustRetryFaults-- > 0)
+                return Task.FromResult(keys.Select(_ => KeyValueProbeResult.MustRetry).ToArray());
+
+            if (InjectGetManyErroredFaults-- > 0)
+                return Task.FromResult(keys.Select(_ => new KeyValueProbeResult(KeyValueResponseType.Errored, null, HLCTimestamp.Zero, false)).ToArray());
+
+            if (InjectGetManyAbortedFaults-- > 0)
+                return Task.FromResult(keys.Select(_ => new KeyValueProbeResult(KeyValueResponseType.Aborted, null, HLCTimestamp.Zero, false)).ToArray());
+
+            return inner.LocateAndTryProbeMany(txId, readTimestamp, keys, lockMode, expiresMs, durability, ct, coordinatorKey, operationId);
+        }
+
         public override Task<List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)>> LocateAndTryGetManyValues(
             HLCTimestamp txId, HLCTimestamp readTimestamp, List<(string key, long revision, KeyValueDurability durability)> keys,
             CancellationToken ct, string coordinatorKey = "", TransactionOperationId operationId = default)

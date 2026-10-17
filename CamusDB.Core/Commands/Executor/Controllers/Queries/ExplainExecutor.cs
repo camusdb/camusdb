@@ -456,6 +456,7 @@ internal sealed class ExplainExecutor
             KvPointLookups = joinStats.KvPointLookups,
             KvScanEntries = joinStats.KvScanEntries,
             ProbeMemoHits = joinStats.ProbeMemoHits,
+            ProbeBatches = joinStats.ProbeBatches,
             ElapsedMs = joinStats.ElapsedMs,
             RanAs = joinStats.RanAs,
             BroadcastSpans = joinStats.BroadcastSpans,
@@ -477,7 +478,8 @@ internal sealed class ExplainExecutor
     /// <summary>
     /// Appends what only execution knows to a node's detail: <c>ran=</c> when the operator ran a
     /// different strategy than the plan names, <c>probe-memo-hits=</c> when an index nested-loop
-    /// join answered probes from its memo, and, on a join the join-order search costed,
+    /// join answered probes from its memo, <c>probe-batches=</c> when it probed a unique index in
+    /// batches, and, on a join the join-order search costed,
     /// <c>join-order-est-rows=</c>, the search's estimate of the join's output. The last is a plan
     /// fact, but it is shown only here: it is useful only beside <c>actual_rows</c>, and plain
     /// EXPLAIN output stays unchanged.
@@ -489,6 +491,9 @@ internal sealed class ExplainExecutor
 
         if (stats is { ProbeMemoHits: > 0 } memo)
             detail += ", probe-memo-hits=" + memo.ProbeMemoHits.ToString(System.Globalization.CultureInfo.InvariantCulture);
+
+        if (stats is { ProbeBatches: > 0 } batches)
+            detail += ", probe-batches=" + batches.ProbeBatches.ToString(System.Globalization.CultureInfo.InvariantCulture);
 
         if (node.JoinOrderEstimatedRows is { } searchRows)
             detail += ", join-order-est-rows=" + searchRows.ToString("0", System.Globalization.CultureInfo.InvariantCulture);
