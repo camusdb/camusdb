@@ -575,8 +575,6 @@ public sealed class TestPlanCostBasedJoinOrder : BaseTest
         // orders = 10 000 rows; products = 2 000 rows.
         // With the 10 % default selectivity for WHERE status = 'urgent' (no histograms seeded):
         //   filtered orders = 1 000 rows.
-        // INLJ cost = 1 000 × 2 = 2 000; hash cost = (1 000 + 2 000) + min(1 000, 2 000) × 0.1 = 3 100.
-        // → INLJ is cheaper once the filter is accounted for.
         executor.Statistics.SeedRowCountForTesting(database, ordersTable,   10_000);
         executor.Statistics.SeedRowCountForTesting(database, productsTable,  2_000);
 
@@ -634,12 +632,16 @@ public sealed class TestPlanCostBasedJoinOrder : BaseTest
     [Test]
     public async Task HashVsINLJ_FlipsWhenFilterMakesLeftSmall()
     {
+        // A left row costs one unit and each of its probes four more (three for the probe, one
+        // for the row it returns), so the products table is seeded at 10 000 rows here, where the
+        // filter decides the operator.
         // Without filter accounting, ShouldPreferHashOverIndexNestedLoop would use the full
-        // 10 000-row orders table as the outer side → hash cost (12 200) < INLJ (20 000).
+        // 10 000-row orders table as the outer side → hash cost (21 000) < INLJ (50 000).
         // With filter accounting, EstimatePhysicalNodeRows sees ExecutionFilter → 1 000
-        // filtered rows → INLJ cost (2 000) < hash (3 100) → IndexNestedLoopJoinNode.
+        // filtered rows → INLJ cost (5 000) < hash (11 100) → IndexNestedLoopJoinNode.
         (DatabaseDescriptor database, BoundSelectQuery bound, QueryTicket ticket, CommandExecutor executor)
             = await BindOrdersProductsJoin();
+        executor.Statistics.SeedRowCountForTesting(database, await database.TableDescriptors["products"], 10_000);
 
         QueryPlan plan = new JoinQueryPlanner(DpOff, executor.Statistics).GetPlan(database, bound, ticket);
 

@@ -1127,4 +1127,52 @@ public sealed class TestKvTableStoreIndex
 
         Assert.AreEqual(0, found.Length);
     }
+
+    // ---- ScanIndexEqualityManyAsync ---------------------------------------
+
+    /// <summary>
+    /// The batch form of the equality scan answers by position: each key's row ids in index order, an
+    /// empty list for a key with no entry, and a key with more entries than the page marked as having
+    /// more, with its first page only, so the caller pages it on its own.
+    /// </summary>
+    [Test]
+    public async Task ScanIndexEqualityManyAsync_AnswersEachKeyInIndexOrder_AndMarksAWideKey()
+    {
+        (EmbeddedKahuna node, KvTableStore store) = await CreateStoreAsync("eq-many");
+        await using EmbeddedKahuna __ = node;
+
+        ColumnType[] keyTypes = [ColumnType.Integer64];
+
+        KvTransaction tx = await BeginTransaction(node.Kahuna, "eq-many-put");
+        for (int i = 0; i < 3; i++)
+            await store.PutIndexEntry(tx, "idx_group", CV(new ColumnValue(ColumnType.Integer64, 1L)), new(1, 0, i + 1), unique: false);
+        for (int i = 0; i < 6; i++)
+            await store.PutIndexEntry(tx, "idx_group", CV(new ColumnValue(ColumnType.Integer64, 3L)), new(3, 0, i + 1), unique: false);
+        await CommitTransaction(node.Kahuna, tx);
+
+        CompositeColumnValue[] keys =
+        [
+            CV(new ColumnValue(ColumnType.Integer64, 3L)),
+            CV(new ColumnValue(ColumnType.Integer64, 2L)),
+            CV(new ColumnValue(ColumnType.Integer64, 1L)),
+        ];
+
+        KvIndexAccessor.IndexEqualityProbe[] probes = await store.ScanIndexEqualityManyAsync(KvTransaction.CreateReadOnly(), "idx_group", keyTypes, keys, pageSize: 4);
+
+        Assert.AreEqual(3, probes.Length);
+        Assert.IsTrue(probes[0].HasMore, "six entries do not fit a page of four");
+        Assert.AreEqual(4, probes[0].RowIds.Count, "the first page only");
+        Assert.IsFalse(probes[1].HasMore);
+        Assert.AreEqual(0, probes[1].RowIds.Count, "a key with no entry answers empty");
+        Assert.IsFalse(probes[2].HasMore);
+
+        List<string> single = [];
+        await foreach ((ObjectIdValue rowId, ReadOnlyMemory<byte> _) in store.ScanIndexEquality(KvTransaction.CreateReadOnly(), "idx_group", keyTypes, keys[2], 512))
+            single.Add(rowId.ToString());
+        CollectionAssert.AreEqual(single, probes[2].RowIds.Select(id => id.ToString()).ToList(), "the batch answers what the single scan answers, in its order");
+
+        KvIndexAccessor.IndexEqualityProbe[] wide = await store.ScanIndexEqualityManyAsync(KvTransaction.CreateReadOnly(), "idx_group", keyTypes, [keys[0]], pageSize: 512);
+        Assert.IsFalse(wide[0].HasMore);
+        Assert.AreEqual(6, wide[0].RowIds.Count, "a page that fits the key answers it whole");
+    }
 }

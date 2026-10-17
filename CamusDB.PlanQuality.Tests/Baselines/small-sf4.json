@@ -13,14 +13,14 @@
       ],
       "rows": 1,
       "resultHash": "2a60d4ffd485b3d7",
-      "work": 15854,
-      "statementRowsRead": 7927,
+      "work": 119252,
+      "statementRowsRead": 59626,
       "qErrorMedian": 2.56,
       "qErrorMax": 2.57,
       "joinOrder": "cost-based",
       "joinStepsCosted": 2,
       "plan": [
-        "index-nested-loop-join(on=i.order_id = o.id, index=order_items_order_idx, left=o.id, right=order_id)",
+        "hash-join(on=o.id=order_id, build=i)",
         "index-range-scan(index=orders_status_total_idx, from>='pending', to<='pending')"
       ]
     },
@@ -36,12 +36,12 @@
       "resultHash": "a40a92f0dca949d3",
       "work": 16600,
       "statementRowsRead": 8300,
-      "qErrorMedian": 1.07,
-      "qErrorMax": 1.14,
+      "qErrorMedian": 1.01,
+      "qErrorMax": 1.03,
       "joinOrder": "cost-based",
       "joinStepsCosted": 2,
       "plan": [
-        "index-nested-loop-join(on=ci.id = c.city_id, index=customers_city_idx, left=ci.id, right=city_id, right-filter=c.credit > 4500)",
+        "hash-join(on=ci.id=city_id, build=ci, build-filter=c.credit > 4500)",
         "table-scan(table=cities)"
       ]
     },
@@ -62,7 +62,7 @@
       "joinOrder": "cost-based",
       "joinStepsCosted": 2,
       "plan": [
-        "index-nested-loop-join(on=p.id = i.product_id, index=order_items_product_idx, left=p.id, right=product_id)",
+        "hash-join(on=p.id=product_id, build=p)",
         "table-scan(table=products)"
       ]
     },
@@ -83,7 +83,7 @@
       "joinOrder": "cost-based",
       "joinStepsCosted": 2,
       "plan": [
-        "index-nested-loop-join(on=c.id = o.customer_id, index=orders_customer_idx, left=c.id, right=customer_id)",
+        "index-nested-loop-join(on=c.id = o.customer_id, index=orders_customer_idx, left=c.id, right=customer_id, probe-batches=1)",
         "index-in-list(index=~pk, values=5)"
       ]
     },
@@ -97,14 +97,14 @@
       ],
       "rows": 10,
       "resultHash": "2e0f605dbb9a2213",
-      "work": 62578,
-      "statementRowsRead": 31289,
+      "work": 64000,
+      "statementRowsRead": 32000,
       "qErrorMedian": 1.02,
       "qErrorMax": 1.03,
       "joinOrder": "cost-based",
       "joinStepsCosted": 2,
       "plan": [
-        "index-nested-loop-join(on=c.id = o.customer_id, index=orders_customer_idx, left=c.id, right=customer_id)",
+        "hash-join(on=c.id=customer_id, build=c)",
         "table-scan(table=customers)"
       ]
     },
@@ -125,7 +125,7 @@
       "joinOrder": "cost-based",
       "joinStepsCosted": 2,
       "plan": [
-        "index-nested-loop-join(on=o.customer_id = c.id, index=orders_customer_idx, left=c.id, right=customer_id)",
+        "index-nested-loop-join(on=o.customer_id = c.id, index=orders_customer_idx, left=c.id, right=customer_id, probe-batches=1)",
         "table-scan(table=customers)"
       ]
     },
@@ -146,7 +146,7 @@
       "joinOrder": "cost-based",
       "joinStepsCosted": 2,
       "plan": [
-        "index-nested-loop-join(on=d.id = o.day_id, index=orders_day_idx, left=d.id, right=day_id)",
+        "index-nested-loop-join(on=d.id = o.day_id, index=orders_day_idx, left=d.id, right=day_id, probe-batches=1)",
         "index-range-scan(index=~pk, from>=200, to<=230)"
       ]
     },
@@ -166,8 +166,8 @@
       "joinOrder": "cost-based",
       "joinStepsCosted": 6,
       "plan": [
-        "index-nested-loop-join(on=ci.country_id = co.id, index=cities_country_idx, left=co.id, right=country_id)",
-        "index-nested-loop-join(on=co.region_id = r.id, index=countries_region_idx, left=r.id, right=region_id)",
+        "index-nested-loop-join(on=ci.country_id = co.id, index=cities_country_idx, left=co.id, right=country_id, probe-batches=1)",
+        "index-nested-loop-join(on=co.region_id = r.id, index=countries_region_idx, left=r.id, right=region_id, probe-batches=1)",
         "table-scan(table=regions)"
       ]
     },
@@ -188,8 +188,8 @@
       "joinOrder": "cost-based",
       "joinStepsCosted": 6,
       "plan": [
-        "index-nested-loop-join(on=ci.id = c.city_id, index=customers_city_idx, left=ci.id, right=city_id)",
-        "index-nested-loop-join(on=co.id = ci.country_id, index=cities_country_idx, left=co.id, right=country_id)",
+        "index-nested-loop-join(on=ci.id = c.city_id, index=customers_city_idx, left=ci.id, right=city_id, probe-batches=3)",
+        "index-nested-loop-join(on=co.id = ci.country_id, index=cities_country_idx, left=co.id, right=country_id, probe-batches=1)",
         "table-scan(table=countries)"
       ]
     },
@@ -204,13 +204,13 @@
       "resultHash": "4b1b5805917cb56d",
       "work": 9816,
       "statementRowsRead": 4908,
-      "qErrorMedian": 2.75,
-      "qErrorMax": 8.62,
+      "qErrorMedian": 8.25,
+      "qErrorMax": 12.9,
       "joinOrder": "cost-based",
       "joinStepsCosted": 6,
       "plan": [
-        "index-nested-loop-join(on=p.id = r.product_id, index=reviews_product_idx, left=p.id, right=product_id, right-filter=r.stars = 5)",
-        "index-nested-loop-join(on=b.id = p.brand_id, index=products_brand_idx, left=b.id, right=brand_id)",
+        "index-nested-loop-join(on=p.id = r.product_id, index=reviews_product_idx, left=p.id, right=product_id, right-filter=r.stars = 5, probe-batches=22)",
+        "index-nested-loop-join(on=b.id = p.brand_id, index=products_brand_idx, left=b.id, right=brand_id, probe-batches=1)",
         "table-scan(table=brands)"
       ]
     },
@@ -231,9 +231,9 @@
       "joinOrder": "cost-based",
       "joinStepsCosted": 12,
       "plan": [
-        "index-nested-loop-join(on=c.city_id = ci.id, index=customers_city_idx, left=ci.id, right=city_id)",
-        "index-nested-loop-join(on=ci.country_id = co.id, index=cities_country_idx, left=co.id, right=country_id)",
-        "index-nested-loop-join(on=co.region_id = r.id, index=countries_region_idx, left=r.id, right=region_id)",
+        "hash-join(on=ci.id=city_id, build=c)",
+        "hash-join(on=co.id=country_id, build=ci)",
+        "hash-join(on=r.id=region_id, build=r)",
         "table-scan(table=regions)"
       ]
     },
@@ -253,9 +253,9 @@
       "joinOrder": "cost-based",
       "joinStepsCosted": 12,
       "plan": [
-        "index-nested-loop-join(on=c.city_id = ci.id, index=customers_city_idx, left=ci.id, right=city_id)",
-        "index-nested-loop-join(on=ci.country_id = co.id, index=cities_country_idx, left=co.id, right=country_id)",
-        "index-nested-loop-join(on=co.region_id = r.id, index=countries_region_idx, left=r.id, right=region_id)",
+        "hash-join(on=ci.id=city_id, build=c)",
+        "hash-join(on=co.id=country_id, build=ci)",
+        "hash-join(on=r.id=region_id, build=r)",
         "table-scan(table=regions)"
       ]
     },
@@ -269,17 +269,17 @@
       ],
       "rows": 1,
       "resultHash": "f190f776e469eae8",
-      "work": 6362,
-      "statementRowsRead": 3181,
+      "work": 49208,
+      "statementRowsRead": 24604,
       "qErrorMedian": 1.22,
       "qErrorMax": 2.41,
       "joinOrder": "cost-based",
       "joinStepsCosted": 20,
       "plan": [
-        "index-nested-loop-join(on=o.customer_id = c.id, index=orders_customer_idx, left=c.id, right=customer_id)",
-        "index-nested-loop-join(on=c.city_id = ci.id, index=customers_city_idx, left=ci.id, right=city_id)",
-        "index-nested-loop-join(on=ci.country_id = co.id, index=cities_country_idx, left=co.id, right=country_id)",
-        "index-nested-loop-join(on=co.region_id = r.id, index=countries_region_idx, left=r.id, right=region_id)",
+        "hash-join(on=c.id=customer_id, build=o)",
+        "index-nested-loop-join(on=c.city_id = ci.id, index=customers_city_idx, left=ci.id, right=city_id, probe-batches=1)",
+        "index-nested-loop-join(on=ci.country_id = co.id, index=cities_country_idx, left=co.id, right=country_id, probe-batches=1)",
+        "index-nested-loop-join(on=co.region_id = r.id, index=countries_region_idx, left=r.id, right=region_id, probe-batches=1)",
         "table-scan(table=regions)"
       ]
     },
@@ -299,11 +299,11 @@
       "joinOrder": "cost-based",
       "joinStepsCosted": 20,
       "plan": [
-        "index-nested-loop-join(on=o.customer_id = c.id, index=orders_customer_idx, left=c.id, right=customer_id)",
-        "index-nested-loop-join(on=c.city_id = ci.id, index=customers_city_idx, left=ci.id, right=city_id)",
-        "index-nested-loop-join(on=ci.country_id = co.id, index=cities_country_idx, left=co.id, right=country_id)",
-        "index-nested-loop-join(on=co.region_id = r.id, index=countries_region_idx, left=r.id, right=region_id, right-filter=co.code LIKE 'B%')",
-        "table-scan(table=regions)"
+        "index-nested-loop-join(on=o.customer_id = c.id, index=orders_customer_idx, left=c.id, right=customer_id, probe-batches=23)",
+        "index-nested-loop-join(on=c.city_id = ci.id, index=customers_city_idx, left=ci.id, right=city_id, probe-batches=2)",
+        "index-nested-loop-join(on=ci.country_id = co.id, index=cities_country_idx, left=co.id, right=country_id, probe-batches=1)",
+        "hash-join(on=co.region_id=id, build=co)",
+        "table-scan(table=countries)"
       ]
     },
     {
@@ -325,8 +325,8 @@
         "index-nested-loop-join(on=parent.id = cat.parent_id, index=~pk, left=cat.parent_id, right=id, probe-memo-hits=5766, probe-batches=1)",
         "index-nested-loop-join(on=cat.id = p.category_id, index=~pk, left=p.category_id, right=id, probe-memo-hits=5742, probe-batches=7)",
         "index-nested-loop-join(on=p.id = i.product_id, index=~pk, left=i.product_id, right=id, probe-memo-hits=4427, probe-batches=91)",
-        "index-nested-loop-join(on=i.order_id = o.id, index=order_items_order_idx, left=o.id, right=order_id)",
-        "index-nested-loop-join(on=o.customer_id = c.id, index=orders_customer_idx, left=c.id, right=customer_id)",
+        "index-nested-loop-join(on=i.order_id = o.id, index=order_items_order_idx, left=o.id, right=order_id, probe-batches=39)",
+        "index-nested-loop-join(on=o.customer_id = c.id, index=orders_customer_idx, left=c.id, right=customer_id, probe-batches=1)",
         "table-scan(table=customers)"
       ]
     },
@@ -341,19 +341,19 @@
       ],
       "rows": 1,
       "resultHash": "6ac348621aaebb58",
-      "work": 12890,
-      "statementRowsRead": 6445,
+      "work": 12918,
+      "statementRowsRead": 6459,
       "qErrorMedian": 13.5,
       "qErrorMax": 13.9,
       "joinOrder": "cost-based",
       "joinStepsCosted": 42,
       "plan": [
         "hash-join(on=co.region_id=id, build=r)",
-        "index-nested-loop-join(on=co.id = ci.country_id, index=~pk, left=ci.country_id, right=id, probe-memo-hits=119, probe-batches=2)",
+        "hash-join(on=ci.country_id=id, build=co)",
         "index-nested-loop-join(on=ci.id = c.city_id, index=~pk, left=c.city_id, right=id, probe-memo-hits=86, probe-batches=3)",
         "index-nested-loop-join(on=c.id = o.customer_id, index=~pk, left=o.customer_id, right=id, probe-memo-hits=39, probe-batches=3)",
         "index-nested-loop-join(on=o.id = i.order_id, index=~pk, left=i.order_id, right=id, probe-batches=3)",
-        "index-nested-loop-join(on=i.product_id = p.id, index=order_items_product_idx, left=p.id, right=product_id)",
+        "index-nested-loop-join(on=i.product_id = p.id, index=order_items_product_idx, left=p.id, right=product_id, probe-batches=1)",
         "table-scan(table=products)"
       ]
     },
@@ -367,19 +367,19 @@
       ],
       "rows": 1,
       "resultHash": "6ac348621aaebb58",
-      "work": 12890,
-      "statementRowsRead": 6445,
+      "work": 12918,
+      "statementRowsRead": 6459,
       "qErrorMedian": 13.5,
       "qErrorMax": 13.9,
       "joinOrder": "cost-based",
       "joinStepsCosted": 42,
       "plan": [
         "hash-join(on=co.region_id=id, build=r)",
-        "index-nested-loop-join(on=ci.country_id = co.id, index=~pk, left=ci.country_id, right=id, probe-memo-hits=119, probe-batches=2)",
+        "hash-join(on=ci.country_id=id, build=co)",
         "index-nested-loop-join(on=c.city_id = ci.id, index=~pk, left=c.city_id, right=id, probe-memo-hits=86, probe-batches=3)",
         "index-nested-loop-join(on=o.customer_id = c.id, index=~pk, left=o.customer_id, right=id, probe-memo-hits=39, probe-batches=3)",
         "index-nested-loop-join(on=i.order_id = o.id, index=~pk, left=i.order_id, right=id, probe-batches=3)",
-        "index-nested-loop-join(on=p.id = i.product_id, index=order_items_product_idx, left=p.id, right=product_id)",
+        "index-nested-loop-join(on=p.id = i.product_id, index=order_items_product_idx, left=p.id, right=product_id, probe-batches=1)",
         "table-scan(table=products)"
       ]
     },
@@ -404,8 +404,8 @@
         "hash-join(on=c.city_id=id, build=ci)",
         "index-nested-loop-join(on=o.customer_id = c.id, index=~pk, left=o.customer_id, right=id, probe-memo-hits=3028, probe-batches=72)",
         "index-nested-loop-join(on=i.order_id = o.id, index=~pk, left=i.order_id, right=id, probe-memo-hits=389, probe-batches=72)",
-        "index-nested-loop-join(on=p.id = i.product_id, index=order_items_product_idx, left=p.id, right=product_id)",
-        "index-nested-loop-join(on=b.id = p.brand_id, index=products_brand_idx, left=b.id, right=brand_id)",
+        "index-nested-loop-join(on=p.id = i.product_id, index=order_items_product_idx, left=p.id, right=product_id, probe-batches=7)",
+        "index-nested-loop-join(on=b.id = p.brand_id, index=products_brand_idx, left=b.id, right=brand_id, probe-batches=1)",
         "table-scan(table=brands)"
       ]
     },
@@ -462,14 +462,14 @@
       ],
       "rows": 1,
       "resultHash": "1c2ed2a8a8e00203",
-      "work": 62578,
-      "statementRowsRead": 31289,
-      "qErrorMedian": 2.19,
-      "qErrorMax": 3.38,
+      "work": 64000,
+      "statementRowsRead": 32000,
+      "qErrorMedian": 1.06,
+      "qErrorMax": 1.12,
       "joinOrder": "heuristic",
       "joinStepsCosted": 0,
       "plan": [
-        "index-nested-loop-join(on=o.customer_id = c.id, index=orders_customer_idx, left=c.id, right=customer_id, kind=left-outer)",
+        "hash-join(on=c.id=customer_id, build=o, kind=left-outer)",
         "table-scan(table=customers)"
       ]
     },
@@ -491,7 +491,7 @@
       "joinStepsCosted": 0,
       "plan": [
         "hash-join(on=sh.carrier_id=id, build=ca, kind=left-outer)",
-        "index-nested-loop-join(on=sh.order_id = o.id, index=shipments_order_idx, left=o.id, right=order_id, kind=left-outer)",
+        "index-nested-loop-join(on=sh.order_id = o.id, index=shipments_order_idx, left=o.id, right=order_id, kind=left-outer, probe-batches=3)",
         "index-range-scan(index=orders_store_idx, from>=20, to<21)"
       ]
     },
@@ -513,7 +513,7 @@
       "joinOrder": "heuristic",
       "joinStepsCosted": 0,
       "plan": [
-        "index-nested-loop-join(on=o.customer_id = c.id, index=orders_customer_idx, left=c.id, right=customer_id, kind=left-outer)",
+        "index-nested-loop-join(on=o.customer_id = c.id, index=orders_customer_idx, left=c.id, right=customer_id, kind=left-outer, probe-batches=1)",
         "index-range-scan(index=~pk, to<=20)"
       ]
     },
@@ -534,7 +534,7 @@
       "joinOrder": "heuristic",
       "joinStepsCosted": 0,
       "plan": [
-        "index-nested-loop-join(on=r.product_id = p.id AND r.stars = 1, index=reviews_product_idx, left=p.id, right=product_id, kind=left-outer)",
+        "index-nested-loop-join(on=r.product_id = p.id AND r.stars = 1, index=reviews_product_idx, left=p.id, right=product_id, kind=left-outer, probe-batches=6)",
         "index-range-scan(index=products_category_idx, from>=12, to<13)"
       ]
     },
@@ -576,8 +576,8 @@
       "joinOrder": "cost-based",
       "joinStepsCosted": 9,
       "plan": [
-        "index-nested-loop-join(on=pa.order_id = o.id AND pa.order_id = sh.order_id, index=payments_order_idx, left=o.id, right=order_id)",
-        "index-nested-loop-join(on=sh.order_id = o.id, index=shipments_order_idx, left=o.id, right=order_id)",
+        "index-nested-loop-join(on=pa.order_id = o.id AND pa.order_id = sh.order_id, index=payments_order_idx, left=o.id, right=order_id, probe-batches=3)",
+        "index-nested-loop-join(on=sh.order_id = o.id, index=shipments_order_idx, left=o.id, right=order_id, probe-batches=3)",
         "index-range-scan(index=orders_store_idx, from>=12, to<13)"
       ]
     },
@@ -597,9 +597,9 @@
       "joinOrder": "cost-based",
       "joinStepsCosted": 28,
       "plan": [
-        "index-nested-loop-join(on=i.order_id = o.id AND i.order_id = sh.order_id AND i.order_id = pa.order_id, index=order_items_order_idx, left=o.id, right=order_id, probe-memo-hits=82)",
-        "index-nested-loop-join(on=pa.order_id = o.id AND pa.order_id = sh.order_id, index=payments_order_idx, left=o.id, right=order_id)",
-        "index-nested-loop-join(on=sh.order_id = o.id, index=shipments_order_idx, left=o.id, right=order_id)",
+        "index-nested-loop-join(on=i.order_id = o.id AND i.order_id = sh.order_id AND i.order_id = pa.order_id, index=order_items_order_idx, left=o.id, right=order_id, probe-memo-hits=82, probe-batches=15)",
+        "index-nested-loop-join(on=pa.order_id = o.id AND pa.order_id = sh.order_id, index=payments_order_idx, left=o.id, right=order_id, probe-batches=14)",
+        "index-nested-loop-join(on=sh.order_id = o.id, index=shipments_order_idx, left=o.id, right=order_id, probe-batches=16)",
         "index-range-scan(index=orders_day_idx, from>=100, to<=130)"
       ]
     },
@@ -615,12 +615,12 @@
       "resultHash": "4e4554305d18400e",
       "work": 93375,
       "statementRowsRead": 46687,
-      "qErrorMedian": 1.6,
-      "qErrorMax": 3.23,
+      "qErrorMedian": 1.32,
+      "qErrorMax": 3.87,
       "joinOrder": "cost-based",
       "joinStepsCosted": 28,
       "plan": [
-        "index-nested-loop-join(on=pa.order_id = i.order_id AND i.order_id = sh.order_id AND i.order_id = o.id, index=order_items_order_idx, left=pa.order_id, right=order_id, probe-memo-hits=1)",
+        "index-nested-loop-join(on=pa.order_id = i.order_id AND i.order_id = sh.order_id AND i.order_id = o.id, index=order_items_order_idx, left=pa.order_id, right=order_id, probe-memo-hits=1, probe-batches=6)",
         "index-nested-loop-join(on=pa.order_id = o.id AND sh.order_id = o.id, index=~pk, left=pa.order_id, right=id, probe-memo-hits=1, probe-batches=6)",
         "merge-join(on=sh.order_id=order_id, right-order=forced-index=payments_order_idx, right-filter=pa.method = 'voucher')",
         "table-scan(table=shipments, forced-index=shipments_order_idx)"
@@ -665,7 +665,7 @@
       "joinStepsCosted": 6,
       "plan": [
         "hash-join(on=m.id=manager_id, build=e)",
-        "index-nested-loop-join(on=st.id = m.store_id, index=employees_store_idx, left=st.id, right=store_id)",
+        "index-nested-loop-join(on=st.id = m.store_id, index=employees_store_idx, left=st.id, right=store_id, probe-batches=1)",
         "index-range-scan(index=~pk, to<=5)"
       ]
     },
@@ -702,15 +702,15 @@
       "resultHash": "515e2d111ca10ee4",
       "work": 10002,
       "statementRowsRead": 5001,
-      "qErrorMedian": 2,
-      "qErrorMax": 2.26,
+      "qErrorMedian": 1.01,
+      "qErrorMax": 4.55,
       "joinOrder": "cost-based",
       "joinStepsCosted": 36,
       "plan": [
         "index-nested-loop-join(on=o.employee_id = e.id, index=~pk, left=o.employee_id, right=id, probe-memo-hits=3, probe-batches=1)",
         "index-nested-loop-join(on=o.customer_id = c.id, index=~pk, left=o.customer_id, right=id, right-filter=c.tier = 'gold', probe-memo-hits=268, probe-batches=9)",
         "hash-join(on=o.day_id=id, build=d, build-filter=d.weekday = 0)",
-        "index-nested-loop-join(on=o.store_id = st.id, index=orders_store_idx, left=st.id, right=store_id)",
+        "index-nested-loop-join(on=o.store_id = st.id, index=orders_store_idx, left=st.id, right=store_id, probe-batches=1)",
         "table-scan(table=stores)"
       ]
     },
@@ -723,17 +723,17 @@
       ],
       "rows": 10,
       "resultHash": "8ba51727f7b022cd",
-      "work": 4812,
-      "statementRowsRead": 2406,
-      "qErrorMedian": 1.58,
-      "qErrorMax": 3.39,
+      "work": 4910,
+      "statementRowsRead": 2455,
+      "qErrorMedian": 1.33,
+      "qErrorMax": 1.69,
       "joinOrder": "cost-based",
       "joinStepsCosted": 36,
       "plan": [
-        "index-nested-loop-join(on=p.id = i.product_id, index=order_items_product_idx, left=p.id, right=product_id)",
-        "index-nested-loop-join(on=b.id = p.brand_id, index=~pk, left=p.brand_id, right=id, probe-memo-hits=183, probe-batches=4)",
+        "index-nested-loop-join(on=p.id = i.product_id, index=order_items_product_idx, left=p.id, right=product_id, probe-batches=4)",
+        "hash-join(on=p.brand_id=id, build=b)",
         "hash-join(on=p.supplier_id=id, build=su, build-filter=su.rating = 5)",
-        "index-nested-loop-join(on=cat.id = p.category_id, index=products_category_idx, left=cat.id, right=category_id)",
+        "index-nested-loop-join(on=cat.id = p.category_id, index=products_category_idx, left=cat.id, right=category_id, probe-batches=1)",
         "index-range-scan(index=categories_parent_idx, from>=2, to<3)"
       ]
     },
@@ -748,14 +748,14 @@
       "resultHash": "88a7e84025142c28",
       "work": 1316,
       "statementRowsRead": 658,
-      "qErrorMedian": 3.34,
-      "qErrorMax": 5,
+      "qErrorMedian": 1.43,
+      "qErrorMax": 1.69,
       "joinOrder": "cost-based",
       "joinStepsCosted": 15,
       "plan": [
         "index-nested-loop-join(on=e.id = o.employee_id, index=~pk, left=o.employee_id, right=id, probe-memo-hits=1, probe-batches=1)",
         "index-nested-loop-join(on=d.id = o.day_id, index=~pk, left=o.day_id, right=id, right-filter=d.cal_month = 12 AND d.cal_year = 2025, probe-memo-hits=41, probe-batches=5)",
-        "index-nested-loop-join(on=st.id = o.store_id, index=orders_store_idx, left=st.id, right=store_id)",
+        "index-nested-loop-join(on=st.id = o.store_id, index=orders_store_idx, left=st.id, right=store_id, probe-batches=1)",
         "table-scan(table=stores)"
       ]
     },
@@ -768,18 +768,18 @@
       ],
       "rows": 5,
       "resultHash": "6fa26894cf25f51e",
-      "work": 5080,
-      "statementRowsRead": 2540,
-      "qErrorMedian": 1.56,
-      "qErrorMax": 2.79,
+      "work": 10914,
+      "statementRowsRead": 5457,
+      "qErrorMedian": 3.03,
+      "qErrorMax": 3.11,
       "joinOrder": "cost-based",
       "joinStepsCosted": 59,
       "plan": [
-        "hash-join(on=o.store_id=id, build=st)",
         "hash-join(on=c.segment_id=id, build=seg)",
         "index-nested-loop-join(on=c.id = o.customer_id, index=~pk, left=o.customer_id, right=id, probe-memo-hits=42, probe-batches=3)",
-        "index-nested-loop-join(on=e.id = o.employee_id, index=~pk, left=o.employee_id, right=id, right-filter=e.salary > 100000, probe-memo-hits=176, probe-batches=14)",
-        "index-nested-loop-join(on=d.id = o.day_id, index=orders_day_idx, left=d.id, right=day_id)",
+        "hash-join(on=o.store_id=id, build=st)",
+        "hash-join(on=o.employee_id=id, build=e, build-filter=e.salary > 100000)",
+        "index-nested-loop-join(on=d.id = o.day_id, index=orders_day_idx, left=d.id, right=day_id, probe-batches=1)",
         "table-scan(table=days)"
       ]
     },
@@ -795,14 +795,14 @@
       "resultHash": "2a1e929d68465e2f",
       "work": 48400,
       "statementRowsRead": 24200,
-      "qErrorMedian": 1,
-      "qErrorMax": 1.19,
+      "qErrorMedian": 3.02,
+      "qErrorMax": 3.02,
       "joinOrder": "cost-based",
       "joinStepsCosted": 6,
       "plan": [
-        "hash-join(on=o.promotion_id=id, build=pr, build-filter=pr.discount_pct >= 40)",
-        "index-nested-loop-join(on=st.id = o.store_id, index=orders_store_idx, left=st.id, right=store_id)",
-        "table-scan(table=stores)"
+        "hash-join(on=o.store_id=id, build=st)",
+        "hash-join(on=pr.id=promotion_id, build=pr)",
+        "table-scan(table=promotions)"
       ]
     },
     {
@@ -823,7 +823,7 @@
       "joinStepsCosted": 6,
       "plan": [
         "hash-join(on=c.id=customer_id, build=r)",
-        "index-nested-loop-join(on=seg.id = c.segment_id, index=customers_segment_idx, left=seg.id, right=segment_id)",
+        "hash-join(on=seg.id=segment_id, build=seg)",
         "table-scan(table=segments)"
       ]
     },
@@ -839,8 +839,8 @@
       "resultHash": "e4af37d5d3898c88",
       "work": 45600,
       "statementRowsRead": 22800,
-      "qErrorMedian": 1.24,
-      "qErrorMax": 1.24,
+      "qErrorMedian": 1.02,
+      "qErrorMax": 1.02,
       "joinOrder": "cost-based",
       "joinStepsCosted": 15,
       "plan": [
@@ -859,22 +859,22 @@
       ],
       "rows": 6,
       "resultHash": "60452dfc9d3f64f0",
-      "work": 10944,
-      "statementRowsRead": 5472,
-      "qErrorMedian": 9.87,
-      "qErrorMax": 10.07,
+      "work": 21942,
+      "statementRowsRead": 10971,
+      "qErrorMedian": 2.32,
+      "qErrorMax": 2.36,
       "joinOrder": "cost-based",
       "joinStepsCosted": 175,
       "plan": [
-        "index-nested-loop-join(on=b.id = p.brand_id, index=~pk, left=p.brand_id, right=id, probe-memo-hits=616, probe-batches=10)",
+        "hash-join(on=p.brand_id=id, build=b)",
         "hash-join(on=co.region_id=id, build=r)",
         "hash-join(on=ci.country_id=id, build=co)",
-        "index-nested-loop-join(on=ci.id = c.city_id, index=~pk, left=c.city_id, right=id, probe-memo-hits=574, probe-batches=11)",
+        "hash-join(on=c.city_id=id, build=ci)",
         "index-nested-loop-join(on=c.id = o.customer_id, index=~pk, left=o.customer_id, right=id, probe-memo-hits=358, probe-batches=11)",
         "hash-join(on=p.category_id=id, build=cat, build-filter=cat.parent_id = 1, right-index=categories_parent_idx)",
-        "index-nested-loop-join(on=p.id = i.product_id, index=~pk, left=i.product_id, right=id, probe-memo-hits=1688, probe-batches=39)",
-        "index-nested-loop-join(on=o.id = i.order_id, index=order_items_order_idx, left=o.id, right=order_id)",
-        "index-nested-loop-join(on=d.id = o.day_id, index=orders_day_idx, left=d.id, right=day_id)",
+        "hash-join(on=i.product_id=id, build=p)",
+        "index-nested-loop-join(on=o.id = i.order_id, index=order_items_order_idx, left=o.id, right=order_id, probe-batches=16)",
+        "index-nested-loop-join(on=d.id = o.day_id, index=orders_day_idx, left=d.id, right=day_id, probe-batches=1)",
         "table-scan(table=days)"
       ]
     },
@@ -887,25 +887,25 @@
       ],
       "rows": 6,
       "resultHash": "aa02be7af2c0eb98",
-      "work": 40980,
-      "statementRowsRead": 20490,
-      "qErrorMedian": 4.9,
-      "qErrorMax": 5.01,
+      "work": 76654,
+      "statementRowsRead": 38327,
+      "qErrorMedian": 1.07,
+      "qErrorMax": 1.07,
       "joinOrder": "cost-based",
       "joinStepsCosted": 831,
       "plan": [
-        "hash-join(on=p.category_id=id, build=cat)",
         "hash-join(on=p.brand_id=id, build=b)",
-        "index-nested-loop-join(on=p.id = i.product_id, index=~pk, left=i.product_id, right=id, probe-memo-hits=1974, probe-batches=44)",
-        "index-nested-loop-join(on=o.id = i.order_id, index=order_items_order_idx, left=o.id, right=order_id)",
+        "hash-join(on=p.category_id=id, build=cat)",
+        "hash-join(on=i.product_id=id, build=p)",
+        "index-nested-loop-join(on=o.id = i.order_id, index=order_items_order_idx, left=o.id, right=order_id, probe-batches=19)",
+        "hash-join(on=o.store_id=id, build=st)",
         "hash-join(on=co.region_id=id, build=r)",
         "hash-join(on=ci.country_id=id, build=co)",
-        "index-nested-loop-join(on=ci.id = c.city_id, index=~pk, left=c.city_id, right=id, probe-memo-hits=1043, probe-batches=19)",
-        "hash-join(on=o.store_id=id, build=st)",
+        "hash-join(on=c.city_id=id, build=ci)",
         "index-nested-loop-join(on=c.id = o.customer_id, index=~pk, left=o.customer_id, right=id, probe-memo-hits=630, probe-batches=19)",
-        "index-nested-loop-join(on=e.id = o.employee_id, index=~pk, left=o.employee_id, right=id, right-filter=e.salary >= 110000, probe-memo-hits=8908, probe-batches=188)",
-        "index-nested-loop-join(on=d.id = o.day_id, index=orders_day_idx, left=d.id, right=day_id)",
-        "table-scan(table=days)"
+        "hash-join(on=o.day_id=id, build=d, build-filter=d.cal_year = 2024)",
+        "hash-join(on=e.id=employee_id, build=e)",
+        "table-scan(table=employees)"
       ]
     },
     {
@@ -918,25 +918,25 @@
       ],
       "rows": 1,
       "resultHash": "963dd499143c13a3",
-      "work": 20448,
-      "statementRowsRead": 10224,
+      "work": 20380,
+      "statementRowsRead": 10190,
       "qErrorMedian": 100.9,
       "qErrorMax": 104.5,
       "joinOrder": "cost-based",
       "joinStepsCosted": 831,
       "plan": [
         "index-nested-loop-join(on=e.id = o.employee_id, index=~pk, left=o.employee_id, right=id, probe-memo-hits=241, probe-batches=16)",
-        "index-nested-loop-join(on=st.id = o.store_id, index=~pk, left=o.store_id, right=id, probe-memo-hits=866, probe-batches=13)",
+        "index-nested-loop-join(on=st.id = o.store_id, index=~pk, left=o.store_id, right=id, probe-memo-hits=866, probe-batches=15)",
         "index-nested-loop-join(on=d.id = o.day_id, index=~pk, left=o.day_id, right=id, probe-memo-hits=467, probe-batches=16)",
         "hash-join(on=co.region_id=id, build=r)",
-        "index-nested-loop-join(on=ci.country_id = co.id, index=~pk, left=ci.country_id, right=id, probe-memo-hits=984, probe-batches=9)",
+        "hash-join(on=ci.country_id=id, build=co)",
         "index-nested-loop-join(on=c.city_id = ci.id, index=~pk, left=c.city_id, right=id, probe-memo-hits=873, probe-batches=16)",
         "index-nested-loop-join(on=o.customer_id = c.id, index=~pk, left=o.customer_id, right=id, probe-memo-hits=516, probe-batches=17)",
         "index-nested-loop-join(on=i.order_id = o.id, index=~pk, left=i.order_id, right=id, probe-memo-hits=20, probe-batches=17)",
-        "index-nested-loop-join(on=p.id = i.product_id, index=order_items_product_idx, left=p.id, right=product_id)",
+        "index-nested-loop-join(on=p.id = i.product_id, index=order_items_product_idx, left=p.id, right=product_id, probe-batches=1)",
         "index-nested-loop-join(on=b.id = p.brand_id, index=~pk, left=p.brand_id, right=id, probe-batches=1)",
-        "index-nested-loop-join(on=cat.id = p.category_id, index=products_category_idx, left=cat.id, right=category_id, right-filter=p.id = 7)",
-        "table-scan(table=categories)"
+        "index-nested-loop-join(on=cat.id = p.category_id, index=~pk, left=p.category_id, right=id, probe-batches=1)",
+        "table-scan(table=products)"
       ]
     },
     {
@@ -949,26 +949,26 @@
       ],
       "rows": 5,
       "resultHash": "1438353551483f78",
-      "work": 12282,
-      "statementRowsRead": 6141,
-      "qErrorMedian": 1.67,
-      "qErrorMax": 1.71,
+      "work": 10534,
+      "statementRowsRead": 5267,
+      "qErrorMedian": 1.37,
+      "qErrorMax": 1.4,
       "joinOrder": "cost-based",
       "joinStepsCosted": 1659,
       "plan": [
         "hash-join(on=p.brand_id=id, build=b)",
         "hash-join(on=p.category_id=id, build=cat)",
         "index-nested-loop-join(on=p.id = i.product_id, index=~pk, left=i.product_id, right=id, probe-memo-hits=306, probe-batches=9)",
-        "index-nested-loop-join(on=o.id = i.order_id, index=order_items_order_idx, left=o.id, right=order_id)",
+        "index-nested-loop-join(on=o.id = i.order_id, index=order_items_order_idx, left=o.id, right=order_id, probe-batches=4)",
         "index-nested-loop-join(on=e.id = o.employee_id, index=~pk, left=o.employee_id, right=id, probe-memo-hits=40, probe-batches=4)",
-        "hash-join(on=c.segment_id=id, build=seg)",
         "hash-join(on=o.store_id=id, build=st)",
-        "hash-join(on=o.day_id=id, build=d, build-filter=d.cal_month = 7)",
-        "index-nested-loop-join(on=c.id = o.customer_id, index=orders_customer_idx, left=c.id, right=customer_id)",
-        "index-nested-loop-join(on=ci.id = c.city_id, index=customers_city_idx, left=ci.id, right=city_id)",
-        "index-nested-loop-join(on=co.id = ci.country_id, index=cities_country_idx, left=co.id, right=country_id)",
-        "index-nested-loop-join(on=r.id = co.region_id, index=countries_region_idx, left=r.id, right=region_id)",
-        "table-scan(table=regions)"
+        "hash-join(on=c.segment_id=id, build=seg)",
+        "hash-join(on=co.region_id=id, build=r, build-filter=r.name = 'west')",
+        "hash-join(on=ci.country_id=id, build=co)",
+        "hash-join(on=c.city_id=id, build=ci)",
+        "index-nested-loop-join(on=c.id = o.customer_id, index=~pk, left=o.customer_id, right=id, probe-memo-hits=1127, probe-batches=32)",
+        "index-nested-loop-join(on=d.id = o.day_id, index=orders_day_idx, left=d.id, right=day_id, probe-batches=1)",
+        "table-scan(table=days)"
       ]
     },
     {
@@ -982,26 +982,26 @@
       ],
       "rows": 1,
       "resultHash": "2ecdf56ed83248ab",
-      "work": 12282,
-      "statementRowsRead": 6141,
-      "qErrorMedian": 1.67,
-      "qErrorMax": 1.71,
+      "work": 10534,
+      "statementRowsRead": 5267,
+      "qErrorMedian": 1.37,
+      "qErrorMax": 1.4,
       "joinOrder": "cost-based",
       "joinStepsCosted": 1659,
       "plan": [
         "hash-join(on=p.category_id=id, build=cat)",
         "hash-join(on=p.brand_id=id, build=b)",
         "index-nested-loop-join(on=p.id = i.product_id, index=~pk, left=i.product_id, right=id, probe-memo-hits=306, probe-batches=9)",
-        "index-nested-loop-join(on=o.id = i.order_id, index=order_items_order_idx, left=o.id, right=order_id)",
-        "hash-join(on=o.store_id=id, build=st)",
+        "index-nested-loop-join(on=o.id = i.order_id, index=order_items_order_idx, left=o.id, right=order_id, probe-batches=4)",
         "index-nested-loop-join(on=e.id = o.employee_id, index=~pk, left=o.employee_id, right=id, probe-memo-hits=40, probe-batches=4)",
+        "hash-join(on=o.store_id=id, build=st)",
         "hash-join(on=c.segment_id=id, build=seg)",
-        "hash-join(on=o.day_id=id, build=d, build-filter=d.cal_month = 7)",
-        "index-nested-loop-join(on=c.id = o.customer_id, index=orders_customer_idx, left=c.id, right=customer_id)",
-        "index-nested-loop-join(on=ci.id = c.city_id, index=customers_city_idx, left=ci.id, right=city_id)",
-        "index-nested-loop-join(on=co.id = ci.country_id, index=cities_country_idx, left=co.id, right=country_id)",
-        "index-nested-loop-join(on=r.id = co.region_id, index=countries_region_idx, left=r.id, right=region_id)",
-        "table-scan(table=regions)"
+        "hash-join(on=co.region_id=id, build=r, build-filter=r.name = 'west')",
+        "hash-join(on=ci.country_id=id, build=co)",
+        "hash-join(on=c.city_id=id, build=ci)",
+        "index-nested-loop-join(on=c.id = o.customer_id, index=~pk, left=o.customer_id, right=id, probe-memo-hits=1127, probe-batches=32)",
+        "index-nested-loop-join(on=d.id = o.day_id, index=orders_day_idx, left=d.id, right=day_id, probe-batches=1)",
+        "table-scan(table=days)"
       ]
     },
     {
@@ -1014,27 +1014,27 @@
       ],
       "rows": 5,
       "resultHash": "951d74f25566f759",
-      "work": 19594,
-      "statementRowsRead": 9797,
-      "qErrorMedian": 1.47,
-      "qErrorMax": 1.5,
+      "work": 75176,
+      "statementRowsRead": 37588,
+      "qErrorMedian": 4.13,
+      "qErrorMax": 4.2,
       "joinOrder": "cost-based",
       "joinStepsCosted": 6733,
       "plan": [
         "hash-join(on=p.supplier_id=id, build=su)",
         "hash-join(on=p.brand_id=id, build=b)",
         "hash-join(on=p.category_id=id, build=cat)",
-        "index-nested-loop-join(on=p.id = i.product_id, index=~pk, left=i.product_id, right=id, probe-memo-hits=459, probe-batches=13)",
-        "index-nested-loop-join(on=o.id = i.order_id, index=order_items_order_idx, left=o.id, right=order_id)",
-        "index-nested-loop-join(on=e.id = o.employee_id, index=~pk, left=o.employee_id, right=id, probe-memo-hits=26, probe-batches=5)",
+        "hash-join(on=i.product_id=id, build=p)",
+        "index-nested-loop-join(on=o.id = i.order_id, index=order_items_order_idx, left=o.id, right=order_id, probe-batches=5)",
+        "hash-join(on=o.employee_id=id, build=e)",
         "hash-join(on=o.store_id=id, build=st)",
-        "index-nested-loop-join(on=d.id = o.day_id, index=~pk, left=o.day_id, right=id, probe-memo-hits=65, probe-batches=5)",
+        "hash-join(on=o.day_id=id, build=d)",
         "hash-join(on=co.region_id=id, build=r)",
         "hash-join(on=ci.country_id=id, build=co)",
         "hash-join(on=c.city_id=id, build=ci)",
         "hash-join(on=o.promotion_id=id, build=pr, build-filter=pr.discount_pct >= 45)",
-        "index-nested-loop-join(on=c.id = o.customer_id, index=orders_customer_idx, left=c.id, right=customer_id)",
-        "index-nested-loop-join(on=seg.id = c.segment_id, index=customers_segment_idx, left=seg.id, right=segment_id)",
+        "hash-join(on=c.id=customer_id, build=o)",
+        "index-nested-loop-join(on=seg.id = c.segment_id, index=customers_segment_idx, left=seg.id, right=segment_id, probe-batches=1)",
         "table-scan(table=segments)"
       ]
     },
@@ -1048,30 +1048,30 @@
       ],
       "rows": 12,
       "resultHash": "0a8d35ebf269092a",
-      "work": 100770,
-      "statementRowsRead": 50385,
-      "qErrorMedian": 4.42,
-      "qErrorMax": 5,
+      "work": 129974,
+      "statementRowsRead": 64987,
+      "qErrorMedian": 1.13,
+      "qErrorMax": 3.91,
       "joinOrder": "cost-based",
       "joinStepsCosted": 22929,
       "plan": [
         "hash-join(on=sh.carrier_id=id, build=ca)",
         "hash-join(on=o.promotion_id=id, build=pr)",
+        "hash-join(on=o.employee_id=id, build=e)",
         "hash-join(on=o.store_id=id, build=st)",
-        "index-nested-loop-join(on=e.id = o.employee_id, index=~pk, left=o.employee_id, right=id, probe-memo-hits=1246, probe-batches=42)",
-        "hash-join(on=p.supplier_id=id, build=su)",
         "hash-join(on=co.region_id=id, build=r)",
         "hash-join(on=ci.country_id=id, build=co)",
         "hash-join(on=c.city_id=id, build=ci)",
         "hash-join(on=c.segment_id=id, build=seg)",
-        "index-nested-loop-join(on=c.id = o.customer_id, index=~pk, left=o.customer_id, right=id, probe-memo-hits=1735, probe-batches=44)",
+        "hash-join(on=o.customer_id=id, build=c)",
+        "hash-join(on=o.id=order_id, build=sh)",
+        "hash-join(on=o.day_id=id, build=d, build-filter=d.cal_year = 2025)",
+        "hash-join(on=i.order_id=id, build=o)",
+        "index-nested-loop-join(on=p.id = i.product_id, index=order_items_product_idx, left=p.id, right=product_id, probe-batches=13)",
+        "hash-join(on=p.supplier_id=id, build=su)",
         "hash-join(on=p.brand_id=id, build=b)",
-        "index-nested-loop-join(on=sh.order_id = o.id, index=shipments_order_idx, left=o.id, right=order_id, probe-memo-hits=362)",
-        "hash-join(on=p.category_id=id, build=cat, build-filter=cat.parent_id = 3, right-index=categories_parent_idx)",
-        "index-nested-loop-join(on=p.id = i.product_id, index=~pk, left=i.product_id, right=id, probe-memo-hits=25080, probe-batches=445)",
-        "index-nested-loop-join(on=o.id = i.order_id, index=order_items_order_idx, left=o.id, right=order_id)",
-        "index-nested-loop-join(on=d.id = o.day_id, index=orders_day_idx, left=d.id, right=day_id)",
-        "table-scan(table=days)"
+        "index-nested-loop-join(on=cat.id = p.category_id, index=products_category_idx, left=cat.id, right=category_id, probe-batches=1)",
+        "index-range-scan(index=categories_parent_idx, from>=3, to<4)"
       ]
     },
     {
@@ -1085,16 +1085,16 @@
       ],
       "rows": 1,
       "resultHash": "487f58593847c9a3",
-      "work": 12536,
-      "statementRowsRead": 6268,
-      "qErrorMedian": 2.05,
-      "qErrorMax": 20.33,
+      "work": 25462,
+      "statementRowsRead": 12731,
+      "qErrorMedian": 1.14,
+      "qErrorMax": 11.04,
       "joinOrder": "cost-based",
       "joinStepsCosted": 20,
       "plan": [
-        "hash-join(on=ci.id=city_id, o.store_id=id, build=st)",
-        "index-nested-loop-join(on=o.customer_id = c.id, index=orders_customer_idx, left=c.id, right=customer_id)",
-        "index-nested-loop-join(on=c.city_id = ci.id, index=customers_city_idx, left=ci.id, right=city_id)",
+        "hash-join(on=o.customer_id=id, ci.id=city_id, build=c)",
+        "index-nested-loop-join(on=o.store_id = st.id, index=orders_store_idx, left=st.id, right=store_id, probe-batches=1)",
+        "hash-join(on=ci.id=city_id, build=ci)",
         "table-scan(table=cities)"
       ]
     },
@@ -1116,8 +1116,8 @@
       "joinStepsCosted": 20,
       "plan": [
         "index-nested-loop-join(on=c.city_id = ci.id AND o.customer_id = c.id, index=~pk, left=o.customer_id, right=id, probe-memo-hits=6563, probe-batches=142)",
-        "index-nested-loop-join(on=st.id = o.store_id, index=orders_store_idx, left=st.id, right=store_id)",
-        "index-nested-loop-join(on=st.city_id = ci.id, index=stores_city_idx, left=ci.id, right=city_id)",
+        "index-nested-loop-join(on=st.id = o.store_id, index=orders_store_idx, left=st.id, right=store_id, probe-batches=1)",
+        "index-nested-loop-join(on=st.city_id = ci.id, index=stores_city_idx, left=ci.id, right=city_id, probe-batches=1)",
         "index-range-scan(index=~pk, to<=3)"
       ]
     },
@@ -1139,7 +1139,7 @@
       "joinStepsCosted": 20,
       "plan": [
         "hash-join(on=o.customer_id=id, ci.id=city_id, build=c)",
-        "index-nested-loop-join(on=st.id = o.store_id, index=orders_store_idx, left=st.id, right=store_id)",
+        "hash-join(on=st.id=store_id, build=o)",
         "index-nested-loop-join(on=ci.id = st.city_id, index=~pk, left=st.city_id, right=id, probe-memo-hits=91, probe-batches=3)",
         "table-scan(table=stores)"
       ]
@@ -1155,16 +1155,16 @@
       "resultHash": "c0e4c6378945ee96",
       "work": 175246,
       "statementRowsRead": 87623,
-      "qErrorMedian": 1,
-      "qErrorMax": 6.22,
+      "qErrorMedian": 2.07,
+      "qErrorMax": 3.18,
       "joinOrder": "cost-based",
       "joinStepsCosted": 35,
       "plan": [
-        "hash-join(on=o.store_id=id, su.city_id=city_id, build=st)",
-        "hash-join(on=i.order_id=id, build=o)",
-        "index-nested-loop-join(on=p.id = i.product_id, index=order_items_product_idx, left=p.id, right=product_id)",
-        "hash-join(on=su.id=supplier_id, build=su)",
-        "table-scan(table=suppliers)"
+        "hash-join(on=i.order_id=id, st.id=store_id, build=o)",
+        "hash-join(on=p.id=product_id, build=i)",
+        "hash-join(on=su.id=supplier_id, build=p)",
+        "hash-join(on=st.city_id=city_id, build=st)",
+        "table-scan(table=stores)"
       ]
     },
     {
@@ -1219,12 +1219,12 @@
       "resultHash": "95251843b02c5f7e",
       "work": 5908,
       "statementRowsRead": 2954,
-      "qErrorMedian": 1.15,
-      "qErrorMax": 1.17,
+      "qErrorMedian": 1.04,
+      "qErrorMax": 1.06,
       "joinOrder": "cost-based",
       "joinStepsCosted": 2,
       "plan": [
-        "index-nested-loop-join(on=st.id = o.store_id, index=orders_store_idx, left=st.id, right=store_id)",
+        "index-nested-loop-join(on=st.id = o.store_id, index=orders_store_idx, left=st.id, right=store_id, probe-batches=1)",
         "table-scan(table=stores)"
       ]
     },
@@ -1392,8 +1392,8 @@
       "resultHash": "3e559f5b4a27fdee",
       "work": 48000,
       "statementRowsRead": 24000,
-      "qErrorMedian": 1.51,
-      "qErrorMax": 4.96,
+      "qErrorMedian": 1,
+      "qErrorMax": 2.01,
       "joinOrder": null,
       "joinStepsCosted": 0,
       "plan": [
@@ -1441,7 +1441,7 @@
       "joinOrder": "cost-based",
       "joinStepsCosted": 6,
       "plan": [
-        "index-nested-loop-join(on=i.product_id = ap.id, index=order_items_product_idx, left=ap.id, right=product_id)",
+        "index-nested-loop-join(on=i.product_id = ap.id, index=order_items_product_idx, left=ap.id, right=product_id, probe-batches=29)",
         "hash-join(on=b.id=brand_id, build=ap)",
         "index-range-scan(index=~pk, to<=3)"
       ]
@@ -1499,8 +1499,8 @@
       "resultHash": "99b24df791c6e533",
       "work": 184,
       "statementRowsRead": 92,
-      "qErrorMedian": 6.52,
-      "qErrorMax": 6.52,
+      "qErrorMedian": 6.49,
+      "qErrorMax": 6.49,
       "joinOrder": null,
       "joinStepsCosted": 0,
       "plan": [
@@ -1646,7 +1646,7 @@
       "resultHash": "e3b0c44298fc1c14",
       "work": 48000,
       "statementRowsRead": 24000,
-      "qErrorMedian": 2400,
+      "qErrorMedian": 1,
       "qErrorMax": 24000,
       "joinOrder": null,
       "joinStepsCosted": 0,
@@ -2204,7 +2204,7 @@
       "resultHash": "1edadc306ff745f6",
       "work": 6438,
       "statementRowsRead": 3219,
-      "qErrorMedian": 3.05,
+      "qErrorMedian": 1.05,
       "qErrorMax": 51.08,
       "joinOrder": null,
       "joinStepsCosted": 0,

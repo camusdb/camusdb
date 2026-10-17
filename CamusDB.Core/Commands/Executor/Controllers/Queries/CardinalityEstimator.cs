@@ -677,8 +677,11 @@ internal static class CardinalityEstimator
         if (inList.Values.Count == 0)
             return 0.0;
 
-        ColumnHistogram? hist = stats.GetColumnHistogram(database, table, inList.ColumnName);
-        long? ndv = stats.GetColumnNdv(database, table, inList.ColumnName);
+        // A list on a joined table carries its alias ("k.keyword"); the statistics are keyed by
+        // the bare column name, as for a single comparison.
+        string columnName = StripAliasPrefix(inList.ColumnName);
+        ColumnHistogram? hist = stats.GetColumnHistogram(database, table, columnName);
+        long? ndv = stats.GetColumnNdv(database, table, columnName);
 
         // Sum individual equality selectivities — each value contributes independently.
         double total = 0.0;

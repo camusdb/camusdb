@@ -24,7 +24,9 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// The probe memo of an index nested-loop join: an outer stream that repeats a key probes the
 /// store once per distinct key, the repeats are answered from the memo and reported as
 /// <c>probe-memo-hits=</c>, and the rows are the same with the memo off. Ten parents with thirty
-/// children each; the children drive every join here, so each key repeats thirty times.
+/// children each; the children drive every join here, so each key repeats thirty times. The join
+/// probes a page of 64 outer rows at a time, and a repeat inside one page shares the page's probe
+/// even with the memo off, so the memo-off counts are per page, not per outer row.
 /// </summary>
 [TestFixture]
 [NonParallelizable]
@@ -69,7 +71,7 @@ public sealed class TestIndexNestedLoopProbeMemo : BaseTest
     }
 
     [Test]
-    public async Task Memo_Off_ReturnsTheSameRows_AndProbesEveryOuterRow()
+    public async Task Memo_Off_ReturnsTheSameRows_AndProbesEveryPage()
     {
         Db db = await CreateTables();
         const string sql = "SELECT c.id AS child, d.id AS sibling FROM children c JOIN children d ON d.parent_id = c.parent_id";
@@ -79,9 +81,12 @@ public sealed class TestIndexNestedLoopProbeMemo : BaseTest
         List<string> withoutMemo = Render(await Query(db, sql));
         CollectionAssert.AreEqual(withoutMemo, withMemo);
 
+        // With the memo off, every page of 64 outer rows probes the ten parents it cycles through once
+        // each (five pages, 1,500 entries); the repeats inside a page share the page's probe.
         IReadOnlyDictionary<string, ColumnValue> probe = await ProbeNode(db, sql);
-        Assert.AreEqual(9_000, probe["kv_scan_entries"].LongValue, "every outer row probes with the memo off");
-        StringAssert.DoesNotContain("probe-memo-hits", probe["detail"].StrValue);
+        Assert.AreEqual(1_500, probe["kv_scan_entries"].LongValue, "every page probes its ten keys with the memo off");
+        StringAssert.Contains("probe-batches=5", probe["detail"].StrValue);
+        StringAssert.Contains("probe-memo-hits=250", probe["detail"].StrValue, "the repeats inside a page share its probe");
     }
 
     [Test]
@@ -94,9 +99,14 @@ public sealed class TestIndexNestedLoopProbeMemo : BaseTest
 
         Assert.AreEqual(9_000, (await Query(db, sql)).Count);
 
+        // Page 1 probes the ten parents (300 entries) and the memo keeps the first one only, which fills
+        // it. Each of the four later pages probes the other nine parents once (270 entries) and answers
+        // the first parent from the memo. Every repeat inside a page shares the page's probe: 300 rows
+        // minus 10 first probes minus 4 pages times 9 probes = 254 hits.
         IReadOnlyDictionary<string, ColumnValue> probe = await ProbeNode(db, sql);
-        StringAssert.Contains("probe-memo-hits=29", probe["detail"].StrValue);
-        Assert.AreEqual(300 + 9 * 29 * 30, probe["kv_scan_entries"].LongValue, "the nine unmemoized keys are probed 29 more times each");
+        StringAssert.Contains("probe-memo-hits=254", probe["detail"].StrValue);
+        StringAssert.Contains("probe-batches=5", probe["detail"].StrValue);
+        Assert.AreEqual(300 + 4 * 9 * 30, probe["kv_scan_entries"].LongValue, "the nine unmemoized keys are probed once per later page");
     }
 
     [Test]

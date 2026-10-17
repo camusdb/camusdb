@@ -33,6 +33,13 @@ internal static class KvStoreConstants
     internal const int ProbeBatchMaxKeys = 512;
 
     /// <summary>
+    /// The most index entries one batched range probe may ask for in one call: the sum of its seeks' page
+    /// sizes. Kahuna refuses a larger probe, so the batch form of the equality scan splits above it. The
+    /// value is Kahuna's default <c>MaxProbeRangeEntries</c>, which CamusDB does not change.
+    /// </summary>
+    internal const int ProbeRangeMaxEntries = 65_536;
+
+    /// <summary>
     /// Page size of a foreign-key existence probe. The probe stops at the first live entry, so a full
     /// page would transfer up to <see cref="DefaultPageSize"/> keys to answer one yes-or-no question
     /// for every parent that has many children. A small page keeps that cost flat; entries the page

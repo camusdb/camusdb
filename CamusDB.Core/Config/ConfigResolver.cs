@@ -209,6 +209,7 @@ public static class ConfigResolver
         StatsFlushIntervalMs = config.StatsFlushIntervalMs,
         StatsAnalyzeSampleRows = config.StatsAnalyzeSampleRows,
         StatsHistogramBuckets = config.StatsHistogramBuckets,
+        StatsAnalyzeMaxColumns = config.StatsAnalyzeMaxColumns,
 
         AutoAnalyzeEnabled = config.AutoAnalyzeEnabled,
         AutoAnalyzeCheckIntervalMs = config.AutoAnalyzeCheckIntervalMs,

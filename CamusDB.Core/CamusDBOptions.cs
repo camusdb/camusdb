@@ -98,6 +98,18 @@ public sealed record CamusDBOptions
     [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Cluster)]
     public int StatsHistogramBuckets { get; init; } = 100;
 
+    /// <summary>
+    /// The most columns of one table that <c>ANALYZE</c> collects a distinct count, bounds and a
+    /// histogram for. The leading column of every readable index comes first, then the other
+    /// columns in declaration order, so a filter on a column with no index gets an estimate from
+    /// its own data instead of the default selectivity. The cap bounds the statistics blob and the
+    /// memory of a scan: a manual scan holds the sampled values of each column, the background scan
+    /// one reservoir and one sketch per column. The indexed leading columns are always collected,
+    /// also past the cap. <c>0</c> collects the indexed leading columns only.
+    /// </summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Cluster)]
+    public int StatsAnalyzeMaxColumns { get; init; } = 32;
+
     // ── Automatic (background) ANALYZE ────────────────────────────────────────────────────────
     // Auto-analyze keeps optimizer statistics fresh without a user running ANALYZE, while staying
     // low-priority: it reads a lock-free snapshot (never blocks/aborts foreground work), bounds

@@ -464,10 +464,12 @@ in `SQLExecutorBaseCreator.EvalComparison`, `EvalAnd` and `EvalOr`, which every 
        `ON` conjuncts could drive the lookup, one on a unique index wins over one on a non-unique
        index, whatever their order in the `ON`: a unique probe returns one row, a non-unique probe
        returns every row with the value, and a popular value can mean thousands of them per left
-       row. A unique probe runs a page of left rows at a time (`IndexScanFetchBatchSize` rows): the
-       distinct keys of the page are read with one batched index read and the rows found with one
-       batched row read, so a page costs two store calls instead of two per left row, and the rows
-       still come out in left-row order. A non-unique probe walks the store's equality scan: the raw window
+       row. Both run a page of left rows at a time (`IndexScanFetchBatchSize` rows): the distinct
+       keys of the page are read with one batched index read (a point probe per key on a unique
+       index, a bounded seek per key on a non-unique one) and the rows found with one batched row
+       read, so a page costs two store calls instead of one or two per left row, and the rows still
+       come out in left-row order. A non-unique key with more entries than one probe page is read on
+       its own, page by page. A non-unique probe walks the store's equality scan: the raw window
        `[v, v + sentinel]` in the index's own direction holds exactly the entries of the key, so
        the scan returns their row ids without decoding a key. The probe asks for the store's
        default page: the store stops a bounded scan at the key, so a page costs the entries of the
@@ -852,8 +854,9 @@ with two refinements:
   the **residual**, spread evenly over the rest of the distinct values. The sum runs over the heavy
   values of either side (a value heavy on one side only meets the other side's residual at its average
   frequency), plus the two residuals joined with the textbook formula. With no heavy value on either
-  side this is exactly the textbook estimate. ANALYZE builds histograms for indexed columns only, so
-  the refinement applies to indexed join keys.
+  side this is exactly the textbook estimate. ANALYZE builds histograms for the leading column of
+  every index and, up to `stats_analyze_max_columns`, for the other columns of the table, so the
+  refinement applies to every analyzed join key.
 
 ## Network & distribution cost
 
@@ -1033,8 +1036,33 @@ selects for the conjuncts that the step attaches. The checks are the builder's o
 | Operator | Step cost | When |
 |---|---|---|
 | hash | `rightScanCost + leftRows + 0.1 · min(leftRows, rightRows)` | an equi-key conjunct |
-| index lookup | `2 · leftRows` | an index on a key column of the right table, and hash is not strictly cheaper (`PrefersHashOverIndexLookup`, the same rule `JoinQueryPlanner` uses) |
+| index lookup | `leftRows + probes · (probeWeight + matchesPerProbe)` | an index on a key column of the right table, and hash is not strictly cheaper (`PrefersHashOverIndexLookup`, the same rule `JoinQueryPlanner` uses) |
 | nested loop | `rightScanCost + 0.1 · max(1, leftRows) · max(1, rightRows)` | no equi-key conjunct |
+
+**The index-lookup step** is priced from the shape of its probes (`IndexLookupProfile`, built by
+`CostEstimator.EstimateIndexLookupProfile` from the statistics):
+
+- Every left row costs one unit, as in a hash join: the operator keeps the rows of each probed key in
+  a memo, and a left row whose key was probed before pairs with rows already in memory, exactly as a
+  hash probe does.
+- `probes` is the number of distinct keys of the left input, `min(leftRows, distinct(leftColumn))`, where
+  the distinct count is the left column's NDV in its own table (its row count for a unique key) and
+  unbounded when unknown, so every left row then probes. When the probed rows would not fit the memo
+  (65,536 rows), every left row is a probe too.
+- `probeWeight` is the cost of one probe in rows read from storage: 3 for a unique index (one batched
+  point read) and 16 for a non-unique index (one batched bounded scan), solved from the retail data set
+  at scale 4 on memory storage, where a scanned row costs about 0.55 µs, a unique probe about 2.2 to 4.8 µs
+  with its row fetch and a non-unique probe about 10 µs with its 2.4 row fetches. The constants carry
+  their derivation in `CostEstimator`; a faster store means a smaller weight, not a different formula.
+- `matchesPerProbe` is the rows one probe returns: 1 for a unique index, else the right table's rows
+  over the NDV of the indexed column (1 when unknown). Each is one row fetch.
+
+A hash join therefore wins sooner than before: a unique probe is worth it while the right table has
+about four rows for each distinct left key, and a non-unique probe while it has about seventeen rows plus
+the rows the key returns. The fan-out term is what puts a filtered fact table before a small dimension:
+with `customers` first, each of its 8,000 rows probes `orders` through the non-unique `customer_id` index
+and returns three rows; with `orders` first, its 2,400 filtered rows join the customers with a hash join or
+with probes by primary key, and either costs a fraction of the 8,000 probes.
 
 `rightScanCost` is the cost of reading the right table: the same leaf cost the table would have as the
 first input of the order. When its pushed filter drives an index (a range or an IN list, past the breakeven
@@ -1124,8 +1152,9 @@ current query.
 >   the greedy order, which is not guaranteed cheapest;
 > - implied join edges: the column classes fix the estimate of `a.x = b.x AND b.x = c.x AND a.x = c.x`, but
 >   when the query writes only `a.x = b.x AND b.x = c.x`, no edge joins `a` and `c` directly;
-> - index-lookup fan-out: `2 · leftRows` assumes one match per left row, and a non-unique index can return
->   more;
+> - the probe weights are the average cost of a batched probe; a popular key of a skewed column returns
+>   many more rows than `matchesPerProbe`, and a left input whose distinct keys a filter or an earlier join
+>   reduced is priced by the column's distinct count in its table, an upper bound;
 > - a tree with one outer join gets no DP at all and keeps its declared order;
 > - a repaired or heuristic tree is built with the builder's own estimates (a join input counts as a fixed
 >   10,000 rows);

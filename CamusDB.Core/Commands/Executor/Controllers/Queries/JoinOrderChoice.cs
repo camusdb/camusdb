@@ -56,18 +56,34 @@ internal enum JoinStepOperator
 }
 
 /// <summary>
+/// The shape of the index lookups one join step would make into its right table, the inputs of
+/// <see cref="CostEstimator.IndexLookupJoinStepCost"/> beyond the left rows: whether the index is
+/// unique (a point read for each key) or not (a bounded scan for each key), the right rows one
+/// probe returns on average, and the distinct keys of the left input. The join keeps the rows of
+/// each probed key in a memo, so a left input that repeats a key probes the store once for it;
+/// <see cref="LeftKeyDistinct"/> bounds the probes, and it is unbounded when the distinct count of
+/// the left column is unknown, so every left row then counts as a probe.
+/// <see cref="CostEstimator.EstimateIndexLookupProfile"/> builds it from the statistics, and the
+/// enumerator and the builder both price a step through the same instance.
+/// </summary>
+internal readonly record struct IndexLookupProfile(bool UniqueIndex, double MatchesPerProbe, double LeftKeyDistinct);
+
+/// <summary>
 /// The enumerator's estimates for one join of the tree it chose: the rows of the left input, the
 /// rows of the right input after its pushed filter, the cost of reading the right input (a full
-/// scan), the operator those numbers select, and the rows the join produces (the subset estimate
-/// of every table up to and including this join's right input). The builder uses the input
-/// estimates in place of its own, which see a join input only as a fixed default and a filtered
-/// right input only by its output rows. The output estimate decides nothing; it is kept on the
-/// built node so EXPLAIN (ANALYZE) can compare the search's model with the rows the join produced.
+/// scan), the shape of the index lookups the step could make (null when no conjunct of the step
+/// can drive one), the operator those numbers select, and the rows the join produces (the subset
+/// estimate of every table up to and including this join's right input). The builder uses the
+/// input estimates in place of its own, which see a join input only as a fixed default and a
+/// filtered right input only by its output rows. The output estimate decides nothing; it is kept
+/// on the built node so EXPLAIN (ANALYZE) can compare the search's model with the rows the join
+/// produced.
 /// </summary>
 internal readonly record struct JoinStepEstimate(
     double LeftRows,
     double RightRows,
     double RightScanCost,
+    IndexLookupProfile? IndexLookup,
     JoinStepOperator Operator,
     double OutputRows);
 

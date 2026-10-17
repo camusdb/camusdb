@@ -631,25 +631,244 @@ internal sealed class KvIndexAccessor
                 (string kvKey, ReadOnlyKeyValueEntry entry) = entries.Current;
                 entriesRead++;
 
-                if (entry.Value is null)
-                    continue;
-
-                BranchKvValue scanDecoded = BranchKvCodec.Decode(entry.Value);
-                if (scanDecoded.Kind == BranchKvKind.Tombstone)
-                    continue;
-
-                // Non-unique: the stored key is {startKey}{encoded trailing columns}{rowIdHex24}.
-                if (kvKey.Length < matchLength || !kvKey.StartsWith(startKey, StringComparison.Ordinal))
-                    continue;
-
-                ObjectIdValue rowId = ObjectId.ToValue(kvKey.AsSpan(kvKey.Length - KvStoreConstants.RowIdHexLength));
-                yield return (rowId, IncludeTupleFromPayload(scanDecoded.Payload));
+                if (TryDecodeEqualityEntry(kvKey, entry, startKey, matchLength, out ObjectIdValue rowId, out BranchKvValue scanDecoded))
+                    yield return (rowId, IncludeTupleFromPayload(scanDecoded.Payload));
             }
         }
         finally
         {
             ServerDiagnostics.AddKvScanEntries(index: true, entriesRead);
         }
+    }
+
+    /// <summary>
+    /// The per-entry rule of the equality scan: a stored entry of a non-unique index is a match when it
+    /// holds a value, is not a tombstone, and its key carries the whole start key, so the stored key is
+    /// <c>{startKey}{encoded trailing columns}{rowIdHex24}</c>. The row id is the key's last 24 characters.
+    /// Shared by the single scan and its batch form, so the two cannot drift.
+    /// </summary>
+    private static bool TryDecodeEqualityEntry(string kvKey, ReadOnlyKeyValueEntry entry, string startKey, int matchLength, out ObjectIdValue rowId, out BranchKvValue decoded)
+    {
+        rowId = default;
+        decoded = default;
+
+        if (entry.Value is null)
+            return false;
+
+        decoded = BranchKvCodec.Decode(entry.Value);
+        if (decoded.Kind == BranchKvKind.Tombstone)
+            return false;
+
+        if (kvKey.Length < matchLength || !kvKey.StartsWith(startKey, StringComparison.Ordinal))
+            return false;
+
+        rowId = ObjectId.ToValue(kvKey.AsSpan(kvKey.Length - KvStoreConstants.RowIdHexLength));
+        return true;
+    }
+
+    /// <summary>
+    /// The answer of the batch equality scan for one lookup key: the row ids of the key's first page in
+    /// index order, and whether the key has more entries than that page. A wide key is not read to its
+    /// end here: the caller pages it through <see cref="ScanIndexEquality"/>, so a probe batch never
+    /// holds more than one page of ids per key.
+    /// </summary>
+    internal readonly record struct IndexEqualityProbe(List<ObjectIdValue> RowIds, bool HasMore);
+
+    /// <summary>
+    /// The batch form of <see cref="ScanIndexEquality"/>: the entries of a page of lookup keys of one
+    /// non-unique index, read with one batched range probe of the index space (one actor turn per
+    /// partition instead of one scan page per key), decoded to row ids with the single scan's rule. Each
+    /// key answers at most <paramref name="pageSize"/> ids; a key with more is marked <c>HasMore</c> and
+    /// is left to the caller to page, so the batch stays bounded by keys times page. Snapshot, identity
+    /// and read registration are those of the single scan. On a branch the general scan runs per key,
+    /// because the ancestry merge has no batch form.
+    /// </summary>
+    internal async Task<IndexEqualityProbe[]> ScanIndexEqualityManyAsync(
+        KvTransaction tx,
+        string indexId,
+        ColumnType[] keyTypes,
+        IReadOnlyList<CompositeColumnValue> lookupKeys,
+        int pageSize,
+        CancellationToken cancellationToken)
+    {
+        IndexEqualityProbe[] answers = new IndexEqualityProbe[lookupKeys.Count];
+
+        if (lookupKeys.Count == 0)
+            return answers;
+
+        if (branch.IsBranch)
+        {
+            for (int i = 0; i < lookupKeys.Count; i++)
+            {
+                List<ObjectIdValue> ids = [];
+                await foreach ((ObjectIdValue rowId, ReadOnlyMemory<byte> _) in ScanIndexEquality(tx, indexId, keyTypes, lookupKeys[i], pageSize, cancellationToken).ConfigureAwait(false))
+                    ids.Add(rowId);
+                answers[i] = new IndexEqualityProbe(ids, false);
+            }
+
+            return answers;
+        }
+
+        await tx.EnsureSessionStartedAsync(cancellationToken, keys.TableKeyPrefix).ConfigureAwait(false);
+
+        string bucketPrefix = keys.BuildIndexBucketPrefix(indexId);
+        string[] startKeys = new string[lookupKeys.Count];
+        KeyValueProbeRange[] seeks = new KeyValueProbeRange[lookupKeys.Count];
+
+        for (int i = 0; i < lookupKeys.Count; i++)
+        {
+            startKeys[i] = keys.BuildIndexScanBound(indexId, lookupKeys[i], withSentinel: false);
+            seeks[i] = new KeyValueProbeRange(startKeys[i], true, keys.BuildIndexScanBound(indexId, lookupKeys[i], withSentinel: true), true, pageSize);
+        }
+
+        string scanCoordinatorKey = tx.FoldReads ? tx.CoordinatorKey : "";
+        HLCTimestamp identity = tx.RangeScanIdentityFor(bucketPrefix);
+
+        // One call holds at most ProbeBatchMaxKeys seeks and ProbeRangeMaxEntries entries in all.
+        int seeksPerCall = Math.Max(1, Math.Min(KvStoreConstants.ProbeBatchMaxKeys, KvStoreConstants.ProbeRangeMaxEntries / Math.Max(1, pageSize)));
+        long entriesRead = 0;
+
+        try
+        {
+            for (int offset = 0; offset < seeks.Length; offset += seeksPerCall)
+            {
+                int count = Math.Min(seeksPerCall, seeks.Length - offset);
+                await ProbeRangesAsync(identity, tx.ReadTimestamp, bucketPrefix, seeks, startKeys, offset, count, answers, scanCoordinatorKey, cancellationToken).ConfigureAwait(false);
+
+                // A wide key's first page is read again by the caller's single scan, which counts it; so
+                // the meter takes only the keys this call answered whole.
+                for (int i = offset; i < offset + count; i++)
+                {
+                    if (!answers[i].HasMore)
+                        entriesRead += answers[i].RowIds.Count;
+                }
+            }
+        }
+        finally
+        {
+            ServerDiagnostics.AddKvScanEntries(index: true, entriesRead);
+        }
+
+        return answers;
+    }
+
+    /// <summary>
+    /// One call of the batch equality scan: asks Kahuna for the seeks at <paramref name="offset"/>, resends
+    /// the seeks that answered a transient until every one is confirmed, and decodes each confirmed page
+    /// into its slot of <paramref name="answers"/>. The retry and operation-id rules are those of the batch
+    /// point read (<see cref="KvBranchReader.ProbeManyRaw"/>): a transient is retried with back-off up to
+    /// the retry bound, an aborted or malformed batch is an error, and an unconfirmed answer is never
+    /// decoded as an empty key.
+    /// </summary>
+    private async Task ProbeRangesAsync(
+        HLCTimestamp identity,
+        HLCTimestamp readTimestamp,
+        string bucketPrefix,
+        KeyValueProbeRange[] seeks,
+        string[] startKeys,
+        int offset,
+        int count,
+        IndexEqualityProbe[] answers,
+        string coordinatorKey,
+        CancellationToken cancellationToken)
+    {
+        List<int>? pending = null;
+        int pendingCount = count;
+        int retries = 0;
+        TransactionOperationId operationId = coordinatorKey.Length == 0 ? default : TransactionOperationId.NewRandom();
+
+        while (true)
+        {
+            KeyValueProbeRange[] request = new KeyValueProbeRange[pendingCount];
+            for (int j = 0; j < pendingCount; j++)
+                request[j] = seeks[SlotAt(j)];
+
+            KeyValueProbeRangeResult[]? results = await KahunaRetryPolicy.InvokeOrUnanswered(
+                () => kahuna.LocateAndTryProbeManyRanges(
+                    identity, readTimestamp, bucketPrefix, request, KeyValueProbeLock.None, 0,
+                    KeyValueDurability.Persistent, cancellationToken, coordinatorKey, operationId),
+                cancellationToken).ConfigureAwait(false);
+
+            List<int>? next = null;
+
+            if (results is null)
+            {
+                next = new(pendingCount);
+                for (int j = 0; j < pendingCount; j++)
+                    next.Add(SlotAt(j));
+            }
+            else
+            {
+                if (results.Length != pendingCount)
+                    throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation,
+                        $"Batched range probe of {pendingCount} seeks answered {results.Length} results");
+
+                for (int j = 0; j < pendingCount; j++)
+                {
+                    KeyValueProbeRangeResult result = results[j];
+                    int slot = SlotAt(j);
+
+                    switch (result.Type)
+                    {
+                        case KeyValueResponseType.Get:
+                        case KeyValueResponseType.DoesNotExist:
+                            answers[slot] = DecodeProbe(result, startKeys[slot]);
+                            break;
+
+                        case KeyValueResponseType.MustRetry:
+                        case KeyValueResponseType.WaitingForReplication:
+                            (next ??= []).Add(slot);
+                            break;
+
+                        case KeyValueResponseType.Aborted:
+                            throw new CamusDBException(CamusDBErrorCodes.TransactionMustRetry,
+                                $"Batched range probe of {bucketPrefix} was aborted by Kahuna — retry the operation from BeginAsync");
+
+                        case KeyValueResponseType.InvalidInput:
+                            throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation,
+                                $"Kahuna refused a batched range probe of {pendingCount} seeks on {bucketPrefix}: a probe holds at most " +
+                                $"{KvStoreConstants.ProbeBatchMaxKeys} seeks and {KvStoreConstants.ProbeRangeMaxEntries} entries");
+
+                        default:
+                            throw new CamusDBException(CamusDBErrorCodes.TransactionMustRetry,
+                                $"Batched range probe of {bucketPrefix} returned {result.Type} — retry the operation from BeginAsync");
+                    }
+                }
+            }
+
+            if (next is null)
+                return;
+
+            if (++retries >= KahunaRetryPolicy.MaxKahunaRetries)
+                throw new CamusDBException(CamusDBErrorCodes.TransactionMustRetry,
+                    $"Batched range probe of {bucketPrefix} was not ready after {KahunaRetryPolicy.MaxKahunaRetries} retries — retry the operation from BeginAsync");
+
+            ServerDiagnostics.AddKvRetryWait("index_probe_batch");
+            await Task.Delay(KahunaRetryPolicy.RetryDelayMs(retries), cancellationToken).ConfigureAwait(false);
+
+            if (coordinatorKey.Length != 0 && next.Count != pendingCount)
+                operationId = TransactionOperationId.NewRandom();
+
+            pending = next;
+            pendingCount = next.Count;
+        }
+
+        int SlotAt(int j) => pending is not null ? pending[j] : offset + j;
+    }
+
+    /// <summary>Decodes one confirmed seek of the batch equality scan with the single scan's per-entry rule.</summary>
+    private static IndexEqualityProbe DecodeProbe(KeyValueProbeRangeResult result, string startKey)
+    {
+        List<ObjectIdValue> ids = new(result.Items.Count);
+        int matchLength = startKey.Length + KvStoreConstants.RowIdHexLength;
+
+        foreach ((string kvKey, ReadOnlyKeyValueEntry entry) in result.Items)
+        {
+            if (TryDecodeEqualityEntry(kvKey, entry, startKey, matchLength, out ObjectIdValue rowId, out _))
+                ids.Add(rowId);
+        }
+
+        return new IndexEqualityProbe(ids, result.HasMore);
     }
 
     /// <summary>

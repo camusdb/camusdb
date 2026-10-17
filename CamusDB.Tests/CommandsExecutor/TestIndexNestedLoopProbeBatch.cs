@@ -21,11 +21,12 @@ using NUnit.Framework;
 namespace CamusDB.Tests.CommandsExecutor;
 
 /// <summary>
-/// The batched unique probe of an index nested-loop join: a page of outer rows (the index scan fetch
-/// batch size, 64 here) probes its distinct keys with one index read and one row read, reported as
+/// The batched probe of an index nested-loop join: a page of outer rows (the index scan fetch batch
+/// size, 64 here) probes its distinct keys with one index read and one row read, reported as
 /// <c>probe-batches=</c>; the rows come out in outer order, a NULL key or a missing parent pads a
 /// left outer join at its position, a key that repeats inside one page probes once, and a LIMIT
-/// stops the join after the page that satisfies it.
+/// stops the join after the page that satisfies it. The same holds over a non-unique index, where a
+/// key with more entries than one probe page is streamed on its own without a double count.
 /// </summary>
 [TestFixture]
 [NonParallelizable]
@@ -145,6 +146,108 @@ public sealed class TestIndexNestedLoopProbeBatch : BaseTest
         StringAssert.Contains("probe-batches=1", probe["detail"].StrValue);
     }
 
+    [Test]
+    public async Task NonUniqueProbe_DistinctKeysPerPage_ProbeOnePageOfOuterRowsPerCall()
+    {
+        Db db = await CreateCyclingTables();
+        // A self join on the non-unique parent index: every child meets the 30 children of its parent.
+        const string sql = "SELECT c.id AS child, d.id AS sibling FROM children c JOIN children d ON d.parent_id = c.parent_id";
+
+        // With the memo off, every page probes the ten parents its 64 rows cycle through, once each.
+        db.Executor.Statistics.IndexProbeMemoCapacityForTesting = 0;
+
+        List<IReadOnlyDictionary<string, ColumnValue>> rows = await Query(db, sql);
+        Assert.AreEqual(9_000, rows.Count, "300 children, 30 siblings each");
+
+        IReadOnlyDictionary<string, ColumnValue> probe = await ProbeNode(db, sql);
+        Assert.AreEqual(1_500, probe["kv_scan_entries"].LongValue, "ten keys of thirty entries in each of five pages");
+        Assert.AreEqual(1_500, probe["rows_read"].LongValue);
+        StringAssert.Contains("probe-batches=5", probe["detail"].StrValue);
+        StringAssert.Contains("probe-memo-hits=250", probe["detail"].StrValue, "a repeat inside a page shares the page's probe");
+    }
+
+    [Test]
+    public async Task NonUniqueProbe_WithTheMemo_ProbesOnlyTheFirstPage_AndMatchesTheStreamedRows()
+    {
+        Db db = await CreateCyclingTables();
+        const string sql = "SELECT c.id AS child, d.id AS sibling FROM children c JOIN children d ON d.parent_id = c.parent_id";
+
+        List<string> withMemo = Render(await Query(db, sql));
+        db.Executor.Statistics.IndexProbeMemoCapacityForTesting = 0;
+        List<string> withoutMemo = Render(await Query(db, sql));
+        CollectionAssert.AreEqual(withoutMemo, withMemo);
+        db.Executor.Statistics.IndexProbeMemoCapacityForTesting = null;
+
+        IReadOnlyDictionary<string, ColumnValue> probe = await ProbeNode(db, sql);
+        Assert.AreEqual(300, probe["kv_scan_entries"].LongValue, "ten distinct keys of thirty entries");
+        StringAssert.Contains("probe-batches=1", probe["detail"].StrValue);
+        StringAssert.Contains("probe-memo-hits=290", probe["detail"].StrValue);
+    }
+
+    [Test]
+    public async Task NonUniqueProbe_KeyWiderThanTheProbePage_IsStreamedWithoutADoubleCount()
+    {
+        Db db = await CreateSchema();
+        await Exec(db, "INSERT INTO parents (id, code) VALUES (1, 'wide'), (2, 'narrow'), (3, 'childless')");
+
+        // Parent 1 has 600 children, more than the 512-entry probe page; parent 2 has 10.
+        for (int batch = 0; batch < 6; batch++)
+        {
+            await Exec(db, "INSERT INTO children (id, parent_id) VALUES " +
+                string.Join(", ", Enumerable.Range(batch * 100 + 1, 100).Select(i => $"({i}, 1)")));
+        }
+
+        await Exec(db, "INSERT INTO children (id, parent_id) VALUES " +
+            string.Join(", ", Enumerable.Range(601, 10).Select(i => $"({i}, 2)")));
+        db = await Finish(db);
+
+        const string sql = "SELECT p.code AS code, c.id AS child FROM parents p LEFT JOIN children c ON c.parent_id = p.id";
+
+        List<IReadOnlyDictionary<string, ColumnValue>> rows = await Query(db, sql);
+        Assert.AreEqual(611, rows.Count, "600 wide, 10 narrow, one padded");
+        Assert.AreEqual(600, rows.Count(r => r["code"].StrValue == "wide"));
+        Assert.AreEqual(10, rows.Count(r => r["code"].StrValue == "narrow"));
+        Assert.AreEqual(1, rows.Count(r => r["code"].StrValue == "childless" && r["child"].Type == ColumnType.Null));
+
+        IReadOnlyDictionary<string, ColumnValue> probe = await ProbeNode(db, sql);
+        Assert.AreEqual(610, probe["kv_scan_entries"].LongValue, "the wide key is streamed once, its first page is not counted twice");
+        Assert.AreEqual(610, probe["rows_read"].LongValue);
+        StringAssert.Contains("probe-batches=1", probe["detail"].StrValue, "the narrow key and the miss are answered by the page's batch");
+    }
+
+    [Test]
+    public async Task LeftOuterJoin_NonUnique_NullKeysAndChildlessParents_PadAtTheirOuterPosition()
+    {
+        Db db = await CreateSchema();
+        await Exec(db, "INSERT INTO parents (id, code) VALUES " +
+            string.Join(", ", Enumerable.Range(1, 100).Select(i => $"({i}, 'p{i}')")));
+        // Parents 1 to 50 have two children each; 51 to 100 have none.
+        await Exec(db, "INSERT INTO children (id, parent_id) VALUES " +
+            string.Join(", ", Enumerable.Range(1, 100).Select(i => $"({i}, {(i - 1) % 50 + 1})")));
+        db = await Finish(db);
+
+        const string sql = "SELECT p.id AS parent, c.id AS child FROM parents p LEFT JOIN children c ON c.parent_id = p.id";
+
+        List<IReadOnlyDictionary<string, ColumnValue>> rows = await Query(db, sql);
+        Assert.AreEqual(150, rows.Count, "two rows for each of the first fifty parents, one padded row for each of the rest");
+
+        List<long> parents = rows.Select(r => r["parent"].LongValue).ToList();
+        CollectionAssert.AreEqual(parents.OrderBy(x => x).ToList(), parents, "the rows keep the outer scan order across pages");
+
+        for (int i = 0; i < rows.Count; i++)
+        {
+            long parent = rows[i]["parent"].LongValue;
+            if (parent <= 50)
+                Assert.AreEqual(ColumnType.Integer64, rows[i]["child"].Type, $"parent {parent} meets a child");
+            else
+                Assert.AreEqual(ColumnType.Null, rows[i]["child"].Type, $"parent {parent} is padded");
+        }
+
+        IReadOnlyDictionary<string, ColumnValue> probe = await ProbeNode(db, sql);
+        Assert.AreEqual(100, probe["kv_scan_entries"].LongValue);
+        StringAssert.Contains("probe-batches=2", probe["detail"].StrValue, "100 outer rows in pages of 64");
+    }
+
     /// <summary>
     /// 300 parents and 300 children in id order: child i has parent i up to 280, a NULL parent for
     /// 281 to 290, and a parent that does not exist for 291 to 300.
@@ -191,6 +294,7 @@ public sealed class TestIndexNestedLoopProbeBatch : BaseTest
 
         await Ddl(db, "CREATE TABLE parents (id int64 primary key, code string)");
         await Ddl(db, "CREATE TABLE children (id int64 primary key, parent_id int64)");
+        await Ddl(db, "CREATE INDEX children_parent_idx ON children (parent_id)");
         return db;
     }
 

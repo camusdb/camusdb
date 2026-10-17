@@ -952,8 +952,8 @@ public sealed class TestCardinalityEstimator : BaseTest
     ///   NDV(region)=20, NDV(category)=20, KeyNdv(region,category)=20, KeyNdv(region,category,score)=400.
     ///
     /// WHERE region=… AND category=… AND score>…:
-    ///              1/20 × FallbackSel(0.10) = 0.005
-    ///   Independence: 1/20 × 1/20 × 0.10     = 0.00025  (20× too selective — wrong)
+    ///              1/20 × 299/400 (the histogram of score, 0..399) = 0.037375
+    ///   Independence: 1/20 × 1/20 × 299/400                        = 0.00187  (20× too selective — wrong)
     /// </summary>
     [Test]
     public async Task B3_ThreeColumnIndex_AnalyzeEmits2ColPrefixKeyNdv_UsedByEstimator()
@@ -1017,8 +1017,9 @@ public sealed class TestCardinalityEstimator : BaseTest
         TableDescriptor table = await database.TableDescriptors["events"];
 
         // WHERE region = 'r0' AND category = 'c0' AND score > 100
-        //              1/20 × 0.10 = 0.005
-        // Independence: 1/20 × 1/20 × 0.10 = 0.00025
+        //              1/20 × 299/400 = 0.037375 (score has a histogram: ANALYZE collects the
+        //              columns without an index too, and score runs from 0 to 399)
+        // Independence: 1/20 × 1/20 × 299/400 = 0.00187
         var comparisons = new List<AnalyzedComparison>
         {
             new("region",   "=", new ColumnValue(ColumnType.String,    "r0"),  NodeAst.Null),
@@ -1030,13 +1031,13 @@ public sealed class TestCardinalityEstimator : BaseTest
             comparisons, inLists: [],
             database, table, executor.Statistics);
 
-        // 1/KeyNdv(region,category) × FallbackSel = 1/20 × 0.10 = 0.005.
-        const double expected = (1.0 / 20) * 0.10;
-        Assert.That(sel, Is.EqualTo(expected).Within(1e-9),
-            "B3: (region,category) priced via ANALYZE-generated 2-col prefix KeyNdv; score > 100 uses FallbackSelectivity");
+        // 1/KeyNdv(region,category) × the histogram fraction of score > 100 = 1/20 × 299/400.
+        const double expected = (1.0 / 20) * (299.0 / 400);
+        Assert.That(sel, Is.EqualTo(expected).Within(0.002),
+            "B3: (region,category) priced via ANALYZE-generated 2-col prefix KeyNdv; score > 100 reads the histogram of score");
 
-        // Independence result (not emitting prefix → falls back): 1/20 × 1/20 × 0.10 = 0.00025.
-        double independenceResult = (1.0 / 20) * (1.0 / 20) * 0.10;
+        // Independence result (not emitting prefix → falls back): 1/20 × 1/20 × 299/400 = 0.00187.
+        double independenceResult = (1.0 / 20) * (1.0 / 20) * (299.0 / 400);
         Assert.That(sel, Is.GreaterThan(independenceResult),
             "B3 via ANALYZE-generated prefix KeyNdv must give looser estimate than column independence");
     }

@@ -613,10 +613,93 @@ internal static class CostEstimator
         rightScanCost + leftRows + Math.Min(leftRows, rightRows) * HashTableRowWeight;
 
     /// <summary>
-    /// Cost of one index-lookup join step: one index probe and one row fetch for each left row. It
-    /// assumes one match for each left row; a non-unique index can return more.
+    /// Cost of one probe of a unique index, in rows read from storage, before the row it returns
+    /// and beyond the unit every left row pays. Measured 2026-10-17 on the retail data set at
+    /// scale 4, memory storage, Apple M3: a scanned row costs about 0.55 µs, and the join over
+    /// customers (8,000 rows) timed equal to the hash join at 7,801 left rows with 2,180 distinct
+    /// keys (27.9 ms against 26.6 ms) and 24 percent under it at 3,869 rows with 1,338 keys
+    /// (10.3 ms against 13.6 ms). Both solve to three rows for the probe: the hash join costs
+    /// 8,000 + 7,801 + 780 units, the lookup 7,801 + 2,180 · (3 + 1).
     /// </summary>
-    internal static double IndexLookupJoinStepCost(double leftRows) => leftRows * 2.0;
+    internal const double UniqueProbeWeight = 3.0;
+
+    /// <summary>
+    /// Cost of one probe of a non-unique index, in rows read from storage, before the rows it
+    /// returns and beyond the unit every left row pays. Measured as
+    /// <see cref="UniqueProbeWeight"/>: a batched bounded scan costs about 10 µs for each distinct
+    /// key with its 2.4 rows fetched, 16 rows for the probe alone. The break-even against a hash
+    /// join solves to between 14 and 22: a probe into order_items (57,273 rows, 2.4 for each key)
+    /// beat the hash join at 1,915 left rows (33 ms against 40 ms) and lost at 3,869 (55 ms against
+    /// 46 ms); one into shipments (20,410 rows, 0.85 for each key) lost already at 1,915 (21 ms
+    /// against 16 ms).
+    /// </summary>
+    internal const double RangeProbeWeight = 16.0;
+
+    /// <summary>
+    /// Cost of one index-lookup join step: one unit for each left row, as in a hash join, where a
+    /// hit in the join's memo pairs the row with rows already in memory exactly as a hash probe
+    /// does; plus, for each distinct key of the left input, one probe and the rows it returns. The
+    /// probe is a point read (<see cref="UniqueProbeWeight"/>) or a bounded scan
+    /// (<see cref="RangeProbeWeight"/>), and each row it returns costs one row fetch. The memo
+    /// (<see cref="IndexNestedLoopJoinOperator.ProbeMemoMaxRows"/>) holds the rows of the probed
+    /// keys; when they would not fit, a repeated key probes again, so every left row is a probe.
+    /// A memo hit priced below a hash probe made a large hash join followed by a few hundred
+    /// memoized lookups look almost free, and the search moved selective tables to the end.
+    /// </summary>
+    internal static double IndexLookupJoinStepCost(double leftRows, IndexLookupProfile probe)
+    {
+        double matches = Math.Max(1.0, probe.MatchesPerProbe);
+        double probes = Math.Min(leftRows, probe.LeftKeyDistinct);
+
+        if (probes * matches > IndexNestedLoopJoinOperator.ProbeMemoMaxRows)
+            probes = leftRows;
+
+        double weight = probe.UniqueIndex ? UniqueProbeWeight : RangeProbeWeight;
+        return leftRows + probes * (weight + matches);
+    }
+
+    /// <summary>
+    /// The <see cref="IndexLookupProfile"/> of a lookup into <paramref name="rightTable"/> through
+    /// <paramref name="index"/> on <paramref name="rightColumn"/>, driven by
+    /// <paramref name="leftColumn"/> of <paramref name="leftTable"/>. A unique index returns one row
+    /// for each probe; a non-unique one returns the table's rows over the column's distinct count,
+    /// or one row when that count is unknown. The distinct keys of the left input are the distinct
+    /// count of the left column in its table (the table's rows when the column is a unique key),
+    /// unbounded when the column's table or its count is unknown. The left table is the table of
+    /// the column, not of the whole left input: a join before this step can only reduce the
+    /// distinct values the column still has.
+    /// </summary>
+    internal static IndexLookupProfile EstimateIndexLookupProfile(
+        TableDescriptor rightTable,
+        TableIndexSchema index,
+        string rightColumn,
+        TableDescriptor? leftTable,
+        string leftColumn,
+        DatabaseDescriptor database,
+        StatisticsManager? stats)
+    {
+        bool unique = index.Type == IndexType.Unique;
+        long rightRows = stats?.GetRowCountEstimate(database, rightTable) ?? DefaultTableRowCount;
+
+        double matches = 1.0;
+        if (!unique)
+        {
+            long? distinct = CardinalityEstimator.EstimateKeyDistinctCount(rightTable, [rightColumn], rightRows, database, stats);
+            if (distinct is > 0)
+                matches = Math.Max(1.0, (double)rightRows / distinct.Value);
+        }
+
+        double leftDistinct = double.PositiveInfinity;
+        if (leftTable is not null)
+        {
+            long leftRows = stats?.GetRowCountEstimate(database, leftTable) ?? DefaultTableRowCount;
+            long? distinct = CardinalityEstimator.EstimateKeyDistinctCount(leftTable, [leftColumn], leftRows, database, stats);
+            if (distinct is > 0)
+                leftDistinct = distinct.Value;
+        }
+
+        return new IndexLookupProfile(unique, matches, leftDistinct);
+    }
 
     /// <summary>
     /// Weight of one left × right pair a nested-loop join compares in memory against one row read
@@ -642,24 +725,25 @@ internal static class CostEstimator
     /// and <see cref="JoinQueryPlanner"/> both call it, so the join order is costed with the
     /// operator that the builder then builds. Hash wins only when it is strictly cheaper.
     /// </summary>
-    internal static bool PrefersHashOverIndexLookup(double leftRows, double rightRows, double rightScanCost) =>
-        HashJoinStepCost(leftRows, rightRows, rightScanCost) < IndexLookupJoinStepCost(leftRows);
+    internal static bool PrefersHashOverIndexLookup(double leftRows, double rightRows, double rightScanCost, IndexLookupProfile probe) =>
+        HashJoinStepCost(leftRows, rightRows, rightScanCost) < IndexLookupJoinStepCost(leftRows, probe);
 
     /// <summary>
     /// The operator that the builder selects for one join step: an index-lookup join when the right
-    /// table has an index on a key column and hash is not strictly cheaper
-    /// (<see cref="PrefersHashOverIndexLookup"/>), else a hash join when a conjunct is an equi-key,
-    /// else a nested loop. This is the order of the checks in <see cref="JoinQueryPlanner"/>, so
-    /// with the same inputs the enumerator and the builder select the same operator.
+    /// table has an index on a key column (<paramref name="indexLookup"/> is its profile) and hash
+    /// is not strictly cheaper (<see cref="PrefersHashOverIndexLookup"/>), else a hash join when a
+    /// conjunct is an equi-key, else a nested loop. This is the order of the checks in
+    /// <see cref="JoinQueryPlanner"/>, so with the same inputs the enumerator and the builder select
+    /// the same operator.
     /// </summary>
     internal static JoinStepOperator SelectJoinStepOperator(
         double leftRows,
         double rightRows,
         double rightScanCost,
         bool hasEquiKey,
-        bool indexLookupPossible)
+        IndexLookupProfile? indexLookup)
     {
-        if (indexLookupPossible && !(hasEquiKey && PrefersHashOverIndexLookup(leftRows, rightRows, rightScanCost)))
+        if (indexLookup is { } probe && !(hasEquiKey && PrefersHashOverIndexLookup(leftRows, rightRows, rightScanCost, probe)))
             return JoinStepOperator.IndexLookup;
 
         return hasEquiKey ? JoinStepOperator.Hash : JoinStepOperator.NestedLoop;
@@ -674,10 +758,10 @@ internal static class CostEstimator
         double rightRows,
         double rightScanCost,
         bool hasEquiKey,
-        bool indexLookupPossible) =>
-        SelectJoinStepOperator(leftRows, rightRows, rightScanCost, hasEquiKey, indexLookupPossible) switch
+        IndexLookupProfile? indexLookup) =>
+        SelectJoinStepOperator(leftRows, rightRows, rightScanCost, hasEquiKey, indexLookup) switch
         {
-            JoinStepOperator.IndexLookup => IndexLookupJoinStepCost(leftRows),
+            JoinStepOperator.IndexLookup => IndexLookupJoinStepCost(leftRows, indexLookup!.Value),
             JoinStepOperator.Hash => HashJoinStepCost(leftRows, rightRows, rightScanCost),
             _ => NestedLoopJoinStepCost(leftRows, rightRows, rightScanCost),
         };
@@ -715,7 +799,7 @@ internal static class CostEstimator
     /// tables from the tables alone (<see cref="JoinEnumerator.EstimateSubsetRows"/>); this
     /// annotation still comes from different code, so the two estimates can differ.</para>
     /// </summary>
-    private static TableDescriptor? TryResolveLeftTable(
+    internal static TableDescriptor? TryResolveLeftTable(
         PhysicalPlanNode? input,
         IReadOnlyList<string> leftKeys,
         out bool isJoinResult)

@@ -41,8 +41,10 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// </para>
 ///
 /// <para>
-/// The fetch shape is asserted with the store-level counters: a probe over M matches at page size B
-/// must issue ceil(M / B) batched reads and no single-row reads.
+/// The fetch shape is asserted with the store-level counters. A key whose entries fit one probe page
+/// is answered by the page's batch: one batched read for the whole key, whatever the fetch page size.
+/// A key with more entries than a probe page is streamed on its own, and a probe over M matches at
+/// page size B then issues ceil(M / B) batched reads. Neither issues a single-row read.
 /// </para>
 /// </summary>
 [NonParallelizable]
@@ -393,9 +395,11 @@ public sealed class TestIndexNestedLoopProbeBatchFetch : SharedNodeBaseTest
 
             List<string> probed = Render(await Run(fixture, JoinSql), JoinColumns);
 
-            long expectedBatches = (matches + pageSize - 1) / pageSize;
+            // A key that fits one probe page is fetched by the batch in one read; a wider key streams
+            // through the page, one batched read per page of B rows.
+            long expectedBatches = matches == 0 ? 0 : matches <= KvStoreConstants.DefaultPageSize ? 1 : (matches + pageSize - 1) / pageSize;
             Assert.AreEqual(expectedBatches, store.PrimaryRowBatchReadCalls - batchBefore,
-                $"a probe over {matches} matches at page size {pageSize} must issue ceil(M / B) batched reads");
+                $"a probe over {matches} matches at page size {pageSize} must issue one batched read when the key fits a probe page, else ceil(M / B)");
             Assert.AreEqual(0, store.PrimaryRowPointReadCalls - pointBefore,
                 "the paged probe must not fall back to single-row reads");
 
@@ -599,17 +603,20 @@ public sealed class TestIndexNestedLoopProbeBatchFetch : SharedNodeBaseTest
     }
 
     /// <summary>
-    /// The lock-timing consequence of paging, pinned down so it is a decision and not a surprise:
-    /// under Serializable read-write a flushed page holds shared point locks on every row it
-    /// fetched, including rows the consumer has not asked for yet, while rows of a page not yet
-    /// flushed are unlocked. A concurrent writer of a fetched row is refused; a writer of an
-    /// unfetched row proceeds, exactly as it did against the per-row read before that row was read.
+    /// The lock-timing consequence of batching, pinned down so it is a decision and not a surprise:
+    /// under Serializable read-write a probe batch holds shared point locks on every row of its page
+    /// of outer keys, including rows the consumer has not asked for yet, while the rows of the next
+    /// page of outer keys are unlocked. A concurrent writer of a fetched row is refused; a writer of
+    /// an unfetched row proceeds, exactly as it did against the per-row read before that row was read.
     /// </summary>
     [Test]
     public async Task SerializableReadWrite_ConcurrentWriterOnAFetchedRowIsRefused_OnAnUnfetchedRowProceeds()
     {
-        Fixture fixture = await Setup(Options with { IndexScanFetchBatchSize = 2 }, [("A", 4)]);
+        // Fetch page size 1: the first page of outer rows is order A alone, so A's rows are fetched
+        // and locked before the first row comes back, and B's rows are not fetched yet.
+        Fixture fixture = await Setup(Options with { IndexScanFetchBatchSize = 1 }, [("A", 2), ("B", 2)]);
         List<ItemRef> items = await LineItems(fixture, "A");
+        List<ItemRef> later = await LineItems(fixture, "B");
         KvTableStore store = await LineItemsStore(fixture);
 
         KvTransaction reader = await fixture.Database.Transactions.BeginAsync(
@@ -624,9 +631,8 @@ public sealed class TestIndexNestedLoopProbeBatchFetch : SharedNodeBaseTest
 
             Assert.IsTrue(await enumerator.MoveNextAsync(), "the first row of the first page");
 
-            // Page size 2: rows 0 and 1 are fetched and locked, rows 2 and 3 are not fetched yet.
-            Assert.IsTrue(reader.HasPointLock(store.RowKeySpace, store.RowPointKey(items[1].RowId)));
-            Assert.IsFalse(reader.HasPointLock(store.RowKeySpace, store.RowPointKey(items[3].RowId)));
+            Assert.IsTrue(reader.HasPointLock(store.RowKeySpace, store.RowPointKey(items[1].RowId)), "every row of the first page of outer keys is locked");
+            Assert.IsFalse(reader.HasPointLock(store.RowKeySpace, store.RowPointKey(later[1].RowId)), "a row of the next page of outer keys is not fetched yet");
 
             KvTransaction writerOfFetched = await fixture.Database.Transactions.BeginAsync();
             CamusDBException? refused = Assert.ThrowsAsync<CamusDBException>(async () =>
@@ -639,7 +645,7 @@ public sealed class TestIndexNestedLoopProbeBatchFetch : SharedNodeBaseTest
             await fixture.Database.Transactions.RollbackIfNotCompletedAsync(writerOfFetched);
 
             KvTransaction writerOfUnfetched = await fixture.Database.Transactions.BeginAsync();
-            await NonQuery(fixture, $"UPDATE line_items SET note = \"late\" WHERE id = \"{items[3].Id}\"", writerOfUnfetched);
+            await NonQuery(fixture, $"UPDATE line_items SET note = \"late\" WHERE id = \"{later[1].Id}\"", writerOfUnfetched);
             await fixture.Database.Transactions.CommitAsync(writerOfUnfetched);
 
             int remaining = 0;
@@ -837,7 +843,7 @@ public sealed class TestIndexNestedLoopProbeBatchFetch : SharedNodeBaseTest
     }
 
     [Test]
-    public async Task OneMatchPerProbe_CostsOneBatchedReadPerOuterRow()
+    public async Task OneMatchPerProbe_CostsOneBatchedReadPerPageOfOuterRows()
     {
         List<(string order, int matches)> fanOut = Enumerable.Range(0, 12).Select(i => ($"O{i:D2}", 1)).ToList();
         Fixture fixture = await Setup(Options with { IndexScanFetchBatchSize = 64 }, fanOut);
@@ -852,8 +858,9 @@ public sealed class TestIndexNestedLoopProbeBatchFetch : SharedNodeBaseTest
         Assert.AreEqual(12, probed.Count);
         Assert.AreEqual(oracle, probed);
 
-        // The oracle run above issues no primary point reads either: it scans the inner table.
-        Assert.AreEqual(12, store.PrimaryRowBatchReadCalls - batchBefore, "one probe, one match, one batched read");
+        // The oracle run above issues no primary point reads either: it scans the inner table. The twelve
+        // outer rows fit one page of 64, so their twelve matches come back in one batched read.
+        Assert.AreEqual(1, store.PrimaryRowBatchReadCalls - batchBefore, "one page of outer rows, one batched read for every match");
         Assert.AreEqual(0, store.PrimaryRowPointReadCalls - pointBefore);
     }
 }

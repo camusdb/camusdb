@@ -465,7 +465,7 @@ internal sealed class JoinQueryPlanner
                 if (leftFree && rightFree && leftRows > MergeJoinPreferenceThreshold)
                     return BuildMergeJoinNode(left, right, joinSource.OnPredicate!, equiKeys!, rightFilter, kind);
 
-                if (ShouldPreferHashOverIndexNestedLoop(left, right, database, stats, rightFilter, step))
+                if (ShouldPreferHashOverIndexNestedLoop(left, right, indexMatch!, database, stats, rightFilter, step))
                     return BuildHashJoinNode(left, right, joinSource.OnPredicate, equiKeys!, rightFilter, database, stats, kind, step);
             }
 
@@ -814,30 +814,53 @@ internal sealed class JoinQueryPlanner
     /// the estimated index-nested-loop cost, through the one rule the join-order enumerator also
     /// uses (<see cref="CostEstimator.PrefersHashOverIndexLookup"/>):
     /// <list type="bullet">
-    ///   <item>INLJ  ≈ 2 × leftRows  (KvPointLookups + RowFetchesAfterIndex)</item>
+    ///   <item>INLJ  ≈ leftRows + distinct left keys × (probe weight + matches per probe)
+    ///   (<see cref="CostEstimator.IndexLookupJoinStepCost"/>)</item>
     ///   <item>Hash  ≈ rightRows + leftRows + min(L,R) × 0.1  (KvRangeScanEntries + InMemoryRows)</item>
     /// </list>
-    /// The right row estimate stands in for the right scan cost here. Hash beats INLJ when the
-    /// outer (left) side is large relative to the indexed right side — roughly when
-    /// leftRows &gt; 1.1 × rightRows. For equal-sized inputs INLJ wins by a small margin, so equal
-    /// or unknown cardinalities keep the index lookup.
+    /// The right row estimate stands in for the right scan cost here. A join from the cost-based
+    /// enumerator decides with the numbers it was costed with, the lookup profile included; the
+    /// heuristic order builds the profile from <paramref name="indexMatch"/> and the statistics,
+    /// with the left column's table found through its alias when the left input is a join.
     /// </summary>
     private bool ShouldPreferHashOverIndexNestedLoop(
         PhysicalPlanNode leftNode,
         BoundJoinRightSource rightSource,
+        JoinEquiJoinIndexMatch indexMatch,
         DatabaseDescriptor database,
         StatisticsManager stats,
         NodeAst? rightScanFilter = null,
         JoinStepEstimate? step = null)
     {
-        // A join from the cost-based enumerator decides with the numbers it was costed with.
+        IndexLookupProfile probe = step?.IndexLookup ?? LookupProfileOf(leftNode, rightSource, indexMatch, database, stats);
+
         if (step is { } estimate)
-            return CostEstimator.PrefersHashOverIndexLookup(estimate.LeftRows, estimate.RightRows, estimate.RightScanCost);
+            return CostEstimator.PrefersHashOverIndexLookup(estimate.LeftRows, estimate.RightRows, estimate.RightScanCost, probe);
 
         long leftRows  = EstimatePhysicalNodeRows(leftNode, database, stats);
         long rightRows = EstimateRightRows(rightSource, database, stats, rightScanFilter);
 
-        return CostEstimator.PrefersHashOverIndexLookup(leftRows, rightRows, rightScanCost: rightRows);
+        return CostEstimator.PrefersHashOverIndexLookup(leftRows, rightRows, rightScanCost: rightRows, probe);
+    }
+
+    /// <summary>
+    /// The lookup profile of <paramref name="indexMatch"/> for a join the enumerator did not cost:
+    /// the left column's table is the leaf under <paramref name="leftNode"/>, or the table its alias
+    /// names inside a join input, or unknown.
+    /// </summary>
+    private static IndexLookupProfile LookupProfileOf(
+        PhysicalPlanNode leftNode,
+        BoundJoinRightSource rightSource,
+        JoinEquiJoinIndexMatch indexMatch,
+        DatabaseDescriptor database,
+        StatisticsManager stats)
+    {
+        TableDescriptor? leftTable = CostEstimator.TryResolveLeftTable(leftNode, [indexMatch.LeftLookupColumn], out _);
+        int dot = indexMatch.LeftLookupColumn.IndexOf('.');
+        string leftColumn = dot > 0 ? indexMatch.LeftLookupColumn[(dot + 1)..] : indexMatch.LeftLookupColumn;
+
+        return CostEstimator.EstimateIndexLookupProfile(
+            rightSource.Table!.Table, indexMatch.Index, indexMatch.RightIndexColumn, leftTable, leftColumn, database, stats);
     }
 
     /// <summary>

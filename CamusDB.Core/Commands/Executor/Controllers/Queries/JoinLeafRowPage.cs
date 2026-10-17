@@ -38,14 +38,17 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 /// </para>
 /// <para>
 /// Lock timing under Serializable read-write: the per-entry read locked a row the moment the
-/// consumer asked for it; a page locks every row it holds when it is flushed. After a fully
-/// consumed scan the lock set is identical. When the consumer stops early (LIMIT, cancellation)
-/// the page can hold up to page-size minus one shared point locks on rows the consumer never
-/// saw. This is accepted rather than gated: the extra locks sit only on rows the index matched
-/// for this scan, never on unrelated keys; a shared lock blocks no reader and only forces a
-/// concurrent writer of those rows to retry; and every other isolation level and mode locks
+/// consumer asked for it; a page locks every row it holds when it is flushed, and a probe batch
+/// (<see cref="FetchAsync"/>) locks every row of its page of outer keys before the first of them
+/// is returned. After a fully consumed scan the lock set is identical. When the consumer stops
+/// early (LIMIT, cancellation) the page can hold up to page-size minus one shared point locks on
+/// rows the consumer never saw, and a probe batch up to one probe page of rows per outer key of
+/// its page. This is accepted rather than gated: the extra locks sit only on rows the index
+/// matched for this join, never on unrelated keys; a shared lock blocks no reader and only forces
+/// a concurrent writer of those rows to retry; and every other isolation level and mode locks
 /// nothing, so the exposure is bounded by <see cref="CamusDBOptions.IndexScanFetchBatchSize"/>
-/// and limited to the one mode that already holds every row it reads until commit.
+/// outer keys times one probe page and limited to the one mode that already holds every row it
+/// reads until commit.
 /// </para>
 /// <para>
 /// The buffer is emptied on every exit from <see cref="FlushAsync"/>, including an abandoned or

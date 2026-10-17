@@ -652,6 +652,16 @@ public sealed partial class KvTableStore
         CancellationToken cancellationToken = default)
         => indexes.ScanIndexEquality(tx, indexId, keyTypes, key, pageSize, cancellationToken);
 
+    /// <inheritdoc cref="KvIndexAccessor.ScanIndexEqualityManyAsync"/>
+    internal Task<KvIndexAccessor.IndexEqualityProbe[]> ScanIndexEqualityManyAsync(
+        KvTransaction tx,
+        string indexId,
+        ColumnType[] keyTypes,
+        IReadOnlyList<CompositeColumnValue> keys,
+        int pageSize,
+        CancellationToken cancellationToken = default)
+        => indexes.ScanIndexEqualityManyAsync(tx, indexId, keyTypes, keys, pageSize, cancellationToken);
+
     /// <inheritdoc cref="KvIndexAccessor.PutIndexEntry"/>
     public Task PutIndexEntry(
         KvTransaction tx,

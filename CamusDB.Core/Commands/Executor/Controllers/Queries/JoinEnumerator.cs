@@ -36,7 +36,9 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 ///   selects for the conjuncts that the step attaches. The right input of a join is read with a
 ///   full scan, so its read cost is its table row count, whatever filter it has. A hash step counts
 ///   the size of its left input, which is the intermediate result of the steps before it, so the
-///   total of a plan is the scan costs plus the size of each intermediate result.</item>
+///   total of a plan is the scan costs plus the size of each intermediate result. An index-lookup
+///   step counts one probe for each distinct left key and the rows each probe returns
+///   (<see cref="IndexLookupProfile"/>, built once for each conjunct that can drive a lookup).</item>
 ///   <item>Builder agreement: <see cref="EstimateSteps"/> hands the builder the left rows, right
 ///   rows and right read cost of each join, and the builder selects the operator from them through
 ///   <see cref="CostEstimator.SelectJoinStepOperator"/>, the rule the step cost uses. The plan
@@ -98,10 +100,10 @@ internal static class JoinEnumerator
 
     /// <summary>
     /// One edge that names a table, seen from that table as the right input of a step: whether
-    /// the builder can use the edge as a hash or merge key, and whether it can drive an index
-    /// lookup into the table.
+    /// the builder can use the edge as a hash or merge key, and, when it can drive an index
+    /// lookup into the table, the shape of that lookup (null when it cannot).
     /// </summary>
-    private readonly record struct StepEdge(ulong Mask, bool EquiKey, bool IndexLookup);
+    private readonly record struct StepEdge(ulong Mask, bool EquiKey, IndexLookupProfile? IndexLookup);
 
     /// <summary>
     /// The inputs of the cost model for one graph, computed once and shared by the dynamic program
@@ -274,7 +276,7 @@ internal static class JoinEnumerator
         for (int k = 1; k < order.Count && k - 1 < joins.Count; k++)
         {
             int leaf = order[k];
-            (bool equiKey, bool indexLookup) = StepOperators(inputs.StepEdges[leaf], (ulong)(prefix | (1 << leaf)));
+            (bool equiKey, IndexLookupProfile? indexLookup) = StepOperators(inputs.StepEdges[leaf], (ulong)(prefix | (1 << leaf)));
 
             double leftRows = inputs.RowsOf(prefix);
             double rightRows = inputs.LeafRows[leaf];
@@ -284,6 +286,7 @@ internal static class JoinEnumerator
                 leftRows,
                 rightRows,
                 rightScanCost,
+                indexLookup,
                 CostEstimator.SelectJoinStepOperator(leftRows, rightRows, rightScanCost, equiKey, indexLookup),
                 inputs.RowsOf(prefix | (1 << leaf)));
 
@@ -333,7 +336,7 @@ internal static class JoinEnumerator
             LeafRows = leafRows,
             SubsetRows = denseSubsets ? EstimateAllSubsets(n, leafRows, selectivity) : null,
             Selectivity = selectivity,
-            StepEdges = BuildStepEdges(graph, bound),
+            StepEdges = BuildStepEdges(graph, bound, database, stats),
         };
     }
 
@@ -427,7 +430,7 @@ internal static class JoinEnumerator
                     if (!graph.Connects((ulong)left, bit))
                         continue;
 
-                    (bool equiKey, bool indexLookup) = StepOperators(inputs.StepEdges[bit], (ulong)mask);
+                    (bool equiKey, IndexLookupProfile? indexLookup) = StepOperators(inputs.StepEdges[bit], (ulong)mask);
                     costedSteps++;
                     double total = leftPlan.Cost + CostEstimator.JoinStepCost(
                         leftPlan.Rows, inputs.LeafRows[bit], inputs.RightScanCost[bit], equiKey, indexLookup);
@@ -528,7 +531,7 @@ internal static class JoinEnumerator
                     if (!graph.RespectsBoundaries((ulong)union))
                         continue;
 
-                    (bool equiKey, bool indexLookup) = StepOperators(inputs.StepEdges[leaf], (ulong)union);
+                    (bool equiKey, IndexLookupProfile? indexLookup) = StepOperators(inputs.StepEdges[leaf], (ulong)union);
                     costedSteps++;
                     double stepCost = CostEstimator.JoinStepCost(rows, inputs.LeafRows[leaf], inputs.RightScanCost[leaf], equiKey, indexLookup);
                     double resultRows = inputs.RowsOf(union, counts, members);
@@ -562,12 +565,14 @@ internal static class JoinEnumerator
     /// that name the table and lie inside the union. The checks are the builder's own
     /// (<see cref="JoinEquiJoinAnalyzer.TryExtractEquiKeys"/> and
     /// <see cref="JoinEquiJoinAnalyzer.TryMatch"/>), one conjunct at a time, which is what they do
-    /// over a combined <c>ON</c>.
+    /// over a combined <c>ON</c>. The index lookup returned is the one the builder would select
+    /// from the same conjuncts: a unique index before a non-unique one, the first attached
+    /// conjunct among equals (<see cref="JoinEquiJoinAnalyzer.TryMatch"/>).
     /// </summary>
-    private static (bool EquiKey, bool IndexLookup) StepOperators(List<StepEdge> rightEdges, ulong union)
+    private static (bool EquiKey, IndexLookupProfile? IndexLookup) StepOperators(List<StepEdge> rightEdges, ulong union)
     {
         bool equiKey = false;
-        bool indexLookup = false;
+        IndexLookupProfile? indexLookup = null;
 
         foreach (StepEdge edge in rightEdges)
         {
@@ -575,13 +580,15 @@ internal static class JoinEnumerator
                 continue;
 
             equiKey |= edge.EquiKey;
-            indexLookup |= edge.IndexLookup;
+
+            if (edge.IndexLookup is { } probe && (indexLookup is null || (probe.UniqueIndex && !indexLookup.Value.UniqueIndex)))
+                indexLookup = probe;
         }
 
         return (equiKey, indexLookup);
     }
 
-    private static List<StepEdge>[] BuildStepEdges(JoinGraph graph, BoundSelectQuery bound)
+    private static List<StepEdge>[] BuildStepEdges(JoinGraph graph, BoundSelectQuery bound, DatabaseDescriptor database, StatisticsManager stats)
     {
         int n = graph.LeafCount;
         List<StepEdge>[] edges = new List<StepEdge>[n];
@@ -609,9 +616,19 @@ internal static class JoinEnumerator
                 bool equiKey = isEquality
                     && JoinEquiJoinAnalyzer.TryExtractEquiKeys(rights[leaf], conjunct.Node, bound, out _);
 
-                bool indexLookup = isEquality
+                IndexLookupProfile? indexLookup = null;
+                if (isEquality
                     && rights[leaf].Table is { } table
-                    && JoinEquiJoinAnalyzer.TryMatch(table, conjunct.Node, bound, out _);
+                    && JoinEquiJoinAnalyzer.TryMatch(table, conjunct.Node, bound, out JoinEquiJoinIndexMatch match))
+                {
+                    // The left column of the match is qualified; its table bounds the distinct keys.
+                    int dot = match.LeftLookupColumn.IndexOf('.');
+                    TableDescriptor? leftTable = dot > 0 ? FindTableDescriptor(match.LeftLookupColumn[..dot], bound) : null;
+                    string leftColumn = dot > 0 ? match.LeftLookupColumn[(dot + 1)..] : match.LeftLookupColumn;
+
+                    indexLookup = CostEstimator.EstimateIndexLookupProfile(
+                        table.Table, match.Index, match.RightIndexColumn, leftTable, leftColumn, database, stats);
+                }
 
                 edges[leaf].Add(new StepEdge(conjunct.Mask, equiKey, indexLookup));
             }

@@ -38,6 +38,7 @@ public class ConfigReader
         "stats_flush_interval_ms",
         "stats_analyze_sample_rows",
         "stats_histogram_buckets",
+        "stats_analyze_max_columns",
         "auto_analyze_enabled",
         "auto_analyze_check_interval_ms",
         "auto_analyze_fraction_stale_rows",

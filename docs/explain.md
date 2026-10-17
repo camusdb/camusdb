@@ -95,15 +95,15 @@ reports a join row this way:
     right rows, and the detail shows `ran=nested-loop-rescan`) in two cases: the right-side
     filter calls a volatile function, or spilling is off and the right side has more rows than
     `HashJoinMaxBuildRows`.
-  - `index-nested-loop-join` over a unique index adds one `kv_lookups` for each distinct non-NULL
-    key it probes. It probes a page of outer rows at a time (`IndexScanFetchBatchSize` rows): the
-    distinct keys of the page cost one index read and one row read for the whole page, and the
-    detail shows the number of pages as `probe-batches=`. Over a non-unique index, it adds one
-    `kv_scan_entries` for each index entry it visits; the probe scan is bounded at the key, so no
-    entry past it is visited. `rows_read` counts the right rows it fetched, before the right-side
-    filter. A key that an earlier outer row probed, or that another outer row of the same page
-    probes, is answered from the join's memo and adds nothing to these counters
-    (`probe-memo-hits=`).
+  - `index-nested-loop-join` probes a page of outer rows at a time (`IndexScanFetchBatchSize`
+    rows): the distinct keys of the page cost one index read and one row read for the whole page,
+    and the detail shows the number of pages as `probe-batches=`. Over a unique index it adds one
+    `kv_lookups` for each distinct non-NULL key it probes. Over a non-unique index it adds one
+    `kv_scan_entries` for each index entry it visits; the probe is bounded at the key, so no entry
+    past it is visited, and a key with more entries than one probe page is read on its own, page by
+    page. `rows_read` counts the right rows it fetched, before the right-side filter. A key that an
+    earlier outer row probed, or that another outer row of the same page probes, is answered from
+    the join's memo and adds nothing to these counters (`probe-memo-hits=`).
   - `hash-join` reads its right side one time, as the build or as the probe.
   - A `hash-join` or `nested-loop-join` whose right table has a pushed filter on an indexed column
     reads that table through the index; the detail shows `right-index=<name>` (or
@@ -131,7 +131,7 @@ A join row's detail can also show two values that only execution knows:
 | `ran=nested-loop-rescan` | The nested-loop join read its right side again for every left row, instead of one time (see above). |
 | `ran=broadcast` | The build was small enough to ship, so the join probed the other side span by span. One `broadcast-span` row follows for each span. |
 | `probe-memo-hits=<n>` | The index nested-loop join answered `n` probes from its memo of earlier probes: outer rows whose key an earlier outer row had already probed, or whose key another outer row of the same probe page probes. A hit reads nothing, so `kv_lookups`, `kv_scan_entries` and `rows_read` count the distinct keys only. The marker appears only when `n` is above zero. |
-| `probe-batches=<n>` | The index nested-loop join probed its unique index in `n` pages of outer rows. Each page costs one batched index read and one batched row read for its distinct keys, instead of two reads per outer row. A page whose keys the memo all answered issues no call and is not counted. The marker appears only when `n` is above zero. |
+| `probe-batches=<n>` | The index nested-loop join probed its index in `n` pages of outer rows. Each page costs one batched index read and one batched row read for its distinct keys, instead of one or two reads per outer row. A page whose keys the memo all answered issues no call and is not counted; a non-unique key wider than one probe page is read on its own and is not part of the page's batch. The marker appears only when `n` is above zero. |
 | `join-order-est-rows=<n>` | The join-order search's estimate of the rows of this join. It appears only when the search costed the order (statistics loaded, cost-based join order on). |
 
 `estimated_rows` comes from the plan annotation, and the join-order search chose the order with

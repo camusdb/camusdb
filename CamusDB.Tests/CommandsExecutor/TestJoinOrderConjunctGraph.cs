@@ -649,6 +649,91 @@ public sealed class TestJoinOrderConjunctGraph : BaseTest
             Assert.IsTrue(double.IsFinite(estimate) && estimate > 0, $"estimate {estimate}");
     }
 
+    // ─── Step cost: the probe and its fan-out ────────────────────────────────
+
+    /// <summary>
+    /// Days (3,650 rows, 365 after the filter), orders (480,000, a non-unique index on the day,
+    /// 131 orders a day) and order items (570,000, a non-unique index on the order, 1.2 items an
+    /// order). The step from the days reads 365 probes of 131 rows and keeps the index lookup; the
+    /// step from the orders would read 48,000 probes, which cost more than a scan of the items, so
+    /// it is a hash join. Priced at two rows a probe, the second step is an index lookup too.
+    /// The weights: the step from the days costs 365 + 365 · (16 + 131) against a scan of 480,000;
+    /// the step from the orders 48,000 + 48,000 · (16 + 1.2) against 570,000 + 48,000 + 4,800.
+    /// </summary>
+    [Test]
+    public async Task StepCost_AProbeCostsMoreThanARow_SoTensOfThousandsOfProbesBecomeAHashJoin()
+    {
+        Db db = await CreateDb(DpOn);
+        await Ddl(db, "CREATE TABLE d (id int64 primary key, cal_year int64)");
+        await Ddl(db, "CREATE TABLE o (id int64 primary key, day_id int64)");
+        await Ddl(db, "CREATE TABLE i (id int64 primary key, order_id int64)");
+        await Ddl(db, "CREATE INDEX o_day ON o (day_id)");
+        await Ddl(db, "CREATE INDEX i_order ON i (order_id)");
+        await Seed(db, ("d", 3_650), ("o", 480_000), ("i", 570_000));
+        await SeedNdv(db, "o", ("day_id", 3_650));
+        await SeedNdv(db, "i", ("order_id", 480_000));
+
+        QueryPlan plan = await Plan(db,
+            "SELECT i.id FROM d JOIN o ON o.day_id = d.id JOIN i ON i.order_id = o.id WHERE d.cal_year = 2025", DpOn);
+        string rendered = PlanRenderer.Render(plan);
+
+        CollectionAssert.AreEqual(new[] { "d", "o", "i" }, JoinOrder(plan.Root), rendered);
+        Dictionary<string, PhysicalPlanNode> joins = JoinNodes(plan.Root).ToDictionary(RightAlias, StringComparer.Ordinal);
+        Assert.IsInstanceOf<IndexNestedLoopJoinNode>(joins["o"], "365 probes of 131 rows against a scan of 480,000:\n" + rendered);
+        Assert.IsInstanceOf<HashJoinNode>(joins["i"], "48,000 probes against a scan of 570,000:\n" + rendered);
+    }
+
+    /// <summary>
+    /// Order items (570,000 rows, 57,000 after the filter) join products (60,000) by primary key.
+    /// The item rows name 3,420 distinct products, so the join probes the store 3,420 times and
+    /// answers the other rows from its memo: cheaper than a hash join over the products. Without
+    /// the distinct count the search prices one probe for each of the 57,000 rows and builds the
+    /// hash join.
+    /// </summary>
+    [Test]
+    public async Task StepCost_AUniqueProbeIsPricedPerDistinctKey_SoARepeatedKeyKeepsTheLookup()
+    {
+        Db db = await CreateDb(DpOn);
+        await Ddl(db, "CREATE TABLE i (id int64 primary key, product_id int64, qty int64)");
+        await Ddl(db, "CREATE TABLE p (id int64 primary key, name int64)");
+        await Seed(db, ("i", 570_000), ("p", 60_000));
+        const string sql = "SELECT p.name FROM i JOIN p ON p.id = i.product_id WHERE i.qty = 1";
+
+        QueryPlan withoutDistinct = await Plan(db, sql, DpOn);
+        Assert.IsInstanceOf<HashJoinNode>(withoutDistinct.Root, "57,000 probes against a scan of 60,000:\n" + PlanRenderer.Render(withoutDistinct));
+
+        await SeedNdv(db, "i", ("product_id", 3_420));
+
+        QueryPlan withDistinct = await Plan(db, sql, DpOn);
+        Assert.IsInstanceOf<IndexNestedLoopJoinNode>(withDistinct.Root, "3,420 probes and 53,580 memo hits:\n" + PlanRenderer.Render(withDistinct));
+        CollectionAssert.AreEqual(new[] { "i", "p" }, JoinOrder(withDistinct.Root));
+    }
+
+    /// <summary>
+    /// Customers (8,000) and orders (24,000, 2,400 after the filter, three orders a customer). From
+    /// the customers, each row probes the non-unique customer index of the orders and returns
+    /// three rows: 8,000 probes for 2,400 rows kept. From the orders, the 2,400 rows join the
+    /// customers with a hash join over the 8,000 customers, or with 2,400 probes by primary key,
+    /// and either costs less than the 8,000 probes. Priced at one match a probe and two rows a
+    /// probe, the customers went first and the join read every order.
+    /// </summary>
+    [Test]
+    public async Task StepCost_TheFanOutOfANonUniqueProbe_PutsTheFilteredFactTableFirst()
+    {
+        Db db = await CreateDb(DpOn);
+        await Ddl(db, "CREATE TABLE c (id int64 primary key, name int64)");
+        await Ddl(db, "CREATE TABLE o (id int64 primary key, customer_id int64, day_id int64)");
+        await Ddl(db, "CREATE INDEX o_customer ON o (customer_id)");
+        await Seed(db, ("c", 8_000), ("o", 24_000));
+        await SeedNdv(db, "o", ("customer_id", 8_000));
+
+        QueryPlan plan = await Plan(db, "SELECT c.name FROM c JOIN o ON c.id = o.customer_id WHERE o.day_id = 240", DpOn);
+        string rendered = PlanRenderer.Render(plan);
+
+        CollectionAssert.AreEqual(new[] { "o", "c" }, JoinOrder(plan.Root), rendered);
+        StringAssert.DoesNotContain("index=o_customer", rendered);
+    }
+
     // ─── Joins wider than the dense estimate array ───────────────────────────
 
     /// <summary>
@@ -985,10 +1070,11 @@ public sealed class TestJoinOrderConjunctGraph : BaseTest
             await Ddl(db, "CREATE TABLE a (id int64 primary key, x int64)");
             await Ddl(db, "CREATE TABLE b (id int64 primary key, x int64, f int64, g int64, h int64)");
             await Ddl(db, "CREATE INDEX b_x_idx ON b (x)");
-            await Seed(db, ("a", 100_000), ("b", 1_000_000));
+            await Seed(db, ("a", 10_000), ("b", 1_000_000));
 
             // About 1000 rows of b pass the filter, but a hash join reads all 1,000,000 rows of b:
-            // 100,000 index lookups are cheaper, and that is what the order was costed with.
+            // 10,000 rows with 10,000 index probes, at sixteen rows a probe plus the row each
+            // returns, are cheaper, and that is what the order was costed with.
             const string sql = "SELECT a.id FROM a JOIN b ON a.x = b.x WHERE b.f = 1 AND b.g = 2 AND b.h = 3";
 
             QueryPlan plan = await Plan(db, sql, options);
@@ -1243,6 +1329,14 @@ public sealed class TestJoinOrderConjunctGraph : BaseTest
         }
 
         return count;
+    }
+
+    /// <summary>Seeds the distinct count of each named column of <paramref name="table"/>.</summary>
+    private static async Task SeedNdv(Db db, string table, params (string Column, long Distinct)[] counts)
+    {
+        TableDescriptor descriptor = await db.Database.TableDescriptors[table];
+        await db.Executor.Statistics.SetNdvAsync(db.Database, descriptor,
+            columnNdv: counts.ToDictionary(c => c.Column, c => c.Distinct, StringComparer.Ordinal), keyNdv: null);
     }
 
     private static async Task Seed(Db db, params (string Table, long Rows)[] counts)

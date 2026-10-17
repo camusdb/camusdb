@@ -858,7 +858,7 @@ public sealed class TestJoinQueryPlanner : BaseTest
     // ─────────────────────────────────────────────────────────────────────────
 
     // Indexed right key + small outer → INLJ should still win.
-    // INLJ cost ≈ 2 × 10 = 20;  hash cost ≈ (10 + 100 000) + 10 × 0.1 ≈ 100 011.
+    // INLJ cost ≈ 10 + 10 × (16 + 1) = 180;  hash cost ≈ (10 + 100 000) + 10 × 0.1 ≈ 100 011.
     [Test]
     public async Task IndexedRightKey_SmallOuter_PlansIndexNestedLoop()
     {
@@ -879,7 +879,7 @@ public sealed class TestJoinQueryPlanner : BaseTest
     }
 
     // Indexed right key + large outer → hash join should win.
-    // INLJ cost ≈ 2 × 100 000 = 200 000;  hash cost ≈ (100 000 + 10) + 10 × 0.1 ≈ 100 011.
+    // INLJ cost ≈ 100 000 + 100 000 × (16 + 1) = 1 800 000;  hash cost ≈ (100 000 + 10) + 10 × 0.1 ≈ 100 011.
     [Test]
     public async Task IndexedRightKey_LargeOuter_PlansHashJoin()
     {
@@ -1542,9 +1542,10 @@ public sealed class TestJoinQueryPlanner : BaseTest
     /// ShouldPreferHashOverIndexNestedLoop must account for the right-side pushed-down
     /// scan filter when the right join key is indexed (INLJ is a live alternative).
     ///
-    /// Without filter: raw right = 10 000, left = 1 000 → left is small → INLJ wins.
-    /// With filter on right (product NDV=100): filtered right ≈ 100 → right becomes
-    /// smaller than left → hash beats INLJ at the filtered threshold.
+    /// Without filter: raw right = 100 000, left = 1 000 → 1 000 rows plus 1 000 probes at
+    /// seventeen rows each (18 000) against a scan of 100 000 → INLJ wins.
+    /// With filter on right (product NDV=100): filtered right ≈ 1 000 → a hash join reads
+    /// 1 000 rows and probes 1 000 (2 100) → hash beats INLJ at the filtered threshold.
     /// </summary>
     [Test]
     public async Task RightSideScanFilter_IndexedRightKey_FlipsHashVsInlj()
@@ -1560,14 +1561,14 @@ public sealed class TestJoinQueryPlanner : BaseTest
         TableDescriptor ordersBase    = await dbBase.TableDescriptors["orders"];
         TableDescriptor lineItemsBase = await dbBase.TableDescriptors["line_items"];
         execBase.Statistics.SeedRowCountForTesting(dbBase, ordersBase,    1_000);
-        execBase.Statistics.SeedRowCountForTesting(dbBase, lineItemsBase, 10_000);
+        execBase.Statistics.SeedRowCountForTesting(dbBase, lineItemsBase, 100_000);
         await execBase.Statistics.SetNdvAsync(dbBase, lineItemsBase, new Dictionary<string, long>() { { "product", 100L } }, keyNdv: null);
 
         QueryPlan planBase = new JoinQueryPlanner(Options, execBase.Statistics).GetPlan(dbBase, boundBase, ticketBase);
         Assert.IsInstanceOf<IndexNestedLoopJoinNode>(planBase.Root,
-            "No right filter: left (1 000) < right (10 000) → INLJ wins (left is small outer)");
+            "No right filter: 1 000 probes (18 000) < a scan of the right (100 000) → INLJ wins (left is small outer)");
 
-        // Now with a selective filter on the right side: filtered right ≈ 100 < left 1 000 → hash wins.
+        // Now with a selective filter on the right side: filtered right ≈ 1 000 → hash wins.
         const string sqlFiltered =
             "SELECT o.name, li.product FROM orders o " +
             "JOIN line_items li ON li.order_ext_key = o.ext_key " +
@@ -1579,11 +1580,11 @@ public sealed class TestJoinQueryPlanner : BaseTest
         TableDescriptor ordersFilt    = await dbFilt.TableDescriptors["orders"];
         TableDescriptor lineItemsFilt = await dbFilt.TableDescriptors["line_items"];
         execFilt.Statistics.SeedRowCountForTesting(dbFilt, ordersFilt,    1_000);
-        execFilt.Statistics.SeedRowCountForTesting(dbFilt, lineItemsFilt, 10_000);
+        execFilt.Statistics.SeedRowCountForTesting(dbFilt, lineItemsFilt, 100_000);
         await execFilt.Statistics.SetNdvAsync(dbFilt, lineItemsFilt, new Dictionary<string, long>() { { "product", 100L } }, keyNdv: null);
 
         QueryPlan planFilt = new JoinQueryPlanner(Options, execFilt.Statistics).GetPlan(dbFilt, boundFilt, ticketFilt);
         Assert.IsInstanceOf<HashJoinNode>(planFilt.Root,
-            "Right filter reduces right to ≈100 rows < left 1 000 → hash beats INLJ at the filtered threshold");
+            "Right filter reduces right to ≈1 000 rows (2 100) < 1 000 probes (18 000) → hash beats INLJ at the filtered threshold");
     }
 }

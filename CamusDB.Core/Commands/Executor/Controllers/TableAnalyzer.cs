@@ -29,9 +29,10 @@ namespace CamusDB.Core.CommandsExecutor.Controllers;
 ///
 /// One pass builds all statistics simultaneously:
 ///   • row count
-///   • per-column min/max (all indexed columns)
-///   • per-column NDV (approximate — exact when within sample limit)
-///   • per-column equi-depth histograms
+///   • per-column min/max, NDV (approximate — exact when within sample limit) and equi-depth
+///     histograms, for the analyzed columns: the leading column of every readable index, then the
+///     other columns in declaration order up to <see cref="CamusDBOptions.StatsAnalyzeMaxColumns"/>
+///     (<see cref="GetAnalyzedColumns"/>)
 ///   • per-composite-index-prefix key-tuple NDV
 ///   • per-index entry counts
 ///
@@ -89,8 +90,8 @@ internal sealed class TableAnalyzer
         StatisticsManager.AnalyzeBaseline baseline =
             await statistics.CaptureAnalyzeBaselineAsync(database, table).ConfigureAwait(false);
 
-        // Collect indexed columns and composite index key-column groups.
-        List<string> indexedColumns = GetIndexedColumns(table);
+        // Collect the analyzed columns and the composite index key-column groups.
+        List<string> analyzedColumns = GetAnalyzedColumns(table, options.StatsAnalyzeMaxColumns);
         List<(string indexName, string[] keyColumns)> readableIndexes = GetReadableIndexes(table);
 
         // Per-column accumulators.
@@ -104,7 +105,7 @@ internal sealed class TableAnalyzer
         // Per-composite-key-tuple distinct sets.
         Dictionary<string, HashSet<string>> keyDistinct    = new(StringComparer.Ordinal);
 
-        foreach (string col in indexedColumns)
+        foreach (string col in analyzedColumns)
         {
             distinctSets[col] = new(StringComparer.Ordinal);
             valueLists[col]   = [];
@@ -153,7 +154,7 @@ internal sealed class TableAnalyzer
                 Dictionary<string, ColumnValue> row = RowEncoder.Decode(table.Schema, rowId, data.Span);
                 rowCount++;
 
-                foreach (string col in indexedColumns)
+                foreach (string col in analyzedColumns)
                 {
                     if (!row.TryGetValue(col, out ColumnValue? val) || val.Type is ColumnType.Null or ColumnType.Bool)
                         continue;
@@ -293,7 +294,7 @@ internal sealed class TableAnalyzer
 
         int maxRowsPerSecond = options.AutoAnalyzeMaxRowsPerSecond;
 
-        List<string> indexedColumns = GetIndexedColumns(table);
+        List<string> analyzedColumns = GetAnalyzedColumns(table, options.StatsAnalyzeMaxColumns);
         List<(string indexName, string[] keyColumns)> readableIndexes = GetReadableIndexes(table);
 
         // Bounded accumulators — memory is fixed regardless of how many rows/distinct values exist.
@@ -305,7 +306,7 @@ internal sealed class TableAnalyzer
         Dictionary<string, long> indexCounts = new(StringComparer.Ordinal);
 
         int colSeed = 0;
-        foreach (string col in indexedColumns)
+        foreach (string col in analyzedColumns)
         {
             columnHll[col]    = new(hllPrecision);
             // Vary each column's reservoir seed so columns don't share an identical retention pattern.
@@ -345,7 +346,7 @@ internal sealed class TableAnalyzer
                 Dictionary<string, ColumnValue> row = RowEncoder.Decode(table.Schema, rowId, data.Span);
                 rowCount++;
 
-                foreach (string col in indexedColumns)
+                foreach (string col in analyzedColumns)
                 {
                     if (!row.TryGetValue(col, out ColumnValue? val) || val.Type is ColumnType.Null or ColumnType.Bool)
                         continue;
@@ -494,6 +495,38 @@ internal sealed class TableAnalyzer
     }
 
     // --- Private helpers ---
+
+    /// <summary>
+    /// The columns one scan collects statistics for: the leading column of every readable index,
+    /// then the other columns of the schema in declaration order, up to <paramref name="maxColumns"/>
+    /// columns in all. The indexed columns are never cut by the cap, so an index keeps the bounds and
+    /// the distinct count its scans are priced with. A column of a type without a total order or a
+    /// single value key (boolean, byte string, array) is skipped: the estimator has no filter
+    /// estimate for it.
+    /// </summary>
+    private static List<string> GetAnalyzedColumns(TableDescriptor table, int maxColumns)
+    {
+        List<string> columns = GetIndexedColumns(table);
+        HashSet<string> seen = new(columns, StringComparer.Ordinal);
+
+        foreach (TableColumnSchema column in table.Schema.Columns ?? [])
+        {
+            if (columns.Count >= maxColumns)
+                break;
+
+            if (!seen.Add(column.Name) || !HasColumnStatistics(column.Type))
+                continue;
+
+            columns.Add(column.Name);
+        }
+
+        return columns;
+    }
+
+    /// <summary>The types with a value key and a total order, the ones a filter estimate can read.</summary>
+    private static bool HasColumnStatistics(ColumnType type) => type is
+        ColumnType.Integer64 or ColumnType.Float64 or ColumnType.Float32 or ColumnType.String or
+        ColumnType.Id or ColumnType.Date or ColumnType.DateTime or ColumnType.Uuid or ColumnType.Numeric;
 
     private static List<string> GetIndexedColumns(TableDescriptor table)
     {

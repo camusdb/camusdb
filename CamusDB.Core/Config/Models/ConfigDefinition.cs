@@ -177,6 +177,13 @@ public class ConfigDefinition
     /// </summary>
     public int StatsHistogramBuckets { get; set; } = 100;
 
+    /// <summary>
+    /// The most columns of one table <c>ANALYZE</c> collects statistics for: the indexed leading
+    /// columns first, then the others in declaration order. <c>0</c> = indexed leading columns only.
+    /// Must be <c>&gt;= 0</c>. Maps to <c>CamusDBOptions.StatsAnalyzeMaxColumns</c>.
+    /// </summary>
+    public int StatsAnalyzeMaxColumns { get; set; } = 32;
+
     // ── Automatic (background) ANALYZE ────────────────────────────────────────────────────────────
     // Keeps optimizer statistics fresh without a user running ANALYZE, while staying low-priority:
     // lock-free snapshot reads, bounded-memory sampling, a throttled scan, and load backoff. On by
@@ -1313,6 +1320,9 @@ public class ConfigDefinition
 
         if (StatsHistogramBuckets < 1)
             throw Invalid($"'stats_histogram_buckets' must be >= 1, got {StatsHistogramBuckets}");
+
+        if (StatsAnalyzeMaxColumns < 0)
+            throw Invalid($"'stats_analyze_max_columns' must be >= 0 (0 = indexed leading columns only), got {StatsAnalyzeMaxColumns}");
 
         if (AutoAnalyzeFractionStaleRows < 0)
             throw Invalid($"'auto_analyze_fraction_stale_rows' must be >= 0, got {AutoAnalyzeFractionStaleRows}");
