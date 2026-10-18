@@ -22,12 +22,18 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 /// heavy values make that sum visible; the residual keeps the textbook assumption for the
 /// values the statistics cannot tell apart.</para>
 ///
-/// <para>The heavy values come from the equi-depth histogram that <c>ANALYZE</c> builds: a value
-/// that holds at least a whole bucket of the sorted rows fills buckets whose only distinct value
-/// it is (<see cref="ColumnHistogramBucket.DistinctInBucket"/> is 1), and the rows of those
-/// buckets are its frequency. The partial bucket where its run starts is not counted, so a
-/// heavy value's fraction is a slight underestimate. A value below one bucket of rows stays in
-/// the residual.</para>
+/// <para>The heavy values are the most common values that <c>ANALYZE</c> keeps next to the
+/// histogram (<see cref="ColumnHistogram.TopValues"/>), each with its counted rows; when the
+/// column has no more distinct values than the list holds, the list is the whole distribution
+/// and the residual is empty. A histogram built before the list existed gives the heavy values
+/// the buckets can resolve: a value that holds at least a whole bucket of the sorted rows fills
+/// buckets whose only distinct value it is (<see cref="ColumnHistogramBucket.DistinctInBucket"/>
+/// is 1), and the rows of those buckets are its frequency; the partial bucket where its run
+/// starts is not counted, so that fraction is a slight underestimate, and a value below one
+/// bucket of rows stays in the residual. The list matters because the skew that sizes a join is
+/// mostly below the bucket line: on the Join Order Benchmark the most popular movie holds about
+/// one percent of the cast rows and the next ones half a percent, and the join of two such
+/// columns is three times the textbook estimate.</para>
 ///
 /// <para>Fractions, not row counts: a histogram can come from a sample, and a join input can be
 /// filtered, so the distribution describes shares of the column and the caller multiplies by
@@ -63,13 +69,17 @@ internal sealed class JoinKeyDistribution
         new([], 1.0, Math.Max(1L, distinct));
 
     /// <summary>
-    /// The distribution of a column from its histogram and its distinct count. Returns null for
-    /// an empty histogram.
+    /// The distribution of a column from its histogram and its distinct count: the most common
+    /// values when the histogram keeps them, else the values that fill whole buckets. Returns null
+    /// for an empty histogram.
     /// </summary>
     public static JoinKeyDistribution? FromHistogram(ColumnHistogram histogram, long distinct)
     {
         if (histogram.TotalRows <= 0 || histogram.Buckets.Count == 0)
             return null;
+
+        if (histogram.TopValues is { Count: > 0 } top)
+            return FromTopValues(histogram, top, distinct);
 
         List<HeavyValue> heavy = [];
         long heavyRows = 0;
@@ -94,6 +104,39 @@ internal sealed class JoinKeyDistribution
 
             heavy.Add(new HeavyValue(value, (double)rows / histogram.TotalRows));
         }
+
+        double residualFraction = Math.Max(0.0, (double)(histogram.TotalRows - heavyRows) / histogram.TotalRows);
+        double residualDistinct = Math.Max(1.0, distinct - heavy.Count);
+
+        return new JoinKeyDistribution(heavy, residualFraction, residualDistinct);
+    }
+
+    /// <summary>
+    /// The distribution from the histogram's most common values: each listed value with its share,
+    /// the rest of the rows as the residual over the rest of the distinct values. The list is
+    /// stored in ascending value order; a list that is not (a histogram built by hand) is sorted
+    /// here, because <see cref="JoinSelectivity"/> merges two lists in one pass.
+    /// </summary>
+    private static JoinKeyDistribution FromTopValues(ColumnHistogram histogram, List<ColumnTopValue> top, long distinct)
+    {
+        List<HeavyValue> heavy = new(top.Count);
+        long heavyRows = 0;
+        bool ordered = true;
+
+        foreach (ColumnTopValue entry in top)
+        {
+            if (entry.Value is not { } value || entry.Rows <= 0)
+                continue;
+
+            if (heavy.Count > 0 && heavy[^1].Value.CompareTo(value) >= 0)
+                ordered = false;
+
+            heavy.Add(new HeavyValue(value, (double)entry.Rows / histogram.TotalRows));
+            heavyRows += entry.Rows;
+        }
+
+        if (!ordered)
+            heavy.Sort((a, b) => a.Value.CompareTo(b.Value));
 
         double residualFraction = Math.Max(0.0, (double)(histogram.TotalRows - heavyRows) / histogram.TotalRows);
         double residualDistinct = Math.Max(1.0, distinct - heavy.Count);

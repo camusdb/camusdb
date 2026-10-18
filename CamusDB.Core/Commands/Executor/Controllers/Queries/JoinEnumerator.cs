@@ -669,14 +669,16 @@ internal static class JoinEnumerator
     /// A set of equal columns: the columns that the equi-conjuncts of the pool join, closed over
     /// shared columns (<c>a.x = b.x</c> and <c>b.x = c.x</c> put <c>a.x</c>, <c>b.x</c> and
     /// <c>c.x</c> in one class). <see cref="Leaves"/> has one entry for each leaf with a column in
-    /// the class, in leaf order, with that column's distinct count (null when unknown) and whether
-    /// its value distribution has heavy values. <see cref="PairSelectivity"/> is the skew-aware
-    /// selectivity of each pair of members (<see cref="JoinKeyDistribution.JoinSelectivity"/>),
-    /// indexed by position in <see cref="Leaves"/>; null when some member has no distribution, in
-    /// which case the class uses the distinct counts alone.
+    /// the class, in leaf order, with that column's distinct count (null when unknown), whether
+    /// its value distribution has heavy values, and the share of its rows that hold a value (a
+    /// NULL key joins nothing, so a subset keeps that share of each member's rows).
+    /// <see cref="PairSelectivity"/> is the skew-aware selectivity of each pair of members
+    /// (<see cref="JoinKeyDistribution.JoinSelectivity"/>), indexed by position in
+    /// <see cref="Leaves"/>; null when some member has no distribution, in which case the class
+    /// uses the distinct counts alone.
     /// </summary>
     private sealed record EquivalenceClass(
-        IReadOnlyList<(int Leaf, long? DistinctCount, bool Skewed)> Leaves,
+        IReadOnlyList<(int Leaf, long? DistinctCount, bool Skewed, double NonNullFraction)> Leaves,
         double[,]? PairSelectivity);
 
     /// <summary>
@@ -784,15 +786,21 @@ internal static class JoinEnumerator
             counts.Clear();
             members.Clear();
 
+            double keyed = 1.0;
             for (int member = 0; member < equivalence.Leaves.Count; member++)
             {
-                (int leaf, long? distinct, _) = equivalence.Leaves[member];
+                (int leaf, long? distinct, _, double nonNull) = equivalence.Leaves[member];
                 if ((mask & (1 << leaf)) == 0)
                     continue;
 
                 counts.Add(distinct);
                 members.Add(member);
+                keyed *= nonNull;
             }
+
+            // The class joins its members only through the rows that hold a key in every member.
+            if (counts.Count >= 2)
+                estimate *= keyed;
 
             estimate *= ClassFactor(equivalence, members, counts);
         }
@@ -997,7 +1005,7 @@ internal static class JoinEnumerator
             if (members.Count <= 2)
                 continue;
 
-            SortedDictionary<int, (long? DistinctCount, JoinKeyDistribution? Distribution, ColumnHistogram? Histogram, IReadOnlyList<ColumnValue>? Keys)> byLeaf = [];
+            SortedDictionary<int, (long? DistinctCount, JoinKeyDistribution? Distribution, ColumnHistogram? Histogram, IReadOnlyList<ColumnValue>? Keys, double NonNull)> byLeaf = [];
             foreach (int member in members)
             {
                 (int leaf, string column) = nodes[member];
@@ -1010,16 +1018,17 @@ internal static class JoinEnumerator
                     CardinalityEstimator.EstimateKeyDistinctCount(table, [column], tableRows, database, stats),
                     CardinalityEstimator.EstimateJoinKeyDistribution(table, column, tableRows, database, stats),
                     table is not null ? stats?.GetColumnHistogram(database, table, column) : null,
-                    KnownKeys(leafKeys, graph.Leaves[leaf].Alias, column));
+                    KnownKeys(leafKeys, graph.Leaves[leaf].Alias, column),
+                    CardinalityEstimator.NonNullFraction(table, [column], database, stats));
             }
 
-            List<(int Leaf, long? DistinctCount, bool Skewed)> classLeaves = new(byLeaf.Count);
+            List<(int Leaf, long? DistinctCount, bool Skewed, double NonNullFraction)> classLeaves = new(byLeaf.Count);
             List<JoinKeyDistribution?> distributions = new(byLeaf.Count);
             List<ColumnHistogram?> histograms = new(byLeaf.Count);
             List<IReadOnlyList<ColumnValue>?> knownKeys = new(byLeaf.Count);
-            foreach ((int leaf, (long? distinct, JoinKeyDistribution? distribution, ColumnHistogram? histogram, IReadOnlyList<ColumnValue>? keys)) in byLeaf)
+            foreach ((int leaf, (long? distinct, JoinKeyDistribution? distribution, ColumnHistogram? histogram, IReadOnlyList<ColumnValue>? keys, double nonNull)) in byLeaf)
             {
-                classLeaves.Add((leaf, distinct, distribution is { HeavyValues.Count: > 0 }));
+                classLeaves.Add((leaf, distinct, distribution is { HeavyValues.Count: > 0 }, nonNull));
                 distributions.Add(distribution);
                 histograms.Add(histogram);
                 knownKeys.Add(keys);
@@ -1040,7 +1049,7 @@ internal static class JoinEnumerator
     /// </summary>
     private static double[,]? PairSelectivities(
         IReadOnlyList<JoinKeyDistribution?> distributions,
-        IReadOnlyList<(int Leaf, long? DistinctCount, bool Skewed)> leaves,
+        IReadOnlyList<(int Leaf, long? DistinctCount, bool Skewed, double NonNullFraction)> leaves,
         IReadOnlyList<ColumnHistogram?> histograms,
         IReadOnlyList<IReadOnlyList<ColumnValue>?> knownKeys)
     {

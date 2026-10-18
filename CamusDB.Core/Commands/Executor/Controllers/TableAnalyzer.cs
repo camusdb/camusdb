@@ -82,6 +82,7 @@ internal sealed class TableAnalyzer
         int sampleLimit = options.StatsAnalyzeSampleRows;
         int bucketCount = options.StatsHistogramBuckets;
         if (bucketCount < 1) bucketCount = 1;
+        int topValueCount = Math.Max(0, options.StatsTopValues);
 
         // Capture the live counter baseline BEFORE pinning the scan snapshot (below), mirroring
         // AnalyzeBackgroundAsync. The reverse order has a systematic under-count: a row committed
@@ -128,6 +129,7 @@ internal sealed class TableAnalyzer
         long rowCount   = 0;
         bool isSampled  = false;
         long? limit     = sampleLimit > 0 ? sampleLimit : null;
+        Dictionary<string, long> nullCounts = NullCounters(analyzedColumns);
 
         // Request one row past the sample limit so the sentinel can set isSampled=true;
         // the sentinel is detected below and not counted toward rowCount.
@@ -156,7 +158,13 @@ internal sealed class TableAnalyzer
 
                 foreach (string col in analyzedColumns)
                 {
-                    if (!row.TryGetValue(col, out ColumnValue? val) || val.Type is ColumnType.Null or ColumnType.Bool)
+                    if (!row.TryGetValue(col, out ColumnValue? val) || val.Type == ColumnType.Null)
+                    {
+                        nullCounts[col]++;
+                        continue;
+                    }
+
+                    if (val.Type == ColumnType.Bool)
                         continue;
 
                     ScalarBound bound = ScalarBound.FromColumnValue(val);
@@ -199,6 +207,8 @@ internal sealed class TableAnalyzer
         foreach ((string col, HashSet<string> set) in distinctSets)
             columnNdv[col] = set.Count;
 
+        Dictionary<string, double> columnNullFraction = NullFractions(nullCounts, rowCount);
+
         Dictionary<string, long> keyNdv = new(StringComparer.Ordinal);
         foreach ((string sig, HashSet<string> set) in keyDistinct)
             keyNdv[sig] = set.Count;
@@ -207,7 +217,7 @@ internal sealed class TableAnalyzer
         foreach ((string col, List<ScalarBound> values) in valueLists)
         {
             if (values.Count == 0) continue;
-            histograms[col] = BuildEquiDepthHistogram(values, bucketCount);
+            histograms[col] = BuildEquiDepthHistogram(values, bucketCount, topValueCount);
         }
 
         // --- Persist ---
@@ -219,7 +229,8 @@ internal sealed class TableAnalyzer
             database, table,
             rowCount, scanComplete: !isSampled,
             minMax, indexCounts, histograms, columnNdv, keyNdv.Count > 0 ? keyNdv : null,
-            baseline, analyzedAt
+            baseline, analyzedAt,
+            columnNullFraction: columnNullFraction
         ).ConfigureAwait(false);
 
         string status = isSampled
@@ -285,6 +296,7 @@ internal sealed class TableAnalyzer
 
         int bucketCount = options.StatsHistogramBuckets;
         if (bucketCount < 1) bucketCount = 1;
+        int topValueCount = Math.Max(0, options.StatsTopValues);
 
         int sampleCapacity = options.AutoAnalyzeHistogramSampleRows;
         if (sampleCapacity < 1) sampleCapacity = 1;
@@ -328,6 +340,7 @@ internal sealed class TableAnalyzer
         StatisticsManager.AnalyzeBaseline baseline =
             await statistics.CaptureAnalyzeBaselineAsync(database, table).ConfigureAwait(false);
         long rowCount = 0;
+        Dictionary<string, long> nullCounts = NullCounters(analyzedColumns);
 
         // Open our own lock-free read-only snapshot. Under the serializable default this pins a
         // single HLC across every scan page (consistent), takes no range locks, and does not fold
@@ -348,7 +361,13 @@ internal sealed class TableAnalyzer
 
                 foreach (string col in analyzedColumns)
                 {
-                    if (!row.TryGetValue(col, out ColumnValue? val) || val.Type is ColumnType.Null or ColumnType.Bool)
+                    if (!row.TryGetValue(col, out ColumnValue? val) || val.Type == ColumnType.Null)
+                    {
+                        nullCounts[col]++;
+                        continue;
+                    }
+
+                    if (val.Type == ColumnType.Bool)
                         continue;
 
                     ScalarBound bound = ScalarBound.FromColumnValue(val);
@@ -403,6 +422,8 @@ internal sealed class TableAnalyzer
         foreach ((string col, HyperLogLog hll) in columnHll)
             columnNdv[col] = hll.Estimate();
 
+        Dictionary<string, double> columnNullFraction = NullFractions(nullCounts, rowCount);
+
         Dictionary<string, long> keyNdv = new(StringComparer.Ordinal);
         foreach ((string sig, HyperLogLog hll) in keyHll)
             keyNdv[sig] = hll.Estimate();
@@ -413,7 +434,7 @@ internal sealed class TableAnalyzer
             if (sampler.Items.Count == 0) continue;
             // Build the histogram over the bounded sample. Bucket boundaries and cumulative
             // fractions are sample-invariant; the estimator scales them by the exact RowCount below.
-            histograms[col] = BuildEquiDepthHistogram([.. sampler.Items], bucketCount);
+            histograms[col] = BuildEquiDepthHistogram([.. sampler.Items], bucketCount, topValueCount);
         }
 
         // Publish under a cluster-visible per-table fence so that, during a failover, exactly one node
@@ -454,7 +475,8 @@ internal sealed class TableAnalyzer
                 database, table,
                 rowCount, scanComplete: true,
                 minMax, indexCounts, histograms, columnNdv, keyNdv.Count > 0 ? keyNdv : null,
-                baseline, analyzedAt
+                baseline, analyzedAt,
+                columnNullFraction: columnNullFraction
             ).ConfigureAwait(false);
 
             await database.Transactions.CommitAsync(fenceTx).ConfigureAwait(false); // releases the fence
@@ -593,6 +615,24 @@ internal sealed class TableAnalyzer
         _                    => b.Type + ":" + b.UuidHigh + ":" + b.LongValue,
     };
 
+    /// <summary>One NULL counter per analyzed column, so a column that is never NULL still gets a share of 0.</summary>
+    private static Dictionary<string, long> NullCounters(IEnumerable<string> analyzedColumns)
+    {
+        Dictionary<string, long> counters = new(StringComparer.Ordinal);
+        foreach (string col in analyzedColumns)
+            counters[col] = 0;
+        return counters;
+    }
+
+    /// <summary>The NULL share of each analyzed column over the scanned rows; 0 for every column of an empty table.</summary>
+    private static Dictionary<string, double> NullFractions(Dictionary<string, long> nullCounts, long rowCount)
+    {
+        Dictionary<string, double> fractions = new(nullCounts.Count, StringComparer.Ordinal);
+        foreach ((string col, long nulls) in nullCounts)
+            fractions[col] = rowCount > 0 ? Math.Clamp((double)nulls / rowCount, 0.0, 1.0) : 0.0;
+        return fractions;
+    }
+
     private static bool IsOrderable(ColumnType t) => t is
         ColumnType.Integer64 or ColumnType.Float64 or ColumnType.Float32 or
         ColumnType.String or ColumnType.Id or ColumnType.Date or ColumnType.DateTime or ColumnType.Numeric;
@@ -613,7 +653,15 @@ internal sealed class TableAnalyzer
         return sb.ToString();
     }
 
-    private static ColumnHistogram BuildEquiDepthHistogram(List<ScalarBound> values, int bucketCount)
+    /// <summary>
+    /// The equi-depth histogram of <paramref name="values"/> (sorted in place) with
+    /// <paramref name="bucketCount"/> buckets, plus the list of its most common values
+    /// (<see cref="ColumnHistogram.TopValues"/>, at most <paramref name="topValueCount"/>; none
+    /// when 0). The buckets price ranges; the list prices an equality on a common value and a join
+    /// between two columns skewed on the same values, which the buckets resolve only for a value
+    /// that fills a whole bucket.
+    /// </summary>
+    private static ColumnHistogram BuildEquiDepthHistogram(List<ScalarBound> values, int bucketCount, int topValueCount)
     {
         values.Sort((a, b) => a.CompareTo(b));
 
@@ -656,6 +704,79 @@ internal sealed class TableAnalyzer
             Buckets   = buckets,
             TotalRows = total,
             MinValue  = total > 0 ? values[0] : null,
+            TopValues = CollectTopValues(values, topValueCount),
         };
+    }
+
+    /// <summary>
+    /// The most common values of <paramref name="sorted"/> (ascending), at most <paramref name="limit"/>,
+    /// in ascending value order. Every value when the column has no more distinct values than the
+    /// limit, so a low-cardinality column (a status, a kind) is described exactly; otherwise the
+    /// values that hold at least two rows and more than 1.25 times the average rows per value, the
+    /// most common first, the rule PostgreSQL uses for its most-common-value list, so a column whose
+    /// values are all about as common lists nothing and keeps the uniform model. Null when the limit
+    /// is 0 or no value qualifies.
+    /// </summary>
+    private static List<ColumnTopValue>? CollectTopValues(List<ScalarBound> sorted, int limit)
+    {
+        if (limit <= 0 || sorted.Count == 0)
+            return null;
+
+        // One pass over the runs of equal values: count them, and keep the runs of two rows or
+        // more as candidates, so a unique column does not materialize a run per row.
+        int runCount = 0;
+        List<(int Start, int Length)> candidates = [];
+        int runStart = 0;
+
+        for (int i = 1; i <= sorted.Count; i++)
+        {
+            if (i < sorted.Count && sorted[i].CompareTo(sorted[runStart]) == 0)
+                continue;
+
+            runCount++;
+            int length = i - runStart;
+            if (length >= 2)
+                candidates.Add((runStart, length));
+
+            runStart = i;
+        }
+
+        List<(int Start, int Length)> chosen;
+
+        if (runCount <= limit)
+        {
+            // Every value fits: the exact distribution, singletons included.
+            chosen = new(runCount);
+            runStart = 0;
+            for (int i = 1; i <= sorted.Count; i++)
+            {
+                if (i < sorted.Count && sorted[i].CompareTo(sorted[runStart]) == 0)
+                    continue;
+
+                chosen.Add((runStart, i - runStart));
+                runStart = i;
+            }
+        }
+        else
+        {
+            double threshold = 1.25 * sorted.Count / runCount;
+            candidates.RemoveAll(run => run.Length <= threshold);
+            if (candidates.Count == 0)
+                return null;
+
+            // The most common first; ties by position, so the order is deterministic.
+            candidates.Sort((a, b) => b.Length != a.Length ? b.Length.CompareTo(a.Length) : a.Start.CompareTo(b.Start));
+            if (candidates.Count > limit)
+                candidates.RemoveRange(limit, candidates.Count - limit);
+
+            candidates.Sort((a, b) => a.Start.CompareTo(b.Start));
+            chosen = candidates;
+        }
+
+        List<ColumnTopValue> top = new(chosen.Count);
+        foreach ((int start, int length) in chosen)
+            top.Add(new ColumnTopValue { Value = sorted[start], Rows = length });
+
+        return top;
     }
 }

@@ -3,8 +3,9 @@
 Collects, persists, and exposes per-table statistics for the cost-based optimizer.
 
 `StatisticsManager` is the central registry. `TableStatistics` holds a table's persisted snapshot:
-row count, per-index entry counts, per-column min/max, equi-depth histograms, per-column and
-per-key-tuple NDV (number of distinct values), plus the auto-analyze staleness fields
+row count, per-index entry counts, per-column min/max, equi-depth histograms with the most common
+values of each column, per-column NULL shares, per-column and per-key-tuple NDV (number of distinct
+values), plus the auto-analyze staleness fields
 (`MutationsSinceAnalyze`, `LastAnalyzedAt`). Stats are advisory — the planner uses them as hints and
 never relies on them for correctness — and are persisted to Kahuna under `{dbId}:stats:{tableId}`.
 

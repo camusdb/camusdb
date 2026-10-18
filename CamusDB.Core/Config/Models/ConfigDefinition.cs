@@ -178,6 +178,12 @@ public class ConfigDefinition
     public int StatsHistogramBuckets { get; set; } = 100;
 
     /// <summary>
+    /// The most common values <c>ANALYZE</c> keeps per column next to its histogram, with their row
+    /// counts. <c>0</c> = no list. Maps to <c>CamusDBOptions.StatsTopValues</c>.
+    /// </summary>
+    public int StatsTopValues { get; set; } = 100;
+
+    /// <summary>
     /// The most columns of one table <c>ANALYZE</c> collects statistics for: the indexed leading
     /// columns first, then the others in declaration order. <c>0</c> = indexed leading columns only.
     /// Must be <c>&gt;= 0</c>. Maps to <c>CamusDBOptions.StatsAnalyzeMaxColumns</c>.
@@ -1327,6 +1333,9 @@ public class ConfigDefinition
 
         if (StatsHistogramBuckets < 1)
             throw Invalid($"'stats_histogram_buckets' must be >= 1, got {StatsHistogramBuckets}");
+
+        if (StatsTopValues < 0)
+            throw Invalid($"'stats_top_values' must be >= 0 (0 = no most-common-value list), got {StatsTopValues}");
 
         if (StatsAnalyzeMaxColumns < 0)
             throw Invalid($"'stats_analyze_max_columns' must be >= 0 (0 = indexed leading columns only), got {StatsAnalyzeMaxColumns}");

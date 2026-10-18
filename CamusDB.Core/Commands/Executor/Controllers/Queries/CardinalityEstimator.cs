@@ -570,15 +570,19 @@ internal static class CardinalityEstimator
         StatisticsManager? stats,
         bool leftIsJoinResult = false)
     {
-        // FK-aware: unique key on the right → at most 1 right match per left row.
+        // A NULL key matches nothing: each side keeps the share of its rows that hold a key.
+        double leftKeyed = NonNullFraction(leftTable, leftKeyColumns, database, stats);
+        double rightKeyed = NonNullFraction(rightTable, rightKeyColumns, database, stats);
+
+        // FK-aware: unique key on the right → at most 1 right match per keyed left row.
         if (rightTable is not null && rightKeyColumns.Count > 0
             && IsJoinKeyUnique(rightTable, rightKeyColumns))
-            return Math.Max(1, leftRows);
+            return Math.Max(1, (long)(leftRows * leftKeyed));
 
-        // FK-aware: unique key on the left → at most 1 left match per right row.
+        // FK-aware: unique key on the left → at most 1 left match per keyed right row.
         if (!leftIsJoinResult && leftTable is not null && leftKeyColumns.Count > 0
             && IsJoinKeyUnique(leftTable, leftKeyColumns))
-            return Math.Max(1, rightRows);
+            return Math.Max(1, (long)(rightRows * rightKeyed));
 
         // NDV-based: |A ⋈ B| ≈ |A| × |B| / max(NDV_A, NDV_B).
         if (stats is not null)
@@ -598,12 +602,12 @@ internal static class CardinalityEstimator
                 && SkewedDistribution(rightTable, rightKeyColumns[0], right, database, stats) is { } rightDistribution
                 && JoinKeyDistribution.JoinSelectivity(leftDistribution, rightDistribution) is { } selectivity)
             {
-                return Math.Max(1, (long)((double)leftRows * rightRows * selectivity));
+                return Math.Max(1, (long)((double)leftRows * leftKeyed * rightRows * rightKeyed * selectivity));
             }
 
             long maxNdv = Math.Max(ndvLeft ?? 0L, ndvRight ?? 0L);
             if (maxNdv > 0)
-                return Math.Max(1, (long)((double)leftRows * rightRows / maxNdv));
+                return Math.Max(1, (long)((double)leftRows * leftKeyed * rightRows * rightKeyed / maxNdv));
         }
 
         // Fallback: fixed selectivity.
@@ -650,6 +654,11 @@ internal static class CardinalityEstimator
         IReadOnlyList<ColumnValue>? leftKeys = null,
         IReadOnlyList<ColumnValue>? rightKeys = null)
     {
+        // A NULL key matches nothing: the selectivity carries the share of each side's rows that
+        // hold a key, because the statistics below describe the rows that hold one.
+        double keyed = NonNullFraction(leftTable, leftKeyColumns, database, stats)
+            * NonNullFraction(rightTable, rightKeyColumns, database, stats);
+
         // Known keys on one side: the join keeps, for each key, the other column's share of that
         // key, and the mean of those shares is the selectivity (the row count of the known side is
         // the number of keys, so the product gives the sum of the shares).
@@ -658,12 +667,12 @@ internal static class CardinalityEstimator
             if (leftKeys is { Count: > 0 } && rightTable is not null
                 && stats.GetColumnHistogram(database, rightTable, rightKeyColumns[0]) is { } rightHistogram
                 && KeyShareSelectivity(rightHistogram, leftKeys) is { } leftShare)
-                return leftShare;
+                return leftShare * keyed;
 
             if (rightKeys is { Count: > 0 } && leftTable is not null
                 && stats.GetColumnHistogram(database, leftTable, leftKeyColumns[0]) is { } leftHistogram
                 && KeyShareSelectivity(leftHistogram, rightKeys) is { } rightShare)
-                return rightShare;
+                return rightShare * keyed;
         }
 
         long? ndvLeft = KeyDistinctCount(leftTable, leftKeyColumns, leftTableRows, database, stats);
@@ -677,18 +686,47 @@ internal static class CardinalityEstimator
             && SkewedDistribution(rightTable, rightKeyColumns[0], right, database, stats) is { } rightDistribution
             && JoinKeyDistribution.JoinSelectivity(leftDistribution, rightDistribution) is { } selectivity)
         {
-            return selectivity;
+            return selectivity * keyed;
         }
 
         long maxNdv = Math.Max(ndvLeft ?? 0L, ndvRight ?? 0L);
 
-        return maxNdv > 0 ? 1.0 / maxNdv : FallbackSelectivity;
+        return (maxNdv > 0 ? 1.0 / maxNdv : FallbackSelectivity) * keyed;
+    }
+
+    /// <summary>
+    /// The share of the rows of <paramref name="table"/> that hold a value in every column of
+    /// <paramref name="keyColumns"/>: the product of the columns' non-null shares as the last
+    /// <c>ANALYZE</c> counted them (<see cref="StatisticsManager.GetColumnNullFraction"/>). A row
+    /// with a NULL key joins nothing and probes nothing, so a join estimate and a probe count scale
+    /// by this share; the histogram and distinct count of a column describe its non-null rows only.
+    /// 1 when the table, the statistics or the count is unknown, the assumption made before the
+    /// count existed.
+    /// </summary>
+    internal static double NonNullFraction(
+        TableDescriptor? table,
+        IReadOnlyList<string> keyColumns,
+        DatabaseDescriptor database,
+        StatisticsManager? stats)
+    {
+        if (table is null || stats is null)
+            return 1.0;
+
+        double keyed = 1.0;
+        foreach (string column in keyColumns)
+        {
+            if (stats.GetColumnNullFraction(database, table, column) is { } nullFraction)
+                keyed *= 1.0 - Math.Clamp(nullFraction, 0.0, 1.0);
+        }
+
+        return keyed;
     }
 
     /// <summary>
     /// The mean share of the rows of <paramref name="histogram"/>'s column behind the values
     /// <paramref name="keys"/>, each read with <see cref="ColumnHistogram.EqualityFraction"/> (a
-    /// heavy value by its whole buckets, a rare one by its bucket's density) and floored at one row.
+    /// common value by its counted rows, a heavy value of an older histogram by its whole buckets,
+    /// a rare one by its bucket's density) and floored at one row.
     /// This is the selectivity of a join through keys read at plan time
     /// (<see cref="PlanTimeLeafLookup"/>): <c>keys.Count × rightRows × share</c> is the sum of the
     /// rows behind the keys. Null when the histogram is empty or no key has a value.
@@ -949,15 +987,18 @@ internal static class CardinalityEstimator
         hist is not null && ndv is > 0 ? JoinKeyDistribution.FromHistogram(hist, ndv.Value) : null;
 
     /// <summary>
-    /// Estimates selectivity for <c>col = constant</c>. A value that fills whole buckets of the
-    /// column's histogram (<see cref="ColumnHistogram.IsHeavyValue"/>) takes the share those
-    /// buckets hold: the distinct count alone prices the popular values of a skewed column like
-    /// its rare ones, a cast note that a tenth of the rows carry at one row in ten thousand, and
-    /// a join search then starts from that filter. Any other value takes the residual of the
+    /// Estimates selectivity for <c>col = constant</c>. A heavy value, one of the most common
+    /// values <c>ANALYZE</c> kept or one that fills whole buckets of the column's histogram
+    /// (<see cref="ColumnHistogram.IsHeavyValue"/>), takes the share the statistics counted for
+    /// it: the distinct count alone prices the popular values of a skewed column like its rare
+    /// ones, a cast note that a tenth of the rows carry at one row in ten thousand, and a join
+    /// search then starts from that filter. Any other value takes the residual of the
     /// distribution: the rows that no heavy value holds, spread over the remaining distinct
-    /// values, the model the join estimate uses (<see cref="JoinKeyDistribution"/>); with no
-    /// heavy value that is <c>1 / NDV</c>. Without a distinct count the containing bucket's
-    /// density stands in; without a histogram or a count, <see cref="FallbackSelectivity"/>.
+    /// values, the model the join estimate uses (<see cref="JoinKeyDistribution"/>), floored at
+    /// one row because a list that names every value leaves no residual and the value may have
+    /// arrived after the statistics; with no heavy value that is <c>1 / NDV</c>. Without a
+    /// distinct count the containing bucket's density stands in; without a histogram or a count,
+    /// <see cref="FallbackSelectivity"/>.
     /// </summary>
     private static double EqualitySelectivity(ScalarBound? bound, ColumnHistogram? hist, long? ndv, JoinKeyDistribution? distribution)
     {
@@ -967,16 +1008,19 @@ internal static class CardinalityEstimator
         if (bound is null)
             return 0.0;
 
-        // 1. A heavy value: its own share of the rows, from the buckets it fills.
+        // 1. A heavy value: its own share of the rows, from the statistics that counted it.
         if (hist is not null && hist.TotalRows > 0 && hist.IsHeavyValue(bound))
             return Math.Min(1.0, hist.EqualityFraction(bound));
 
         // 2. NDV: the residual share over the residual distinct values when the column has heavy
-        //    values, else 1/NDV.
+        //    values (at least one row: the value may be newer than the statistics), else 1/NDV.
         if (ndv is > 0)
         {
             if (distribution is { HeavyValues.Count: > 0 })
-                return Math.Min(1.0, distribution.ResidualFraction / distribution.ResidualDistinct);
+            {
+                double oneRow = hist is { TotalRows: > 0 } ? 1.0 / hist.TotalRows : 0.0;
+                return Math.Min(1.0, Math.Max(oneRow, distribution.ResidualFraction / distribution.ResidualDistinct));
+            }
 
             return Math.Min(1.0, 1.0 / ndv.Value);
         }

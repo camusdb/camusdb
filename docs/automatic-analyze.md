@@ -57,7 +57,8 @@ sketches, so peak memory is a function of the sample size, **not** the table siz
 
 - **Histograms** are built from a bounded [reservoir sample](../CamusDB.Core/Statistics/ReservoirSampler.cs)
   (Vitter's Algorithm R) of at most `auto_analyze_histogram_sample_rows` (default `10,000`) values per
-  column.
+  column. The most common values of the sample (`stats_top_values`) are kept with the histogram, with
+  their sample counts, which the estimates read as shares.
 - **NDV** is estimated with a small [HyperLogLog](../CamusDB.Core/Statistics/HyperLogLog.cs) sketch
   (~2 KB per column at the default precision), rather than an exact distinct-set.
 - **Row and index-entry counts** stay exact — they're running integers, O(1) memory.

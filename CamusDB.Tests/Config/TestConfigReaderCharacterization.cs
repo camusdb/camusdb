@@ -384,6 +384,7 @@ public sealed class TestConfigReaderCharacterization
         ConfigDefinition config = new ConfigReader().Read(
             "stats_analyze_sample_rows: 250000\n" +
             "stats_histogram_buckets: 64\n" +
+            "stats_top_values: 50\n" +
             "stats_analyze_max_columns: 8\n" +
             "stats_plan_time_lookup_max_rows: 500\n" +
             "auto_analyze_enabled: true\n" +
@@ -399,6 +400,7 @@ public sealed class TestConfigReaderCharacterization
 
         Assert.That(config.StatsAnalyzeSampleRows, Is.EqualTo(250000));
         Assert.That(config.StatsHistogramBuckets, Is.EqualTo(64));
+        Assert.That(config.StatsTopValues, Is.EqualTo(50));
         Assert.That(config.StatsAnalyzeMaxColumns, Is.EqualTo(8));
         Assert.That(config.StatsPlanTimeLookupMaxRows, Is.EqualTo(500));
         Assert.That(config.AutoAnalyzeEnabled, Is.True);

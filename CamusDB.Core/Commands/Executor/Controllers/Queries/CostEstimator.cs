@@ -643,16 +643,18 @@ internal static class CostEstimator
     /// (<see cref="RangeProbeWeight"/>), and each row it returns costs one row fetch. The memo
     /// (<see cref="IndexNestedLoopJoinOperator.ProbeMemoMaxRows"/>) holds the rows of the probed
     /// keys; when they would not fit, a repeated key probes again, so every left row is a probe.
+    /// A left row whose key is NULL probes nothing (<see cref="IndexLookupProfile.LeftNonNullFraction"/>).
     /// A memo hit priced below a hash probe made a large hash join followed by a few hundred
     /// memoized lookups look almost free, and the search moved selective tables to the end.
     /// </summary>
     internal static double IndexLookupJoinStepCost(double leftRows, IndexLookupProfile probe)
     {
         double matches = Math.Max(1.0, probe.MatchesPerProbe);
-        double probes = Math.Min(leftRows, probe.LeftKeyDistinct);
+        double keyedRows = leftRows * Math.Clamp(probe.LeftNonNullFraction, 0.0, 1.0);
+        double probes = Math.Min(keyedRows, probe.LeftKeyDistinct);
 
         if (probes * matches > IndexNestedLoopJoinOperator.ProbeMemoMaxRows)
-            probes = leftRows;
+            probes = keyedRows;
 
         double weight = probe.UniqueIndex ? UniqueProbeWeight : RangeProbeWeight;
         return leftRows + probes * (weight + matches);
@@ -701,6 +703,7 @@ internal static class CostEstimator
         }
 
         double leftDistinct = double.PositiveInfinity;
+        double leftNonNull = 1.0;
         if (leftKeys is { Count: > 0 })
         {
             leftDistinct = leftKeys.Count;
@@ -711,9 +714,11 @@ internal static class CostEstimator
             long? distinct = CardinalityEstimator.EstimateKeyDistinctCount(leftTable, [leftColumn], leftRows, database, stats);
             if (distinct is > 0)
                 leftDistinct = distinct.Value;
+
+            leftNonNull = CardinalityEstimator.NonNullFraction(leftTable, [leftColumn], database, stats);
         }
 
-        return new IndexLookupProfile(unique, matches, leftDistinct);
+        return new IndexLookupProfile(unique, matches, leftDistinct, leftNonNull);
     }
 
     /// <summary>

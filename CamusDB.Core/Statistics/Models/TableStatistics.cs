@@ -70,6 +70,17 @@ public sealed class TableStatistics
     public Dictionary<string, long>? KeyNdv { get; set; }
 
     /// <summary>
+    /// The share of the rows in which the column is NULL, per analyzed column, counted by
+    /// <c>ANALYZE TABLE</c> over the rows it scanned. A NULL join key matches nothing and probes
+    /// nothing, so the join estimate and the probe count of a lookup join scale by the non-null
+    /// share; a cast table whose character column is NULL in half the rows joins the characters at
+    /// half its size. Null on a blob written before this field existed or before ANALYZE ran; the
+    /// estimates then assume no NULLs, as before.
+    /// </summary>
+    [JsonPropertyName("colNullFrac")]
+    public Dictionary<string, double>? ColumnNullFraction { get; set; }
+
+    /// <summary>
     /// Number of row mutations (inserts + updates + deletes) observed since the last
     /// <c>ANALYZE</c> completed. Drives automatic-analyze staleness: when it grows past a
     /// fraction of <see cref="RowCount"/> the table's histograms/NDV are considered stale and a

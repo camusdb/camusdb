@@ -62,11 +62,14 @@ internal enum JoinStepOperator
 /// probe returns on average, and the distinct keys of the left input. The join keeps the rows of
 /// each probed key in a memo, so a left input that repeats a key probes the store once for it;
 /// <see cref="LeftKeyDistinct"/> bounds the probes, and it is unbounded when the distinct count of
-/// the left column is unknown, so every left row then counts as a probe.
+/// the left column is unknown, so every left row then counts as a probe. A left row whose key is
+/// NULL probes nothing, so <see cref="LeftNonNullFraction"/>, the share of the left column's rows
+/// that hold a value, scales the probes before the distinct bound: a cast table whose character
+/// column is NULL in half the rows probes the characters for half of them.
 /// <see cref="CostEstimator.EstimateIndexLookupProfile"/> builds it from the statistics, and the
 /// enumerator and the builder both price a step through the same instance.
 /// </summary>
-internal readonly record struct IndexLookupProfile(bool UniqueIndex, double MatchesPerProbe, double LeftKeyDistinct);
+internal readonly record struct IndexLookupProfile(bool UniqueIndex, double MatchesPerProbe, double LeftKeyDistinct, double LeftNonNullFraction = 1.0);
 
 /// <summary>
 /// The enumerator's estimates for one join of the tree it chose: the rows of the left input, the

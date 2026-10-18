@@ -826,7 +826,7 @@ an estimated row fraction/count. Falls back to the fixed constants above when no
 
 | Predicate | Estimate |
 |-----------|----------|
-| `col = v` | the share of `v` from the histogram when `v` is a **heavy value** (it fills whole buckets) → else the residual `(1 − heavy shares) / (NDV − heavy count)`, which is `1/NDV` on a column with no heavy value → else histogram bucket `rows/total/distinct` → else fixed |
+| `col = v` | the share of `v` from the statistics when `v` is a **heavy value** (one of the most common values `ANALYZE` kept, or a value that fills whole buckets of an older histogram) → else the residual `(1 − heavy shares) / (NDV − heavy count)`, at least one row, which is `1/NDV` on a column with no heavy value → else histogram bucket `rows/total/distinct` → else fixed |
 | `col <> v` | `1 − equality(v)` |
 | `col > v` / `>= v` | histogram `RangeFraction(v, ∞)` |
 | `col < v` / `<= v` | histogram `RangeFraction(−∞, v)` |
@@ -841,11 +841,14 @@ An equality reads the histogram before the distinct count because `1/NDV` prices
 column alike. On a skewed column that is wrong in both directions: a cast note that a tenth of the
 rows carry is priced at one row in ten thousand, and the join search then starts from that filter
 and probes the rest of the query from a result a thousand times larger than it planned for; a rare
-value is priced at the average. The heavy values of a column are the values that fill whole buckets
-of its equi-depth histogram (the same values the join estimate uses, see *Join cardinality* below),
-and `ANALYZE` builds the histogram, so a value that holds two percent of the rows or more is always
-one. An inclusive range bound on a heavy value carries its whole mass, and the cumulative fraction at
-a heavy value counts the rows at or below the end of its run.
+value is priced at the average. The heavy values of a column are the most common values `ANALYZE`
+keeps next to its equi-depth histogram, each with its counted rows (`stats_top_values`, default 100:
+every value when the column has no more distinct values than that, so a status or a kind column is
+described exactly, else the values with at least two rows and more than 1.25 times the average rows
+per value), the same values the join estimate uses, see *Join cardinality* below. A histogram built
+before the list existed has the values that fill whole buckets, two percent of the rows or more. An
+inclusive range bound on a heavy value carries its whole mass, and the cumulative fraction at a heavy
+value counts the rows at or below the end of its run.
 
 **Join cardinality** (`EstimateJoinCardinality`): the textbook estimate
 
@@ -855,22 +858,34 @@ a heavy value counts the rows at or below the end of its run.
 
 with two refinements:
 
+- **NULL keys match nothing**: `ANALYZE` counts the share of each column's rows that are NULL
+  (`TableStatistics.ColumnNullFraction`), and every join estimate keeps, for each side, the share of
+  its rows that hold a key (`CardinalityEstimator.NonNullFraction`, the product over the key's columns).
+  The histogram and the distinct count of a column describe its non-null rows, so the factor applies
+  to every form below. A cast table whose character column is NULL in half the rows joins the
+  characters at half its size, where the row count alone said all of it. Statistics written before
+  the count existed assume no NULLs, as before.
 - **FK-aware uniqueness**: if the join key *contains every column* of a unique index
   on one side (`IsJoinKeyUnique`, set-containment, **not** prefix-match — a join on `tenant_id` alone of a
   `UNIQUE(tenant_id, email)` is *not* unique), that side contributes ≤1 match per row and the result is the
-  other side's row count. Multi-column join keys use `KeyNdv`; single-column keys use `ColumnNdv`.
+  other side's keyed row count. Multi-column join keys use `KeyNdv`; single-column keys use `ColumnNdv`.
 - **Skew-aware keys** (`JoinKeyDistribution`): a single-column key that is unique on neither side and has
   a histogram on both is estimated from the two value distributions, `|A| · |B| · Σ_v f_A(v) · f_B(v)`.
   The textbook formula assumes every value is as common as every other; when both sides concentrate on
   the same values (customers and stores both in the popular cities) the true join is many times larger.
-  The **heavy values** of a column are the values that fill whole buckets of its equi-depth histogram
-  (`DistinctInBucket = 1`), with the rows of those buckets as their frequency; the rest of the rows are
-  the **residual**, spread evenly over the rest of the distinct values. The sum runs over the heavy
-  values of either side (a value heavy on one side only meets the other side's residual at its average
-  frequency), plus the two residuals joined with the textbook formula. With no heavy value on either
-  side this is exactly the textbook estimate. ANALYZE builds histograms for the leading column of
-  every index and, up to `stats_analyze_max_columns`, for the other columns of the table, so the
-  refinement applies to every analyzed join key.
+  The **heavy values** of a column are the most common values `ANALYZE` keeps next to its histogram
+  (`stats_top_values`), each with its counted rows; a histogram built before the list existed has the
+  values that fill whole buckets (`DistinctInBucket = 1`), with the rows of those buckets as their
+  frequency. The rest of the rows are the **residual**, spread evenly over the rest of the distinct
+  values. The sum runs over the heavy values of either side (a value heavy on one side only meets the
+  other side's residual at its average frequency), plus the two residuals joined with the textbook
+  formula. With no heavy value on either side this is exactly the textbook estimate. The list matters
+  because the skew that sizes a join sits mostly below the bucket line: on the Join Order Benchmark
+  the most popular movie holds one percent of the cast rows and the next ones half a percent, the join
+  of two such columns is three times the textbook estimate, and the whole buckets alone see 1.7 times.
+  ANALYZE builds histograms for the leading column of every index and, up to
+  `stats_analyze_max_columns`, for the other columns of the table, so the refinement applies to every
+  analyzed join key.
 - **A dimension row named by a filter: the plan-time lookup** (`PlanTimeLeafLookup`). A filter such
   as `it.info = 'release dates'` keeps one row of a small table, and no statistic can say which key
   that row carries into the fact table: the average key of `movie_info.info_type_id` holds 394 rows,
@@ -1076,10 +1091,12 @@ selects for the conjuncts that the step attaches. The checks are the builder's o
 - Every left row costs one unit, as in a hash join: the operator keeps the rows of each probed key in
   a memo, and a left row whose key was probed before pairs with rows already in memory, exactly as a
   hash probe does.
-- `probes` is the number of distinct keys of the left input, `min(leftRows, distinct(leftColumn))`, where
+- `probes` is the number of distinct keys of the left input, `min(leftRows × nonNull, distinct(leftColumn))`,
+  where `nonNull` is the share of the left column's rows that hold a value (a NULL key probes nothing; a
+  cast table whose character column is NULL in half the rows probes the characters for half of them) and
   the distinct count is the left column's NDV in its own table (its row count for a unique key) and
-  unbounded when unknown, so every left row then probes. When the probed rows would not fit the memo
-  (65,536 rows), every left row is a probe too.
+  unbounded when unknown, so every keyed left row then probes. When the probed rows would not fit the
+  memo (65,536 rows), every keyed left row is a probe too.
 - `probeWeight` is the cost of one probe in rows read from storage: 3 for a unique index (one batched
   point read) and 16 for a non-unique index (one batched bounded scan), solved from the retail data set
   at scale 4 on memory storage, where a scanned row costs about 0.55 µs, a unique probe about 2.2 to 4.8 µs
@@ -1139,8 +1156,8 @@ rows[S] = Π leafRows[t ∈ S] × Π selectivity(g ⊆ S) × Π classFactor(C, S
   skew-aware selectivity of `JoinKeyDistribution` (see *Join cardinality* above).
 - **Skewed classes.** When every column of a class has a value distribution
   (`CardinalityEstimator.EstimateJoinKeyDistribution`: uniform over the row count for a unique key, the
-  histogram's heavy values plus a uniform residual for an indexed column, uniform over the NDV for a
-  column with a count and no histogram) and a column of the subset has heavy values, the `k − 1` factors
+  histogram's most common values plus a uniform residual for a column with a histogram, uniform over the
+  NDV for a column with a count and no histogram) and a column of the subset has heavy values, the `k − 1` factors
   are the skew-aware pair selectivities between an **anchor**, the skewed column of the subset with the
   fewest distinct values, and each other column. The distinct-count factors are the special case with no
   heavy value. This is what makes the cycle `customers ⋈ orders ⋈ stores ⋈ cities`, where customers and

@@ -88,6 +88,9 @@ public sealed class StatisticsManager
         public Dictionary<string, long>? ColumnNdv;
         public Dictionary<string, long>? KeyNdv;
 
+        // Per-column NULL share. Set wholesale by ANALYZE. Protected by ColumnStatsLock.
+        public Dictionary<string, double>? ColumnNullFraction;
+
         // Row mutations (insert/update/delete) accumulated since the last completed ANALYZE.
         // Updated with Interlocked; drives auto-analyze staleness. Same Loaded/delta merge
         // semantics as RowCount: pre-load increments are added to the persisted base on load.
@@ -290,6 +293,24 @@ public sealed class StatisticsManager
     }
 
     /// <summary>
+    /// The share of the rows of <paramref name="table"/> in which <paramref name="columnName"/> is
+    /// NULL, as the last <c>ANALYZE</c> counted it (<see cref="TableStatistics.ColumnNullFraction"/>),
+    /// or null when the column was not analyzed or the statistics predate the count.
+    /// </summary>
+    public double? GetColumnNullFraction(DatabaseDescriptor database, TableDescriptor table, string columnName)
+    {
+        string key = CacheKey(database.Id, table.Id);
+        if (!_cache.TryGetValue(key, out Entry? entry) || !entry.Loaded)
+            return null;
+
+        lock (entry.ColumnStatsLock)
+        {
+            return entry.ColumnNullFraction is not null &&
+                   entry.ColumnNullFraction.TryGetValue(columnName, out double fraction) ? fraction : null;
+        }
+    }
+
+    /// <summary>
     /// Returns the approximate distinct-value count for a multi-column key prefix, or null if
     /// not available. <paramref name="columns"/> must be in index-key order.
     /// </summary>
@@ -315,7 +336,8 @@ public sealed class StatisticsManager
         DatabaseDescriptor database,
         TableDescriptor table,
         Dictionary<string, long>? columnNdv,
-        Dictionary<string, long>? keyNdv)
+        Dictionary<string, long>? keyNdv,
+        Dictionary<string, double>? columnNullFraction = null)
     {
         await LoadByIdAsync(database, table.Id).ConfigureAwait(false);
 
@@ -326,6 +348,7 @@ public sealed class StatisticsManager
         {
             if (columnNdv is not null) entry.ColumnNdv = columnNdv;
             if (keyNdv    is not null) entry.KeyNdv    = keyNdv;
+            if (columnNullFraction is not null) entry.ColumnNullFraction = columnNullFraction;
 
             Volatile.Write(ref entry.AnalyzeGeneration, Interlocked.Increment(ref globalAnalyzeGeneration));
         }
@@ -629,7 +652,8 @@ public sealed class StatisticsManager
         Dictionary<string, long> columnNdv,
         Dictionary<string, long>? keyNdv,
         AnalyzeBaseline baseline,
-        Kommander.Time.HLCTimestamp analyzedAt)
+        Kommander.Time.HLCTimestamp analyzedAt,
+        Dictionary<string, double>? columnNullFraction = null)
     {
         await LoadByIdAsync(database, table.Id).ConfigureAwait(false);
         Entry entry = GetOrCreateEntry(database, table, CacheKey(database.Id, table.Id));
@@ -668,11 +692,13 @@ public sealed class StatisticsManager
             foreach ((string col, ColumnMinMax mm) in scannedMinMax)
                 entry.ColumnStats[col] = new ColumnMinMax { Min = mm.Min, Max = mm.Max };
 
-            // Histograms / NDV: rebuilt wholesale by ANALYZE (no incremental delta to preserve).
+            // Histograms / NDV / NULL shares: rebuilt wholesale by ANALYZE (no incremental delta to preserve).
             entry.Histograms = histograms;
             entry.ColumnNdv = columnNdv;
             if (keyNdv is not null)
                 entry.KeyNdv = keyNdv;
+            if (columnNullFraction is not null)
+                entry.ColumnNullFraction = columnNullFraction;
 
             // Staleness: subtract the baseline consumed (so churn during the scan is not lost), record ts.
             ApplyDelta(ref entry.MutationsSinceAnalyze, -baseline.Mutations);
@@ -1354,6 +1380,7 @@ public sealed class StatisticsManager
         Dictionary<string, ColumnHistogram>? histSnapshot = null;
         Dictionary<string, long>? colNdvSnapshot = null;
         Dictionary<string, long>? keyNdvSnapshot = null;
+        Dictionary<string, double>? nullFractionSnapshot = null;
 
         lock (entry.ColumnStatsLock)
         {
@@ -1382,6 +1409,9 @@ public sealed class StatisticsManager
 
             if (entry.KeyNdv is { Count: > 0 })
                 keyNdvSnapshot = new Dictionary<string, long>(entry.KeyNdv, StringComparer.Ordinal);
+
+            if (entry.ColumnNullFraction is { Count: > 0 })
+                nullFractionSnapshot = new Dictionary<string, double>(entry.ColumnNullFraction, StringComparer.Ordinal);
         }
 
         TableStatistics snapshot = new()
@@ -1392,6 +1422,7 @@ public sealed class StatisticsManager
             Histograms            = histSnapshot,
             ColumnNdv             = colNdvSnapshot,
             KeyNdv                = keyNdvSnapshot,
+            ColumnNullFraction    = nullFractionSnapshot,
             MutationsSinceAnalyze = Interlocked.Read(ref entry.MutationsSinceAnalyze),
             LastAnalyzedAt        = ReadLastAnalyzedAt(entry),
             ContentsGeneration    = entry.ContentsGeneration,
@@ -1559,6 +1590,7 @@ public sealed class StatisticsManager
         merged.Histograms     = analyzeSource.Histograms;
         merged.ColumnNdv      = analyzeSource.ColumnNdv;
         merged.KeyNdv         = analyzeSource.KeyNdv;
+        merged.ColumnNullFraction = analyzeSource.ColumnNullFraction;
         merged.LastAnalyzedAt = analyzeSource.LastAnalyzedAt;
 
         // Min/max: widest union of both sides — advisory bounds, so widening is always safe and
@@ -1764,7 +1796,7 @@ public sealed class StatisticsManager
                 MergeIndexCounts(entry, loaded.IndexEntryCounts);
                 MergeColumnStats(entry, loaded.ColumnStats);
                 MergeHistograms(entry, loaded.Histograms);
-                MergeNdv(entry, loaded.ColumnNdv, loaded.KeyNdv);
+                MergeNdv(entry, loaded.ColumnNdv, loaded.KeyNdv, loaded.ColumnNullFraction);
                 MergeStaleness(entry, loaded.MutationsSinceAnalyze, loaded.LastAnalyzedAt);
 
                 // Record the persisted base as the flush baseline: everything already in the
@@ -1877,9 +1909,13 @@ public sealed class StatisticsManager
             return entry.LastAnalyzedAt;
     }
 
-    private static void MergeNdv(Entry entry, Dictionary<string, long>? persistedCol, Dictionary<string, long>? persistedKey)
+    private static void MergeNdv(
+        Entry entry,
+        Dictionary<string, long>? persistedCol,
+        Dictionary<string, long>? persistedKey,
+        Dictionary<string, double>? persistedNullFraction = null)
     {
-        if (persistedCol is null && persistedKey is null) return;
+        if (persistedCol is null && persistedKey is null && persistedNullFraction is null) return;
 
         lock (entry.ColumnStatsLock)
         {
@@ -1888,6 +1924,9 @@ public sealed class StatisticsManager
 
             if (persistedKey is { Count: > 0 })
                 entry.KeyNdv ??= new Dictionary<string, long>(persistedKey, StringComparer.Ordinal);
+
+            if (persistedNullFraction is { Count: > 0 })
+                entry.ColumnNullFraction ??= new Dictionary<string, double>(persistedNullFraction, StringComparer.Ordinal);
         }
     }
 

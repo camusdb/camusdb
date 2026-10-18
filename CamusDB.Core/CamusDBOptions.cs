@@ -99,6 +99,14 @@ public sealed record CamusDBOptions
     public int StatsHistogramBuckets { get; init; } = 100;
 
     /// <summary>
+    /// The most common values ANALYZE keeps per column next to its histogram, each with its row
+    /// count, for the equality and join estimates on skewed columns. A bucket resolves a value only
+    /// when the value fills it; the list names the common values below that line. 0 = no list.
+    /// </summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Cluster)]
+    public int StatsTopValues { get; init; } = 100;
+
+    /// <summary>
     /// The most columns of one table that <c>ANALYZE</c> collects a distinct count, bounds and a
     /// histogram for. The leading column of every readable index comes first, then the other
     /// columns in declaration order, so a filter on a column with no index gets an estimate from

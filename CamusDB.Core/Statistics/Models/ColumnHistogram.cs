@@ -22,12 +22,29 @@ namespace CamusDB.Core.Statistics.Models;
 ///
 /// <see cref="TotalRows"/> is the number of non-null rows scanned when the histogram was built.
 /// It may differ from <see cref="TableStatistics.RowCount"/> when sampling was used.
+///
+/// <see cref="TopValues"/> names the most common values with their row counts, because the buckets
+/// resolve a value only when it fills a whole bucket. The equality and join estimates read a value
+/// from the list first (<see cref="EqualityFraction"/>, <see cref="IsHeavyValue"/>); a histogram
+/// persisted before the list existed has none, and the whole-bucket rule stands for it.
 /// </summary>
 public sealed class ColumnHistogram
 {
     /// <summary>Ordered list of equi-depth buckets (ascending by upper bound).</summary>
     [JsonPropertyName("buckets")]
     public List<ColumnHistogramBucket> Buckets { get; set; } = [];
+
+    /// <summary>
+    /// The most common values of the column, in ascending value order with no two equal, each with
+    /// the rows that hold it out of <see cref="TotalRows"/>; null when the histogram was built
+    /// without the list. <c>ANALYZE</c> keeps every value when the column has no more distinct
+    /// values than <c>stats_top_values</c>, so the list is then the exact distribution; otherwise
+    /// the values that hold at least two rows and more than 1.25 times the average, the most common
+    /// first. A value that fills whole buckets is always among them.
+    /// </summary>
+    [JsonPropertyName("mcv")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public List<ColumnTopValue>? TopValues { get; set; }
 
     /// <summary>Total non-null rows observed when this histogram was last built.</summary>
     [JsonPropertyName("totalRows")]
@@ -148,20 +165,24 @@ public sealed class ColumnHistogram
     }
 
     /// <summary>
-    /// Estimated fraction of rows equal to <paramref name="value"/>: the share the value holds
-    /// of the bucket its run starts in, <c>bucketRows / distinctInBucket</c>, plus every
-    /// following bucket that holds the value alone (the same upper bound and
-    /// <see cref="ColumnHistogramBucket.DistinctInBucket"/> 1). A value common enough to fill
-    /// whole buckets of the sorted rows is counted by those buckets; the density of the one
-    /// bucket its run starts in would price a value that holds half the table like any other
-    /// value of that bucket. The bucket where the run ends is not counted, because the histogram
-    /// does not say how much of it the value holds, so a heavy value's fraction is a slight
-    /// underestimate. Returns 0 for out-of-domain values and on an empty histogram.
+    /// Estimated fraction of rows equal to <paramref name="value"/>: its counted rows when it is one
+    /// of the <see cref="TopValues"/>; otherwise the share the value holds of the bucket its run
+    /// starts in, <c>bucketRows / distinctInBucket</c>, plus every following bucket that holds the
+    /// value alone (the same upper bound and <see cref="ColumnHistogramBucket.DistinctInBucket"/>
+    /// 1). A value common enough to fill whole buckets of the sorted rows is counted by those
+    /// buckets; the density of the one bucket its run starts in would price a value that holds
+    /// half the table like any other value of that bucket. The bucket where the run ends is not
+    /// counted, because the histogram does not say how much of it the value holds, so a heavy
+    /// value's fraction from the buckets alone is a slight underestimate. Returns 0 for
+    /// out-of-domain values and on an empty histogram.
     /// </summary>
     public double EqualityFraction(ScalarBound value)
     {
         if (Buckets.Count == 0 || TotalRows <= 0)
             return 0.0;
+
+        if (TopValueRows(value) is { } counted)
+            return (double)counted / TotalRows;
 
         if (MinValue is not null && value.CompareTo(MinValue) < 0)
             return 0.0;
@@ -192,14 +213,18 @@ public sealed class ColumnHistogram
     }
 
     /// <summary>
-    /// True when <paramref name="value"/> fills at least one whole bucket: a heavy value, whose
-    /// share <see cref="EqualityFraction"/> reads from its buckets instead of a distinct count.
-    /// The first bucket of a value's run is the one its rows start in, so the whole buckets are
-    /// the ones after it under the same upper bound; a run that starts at a bucket boundary
-    /// fills its first bucket too. False for a value outside the histogram's domain.
+    /// True when <paramref name="value"/> is one of the <see cref="TopValues"/> or fills at least
+    /// one whole bucket: a heavy value, whose share <see cref="EqualityFraction"/> reads from the
+    /// statistics instead of a distinct count. The first bucket of a value's run is the one its
+    /// rows start in, so the whole buckets are the ones after it under the same upper bound; a run
+    /// that starts at a bucket boundary fills its first bucket too. False for a value outside the
+    /// histogram's domain.
     /// </summary>
     public bool IsHeavyValue(ScalarBound value)
     {
+        if (TopValueRows(value) is not null)
+            return true;
+
         if (MinValue is not null && value.CompareTo(MinValue) < 0)
             return false;
 
@@ -217,6 +242,45 @@ public sealed class ColumnHistogram
         }
 
         return false;
+    }
+
+    /// <summary>
+    /// The counted rows of <paramref name="value"/> when it is one of the <see cref="TopValues"/>,
+    /// else null. A binary search over the ascending list; a value of another type than the list
+    /// (a string against an integer column) is never a match, because the bound comparison across
+    /// types is not an equality.
+    /// </summary>
+    public long? TopValueRows(ScalarBound value)
+    {
+        List<ColumnTopValue>? top = TopValues;
+        if (top is null || top.Count == 0)
+            return null;
+
+        ScalarBound? first = top[0].Value;
+        if (first is null || (first.Type != value.Type && !(first.TryToDouble(out _) && value.TryToDouble(out _))))
+            return null;
+
+        int lo = 0;
+        int hi = top.Count - 1;
+
+        while (lo <= hi)
+        {
+            int mid = lo + ((hi - lo) >> 1);
+            ScalarBound? candidate = top[mid].Value;
+            if (candidate is null)
+                return null;
+
+            int cmp = candidate.CompareTo(value);
+            if (cmp == 0)
+                return top[mid].Rows;
+
+            if (cmp < 0)
+                lo = mid + 1;
+            else
+                hi = mid - 1;
+        }
+
+        return null;
     }
 
     // The rows of the buckets from index `from` on that hold `value` alone (the value as their
