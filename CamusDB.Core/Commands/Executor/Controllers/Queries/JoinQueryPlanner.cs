@@ -67,7 +67,12 @@ internal sealed class JoinQueryPlanner
         _options = options;
     }
 
-    public QueryPlan GetPlan(DatabaseDescriptor database, BoundSelectQuery bound, QueryTicket ticket)
+    /// <param name="leafKeys">
+    /// The rows that the filters of small dimension leaves keep, read at plan time by the executor
+    /// (<see cref="PlanTimeLeafLookup"/>), or null: the search then prices a probe through those
+    /// keys at their own shares instead of the average key.
+    /// </param>
+    public QueryPlan GetPlan(DatabaseDescriptor database, BoundSelectQuery bound, QueryTicket ticket, IReadOnlyDictionary<string, PlanTimeLeafKeys>? leafKeys = null)
     {
         if (!bound.IsMultiSource)
         {
@@ -113,7 +118,7 @@ internal sealed class JoinQueryPlanner
         {
             // Re-apply the cached ordering to the CURRENT bound.Query.Source so that ON-predicate
             // literals from this query are used (not frozen from the first query of this shape).
-            choice = ReplayCachedOrder(database, bound, pushdown, cachedAliasOrder, cached.JoinBuild, clockValues);
+            choice = ReplayCachedOrder(database, bound, pushdown, cachedAliasOrder, cached.JoinBuild, clockValues, leafKeys);
 
             if (choice is not null)
                 fromCache = true;
@@ -124,7 +129,7 @@ internal sealed class JoinQueryPlanner
         // A miss, or a hit whose order cannot be rebuilt over the current query: plan from the start.
         choice ??= _options.CostBasedJoinOrderEnabled && _stats is not null
                 && AllBaseTableEstimatesLoaded(database, bound)
-            ? JoinEnumerator.Enumerate(bound.Query.Source, bound, pushdown, database, _stats, _options, clockValues)
+            ? JoinEnumerator.Enumerate(bound.Query.Source, bound, pushdown, database, _stats, _options, clockValues, leafKeys)
             : JoinOrderOptimizer.Choose(bound.Query.Source, bound, pushdown);
 
         QuerySource orderedSource = choice.Source;
@@ -187,7 +192,8 @@ internal sealed class JoinQueryPlanner
         JoinPredicatePushdown.Result pushdown,
         IReadOnlyList<string> cachedAliasOrder,
         JoinBuildMode mode,
-        Dictionary<string, ColumnValue>? clockValues)
+        Dictionary<string, ColumnValue>? clockValues,
+        IReadOnlyDictionary<string, PlanTimeLeafKeys>? leafKeys)
     {
         if (mode == JoinBuildMode.WholePredicate)
             return JoinOrderChoice.WholePredicate(
@@ -213,7 +219,7 @@ internal sealed class JoinQueryPlanner
 
         // A replay runs no search, so it costs no step.
         return JoinOrderChoice.CostBased(tree, graph,
-            JoinEnumerator.EstimateSteps(graph, order, tree, bound, pushdown, database, _stats, _options, clockValues),
+            JoinEnumerator.EstimateSteps(graph, order, tree, bound, pushdown, database, _stats, _options, clockValues, leafKeys),
             costedJoinSteps: 0);
     }
 

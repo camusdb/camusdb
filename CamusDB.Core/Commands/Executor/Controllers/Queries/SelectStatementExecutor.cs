@@ -621,7 +621,11 @@ internal sealed class SelectStatementExecutor
                         }
                         if (schemaOut is not null)
                             schemaOut.Schema = DerivedTableSchemaBuilder.Build(selectQuery, boundQuery);
-                        return (database, ExecuteBoundQuery(database, boundQuery, queryTicket));
+
+                        // Planned before the cursor is handed out, as a single-table query is: the
+                        // plan-time lookup of the dimension leaves is the one awaited step.
+                        QueryPlan joinPlan = await queryExecutor.PlanJoinQueryAsync(database, boundQuery, queryTicket).ConfigureAwait(false);
+                        return (database, queryExecutor.ExecuteJoinPlan(joinPlan));
                     }
 
                     if (schemaOut is not null)

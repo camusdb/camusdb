@@ -562,7 +562,11 @@ internal sealed class ExplainExecutor
             boundQuery, ticket, bound.ExistsRegistry, bound.SemiJoinSpecsOrNull);
 
         if (boundQuery.IsMultiSource)
-            return joinQueryPlanner.GetPlan(database, boundQuery, queryTicket);
+        {
+            IReadOnlyDictionary<string, PlanTimeLeafKeys>? leafKeys =
+                await queryExecutor.JoinExecutor.ResolvePlanTimeLeafKeysAsync(database, boundQuery, queryTicket).ConfigureAwait(false);
+            return joinQueryPlanner.GetPlan(database, boundQuery, queryTicket, leafKeys);
+        }
 
         TableDescriptor table = boundQuery.PrimaryTable;
         return queryPlanner.GetPlan(database, table, queryTicket);

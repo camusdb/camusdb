@@ -12,6 +12,7 @@ using CamusDB.Core.CommandsExecutor.Models.Plans;
 using CamusDB.Core.CommandsExecutor.Models.Predicates;
 using CamusDB.Core.CommandsExecutor.Models.Queries;
 using CamusDB.Core.SQLParser;
+using CamusDB.Core.Statistics.Models;
 using CamusDB.Core.Statistics;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
@@ -186,6 +187,12 @@ internal static class JoinEnumerator
     /// (<see cref="Functions.ClockScalarFunctions.ClockValuesOnly"/>), or null. A leaf filter on
     /// <c>now()</c> is costed as the index range the builder will make from the same values.
     /// </param>
+    /// <param name="leafKeys">
+    /// The rows that the filters of small dimension leaves keep, read at plan time
+    /// (<see cref="PlanTimeLeafLookup"/>), by alias; or null. A leaf with an entry is estimated at
+    /// its kept rows, and a probe through one of its key columns at the keys' own shares of the
+    /// probed column.
+    /// </param>
     public static JoinOrderChoice Enumerate(
         QuerySource root,
         BoundSelectQuery bound,
@@ -193,7 +200,8 @@ internal static class JoinEnumerator
         DatabaseDescriptor database,
         StatisticsManager stats,
         CamusDBOptions options,
-        Dictionary<string, ColumnValue>? clockValues = null)
+        Dictionary<string, ColumnValue>? clockValues = null,
+        IReadOnlyDictionary<string, PlanTimeLeafKeys>? leafKeys = null)
     {
         JoinGraph? graph = JoinGraph.TryBuild(root, bound, pushdown.PostJoinConjuncts);
 
@@ -207,7 +215,7 @@ internal static class JoinEnumerator
             return JoinOrderOptimizer.ChooseWithGraph(root, bound, pushdown, graph);
 
         CostInputs inputs = ComputeCostInputs(graph, bound, pushdown, database, stats, options, clockValues,
-            denseSubsets: graph.LeafCount <= MaxTablesForDenseEstimates);
+            denseSubsets: graph.LeafCount <= MaxTablesForDenseEstimates, leafKeys: leafKeys);
         long budget = stats.JoinSearchStepBudgetForTesting ?? MaxCostedStepsForEnumeration;
         int[]? order = FindCheapestOrder(graph, inputs, budget, out long costedSteps, out bool overBudget);
         bool greedy = false;
@@ -249,8 +257,9 @@ internal static class JoinEnumerator
         DatabaseDescriptor database,
         StatisticsManager stats,
         CamusDBOptions options,
-        Dictionary<string, ColumnValue>? clockValues = null) =>
-        EstimateSteps(graph, order, tree, ComputeCostInputs(graph, bound, pushdown, database, stats, options, clockValues, denseSubsets: false));
+        Dictionary<string, ColumnValue>? clockValues = null,
+        IReadOnlyDictionary<string, PlanTimeLeafKeys>? leafKeys = null) =>
+        EstimateSteps(graph, order, tree, ComputeCostInputs(graph, bound, pushdown, database, stats, options, clockValues, denseSubsets: false, leafKeys: leafKeys));
 
     private static IReadOnlyDictionary<JoinSource, JoinStepEstimate> EstimateSteps(
         JoinGraph graph,
@@ -309,7 +318,8 @@ internal static class JoinEnumerator
         StatisticsManager stats,
         CamusDBOptions options,
         Dictionary<string, ColumnValue>? clockValues = null,
-        bool denseSubsets = true)
+        bool denseSubsets = true,
+        IReadOnlyDictionary<string, PlanTimeLeafKeys>? leafKeys = null)
     {
         int n = graph.LeafCount;
 
@@ -321,12 +331,17 @@ internal static class JoinEnumerator
         {
             string alias = graph.Leaves[i].Alias;
             EstimateLeaf(alias, pushdown, bound, database, stats, out firstLeafCost[i], out long rows, options, clockValues);
+
+            // The rows a plan-time lookup counted are the rows; the scan still costs its read.
+            if (leafKeys is not null && leafKeys.TryGetValue(alias, out PlanTimeLeafKeys? known))
+                rows = Math.Max(1L, known.RowCount);
+
             leafRows[i] = rows;
             rightScanCost[i] = firstLeafCost[i];
         }
 
         (List<(ulong Mask, double Selectivity)> groups, List<EquivalenceClass> classes) =
-            BuildSelectivityGroups(graph, bound, database, stats);
+            BuildSelectivityGroups(graph, bound, database, stats, leafKeys);
         SelectivityModel selectivity = new(groups, classes);
 
         return new CostInputs
@@ -336,9 +351,13 @@ internal static class JoinEnumerator
             LeafRows = leafRows,
             SubsetRows = denseSubsets ? EstimateAllSubsets(n, leafRows, selectivity) : null,
             Selectivity = selectivity,
-            StepEdges = BuildStepEdges(graph, bound, database, stats),
+            StepEdges = BuildStepEdges(graph, bound, database, stats, leafKeys),
         };
     }
+
+    /// <summary>The known values of <paramref name="column"/> of the leaf <paramref name="alias"/>, or null.</summary>
+    private static IReadOnlyList<ColumnValue>? KnownKeys(IReadOnlyDictionary<string, PlanTimeLeafKeys>? leafKeys, string alias, string column) =>
+        leafKeys is not null && leafKeys.TryGetValue(alias, out PlanTimeLeafKeys? keys) ? keys.ValuesOf(column) : null;
 
     /// <summary>
     /// Runs the dynamic program and returns the leaf order of the cheapest plan, or null when no
@@ -588,7 +607,12 @@ internal static class JoinEnumerator
         return (equiKey, indexLookup);
     }
 
-    private static List<StepEdge>[] BuildStepEdges(JoinGraph graph, BoundSelectQuery bound, DatabaseDescriptor database, StatisticsManager stats)
+    private static List<StepEdge>[] BuildStepEdges(
+        JoinGraph graph,
+        BoundSelectQuery bound,
+        DatabaseDescriptor database,
+        StatisticsManager stats,
+        IReadOnlyDictionary<string, PlanTimeLeafKeys>? leafKeys)
     {
         int n = graph.LeafCount;
         List<StepEdge>[] edges = new List<StepEdge>[n];
@@ -623,11 +647,13 @@ internal static class JoinEnumerator
                 {
                     // The left column of the match is qualified; its table bounds the distinct keys.
                     int dot = match.LeftLookupColumn.IndexOf('.');
-                    TableDescriptor? leftTable = dot > 0 ? FindTableDescriptor(match.LeftLookupColumn[..dot], bound) : null;
+                    string leftAlias = dot > 0 ? match.LeftLookupColumn[..dot] : "";
+                    TableDescriptor? leftTable = dot > 0 ? FindTableDescriptor(leftAlias, bound) : null;
                     string leftColumn = dot > 0 ? match.LeftLookupColumn[(dot + 1)..] : match.LeftLookupColumn;
 
                     indexLookup = CostEstimator.EstimateIndexLookupProfile(
-                        table.Table, match.Index, match.RightIndexColumn, leftTable, leftColumn, database, stats);
+                        table.Table, match.Index, match.RightIndexColumn, leftTable, leftColumn, database, stats,
+                        KnownKeys(leafKeys, leftAlias, leftColumn));
                 }
 
                 edges[leaf].Add(new StepEdge(conjunct.Mask, equiKey, indexLookup));
@@ -702,10 +728,11 @@ internal static class JoinEnumerator
         IReadOnlyList<double> leafRows,
         BoundSelectQuery bound,
         DatabaseDescriptor database,
-        StatisticsManager? stats)
+        StatisticsManager? stats,
+        IReadOnlyDictionary<string, PlanTimeLeafKeys>? leafKeys = null)
     {
         (List<(ulong Mask, double Selectivity)> groups, List<EquivalenceClass> classes) =
-            BuildSelectivityGroups(graph, bound, database, stats);
+            BuildSelectivityGroups(graph, bound, database, stats, leafKeys);
 
         return EstimateAllSubsets(graph.LeafCount, leafRows, new SelectivityModel(groups, classes));
     }
@@ -847,7 +874,8 @@ internal static class JoinEnumerator
         JoinGraph graph,
         BoundSelectQuery bound,
         DatabaseDescriptor database,
-        StatisticsManager? stats)
+        StatisticsManager? stats,
+        IReadOnlyDictionary<string, PlanTimeLeafKeys>? leafKeys)
     {
         List<(ulong Mask, double Selectivity)> groups = [];
 
@@ -953,7 +981,9 @@ internal static class JoinEnumerator
             double selectivity = CardinalityEstimator.EstimateEquiJoinSelectivity(
                 lowTable, lowColumns, TableRows(lowTable, database, stats),
                 highTable, highColumns, TableRows(highTable, database, stats),
-                database, stats);
+                database, stats,
+                lowColumns.Count == 1 ? KnownKeys(leafKeys, graph.Leaves[low].Alias, lowColumns[0]) : null,
+                highColumns.Count == 1 ? KnownKeys(leafKeys, graph.Leaves[high].Alias, highColumns[0]) : null);
 
             groups.Add(((1UL << low) | (1UL << high), selectivity));
         }
@@ -967,7 +997,7 @@ internal static class JoinEnumerator
             if (members.Count <= 2)
                 continue;
 
-            SortedDictionary<int, (long? DistinctCount, JoinKeyDistribution? Distribution)> byLeaf = [];
+            SortedDictionary<int, (long? DistinctCount, JoinKeyDistribution? Distribution, ColumnHistogram? Histogram, IReadOnlyList<ColumnValue>? Keys)> byLeaf = [];
             foreach (int member in members)
             {
                 (int leaf, string column) = nodes[member];
@@ -978,18 +1008,24 @@ internal static class JoinEnumerator
                 long tableRows = TableRows(table, database, stats);
                 byLeaf[leaf] = (
                     CardinalityEstimator.EstimateKeyDistinctCount(table, [column], tableRows, database, stats),
-                    CardinalityEstimator.EstimateJoinKeyDistribution(table, column, tableRows, database, stats));
+                    CardinalityEstimator.EstimateJoinKeyDistribution(table, column, tableRows, database, stats),
+                    table is not null ? stats?.GetColumnHistogram(database, table, column) : null,
+                    KnownKeys(leafKeys, graph.Leaves[leaf].Alias, column));
             }
 
             List<(int Leaf, long? DistinctCount, bool Skewed)> classLeaves = new(byLeaf.Count);
             List<JoinKeyDistribution?> distributions = new(byLeaf.Count);
-            foreach ((int leaf, (long? distinct, JoinKeyDistribution? distribution)) in byLeaf)
+            List<ColumnHistogram?> histograms = new(byLeaf.Count);
+            List<IReadOnlyList<ColumnValue>?> knownKeys = new(byLeaf.Count);
+            foreach ((int leaf, (long? distinct, JoinKeyDistribution? distribution, ColumnHistogram? histogram, IReadOnlyList<ColumnValue>? keys)) in byLeaf)
             {
                 classLeaves.Add((leaf, distinct, distribution is { HeavyValues.Count: > 0 }));
                 distributions.Add(distribution);
+                histograms.Add(histogram);
+                knownKeys.Add(keys);
             }
 
-            classes.Add(new EquivalenceClass(classLeaves, PairSelectivities(distributions, classLeaves)));
+            classes.Add(new EquivalenceClass(classLeaves, PairSelectivities(distributions, classLeaves, histograms, knownKeys)));
         }
 
         return (groups, classes);
@@ -998,11 +1034,15 @@ internal static class JoinEnumerator
     /// <summary>
     /// The skew-aware selectivity of each pair of class members, or null when a member has no
     /// distribution. A pair whose distributions cannot be compared (heavy values of two types)
-    /// takes the textbook <c>1 / max(d)</c>.
+    /// takes the textbook <c>1 / max(d)</c>. A pair with the keys of one member known at plan time
+    /// (<paramref name="knownKeys"/>) and a histogram on the other takes the mean share of those
+    /// keys in the other column (<see cref="CardinalityEstimator.KeyShareSelectivity"/>).
     /// </summary>
     private static double[,]? PairSelectivities(
         IReadOnlyList<JoinKeyDistribution?> distributions,
-        IReadOnlyList<(int Leaf, long? DistinctCount, bool Skewed)> leaves)
+        IReadOnlyList<(int Leaf, long? DistinctCount, bool Skewed)> leaves,
+        IReadOnlyList<ColumnHistogram?> histograms,
+        IReadOnlyList<IReadOnlyList<ColumnValue>?> knownKeys)
     {
         int count = distributions.Count;
         double[,] pairs = new double[count, count];
@@ -1019,6 +1059,13 @@ internal static class JoinEnumerator
             {
                 double selectivity = JoinKeyDistribution.JoinSelectivity(distributions[i]!, distributions[j]!)
                     ?? 1.0 / Math.Max(Math.Max(leaves[i].DistinctCount ?? 1L, leaves[j].DistinctCount ?? 1L), 1L);
+
+                if (knownKeys[i] is { Count: > 0 } keysOfI && histograms[j] is { } histogramJ
+                    && CardinalityEstimator.KeyShareSelectivity(histogramJ, keysOfI) is { } shareInJ)
+                    selectivity = shareInJ;
+                else if (knownKeys[j] is { Count: > 0 } keysOfJ && histograms[i] is { } histogramI
+                    && CardinalityEstimator.KeyShareSelectivity(histogramI, keysOfJ) is { } shareInI)
+                    selectivity = shareInI;
 
                 pairs[i, j] = selectivity;
                 pairs[j, i] = selectivity;

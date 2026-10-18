@@ -210,6 +210,7 @@ public static class ConfigResolver
         StatsAnalyzeSampleRows = config.StatsAnalyzeSampleRows,
         StatsHistogramBuckets = config.StatsHistogramBuckets,
         StatsAnalyzeMaxColumns = config.StatsAnalyzeMaxColumns,
+        StatsPlanTimeLookupMaxRows = config.StatsPlanTimeLookupMaxRows,
 
         AutoAnalyzeEnabled = config.AutoAnalyzeEnabled,
         AutoAnalyzeCheckIntervalMs = config.AutoAnalyzeCheckIntervalMs,

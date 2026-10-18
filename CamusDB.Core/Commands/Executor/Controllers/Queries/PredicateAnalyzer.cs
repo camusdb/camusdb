@@ -909,6 +909,68 @@ public static class PredicateAnalyzer
         };
     }
 
+    /// <summary>
+    /// Recognizes a pattern predicate the estimator can price: <c>column LIKE 'p'</c> or
+    /// <c>column ILIKE 'p'</c> with a constant pattern, an <c>OR</c> chain of them on one column,
+    /// and <c>NOT</c> over either. The conjunct keeps its place among the residual conjuncts, so
+    /// the execution filter is unchanged; this reads it for the estimate only
+    /// (<see cref="CardinalityEstimator.PatternSelectivity"/>). A pattern that is a column, an
+    /// expression or an unresolved parameter is not recognized.
+    /// </summary>
+    internal static bool TryAnalyzePattern(NodeAst conjunct, Dictionary<string, ColumnValue>? parameters, out AnalyzedPattern? pattern)
+    {
+        pattern = null;
+
+        NodeAst node = conjunct;
+        bool negated = false;
+
+        if (node.nodeType == NodeType.ExprNot && node.leftAst is not null)
+        {
+            negated = true;
+            node = node.leftAst;
+        }
+
+        List<NodeAst> leaves = [];
+        ExpressionChains.Flatten(node, NodeType.ExprOr, leaves);
+
+        string? column = null;
+        bool ignoreCase = false;
+        List<string> patterns = new(leaves.Count);
+
+        foreach (NodeAst leaf in leaves)
+        {
+            if (leaf.nodeType is not (NodeType.ExprLike or NodeType.ExprILike))
+                return false;
+
+            bool leafIgnoreCase = leaf.nodeType == NodeType.ExprILike;
+
+            if (leaf.leftAst?.nodeType != NodeType.Identifier || leaf.leftAst.yytext is null || leaf.rightAst is null)
+                return false;
+
+            if (!TryGetConstant(leaf.rightAst, parameters, out ColumnValue? constant)
+                || constant is not { Type: ColumnType.String, StrValue: { } text })
+                return false;
+
+            if (column is null)
+            {
+                column = leaf.leftAst.yytext;
+                ignoreCase = leafIgnoreCase;
+            }
+            else if (!string.Equals(column, leaf.leftAst.yytext, StringComparison.OrdinalIgnoreCase) || ignoreCase != leafIgnoreCase)
+            {
+                return false;
+            }
+
+            patterns.Add(text);
+        }
+
+        if (column is null)
+            return false;
+
+        pattern = new AnalyzedPattern(column, patterns, negated, ignoreCase, conjunct);
+        return true;
+    }
+
     private static bool TryGetConstant(NodeAst nodeAst, Dictionary<string, ColumnValue>? parameters, out ColumnValue? columnValue)
     {
         try

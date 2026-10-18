@@ -184,6 +184,13 @@ public class ConfigDefinition
     /// </summary>
     public int StatsAnalyzeMaxColumns { get; set; } = 32;
 
+    /// <summary>
+    /// The largest dimension table, in rows, whose filtered rows the join planner reads at plan
+    /// time to price a probe at the named keys' shares. <c>0</c> = off. Must be <c>&gt;= 0</c>.
+    /// Maps to <c>CamusDBOptions.StatsPlanTimeLookupMaxRows</c>.
+    /// </summary>
+    public int StatsPlanTimeLookupMaxRows { get; set; } = 2000;
+
     // ── Automatic (background) ANALYZE ────────────────────────────────────────────────────────────
     // Keeps optimizer statistics fresh without a user running ANALYZE, while staying low-priority:
     // lock-free snapshot reads, bounded-memory sampling, a throttled scan, and load backoff. On by
@@ -1323,6 +1330,9 @@ public class ConfigDefinition
 
         if (StatsAnalyzeMaxColumns < 0)
             throw Invalid($"'stats_analyze_max_columns' must be >= 0 (0 = indexed leading columns only), got {StatsAnalyzeMaxColumns}");
+
+        if (StatsPlanTimeLookupMaxRows < 0)
+            throw Invalid($"'stats_plan_time_lookup_max_rows' must be >= 0 (0 = no plan-time lookup), got {StatsPlanTimeLookupMaxRows}");
 
         if (AutoAnalyzeFractionStaleRows < 0)
             throw Invalid($"'auto_analyze_fraction_stale_rows' must be >= 0, got {AutoAnalyzeFractionStaleRows}");

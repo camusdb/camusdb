@@ -140,15 +140,49 @@ internal sealed class QueryJoinExecutor : IJoinNodeExecutor
     /// <c>CommandExecutor.ExecuteSQLQuery</c> by routing <c>IsMultiSource</c> queries here
     /// rather than through <c>QueryExecutor.Query</c>.
     /// </summary>
-    public IAsyncEnumerable<QueryResultRow> ExecuteJoinQuery(
+    public async IAsyncEnumerable<QueryResultRow> ExecuteJoinQuery(
         DatabaseDescriptor database,
         BoundSelectQuery bound,
         QueryTicket ticket)
     {
-        JoinQueryPlanner planner = new(services.Statistics, planCache, services.Options);
-        QueryPlan plan = planner.GetPlan(database, bound, ticket);
+        QueryPlan plan = await PlanJoinQueryAsync(database, bound, ticket).ConfigureAwait(false);
 
-        return ExecuteJoinPlan(plan);
+        await foreach (QueryResultRow row in ExecuteJoinPlan(plan).ConfigureAwait(false))
+            yield return row;
+    }
+
+    /// <summary>
+    /// Builds the plan of a join query: the plan-time lookup of the small dimension leaves first
+    /// (<see cref="ResolvePlanTimeLeafKeysAsync"/>), then the planner. The top-level SELECT path
+    /// awaits this before it hands out its cursor, so a planning error surfaces where it did before
+    /// the lookup existed; <see cref="ExecuteJoinQuery"/> plans on the first read instead, for the
+    /// consumers that open the cursor and read it at once.
+    /// </summary>
+    internal async Task<QueryPlan> PlanJoinQueryAsync(
+        DatabaseDescriptor database,
+        BoundSelectQuery bound,
+        QueryTicket ticket)
+    {
+        IReadOnlyDictionary<string, PlanTimeLeafKeys>? leafKeys = await ResolvePlanTimeLeafKeysAsync(database, bound, ticket).ConfigureAwait(false);
+        JoinQueryPlanner planner = new(services.Statistics, planCache, services.Options);
+        return planner.GetPlan(database, bound, ticket, leafKeys);
+    }
+
+    /// <summary>
+    /// The rows that the filters of small dimension leaves keep, read under the query's own
+    /// transaction (<see cref="PlanTimeLeafLookup"/>), for the planner; null when no leaf
+    /// qualifies. EXPLAIN calls this too, so the plan it shows is the plan the statement runs.
+    /// </summary>
+    internal Task<IReadOnlyDictionary<string, PlanTimeLeafKeys>?> ResolvePlanTimeLeafKeysAsync(
+        DatabaseDescriptor database,
+        BoundSelectQuery bound,
+        QueryTicket ticket)
+    {
+        if (!bound.IsMultiSource || services.Statistics is null || services.Options.StatsPlanTimeLookupMaxRows <= 0)
+            return Task.FromResult<IReadOnlyDictionary<string, PlanTimeLeafKeys>?>(null);
+
+        JoinPredicatePushdown.Result pushdown = JoinPredicatePushdown.Analyze(bound, ticket.Where);
+        return PlanTimeLeafLookup.ResolveAsync(database, bound, ticket, pushdown, services.Statistics, services.Filterer, services.Options);
     }
 
     /// <summary>

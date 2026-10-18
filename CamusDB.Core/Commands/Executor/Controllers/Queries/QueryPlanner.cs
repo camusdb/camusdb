@@ -1006,16 +1006,20 @@ public sealed class QueryPlanner
     }
 
     /// <summary>
-    /// The estimated fraction of the table's rows the whole WHERE keeps. Comparisons and IN lists
-    /// use the statistics; each other conjunct counts at the fallback selectivity, which can only
-    /// make an early-stopping ordered scan look more expensive, never cheaper.
+    /// The estimated fraction of the table's rows the whole WHERE keeps. Comparisons, IN lists and
+    /// pattern predicates use the statistics; each other conjunct counts at the fallback
+    /// selectivity, which can only make an early-stopping ordered scan look more expensive, never
+    /// cheaper.
     /// </summary>
     private double EstimateWhereSelectivity(DatabaseDescriptor database, TableDescriptor table, PredicateAnalysis analysis)
     {
         double selectivity = CardinalityEstimator.EstimatePredicateSelectivity(
             analysis.IndexableComparisons, analysis.InListComparisons, database, table, _stats!);
 
-        for (int i = 0; i < analysis.ResidualConjuncts.Count + analysis.ColumnComparisons.Count; i++)
+        selectivity *= CardinalityEstimator.PatternConjunctsSelectivity(
+            analysis.ResidualConjuncts, database, table, _stats!, out int unrecognized);
+
+        for (int i = 0; i < unrecognized + analysis.ColumnComparisons.Count; i++)
             selectivity *= CardinalityEstimator.FallbackSelectivity;
 
         return Math.Clamp(selectivity, MinimumSelectivity, 1.0);

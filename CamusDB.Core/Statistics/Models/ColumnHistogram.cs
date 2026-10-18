@@ -83,7 +83,16 @@ public sealed class ColumnHistogram
 
             int cmp = value.CompareTo(b.UpperBound);
             if (cmp == 0)
-                return (double)b.CumulativeRows / TotalRows;
+            {
+                // A value that fills whole buckets is the upper bound of each of them; the rows
+                // at or below it end with the last bucket of that run, not the first. Stopping
+                // at the first would leave most of a heavy value's rows above it, and an
+                // inclusive bound would then count them twice with the equality mass.
+                while (i + 1 < Buckets.Count && Buckets[i + 1].UpperBound is { } sameBound && value.CompareTo(sameBound) == 0)
+                    i++;
+
+                return (double)Buckets[i].CumulativeRows / TotalRows;
+            }
 
             if (cmp < 0)
             {
@@ -139,9 +148,15 @@ public sealed class ColumnHistogram
     }
 
     /// <summary>
-    /// Estimated fraction of rows equal to <paramref name="value"/>, from the containing
-    /// bucket's density: <c>bucketRows / distinctInBucket / totalRows</c>. Returns 0 for
-    /// out-of-domain values and on an empty histogram.
+    /// Estimated fraction of rows equal to <paramref name="value"/>: the share the value holds
+    /// of the bucket its run starts in, <c>bucketRows / distinctInBucket</c>, plus every
+    /// following bucket that holds the value alone (the same upper bound and
+    /// <see cref="ColumnHistogramBucket.DistinctInBucket"/> 1). A value common enough to fill
+    /// whole buckets of the sorted rows is counted by those buckets; the density of the one
+    /// bucket its run starts in would price a value that holds half the table like any other
+    /// value of that bucket. The bucket where the run ends is not counted, because the histogram
+    /// does not say how much of it the value holds, so a heavy value's fraction is a slight
+    /// underestimate. Returns 0 for out-of-domain values and on an empty histogram.
     /// </summary>
     public double EqualityFraction(ScalarBound value)
     {
@@ -157,17 +172,69 @@ public sealed class ColumnHistogram
             if (b.UpperBound is null)
                 continue;
 
-            if (value.CompareTo(b.UpperBound) <= 0)
-            {
-                long prevCumul = i == 0 ? 0 : Buckets[i - 1].CumulativeRows;
-                long bucketRows = b.CumulativeRows - prevCumul;
-                long distinct = Math.Max(1, b.DistinctInBucket);
-                return bucketRows <= 0 ? 0.0 : (double)bucketRows / distinct / TotalRows;
-            }
+            int cmp = value.CompareTo(b.UpperBound);
+            if (cmp > 0)
+                continue;
+
+            long prevCumul = i == 0 ? 0 : Buckets[i - 1].CumulativeRows;
+            long bucketRows = b.CumulativeRows - prevCumul;
+            long distinct = Math.Max(1, b.DistinctInBucket);
+            double rows = bucketRows <= 0 ? 0.0 : (double)bucketRows / distinct;
+
+            if (cmp == 0)
+                rows += WholeBucketRows(value, i + 1);
+
+            return rows / TotalRows;
         }
 
         // Above every bucket's upper bound → outside the observed domain.
         return 0.0;
+    }
+
+    /// <summary>
+    /// True when <paramref name="value"/> fills at least one whole bucket: a heavy value, whose
+    /// share <see cref="EqualityFraction"/> reads from its buckets instead of a distinct count.
+    /// The first bucket of a value's run is the one its rows start in, so the whole buckets are
+    /// the ones after it under the same upper bound; a run that starts at a bucket boundary
+    /// fills its first bucket too. False for a value outside the histogram's domain.
+    /// </summary>
+    public bool IsHeavyValue(ScalarBound value)
+    {
+        if (MinValue is not null && value.CompareTo(MinValue) < 0)
+            return false;
+
+        for (int i = 0; i < Buckets.Count; i++)
+        {
+            ColumnHistogramBucket b = Buckets[i];
+            if (b.UpperBound is null)
+                continue;
+
+            int cmp = value.CompareTo(b.UpperBound);
+            if (cmp > 0)
+                continue;
+
+            return cmp == 0 && (b.DistinctInBucket == 1 || WholeBucketRows(value, i + 1) > 0);
+        }
+
+        return false;
+    }
+
+    // The rows of the buckets from index `from` on that hold `value` alone (the value as their
+    // upper bound and one distinct value): the whole buckets of the value's run.
+    private double WholeBucketRows(ScalarBound value, int from)
+    {
+        double rows = 0;
+
+        for (int j = from; j < Buckets.Count; j++)
+        {
+            ColumnHistogramBucket next = Buckets[j];
+            if (next.UpperBound is null || next.DistinctInBucket != 1 || value.CompareTo(next.UpperBound) != 0)
+                break;
+
+            rows += next.CumulativeRows - Buckets[j - 1].CumulativeRows;
+        }
+
+        return rows;
     }
 
     // Returns the fractional position of value within bucket i, in [0, 1).

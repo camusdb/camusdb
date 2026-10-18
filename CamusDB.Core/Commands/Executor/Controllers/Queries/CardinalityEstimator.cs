@@ -9,6 +9,7 @@
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Predicates;
+using CamusDB.Core.CommandsExecutor.Controllers.DML;
 using CamusDB.Core.SQLParser;
 using CamusDB.Core.Statistics;
 using CamusDB.Core.Statistics.Models;
@@ -36,8 +37,10 @@ internal static class CardinalityEstimator
 
     /// <summary>
     /// Estimates the overall filter selectivity of <paramref name="predicate"/> using histogram
-    /// and NDV statistics from <paramref name="stats"/>. Falls back to
-    /// <see cref="FallbackSelectivity"/> when no stats are available for any column.
+    /// and NDV statistics from <paramref name="stats"/>: the comparisons and <c>IN</c> lists
+    /// (<see cref="EstimatePredicateSelectivity"/>) times each pattern predicate among the residual
+    /// conjuncts (<see cref="PatternSelectivity"/>). Any other residual conjunct is not priced.
+    /// Falls back to <see cref="FallbackSelectivity"/> when nothing in the predicate can be priced.
     /// </summary>
     public static double EstimateFilterSelectivity(
         NodeAst predicate,
@@ -53,13 +56,270 @@ internal static class CardinalityEstimator
         // column is compared against the histogram in the histogram's domain.
         analysis = PredicateAnalyzer.CoerceConstantsForColumns(analysis, table);
 
-        if (analysis.IndexableComparisons.Count == 0 && analysis.InListComparisons.Count == 0)
-            return FallbackSelectivity;
+        double sel = 1.0;
+        bool priced = false;
 
-        return EstimatePredicateSelectivity(
-            analysis.IndexableComparisons,
-            analysis.InListComparisons,
-            database, table, stats);
+        if (analysis.IndexableComparisons.Count > 0 || analysis.InListComparisons.Count > 0)
+        {
+            sel = EstimatePredicateSelectivity(
+                analysis.IndexableComparisons,
+                analysis.InListComparisons,
+                database, table, stats);
+            priced = true;
+        }
+
+        sel *= PatternConjunctsSelectivity(analysis.ResidualConjuncts, database, table, stats, out int unrecognized);
+        if (unrecognized < analysis.ResidualConjuncts.Count)
+            priced = true;
+
+        return priced ? Clamp(sel) : FallbackSelectivity;
+    }
+
+    /// <summary>
+    /// The selectivity of the pattern predicates among <paramref name="residual"/>
+    /// (<see cref="PredicateAnalyzer.TryAnalyzePattern"/>), as one product. The patterns on one
+    /// column are priced together over the histogram's bucket bounds, a bound counting when it
+    /// satisfies every one of them: two patterns on one column are seldom independent
+    /// (<c>note LIKE '%(voice)%' AND note LIKE '%(uncredited)%'</c> both hold on the value
+    /// <c>(voice) (uncredited)</c>), and the product of their shares would price the pair at a
+    /// tenth of its rows. A column with one pattern predicate takes
+    /// <see cref="PatternSelectivity"/>, which reads a prefix as a range.
+    /// <paramref name="unrecognized"/> counts the residual conjuncts that are not patterns.
+    /// </summary>
+    internal static double PatternConjunctsSelectivity(
+        IReadOnlyList<NodeAst> residual,
+        DatabaseDescriptor database,
+        TableDescriptor table,
+        StatisticsManager stats,
+        out int unrecognized)
+    {
+        unrecognized = 0;
+        Dictionary<string, List<AnalyzedPattern>>? byColumn = null;
+
+        foreach (NodeAst conjunct in residual)
+        {
+            if (!PredicateAnalyzer.TryAnalyzePattern(conjunct, parameters: null, out AnalyzedPattern? pattern))
+            {
+                unrecognized++;
+                continue;
+            }
+
+            byColumn ??= new(StringComparer.OrdinalIgnoreCase);
+            string column = StripAliasPrefix(pattern!.ColumnName);
+            if (!byColumn.TryGetValue(column, out List<AnalyzedPattern>? group))
+                byColumn[column] = group = [];
+
+            group.Add(pattern);
+        }
+
+        if (byColumn is null)
+            return 1.0;
+
+        double sel = 1.0;
+        foreach ((string column, List<AnalyzedPattern> group) in byColumn)
+        {
+            if (group.Count == 1)
+            {
+                sel *= PatternSelectivity(group[0], database, table, stats);
+                continue;
+            }
+
+            ColumnHistogram? hist = stats.GetColumnHistogram(database, table, column);
+            if (hist is null || hist.TotalRows <= 0 || hist.Buckets.Count == 0)
+            {
+                foreach (AnalyzedPattern pattern in group)
+                    sel *= pattern.Negated ? 1.0 - FallbackSelectivity : FallbackSelectivity;
+                continue;
+            }
+
+            sel *= JointPatternFraction(hist, group);
+        }
+
+        return Clamp(sel);
+    }
+
+    /// <summary>
+    /// The share of the rows whose bucket bound satisfies every pattern predicate of
+    /// <paramref name="group"/> (a bound satisfies a predicate when one of its patterns matches,
+    /// or none does for a negated one); half a bucket when no bound does.
+    /// </summary>
+    private static double JointPatternFraction(ColumnHistogram hist, List<AnalyzedPattern> group)
+    {
+        double matched = 0;
+        long previous = 0;
+
+        foreach (ColumnHistogramBucket bucket in hist.Buckets)
+        {
+            long rows = bucket.CumulativeRows - previous;
+            previous = bucket.CumulativeRows;
+
+            if (rows <= 0 || bucket.UpperBound is not { Type: ColumnType.String, StrValue: { } text })
+                continue;
+
+            bool all = true;
+            foreach (AnalyzedPattern predicate in group)
+            {
+                bool any = false;
+                foreach (string pattern in predicate.Patterns)
+                {
+                    if (predicate.IgnoreCase ? SQLExecutorBaseCreator.ILike(text, pattern) : SQLExecutorBaseCreator.Like(text, pattern))
+                    {
+                        any = true;
+                        break;
+                    }
+                }
+
+                if (any == predicate.Negated)
+                {
+                    all = false;
+                    break;
+                }
+            }
+
+            if (all)
+                matched += rows;
+        }
+
+        return Math.Max(matched, hist.TotalRows / (2.0 * hist.Buckets.Count)) / hist.TotalRows;
+    }
+
+    /// <summary>
+    /// Selectivity of a pattern predicate (<see cref="AnalyzedPattern"/>) from the column's
+    /// histogram, where the flat fallback priced every pattern at a tenth of the rows and the join
+    /// search then could not tell <c>name LIKE '%An%'</c> from <c>title LIKE 'Kung Fu Panda%'</c>.
+    /// A single pattern with a fixed prefix and nothing but a trailing wildcard after it is the
+    /// range of the prefix, <c>[prefix, next(prefix))</c>, read like any range; with more literal
+    /// text after the prefix (<c>'USA:% 200%'</c>) the range is scaled by the share of the bucket
+    /// bounds inside it that match the whole pattern. Any other pattern, and an <c>OR</c> chain of
+    /// patterns, is the share of the histogram's bucket bounds that match, each bound weighted by
+    /// its bucket's rows: the bounds are the values at every hundredth rank of the sorted column,
+    /// a sample that a pattern unrelated to the sort order hits in proportion, and a heavy value
+    /// that fills whole buckets weighs in with all of them. No matching bound estimates half a
+    /// bucket. A pattern without a wildcard is an equality. <c>ILIKE</c> uses the sample only,
+    /// because the histogram's order is case-sensitive. Without a histogram,
+    /// <see cref="FallbackSelectivity"/>. <c>NOT</c> takes the complement.
+    /// </summary>
+    internal static double PatternSelectivity(
+        AnalyzedPattern pattern,
+        DatabaseDescriptor database,
+        TableDescriptor table,
+        StatisticsManager stats)
+    {
+        string columnName = StripAliasPrefix(pattern.ColumnName);
+        ColumnHistogram? hist = stats.GetColumnHistogram(database, table, columnName);
+
+        double sel;
+        if (hist is null || hist.TotalRows <= 0 || hist.Buckets.Count == 0)
+            sel = FallbackSelectivity;
+        else if (pattern.Patterns.Count == 1)
+            sel = SinglePatternFraction(hist, stats.GetColumnNdv(database, table, columnName), pattern.Patterns[0], pattern.IgnoreCase);
+        else
+            sel = MatchingBoundsFraction(hist, pattern.Patterns, pattern.IgnoreCase);
+
+        sel = Clamp(sel);
+        return pattern.Negated ? 1.0 - sel : sel;
+    }
+
+    private static double SinglePatternFraction(ColumnHistogram hist, long? ndv, string pattern, bool ignoreCase)
+    {
+        // Only '%' is a wildcard; '_' is literal (the matcher's semantics).
+        int wildcard = pattern.IndexOf('%');
+
+        if (wildcard < 0 && !ignoreCase)
+        {
+            ScalarBound value = new() { Type = ColumnType.String, StrValue = pattern };
+            return EqualitySelectivity(value, hist, ndv, EqualityDistribution(hist, ndv));
+        }
+
+        if (wildcard <= 0 || ignoreCase)
+            return MatchingBoundsFraction(hist, [pattern], ignoreCase);
+
+        string prefix = pattern[..wildcard];
+        ScalarBound lo = new() { Type = ColumnType.String, StrValue = prefix };
+        ScalarBound? hi = PrefixUpperBound(prefix);
+        double range = hist.RangeFraction(lo, loInclusive: true, hi, hiInclusive: false);
+
+        if (wildcard == pattern.Length - 1)
+            return range;
+
+        return range * MatchingBoundsShare(hist, pattern, lo, hi);
+    }
+
+    /// <summary>
+    /// The share of the rows whose bucket bound matches one of <paramref name="patterns"/>; half a
+    /// bucket when no bound matches.
+    /// </summary>
+    private static double MatchingBoundsFraction(ColumnHistogram hist, IReadOnlyList<string> patterns, bool ignoreCase)
+    {
+        double matched = 0;
+        long previous = 0;
+
+        foreach (ColumnHistogramBucket bucket in hist.Buckets)
+        {
+            long rows = bucket.CumulativeRows - previous;
+            previous = bucket.CumulativeRows;
+
+            if (rows <= 0 || bucket.UpperBound is not { Type: ColumnType.String, StrValue: { } text })
+                continue;
+
+            foreach (string pattern in patterns)
+            {
+                if (ignoreCase ? SQLExecutorBaseCreator.ILike(text, pattern) : SQLExecutorBaseCreator.Like(text, pattern))
+                {
+                    matched += rows;
+                    break;
+                }
+            }
+        }
+
+        return Math.Max(matched, hist.TotalRows / (2.0 * hist.Buckets.Count)) / hist.TotalRows;
+    }
+
+    /// <summary>
+    /// Among the bucket bounds inside <c>[lo, hi)</c>, the share of their rows whose bound matches
+    /// <paramref name="pattern"/>, at least half a bucket; 1 when no bound lies in the range (the
+    /// range is narrower than a bucket, and the range fraction stands alone).
+    /// </summary>
+    private static double MatchingBoundsShare(ColumnHistogram hist, string pattern, ScalarBound lo, ScalarBound? hi)
+    {
+        double matched = 0;
+        double candidates = 0;
+        long previous = 0;
+
+        foreach (ColumnHistogramBucket bucket in hist.Buckets)
+        {
+            long rows = bucket.CumulativeRows - previous;
+            previous = bucket.CumulativeRows;
+
+            if (rows <= 0 || bucket.UpperBound is not { Type: ColumnType.String, StrValue: { } text } bound)
+                continue;
+
+            if (bound.CompareTo(lo) < 0 || (hi is not null && bound.CompareTo(hi) >= 0))
+                continue;
+
+            candidates += rows;
+            if (SQLExecutorBaseCreator.Like(text, pattern))
+                matched += rows;
+        }
+
+        if (candidates <= 0)
+            return 1.0;
+
+        return Math.Min(1.0, Math.Max(matched, hist.TotalRows / (2.0 * hist.Buckets.Count)) / candidates);
+    }
+
+    /// <summary>
+    /// The smallest string above every string that starts with <paramref name="prefix"/>, in the
+    /// ordinal order of the histogram: the prefix with its last character raised by one. Null when
+    /// that character cannot be raised, which leaves the range open above.
+    /// </summary>
+    private static ScalarBound? PrefixUpperBound(string prefix)
+    {
+        char last = prefix[^1];
+        if (last == char.MaxValue)
+            return null;
+
+        return new ScalarBound { Type = ColumnType.String, StrValue = string.Concat(prefix.AsSpan(0, prefix.Length - 1), new string((char)(last + 1), 1)) };
     }
 
     /// <summary>
@@ -376,6 +636,8 @@ internal static class CardinalityEstimator
     /// <param name="rightTableRows">Unfiltered row count of the right table.</param>
     /// <param name="database">Database descriptor used for the stats cache key.</param>
     /// <param name="stats">Statistics manager; may be null when no stats are loaded.</param>
+    /// <param name="leftKeys">The known values of the left key column, read at plan time (<see cref="PlanTimeLeafLookup"/>), or null.</param>
+    /// <param name="rightKeys">The known values of the right key column, or null.</param>
     internal static double EstimateEquiJoinSelectivity(
         TableDescriptor? leftTable,
         IReadOnlyList<string> leftKeyColumns,
@@ -384,8 +646,26 @@ internal static class CardinalityEstimator
         IReadOnlyList<string> rightKeyColumns,
         long rightTableRows,
         DatabaseDescriptor database,
-        StatisticsManager? stats)
+        StatisticsManager? stats,
+        IReadOnlyList<ColumnValue>? leftKeys = null,
+        IReadOnlyList<ColumnValue>? rightKeys = null)
     {
+        // Known keys on one side: the join keeps, for each key, the other column's share of that
+        // key, and the mean of those shares is the selectivity (the row count of the known side is
+        // the number of keys, so the product gives the sum of the shares).
+        if (leftKeyColumns.Count == 1 && rightKeyColumns.Count == 1 && stats is not null)
+        {
+            if (leftKeys is { Count: > 0 } && rightTable is not null
+                && stats.GetColumnHistogram(database, rightTable, rightKeyColumns[0]) is { } rightHistogram
+                && KeyShareSelectivity(rightHistogram, leftKeys) is { } leftShare)
+                return leftShare;
+
+            if (rightKeys is { Count: > 0 } && leftTable is not null
+                && stats.GetColumnHistogram(database, leftTable, leftKeyColumns[0]) is { } leftHistogram
+                && KeyShareSelectivity(leftHistogram, rightKeys) is { } rightShare)
+                return rightShare;
+        }
+
         long? ndvLeft = KeyDistinctCount(leftTable, leftKeyColumns, leftTableRows, database, stats);
         long? ndvRight = KeyDistinctCount(rightTable, rightKeyColumns, rightTableRows, database, stats);
 
@@ -403,6 +683,35 @@ internal static class CardinalityEstimator
         long maxNdv = Math.Max(ndvLeft ?? 0L, ndvRight ?? 0L);
 
         return maxNdv > 0 ? 1.0 / maxNdv : FallbackSelectivity;
+    }
+
+    /// <summary>
+    /// The mean share of the rows of <paramref name="histogram"/>'s column behind the values
+    /// <paramref name="keys"/>, each read with <see cref="ColumnHistogram.EqualityFraction"/> (a
+    /// heavy value by its whole buckets, a rare one by its bucket's density) and floored at one row.
+    /// This is the selectivity of a join through keys read at plan time
+    /// (<see cref="PlanTimeLeafLookup"/>): <c>keys.Count × rightRows × share</c> is the sum of the
+    /// rows behind the keys. Null when the histogram is empty or no key has a value.
+    /// </summary>
+    internal static double? KeyShareSelectivity(ColumnHistogram histogram, IReadOnlyList<ColumnValue> keys)
+    {
+        if (histogram.TotalRows <= 0 || histogram.Buckets.Count == 0)
+            return null;
+
+        double floor = 1.0 / histogram.TotalRows;
+        double sum = 0.0;
+        int counted = 0;
+
+        foreach (ColumnValue key in keys)
+        {
+            if (TryGetBound(key) is not { } bound)
+                continue;
+
+            sum += Math.Max(floor, histogram.EqualityFraction(bound));
+            counted++;
+        }
+
+        return counted == 0 ? null : Math.Min(1.0, sum / counted);
     }
 
     /// <summary>
@@ -571,10 +880,11 @@ internal static class CardinalityEstimator
             string colKey = StripAliasPrefix(columnName);
             ColumnHistogram? hist = stats.GetColumnHistogram(database, table, colKey);
             long? ndv = stats.GetColumnNdv(database, table, colKey);
+            JoinKeyDistribution? distribution = EqualityDistribution(hist, ndv);
 
             double total = 0.0;
             foreach (ColumnValue val in values)
-                total += EqualitySelectivity(TryGetBound(val), hist, ndv);
+                total += EqualitySelectivity(TryGetBound(val), hist, ndv, distribution);
 
             return Math.Max(1L, (long)(trc * Math.Min(1.0, total)));
         }
@@ -604,10 +914,10 @@ internal static class CardinalityEstimator
         switch (op)
         {
             case "=":
-                return EqualitySelectivity(bound, hist, ndv);
+                return EqualitySelectivity(bound, hist, ndv, EqualityDistribution(hist, ndv));
 
             case "!=":
-                return Clamp(1.0 - EqualitySelectivity(bound, hist, ndv));
+                return Clamp(1.0 - EqualitySelectivity(bound, hist, ndv, EqualityDistribution(hist, ndv)));
 
             case ">":
             case ">=":
@@ -630,11 +940,26 @@ internal static class CardinalityEstimator
     }
 
     /// <summary>
-    /// Estimates selectivity for <c>col = constant</c>.
-    /// NDV takes priority; falls back to bucket-level estimation; ultimate fallback is
-    /// <see cref="FallbackSelectivity"/>.
+    /// The value distribution that prices an equality on a column: its heavy values and the
+    /// residual (<see cref="JoinKeyDistribution.FromHistogram"/>), when the column has both a
+    /// histogram and a distinct count. Built once per column, so an <c>IN</c> list prices every
+    /// value against one distribution.
     /// </summary>
-    private static double EqualitySelectivity(ScalarBound? bound, ColumnHistogram? hist, long? ndv)
+    private static JoinKeyDistribution? EqualityDistribution(ColumnHistogram? hist, long? ndv) =>
+        hist is not null && ndv is > 0 ? JoinKeyDistribution.FromHistogram(hist, ndv.Value) : null;
+
+    /// <summary>
+    /// Estimates selectivity for <c>col = constant</c>. A value that fills whole buckets of the
+    /// column's histogram (<see cref="ColumnHistogram.IsHeavyValue"/>) takes the share those
+    /// buckets hold: the distinct count alone prices the popular values of a skewed column like
+    /// its rare ones, a cast note that a tenth of the rows carry at one row in ten thousand, and
+    /// a join search then starts from that filter. Any other value takes the residual of the
+    /// distribution: the rows that no heavy value holds, spread over the remaining distinct
+    /// values, the model the join estimate uses (<see cref="JoinKeyDistribution"/>); with no
+    /// heavy value that is <c>1 / NDV</c>. Without a distinct count the containing bucket's
+    /// density stands in; without a histogram or a count, <see cref="FallbackSelectivity"/>.
+    /// </summary>
+    private static double EqualitySelectivity(ScalarBound? bound, ColumnHistogram? hist, long? ndv, JoinKeyDistribution? distribution)
     {
         // NULL bound means the constant is SQL NULL.  col = NULL is UNKNOWN in 3VL → 0 rows.
         // Guard this before the NDV branch so we don't return 1/NDV for a NULL constant.
@@ -642,27 +967,29 @@ internal static class CardinalityEstimator
         if (bound is null)
             return 0.0;
 
-        // 1. NDV: 1/NDV is the most direct equality estimate when available.
-        if (ndv is > 0)
-            return Math.Min(1.0, 1.0 / ndv.Value);
+        // 1. A heavy value: its own share of the rows, from the buckets it fills.
+        if (hist is not null && hist.TotalRows > 0 && hist.IsHeavyValue(bound))
+            return Math.Min(1.0, hist.EqualityFraction(bound));
 
-        // 2. Histogram bucket: rows-in-bucket / totalRows / distinct-in-bucket.
-        if (bound is not null && hist is not null && hist.TotalRows > 0)
+        // 2. NDV: the residual share over the residual distinct values when the column has heavy
+        //    values, else 1/NDV.
+        if (ndv is > 0)
+        {
+            if (distribution is { HeavyValues.Count: > 0 })
+                return Math.Min(1.0, distribution.ResidualFraction / distribution.ResidualDistinct);
+
+            return Math.Min(1.0, 1.0 / ndv.Value);
+        }
+
+        // 3. Histogram bucket, no distinct count: rows-in-bucket / totalRows / distinct-in-bucket.
+        if (hist is not null && hist.TotalRows > 0)
         {
             // Out-of-domain: equality on a value above every bucket (or below the observed
             // minimum) matches ~nothing — estimate one row rather than last-bucket density.
             if (IsOutsideHistogramDomain(hist, bound))
                 return Math.Min(1.0, 1.0 / hist.TotalRows);
 
-            int bi = FindBucketIndex(hist, bound);
-            if (bi >= 0)
-            {
-                long prevCum = bi > 0 ? hist.Buckets[bi - 1].CumulativeRows : 0;
-                long bucketRows = hist.Buckets[bi].CumulativeRows - prevCum;
-                long distinct = hist.Buckets[bi].DistinctInBucket;
-                if (distinct > 0 && bucketRows > 0)
-                    return Math.Min(1.0, (double)bucketRows / hist.TotalRows / distinct);
-            }
+            return Math.Min(1.0, Math.Max(hist.EqualityFraction(bound), 1.0 / hist.TotalRows));
         }
 
         return FallbackSelectivity;
@@ -682,28 +1009,14 @@ internal static class CardinalityEstimator
         string columnName = StripAliasPrefix(inList.ColumnName);
         ColumnHistogram? hist = stats.GetColumnHistogram(database, table, columnName);
         long? ndv = stats.GetColumnNdv(database, table, columnName);
+        JoinKeyDistribution? distribution = EqualityDistribution(hist, ndv);
 
         // Sum individual equality selectivities — each value contributes independently.
         double total = 0.0;
         foreach (ColumnValue val in inList.Values)
-            total += EqualitySelectivity(TryGetBound(val), hist, ndv);
+            total += EqualitySelectivity(TryGetBound(val), hist, ndv, distribution);
 
         return Math.Min(1.0, total);
-    }
-
-    /// <summary>
-    /// Returns the index of the first bucket whose upper bound is ≥ <paramref name="bound"/>.
-    /// When <paramref name="bound"/> exceeds every bucket's upper bound, returns the last bucket index.
-    /// Returns -1 on an empty histogram.
-    /// </summary>
-    private static int FindBucketIndex(ColumnHistogram hist, ScalarBound bound)
-    {
-        for (int i = 0; i < hist.Buckets.Count; i++)
-        {
-            if (hist.Buckets[i].UpperBound is { } ub && bound.CompareTo(ub) <= 0)
-                return i;
-        }
-        return hist.Buckets.Count > 0 ? hist.Buckets.Count - 1 : -1;
     }
 
     // True when the value lies outside the histogram's observed [min, max] domain: above the

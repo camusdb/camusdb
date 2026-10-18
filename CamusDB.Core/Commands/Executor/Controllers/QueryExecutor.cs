@@ -489,6 +489,16 @@ internal sealed class QueryExecutor
         QueryTicket ticket) =>
         queryJoinExecutor.ExecuteJoinQuery(database, bound, ticket);
 
+    /// <summary>
+    /// Builds the plan of a join query before its cursor is opened (see
+    /// <see cref="QueryJoinExecutor.PlanJoinQueryAsync"/>); run it with <see cref="ExecuteJoinPlan"/>.
+    /// </summary>
+    internal Task<QueryPlan> PlanJoinQueryAsync(
+        DatabaseDescriptor database,
+        BoundSelectQuery bound,
+        QueryTicket ticket) =>
+        queryJoinExecutor.PlanJoinQueryAsync(database, bound, ticket);
+
     private IAsyncEnumerable<QueryResultRow> ExecuteQueryPlanInternal(QueryPlan plan)
     {
         if (plan.Root is null)

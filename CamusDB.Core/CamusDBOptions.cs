@@ -110,6 +110,18 @@ public sealed record CamusDBOptions
     [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Cluster)]
     public int StatsAnalyzeMaxColumns { get; init; } = 32;
 
+    /// <summary>
+    /// The largest dimension table (in rows, by the statistics) whose filtered rows the join
+    /// planner reads at plan time to learn the keys a probe will carry
+    /// (<see cref="CommandsExecutor.Controllers.Queries.PlanTimeLeafLookup"/>): a filter such as
+    /// <c>it.info = 'release dates'</c> names a key that holds ten times the average share of the
+    /// fact table, and no statistic can say which key a filter names. The read is one scan of the
+    /// small table under the query's own snapshot. <c>0</c> turns the lookup off. Per node, since
+    /// it changes plans and not results; read for each statement from the options snapshot.
+    /// </summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Node)]
+    public int StatsPlanTimeLookupMaxRows { get; init; } = 2000;
+
     // ── Automatic (background) ANALYZE ────────────────────────────────────────────────────────
     // Auto-analyze keeps optimizer statistics fresh without a user running ANALYZE, while staying
     // low-priority: it reads a lock-free snapshot (never blocks/aborts foreground work), bounds

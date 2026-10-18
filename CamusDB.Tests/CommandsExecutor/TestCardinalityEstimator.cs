@@ -1341,4 +1341,46 @@ public sealed class TestCardinalityEstimator : BaseTest
         Assert.That(sel, Is.EqualTo(0.5).Within(0.1),
             "The tighter lower bound (> 50) must win the merge, not the first-seen (> 5)");
     }
+
+    /// <summary>
+    /// On a skewed column the distinct count prices every value alike. A heavy value, one that
+    /// fills whole buckets of the histogram, takes its own share; a rare value takes the
+    /// residual, the rows no heavy value holds over the remaining distinct values.
+    /// </summary>
+    [Test]
+    public async Task EqualityOnASkewedColumn_HeavyValueTakesItsShare_RareValueTakesTheResidual()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupTableAsync();
+        TableDescriptor table = await OpenTableAsync(database);
+
+        // 1,000 rows: 500 hold the value 5, the other 500 spread over 40 values; 41 distinct.
+        var skewed = new ColumnHistogram
+        {
+            TotalRows = 1000,
+            MinValue  = Int(5),
+            Buckets =
+            [
+                new() { UpperBound = Int(5),  CumulativeRows = 500,  DistinctInBucket = 1 },
+                new() { UpperBound = Int(45), CumulativeRows = 1000, DistinctInBucket = 40 },
+            ],
+        };
+        await executor.Statistics.SetHistogramsAsync(database, table,
+            new Dictionary<string, ColumnHistogram> { ["year"] = skewed });
+        await executor.Statistics.SetNdvAsync(database, table,
+            columnNdv: new Dictionary<string, long> { ["year"] = 41L }, keyNdv: null);
+
+        double heavy = CardinalityEstimator.EstimatePredicateSelectivity(
+            [new("year", "=", new ColumnValue(ColumnType.Integer64, 5L), conjunct: null!)],
+            [], database, table, executor.Statistics);
+        double rare = CardinalityEstimator.EstimatePredicateSelectivity(
+            [new("year", "=", new ColumnValue(ColumnType.Integer64, 7L), conjunct: null!)],
+            [], database, table, executor.Statistics);
+        double notHeavy = CardinalityEstimator.EstimatePredicateSelectivity(
+            [new("year", "!=", new ColumnValue(ColumnType.Integer64, 5L), conjunct: null!)],
+            [], database, table, executor.Statistics);
+
+        Assert.That(heavy, Is.EqualTo(0.5).Within(0.01), "year = 5 holds half the rows; 1/NDV would say 2.4 percent");
+        Assert.That(rare, Is.EqualTo(0.0125).Within(0.001), "year = 7: the residual half of the rows over the 40 residual values; 1/NDV would say 2.4 percent");
+        Assert.That(notHeavy, Is.EqualTo(0.5).Within(0.01), "year != 5 is the other half");
+    }
 }

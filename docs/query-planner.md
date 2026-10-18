@@ -826,12 +826,26 @@ an estimated row fraction/count. Falls back to the fixed constants above when no
 
 | Predicate | Estimate |
 |-----------|----------|
-| `col = v` | `1/NDV` (preferred) → else histogram bucket `rows/total/distinct` → else fixed |
+| `col = v` | the share of `v` from the histogram when `v` is a **heavy value** (it fills whole buckets) → else the residual `(1 − heavy shares) / (NDV − heavy count)`, which is `1/NDV` on a column with no heavy value → else histogram bucket `rows/total/distinct` → else fixed |
 | `col <> v` | `1 − equality(v)` |
 | `col > v` / `>= v` | histogram `RangeFraction(v, ∞)` |
 | `col < v` / `<= v` | histogram `RangeFraction(−∞, v)` |
 | `col IN (a,b,…)` | sum of per-value equality selectivities, capped at 1.0 |
+| `col LIKE 'abc%'` | the histogram range of the prefix, `[abc, abd)` |
+| `col LIKE 'abc%x%'` | the prefix range, scaled by the share of the bucket bounds in it that match the whole pattern |
+| `col LIKE '%abc%'`, `col ILIKE …`, `col LIKE … OR col LIKE …` | the share of the histogram's bucket bounds that match, each bound weighted by its bucket's rows (the bounds sample the sorted column at every hundredth rank, so a pattern unrelated to the order hits them in proportion, and a heavy value counts with all its buckets); half a bucket when none matches; the fallback without a histogram |
+| `col NOT LIKE …` | `1 − pattern(…)` |
 | `p AND q` | product (independence) — **unless** the equality columns form a composite-index prefix, then `1/KeyNdv` for that tuple (corrects correlated columns like `city`+`zip`) |
+
+An equality reads the histogram before the distinct count because `1/NDV` prices every value of a
+column alike. On a skewed column that is wrong in both directions: a cast note that a tenth of the
+rows carry is priced at one row in ten thousand, and the join search then starts from that filter
+and probes the rest of the query from a result a thousand times larger than it planned for; a rare
+value is priced at the average. The heavy values of a column are the values that fill whole buckets
+of its equi-depth histogram (the same values the join estimate uses, see *Join cardinality* below),
+and `ANALYZE` builds the histogram, so a value that holds two percent of the rows or more is always
+one. An inclusive range bound on a heavy value carries its whole mass, and the cumulative fraction at
+a heavy value counts the rows at or below the end of its run.
 
 **Join cardinality** (`EstimateJoinCardinality`): the textbook estimate
 
@@ -857,6 +871,23 @@ with two refinements:
   side this is exactly the textbook estimate. ANALYZE builds histograms for the leading column of
   every index and, up to `stats_analyze_max_columns`, for the other columns of the table, so the
   refinement applies to every analyzed join key.
+- **A dimension row named by a filter: the plan-time lookup** (`PlanTimeLeafLookup`). A filter such
+  as `it.info = 'release dates'` keeps one row of a small table, and no statistic can say which key
+  that row carries into the fact table: the average key of `movie_info.info_type_id` holds 394 rows,
+  the named one 3,208. Two priors that guessed the named key is a popular one were measured and
+  rejected: true on the Join Order Benchmark, false on the retail data set, and the guess cost the
+  retail tier a fifth of its work. The executor therefore reads the row before the search runs, when
+  the leaf's table has a single-column unique key, at most `stats_plan_time_lookup_max_rows` rows
+  (default 2,000; `0` turns the lookup off), and a filter with an equality or an `IN` list on
+  constants: one scan of the small table under the query's own snapshot, the leaf's filter evaluated
+  as the leaf scan evaluates it, and at most 64 kept rows. With the keys known, the leaf's row estimate
+  is the kept count, the pair selectivity between the leaf and a fact column is the mean of the keys'
+  shares of that column (`CardinalityEstimator.KeyShareSelectivity`, each key read from the column's
+  histogram as an equality is), and the step cost of a probe through those keys returns that share
+  instead of the average (`CostEstimator.EstimateIndexLookupProfile`). A key that is not a heavy
+  value keeps the average, so a random key changes nothing. A scan that meets more than twice the cap
+  (a stale count) or keeps more than 64 rows yields nothing, and the statistics stand. EXPLAIN reads
+  the same keys, so it shows the plan the statement runs.
 
 ## Network & distribution cost
 

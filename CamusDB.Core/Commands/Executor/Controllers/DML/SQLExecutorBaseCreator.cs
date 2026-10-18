@@ -1458,7 +1458,7 @@ internal abstract class SQLExecutorBaseCreator
                 $"DEFAULT function '{functionName}()' returns {returnType} but column '{columnName}' is {columnType}");
     }
 
-    private static bool Like(string text, string pattern)
+    internal static bool Like(string text, string pattern)
     {
         // Fast paths: only '%' is a wildcard ('_' is literal, matching current semantics).
         // Use ordinal comparison to avoid culture-dependent results for non-ASCII input.
@@ -1490,7 +1490,7 @@ internal abstract class SQLExecutorBaseCreator
         return Functions.RegexMatcher.IsMatch(text, regexPattern, ignoreCase: false);
     }
 
-    private static bool ILike(string text, string pattern)
+    internal static bool ILike(string text, string pattern)
     {
         int percentCount = CountChar(pattern, '%');
 

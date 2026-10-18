@@ -48,6 +48,7 @@ public class TestConfigurationDefaults
         Assert.AreEqual(100_000, CamusDBOptions.Default.StatsAnalyzeSampleRows, nameof(CamusDBOptions.Default.StatsAnalyzeSampleRows));
         Assert.AreEqual(100, CamusDBOptions.Default.StatsHistogramBuckets, nameof(CamusDBOptions.Default.StatsHistogramBuckets));
         Assert.AreEqual(32, CamusDBOptions.Default.StatsAnalyzeMaxColumns, nameof(CamusDBOptions.Default.StatsAnalyzeMaxColumns));
+        Assert.AreEqual(2000, CamusDBOptions.Default.StatsPlanTimeLookupMaxRows, nameof(CamusDBOptions.Default.StatsPlanTimeLookupMaxRows));
         Assert.AreEqual(true, CamusDBOptions.Default.AutoAnalyzeEnabled, nameof(CamusDBOptions.Default.AutoAnalyzeEnabled));
         Assert.AreEqual(60_000, CamusDBOptions.Default.AutoAnalyzeCheckIntervalMs, nameof(CamusDBOptions.Default.AutoAnalyzeCheckIntervalMs));
         Assert.AreEqual(0.20, CamusDBOptions.Default.AutoAnalyzeFractionStaleRows, nameof(CamusDBOptions.Default.AutoAnalyzeFractionStaleRows));
