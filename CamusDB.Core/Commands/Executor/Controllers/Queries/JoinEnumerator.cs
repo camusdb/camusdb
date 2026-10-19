@@ -39,7 +39,11 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 ///   the size of its left input, which is the intermediate result of the steps before it, so the
 ///   total of a plan is the scan costs plus the size of each intermediate result. An index-lookup
 ///   step counts one probe for each distinct left key and the rows each probe returns
-///   (<see cref="IndexLookupProfile"/>, built once for each conjunct that can drive a lookup).</item>
+///   (<see cref="IndexLookupProfile"/>, built once for each conjunct that can drive a lookup). The
+///   distinct keys of a step are bounded by the smallest estimate of any subset of its left tables
+///   that contains the key's table, or a table with a column equal to the key
+///   (<see cref="CostInputs.MinRowsContaining"/>): a join after that table multiplies its rows,
+///   and the memo answers the repeats.</item>
 ///   <item>Builder agreement: <see cref="EstimateSteps"/> hands the builder the left rows, right
 ///   rows and right read cost of each join, and the builder selects the operator from them through
 ///   <see cref="CostEstimator.SelectJoinStepOperator"/>, the rule the step cost uses. The plan
@@ -102,9 +106,11 @@ internal static class JoinEnumerator
     /// <summary>
     /// One edge that names a table, seen from that table as the right input of a step: whether
     /// the builder can use the edge as a hash or merge key, and, when it can drive an index
-    /// lookup into the table, the shape of that lookup (null when it cannot).
+    /// lookup into the table, the shape of that lookup (null when it cannot) and the leaves whose
+    /// rows bound its distinct keys: the leaf of the column that supplies the keys and the leaves
+    /// of the columns equal to it (its column class), as a mask; zero when not known.
     /// </summary>
-    private readonly record struct StepEdge(ulong Mask, bool EquiKey, IndexLookupProfile? IndexLookup);
+    private readonly record struct StepEdge(ulong Mask, bool EquiKey, IndexLookupProfile? IndexLookup, ulong KeyLeaves = 0);
 
     /// <summary>
     /// The inputs of the cost model for one graph, computed once and shared by the dynamic program
@@ -152,6 +158,72 @@ internal static class JoinEnumerator
         /// <summary><see cref="RowsOf(int)"/> with scratch lists a caller that loops reuses.</summary>
         public double RowsOf(int mask, List<long?> counts, List<int> members) =>
             SubsetRows is { } dense ? dense[mask] : EstimateMaskRows(mask, LeafRows, Selectivity, counts, members);
+
+        /// <summary>
+        /// For each leaf, the smallest row estimate over the subsets that contain it, indexed by
+        /// subset mask (<see cref="MinRowsContaining"/>); built from the dense array on the first
+        /// request for the leaf, so a leaf that drives no lookup costs nothing.
+        /// </summary>
+        private double[]?[]? minRowsContaining;
+
+        /// <summary>
+        /// The smallest row estimate of any subset of <paramref name="mask"/> that contains
+        /// <paramref name="leaf"/>: a bound on the distinct rows of the leaf's table, and so on the
+        /// distinct keys of any of its columns, in the join of <paramref name="mask"/>. A join step
+        /// multiplies the rows of the tables before it but adds no row of theirs, so the rows of
+        /// one table that an intermediate result still holds are at most the size of the smallest
+        /// join of a subset that includes the table. Positive infinity (no bound) without the dense
+        /// array: the bound reads every subset, and the sparse search estimates only the subsets it
+        /// reaches.
+        /// </summary>
+        public double MinRowsContaining(int mask, int leaf)
+        {
+            if (SubsetRows is not { } rows)
+                return double.PositiveInfinity;
+
+            minRowsContaining ??= new double[LeafRows.Length][];
+            double[] table = minRowsContaining[leaf] ??= MinRowsContainingTable(rows, LeafRows.Length, leaf);
+            return table[mask];
+        }
+    }
+
+    /// <summary>
+    /// For each mask, the minimum of <paramref name="rows"/> over the subsets of the mask that
+    /// contain <paramref name="leaf"/>; positive infinity for a mask without the leaf. One pass
+    /// for each other leaf <c>i</c>, over the masks that hold both leaves (the sub-masks of the
+    /// rest, enumerated downward): after it, an entry holds the minimum over the subsets that
+    /// differ from its mask in the leaves passed so far. Internal for tests.
+    /// </summary>
+    internal static double[] MinRowsContainingTable(double[] rows, int n, int leaf)
+    {
+        double[] table = new double[rows.Length];
+        int leafBit = 1 << leaf;
+        int all = (1 << n) - 1;
+
+        for (int mask = 0; mask < table.Length; mask++)
+            table[mask] = (mask & leafBit) != 0 ? rows[mask] : double.PositiveInfinity;
+
+        for (int i = 0; i < n; i++)
+        {
+            if (i == leaf)
+                continue;
+
+            int bit = 1 << i;
+            int both = leafBit | bit;
+            int rest = all & ~both;
+
+            for (int sub = rest; ; sub = (sub - 1) & rest)
+            {
+                int mask = sub | both;
+                if (table[mask ^ bit] < table[mask])
+                    table[mask] = table[mask ^ bit];
+
+                if (sub == 0)
+                    break;
+            }
+        }
+
+        return table;
     }
 
     /// <summary>
@@ -172,7 +244,10 @@ internal static class JoinEnumerator
     /// groups with their selectivities, and the column equivalence classes. Built once per plan by
     /// <see cref="BuildSelectivityGroups"/>.
     /// </summary>
-    private sealed record SelectivityModel(List<(ulong Mask, double Selectivity)> Groups, List<EquivalenceClass> Classes);
+    private sealed record SelectivityModel(
+        List<(ulong Mask, double Selectivity)> Groups,
+        List<EquivalenceClass> Classes,
+        Dictionary<(int Leaf, string Column), ulong> ClassLeaves);
 
     /// <summary>
     /// Returns the cheapest left-deep join tree for <paramref name="root"/>, the filter that stays
@@ -246,7 +321,10 @@ internal static class JoinEnumerator
     /// input, and the operator the dynamic program costed. The builder selects the operator from the
     /// same numbers through the same rule (<see cref="CostEstimator.SelectJoinStepOperator"/>), so
     /// the plan has the operators the order was chosen for. The plan-cache replay of a cost-based
-    /// order calls this too, so a hit gets the operators of the miss.
+    /// order calls this too, so a hit gets the operators of the miss; it passes the distinct-key
+    /// bounds the miss stored (<paramref name="keyRowsBounds"/>, one for each join of the spine,
+    /// bottom first), because the bound reads the estimate of every subset and a replay estimates
+    /// only the prefixes of its order.
     /// </summary>
     internal static IReadOnlyDictionary<JoinSource, JoinStepEstimate> EstimateSteps(
         JoinGraph graph,
@@ -258,14 +336,23 @@ internal static class JoinEnumerator
         StatisticsManager stats,
         CamusDBOptions options,
         Dictionary<string, ColumnValue>? clockValues = null,
-        IReadOnlyDictionary<string, PlanTimeLeafKeys>? leafKeys = null) =>
-        EstimateSteps(graph, order, tree, ComputeCostInputs(graph, bound, pushdown, database, stats, options, clockValues, denseSubsets: false, leafKeys: leafKeys));
+        IReadOnlyDictionary<string, PlanTimeLeafKeys>? leafKeys = null,
+        IReadOnlyList<double>? keyRowsBounds = null) =>
+        EstimateSteps(graph, order, tree,
+            ComputeCostInputs(graph, bound, pushdown, database, stats, options, clockValues, denseSubsets: false, leafKeys: leafKeys),
+            keyRowsBounds);
 
+    /// <param name="keyRowsBounds">
+    /// The distinct-key bound of each step, from the plan cache, or null to read it from
+    /// <paramref name="inputs"/> (positive infinity without the dense array). A list whose length is
+    /// not the number of steps is ignored.
+    /// </param>
     private static IReadOnlyDictionary<JoinSource, JoinStepEstimate> EstimateSteps(
         JoinGraph graph,
         IReadOnlyList<int> order,
         QuerySource tree,
-        CostInputs inputs)
+        CostInputs inputs,
+        IReadOnlyList<double>? keyRowsBounds = null)
     {
         // The joins of the left spine, bottom first: join k adds order[k].
         List<JoinSource> joins = [];
@@ -280,12 +367,15 @@ internal static class JoinEnumerator
         joins.Reverse();
 
         Dictionary<JoinSource, JoinStepEstimate> steps = new(joins.Count, ReferenceEqualityComparer.Instance);
+        IReadOnlyList<double>? cachedBounds = keyRowsBounds is { } list && list.Count == order.Count - 1 ? list : null;
         int prefix = 1 << order[0];
 
         for (int k = 1; k < order.Count && k - 1 < joins.Count; k++)
         {
             int leaf = order[k];
-            (bool equiKey, IndexLookupProfile? indexLookup) = StepOperators(inputs.StepEdges[leaf], (ulong)(prefix | (1 << leaf)));
+            (bool equiKey, IndexLookupProfile? indexLookup, ulong keyLeaves) = StepOperators(inputs.StepEdges[leaf], (ulong)(prefix | (1 << leaf)));
+            double keyRows = cachedBounds is not null ? cachedBounds[k - 1] : KeyRowsBound(inputs, keyLeaves, prefix);
+            indexLookup = ApplyKeyRowsBound(indexLookup, keyRows);
 
             double leftRows = inputs.RowsOf(prefix);
             double rightRows = inputs.LeafRows[leaf];
@@ -297,7 +387,8 @@ internal static class JoinEnumerator
                 rightScanCost,
                 indexLookup,
                 CostEstimator.SelectJoinStepOperator(leftRows, rightRows, rightScanCost, equiKey, indexLookup),
-                inputs.RowsOf(prefix | (1 << leaf)));
+                inputs.RowsOf(prefix | (1 << leaf)),
+                keyRows);
 
             prefix |= 1 << leaf;
         }
@@ -306,9 +397,10 @@ internal static class JoinEnumerator
     }
 
     /// <param name="denseSubsets">
-    /// True to estimate every subset up front, for the dynamic program. A cache replay passes false:
-    /// it reads only the n prefixes of its order, which <see cref="CostInputs.RowsOf"/> then computes
-    /// one by one.
+    /// True to estimate every subset up front, for the dynamic program and for the distinct-key
+    /// bound of the lookup steps. False above the dense cap, where the search estimates each subset
+    /// it reaches, and for a cache replay, which reads only the n prefixes of its order, which
+    /// <see cref="CostInputs.RowsOf"/> then computes one by one.
     /// </param>
     private static CostInputs ComputeCostInputs(
         JoinGraph graph,
@@ -340,9 +432,7 @@ internal static class JoinEnumerator
             rightScanCost[i] = firstLeafCost[i];
         }
 
-        (List<(ulong Mask, double Selectivity)> groups, List<EquivalenceClass> classes) =
-            BuildSelectivityGroups(graph, bound, database, stats, leafKeys);
-        SelectivityModel selectivity = new(groups, classes);
+        SelectivityModel selectivity = BuildSelectivityGroups(graph, bound, database, stats, leafKeys);
 
         return new CostInputs
         {
@@ -351,7 +441,7 @@ internal static class JoinEnumerator
             LeafRows = leafRows,
             SubsetRows = denseSubsets ? EstimateAllSubsets(n, leafRows, selectivity) : null,
             Selectivity = selectivity,
-            StepEdges = BuildStepEdges(graph, bound, database, stats, leafKeys),
+            StepEdges = BuildStepEdges(graph, bound, database, stats, leafKeys, selectivity.ClassLeaves),
         };
     }
 
@@ -449,10 +539,11 @@ internal static class JoinEnumerator
                     if (!graph.Connects((ulong)left, bit))
                         continue;
 
-                    (bool equiKey, IndexLookupProfile? indexLookup) = StepOperators(inputs.StepEdges[bit], (ulong)mask);
+                    (bool equiKey, IndexLookupProfile? indexLookup, ulong keyLeaves) = StepOperators(inputs.StepEdges[bit], (ulong)mask);
                     costedSteps++;
                     double total = leftPlan.Cost + CostEstimator.JoinStepCost(
-                        leftPlan.Rows, inputs.LeafRows[bit], inputs.RightScanCost[bit], equiKey, indexLookup);
+                        leftPlan.Rows, inputs.LeafRows[bit], inputs.RightScanCost[bit], equiKey,
+                        ApplyKeyRowsBound(indexLookup, KeyRowsBound(inputs, keyLeaves, left)));
 
                     if (total < plan.Cost)
                     {
@@ -550,9 +641,10 @@ internal static class JoinEnumerator
                     if (!graph.RespectsBoundaries((ulong)union))
                         continue;
 
-                    (bool equiKey, IndexLookupProfile? indexLookup) = StepOperators(inputs.StepEdges[leaf], (ulong)union);
+                    (bool equiKey, IndexLookupProfile? indexLookup, ulong keyLeaves) = StepOperators(inputs.StepEdges[leaf], (ulong)union);
                     costedSteps++;
-                    double stepCost = CostEstimator.JoinStepCost(rows, inputs.LeafRows[leaf], inputs.RightScanCost[leaf], equiKey, indexLookup);
+                    double stepCost = CostEstimator.JoinStepCost(rows, inputs.LeafRows[leaf], inputs.RightScanCost[leaf], equiKey,
+                        ApplyKeyRowsBound(indexLookup, KeyRowsBound(inputs, keyLeaves, mask)));
                     double resultRows = inputs.RowsOf(union, counts, members);
 
                     if (resultRows < bestRows || (resultRows == bestRows && stepCost < bestCost))
@@ -586,12 +678,14 @@ internal static class JoinEnumerator
     /// <see cref="JoinEquiJoinAnalyzer.TryMatch"/>), one conjunct at a time, which is what they do
     /// over a combined <c>ON</c>. The index lookup returned is the one the builder would select
     /// from the same conjuncts: a unique index before a non-unique one, the first attached
-    /// conjunct among equals (<see cref="JoinEquiJoinAnalyzer.TryMatch"/>).
+    /// conjunct among equals (<see cref="JoinEquiJoinAnalyzer.TryMatch"/>). <c>KeyLeaves</c> are
+    /// the leaves whose rows bound the distinct keys of that lookup, for <see cref="KeyRowsBound"/>.
     /// </summary>
-    private static (bool EquiKey, IndexLookupProfile? IndexLookup) StepOperators(List<StepEdge> rightEdges, ulong union)
+    private static (bool EquiKey, IndexLookupProfile? IndexLookup, ulong KeyLeaves) StepOperators(List<StepEdge> rightEdges, ulong union)
     {
         bool equiKey = false;
         IndexLookupProfile? indexLookup = null;
+        ulong keyLeaves = 0;
 
         foreach (StepEdge edge in rightEdges)
         {
@@ -601,18 +695,62 @@ internal static class JoinEnumerator
             equiKey |= edge.EquiKey;
 
             if (edge.IndexLookup is { } probe && (indexLookup is null || (probe.UniqueIndex && !indexLookup.Value.UniqueIndex)))
+            {
                 indexLookup = probe;
+                keyLeaves = edge.KeyLeaves;
+            }
         }
 
-        return (equiKey, indexLookup);
+        return (equiKey, indexLookup, keyLeaves);
     }
 
+    /// <summary>
+    /// The rows that bound the distinct keys of a lookup step from its left input: the keys of the
+    /// left column are at most the distinct rows, in the join of <paramref name="leftMask"/>, of
+    /// its table or of any table with a column equal to it (<paramref name="keyLeaves"/>, read
+    /// through <see cref="CostInputs.MinRowsContaining"/>). Positive infinity when no such table is
+    /// known or the inputs have no dense array. Without the bound, a left input that a later join
+    /// multiplied (the cast rows of a movie, once for each of its companies) counts every repeated
+    /// key as a probe, and the memo that answers the repeats is priced as if each read the store;
+    /// a hash join over the whole right table then looks cheaper than the few probes the step
+    /// makes.
+    /// </summary>
+    private static double KeyRowsBound(CostInputs inputs, ulong keyLeaves, int leftMask)
+    {
+        double rows = double.PositiveInfinity;
+        ulong leaves = keyLeaves & (ulong)leftMask;
+        while (leaves != 0)
+        {
+            int leaf = BitOperations.TrailingZeroCount(leaves);
+            leaves &= leaves - 1;
+            rows = Math.Min(rows, inputs.MinRowsContaining(leftMask, leaf));
+        }
+
+        return rows;
+    }
+
+    /// <summary>
+    /// <paramref name="lookup"/> with its distinct keys lowered to the rows of
+    /// <see cref="KeyRowsBound"/> that hold a value (the column's non-NULL share), when that is
+    /// below the distinct count of the column in its table; the profile unchanged otherwise.
+    /// </summary>
+    private static IndexLookupProfile? ApplyKeyRowsBound(IndexLookupProfile? lookup, double keyRows)
+    {
+        if (lookup is not { } probe || double.IsPositiveInfinity(keyRows))
+            return lookup;
+
+        double keyed = keyRows * Math.Clamp(probe.LeftNonNullFraction, 0.0, 1.0);
+        return keyed < probe.LeftKeyDistinct ? probe with { LeftKeyDistinct = keyed } : lookup;
+    }
+
+    /// <param name="classLeaves">The leaves of each column's class, by (leaf, lower-case column).</param>
     private static List<StepEdge>[] BuildStepEdges(
         JoinGraph graph,
         BoundSelectQuery bound,
         DatabaseDescriptor database,
         StatisticsManager stats,
-        IReadOnlyDictionary<string, PlanTimeLeafKeys>? leafKeys)
+        IReadOnlyDictionary<string, PlanTimeLeafKeys>? leafKeys,
+        IReadOnlyDictionary<(int Leaf, string Column), ulong> classLeaves)
     {
         int n = graph.LeafCount;
         List<StepEdge>[] edges = new List<StepEdge>[n];
@@ -641,6 +779,7 @@ internal static class JoinEnumerator
                     && JoinEquiJoinAnalyzer.TryExtractEquiKeys(rights[leaf], conjunct.Node, bound, out _);
 
                 IndexLookupProfile? indexLookup = null;
+                ulong keyLeaves = 0;
                 if (isEquality
                     && rights[leaf].Table is { } table
                     && JoinEquiJoinAnalyzer.TryMatch(table, conjunct.Node, bound, out JoinEquiJoinIndexMatch match))
@@ -654,9 +793,12 @@ internal static class JoinEnumerator
                     indexLookup = CostEstimator.EstimateIndexLookupProfile(
                         table.Table, match.Index, match.RightIndexColumn, leftTable, leftColumn, database, stats,
                         KnownKeys(leafKeys, leftAlias, leftColumn));
+                    int keyLeaf = leftTable is not null ? graph.LeafOf(leftAlias) : -1;
+                    if (keyLeaf >= 0 && !classLeaves.TryGetValue((keyLeaf, leftColumn.ToLowerInvariant()), out keyLeaves))
+                        keyLeaves = 1UL << keyLeaf;
                 }
 
-                edges[leaf].Add(new StepEdge(conjunct.Mask, equiKey, indexLookup));
+                edges[leaf].Add(new StepEdge(conjunct.Mask, equiKey, indexLookup, keyLeaves));
             }
         }
 
@@ -733,10 +875,7 @@ internal static class JoinEnumerator
         StatisticsManager? stats,
         IReadOnlyDictionary<string, PlanTimeLeafKeys>? leafKeys = null)
     {
-        (List<(ulong Mask, double Selectivity)> groups, List<EquivalenceClass> classes) =
-            BuildSelectivityGroups(graph, bound, database, stats, leafKeys);
-
-        return EstimateAllSubsets(graph.LeafCount, leafRows, new SelectivityModel(groups, classes));
+        return EstimateAllSubsets(graph.LeafCount, leafRows, BuildSelectivityGroups(graph, bound, database, stats, leafKeys));
     }
 
     /// <summary>The estimate of every non-empty subset of <paramref name="n"/> leaves; index 0 is unused.</summary>
@@ -878,7 +1017,7 @@ internal static class JoinEnumerator
         return factor;
     }
 
-    private static (List<(ulong Mask, double Selectivity)> Groups, List<EquivalenceClass> Classes) BuildSelectivityGroups(
+    private static SelectivityModel BuildSelectivityGroups(
         JoinGraph graph,
         BoundSelectQuery bound,
         DatabaseDescriptor database,
@@ -942,6 +1081,19 @@ internal static class JoinEnumerator
             if (!membersOf.TryGetValue(root, out List<int>? members))
                 membersOf[root] = members = [];
             members.Add(i);
+        }
+
+        // The leaves of each column's class, by (leaf, lower-case column), for the distinct-key
+        // bound of a lookup step: a column equal to the key bounds the key's values as well.
+        Dictionary<(int Leaf, string Column), ulong> classLeaves = new(nodes.Count);
+        foreach (List<int> members in membersOf.Values)
+        {
+            ulong leaves = 0;
+            foreach (int member in members)
+                leaves |= 1UL << nodes[member].Leaf;
+
+            foreach (int member in members)
+                classLeaves[(nodes[member].Leaf, nodes[member].Column.ToLowerInvariant())] = leaves;
         }
 
         // Two-column classes: equi-conjuncts grouped by their unordered pair of leaves, in pool order.
@@ -1022,22 +1174,22 @@ internal static class JoinEnumerator
                     CardinalityEstimator.NonNullFraction(table, [column], database, stats));
             }
 
-            List<(int Leaf, long? DistinctCount, bool Skewed, double NonNullFraction)> classLeaves = new(byLeaf.Count);
+            List<(int Leaf, long? DistinctCount, bool Skewed, double NonNullFraction)> memberLeaves = new(byLeaf.Count);
             List<JoinKeyDistribution?> distributions = new(byLeaf.Count);
             List<ColumnHistogram?> histograms = new(byLeaf.Count);
             List<IReadOnlyList<ColumnValue>?> knownKeys = new(byLeaf.Count);
             foreach ((int leaf, (long? distinct, JoinKeyDistribution? distribution, ColumnHistogram? histogram, IReadOnlyList<ColumnValue>? keys, double nonNull)) in byLeaf)
             {
-                classLeaves.Add((leaf, distinct, distribution is { HeavyValues.Count: > 0 }, nonNull));
+                memberLeaves.Add((leaf, distinct, distribution is { HeavyValues.Count: > 0 }, nonNull));
                 distributions.Add(distribution);
                 histograms.Add(histogram);
                 knownKeys.Add(keys);
             }
 
-            classes.Add(new EquivalenceClass(classLeaves, PairSelectivities(distributions, classLeaves, histograms, knownKeys)));
+            classes.Add(new EquivalenceClass(memberLeaves, PairSelectivities(distributions, memberLeaves, histograms, knownKeys)));
         }
 
-        return (groups, classes);
+        return new SelectivityModel(groups, classes, classLeaves);
     }
 
     /// <summary>

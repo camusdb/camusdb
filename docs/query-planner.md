@@ -1095,8 +1095,13 @@ selects for the conjuncts that the step attaches. The checks are the builder's o
   where `nonNull` is the share of the left column's rows that hold a value (a NULL key probes nothing; a
   cast table whose character column is NULL in half the rows probes the characters for half of them) and
   the distinct count is the left column's NDV in its own table (its row count for a unique key) and
-  unbounded when unknown, so every keyed left row then probes. When the probed rows would not fit the
-  memo (65,536 rows), every keyed left row is a probe too.
+  unbounded when unknown, so every keyed left row then probes. The join-order search lowers the
+  distinct count further to the rows the key's table can still have in the left input: the smallest
+  estimate of any subset of the left tables that contains it (a join after that table multiplies its
+  rows but adds none of them, so the cast rows of a movie, repeated once for each of its companies,
+  probe the people once each). The bound needs the estimate of every subset, which the search keeps
+  for joins of up to 12 tables. When the probed rows would not fit the memo (65,536 rows), every
+  keyed left row is a probe too.
 - `probeWeight` is the cost of one probe in rows read from storage: 3 for a unique index (one batched
   point read) and 16 for a non-unique index (one batched bounded scan), solved from the retail data set
   at scale 4 on memory storage, where a scanned row costs about 0.55 µs, a unique probe about 2.2 to 4.8 µs
@@ -1188,7 +1193,9 @@ The plan cache stores the join as an alias order plus a **build mode** (`JoinBui
 `Conjunct` entry (a repaired tree) or `CostBased` entry (a DP tree) rebuilds the tree through `JoinGraph` from
 the current query — also when the order equals the declared order, because the DP can keep the declared
 order and still move a conjunct to an earlier join. A `CostBased` hit also recomputes the step estimates, so
-it builds the operators of the miss. If the graph refuses the current query or the order is not connected, the
+it builds the operators of the miss; the one value it does not recompute is the bound on the distinct keys of
+each lookup step, which the miss read from the estimate of every subset of tables and stores with the order,
+because a replay estimates only the prefixes of that order. If the graph refuses the current query or the order is not connected, the
 planner plans from the start, as on a miss, and counts a replay failure. `ON` literals always come from the
 current query.
 

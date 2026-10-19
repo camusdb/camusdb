@@ -669,7 +669,8 @@ internal static class CostEstimator
     /// count of the left column in its table (the table's rows when the column is a unique key),
     /// unbounded when the column's table or its count is unknown. The left table is the table of
     /// the column, not of the whole left input: a join before this step can only reduce the
-    /// distinct values the column still has. When the left column's values are known
+    /// distinct values the column still has, and the join-order search applies that reduction when
+    /// it prices the step (<see cref="JoinEnumerator"/>). When the left column's values are known
     /// (<paramref name="leftKeys"/>, read at plan time by <see cref="PlanTimeLeafLookup"/>), a
     /// non-unique probe returns the mean of those keys' shares of the right column, from its
     /// histogram, and the distinct keys are the known keys.

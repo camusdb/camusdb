@@ -118,7 +118,7 @@ internal sealed class JoinQueryPlanner
         {
             // Re-apply the cached ordering to the CURRENT bound.Query.Source so that ON-predicate
             // literals from this query are used (not frozen from the first query of this shape).
-            choice = ReplayCachedOrder(database, bound, pushdown, cachedAliasOrder, cached.JoinBuild, clockValues, leafKeys);
+            choice = ReplayCachedOrder(database, bound, pushdown, cachedAliasOrder, cached.JoinBuild, cached.JoinKeyRowsBounds, clockValues, leafKeys);
 
             if (choice is not null)
                 fromCache = true;
@@ -170,7 +170,8 @@ internal sealed class JoinQueryPlanner
             _cache!.Put(database.Id, shapeId,
                 new PlanCacheEntry(cacheDeps!, SingleTable: null,
                     JoinAliasOrder: CollectAliasOrder(orderedSource),
-                    JoinBuild: choice.Mode));
+                    JoinBuild: choice.Mode,
+                    JoinKeyRowsBounds: CollectKeyRowsBounds(orderedSource, choice.StepEstimates)));
 
         return plan;
     }
@@ -192,6 +193,7 @@ internal sealed class JoinQueryPlanner
         JoinPredicatePushdown.Result pushdown,
         IReadOnlyList<string> cachedAliasOrder,
         JoinBuildMode mode,
+        IReadOnlyList<double>? keyRowsBounds,
         Dictionary<string, ColumnValue>? clockValues,
         IReadOnlyDictionary<string, PlanTimeLeafKeys>? leafKeys)
     {
@@ -219,7 +221,7 @@ internal sealed class JoinQueryPlanner
 
         // A replay runs no search, so it costs no step.
         return JoinOrderChoice.CostBased(tree, graph,
-            JoinEnumerator.EstimateSteps(graph, order, tree, bound, pushdown, database, _stats, _options, clockValues, leafKeys),
+            JoinEnumerator.EstimateSteps(graph, order, tree, bound, pushdown, database, _stats, _options, clockValues, leafKeys, keyRowsBounds),
             costedJoinSteps: 0);
     }
 
@@ -1037,6 +1039,24 @@ internal sealed class JoinQueryPlanner
     /// Used to extract the ordering fingerprint after enumeration, so the cache stores
     /// an alias list rather than a frozen AST.
     /// </summary>
+    /// <summary>
+    /// The distinct-key bound of each join of the left spine of <paramref name="source"/>, bottom
+    /// first, from the enumerator's estimates (<see cref="JoinStepEstimate.KeyRowsBound"/>), for
+    /// the plan cache; null when the tree has no estimates (a heuristic order).
+    /// </summary>
+    private static List<double>? CollectKeyRowsBounds(QuerySource source, IReadOnlyDictionary<JoinSource, JoinStepEstimate>? steps)
+    {
+        if (steps is null)
+            return null;
+
+        List<double> bounds = [];
+        for (QuerySource current = source; current is JoinSource join; current = join.Left)
+            bounds.Add(steps.TryGetValue(join, out JoinStepEstimate step) ? step.KeyRowsBound : double.PositiveInfinity);
+
+        bounds.Reverse();
+        return bounds;
+    }
+
     private static List<string> CollectAliasOrder(QuerySource source)
     {
         List<string> aliases = [];

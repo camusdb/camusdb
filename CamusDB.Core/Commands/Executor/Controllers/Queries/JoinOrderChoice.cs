@@ -62,7 +62,10 @@ internal enum JoinStepOperator
 /// probe returns on average, and the distinct keys of the left input. The join keeps the rows of
 /// each probed key in a memo, so a left input that repeats a key probes the store once for it;
 /// <see cref="LeftKeyDistinct"/> bounds the probes, and it is unbounded when the distinct count of
-/// the left column is unknown, so every left row then counts as a probe. A left row whose key is
+/// the left column is unknown, so every left row then counts as a probe. The join-order search
+/// lowers that bound to the distinct rows the key's table can have in the step's left input, the
+/// smallest estimate of any subset of the left tables that contains it, so the rows a later join
+/// multiplied do not count as probes again. A left row whose key is
 /// NULL probes nothing, so <see cref="LeftNonNullFraction"/>, the share of the left column's rows
 /// that hold a value, scales the probes before the distinct bound: a cast table whose character
 /// column is NULL in half the rows probes the characters for half of them.
@@ -80,7 +83,11 @@ internal readonly record struct IndexLookupProfile(bool UniqueIndex, double Matc
 /// input estimates in place of its own, which see a join input only as a fixed default and a
 /// filtered right input only by its output rows. The output estimate decides nothing; it is kept
 /// on the built node so EXPLAIN (ANALYZE) can compare the search's model with the rows the join
-/// produced.
+/// produced. <see cref="KeyRowsBound"/> is the rows the search put as a bound on the distinct
+/// keys of the lookup (the smallest estimate of a subset of the left tables with the key's table,
+/// see <see cref="JoinEnumerator"/>), already applied to <see cref="IndexLookup"/>; positive
+/// infinity when there is none. The plan cache keeps it with the order, because a replay does
+/// not estimate every subset.
 /// </summary>
 internal readonly record struct JoinStepEstimate(
     double LeftRows,
@@ -88,7 +95,8 @@ internal readonly record struct JoinStepEstimate(
     double RightScanCost,
     IndexLookupProfile? IndexLookup,
     JoinStepOperator Operator,
-    double OutputRows);
+    double OutputRows,
+    double KeyRowsBound = double.PositiveInfinity);
 
 /// <summary>
 /// The join tree that the planner builds, how it was built, the filter that runs after the

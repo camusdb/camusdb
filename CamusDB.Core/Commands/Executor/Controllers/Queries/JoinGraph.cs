@@ -373,6 +373,9 @@ internal sealed class JoinGraph
         return null;
     }
 
+    /// <summary>The leaf index of <paramref name="alias"/>, or <c>-1</c> when no leaf has it.</summary>
+    public int LeafOf(string alias) => leafByAlias.TryGetValue(alias, out int leaf) ? leaf : -1;
+
     /// <summary>
     /// Maps an alias order (for example one from the plan cache) to leaf indices. Returns null
     /// when it is not a permutation of the leaves of this graph.

@@ -280,13 +280,17 @@ internal readonly record struct PlanCacheDep(
 /// <see cref="JoinBuildMode.CostBased"/> entry rebuilds the tree through <see cref="JoinGraph"/>,
 /// also when the order equals the declared order, so a hit evaluates each conjunct at the same
 /// join as the miss. A cost-based entry also recomputes the enumerator's estimates of each join,
-/// so the hit selects the same join operators.</para>
+/// so the hit selects the same join operators; the one estimate it does not recompute is the bound
+/// on the distinct keys of each lookup step (<see cref="JoinKeyRowsBounds"/>, one value per join
+/// of the left spine, bottom first), which the search read from the estimate of every subset of
+/// tables, work a replay does not repeat.</para>
 /// </summary>
 internal sealed record PlanCacheEntry(
     IReadOnlyList<PlanCacheDep> SchemaDeps,
     SingleTableDecision? SingleTable,
     IReadOnlyList<string>? JoinAliasOrder,
-    JoinBuildMode JoinBuild = JoinBuildMode.WholePredicate);
+    JoinBuildMode JoinBuild = JoinBuildMode.WholePredicate,
+    IReadOnlyList<double>? JoinKeyRowsBounds = null);
 
 /// <summary>
 /// Cached access-path decision for a single-table query.
