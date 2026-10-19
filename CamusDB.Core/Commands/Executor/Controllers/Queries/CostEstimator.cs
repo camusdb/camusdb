@@ -614,8 +614,8 @@ internal static class CostEstimator
 
     /// <summary>
     /// Cost of one probe of a unique index, in rows read from storage, before the row it returns
-    /// and beyond the unit every left row pays. Measured 2026-10-17 on the retail data set at
-    /// scale 4, memory storage, Apple M3: a scanned row costs about 0.55 µs, and the join over
+    /// and beyond the unit every left row pays. Measured on the retail data set at
+    /// scale 4, memory storage: a scanned row costs about 0.55 µs, and the join over
     /// customers (8,000 rows) timed equal to the hash join at 7,801 left rows with 2,180 distinct
     /// keys (27.9 ms against 26.6 ms) and 24 percent under it at 3,869 rows with 1,338 keys
     /// (10.3 ms against 13.6 ms). Both solve to three rows for the probe: the hash join costs
@@ -636,16 +636,30 @@ internal static class CostEstimator
     internal const double RangeProbeWeight = 16.0;
 
     /// <summary>
-    /// Cost of one index-lookup join step: one unit for each left row, as in a hash join, where a
-    /// hit in the join's memo pairs the row with rows already in memory exactly as a hash probe
+    /// Cost of one left row of an index-lookup join, as a share of the unit a hash join pays for
+    /// each left row (<see cref="HashJoinStepCost"/>): the price of a hit in the join's memo. A hit
+    /// pairs the row with rows already in memory as a hash probe does, but finds them through a
+    /// dictionary on the one key value instead of a hash table over extracted key arrays. Measured
+    /// on the JOB data set at scale 0.003, memory storage: one join step over
+    /// a unique index, forced as a lookup join and as a hash join, on five left inputs whose keys
+    /// repeat 1 to 14 times, at five to seven sizes each, with the left scan timed alone and
+    /// subtracted. The fit gives 0.32 µs for a memo hit with the pair it emits against 0.51 µs for
+    /// a hash probe with its pair, a share of 0.62 (0.67 on the medians of the runs), and 4 to
+    /// 9 µs for a unique probe with its row. A hit priced at 0.1 made a large join followed by
+    /// memoized lookups look almost free, and the search moved selective tables to the end; at its
+    /// measured share a left row of a lookup join still pays two thirds of a hash join's.
+    /// </summary>
+    internal const double MemoHitWeight = 0.65;
+
+    /// <summary>
+    /// Cost of one index-lookup join step: <see cref="MemoHitWeight"/> for each left row, the price
+    /// of a hit in the join's memo, which pairs the row with rows already in memory as a hash probe
     /// does; plus, for each distinct key of the left input, one probe and the rows it returns. The
     /// probe is a point read (<see cref="UniqueProbeWeight"/>) or a bounded scan
     /// (<see cref="RangeProbeWeight"/>), and each row it returns costs one row fetch. The memo
     /// (<see cref="IndexNestedLoopJoinOperator.ProbeMemoMaxRows"/>) holds the rows of the probed
     /// keys; when they would not fit, a repeated key probes again, so every left row is a probe.
     /// A left row whose key is NULL probes nothing (<see cref="IndexLookupProfile.LeftNonNullFraction"/>).
-    /// A memo hit priced below a hash probe made a large hash join followed by a few hundred
-    /// memoized lookups look almost free, and the search moved selective tables to the end.
     /// </summary>
     internal static double IndexLookupJoinStepCost(double leftRows, IndexLookupProfile probe)
     {
@@ -657,7 +671,7 @@ internal static class CostEstimator
             probes = keyedRows;
 
         double weight = probe.UniqueIndex ? UniqueProbeWeight : RangeProbeWeight;
-        return leftRows + probes * (weight + matches);
+        return leftRows * MemoHitWeight + probes * (weight + matches);
     }
 
     /// <summary>

@@ -65,7 +65,7 @@ public sealed class TestNullJoinKeys : BaseTest
         Db db = await CreateTables(Options);
 
         // 600 roles of 120 movies, 300 of them keyed. A hash join over the 1,500 characters costs
-        // 1,650 + 600 units; 600 probes would cost 600 + 600 × 4, 300 probes 600 + 300 × 4, so
+        // 1,650 + 600 units; 600 probes would cost 390 + 600 × 4, 300 probes 390 + 300 × 4, so
         // only the keyed count makes the lookup join the cheaper step.
         List<QueryResultRow> plan = await Query(db, "EXPLAIN (ANALYZE) SELECT r.id FROM roles r, characters c WHERE c.id = r.character_id AND r.movie_id <= 120");
         string text = PlanText(plan);
@@ -81,12 +81,13 @@ public sealed class TestNullJoinKeys : BaseTest
         IndexLookupProfile keyed = new(UniqueIndex: true, MatchesPerProbe: 1, LeftKeyDistinct: 10_000);
         IndexLookupProfile halfNull = keyed with { LeftNonNullFraction = 0.5 };
 
-        Assert.That(CostEstimator.IndexLookupJoinStepCost(1000, keyed), Is.EqualTo(1000 + 1000 * 4.0));
-        Assert.That(CostEstimator.IndexLookupJoinStepCost(1000, halfNull), Is.EqualTo(1000 + 500 * 4.0));
+        double rows = 1000 * CostEstimator.MemoHitWeight;
+        Assert.That(CostEstimator.IndexLookupJoinStepCost(1000, keyed), Is.EqualTo(rows + 1000 * 4.0).Within(1e-9));
+        Assert.That(CostEstimator.IndexLookupJoinStepCost(1000, halfNull), Is.EqualTo(rows + 500 * 4.0).Within(1e-9));
 
         // The distinct bound still applies after the share.
         IndexLookupProfile fewKeys = halfNull with { LeftKeyDistinct = 100 };
-        Assert.That(CostEstimator.IndexLookupJoinStepCost(1000, fewKeys), Is.EqualTo(1000 + 100 * 4.0));
+        Assert.That(CostEstimator.IndexLookupJoinStepCost(1000, fewKeys), Is.EqualTo(rows + 100 * 4.0).Within(1e-9));
     }
 
     // ─── Helpers ─────────────────────────────────────────────────────────────

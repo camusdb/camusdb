@@ -1082,15 +1082,20 @@ selects for the conjuncts that the step attaches. The checks are the builder's o
 | Operator | Step cost | When |
 |---|---|---|
 | hash | `rightScanCost + leftRows + 0.1 · min(leftRows, rightRows)` | an equi-key conjunct |
-| index lookup | `leftRows + probes · (probeWeight + matchesPerProbe)` | an index on a key column of the right table, and hash is not strictly cheaper (`PrefersHashOverIndexLookup`, the same rule `JoinQueryPlanner` uses) |
+| index lookup | `memoHit · leftRows + probes · (probeWeight + matchesPerProbe)` | an index on a key column of the right table, and hash is not strictly cheaper (`PrefersHashOverIndexLookup`, the same rule `JoinQueryPlanner` uses) |
 | nested loop | `rightScanCost + 0.1 · max(1, leftRows) · max(1, rightRows)` | no equi-key conjunct |
 
 **The index-lookup step** is priced from the shape of its probes (`IndexLookupProfile`, built by
 `CostEstimator.EstimateIndexLookupProfile` from the statistics):
 
-- Every left row costs one unit, as in a hash join: the operator keeps the rows of each probed key in
-  a memo, and a left row whose key was probed before pairs with rows already in memory, exactly as a
-  hash probe does.
+- Every left row costs `memoHit` = 0.65 of the unit a hash join pays for a left row: the operator
+  keeps the rows of each probed key in a memo, and a left row whose key was probed before pairs with
+  rows already in memory as a hash probe does, through a dictionary on the one key value instead of
+  a hash table over extracted key arrays. Measured on the JOB data set at scale 0.003 (2026-10-19):
+  a memo hit with the pair it emits costs 0.32 µs against 0.51 µs for a hash probe with its pair.
+  A hit priced far below that (0.1) once made a large join followed by memoized lookups look almost
+  free, and the search moved selective tables to the end; the constant carries its derivation in
+  `CostEstimator`.
 - `probes` is the number of distinct keys of the left input, `min(leftRows × nonNull, distinct(leftColumn))`,
   where `nonNull` is the share of the left column's rows that hold a value (a NULL key probes nothing; a
   cast table whose character column is NULL in half the rows probes the characters for half of them) and
