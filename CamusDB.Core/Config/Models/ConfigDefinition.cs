@@ -822,8 +822,9 @@ public class ConfigDefinition
     public int MaxIndexColumns { get; set; } = 32;
 
     /// <summary>
-    /// Max encoded byte size of one index entry's key + INCLUDE tuple, checked at write time. &lt;= 0
-    /// disables. Default 4096 (4 KiB). Maps to <c>CamusDBOptions.MaxIndexIncludeTupleBytes</c>.
+    /// Max encoded byte size of one index entry's INCLUDE tuple, checked at write time. The index key
+    /// does not count toward it. &lt;= 0 disables. Default 4096 (4 KiB). Maps to
+    /// <c>CamusDBOptions.MaxIndexIncludeTupleBytes</c>.
     /// </summary>
     public int MaxIndexIncludeTupleBytes { get; set; } = 4096;
 

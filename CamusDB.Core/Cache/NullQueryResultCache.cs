@@ -69,4 +69,7 @@ public sealed class NullQueryResultCache : IQueryResultCache
 
     /// <summary>No-op: the null cache never registers an in-flight slot.</summary>
     public void ExitSingleFlight(string fingerprint, bool published) { }
+
+    /// <summary>No-op: the null cache holds no entries and reads no settings.</summary>
+    public void ApplyOptions(CamusDBOptions next) { }
 }

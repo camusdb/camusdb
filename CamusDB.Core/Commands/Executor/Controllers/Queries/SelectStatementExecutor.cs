@@ -98,8 +98,11 @@ internal sealed class SelectStatementExecutor
 
     internal readonly EngineMetricsCollector? engineMetrics;
 
-    /// <summary>Times statements into the slow query log, or null when the log is not built.</summary>
-    internal readonly SlowQueryRecorder? slowQueries;
+    /// <summary>
+    /// Times statements into the slow query log. Never null, because the engine always builds it;
+    /// its <see cref="SlowQueryRecorder.Log"/> is null until the log is first enabled.
+    /// </summary>
+    internal readonly SlowQueryRecorder slowQueries;
 
     /// <summary>The running-statement list; never null, because the engine always builds it.</summary>
     internal readonly QueryActivityRegistry queryActivity;
@@ -142,7 +145,7 @@ internal sealed class SelectStatementExecutor
         ClusterSettingsService? clusterSettings,
         EngineMetricsCollector? engineMetrics,
         Functions.SequenceStatementBinder sequenceBinder,
-        SlowQueryRecorder? slowQueries,
+        SlowQueryRecorder slowQueries,
         QueryActivityService queryActivityService
     )
     {
@@ -288,7 +291,7 @@ internal sealed class SelectStatementExecutor
     private async Task<(DatabaseDescriptor database, IAsyncEnumerable<QueryResultRow> cursor)> ExecuteSQLQueryTimed(
         ExecuteSQLTicket ticket, CacheMetadataHolder? metaOut, QuerySchemaHolder? schemaOut, QueryActivityEntry? activity)
     {
-        SlowQueryRecording? recording = slowQueries?.Begin(ticket.Sql, ticket.DatabaseName, ticket.Principal?.UserName);
+        SlowQueryRecording? recording = slowQueries.Begin(ticket.Sql, ticket.DatabaseName, ticket.Principal?.UserName);
 
         if (recording is null)
             return await ExecuteSQLQueryInternal(ticket, metaOut, schemaOut, recording: null, activity).ConfigureAwait(false);
@@ -397,7 +400,7 @@ internal sealed class SelectStatementExecutor
             if (schemaOut is not null)
                 schemaOut.Schema = DerivedTableSchemaBuilder.ShowSlowQueriesSchema;
 
-            return (null!, schemaQuerier.ShowSlowQueries(slowQueries?.Log, UnquoteLikePattern(ast.leftAst?.yytext)));
+            return (null!, schemaQuerier.ShowSlowQueries(slowQueries.Log, UnquoteLikePattern(ast.leftAst?.yytext)));
         }
 
         // SHOW [CLUSTER] QUERIES and SHOW [CLUSTER] CONNECTIONS report what this node, or every member,

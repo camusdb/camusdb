@@ -47,14 +47,15 @@ slow_query_log_max_sql_length: 4096
 
 ### Which of these need a restart
 
-`slow_query_log_max_entries` is **restart-class**. The ring allocates its array when the node builds
-it, so a live change cannot resize it. The other three are **runtime-mutable**: the engine re-reads
-them per statement, so you can raise the threshold or turn recording off on a busy node without a
-restart.
+`slow_query_log_max_entries` is **restart-class**. The ring allocates its array once, so a live
+change cannot resize it. The other three are **runtime-mutable**: the engine re-reads them per
+statement, so you can turn recording on, raise the threshold, or turn recording off on a busy node
+without a restart.
 
-There is one asymmetry worth knowing. A node that started with `slow_query_log_enabled: false` has
-no ring at all, so turning the setting on at runtime records nothing. Turning it **off** at runtime
-does work, and it keeps the entries already recorded so you can still read them.
+A node that started with `slow_query_log_enabled: false` holds no ring. The first
+`SET CLUSTER SETTING slow_query_log_enabled = true` creates it, at the capacity the node started
+with, and the next statement is recorded. Turning the log **off** at runtime keeps the ring and the
+entries already recorded, so you can still read them.
 
 All four are **node-scoped**. Nodes may legitimately disagree, which is the point: turn the log on
 for the one node you are investigating.

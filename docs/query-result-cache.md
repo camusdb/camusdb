@@ -361,8 +361,18 @@ intentionally ignores them, the result cache must not.
 ## 9. Configuration
 
 The cache is **on by default** (it does nothing until a query opts in with a `{cache=…}` hint).
-All knobs are YAML-only (operational tuning), under the same `config.yml` the rest of the server
-reads.
+The knobs live in the same `config.yml` the rest of the server reads. Every knob except
+`query_result_cache_enabled` can also change on a running node with `SET CLUSTER SETTING`
+(see `docs/runtime-cluster-settings.md`); `query_result_cache_enabled` needs a restart, because a
+disabled node builds no cache at all. A live change applies as follows:
+
+- **`default_ttl_ms`** governs entries published after the change. An entry keeps the expiry it
+  was stamped with, so lowering the TTL does not shorten entries already resident.
+- **`max_entries` / `max_bytes`** trim the resident population down to the new cap at once
+  (least recently used first), and govern every later publish.
+- **`sweep_interval_ms`** re-arms the background sweep timer at the new interval.
+- The per-entry caps, dependency caps, single-flight wait and strict-validation budget are read
+  per query, so the next query uses the new value.
 
 | Key | Default | Meaning |
 |-----|---------|---------|

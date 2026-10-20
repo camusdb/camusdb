@@ -109,9 +109,10 @@ public sealed class QueryResultCache : IQueryResultCache, IDisposable
     /// </param>
     /// <summary>
     /// Configuration for the engine this cache serves; injected, never ambient. Swapped by
-    /// <see cref="ApplyOptions"/>: the publish path reads the entry/byte bounds per call, so a
-    /// published change governs the next publish, and <see cref="ApplyOptions"/> trims the cache
-    /// down to the new bounds immediately.
+    /// <see cref="ApplyOptions"/>: each publish pins one snapshot for its TTL and its entry/byte
+    /// bounds, so a published change governs the next publish, and <see cref="ApplyOptions"/> trims
+    /// the cache down to the new bounds immediately. An entry keeps the expiry it was stamped with,
+    /// so a lower TTL shortens new entries only.
     /// </summary>
     private CamusDBOptions options;
 
@@ -144,9 +145,9 @@ public sealed class QueryResultCache : IQueryResultCache, IDisposable
     /// cap would only be enforced by future publishes, leaving the oversized population resident
     /// until natural churn drained it.
     /// </summary>
-    internal void ApplyOptions(CamusDBOptions next)
+    public void ApplyOptions(CamusDBOptions next)
     {
-        options = next;
+        Volatile.Write(ref options, next);
 
         if (sweepIntervalFromOptions)
         {
@@ -167,10 +168,12 @@ public sealed class QueryResultCache : IQueryResultCache, IDisposable
     /// </summary>
     private void TrimToBounds()
     {
+        CamusDBOptions bounds = Volatile.Read(ref options);
+
         lock (_lock)
         {
-            while ((_entries.Count > options.QueryResultCacheMaxEntries
-                    || _totalBytes > options.QueryResultCacheMaxBytes)
+            while ((_entries.Count > bounds.QueryResultCacheMaxEntries
+                    || _totalBytes > bounds.QueryResultCacheMaxBytes)
                    && _lruList.Count > 0)
             {
                 EvictLruLocked();
@@ -257,6 +260,10 @@ public sealed class QueryResultCache : IQueryResultCache, IDisposable
         QueryDependencySet? deps = null,
         CancellationToken cancellationToken = default)
     {
+        // One snapshot for the whole publish, so a concurrent ApplyOptions cannot give this entry
+        // the TTL of one configuration and the caps of another.
+        CamusDBOptions options = Volatile.Read(ref this.options);
+
         // Per-entry row and byte caps — belt-and-suspenders; CachedQueryRunner's _capBreached
         // flag catches these before TryPublishAsync is called in normal usage.
         if (result.Rows.Count > options.QueryResultCacheMaxEntryRows)

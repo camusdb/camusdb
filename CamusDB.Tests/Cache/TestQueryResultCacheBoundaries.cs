@@ -74,6 +74,7 @@ public class TestQueryResultCacheBoundaries
         public void InvalidateCacheName(string databaseId, string cacheName) { }
         public SingleFlightSlot EnterSingleFlight(string fingerprint) => new(isOwner: true, Task.FromResult(false));
         public void ExitSingleFlight(string fingerprint, bool published) { }
+        public void ApplyOptions(CamusDBOptions next) { }
     }
 
     /// <summary>Yields <paramref name="count"/> rows, then cancels if a token was provided.</summary>

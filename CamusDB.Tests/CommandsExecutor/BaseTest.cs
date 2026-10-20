@@ -208,17 +208,21 @@ public abstract class BaseTest
     /// An engine wired to a swappable options holder, for tests that exercise runtime
     /// configuration change. Engines built without a holder (every other factory here) keep their
     /// configuration for life, which is the isolation the rest of the suite relies on.
+    ///
+    /// <para>Pass <paramref name="cache"/> to give the engine a query result cache built, as the host
+    /// builds it, before the engine and from an older snapshot.</para>
     /// </summary>
     protected CommandExecutor CreateCommandExecutor(
         CamusDBOptions options,
         CamusDB.Core.Config.CamusDBOptionsHolder holder,
-        CamusDB.Core.Config.ClusterSettingsService? clusterSettings = null)
+        CamusDB.Core.Config.ClusterSettingsService? clusterSettings = null,
+        CamusDB.Core.Cache.IQueryResultCache? cache = null)
     {
         CommandValidator validator = new(options);
         CatalogsManager catalogsManager = new(logger);
         CommandExecutor executor = new(validator, catalogsManager, logger, options,
                    sharedNode: testNode!, registry: sharedRegistry!, isClusterMode: false,
-                   optionsHolder: holder, clusterSettings: clusterSettings);
+                   cache: cache, optionsHolder: holder, clusterSettings: clusterSettings);
         createdExecutors.Add(executor);
         return executor;
     }

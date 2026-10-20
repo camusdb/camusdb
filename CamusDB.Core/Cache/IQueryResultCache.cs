@@ -226,4 +226,17 @@ public interface IQueryResultCache
     /// <see cref="NullQueryResultCache"/> returned an always-owner slot).</para>
     /// </summary>
     void ExitSingleFlight(string fingerprint, bool published);
+
+    /// <summary>
+    /// Installs a newly published configuration snapshot. The cache is a node singleton built
+    /// before the engine, from the boot options, so this is the only way a live change to its
+    /// <c>Runtime</c>-class settings (TTL, entry and byte caps, sweep interval) reaches it.
+    /// <see cref="CommandsExecutor.CommandExecutor"/> forwards every publish here from its own
+    /// options fan-out.
+    ///
+    /// <para>Runs inline under the options holder's publish lock, so an implementation must stay
+    /// cheap and must not block on I/O. Must be safe to call more than once with the same
+    /// snapshot.</para>
+    /// </summary>
+    void ApplyOptions(CamusDBOptions next);
 }

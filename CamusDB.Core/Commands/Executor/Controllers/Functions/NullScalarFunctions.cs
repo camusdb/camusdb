@@ -8,16 +8,18 @@
 
 using System.Linq;
 using CamusDB.Core.Catalogs.Models;
+using CamusDB.Core.CommandsExecutor.Controllers.DML;
 using CamusDB.Core.CommandsExecutor.Models;
+using CamusDB.Core.SQLParser;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers.Functions;
 
 /// <summary>
-/// Registers the null-coalescing scalar function family: COALESCE (variadic), IFNULL (2-arg),
-/// and NVL (alias of IFNULL). Each returns the first argument whose type is not ColumnType.Null;
-/// if every argument is null the function returns ColumnValue.Null.
+/// Registers the null scalar function family: COALESCE (variadic), IFNULL (2-arg), NVL (alias of
+/// IFNULL), and NULLIF (2-arg). The first three return the first argument whose type is not
+/// ColumnType.Null, or ColumnValue.Null when every argument is null.
 ///
-/// Return type is inferred from the non-null argument types using these rules in order:
+/// For those three, the return type is inferred from the non-null argument types using these rules in order:
 ///   1. Numeric widening, the arithmetic rule (MixedNumericComparison.ArithmeticResultType): Float64
 ///      beats Float32 beats Integer64, NUMERIC beats Integer64, and NUMERIC beside a float gives Float64.
 ///   2. Incompatible mixes (e.g. numeric + String, Id + String) are rejected with InvalidInput.
@@ -34,6 +36,13 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Functions;
 /// declared column types when it is filled (see <see cref="NumericWidening"/>), so a join over the
 /// derived column sees one type. A top-level result is not widened, so its metadata can name the
 /// declared type while a cell carries the narrower one.</para>
+///
+/// <para>NULLIF(a, b) is the inverse rule: it returns NULL when <c>a = b</c> is TRUE and returns
+/// <c>a</c> otherwise. It compares through <see cref="SQLExecutorBaseCreator.EvalComparison"/>, the
+/// evaluator of the <c>=</c> operator, so mixed numeric pairs, a string literal beside a Uuid or Id,
+/// and a pair with no comparison rule (never equal) behave exactly as <c>a = b</c> does. A NULL
+/// <c>b</c> makes the comparison UNKNOWN, so the result is <c>a</c>. The declared type is the type
+/// of <c>a</c>, and <c>a</c> is returned without widening.</para>
 /// </summary>
 internal static class NullScalarFunctions
 {
@@ -59,7 +68,30 @@ internal static class NullScalarFunctions
             Evaluator = EvaluateCoalesce,
             InferReturnType = InferCoalesceReturnType,
         });
+
+        registry.Register(new ScalarFunctionDescriptor
+        {
+            Name = "nullif",
+            MinArity = 2,
+            MaxArity = 2,
+            IsVolatile = false,
+            Evaluator = EvaluateNullIf,
+            InferReturnType = InferNullIfReturnType,
+        });
     }
+
+    private static ColumnValue EvaluateNullIf(string calledName, IReadOnlyList<ColumnValue> arguments)
+    {
+        ColumnValue value = arguments[0];
+
+        // Only a TRUE comparison yields NULL: FALSE and UNKNOWN (a NULL operand) both keep the value.
+        ColumnValue equal = SQLExecutorBaseCreator.EvalComparison(NodeType.ExprEquals, value, arguments[1]);
+
+        return equal.Type == ColumnType.Bool && equal.BoolValue ? ColumnValue.Null : value;
+    }
+
+    private static ColumnType InferNullIfReturnType(IReadOnlyList<ColumnType> argumentTypes)
+        => argumentTypes.Count > 0 ? argumentTypes[0] : ColumnType.Null;
 
     private static ColumnValue EvaluateCoalesce(string calledName, IReadOnlyList<ColumnValue> arguments)
     {

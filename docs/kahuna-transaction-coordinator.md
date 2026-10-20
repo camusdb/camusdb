@@ -227,19 +227,25 @@ skip validation.
 
 ## 7. Commit-decision durability
 
-Each transaction also chooses how durable its commit *decision* must be, defaulting to
-best-effort:
+Each transaction also names a commit-decision durability, `best_effort` (the default) or
+`durable`. **For SQL data the two give the same guarantee.** Kahuna finalizes every transaction
+that modified a persistent key through its durable-intent path: it writes a canonical decision
+record and prepared intents, and recovery resolves an undecided transaction by presumed abort.
+A transaction whose persistent writes cannot take that path aborts. There is no in-memory decision
+for persistent keys under either value, and all of CamusDB's row, index, and schema writes are
+persistent.
 
-- **Best-effort** — the decision may live in memory and can be lost if the coordinator crashes
-  before its next checkpoint. This is the historical behavior and the right default for most
-  workloads.
-- **Durable** — the decision is written to durable storage before the outcome is returned, so it
-  survives coordinator loss and recovery can finish the transaction's participants.
+The two values differ only on ephemeral (in-memory) keys:
 
-The coordinator assigns the durable decision's anchor from the first confirmed persistent write,
-so there is no client-side plumbing: a transaction simply opts in when it begins. (Durable mode
-rejects a transaction that confirmed any ephemeral modification; all of CamusDB's row, index, and
-schema writes are persistent, so this never trips in practice.)
+- **Best-effort** lets a transaction mix ephemeral keys with persistent ones; the ephemeral writes
+  are applied in memory after the durable decision. A transaction whose only write is one
+  ephemeral key may also finalize inside one turn of the actor that owns that key.
+- **Durable** rejects a transaction that modified any ephemeral key, and requires a decision
+  anchor. The coordinator assigns the anchor from the first confirmed persistent write, so there
+  is no client-side plumbing. It never takes the one-actor-turn shortcut.
+
+Because CamusDB writes no ephemeral keys, neither difference changes what a SQL transaction
+commits or what survives a coordinator crash.
 
 ---
 

@@ -455,6 +455,134 @@ public sealed class TestKvTableStore
         await transactions.CommitAsync(tx2);
     }
 
+    // A serializable read-only transaction reads at a pinned snapshot, so under key-range sharding it
+    // takes no scan predicate lock. The isolation guide promises a lock-free snapshot; a shared lock here
+    // was how a snapshot lookup came to be refused by a writer's lock (CADB0502) and how it made writers
+    // wait until it ended. The transaction has a real identity, so only the lock policy keeps it lock-free.
+    [Test]
+    [NonParallelizable]
+    public async Task SerializableReadOnlySnapshot_TakesNoScanLock_UnderKeyRangeSharding()
+    {
+        (EmbeddedKahuna node, KvTableStore store) = await CreateStoreAsync("rosnaplock", ShardedOptions);
+        await using EmbeddedKahuna __ = node;
+
+        store.MarkIndexAsRanged("idx_slot");
+        KvTransactionsManager transactions = new(node.Kahuna, ShardedOptions);
+
+        KvTransaction snapshot = await transactions.BeginAsync(
+            CamusIsolationLevel.Serializable, CamusTransactionMode.ReadOnly);
+        Assert.AreNotEqual(HLCTimestamp.Zero, snapshot.TransactionId,
+            "the snapshot has a real identity and could own a lock; the lock policy is what keeps it lock-free");
+        Assert.IsFalse(snapshot.ReadTimestamp.IsNull(), "the snapshot reads at a pinned timestamp");
+
+        CompositeColumnValue cv7 = new(new ColumnValue(ColumnType.Integer64, 7L));
+
+        await store.AcquireRowRangeLockAsync(snapshot);
+        await store.AcquireIndexRangeLockAsync(snapshot, "idx_slot");
+        await store.AcquireBoundedIndexRangeLockAsync(snapshot, "idx_slot", cv7, true, cv7, true, unique: false);
+
+        Assert.AreEqual(0, snapshot.GetAcquiredRangeLocks().Count,
+            "a pinned snapshot must take no row, index or bounded index range lock under key-range sharding");
+
+        // The latest-state shape still locks in this mode, so the exemption belongs to the snapshot alone.
+        KvTransaction latest = await transactions.BeginReadOnlyAsync(promote: true);
+        await store.AcquireBoundedIndexRangeLockAsync(latest, "idx_slot", cv7, true, cv7, true, unique: false);
+        Assert.AreEqual(1, latest.GetAcquiredRangeLocks().Count,
+            "a promoted latest-state scan keeps its shared range lock under key-range sharding");
+
+        await transactions.CommitAsync(latest);
+        await transactions.RollbackAsync(snapshot);
+    }
+
+    // The two directions of the contract at the store level under key-range sharding. A writer that
+    // starts after the snapshot takes an exclusive lock over the index range the snapshot read and
+    // stages a write into it; the snapshot holds nothing, so the writer is neither refused nor fenced
+    // at commit. The snapshot then reads the range again under that exclusive lock and live intent,
+    // and is neither refused nor delayed.
+    //
+    // The writer is deliberately the younger of the two. Kahuna lets a snapshot read pass a foreign
+    // write intent that cannot commit at or before the snapshot's timestamp, which is the case for a
+    // transaction started after it. An older in-flight writer is waited for by every snapshot read,
+    // lock or no lock, and that intent rule is not what this test is about.
+    [Test]
+    [NonParallelizable]
+    public async Task SerializableReadOnlySnapshot_NeitherRefusedByNorFencing_AYoungerWriter()
+    {
+        (EmbeddedKahuna node, KvTableStore store) = await CreateStoreAsync("rosnapwriter", ShardedOptions);
+        await using EmbeddedKahuna __ = node;
+
+        store.MarkIndexAsRanged("idx_slot");
+        KvTransactionsManager transactions = new(node.Kahuna, ShardedOptions);
+
+        CompositeColumnValue cv7 = new(new ColumnValue(ColumnType.Integer64, 7L));
+        ColumnType[] keyTypes = [ColumnType.Integer64];
+
+        ObjectIdValue seeded = new(7, 0, 1);
+        KvTransaction seed = await transactions.BeginAsync();
+        await store.InsertRow(seed, seeded, [7]);
+        await store.PutIndexEntry(seed, "idx_slot", cv7, seeded, unique: false);
+        await transactions.CommitAsync(seed);
+
+        KvTransaction snapshot = await transactions.BeginAsync(
+            CamusIsolationLevel.Serializable, CamusTransactionMode.ReadOnly);
+        Assert.AreEqual(1, await CountIndexEntries(store, snapshot, keyTypes, cv7),
+            "the snapshot sees the seeded entry");
+
+        // A younger Serializable read-write writer takes the exclusive lock an UPDATE/DELETE locate scan
+        // takes over [7,7] and stages a second entry into it. Before the fix the snapshot held a shared
+        // lock on the same range and this younger acquire was refused with a conflict.
+        KvTransaction writer = await transactions.BeginAsync(
+            CamusIsolationLevel.Serializable, CamusTransactionMode.ReadWrite);
+        ObjectIdValue added = new(7, 0, 2);
+        Assert.DoesNotThrowAsync(async () =>
+        {
+            await store.AcquireBoundedIndexRangeLockAsync(writer, "idx_slot", cv7, true, cv7, true, unique: false, exclusive: true);
+            await store.InsertRow(writer, added, [7]);
+            await store.PutIndexEntry(writer, "idx_slot", cv7, added, unique: false);
+        }, "a writer must not be refused by a snapshot that read the same range");
+        Assert.AreEqual(1, writer.GetAcquiredRangeLocks().Count, "the writer holds the exclusive range lock");
+
+        // With that exclusive lock and the staged write live, the snapshot reads the range again. A shared
+        // acquire would have conflicted with the exclusive lock; the snapshot takes none and reads at T.
+        Assert.AreEqual(1, await CountIndexEntries(store, snapshot, keyTypes, cv7),
+            "the snapshot must read its pinned instant while a younger writer holds the range exclusively");
+
+        Assert.DoesNotThrowAsync(async () => await transactions.CommitAsync(writer),
+            "the writer's commit must not be fenced by the snapshot");
+
+        Assert.AreEqual(1, await CountIndexEntries(store, snapshot, keyTypes, cv7),
+            "the snapshot stays pinned after the writer commits");
+        Assert.AreEqual(0, snapshot.GetAcquiredRangeLocks().Count, "the snapshot took no lock throughout");
+
+        KvTransaction latest = await transactions.BeginAsync();
+        Assert.AreEqual(2, await CountIndexEntries(store, latest, keyTypes, cv7),
+            "a latest-state read sees the committed write");
+        Assert.AreEqual(1, latest.GetAcquiredRangeLocks().Count,
+            "a latest-state read-write transaction keeps its shared scan lock under key-range sharding");
+        await transactions.CommitAsync(latest);
+
+        await transactions.RollbackAsync(snapshot);
+    }
+
+    /// <summary>
+    /// The number of <c>idx_slot</c> entries at <paramref name="key"/> as <paramref name="tx"/> reads them,
+    /// after the scan-lock request the query executor makes before an index lookup. The request is the
+    /// point under test: for a pinned snapshot it must take nothing.
+    /// </summary>
+    private static async Task<int> CountIndexEntries(
+        KvTableStore store, KvTransaction tx, ColumnType[] keyTypes, CompositeColumnValue key)
+    {
+        await store.AcquireBoundedIndexRangeLockAsync(tx, "idx_slot", key, true, key, true, unique: false);
+
+        int count = 0;
+
+        await foreach ((CompositeColumnValue _, ObjectIdValue _, ReadOnlyMemory<byte> _) in
+                       store.ScanIndex(tx, "idx_slot", keyTypes, key, key, unique: false))
+            count++;
+
+        return count;
+    }
+
     /// <summary>
     /// Counts the client-issued lock-release RPCs on the outer <see cref="IKahuna"/> surface. The
     /// coordinator releases a transaction's folded range/prefix locks from inside the node (via its own

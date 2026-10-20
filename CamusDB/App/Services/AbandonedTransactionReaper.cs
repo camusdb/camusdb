@@ -7,6 +7,7 @@
  */
 
 using CamusDB.Core;
+using CamusDB.Core.Config;
 using Microsoft.Extensions.Hosting;
 
 namespace CamusDB.App.Services;
@@ -34,47 +35,62 @@ namespace CamusDB.App.Services;
 /// <c>&lt;= 0</c>. Even disabled, an abandoned Serializable+RW transaction's locks remain bounded by
 /// <see cref="CamusDBOptions.MaxSerializableTransactionLifetimeMs"/> (the session lease is reclaimed
 /// past that cap), so the reaper is prompt cleanup, not the sole safety net.</para>
+///
+/// <para><b>Both settings are runtime-mutable, so this service reads the options holder, never an
+/// injected snapshot.</b> It is a singleton: a <see cref="CamusDBOptions"/> injected into it is the
+/// boot snapshot for the life of the process, and a <c>SET CLUSTER SETTING</c> would show in
+/// <c>SHOW VARIABLES</c> and change nothing here. The idle timeout, including the switch between
+/// enabled and disabled, is read at each tick. A new sweep interval re-arms the timer from the
+/// publish itself, so shortening it during an incident does not first wait out one tick of the old,
+/// longer interval.</para>
 /// </summary>
 public sealed class AbandonedTransactionReaper : BackgroundService
 {
     private readonly HttpTransactionCoordinator coordinator;
 
-    /// <summary>Configuration for the engine this service serves; injected, never ambient.</summary>
-    private readonly CamusDBOptions options;
+    /// <summary>
+    /// Source of the current configuration snapshot; injected, never ambient. Read once per tick,
+    /// and the snapshot read is used for the whole sweep.
+    /// </summary>
+    private readonly CamusDBOptionsHolder optionsHolder;
+
     private readonly ILogger<AbandonedTransactionReaper> logger;
 
     public AbandonedTransactionReaper(
         HttpTransactionCoordinator coordinator,
         ILogger<AbandonedTransactionReaper> logger,
-        CamusDBOptions options)
+        CamusDBOptionsHolder optionsHolder)
     {
         this.coordinator = coordinator;
         this.logger = logger;
-        this.options = options;
+        this.optionsHolder = optionsHolder;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        int idleTimeoutMs = options.TransactionIdleTimeoutMs;
-        bool reapIdle = idleTimeoutMs > 0;
-
-        TimeSpan idleTimeout = TimeSpan.FromMilliseconds(idleTimeoutMs);
-        TimeSpan interval = TimeSpan.FromMilliseconds(options.TransactionReaperIntervalMs);
+        CamusDBOptions startup = optionsHolder.Current;
+        int idleTimeoutMs = startup.TransactionIdleTimeoutMs;
 
         if (logger.IsEnabled(LogLevel.Information))
         {
-            if (reapIdle)
+            if (idleTimeoutMs > 0)
                 logger.LogInformation(
                     "Abandoned-transaction reaper started: idle timeout {IdleMs} ms, sweep interval {IntervalMs} ms",
-                    idleTimeoutMs, options.TransactionReaperIntervalMs);
+                    idleTimeoutMs, startup.TransactionReaperIntervalMs);
             else
                 logger.LogInformation(
                     "Abandoned-transaction reaper started with the idle reap disabled (transaction_idle_timeout_ms <= 0); " +
                     "it still releases parked transaction holdings every {IntervalMs} ms",
-                    options.TransactionReaperIntervalMs);
+                    startup.TransactionReaperIntervalMs);
         }
 
-        using PeriodicTimer timer = new(interval);
+        using PeriodicTimer timer = new(TimeSpan.FromMilliseconds(startup.TransactionReaperIntervalMs));
+
+        // Declared after the timer, so it is disposed first: once Dispose returns, the holder runs no
+        // callback that could touch a disposed timer. The catch-up call covers a publish that landed
+        // between the read of the startup snapshot and the subscription.
+        using IDisposable subscription = optionsHolder.Subscribe(next => RetuneInterval(timer, next));
+        RetuneInterval(timer, optionsHolder.Current);
 
         try
         {
@@ -82,9 +98,20 @@ public sealed class AbandonedTransactionReaper : BackgroundService
             {
                 try
                 {
-                    if (reapIdle)
+                    int currentIdleTimeoutMs = optionsHolder.Current.TransactionIdleTimeoutMs;
+                    if (currentIdleTimeoutMs != idleTimeoutMs)
                     {
-                        int reaped = await coordinator.ReapIdleAsync(idleTimeout, stoppingToken).ConfigureAwait(false);
+                        if (logger.IsEnabled(LogLevel.Information))
+                            logger.LogInformation(
+                                "Abandoned-transaction reaper idle timeout changed from {OldMs} ms to {NewMs} ms (<= 0 disables the idle reap)",
+                                idleTimeoutMs, currentIdleTimeoutMs);
+
+                        idleTimeoutMs = currentIdleTimeoutMs;
+                    }
+
+                    if (idleTimeoutMs > 0)
+                    {
+                        int reaped = await coordinator.ReapIdleAsync(TimeSpan.FromMilliseconds(idleTimeoutMs), stoppingToken).ConfigureAwait(false);
                         if (reaped > 0 && logger.IsEnabled(LogLevel.Warning))
                             logger.LogWarning(
                                 "Reaped {Count} abandoned transaction(s) idle for >= {IdleMs} ms",
@@ -115,5 +142,28 @@ public sealed class AbandonedTransactionReaper : BackgroundService
         {
             // Normal shutdown.
         }
+    }
+
+    /// <summary>
+    /// Adopts a published sweep interval. Setting <see cref="PeriodicTimer.Period"/> re-arms the
+    /// timer from now, so the next tick comes one new interval after the change. Runs inline under
+    /// the holder's publish lock, so it does no more than swap the period and write one log line,
+    /// and only when the interval changed. A non-positive interval is ignored and
+    /// the timer keeps its current period: configuration validation rejects one, and a timer cannot
+    /// run with it.
+    /// </summary>
+    private void RetuneInterval(PeriodicTimer timer, CamusDBOptions next)
+    {
+        if (next.TransactionReaperIntervalMs <= 0)
+            return;
+
+        TimeSpan interval = TimeSpan.FromMilliseconds(next.TransactionReaperIntervalMs);
+        if (timer.Period == interval)
+            return;
+
+        timer.Period = interval;
+
+        if (logger.IsEnabled(LogLevel.Information))
+            logger.LogInformation("Abandoned-transaction reaper sweep interval changed to {IntervalMs} ms", next.TransactionReaperIntervalMs);
     }
 }

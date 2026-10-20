@@ -16,29 +16,48 @@ namespace CamusDB.Core.Diagnostics;
 /// <summary>
 /// Decides which statements the slow query log keeps, and times them.
 ///
-/// <para>The engine builds one of these per instance when
-/// <see cref="CamusDBOptions.SlowQueryLogEnabled"/> is set at construction, and holds null otherwise.
-/// A caller asks <see cref="Begin"/> for a recording at the top of a statement; a null answer means
-/// the log is off right now and the caller runs the statement with no probe, no clock, and no
-/// allocation.</para>
+/// <para>The engine always builds one of these. The ring behind it is built only when the log is
+/// first enabled — at construction, or by the first published options snapshot that turns
+/// <see cref="CamusDBOptions.SlowQueryLogEnabled"/> on — so an engine that never enables the log
+/// never holds the ring's array. A caller asks <see cref="Begin"/> for a recording at the top of a
+/// statement; a null answer means the log is off right now and the caller runs the statement with
+/// no probe, no clock, and no allocation.</para>
 ///
 /// <para>The threshold and the enabled flag are re-read per statement from the current options
 /// snapshot, which is what lets both be honestly classified as runtime-mutable. The ring's capacity
-/// is not, because the ring allocated its array when this recorder was built.</para>
+/// is not: it is taken from the options this recorder was built with, whichever snapshot later
+/// creates the ring, and the ring keeps it for life. Turning the log off stops new entries and keeps
+/// the ring and what it holds.</para>
 /// </summary>
 public sealed class SlowQueryRecorder
 {
-    private readonly SlowQueryLog log;
+    /// <summary>
+    /// Ring capacity, latched from the construction-time options. A ring created later by a live
+    /// enable uses this value rather than the live snapshot's, because the setting is restart-class.
+    /// </summary>
+    private readonly int capacity;
+
+    /// <summary>
+    /// Null until the log is first enabled, then fixed. Written before the enabling snapshot is
+    /// published to <see cref="options"/>, so a statement that sees the log enabled also sees the ring.
+    /// </summary>
+    private SlowQueryLog? log;
 
     private CamusDBOptions options;
 
-    /// <summary>The log this recorder writes into, read by <c>SHOW SLOW QUERIES</c>.</summary>
-    public SlowQueryLog Log => log;
+    /// <summary>
+    /// The log this recorder writes into, read by <c>SHOW SLOW QUERIES</c>; null while the log has
+    /// never been enabled on this engine.
+    /// </summary>
+    public SlowQueryLog? Log => Volatile.Read(ref log);
 
     public SlowQueryRecorder(CamusDBOptions options)
     {
         this.options = options;
-        log = new SlowQueryLog(options.SlowQueryLogMaxEntries, options.SlowQueryLogMaxSqlLength);
+        capacity = options.SlowQueryLogMaxEntries;
+
+        if (options.SlowQueryLogEnabled)
+            log = new SlowQueryLog(capacity, options.SlowQueryLogMaxSqlLength);
     }
 
     /// <summary>
@@ -46,11 +65,24 @@ public sealed class SlowQueryRecorder
     /// effect on the next statement; the truncation length is handed to the log, which applies it to
     /// the next entry. Capacity is deliberately not adopted — see
     /// <see cref="CamusDBOptions.SlowQueryLogMaxEntries"/>.
+    ///
+    /// <para>The first snapshot that enables the log creates the ring, and the ring is stored before
+    /// the snapshot is: <see cref="Begin"/> reads the snapshot first, so it never sees the log enabled
+    /// with no ring behind it. The create is a compare-exchange, so two concurrent publishes cannot
+    /// leave two rings with entries split between them.</para>
     /// </summary>
     internal void ApplyOptions(CamusDBOptions next)
     {
-        options = next;
-        log.ApplyOptions(next);
+        SlowQueryLog? current = Volatile.Read(ref log);
+
+        if (current is null && next.SlowQueryLogEnabled)
+        {
+            SlowQueryLog created = new(capacity, next.SlowQueryLogMaxSqlLength);
+            current = Interlocked.CompareExchange(ref log, created, null) ?? created;
+        }
+
+        current?.ApplyOptions(next);
+        Volatile.Write(ref options, next);
     }
 
     /// <summary>
@@ -63,11 +95,15 @@ public sealed class SlowQueryRecorder
     /// </summary>
     public SlowQueryRecording? Begin(string sql, string database, string? user)
     {
-        CamusDBOptions current = options;
+        CamusDBOptions current = Volatile.Read(ref options);
+        if (!current.SlowQueryLogEnabled)
+            return null;
 
-        return current.SlowQueryLogEnabled
-            ? new SlowQueryRecording(log, current.SlowQueryLogThresholdMs, sql, database, user)
-            : null;
+        SlowQueryLog? target = Volatile.Read(ref log);
+
+        return target is null
+            ? null
+            : new SlowQueryRecording(target, current.SlowQueryLogThresholdMs, sql, database, user);
     }
 }
 

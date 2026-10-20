@@ -289,6 +289,18 @@ validation covers the specific rows it read, not predicates). Serializable is de
 to lock-free, because that would silently break its isolation guarantee. See
 `kahuna-transaction-coordinator.md` for the mechanism.
 
+**What "observed rows" means.** An observation is recorded per *key*, for every key a read touched: the
+key of a point read, and every key a scan visited — including rows the `WHERE` clause then rejected,
+because the filter runs after the store returned the page. The observation is the row's revision, so a
+committed write to *any* column of that row invalidates it, including columns the transaction never
+read. Two consequences follow. A read-modify-write of one row is validated exactly as intended. But an
+optimistic transaction that scans a table under sustained writes — a report, a `COUNT(*)`, an
+`INSERT … SELECT` out of it — depends on every row the scan passed and does not commit while the
+writers run, at Read Committed as much as at Serializable; a pessimistic Read Committed scan records
+nothing and has no such dependency. For a bulk read out of a busy table under optimistic locking, read
+a snapshot (`AS OF SYSTEM TIME`) or run that statement pessimistically — see
+[`insert-select-and-ctas.md`](insert-select-and-ctas.md#concurrent-writers-on-the-source).
+
 #### Selecting the locking mode
 
 Pessimistic is the default. Optimistic is opt-in, chosen three ways (precedence: per-request >
@@ -473,7 +485,10 @@ different strategies, picked automatically from whether the transaction is read-
 - **Serializable read-only → a consistent snapshot.** The transaction is pinned to a single timestamp
   at the moment it begins and reads *every* key as of that instant — across statements and across
   partitions. It sees no write committed after it started: no read skew, no phantoms, fully repeatable.
-  And it does this **without taking any locks**, so it never blocks writers and is never blocked. You can
+  And it does this **without taking any locks**, so it never blocks writers and is never blocked. This
+  holds under key-range sharding too (`key-range-sharding.md`): the engine takes no scan lock for a
+  transaction that reads at a pinned timestamp, so a snapshot read is never refused by a writer's range
+  lock and never makes a writer wait. You can
   hold one open across **several reads** (in separate requests, resumed by transaction id) and they all
   observe the same instant — ideal for a consistent multi-query report.
 - **Serializable read-write → strict locking.** Reads take the shared point/range locks from §6.2–6.3

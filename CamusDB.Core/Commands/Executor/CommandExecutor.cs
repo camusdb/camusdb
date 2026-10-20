@@ -208,6 +208,14 @@ public sealed class CommandExecutor : IAsyncDisposable
     internal CamusDBOptions Options => options;
 
     /// <summary>
+    /// The node's query result cache, or null when the feature is off. The host builds it once from
+    /// the boot options, before this engine, and does not own its configuration afterwards: this
+    /// engine forwards each published snapshot to it from <see cref="ApplyOptions"/>, which is how a
+    /// live <c>SET CLUSTER SETTING query_result_cache_*</c> reaches the TTL, the caps and the sweep.
+    /// </summary>
+    private readonly IQueryResultCache? resultCache;
+
+    /// <summary>
     /// The node's data-volume monitor: the one cache behind every opened database's write-admission
     /// gate and behind the node stats call. Sharing it is what makes the stats call's
     /// <c>below_watermark</c> the gate's own answer instead of a second probe that can disagree near
@@ -270,17 +278,18 @@ public sealed class CommandExecutor : IAsyncDisposable
     private readonly Diagnostics.EngineMetricsCollector? engineMetrics;
 
     /// <summary>
-    /// Times statements into the bounded slow query log, or null when the log was off when this
-    /// engine was built. Null rather than an always-present recorder with a flag, because the ring
-    /// allocates its backing array in its constructor: an engine that never enables the log should
-    /// not hold that array at all.
+    /// Times statements into the bounded slow query log. Always present, so a live
+    /// <c>SET CLUSTER SETTING slow_query_log_enabled = true</c> reaches it through
+    /// <see cref="ApplyOptions"/> even when the engine started with the log off. The recorder builds
+    /// its ring only when the log is first enabled, so an engine that never enables the log holds no
+    /// ring array; while the log is off, a statement pays one options read here.
     ///
-    /// <para>Turning the log off at runtime therefore stops recording without discarding what was
-    /// already recorded, and turning it on at runtime works only if the engine started with it on.
-    /// That asymmetry is what <see cref="CamusDBOptions.SlowQueryLogMaxEntries"/> being
-    /// restart-class means in practice.</para>
+    /// <para>Turning the log off at runtime stops recording without discarding what was already
+    /// recorded. The ring's capacity is the boot value of
+    /// <see cref="CamusDBOptions.SlowQueryLogMaxEntries"/> whenever the ring is created, which is what
+    /// that setting being restart-class means in practice.</para>
     /// </summary>
-    private readonly Diagnostics.SlowQueryRecorder? slowQueries;
+    private readonly Diagnostics.SlowQueryRecorder slowQueries;
 
     /// <summary>
     /// The statements that run on this node now, and the client connections the host reports. Always
@@ -440,6 +449,13 @@ public sealed class CommandExecutor : IAsyncDisposable
         this.isClusterMode = isClusterMode;
         this.sharedNode = sharedNode;
         this.clusterSettings = clusterSettings;
+        resultCache = cache;
+
+        // The host builds the cache before the persisted cluster-settings overlay is published, so
+        // its snapshot can be older than the one this engine starts from. Bring it level here; later
+        // publishes reach it through ApplyOptions.
+        if (optionsHolder is not null)
+            cache?.ApplyOptions(options);
 
         if (registry is not null)
         {
@@ -548,8 +564,7 @@ public sealed class CommandExecutor : IAsyncDisposable
         if (options.EngineMetricsEnabled)
             engineMetrics = new Diagnostics.EngineMetricsCollector();
 
-        if (options.SlowQueryLogEnabled)
-            slowQueries = new Diagnostics.SlowQueryRecorder(options);
+        slowQueries = new Diagnostics.SlowQueryRecorder(options);
 
         sqlParserCache = new SQLParser.SqlParserCache(
             logger,
@@ -793,12 +808,16 @@ public sealed class CommandExecutor : IAsyncDisposable
         statementAuthorizer.ApplyOptions(next);
         userAdmin.ApplyOptions(next);
         selectExecutor.ApplyOptions(next);
-        slowQueries?.ApplyOptions(next);
+        slowQueries.ApplyOptions(next);
         queryActivity.ApplyOptions(next);
         queryActivityService.ApplyOptions(next);
         sequenceAllocator.ApplyOptions(next);
 
         backgroundSchedulers?.ApplyOptions(next);
+
+        // The result cache is built by the host from the boot options, so without this forward it
+        // would keep the boot TTL, caps and sweep interval for life.
+        resultCache?.ApplyOptions(next);
 
         // The parser cache latched its TTL/cap/sweep cadence at construction; retune swaps them and
         // trims an over-cap population immediately.
@@ -1052,7 +1071,7 @@ public sealed class CommandExecutor : IAsyncDisposable
 
     private async Task<ExecuteDDLSQLResult> ExecuteDDLSQLTimed(ExecuteSQLTicket ticket, Diagnostics.QueryActivityEntry? activity)
     {
-        Diagnostics.SlowQueryRecording? recording = slowQueries?.Begin(ticket.Sql, ticket.DatabaseName, ticket.Principal?.UserName);
+        Diagnostics.SlowQueryRecording? recording = slowQueries.Begin(ticket.Sql, ticket.DatabaseName, ticket.Principal?.UserName);
 
         if (recording is null)
             return await ddlDispatcher.ExecuteDDLSQL(this, ticket, activity).ConfigureAwait(false);
@@ -1128,7 +1147,7 @@ public sealed class CommandExecutor : IAsyncDisposable
 
     private async Task<ExecuteNonSQLResult> ExecuteNonSQLQueryTimed(ExecuteSQLTicket ticket, Diagnostics.QueryActivityEntry? activity)
     {
-        Diagnostics.SlowQueryRecording? recording = slowQueries?.Begin(ticket.Sql, ticket.DatabaseName, ticket.Principal?.UserName);
+        Diagnostics.SlowQueryRecording? recording = slowQueries.Begin(ticket.Sql, ticket.DatabaseName, ticket.Principal?.UserName);
 
         if (recording is null)
         {

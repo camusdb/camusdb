@@ -1396,7 +1396,7 @@ internal sealed class SchemaQuerier
     /// — a gap between two readings counts the entries the ring overwrote in between, which is the
     /// only signal that the log is too small for the threshold in force.</para>
     ///
-    /// <para>A null <paramref name="log"/> — the log disabled by configuration — contributes no rows
+    /// <para>A null <paramref name="log"/> — the log never enabled on this engine — contributes no rows
     /// rather than raising, matching <see cref="ShowEngineStats"/>: a script polling a fleet gets the
     /// same shape from every node whether or not that node has the log on.</para>
     ///

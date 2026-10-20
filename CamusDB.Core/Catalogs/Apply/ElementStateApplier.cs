@@ -20,8 +20,8 @@ namespace CamusDB.Core.Catalogs.Apply;
 /// ladder (see <see cref="ApplyForeignKeyElementState"/>).
 ///
 /// <para><b>The staging exists so the cluster is never in a state where one node writes an element
-/// another node cannot read.</b> A node at <c>DeleteOnly</c> removes entries for the element but
-/// creates none; a node at <c>WriteOnly</c> maintains it but no query may use it; only at
+/// another node cannot read.</b> A node at <c>DeleteOnly</c> knows the element but no DML on it
+/// writes or removes entries for it; a node at <c>WriteOnly</c> maintains it but no query may use it; only at
 /// <c>Public</c> is it visible to readers. Skipping a state, or moving two at once, produces exactly
 /// the divergence the ladder is built to prevent, which is what
 /// <see cref="ValidateElementStateTransition"/> refuses.</para>

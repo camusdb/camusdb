@@ -475,6 +475,12 @@ public sealed class KvTransactionsManager : IDisposable
     /// transaction across multiple requests. The transaction never acquires any locks and never writes
     /// any data — it is finalized via rollback on commit or rollback (see
     /// <see cref="CommitAsync"/>).</para>
+    ///
+    /// <para>Lock-free holds in every routing mode. The scan-lock helpers skip a transaction with a
+    /// pinned <see cref="KvTransaction.ReadTimestamp"/> (see <c>KvRangeLockManager.ScanTakesPredicateLock</c>),
+    /// so under key-range sharding the snapshot is neither refused by a writer's range lock nor a holder
+    /// that a writer waits for. The key-range promoted scan is a different shape: it reads the latest
+    /// state and keeps its shared lock (<see cref="BeginReadOnlyAsync"/>).</para>
     /// </summary>
     private async Task<KvTransaction> BeginSerializableReadOnlyAsync(
         TransactionPriority priority, 

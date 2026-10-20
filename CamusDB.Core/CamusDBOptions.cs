@@ -916,13 +916,26 @@ public sealed record CamusDBOptions
 
     /// <summary>
     /// Default commit-decision durability applied when a transaction is begun without an explicit
-    /// value. <see cref="Kahuna.Shared.KeyValue.DecisionDurability.BestEffort"/> keeps the decision in
-    /// memory (it can be lost if the coordinator crashes before its next checkpoint) and is the
-    /// historical behavior. A transaction can opt into
-    /// <see cref="Kahuna.Shared.KeyValue.DecisionDurability.Durable"/> so the commit decision is
-    /// written to durable storage before the outcome is returned; the coordinator assigns the record
-    /// anchor from the first confirmed persistent write, so no client-side anchor plumbing is needed.
-    /// Durable mode rejects a transaction that confirmed any ephemeral modification.
+    /// value.
+    ///
+    /// <para><b>Both values give a SQL transaction the same crash-atomic commit.</b> Kahuna finalizes
+    /// every transaction that modified a persistent key through its durable-intent path — a canonical
+    /// decision record plus prepared intents, recovered by presumed abort — or aborts it; there is no
+    /// in-memory decision for persistent keys under either value. Every row, index and schema write
+    /// CamusDB issues is persistent, so for SQL data this setting does not change what survives a
+    /// coordinator crash.</para>
+    ///
+    /// <para>What the two values differ on today concerns ephemeral (in-memory) keys only:</para>
+    /// <list type="bullet">
+    /// <item><description><see cref="Kahuna.Shared.KeyValue.DecisionDurability.BestEffort"/> lets a
+    /// transaction mix ephemeral keys with persistent ones; the ephemeral writes are applied in memory
+    /// after the durable decision. It also lets a single-ephemeral-key transaction finalize inside one
+    /// turn of the actor that owns the key.</description></item>
+    /// <item><description><see cref="Kahuna.Shared.KeyValue.DecisionDurability.Durable"/> rejects a
+    /// transaction that modified any ephemeral key, and requires a record anchor, which the coordinator
+    /// assigns from the first confirmed persistent write, so no client-side anchor plumbing is needed.
+    /// It never takes the one-actor-turn shortcut.</description></item>
+    /// </list>
     /// </summary>
     [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Cluster)]
     public global::Kahuna.Shared.KeyValue.DecisionDurability DefaultDecisionDurability { get; init; } = global::Kahuna.Shared.KeyValue.DecisionDurability.BestEffort;
@@ -1035,6 +1048,10 @@ public sealed record CamusDBOptions
     /// worst case from "prompt cleanup" to "reclaimed by the server after the lifetime cap", never
     /// back to a permanent hold.</para>
     ///
+    /// <para>Runtime-mutable: the reaper reads the current snapshot at each sweep, so a live change,
+    /// including a switch between enabled and disabled, governs the next sweep. A shorter timeout
+    /// reaps transactions that are already idle past it on that sweep.</para>
+    ///
     /// Default: 300 000 ms (5 minutes).
     /// </summary>
     [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Cluster)]
@@ -1048,6 +1065,9 @@ public sealed record CamusDBOptions
     ///
     /// <para>Must be positive. Set it well under <see cref="TransactionIdleTimeoutMs"/> so an
     /// abandoned transaction is caught within roughly one sweep of crossing the idle threshold.</para>
+    ///
+    /// <para>Runtime-mutable: a published change re-arms the reaper's timer at once, so the next
+    /// sweep comes one new interval after the change rather than at the end of the old one.</para>
     ///
     /// Default: 30 000 ms (30 s).
     /// </summary>

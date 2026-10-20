@@ -62,10 +62,39 @@ A transaction may not insert more than `max_mutations_per_transaction` rows (def
 this statement is bounded by that. A larger copy fails with `CADB0506`; split it with `WHERE` or
 `LIMIT` and run it in several transactions.
 
-While the copy runs, the rows it reads are locked against concurrent writers for the rest of the
-transaction — the source scan decides what is written, so it holds exclusive range locks over the
-range it scanned. A large copy therefore blocks writes to that range until it commits. (A time-travel
-source is exempt; see below.)
+### Concurrent writers on the source
+
+What the source scan does about a concurrent writer of the source table is decided by the
+transaction's isolation level and locking mode, not by the statement:
+
+- **Serializable.** The source scan decides what is written, so it holds an **exclusive range lock**
+  over the range it scanned for the rest of the transaction, exactly as an `UPDATE`'s locate scan
+  does. A large copy therefore blocks writes to that range until it commits. (Under key-range
+  sharding this lock is taken at every isolation level.)
+- **Read Committed, pessimistic locking.** The scan takes no lock and records nothing. The copy is a
+  non-repeatable read of the rows as they were when the scan passed them, which is what this level
+  permits, and a writer that changes a source row afterwards does not affect the commit.
+- **Optimistic locking, at either level.** Every key the scan *visits* becomes a commit dependency,
+  and the commit is refused with `CADB0502` if any of them was rewritten by a transaction that
+  committed in the meantime. This is stricter than it may look. The dependency is on the row, so a
+  write to a column the copy never reads counts. It covers every row the scan passed over, including
+  rows the `WHERE` clause rejected, because the filter runs after the store returned the page: a full
+  scan of a 20,000-row table that copies 5,000 of them depends on all 20,000. And a long copy is
+  exposed while it reads as well as at commit, because a page the store has to retry is re-checked
+  against the same pins. A bulk copy out of a table under sustained writes therefore does not
+  commit under optimistic locking: each retry reads the source again and fails again.
+
+  Copy out of a busy table in one of these ways instead:
+
+  - give the source an `AS OF SYSTEM TIME` clause (see below) — a historical source takes no lock and
+    no dependency, and the writes still land in your transaction;
+  - run the statement pessimistically — `"locking": "Pessimistic"` on the request, or
+    `SET TRANSACTION LOCKING PESSIMISTIC` before the first statement of an explicit transaction
+    (see [transactions, locking and isolation](transactions-locking-and-isolation.md#64-pessimistic-vs-optimistic-an-advanced-opt-in-choice));
+  - or copy in slices small enough that each one commits before the writers reach its rows.
+
+The engine's own bulk jobs (index backfills, `ADD COLUMN` fills) run each batch in a pessimistic
+transaction for the same reason, whatever the configured default.
 
 ## `CREATE TABLE … AS SELECT`
 
@@ -127,8 +156,8 @@ milliseconds, or a parameter. It applies to the whole source query, so an aggreg
 the historical value.
 
 A time-travel source is **cheaper and safer** than a live one: history cannot change, so the scan
-takes no range locks and does not block concurrent writers, and it can never observe the statement's
-own writes. Unlike a plain historical `SELECT`, it also works inside an explicit transaction, because
+takes no range locks, registers no commit dependencies even under optimistic locking, does not block
+concurrent writers, and can never observe the statement's own writes. Unlike a plain historical `SELECT`, it also works inside an explicit transaction, because
 only the source reads at the snapshot — the writes stay in your transaction.
 
 ### What time travel can and cannot recover

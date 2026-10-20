@@ -20,7 +20,7 @@ Built-in function groups. Each lowercase name in the second column is a register
 | `CastScalarFunctions` | `CAST(x AS type)` and `x::type` (grammar forms); `to_string`, `to_int64`, `to_float64`, `to_float32`, `to_bool`, `to_date` (one argument; two arguments parse with a pattern), `to_datetime`, `to_bytes`, `to_id` / `str_id` |
 | `IdScalarFunctions` | `gen_id` — generates a new ObjectId |
 | `UuidScalarFunctions` | `gen_uuid_v4`, `gen_uuid_v7` |
-| `NullScalarFunctions` | `coalesce`, `ifnull` / `nvl` |
+| `NullScalarFunctions` | `coalesce`, `ifnull` / `nvl`, `nullif` |
 | `JsonScalarFunctions` | `json_valid`, `json_type`, `json_extract`, `json_value`, `json_contains`, `json_array_length` |
 | `RegexScalarFunctions` | `regexp_like`, `regexp_match`, `regexp_matches`, `regexp_replace`, `regexp_count`, `regexp_instr`, `regexp_substr`, `regexp_split_to_array`, `regexp_split_to_table` |
 | `VectorScalarFunctions` | `vector_dims`, `octet_length`, `l2_distance`, `inner_product`, `cosine_distance` |

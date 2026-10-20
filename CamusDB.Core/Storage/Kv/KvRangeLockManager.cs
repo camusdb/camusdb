@@ -48,6 +48,11 @@ namespace CamusDB.Core.Storage.Kv;
 /// predicate lock regardless of <see cref="KvTransaction.Locking"/>. Serializable + Optimistic is
 /// therefore a hybrid — optimistic writes with commit-time validation, plus retained predicate locks
 /// that keep the read phantom-free. Weakening it to fully lock-free would silently break isolation.</para>
+///
+/// <para><b>A pinned snapshot never locks.</b> A transaction with a <see cref="KvTransaction.ReadTimestamp"/>
+/// (the Serializable read-only shape) reads every key as of that timestamp, on every page, range and
+/// partition, so its read is consistent with no lock at all. <see cref="ScanTakesPredicateLock"/> is the
+/// one place that decides which transactions take a scan lock, in every routing mode.</para>
 /// </summary>
 internal sealed class KvRangeLockManager
 {
@@ -106,6 +111,46 @@ internal sealed class KvRangeLockManager
         => tx is { IsolationLevel: CamusIsolationLevel.Serializable, TransactionMode: CamusTransactionMode.ReadWrite };
 
     /// <summary>
+    /// Decides whether a scan by <paramref name="tx"/> takes a shared predicate (range) lock at all.
+    /// The lock is the phantom fence of strict two-phase locking, so it is owed to exactly the
+    /// transactions whose consistency comes from locking:
+    /// <list type="bullet">
+    ///   <item>A Serializable read-write transaction, in every routing mode
+    ///   (<see cref="IsSerializableReadWrite"/>).</item>
+    ///   <item>Under key-range sharding, a transaction that reads the latest state with a real
+    ///   identity: the promoted autocommit scan and a Read Committed read-write transaction. Their
+    ///   pages can be answered by several ranges on several partitions, and the shared lock is what
+    ///   keeps those pages one consistent read. For an index this arm applies only once the index
+    ///   space is range-routed (<see cref="MarkIndexAsRanged"/>); a hash-routed index needs no lock.</item>
+    /// </list>
+    /// A transaction that reads at a pinned snapshot (<see cref="KvTransaction.ReadTimestamp"/> set,
+    /// the Serializable read-only shape) never locks, in key-range mode too. Kahuna serves every key it
+    /// reads as of that timestamp, so the read is consistent by MVCC alone; a lock would give it only
+    /// a way to be refused by a writer's lock or intent, and a way to stall writers until it ends.
+    /// That is the lock-free snapshot the isolation guide promises (see
+    /// <c>docs/transactions-locking-and-isolation.md</c> §9.3). A split is no reason to lock either:
+    /// the Kahuna scan re-resolves the range map per page and reads a moved range at the fixed
+    /// timestamp from the source's retained rows.
+    ///
+    /// <para>The Zero-identity case is not decided here. Such a transaction cannot own a lock, and
+    /// <see cref="AcquireRangeLockAsync"/> skips it after the session start.</para>
+    /// </summary>
+    /// <param name="indexId">The index the scan reads, or null for a row scan.</param>
+    private bool ScanTakesPredicateLock(KvTransaction tx, string? indexId)
+    {
+        if (IsSerializableReadWrite(tx))
+            return true;
+
+        if (!tx.ReadTimestamp.IsNull())
+            return false;
+
+        if (!options.KeyRangeShardingEnabled)
+            return false;
+
+        return indexId is null || rangedIndexIds.Contains(indexId);
+    }
+
+    /// <summary>
     /// Returns <c>true</c> if <paramref name="tx"/> holds a singleton <b>Shared</b> point lock
     /// <c>[key, key]</c> for the given <paramref name="bucketPrefix"/>. Used by write paths
     /// to detect the read-then-write pattern and trigger the S→X upgrade.
@@ -131,14 +176,13 @@ internal sealed class KvRangeLockManager
     /// guarantees a snapshot, not serializability. The lock is tracked on the transaction and
     /// released automatically on commit/rollback.
     ///
-    /// In key-range-sharding mode the lock is always acquired (existing behaviour). In hash mode
-    /// (single partition per table) the lock fires only for Serializable read-write transactions
-    /// — the isolation level that requires phantom protection as part of strict two-phase locking.
-    /// Read Committed and Serializable read-only transactions are exempt.
+    /// Whether the lock is taken at all is decided by <see cref="ScanTakesPredicateLock"/>: always for
+    /// a Serializable read-write transaction, under key-range sharding also for a latest-state read with
+    /// a real identity, and never for a pinned snapshot.
     /// </summary>
     internal Task AcquireRowRangeLockAsync(KvTransaction tx, bool exclusive = false, CancellationToken cancellationToken = default)
     {
-        if (!options.KeyRangeShardingEnabled && !IsSerializableReadWrite(tx))
+        if (!ScanTakesPredicateLock(tx, indexId: null))
             return Task.CompletedTask;
 
         return AcquireRangeLockAsync(
@@ -192,13 +236,14 @@ internal sealed class KvRangeLockManager
     /// mode blocks concurrent Serializable+RW readers from acquiring a Shared lock on the same
     /// range, preventing them from observing a partial mutation during the write phase.
     ///
-    /// Fires when key-range sharding is enabled and the index is ranged, or unconditionally for
-    /// Serializable read-write transactions (which need phantom protection regardless of sharding
-    /// mode — in hash mode the lock covers the single partition that owns the index bucket).
+    /// Whether the lock is taken at all is decided by <see cref="ScanTakesPredicateLock"/>: always for
+    /// a Serializable read-write transaction (in hash mode the lock covers the single partition that
+    /// owns the index bucket), under key-range sharding also for a latest-state read with a real
+    /// identity once the index is range-routed, and never for a pinned snapshot.
     /// </summary>
     internal Task AcquireIndexRangeLockAsync(KvTransaction tx, string indexId, bool exclusive = false, CancellationToken cancellationToken = default)
     {
-        if ((!options.KeyRangeShardingEnabled || !rangedIndexIds.Contains(indexId)) && !IsSerializableReadWrite(tx))
+        if (!ScanTakesPredicateLock(tx, indexId))
             return Task.CompletedTask;
 
         return AcquireRangeLockAsync(
@@ -237,7 +282,7 @@ internal sealed class KvRangeLockManager
         CancellationToken cancellationToken = default,
         int keyColumnCount = 0)
     {
-        if ((!options.KeyRangeShardingEnabled || !rangedIndexIds.Contains(indexId)) && !IsSerializableReadWrite(tx))
+        if (!ScanTakesPredicateLock(tx, indexId))
             return Task.CompletedTask;
 
         string bucketPrefix = keys.BuildIndexBucketPrefix(indexId);
