@@ -59,6 +59,20 @@ internal sealed class SchemaChangePublisher
         this.logger = logger;
     }
 
+    /// <summary>
+    /// The error code a schema-log proposal that did not commit is reported with. A
+    /// <see cref="SchemaReplicationOutcome.NotLeader"/> outcome is a routing transient: the schema
+    /// leader moved while the proposal was in flight, every forward was answered "not the leader", and
+    /// nothing was committed. It is reported as <see cref="CamusDBErrorCodes.TransactionMustRetry"/>, the
+    /// code of a pre-write transient, so a client that follows the retry contract runs the statement
+    /// again. A timeout or a failure may have committed the entry after all, so a replay could apply the
+    /// change twice; those keep the generic internal code and are not retried.
+    /// </summary>
+    internal static string RefusalCodeFor(SchemaReplicationOutcome outcome) =>
+        outcome == SchemaReplicationOutcome.NotLeader
+            ? CamusDBErrorCodes.TransactionMustRetry
+            : CamusDBErrorCodes.InvalidInternalOperation;
+
     internal async Task ReplicateAndWaitLocalApplyAsync(DatabaseDescriptor database, SchemaChangeLogEntry entry)
     {
         // Replicating the schema-log delta (and the checkpoint persist below) re-enters the
@@ -105,8 +119,11 @@ internal sealed class SchemaChangePublisher
 
         if (result.Outcome != SchemaReplicationOutcome.Committed)
             throw new CamusDBException(
-                CamusDBErrorCodes.InvalidInternalOperation,
-                $"Schema change '{entry.Op}' for database '{database.Name}' was not committed: {result.Outcome} {result.Status}"
+                RefusalCodeFor(result.Outcome),
+                $"Schema change '{entry.Op}' for database '{database.Name}' was not committed: {result.Outcome} {result.Status}" +
+                (result.Outcome == SchemaReplicationOutcome.NotLeader
+                    ? "; the schema leader moved while the change was in flight and nothing was committed, retry the statement"
+                    : "")
             );
 
         DateTime deadline = DateTime.UtcNow.AddSeconds(5);

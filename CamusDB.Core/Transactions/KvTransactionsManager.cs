@@ -771,7 +771,20 @@ public sealed class KvTransactionsManager : IDisposable
         bool firstFinalizeAttempt = tx.Status == KvTransactionStatus.Active;
         if (firstFinalizeAttempt)
         {
-            tx.ValidateSchemaPins();
+            // The schema-version pin. A table this transaction read or wrote changed its row layout
+            // (a column added or dropped, a column element moved state) or was dropped after the
+            // statement was planned. Nothing staged has left the node, so the refusal is a definite
+            // non-commit with the retryable code, and the transaction is rolled back here so a client
+            // that replays from BeginAsync leaves no lock behind.
+            if (!tx.TryValidateSchemaPins(out string? schemaRefusal))
+            {
+                await AbandonRefusedCommitAsync(tx, cancellationToken).ConfigureAwait(false);
+
+                throw new CamusDBException(
+                    CamusDBErrorCodes.TransactionConflict,
+                    $"Transaction {tx.UniqueId} cannot commit: {schemaRefusal}; a schema change landed after the " +
+                    "transaction planned its statements, so the transaction was rolled back, retry it from BeginAsync");
+            }
 
             // The write-shape fence. A table this transaction wrote gained an index or a constraint
             // after the write was planned, so the staged work is incomplete: it lacks the index entry,

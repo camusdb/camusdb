@@ -292,12 +292,6 @@ public sealed class CommandExecutor : IAsyncDisposable
     /// <summary>Answers the activity statements on this node and, through peers, on the cluster.</summary>
     private readonly Diagnostics.QueryActivityService queryActivityService;
 
-    // Number of rows indexed per Kahuna transaction during backfill.  Committing in bounded
-    // batches keeps transaction size manageable and allows a leader-change resume to skip
-    // already-indexed rows via the persisted StartOffset checkpoint. Shared with the standalone
-    // flux backfill so both paths batch identically.
-    private const int BackfillBatchSize = TableIndexAdder.IndexBackfillBatchSize;
-
     /// <summary>
     /// Initializes the commands executor
     /// </summary>

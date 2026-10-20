@@ -87,12 +87,6 @@ internal sealed partial class SchemaDdlService
     // converting permanent stalls into a recoverable CamusDBException.
     private static readonly TimeSpan DdlCommitTimeout = TimeSpan.FromSeconds(10);
 
-    // Number of rows indexed per Kahuna transaction during backfill.  Committing in bounded
-    // batches keeps transaction size manageable and allows a leader-change resume to skip
-    // already-indexed rows via the persisted StartOffset checkpoint. Shared with the standalone
-    // flux backfill so both paths batch identically.
-    private const int BackfillBatchSize = TableIndexAdder.IndexBackfillBatchSize;
-
     /// <summary>
     /// Test-only hook: invoked after each intermediate batch checkpoint is persisted
     /// (i.e., after batch N commits and before batch N+1 starts). Allows tests to inject
@@ -945,133 +939,38 @@ internal sealed partial class SchemaDdlService
         CamusDBOptions currentOptions = options;
 
         TableDescriptor table = await context.TableOpener.Open(database, tableName).ConfigureAwait(false);
-        bool unique = indexInfo.IndexType == IndexType.Unique;
 
         ObjectIdValue? afterRowId = string.IsNullOrWhiteSpace(startOffset)
             ? null
             : ObjectId.ToValue(startOffset!);
 
-        // The backfill only reads the index's key and INCLUDE columns, so narrow the per-row decode
-        // to them — values for those columns are identical to a full decode, and the scanned rows are
-        // never re-encoded, only turned into index entries.
-        HashSet<string> requiredColumns = new(StringComparer.OrdinalIgnoreCase);
-        foreach (string columnName in indexInfo.ColumnNames)
-            requiredColumns.Add(columnName);
-        if (indexInfo.IncludeColumnNames is { Length: > 0 } includeColumnNames)
+        IndexBackfiller.Target target = new(
+            indexInfo.IndexId,
+            indexInfo.IndexName,
+            Unique: indexInfo.IndexType == IndexType.Unique,
+            indexInfo.ColumnNames,
+            indexInfo.IncludeColumnNames is { Length: > 0 } includeColumnNames ? includeColumnNames : null);
+
+        // After each full batch: persist the cursor (the coordinator's callback), then run the test
+        // seam, so a test can pause or force a leader change between two batches.
+        async Task Checkpoint(string offset)
         {
-            foreach (string columnName in includeColumnNames)
-                requiredColumns.Add(columnName);
-        }
-
-        int totalRows = 0;
-
-        while (true)
-        {
-            KvTransaction tx = await database.Transactions.BeginAsync(
-                CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite,
-                mutationLimitOverride: 0
-            ).ConfigureAwait(false);
-            int batchRows = 0;
-            ObjectIdValue lastRowId = default;
-
-            // Per-batch decode-plan cache; scoped to the batch transaction because the visibility
-            // version is re-read from the live schema each batch.
-            RowEncoder.DictionaryDecodeState decodeState = new();
-
-            try
-            {
-                // Each scanned row produces an index entry in this same transaction, so the rows read
-                // are a genuine commit dependency and must stay in the read set.
-                await foreach ((ObjectIdValue rowId, ReadOnlyMemory<byte> data) in table.Store.ScanRows(
-                    tx, afterRowId: afterRowId).ConfigureAwait(false))
-                {
-                    Dictionary<string, ColumnValue> row = await RowEncoder.DecodeWritableAsync(
-                        table.Schema, tx.TransactionId, rowId, data,
-                        requiredColumns: requiredColumns,
-                        visibilitySchemaVersion: table.Schema.Version,
-                        decodeState: decodeState).ConfigureAwait(false);
-
-                    // NULLs are distinct: a unique index omits entries for rows with a NULL (or absent)
-                    // value in any indexed column, so multiple such rows can coexist. This must match
-                    // the incremental insert path so a backfilled index equals one built row-by-row.
-                    if (!unique || !HasNullIndexColumn(row, indexInfo.ColumnNames))
-                    {
-                        int i = 0;
-                        ColumnValue[] columnValues = unique
-                            ? new ColumnValue[indexInfo.ColumnNames.Length]
-                            : new ColumnValue[indexInfo.ColumnNames.Length + 1];
-
-                        foreach (string columnName in indexInfo.ColumnNames)
-                        {
-                            ColumnValue? keyValue = row.GetValueOrDefault(columnName);
-                            if (keyValue is null)
-                                throw new CamusDBException(
-                                    CamusDBErrorCodes.InvalidInternalOperation,
-                                    $"A null value was found for index key field '{columnName}'"
-                                );
-                            columnValues[i++] = keyValue;
-                        }
-
-                        if (!unique)
-                            columnValues[i] = new(ColumnType.Id, rowId.ToString());
-
-                        CompositeColumnValue compositeKey = new(columnValues);
-
-                        // Materialize stored/payload (INCLUDE) values (NULL-tolerant) for a covering index.
-                        // EncodeTupleChecked enforces the per-entry byte ceiling before the KV write.
-                        byte[]? includeTuple = indexInfo.IncludeColumnNames is { Length: > 0 } includeNames
-                            ? IndexIncludeValueCodec.EncodeTupleChecked(includeNames, row, indexInfo.IndexName, currentOptions)
-                            : null;
-
-                        await table.Store.PutIndexEntry(tx, indexInfo.IndexId, compositeKey, rowId, unique, backfillMode: true, includeTuple: includeTuple).ConfigureAwait(false);
-                    }
-
-                    lastRowId = rowId;
-                    batchRows++;
-
-                    if (batchRows >= BackfillBatchSize)
-                        break;
-                }
-
-                await database.Transactions.CommitAsync(tx).ConfigureAwait(false);
-            }
-            catch
-            {
-                await database.Transactions.RollbackIfNotCompletedAsync(tx).ConfigureAwait(false);
-                throw;
-            }
-
-            totalRows += batchRows;
-
-            if (batchRows < BackfillBatchSize)
-                break;
-
-            // More rows may remain — checkpoint and advance the cursor.
-            afterRowId = lastRowId;
             if (onCheckpoint is not null)
-                await onCheckpoint(lastRowId.ToString()).ConfigureAwait(false);
+                await onCheckpoint(offset).ConfigureAwait(false);
 
             if (TestInterceptAfterBackfillCheckpoint is not null)
                 await TestInterceptAfterBackfillCheckpoint().ConfigureAwait(false);
         }
 
-        Log.LogIndexBackfillComplete(context.Logger, totalRows, indexInfo.IndexName);
-    }
+        IndexBackfiller.Result result = await IndexBackfiller.BackfillAsync(
+            database, table, target, afterRowId,
+            priority: null,
+            Checkpoint,
+            context.Logger,
+            currentOptions,
+            CancellationToken.None).ConfigureAwait(false);
 
-    /// <summary>
-    /// Returns true when any of the index's columns is absent from the row or holds a NULL value.
-    /// Such a row is exempt from a unique index (NULLs are distinct) and is skipped during backfill.
-    /// </summary>
-    private static bool HasNullIndexColumn(Dictionary<string, ColumnValue> row, string[] columnNames)
-    {
-        foreach (string columnName in columnNames)
-        {
-            ColumnValue? value = row.GetValueOrDefault(columnName);
-            if (value is null || value.Type == ColumnType.Null)
-                return true;
-        }
-
-        return false;
+        Log.LogIndexBackfillComplete(context.Logger, result.Rows, indexInfo.IndexName);
     }
 
     /// <summary>

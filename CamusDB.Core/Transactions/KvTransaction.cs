@@ -7,6 +7,7 @@
  */
 
 using System.Diagnostics;
+using System.Diagnostics.CodeAnalysis;
 using Kahuna.Server.KeyValues;
 using Kahuna.Shared.KeyValue;
 using Kommander.Time;
@@ -1070,6 +1071,16 @@ public sealed class KvTransaction
         }
     }
 
+    /// <summary>
+    /// Pins the schema version a statement planned against for <paramref name="resource"/> (one table
+    /// of one database), so the commit can refuse the transaction if a schema change moved the table's
+    /// layout in between (<see cref="TryValidateSchemaPins"/>). The first pin of a resource decides. A
+    /// later statement of the same transaction that finds the table at another version is refused here,
+    /// at the statement, with the retryable <see cref="CamusDBErrorCodes.TransactionConflict"/>: the
+    /// transaction cannot see one consistent schema any more, nothing it staged is lost by a rollback,
+    /// and a replay from <c>BEGIN</c> plans every statement against the new version. The generic
+    /// internal code was used before, and no client retried it.
+    /// </summary>
     public void PinSchemaVersion(
         string resource,
         long schemaVersion,
@@ -1086,8 +1097,9 @@ public sealed class KvTransaction
         {
             if (pin.SchemaVersion != schemaVersion)
                 throw new CamusDBException(
-                    CamusDBErrorCodes.InvalidInternalOperation,
-                    $"Transaction {UniqueId} already pinned schema resource '{resource}' at version {pin.SchemaVersion}, not {schemaVersion}"
+                    CamusDBErrorCodes.TransactionConflict,
+                    $"Transaction {UniqueId} already pinned schema resource '{resource}' at version {pin.SchemaVersion}, not {schemaVersion}: " +
+                    "a schema change landed between two statements of the transaction; retry it from BeginAsync"
                 );
 
             return;
@@ -1096,30 +1108,40 @@ public sealed class KvTransaction
         schemaPins[resource] = new(schemaVersion, currentVersion, isStillValid);
     }
 
-    public void ValidateSchemaPins()
+    /// <summary>
+    /// Checks every pin taken by <see cref="PinSchemaVersion"/> against the live schema, at commit. Returns
+    /// false, with <paramref name="refusal"/> naming the first pin that no longer holds, when the table was
+    /// dropped or recreated (its id changed) or its layout version moved: a column was added or dropped,
+    /// or a column element changed state. The caller refuses the commit with the retryable
+    /// <see cref="CamusDBErrorCodes.TransactionConflict"/> and rolls the transaction back, as the
+    /// write-shape fence does for an index or a constraint, so a client replays from <c>BEGIN</c> against
+    /// the new schema. Nothing the transaction staged can have landed, because this runs before the
+    /// commit request leaves the node.
+    /// </summary>
+    public bool TryValidateSchemaPins([NotNullWhen(false)] out string? refusal)
     {
+        refusal = null;
+
         if (schemaPins is null)
-            return;
+            return true;
 
         foreach ((string resource, SchemaVersionPin pin) in schemaPins)
         {
             if (pin.IsStillValid is not null && !pin.IsStillValid())
             {
-                throw new CamusDBException(
-                    CamusDBErrorCodes.InvalidInternalOperation,
-                    $"Transaction {UniqueId} pinned schema resource '{resource}', but it is no longer present"
-                );
+                refusal = $"it pinned schema resource '{resource}', but it is no longer present";
+                return false;
             }
 
             long current = pin.CurrentVersion();
             if (current == pin.SchemaVersion)
                 continue;
 
-            throw new CamusDBException(
-                CamusDBErrorCodes.InvalidInternalOperation,
-                $"Transaction {UniqueId} pinned schema resource '{resource}' at version {pin.SchemaVersion}, but current version is {current}"
-            );
+            refusal = $"it pinned schema resource '{resource}' at version {pin.SchemaVersion}, but current version is {current}";
+            return false;
         }
+
+        return true;
     }
 
     public long? GetPinnedSchemaVersion(string resource)

@@ -29,14 +29,6 @@ internal sealed class TableIndexAdder
     private readonly ILogger<ICamusDB> logger;
 
     /// <summary>
-    /// Rows processed per index-backfill transaction, on both the standalone flux path here and the
-    /// coordinator-driven cluster path. It bounds how many locks and modified keys a single backfill
-    /// transaction accumulates; on the cluster path it is also the resume-checkpoint granularity, so
-    /// raising it makes a leader change replay more work.
-    /// </summary>
-    internal const int IndexBackfillBatchSize = 500;
-
-    /// <summary>
     /// Test-only seam fired once while a newly added index is still in
     /// <see cref="SchemaElementState.WriteOnly"/> — after backfill has scanned the existing rows
     /// and immediately before the index is published. Tests use it to perform a concurrent DML
@@ -187,28 +179,6 @@ internal sealed class TableIndexAdder
         }
     }
 
-    private static ColumnValue? GetColumnValue(Dictionary<string, ColumnValue> columnValues, string name)
-    {
-        return columnValues.GetValueOrDefault(name);
-    }
-
-    /// <summary>
-    /// Returns true when any of the index's key columns is absent from the row or holds a NULL value.
-    /// Such a row is exempt from a unique index (NULLs are distinct) and is skipped during backfill,
-    /// which keeps a freshly built index identical to one populated row by row on the insert path.
-    /// </summary>
-    private static bool HasNullKeyColumn(Dictionary<string, ColumnValue> row, ColumnIndexInfo[] columns)
-    {
-        foreach (ColumnIndexInfo columnIndex in columns)
-        {
-            ColumnValue? value = GetColumnValue(row, columnIndex.Name);
-            if (value is null || value.Type == ColumnType.Null)
-                return true;
-        }
-
-        return false;
-    }
-
     internal async Task<int> AddIndex(
         CatalogsManager catalogs,
         KvTransaction tx,
@@ -284,11 +254,11 @@ internal sealed class TableIndexAdder
     }
 
     /// <summary>
-    /// Writes one index entry for every existing row, in batches of
-    /// <see cref="IndexBackfillBatchSize"/> rows, each in its own transaction committed as soon as the
-    /// batch completes. A single transaction over the whole table would accumulate every acquired lock
-    /// and modified key for as long as the build runs — a memory hazard, and a long-held-lock hazard
-    /// for concurrent DML.
+    /// Writes one index entry for every existing row through <see cref="IndexBackfiller"/>: batches of
+    /// <see cref="IndexBackfiller.BatchRows"/> rows, each locked, read and committed in its own
+    /// transaction, and each retried until it wins its locks. A single transaction over the whole table
+    /// would accumulate every acquired lock and modified key for as long as the build runs — a memory
+    /// hazard, and a long-held-lock hazard for concurrent DML.
     ///
     /// <para>
     /// The batches deliberately do <em>not</em> reuse the caller's DDL transaction, not even for the
@@ -318,10 +288,10 @@ internal sealed class TableIndexAdder
             ?? throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, $"Index '{ticket.IndexName}' was not found in schema");
 
         // The index is WriteOnly in the schema and in the descriptor, so every statement that starts
-        // now maintains it. A transaction that wrote the table before that did not, and the scan below
+        // now maintains it. A transaction that wrote the table before that did not, and the backfill
         // reads committed rows only. The fence refuses the later commit of such a transaction, and
         // waits for one whose commit is already in flight, so that its rows are either visible to the
-        // scan or never exist. Without it such a row gets no entry and the index stays incomplete.
+        // backfill or never exist. Without it such a row gets no entry and the index stays incomplete.
         await database.FenceWritersAndWaitAsync(table.Schema, database.Kahuna.SchemaAckWaitTimeout).ConfigureAwait(false);
 
         TableIndexSchema? schemaIndex = table.Schema.Indexes?.FirstOrDefault(ix => ix.Id == indexId);
@@ -329,123 +299,32 @@ internal sealed class TableIndexAdder
             ? null
             : ObjectId.ToValue(schemaIndex.StartOffset!);
 
-        // The backfill only reads the index's key and INCLUDE columns, so narrow the per-row decode
-        // to them — values for those columns are identical to a full decode, and the scanned rows are
-        // never re-encoded, only turned into index entries.
-        HashSet<string> requiredColumns = new(StringComparer.OrdinalIgnoreCase);
-        foreach (ColumnIndexInfo columnIndex in ticket.Columns)
-            requiredColumns.Add(columnIndex.Name);
-        foreach (string includeColumn in ticket.IncludeColumns)
-            requiredColumns.Add(includeColumn);
+        string[] keyColumns = new string[ticket.Columns.Length];
+        for (int i = 0; i < ticket.Columns.Length; i++)
+            keyColumns[i] = ticket.Columns[i].Name;
 
-        int totalRows = 0;
+        IndexBackfiller.Target target = new(
+            indexId,
+            ticket.IndexName,
+            unique,
+            keyColumns,
+            ticket.IncludeColumns.Length > 0 ? ticket.IncludeColumns : null);
 
-        while (true)
-        {
-            // Background priority: the backfill is bulk, deferrable work that already runs in
-            // resumable batches, so on a saturated node it should yield the door to user traffic.
-            // This is the one engine path where admission priority genuinely applies — the backfill
-            // opens a coordinator session per batch, and each batch re-enters the gate.
-            KvTransaction tx = await database.Transactions.BeginAsync(
-                CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite,
-                mutationLimitOverride: 0,
-                priority: TransactionPriority.Background
-            ).ConfigureAwait(false);
+        // Background priority: the backfill is bulk, deferrable work that already runs in resumable
+        // batches, so on a saturated node it yields the door to user traffic. The backfill opens a
+        // coordinator session per batch, and each batch re-enters the admission gate.
+        IndexBackfiller.Result result = await IndexBackfiller.BackfillAsync(
+            database, table, target, afterRowId,
+            TransactionPriority.Background,
+            onCheckpoint: null,
+            logger,
+            database.Options,
+            CancellationToken.None).ConfigureAwait(false);
 
-            int batchRows = 0;
-            ObjectIdValue lastRowId = default;
+        state.LastBackfilledRowId = result.LastRowId;
+        state.ModifiedRows = result.Rows;
 
-            // Per-batch decode-plan cache; scoped to the batch transaction because the visibility
-            // version is re-read from the live schema each batch.
-            RowEncoder.DictionaryDecodeState decodeState = new();
-
-            try
-            {
-                // The backfill writes one index entry per row it reads, so the rows it observed are a
-                // real commit dependency: a concurrent modification to one of them must invalidate
-                // this batch.
-                await foreach ((ObjectIdValue rowId, ReadOnlyMemory<byte> data) in table.Store.ScanRows(
-                    tx,
-                    afterRowId: afterRowId).ConfigureAwait(false))
-                {
-                    Dictionary<string, ColumnValue> row = await RowEncoder.DecodeWritableAsync(
-                        table.Schema,
-                        tx.TransactionId,
-                        rowId,
-                        data,
-                        requiredColumns: requiredColumns,
-                        visibilitySchemaVersion: table.Schema.Version,
-                        decodeState: decodeState).ConfigureAwait(false);
-
-                    // NULLs are distinct: a unique index holds no entry for a row with a NULL (or
-                    // absent) value in any key column, so several such rows can coexist. The insert
-                    // path applies the same rule, which keeps a backfilled index identical to one
-                    // built row by row. A non-unique index keeps every row (the row id breaks ties).
-                    // The row itself is not skipped: the cursor bookkeeping below still advances.
-                    if (!unique || !HasNullKeyColumn(row, ticket.Columns))
-                    {
-                        int i = 0;
-                        ColumnValue[] columnValues = unique
-                            ? new ColumnValue[ticket.Columns.Length]
-                            : new ColumnValue[ticket.Columns.Length + 1];
-
-                        foreach (ColumnIndexInfo columnIndex in ticket.Columns)
-                        {
-                            ColumnValue? keyValue = GetColumnValue(row, columnIndex.Name);
-
-                            if (keyValue is null)
-                                throw new CamusDBException(
-                                    CamusDBErrorCodes.InvalidInternalOperation,
-                                    $"A null value was found for key field '{columnIndex.Name}'"
-                                );
-
-                            columnValues[i++] = keyValue;
-                        }
-
-                        if (!unique)
-                            columnValues[i] = new(ColumnType.Id, rowId.ToString());
-
-                        CompositeColumnValue compositeKey = new(columnValues);
-
-                        // Materialize the stored/payload (INCLUDE) values for a covering index. Unlike key
-                        // columns, included columns may be NULL (they are payload, not part of the key).
-                        // EncodeTupleChecked enforces the per-entry byte ceiling before the KV write.
-                        byte[]? includeTuple = ticket.IncludeColumns.Length > 0
-                            ? IndexIncludeValueCodec.EncodeTupleChecked(ticket.IncludeColumns, row, ticket.IndexName, state.Database.Options)
-                            : null;
-
-                        await table.Store.PutIndexEntry(tx, indexId, compositeKey, rowId, unique, includeTuple: includeTuple).ConfigureAwait(false);
-                    }
-
-                    state.LastBackfilledRowId = rowId.ToString();
-
-                    lastRowId = rowId;
-                    batchRows++;
-
-                    if (batchRows >= IndexBackfillBatchSize)
-                        break;
-                }
-
-                await database.Transactions.CommitAsync(tx).ConfigureAwait(false);
-            }
-            catch
-            {
-                await database.Transactions.RollbackIfNotCompletedAsync(tx).ConfigureAwait(false);
-                throw;
-            }
-
-            totalRows += batchRows;
-
-            // A short batch means the scan reached the end of the table.
-            if (batchRows < IndexBackfillBatchSize)
-                break;
-
-            afterRowId = lastRowId;
-        }
-
-        state.ModifiedRows = totalRows;
-
-        Log.LogIndexRowsAdded(logger, totalRows, ticket.IndexName);
+        Log.LogIndexRowsAdded(logger, result.Rows, ticket.IndexName);
 
         return FluxAction.Continue;
     }

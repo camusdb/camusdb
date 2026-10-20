@@ -424,7 +424,24 @@ public sealed class RowUpdater
         return FluxAction.Continue;
     }
 
-    private static void CheckForNotNulls(TableDescriptor table, Dictionary<string, ColumnValue> rowValues)
+    /// <summary>
+    /// Refuses a NULL in a NOT NULL column of the merged row, and a value past a column's length
+    /// bound. The merged row is the stored row with the statement's assignments applied, so a NULL
+    /// there is either one the statement assigned (a literal, or an expression that evaluated to NULL
+    /// for this row) or one the row inherited.
+    ///
+    /// <para><b>A column that is not yet readable is judged only on a value the statement assigns.</b>
+    /// While a column is <c>WriteOnly</c> during <c>ADD COLUMN</c>, the row inherits a value the
+    /// statement never saw: the decoder's injected default for a row older than the column, which is
+    /// NULL for a function or sequence default (every identity column), or the NULL placeholder of a
+    /// row written while the column was <c>DeleteOnly</c>. The column's fill replaces both before the
+    /// column becomes <c>Public</c>, so refusing them here turned a schema change into
+    /// <see cref="CamusDBErrorCodes.NotNullViolation"/> errors for every UPDATE of an older row, for a
+    /// column the statement could not read. A statement can still assign a staged column, and a NULL it
+    /// assigns is refused as for any other column, so no NULL of a user's reaches the fill. Once the
+    /// column is <c>Public</c> every row holds a value and the check applies in full.</para>
+    /// </summary>
+    private static void CheckForNotNulls(TableDescriptor table, Dictionary<string, ColumnValue> rowValues, IReadOnlySet<string> assignedColumns)
     {
         List<TableColumnSchema> columns = table.Schema.Columns!;
 
@@ -434,6 +451,9 @@ public sealed class RowUpdater
                 continue;
 
             if (!columnSchema.NotNull)
+                continue;
+
+            if (!SchemaElementStateRules.IsReadable(columnSchema) && !assignedColumns.Contains(columnSchema.Name))
                 continue;
 
             if (!rowValues.TryGetValue(columnSchema.Name, out ColumnValue? columnValue))
@@ -766,7 +786,7 @@ public sealed class RowUpdater
                 carryRow = false;
 
             CoerceRowValues(table, newRow);
-            CheckForNotNulls(table, newRow);
+            CheckForNotNulls(table, newRow, carry.AssignedColumns);
             CheckEnforcer.EnforceOnRow(table, newRow);
             state.ForeignKeys.AddUpdatedRow(oldRow, newRow);
 
@@ -847,6 +867,14 @@ public sealed class RowUpdater
         /// column that an index or a CHECK constraint reads.
         /// </summary>
         public required IReadOnlySet<string> DecodedColumns { get; init; }
+
+        /// <summary>
+        /// The columns the statement assigns (its SET list), compared case-insensitively. Every other
+        /// column of the new row holds a value the row inherited from its stored form or from the
+        /// decoder, which the NOT NULL check of a staged column must not judge (see
+        /// <see cref="CheckForNotNulls"/>).
+        /// </summary>
+        public required IReadOnlySet<string> AssignedColumns { get; init; }
 
         public bool IsEmpty => CarriedVariableOrdinals.Count == 0;
 
@@ -946,7 +974,7 @@ public sealed class RowUpdater
                     variableOrdinal++;
             }
 
-            return new UpdateCarryPlan { CarryMask = mask, CarriedVariableOrdinals = carriedOrdinals, DecodedColumns = decoded };
+            return new UpdateCarryPlan { CarryMask = mask, CarriedVariableOrdinals = carriedOrdinals, DecodedColumns = decoded, AssignedColumns = assigned };
         }
     }
 

@@ -15,6 +15,8 @@ using NUnit.Framework;
 using CamusDB.Core;
 using CamusDB.Core.Catalogs;
 using CamusDB.Core.Catalogs.Models;
+using CamusDB.Core.Catalogs.Replication;
+using CamusDB.Core.Storage.Kv;
 using CamusDB.Core.CommandsExecutor;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Results;
@@ -234,6 +236,70 @@ internal static class SchemaChangeSpanningTransactionScenarios
         Assert.AreEqual(7, rows[0].Row["temp"].LongValue, "A row committed after the column backfill must read the default");
     }
 
+    /// <summary>
+    /// A transaction that only read the table before an ADD COLUMN finished on it. Its schema-version
+    /// pin no longer holds at commit, so the commit is refused with the retryable conflict code and the
+    /// transaction is rolled back, exactly as the write-shape fence refuses a write. The same work on a
+    /// new transaction succeeds and reads the new column.
+    /// </summary>
+    public static async Task ReadPinnedBeforeAnAddColumnIsRefusedAndSucceedsOnReplay(CommandExecutor executor, DatabaseDescriptor database, string dbname)
+    {
+        await ForeignKeyAlterScenarios.Seed(executor, dbname, withUserIndex: false);
+
+        KvTransaction tx = await database.Transactions.BeginAsync();
+        await ReadInTransaction(executor, tx, dbname, "SELECT id FROM weather WHERE id = 1");
+
+        await ForeignKeyAlterScenarios.Ddl(executor, dbname, "ALTER TABLE weather ADD COLUMN temp INT64 DEFAULT (7)");
+
+        Exception? commitError = await Capture(database.Transactions.CommitAsync(tx));
+        AssertRefusedAndRolledBack(commitError, tx);
+        Assert.That(commitError!.Message, Does.Contain("pinned schema resource"));
+
+        // The replay a client makes on the retryable code: a new transaction plans against the new version.
+        KvTransaction replay = await database.Transactions.BeginAsync();
+        List<QueryResultRow> rows = await ReadInTransaction(executor, replay, dbname, "SELECT id, temp FROM weather WHERE id = 1");
+        await database.Transactions.CommitAsync(replay);
+
+        Assert.AreEqual(1, rows.Count);
+        Assert.AreEqual(7, rows[0].Row["temp"].LongValue, "The replay must read the added column");
+    }
+
+    /// <summary>
+    /// The same transaction runs a second statement on the table after the ADD COLUMN finished. The
+    /// statement finds the table at another version than the one the transaction pinned, and is refused
+    /// at once with the retryable conflict code; the transaction cannot see one consistent schema any more.
+    /// </summary>
+    public static async Task StatementAfterAnAddColumnInTheSameTransactionIsRefused(CommandExecutor executor, DatabaseDescriptor database, string dbname)
+    {
+        await ForeignKeyAlterScenarios.Seed(executor, dbname, withUserIndex: false);
+
+        KvTransaction tx = await database.Transactions.BeginAsync();
+        await ReadInTransaction(executor, tx, dbname, "SELECT id FROM weather WHERE id = 1");
+
+        await ForeignKeyAlterScenarios.Ddl(executor, dbname, "ALTER TABLE weather ADD COLUMN temp INT64 DEFAULT (7)");
+
+        Exception? statementError = await Capture(ReadInTransaction(executor, tx, dbname, "SELECT id FROM weather WHERE id = 2"));
+        await database.Transactions.RollbackIfNotCompletedAsync(tx);
+
+        Assert.IsInstanceOf<CamusDBException>(statementError, "A statement planned against another schema version must be refused");
+        CamusDBException refusal = (CamusDBException)statementError!;
+        Assert.AreEqual(CamusDBErrorCodes.TransactionConflict, refusal.Code, refusal.Message);
+        Assert.That(SerializableRetryHelper.IsRetryable(refusal), Is.True);
+        Assert.That(refusal.Message, Does.Contain("already pinned schema resource"));
+    }
+
+    private static async Task<List<QueryResultRow>> ReadInTransaction(CommandExecutor executor, KvTransaction tx, string dbname, string sql)
+    {
+        (DatabaseDescriptor _, IAsyncEnumerable<QueryResultRow> cursor) =
+            await executor.ExecuteSQLQuery(new ExecuteSQLTicket(tx, dbname, sql, null));
+
+        List<QueryResultRow> rows = [];
+        await foreach (QueryResultRow row in cursor)
+            rows.Add(row);
+
+        return rows;
+    }
+
     private static void AssertRefusedAndRolledBack(Exception? commitError, KvTransaction tx)
     {
         Assert.IsInstanceOf<CamusDBException>(commitError, "The commit of a write planned before the change must be refused");
@@ -270,6 +336,21 @@ public sealed class TestSchemaChangeSpanningTransactions : BaseTest
     [Test] public async Task ValidationWaitsForACommitInFlight() => await Run(SchemaChangeSpanningTransactionScenarios.ValidationWaitsForACommitInFlight);
     [Test] public async Task WritesPlannedAfterTheChangeCommit() => await Run(SchemaChangeSpanningTransactionScenarios.WritesPlannedAfterTheChangeCommit);
     [Test] public async Task RowCommittedAfterAColumnBackfillReadsTheDefault() => await Run(SchemaChangeSpanningTransactionScenarios.RowCommittedAfterAColumnBackfillReadsTheDefault);
+    [Test] public async Task ReadPinnedBeforeAnAddColumnIsRefusedAndSucceedsOnReplay() => await Run(SchemaChangeSpanningTransactionScenarios.ReadPinnedBeforeAnAddColumnIsRefusedAndSucceedsOnReplay);
+    [Test] public async Task StatementAfterAnAddColumnInTheSameTransactionIsRefused() => await Run(SchemaChangeSpanningTransactionScenarios.StatementAfterAnAddColumnInTheSameTransactionIsRefused);
+
+    /// <summary>
+    /// A schema-log proposal that every forward answered "not the leader" committed nothing, so it is
+    /// reported with the pre-write retryable code; an outcome whose entry may still commit is not.
+    /// </summary>
+    [Test]
+    public void DdlWhoseSchemaLeaderMovedIsRefusedWithARetryableCode()
+    {
+        Assert.That(SchemaChangePublisher.RefusalCodeFor(SchemaReplicationOutcome.NotLeader), Is.EqualTo(CamusDBErrorCodes.TransactionMustRetry));
+        Assert.That(SerializableRetryHelper.IsRetryable(new CamusDBException(SchemaChangePublisher.RefusalCodeFor(SchemaReplicationOutcome.NotLeader), "")), Is.True);
+        Assert.That(SchemaChangePublisher.RefusalCodeFor(SchemaReplicationOutcome.Timeout), Is.EqualTo(CamusDBErrorCodes.InvalidInternalOperation));
+        Assert.That(SchemaChangePublisher.RefusalCodeFor(SchemaReplicationOutcome.Failed), Is.EqualTo(CamusDBErrorCodes.InvalidInternalOperation));
+    }
 
     /// <summary>
     /// The oldest statement decides. A later statement of the same transaction plans against the new
@@ -393,6 +474,8 @@ public sealed class TestSchemaChangeSpanningTransactionsCluster : SharedNodeBase
     [Test] public async Task ValidationWaitsForACommitInFlight() => await Run(SchemaChangeSpanningTransactionScenarios.ValidationWaitsForACommitInFlight);
     [Test] public async Task WritesPlannedAfterTheChangeCommit() => await Run(SchemaChangeSpanningTransactionScenarios.WritesPlannedAfterTheChangeCommit);
     [Test] public async Task RowCommittedAfterAColumnBackfillReadsTheDefault() => await Run(SchemaChangeSpanningTransactionScenarios.RowCommittedAfterAColumnBackfillReadsTheDefault);
+    [Test] public async Task ReadPinnedBeforeAnAddColumnIsRefusedAndSucceedsOnReplay() => await Run(SchemaChangeSpanningTransactionScenarios.ReadPinnedBeforeAnAddColumnIsRefusedAndSucceedsOnReplay);
+    [Test] public async Task StatementAfterAnAddColumnInTheSameTransactionIsRefused() => await Run(SchemaChangeSpanningTransactionScenarios.StatementAfterAnAddColumnInTheSameTransactionIsRefused);
 
     private async Task Run(Func<CommandExecutor, DatabaseDescriptor, string, Task> scenario)
     {

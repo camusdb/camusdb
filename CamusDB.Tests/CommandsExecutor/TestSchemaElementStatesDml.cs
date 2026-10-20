@@ -140,6 +140,12 @@ internal sealed class TestSchemaElementStatesDml : SharedNodeBaseTest
 
         Assert.NotNull(error);
         Assert.That(error!.Message, Does.Contain("pinned schema resource"));
+
+        // The refusal is a definite non-commit a client replays from BEGIN: it carries the retryable
+        // conflict code, and the transaction is already rolled back so the replay leaves no lock behind.
+        Assert.That(error.Code, Is.EqualTo(CamusDBErrorCodes.TransactionConflict));
+        Assert.That(SerializableRetryHelper.IsRetryable(error), Is.True);
+        Assert.That(tx.Status, Is.EqualTo(KvTransactionStatus.RolledBack));
     }
 
     [Test]
@@ -164,6 +170,8 @@ internal sealed class TestSchemaElementStatesDml : SharedNodeBaseTest
 
         Assert.NotNull(error);
         Assert.That(error!.Message, Does.Contain("no longer present"));
+        Assert.That(error.Code, Is.EqualTo(CamusDBErrorCodes.TransactionConflict));
+        Assert.That(tx.Status, Is.EqualTo(KvTransactionStatus.RolledBack));
     }
 
     private async Task<(string DbName, DatabaseDescriptor Database, CommandExecutor Executor, TableDescriptor Table)> SetupRobotsTable()

@@ -331,6 +331,13 @@ CommitLogs(partition, ticketId)                                      // commit q
         return failure
 ```
 
+The proposer (`SchemaChangePublisher.ReplicateAndWaitLocalApplyAsync`) turns a result that is not
+`Committed` into an error for the DDL statement. `NotLeader` is a routing transient: the schema
+leader moved while the proposal was in flight, every forward was answered "not the leader", and
+nothing was committed, so it is reported as the retryable `CADB0504` (`TransactionMustRetry`) and
+the client runs the statement again. `Timeout` and `Failed` keep the generic `CADB0099`, because
+the entry may still commit and a replay could apply the change twice.
+
 Followers receive the committed entry through Kommander's `OnReplicationReceived`
 callback, which `RegisterSchemaApply` wires to `SchemaReplicator.ApplyAsync`. On restart /
 log recovery, `OnLogRestored` is wired to `SchemaReplicator.RestoreAsync`.
@@ -813,18 +820,35 @@ AddIndex(DeleteOnly)  → ack gate → SetElementState(WriteOnly) → ack gate
   not** bump `TableSchema.Version` (indexes aren't part of row layout). `SchemaReplicator` evicts
   each node's cached `TableDescriptor` on `SetElementState(Index)` so DML rebuilds with the new
   state.
-- **Backfill** (`CommandExecutor.BackfillIndexEntriesAsync`) fires exactly on the
-  `WriteOnly → Public` transition, on both the initial run and a leader-change resume that starts
-  from `WriteOnly`. It scans existing rows (`KvTableStore.ScanRows`), decodes them with
-  *writable* visibility, and writes index entries with `PutIndexEntry(backfillMode: true)`.
-  Backfilled entries replicate to followers through Kahuna's Raft KV (each node sees the index
-  via `FORCE_INDEX` without rebuilding); the metadata converges via the schema delta. Because the
-  backfill commits **before** the `Public` delta is proposed, the ack gate on the `Public`
-  version implies backfill-done cluster-wide.
-- **Idempotent backfill (no duplicates on resume).** `PutIndexEntry(backfillMode: true)` makes a
-  re-run safe: on a unique index a `NotSet` response triggers a read-back — same `rowId` ⇒ this
-  is an idempotent re-write of a row a previous partial run already indexed, so skip it; a
-  different `rowId` ⇒ a genuine duplicate-key violation, so throw `DuplicateUniqueKeyValue`.
+- **Backfill** (`CommandExecutor.BackfillIndexEntriesAsync`, which runs `IndexBackfiller`, the
+  same code the standalone flux runs) fires exactly on the `WriteOnly → Public` transition, on
+  both the initial run and a leader-change resume that starts from `WriteOnly`. Each batch scans
+  a run of row ids without a lock, takes an exclusive lock on each row, reads the rows under the
+  lock (`KvTableStore.LockAndReadRowsForMutationAsync`), decodes them with *writable* visibility,
+  writes index entries with `PutIndexEntry(backfillMode: true)` and commits. The lock is what
+  makes every entry match a committed row: an unlocked read would let an UPDATE commit between
+  the read and the entry write, so the UPDATE removes an entry that does not exist yet, writes the
+  entry for its new value, and the backfill then writes the old value's entry, which stays as a
+  stale entry. The batch transaction is pessimistic whatever the engine default is; under an
+  optimistic default it would take no lock, and a writer that touched any of its rows first would
+  abort it at commit. Backfilled entries replicate to followers through Kahuna's Raft KV (each
+  node sees the index via `FORCE_INDEX` without rebuilding); the metadata converges via the schema
+  delta. Because the backfill commits **before** the `Public` delta is proposed, the ack gate on
+  the `Public` version implies backfill-done cluster-wide.
+- **A lost batch is retried, never abandoned.** A batch loses only at its locks, before any work,
+  when a writer holds one of its rows. `BackfillBatchRunner` retries it after a jittered backoff,
+  halving the batch on each loss and doubling it on each win, so the free rows are written while
+  the busy ones wait. There is no attempt cap: a writer holds a row for one transaction at most and
+  Kahuna expires an abandoned lock with its lease, so every row is free again within a bounded
+  time. A table under sustained writes is still indexed; the build is slower, not failed. Only a
+  non-retryable error (a duplicate key, a cancellation) ends the build and triggers compensation.
+  The fill of an added column uses the same runner (`TableColumnAdder`).
+- **Idempotent backfill (no duplicates on resume, none after a concurrent UPDATE).**
+  `PutIndexEntry(backfillMode: true)` makes a re-run safe: on a unique index a `NotSet` response
+  triggers a read-back — same `rowId` ⇒ this is an idempotent re-write of a row a previous partial
+  run already indexed, or of a row an UPDATE already indexed while the index was `WriteOnly`, so
+  skip it; a different `rowId` ⇒ a genuine duplicate-key violation, so throw
+  `DuplicateUniqueKeyValue`.
 - **Failure compensation.** If the staged add throws before reaching `Public`,
   `CompensateClusterAddIndexAsync` emits a `DropIndex` delta (removing the partial `DeleteOnly`/
   `WriteOnly` index on every node) and deletes the persisted coordinator job, leaving the cluster
@@ -836,8 +860,9 @@ staging is needed to remove an index. `DROP INDEX` reclaims the data via
 `KvTableStore.DropIndexEntries`.
 
 **The backfill is checkpointed and resumable.** `BackfillIndexEntriesAsync` processes rows in
-bounded batches (`BackfillBatchSize`, currently 500 rows per Kahuna transaction). After each
-batch *commits*, it invokes a checkpoint callback supplied by the coordinator, which persists
+bounded batches (`IndexBackfiller.BatchRows`, currently 500 rows scanned per batch; a batch that
+loses its locks is halved, and its parts commit one by one in row order). After each full batch
+*commits* in full, it invokes a checkpoint callback supplied by the coordinator, which persists
 the last processed rowId into `PersistedCoordinatorJob.StartOffset`. A leader-change resume reads
 that offset and restarts the scan via `ScanRows(afterRowId:)`, skipping the rows already indexed
 rather than rebuilding from row zero. Two ordering/accounting details make this safe:
@@ -1112,15 +1137,20 @@ tx.PinSchemaVersion(
                           && cur.Id == table.Id);
 ```
 
-At commit, `KvTransactionsManager.CommitAsync` calls `tx.ValidateSchemaPins()`, which:
+At commit, `KvTransactionsManager.CommitAsync` calls `tx.TryValidateSchemaPins()`, which:
 
 1. runs `isStillValid` first → catches **drop / drop+recreate / rename** (the table is gone
    or now has a different `Id`), then
 2. compares `currentVersion()` against the pinned version → catches **add/drop column,
    element-state** changes.
 
-If either check fails the commit is rejected. (Transparent retry against the new version is a
-future-work item — see §13; today the transaction simply fails with a typed error.)
+If either check fails the commit is refused with the retryable `CADB0502` (`TransactionConflict`),
+and the manager rolls the transaction back first, exactly as the write-shape fence does (§9.1): the
+check runs before any commit request leaves the node, so nothing the transaction staged can have
+landed, and a client that follows the retry contract replays from `BEGIN` against the new version.
+A later statement of the same transaction that finds the table at another version than the pinned
+one is refused at the statement with the same code (`KvTransaction.PinSchemaVersion`). (Transparent
+retry inside the server is a future-work item — see §13; today the client does the replay.)
 
 Why this works without extra plumbing: `ApplyAlterColumn`/`ApplyElementState` mutate the
 **same `TableSchema` instance** the cached `TableDescriptor` holds (`Version++` in place),
@@ -1412,8 +1442,8 @@ on an older layout decode with their own version and read `age` with current vis
   that recovery still rides the restart-replay path, because only the log carries what the
   checkpoint lost.
 - **Auto-retry on schema-version conflict.** A DML/read transaction whose pin is invalidated by a
-  concurrent `ALTER` currently fails (§9) rather than transparently retrying against the new
-  version.
+  concurrent `ALTER` is refused with the retryable `CADB0502` (§9); the client replays it. The
+  server does not yet replay it transparently against the new version.
 - **Staged `DROP INDEX`.** Drops are a single delta; an online-safe
   `Public → WriteOnly → DeleteOnly → Absent` drop is a possible future refinement.
 - **Legacy index cleanup.** `SystemSchema` index storage is read-only legacy (§7.3); remove it

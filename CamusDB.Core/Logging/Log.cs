@@ -129,6 +129,12 @@ internal static partial class Log
     [LoggerMessage(Level = LogLevel.Information, Message = "Added {Rows} rows to index {IndexName}")]
     public static partial void LogIndexRowsAdded(ILogger logger, int rows, string indexName);
 
+    [LoggerMessage(Level = LogLevel.Debug, Message = "Backfill of {Element} lost a batch of {Rows} rows to a concurrent writer ({Losses} in a row); retrying in {DelayMs} ms: {Reason}")]
+    public static partial void LogBackfillBatchLost(ILogger logger, string element, int rows, int losses, int delayMs, string reason);
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "Backfill of {Element} lost {Losses} consecutive attempts over {Rows} rows to concurrent writers and keeps retrying; a lock on one of the rows is held longer than a statement: {Reason}")]
+    public static partial void LogBackfillBatchWaiting(ILogger logger, string element, int losses, int rows, string reason);
+
     [LoggerMessage(Level = LogLevel.Information, Message = "Added index {IndexName} to {TableName}, Time taken: {Time}")]
     public static partial void LogIndexAdded(ILogger logger, string indexName, string tableName, TimeSpan time);
 

@@ -11,6 +11,7 @@ using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.Storage.Kv;
 using CamusDB.Core.Util.ObjectIds;
 using CamusDB.Core.Transactions;
+using Kahuna.Shared.KeyValue;
 using Microsoft.Extensions.Logging;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers.DDL;
@@ -35,9 +36,11 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.DDL;
 /// <item><description>The layout does not have the column: the row was written before the column existed.</description></item>
 /// <item><description>The layout has the column in <c>DeleteOnly</c>: the writer could not write it, and stored a NULL placeholder.</description></item>
 /// <item><description>The layout has the column writable, and it holds NULL where the column is NOT NULL or has a
-/// function or sequence default. No statement can name the column before it is readable, so that NULL
-/// was not chosen by a user. An UPDATE of an older row writes the decoder's injected default, which is
-/// NULL for those defaults.</description></item>
+/// default of any kind. No statement can name the column before it is readable, so that NULL was not
+/// chosen by a user. It came from a writer: an UPDATE of an older row writes the decoder's injected
+/// default, which is NULL for a function or sequence default, and an UPDATE during <c>WriteOnly</c> of a
+/// row written while the column was <c>DeleteOnly</c> carries that row's NULL placeholder into the
+/// writable layout, whatever the default is.</description></item>
 /// </list>
 /// <para>Any other row keeps its value: an INSERT during <c>WriteOnly</c> already evaluated the default.</para>
 ///
@@ -45,25 +48,29 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.DDL;
 /// lock, so a concurrent UPDATE or DELETE can commit between it and the write. Writing the image from
 /// the first read would lose that update, or bring a deleted row back. With the lock held, the read
 /// returns the latest committed row, and a row that a DELETE removed comes back null and is skipped
-/// (<see cref="KvTableStore.LockAndReadRowsForMutationAsync"/>).</para>
+/// (<see cref="KvTableStore.LockAndReadRowsForMutationAsync"/>). The batch transaction is pessimistic
+/// whatever the engine default is: under an optimistic default it would take no lock, its reads would
+/// be validated at commit instead, and a writer that touched any of its rows first would abort the
+/// whole batch after all of its work. Under the lock a batch loses at the lock only, before any work,
+/// and a writer that wants a locked row waits or retries its own statement.</para>
 ///
 /// <para><b>Each batch commits on its own.</b> The work held by one transaction is bounded by the batch,
 /// not by the table, and a row lock is held for one batch only. The column is not readable until the
 /// fill completes, so a partly filled column is never visible. A run that stops part-way is safe to run
-/// again: a filled row no longer needs a value and is skipped. A batch that loses a lock race is retried;
-/// any other failure stops the fill, and the coordinator removes the column.</para>
+/// again: a filled row no longer needs a value and is skipped. A batch that loses its row locks to a
+/// concurrent writer is retried without limit and halved on each loss (<see cref="BackfillBatchRunner"/>),
+/// so a table under sustained writes is still filled; any other failure stops the fill, and the
+/// coordinator removes the column.</para>
 /// </summary>
 public sealed class TableColumnAdder
 {
-    /// <summary>Attempts for one batch that keeps losing lock races to concurrent writers.</summary>
-    private const int BatchAttempts = 8;
-
     private readonly ILogger<ICamusDB> logger;
 
     /// <summary>
-    /// Test-only hook: invoked after a batch's row ids were scanned without a lock, and before the batch
-    /// locks and reads them. A test commits an UPDATE or a DELETE at that point. Null in production; a
-    /// test clears it after use.
+    /// Test-only hook: invoked before each attempt of a batch locks and reads its rows, after the
+    /// batch's row ids were scanned without a lock. A test commits an UPDATE or a DELETE at that point,
+    /// or counts the attempts of a batch that keeps losing its locks. Null in production; a test
+    /// clears it after use.
     /// </summary>
     internal Func<Task>? TestInterceptBeforeBatchLock;
 
@@ -108,23 +115,23 @@ public sealed class TableColumnAdder
                 ? ClockScalarFunctions.CreateFixedClock(DateTime.UtcNow)
                 : null;
         int modifiedRows = 0;
+        string element = $"column '{column.Name}' of table '{table.Name}'";
 
         while (true)
         {
             cancellationToken.ThrowIfCancellationRequested();
 
-            List<ObjectIdValue> rowIds = await ScanRowIdsAsync(database, table, afterRowId, cancellationToken).ConfigureAwait(false);
+            List<ObjectIdValue> rowIds = await BackfillBatchRunner.ScanRowIdsAsync(
+                database, table, afterRowId, StoredRowRewriter.BatchRows, cancellationToken).ConfigureAwait(false);
             if (rowIds.Count == 0)
                 break;
 
-            if (TestInterceptBeforeBatchLock is { } intercept)
-                await intercept().ConfigureAwait(false);
-
-            modifiedRows += await SerializableRetryHelper.ExecuteAutocommitAsync(
-                _ => FillBatchAsync(database, table, fill, rowIds, clockParameters, cancellationToken),
-                canRetry: static () => true,
-                maxAttempts: BatchAttempts,
-                cancellationToken: cancellationToken).ConfigureAwait(false);
+            modifiedRows += await BackfillBatchRunner.RunAsync(
+                rowIds,
+                (ids, ct) => FillBatchAsync(database, table, fill, ids, clockParameters, ct),
+                logger,
+                element,
+                cancellationToken).ConfigureAwait(false);
 
             if (rowIds.Count < StoredRowRewriter.BatchRows)
                 break;
@@ -160,37 +167,6 @@ public sealed class TableColumnAdder
             $"fill it, then run ALTER TABLE {tableName} ALTER COLUMN {columnName} SET NOT NULL");
 
     /// <summary>
-    /// The next ids in row-id order after <paramref name="afterRowId"/>, at most one batch. Read without a
-    /// lock: only the ids are kept, and the batch reads each row again under its lock.
-    /// </summary>
-    private static async Task<List<ObjectIdValue>> ScanRowIdsAsync(
-        DatabaseDescriptor database, TableDescriptor table, ObjectIdValue? afterRowId, CancellationToken cancellationToken)
-    {
-        List<ObjectIdValue> rowIds = new(StoredRowRewriter.BatchRows);
-
-        KvTransaction tx = await database.Transactions.BeginAsync(
-            CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadOnly
-        ).ConfigureAwait(false);
-        try
-        {
-            await foreach ((ObjectIdValue rowId, ReadOnlyMemory<byte> _) in table.Store.ScanRows(tx, afterRowId: afterRowId).ConfigureAwait(false))
-            {
-                rowIds.Add(rowId);
-                if (rowIds.Count >= StoredRowRewriter.BatchRows)
-                    break;
-
-                cancellationToken.ThrowIfCancellationRequested();
-            }
-        }
-        finally
-        {
-            await database.Transactions.RollbackIfNotCompletedAsync(tx).ConfigureAwait(false);
-        }
-
-        return rowIds;
-    }
-
-    /// <summary>
     /// One batch in its own transaction: locks the rows, reads them, fills those that need a value, writes
     /// them and commits. Returns the number of rows written.
     /// </summary>
@@ -199,12 +175,21 @@ public sealed class TableColumnAdder
         DatabaseDescriptor database,
         TableDescriptor table,
         ColumnFill fill,
-        List<ObjectIdValue> rowIds,
+        IReadOnlyList<ObjectIdValue> rowIds,
         Dictionary<string, ColumnValue>? clockParameters,
         CancellationToken cancellationToken)
     {
+        if (TestInterceptBeforeBatchLock is { } intercept)
+            await intercept().ConfigureAwait(false);
+
+        // Pessimistic with no read-set validation, whatever the engine default: the row locks are
+        // this batch's conflict detection (see the class summary). Under an optimistic default the
+        // batch would take no lock, and a writer that touched any of its rows first would abort the
+        // whole batch at commit, after all of its work.
         KvTransaction tx = await database.Transactions.BeginAsync(
-            CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite
+            CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite,
+            locking: KeyValueTransactionLocking.Pessimistic,
+            readValidation: ReadValidation.None
         ).ConfigureAwait(false);
         try
         {
@@ -309,7 +294,10 @@ public sealed class TableColumnAdder
         internal ColumnFill(TableColumnSchema column)
         {
             Column = column;
-            nullNeedsValue = column.NotNull || column.DefaultFunction is not null || column.DefaultSequenceId is not null;
+            nullNeedsValue = column.NotNull
+                || column.DefaultFunction is not null
+                || column.DefaultSequenceId is not null
+                || column.DefaultValue is { Type: not ColumnType.Null };
         }
 
         internal async ValueTask<bool> NeedsValueAsync(

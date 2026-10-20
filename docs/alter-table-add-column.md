@@ -57,16 +57,28 @@ settled on every live node. It gives a value to each row that needs one:
 
 - a row written before the column existed;
 - a row written while the column was `DeleteOnly`, which holds a NULL placeholder;
-- a row that holds NULL where the column is NOT NULL or has a function or sequence default. An UPDATE
-  of an older row during `WriteOnly` stores NULL for such a column, because it cannot evaluate the
-  default.
+- a row that holds NULL where the column is NOT NULL or has a default. No statement can name the
+  column before it is readable, so the NULL is not a user's value. An UPDATE of an older row during
+  `WriteOnly` stores NULL for a function or sequence default, because it cannot evaluate it, and an
+  UPDATE during `WriteOnly` of a row that was written while the column was `DeleteOnly` carries that
+  row's NULL placeholder forward, whatever the default is.
 
 Any other row keeps its value. An INSERT during `WriteOnly` already evaluated the default.
 
+An UPDATE that does not name the column is accepted while the column is `WriteOnly`, whatever value
+the row inherits for it. The NOT NULL rule of the column applies, until the column is `Public`, only
+to a value that a statement assigns to it; an inherited NULL is left for the fill. Without this
+rule, every UPDATE of an older row during an identity `ADD COLUMN` was refused with
+`NotNullViolation` (`CADB0301`), for a column the statement could not even read.
+
 The fill works in batches of 256 rows. Each batch locks its rows, reads them again, writes them and
-commits. A concurrent UPDATE is not overwritten, and a concurrent DELETE is not undone. A batch that
-loses a lock race to a concurrent writer is retried. The statement holds the database's DDL gate until
-the column is `Public`.
+commits. The batch takes its locks whatever the configured locking mode is, so an optimistic default
+does not turn the fill into a batch that is validated, and aborted, at commit. A concurrent UPDATE is
+not overwritten, and a concurrent DELETE is not undone. A batch that loses a lock to a concurrent
+writer is retried until it wins: the batch is halved on each loss, so the rows that are free are
+written while the busy ones wait, and a lost batch waits only as long as the writers that hold its
+rows. A table under sustained writes is therefore still filled; the fill is slower, never abandoned.
+The statement holds the database's DDL gate until the column is `Public`.
 
 ## When the statement fails
 
