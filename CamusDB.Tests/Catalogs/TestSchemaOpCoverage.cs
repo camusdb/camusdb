@@ -224,7 +224,9 @@ public sealed class TestSchemaOpCoverage
             SchemaOp.CreateSequence, SchemaOp.DropSequence, SchemaOp.RenameSequence,
             // Answered from the constraint id, so a later constraint of the same name is not mistaken
             // for this one.
-            SchemaOp.AddForeignKey
+            SchemaOp.AddForeignKey,
+            // Answered from the table's trigger list: a trigger change does not move TableSchema.Version.
+            SchemaOp.CreateTrigger, SchemaOp.DropTrigger
         ];
 
         // A structurally checked op answers "not applied" against an empty schema even when the

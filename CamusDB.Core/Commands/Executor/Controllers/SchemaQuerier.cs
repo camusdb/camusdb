@@ -1564,6 +1564,33 @@ internal sealed class SchemaQuerier
     }
 
     /// <summary>
+    /// Lists the C# extension assemblies this engine loaded at startup, in configuration order: where
+    /// each came from, the SHA-256 of the bytes that were loaded, its trust level, and what it
+    /// registered. An engine without extensions returns no rows, which is a normal answer, not an
+    /// error. Node-local by nature: a cluster's nodes each load their own files, and the hash column
+    /// is how an operator compares them.
+    /// </summary>
+    internal async IAsyncEnumerable<QueryResultRow> ShowExtensions(Extensions.ExtensionRegistry extensions)
+    {
+        await Task.CompletedTask;
+
+        foreach (Extensions.LoadedExtension extension in extensions.Extensions)
+        {
+            yield return new QueryResultRow(default, new Dictionary<string, ColumnValue>(StringComparer.OrdinalIgnoreCase)
+            {
+                { "name",       new ColumnValue(ColumnType.String, extension.Name) },
+                { "version",    new ColumnValue(ColumnType.String, extension.Version) },
+                { "path",       new ColumnValue(ColumnType.String, extension.Path) },
+                { "sha256",     new ColumnValue(ColumnType.String, extension.Sha256) },
+                { "trust",      new ColumnValue(ColumnType.String, extension.Trust == Extensions.ExtensionTrust.Safe ? "safe" : "unsafe") },
+                { "functions",  new ColumnValue(ColumnType.String, string.Join(",", extension.Functions)) },
+                { "triggers",   new ColumnValue(ColumnType.String, string.Join(",", extension.Triggers)) },
+                { "procedures", new ColumnValue(ColumnType.String, string.Join(",", extension.Procedures)) },
+            });
+        }
+    }
+
+    /// <summary>
     /// Lists the runtime cluster-settings overlay: the entries <c>SET CLUSTER SETTING</c> put in
     /// force fleet-wide and no <c>RESET</c> has dropped. Values are the stored scalar text, so a
     /// row pastes straight back into a <c>SET</c> statement or a configuration file.

@@ -670,6 +670,42 @@ internal static class SchemaChangeEntryFactory
         };
     }
 
+    /// <summary>Adds a row trigger, already resolved by the proposer, to an existing table.</summary>
+    internal static SchemaChangeLogEntry CreateTriggerEntry(DatabaseDescriptor database, TableSchema table, TriggerDefinition trigger)
+    {
+        return new()
+        {
+            Database = database.Id,
+            FromVersion = database.Schema.SchemaVersion,
+            ToVersion = database.Schema.SchemaVersion + 1,
+            Op = SchemaOp.CreateTrigger,
+            Payload = SchemaChangeLogEntryCodec.EncodePayload(new SchemaCreateTriggerPayload
+            {
+                TableName = table.Name!,
+                TableId = table.Id!,
+                Trigger = trigger
+            })
+        };
+    }
+
+    /// <summary>Removes a row trigger from a table, by name.</summary>
+    internal static SchemaChangeLogEntry DropTriggerEntry(DatabaseDescriptor database, TableSchema table, string triggerName)
+    {
+        return new()
+        {
+            Database = database.Id,
+            FromVersion = database.Schema.SchemaVersion,
+            ToVersion = database.Schema.SchemaVersion + 1,
+            Op = SchemaOp.DropTrigger,
+            Payload = SchemaChangeLogEntryCodec.EncodePayload(new SchemaDropTriggerPayload
+            {
+                TableName = table.Name!,
+                TableId = table.Id!,
+                TriggerName = triggerName
+            })
+        };
+    }
+
     /// <summary>
     /// Drops a CHECK constraint. The payload carries an empty expression and no referenced columns:
     /// a drop is identified by name alone, and repeating the expression would invite a reader to

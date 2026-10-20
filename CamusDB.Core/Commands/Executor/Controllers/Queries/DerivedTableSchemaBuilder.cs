@@ -358,6 +358,20 @@ internal static class DerivedTableSchemaBuilder
         new("scope",      ColumnType.String),
     ];
 
+    // SHOW EXTENSIONS: one row per loaded extension assembly. The member lists are comma-joined text so
+    // one assembly stays one row whatever it registered.
+    internal static readonly IReadOnlyList<DerivedColumnSchema> ShowExtensionsSchema =
+    [
+        new("name",       ColumnType.String),
+        new("version",    ColumnType.String),
+        new("path",       ColumnType.String),
+        new("sha256",     ColumnType.String),
+        new("trust",      ColumnType.String),
+        new("functions",  ColumnType.String),
+        new("triggers",   ColumnType.String),
+        new("procedures", ColumnType.String),
+    ];
+
     // SHOW CLUSTER SETTINGS: one row per overlay entry the cluster currently carries — the keys a
     // SET CLUSTER SETTING changed and no RESET has dropped. Values are the scalar text the overlay
     // stores (the same spelling config.yml would use); each key's effective per-node value, with

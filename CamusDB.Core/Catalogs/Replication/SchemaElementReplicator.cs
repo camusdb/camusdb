@@ -229,6 +229,72 @@ internal sealed class SchemaElementReplicator
     }
 
     /// <summary>
+    /// Proposes a <see cref="SchemaOp.CreateTrigger"/> delta for the table named
+    /// <paramref name="tableName"/> and waits for the cluster to apply it. Valid in both modes. The
+    /// checks run under the schema lock against the live schema, so the caller gets the error: the
+    /// table still exists with the id the statement resolved, it is a plain table, and the name is free.
+    /// The lock is released before the replication, which must never run under it.
+    /// </summary>
+    internal async Task ReplicateCreateTriggerAsync(
+        DatabaseDescriptor database, string tableName, string tableId, TriggerDefinition trigger)
+    {
+        SchemaChangeLogEntry entry;
+
+        await database.Schema.AcquireLockAsync().ConfigureAwait(false);
+        try
+        {
+            if (!database.Schema.Tables.TryGetValue(tableName, out TableSchema? table)
+                || !string.Equals(table.Id, tableId, StringComparison.Ordinal))
+                throw new CamusDBException(CamusDBErrorCodes.TableDoesntExist, $"Table '{tableName}' does not exist");
+
+            if (TriggerDeltaApplier.Find(table, trigger.Name) is not null)
+                throw new CamusDBException(
+                    CamusDBErrorCodes.TriggerAlreadyExists,
+                    $"Table '{tableName}' already has a trigger named '{trigger.Name}'");
+
+            entry = SchemaChangeEntryFactory.CreateTriggerEntry(database, table, trigger);
+            SchemaDeltaApplier.ValidateSchemaDelta(database, entry);
+        }
+        finally
+        {
+            database.Schema.ReleaseLock();
+        }
+
+        await publisher.ReplicateAndWaitLocalApplyAsync(database, entry).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Proposes a <see cref="SchemaOp.DropTrigger"/> delta and waits for the cluster to apply it. A
+    /// trigger the table does not have is refused here, under the schema lock, with
+    /// <see cref="CamusDBErrorCodes.TriggerNotFound"/>.
+    /// </summary>
+    internal async Task ReplicateDropTriggerAsync(DatabaseDescriptor database, string tableName, string triggerName)
+    {
+        SchemaChangeLogEntry entry;
+
+        await database.Schema.AcquireLockAsync().ConfigureAwait(false);
+        try
+        {
+            if (!database.Schema.Tables.TryGetValue(tableName, out TableSchema? table))
+                throw new CamusDBException(CamusDBErrorCodes.TableDoesntExist, $"Table '{tableName}' does not exist");
+
+            if (TriggerDeltaApplier.Find(table, triggerName) is null)
+                throw new CamusDBException(
+                    CamusDBErrorCodes.TriggerNotFound,
+                    $"Table '{tableName}' has no trigger named '{triggerName}'");
+
+            entry = SchemaChangeEntryFactory.DropTriggerEntry(database, table, triggerName);
+            SchemaDeltaApplier.ValidateSchemaDelta(database, entry);
+        }
+        finally
+        {
+            database.Schema.ReleaseLock();
+        }
+
+        await publisher.ReplicateAndWaitLocalApplyAsync(database, entry).ConfigureAwait(false);
+    }
+
+    /// <summary>
     /// Proposes a <see cref="SchemaOp.SetTableSettings"/> delta and replicates it to all cluster nodes,
     /// so every node's in-memory <see cref="TableSchema.Settings"/> updates and the KV checkpoint is
     /// rewritten. Advances the database schema version (like check constraints) but not

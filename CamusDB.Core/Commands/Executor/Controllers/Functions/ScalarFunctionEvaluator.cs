@@ -26,7 +26,7 @@ internal static class ScalarFunctionEvaluator
     {
         string functionName = funcCallExpr.leftAst!.yytext!.ToLowerInvariant();
 
-        if (!Registry.TryGet(functionName, out ScalarFunctionDescriptor? descriptor))
+        if (!TryResolve(functionName, out ScalarFunctionDescriptor? descriptor))
         {
             // SELECT generate_series(1, 3): a set-returning function in the select list.
             if (TableFunctionRegistry.IsTableFunction(functionName))
@@ -65,7 +65,34 @@ internal static class ScalarFunctionEvaluator
 
     public static bool IsRegisteredScalarFunction(string functionName)
     {
+        return Registry.IsRegisteredScalarFunction(functionName) ||
+               (Extensions.ExtensionFunctionScope.Current?.HasFunction(functionName) ?? false);
+    }
+
+    /// <summary>
+    /// True when <paramref name="functionName"/> is a built-in, whatever extension scope the flow
+    /// carries. The extension loader uses it to refuse an extension name that would shadow a
+    /// built-in, and fragment shippability uses it so the decision does not depend on the flow.
+    /// </summary>
+    internal static bool IsBuiltInScalarFunction(string functionName)
+    {
         return Registry.IsRegisteredScalarFunction(functionName);
+    }
+
+    /// <summary>
+    /// Resolves a function name: the built-in table first, then the extension functions of the engine
+    /// whose statement this flow runs (<see cref="Extensions.ExtensionFunctionScope"/>). The loader
+    /// refuses an extension name that collides with a built-in, so the order never changes which
+    /// function a name means; it keeps a built-in lookup exactly as cheap as before. A flow with no
+    /// scope resolves built-ins only, so a missing scope fails closed ("Function not found").
+    /// </summary>
+    private static bool TryResolve(string functionName, out ScalarFunctionDescriptor descriptor)
+    {
+        if (Registry.TryGet(functionName, out descriptor))
+            return true;
+
+        Extensions.ExtensionRegistry? extensions = Extensions.ExtensionFunctionScope.Current;
+        return extensions is not null && extensions.TryGetFunction(functionName, out descriptor);
     }
 
     /// <summary>
@@ -105,7 +132,7 @@ internal static class ScalarFunctionEvaluator
     /// </summary>
     internal static bool IsStatementClockFunction(string functionName)
     {
-        return Registry.TryGet(functionName, out ScalarFunctionDescriptor? descriptor) && descriptor.ReadsStatementClock;
+        return TryResolve(functionName, out ScalarFunctionDescriptor? descriptor) && descriptor.ReadsStatementClock;
     }
 
     /// <summary>
@@ -115,12 +142,14 @@ internal static class ScalarFunctionEvaluator
     /// </summary>
     internal static bool IsSessionScopedFunction(string functionName)
     {
-        return Registry.TryGet(functionName, out ScalarFunctionDescriptor? descriptor) && descriptor.IsSessionScoped;
+        return TryResolve(functionName, out ScalarFunctionDescriptor? descriptor) && descriptor.IsSessionScoped;
     }
 
     public static ColumnType InferReturnType(string functionName, IReadOnlyList<ColumnType> argumentTypes)
     {
-        return Registry.InferReturnType(functionName, argumentTypes);
+        return TryResolve(functionName, out ScalarFunctionDescriptor descriptor)
+            ? descriptor.InferReturnType(argumentTypes)
+            : Registry.InferReturnType(functionName, argumentTypes);
     }
 
     /// <summary>
@@ -170,7 +199,7 @@ internal static class ScalarFunctionEvaluator
 
         string name = node.leftAst?.yytext?.ToLowerInvariant() ?? string.Empty;
 
-        return Registry.TryGet(name, out descriptor);
+        return TryResolve(name, out descriptor);
     }
 
     /// <summary>
@@ -183,7 +212,7 @@ internal static class ScalarFunctionEvaluator
     {
         returnType = ColumnType.Null;
 
-        if (!Registry.TryGet(functionName, out ScalarFunctionDescriptor? descriptor))
+        if (!TryResolve(functionName, out ScalarFunctionDescriptor? descriptor))
             return false;
 
         if (!descriptor.IsVolatile || descriptor.MinArity != 0 || descriptor.MaxArity != 0)
@@ -211,7 +240,7 @@ internal static class ScalarFunctionEvaluator
     /// </summary>
     internal static ColumnValue EvaluateNullary(string functionName, Dictionary<string, ColumnValue>? parameters)
     {
-        if (!Registry.TryGet(functionName, out ScalarFunctionDescriptor? descriptor))
+        if (!TryResolve(functionName, out ScalarFunctionDescriptor? descriptor))
             throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Default function not found: " + functionName);
 
         // Only a clock function reads the statement here. A sequence function that passed the DDL

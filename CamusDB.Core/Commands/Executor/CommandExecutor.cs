@@ -400,6 +400,23 @@ public sealed class CommandExecutor : IAsyncDisposable
     /// databases, and table stores. When null the engine keeps <paramref name="options"/> for life.</param>
     /// <param name="diskSpace">Optional data-volume monitor (a test seam for an injected free-space
     /// probe). When null the engine watches <see cref="CamusDBOptions.DataDirectory"/>.</param>
+    /// <summary>
+    /// The C# extensions this engine loaded from <see cref="CamusDBOptions.ExtensionAssemblies"/> and
+    /// <see cref="CamusDBOptions.UnsafeExtensionAssemblies"/>. Built once in the constructor and never
+    /// changed (the options are restart-class). Statement code reaches the functions through
+    /// <see cref="CamusDB.Core.Extensions.ExtensionFunctionScope"/>, which <see cref="EnterExtensionScope"/>
+    /// sets.
+    /// </summary>
+    internal CamusDB.Core.Extensions.ExtensionRegistry Extensions { get; }
+
+    /// <summary>
+    /// Makes this engine's extensions the function scope of the current flow. Called first thing in
+    /// each entry point that can evaluate an expression, in the method's synchronous part, so the scope
+    /// also reaches the caller that later pulls rows from a returned cursor (see
+    /// <see cref="CamusDB.Core.Extensions.ExtensionFunctionScope"/>).
+    /// </summary>
+    internal void EnterExtensionScope() => CamusDB.Core.Extensions.ExtensionFunctionScope.Enter(Extensions);
+
     public CommandExecutor(
         CommandValidator validator,
         CatalogsManager catalogs,
@@ -421,6 +438,10 @@ public sealed class CommandExecutor : IAsyncDisposable
         this.logger = logger;
         this.options = optionsHolder?.Current ?? options;
         options = this.options;
+
+        // First, before any background work starts: a node told to load extensions refuses to start
+        // without them, and a refusal here leaves nothing half-running.
+        Extensions = CamusDB.Core.Extensions.ExtensionLoader.Load(options, logger);
         this.schemaDdlForwarder = schemaDdlForwarder;
         this.isClusterMode = isClusterMode;
         this.sharedNode = sharedNode;
@@ -486,10 +507,13 @@ public sealed class CommandExecutor : IAsyncDisposable
         tableCreator = new(catalogs, logger, options);
         tableIndexAlterer = new(catalogs, logger);
         tableConstraintAlterer = new(logger);
-        rowInserter = new(logger, tableOpener);
-        rowUpdater = new(logger, tableOpener, statisticsManager);
+        // The trigger runtime only keeps this reference; it reaches the executor's statement entry
+        // points when a trigger runs SQL, long after construction ends.
+        Extensions.TriggerRuntime triggerRuntime = new(this);
+        rowInserter = new(logger, tableOpener, triggerRuntime);
+        rowUpdater = new(logger, tableOpener, statisticsManager, triggerRuntime);
         tableDropper = new(catalogs, statisticsManager, logger);
-        rowDeleter = new(logger, tableOpener, statisticsManager);
+        rowDeleter = new(logger, tableOpener, statisticsManager, triggerRuntime);
         queryExecutor = new(logger, options, statisticsManager, sharedNode?.Kahuna, fragmentTransport);
         // The allocator is the single binding to Kahuna's sequencer; the binder reserves a
         // statement's values through it before the statement runs. Both are built here, ahead of
@@ -564,7 +588,8 @@ public sealed class CommandExecutor : IAsyncDisposable
             tableOpener,
             statisticsManager,
             validator,
-            isClusterMode
+            isClusterMode,
+            Extensions
         );
 
         metadataDiscovery = new Controllers.Maintenance.MetadataDiscoveryService(executorContext, options);
@@ -1012,6 +1037,8 @@ public sealed class CommandExecutor : IAsyncDisposable
     /// </summary>
     public async Task<ExecuteDDLSQLResult> ExecuteDDLSQL(ExecuteSQLTicket ticket)
     {
+        EnterExtensionScope();
+
         // Listed for SHOW QUERIES, but not cancellable: schema DDL ignores the read token, so the
         // ticket keeps the transport's own.
         Diagnostics.QueryActivityEntry? activity = queryActivity.Begin(ticket, cancellable: false, executing: true);
@@ -1086,6 +1113,8 @@ public sealed class CommandExecutor : IAsyncDisposable
     /// </summary>
     public async Task<ExecuteNonSQLResult> ExecuteNonSQLQuery(ExecuteSQLTicket ticket)
     {
+        EnterExtensionScope();
+
         // Listed for SHOW QUERIES, but not cancellable: a write ignores the read token once its first
         // mutation lands, so the ticket keeps the transport's own.
         Diagnostics.QueryActivityEntry? activity = queryActivity.Begin(ticket, cancellable: false, executing: true);
@@ -1182,9 +1211,17 @@ public sealed class CommandExecutor : IAsyncDisposable
     /// </summary>
     private const int MaxFenceRetries = 3;
 
-    public Task<CreateTableResult> CreateTable(CreateTableTicket ticket) => schemaDdl.CreateTable(ticket);
+    public Task<CreateTableResult> CreateTable(CreateTableTicket ticket)
+    {
+        EnterExtensionScope();
+        return schemaDdl.CreateTable(ticket);
+    }
 
-    public Task<bool> AlterTable(AlterTableTicket ticket) => schemaDdl.AlterTable(ticket);
+    public Task<bool> AlterTable(AlterTableTicket ticket)
+    {
+        EnterExtensionScope();
+        return schemaDdl.AlterTable(ticket);
+    }
 
     /// <summary>
     /// Re-encodes every existing row so a newly added column is stored with its default value.
@@ -1192,7 +1229,10 @@ public sealed class CommandExecutor : IAsyncDisposable
     /// leader-change resume coordinator.
     /// </summary>
     internal Task BackfillColumnDefaultsAsync(DatabaseDescriptor database, string tableName, ColumnInfo column)
-        => schemaDdl.BackfillColumnDefaultsAsync(database, tableName, column);
+    {
+        EnterExtensionScope();
+        return schemaDdl.BackfillColumnDefaultsAsync(database, tableName, column);
+    }
 
     /// <summary>
     /// Drops the sequence an identity column owned after a failed ADD COLUMN removed that column.
@@ -1302,8 +1342,11 @@ public sealed class CommandExecutor : IAsyncDisposable
     /// resume coordinator, which validates a constraint that a previous leader enforced but did not
     /// validate.
     /// </summary>
-    internal Task ValidateRowConstraintAsync(DatabaseDescriptor database, string tableName, Catalogs.Models.SchemaElementKind kind, string constraintName) =>
-        schemaDdl.ValidateRowConstraintAsync(database, tableName, kind, constraintName);
+    internal Task ValidateRowConstraintAsync(DatabaseDescriptor database, string tableName, Catalogs.Models.SchemaElementKind kind, string constraintName)
+    {
+        EnterExtensionScope();
+        return schemaDdl.ValidateRowConstraintAsync(database, tableName, kind, constraintName);
+    }
 
     /// <summary>
     /// Test-only hook, invoked by <c>ADD CONSTRAINT ... CHECK</c> and by <c>SET NOT NULL</c> after the
@@ -1397,7 +1440,10 @@ public sealed class CommandExecutor : IAsyncDisposable
     /// scans all existing rows and rejects if any row violates the expression.
     /// </summary>
     public Task<ExecuteDDLSQLResult> AlterConstraint(AlterConstraintTicket ticket)
-        => schemaDdl.AlterConstraint(ticket);
+    {
+        EnterExtensionScope();
+        return schemaDdl.AlterConstraint(ticket);
+    }
 
     /// <summary>
     /// Attaches or removes a comment on a table, column, index, or database. Public so a ticket caller
@@ -1659,21 +1705,56 @@ public sealed class CommandExecutor : IAsyncDisposable
     #region DML
 
     /// <summary>Inserts a row from a typed ticket.</summary>
-    public Task<InsertResult> Insert(InsertTicket ticket) => rowCommands.Insert(ticket);
+    public Task<InsertResult> Insert(InsertTicket ticket)
+    {
+        EnterExtensionScope();
+        return rowCommands.Insert(ticket);
+    }
 
     /// <summary>Updates rows specifying filters and sorts.</summary>
-    public Task<UpdateResult> Update(UpdateTicket ticket) => rowCommands.Update(ticket);
+    public Task<UpdateResult> Update(UpdateTicket ticket)
+    {
+        EnterExtensionScope();
+        return rowCommands.Update(ticket);
+    }
 
     /// <summary>Deletes rows specifying a filter criteria.</summary>
-    public Task<DeleteResult> Delete(DeleteTicket ticket) => rowCommands.Delete(ticket);
+    public Task<DeleteResult> Delete(DeleteTicket ticket)
+    {
+        EnterExtensionScope();
+        return rowCommands.Delete(ticket);
+    }
 
     /// <summary>Queries table data specifying filters and sorts.</summary>
     public Task<(DatabaseDescriptor, IAsyncEnumerable<QueryResultRow>)> Query(QueryTicket ticket)
-        => rowCommands.Query(ticket);
+    {
+        EnterExtensionScope();
+
+        if (!CamusDB.Core.Extensions.ExtensionRegistry.AnyLoaded)
+            return rowCommands.Query(ticket);
+
+        return BindAsync(rowCommands.Query(ticket));
+
+        async Task<(DatabaseDescriptor, IAsyncEnumerable<QueryResultRow>)> BindAsync(Task<(DatabaseDescriptor, IAsyncEnumerable<QueryResultRow>)> query)
+        {
+            (DatabaseDescriptor database, IAsyncEnumerable<QueryResultRow> cursor) = await query.ConfigureAwait(false);
+            return (database, CamusDB.Core.Extensions.ExtensionScopedCursor.Bind(cursor, Extensions));
+        }
+    }
 
     /// <summary>Queries a table by the row's id.</summary>
     public Task<IAsyncEnumerable<Dictionary<string, ColumnValue>>> QueryById(QueryByIdTicket ticket)
-        => rowCommands.QueryById(ticket);
+    {
+        EnterExtensionScope();
+
+        if (!CamusDB.Core.Extensions.ExtensionRegistry.AnyLoaded)
+            return rowCommands.QueryById(ticket);
+
+        return BindAsync(rowCommands.QueryById(ticket));
+
+        async Task<IAsyncEnumerable<Dictionary<string, ColumnValue>>> BindAsync(Task<IAsyncEnumerable<Dictionary<string, ColumnValue>>> query) =>
+            CamusDB.Core.Extensions.ExtensionScopedCursor.Bind(await query.ConfigureAwait(false), Extensions);
+    }
 
     /// <summary>Mints an HLC timestamp through the shared node's clock.</summary>
     internal HLCTimestamp ClusterNow() => ctasExecutor.ClusterNow();
@@ -1684,7 +1765,10 @@ public sealed class CommandExecutor : IAsyncDisposable
     /// </summary>
     internal Task<bool> CreateRelationInDdlTransactionAsync(
         DatabaseDescriptor database, CreateTableTicket ticket, string tableId, bool validate)
-        => ctasExecutor.CreateRelationInDdlTransactionAsync(database, ticket, tableId, validate);
+    {
+        EnterExtensionScope();
+        return ctasExecutor.CreateRelationInDdlTransactionAsync(database, ticket, tableId, validate);
+    }
 
     /// <summary>Drops a refresh's staging relation, best-effort.</summary>
     internal Task DropStagingRelationAsync(DatabaseDescriptor database, string relationName)
@@ -1697,7 +1781,10 @@ public sealed class CommandExecutor : IAsyncDisposable
         IReadOnlyList<DerivedColumnSchema> sourceColumns,
         IReadOnlyList<string> targetColumns,
         IReadOnlyList<QueryResultRow> rows)
-        => ctasExecutor.InsertRefreshChunkAsync(database, relationName, sourceColumns, targetColumns, rows);
+    {
+        EnterExtensionScope();
+        return ctasExecutor.InsertRefreshChunkAsync(database, relationName, sourceColumns, targetColumns, rows);
+    }
 
     /// <summary>
     /// Executes a SQL statement that returns rows: <c>SELECT</c> in all its forms and the
@@ -1705,7 +1792,23 @@ public sealed class CommandExecutor : IAsyncDisposable
     /// </summary>
     public Task<(DatabaseDescriptor database, IAsyncEnumerable<QueryResultRow> cursor)> ExecuteSQLQuery(
         ExecuteSQLTicket ticket, CacheMetadataHolder? metaOut = null, QuerySchemaHolder? schemaOut = null)
-        => selectExecutor.ExecuteSQLQuery(ticket, metaOut, schemaOut);
+    {
+        EnterExtensionScope();
+
+        // The returned cursor is pulled later, possibly in a flow that never saw this scope; once any
+        // extension is loaded in the process, the cursor re-enters this engine's scope on every row.
+        if (!CamusDB.Core.Extensions.ExtensionRegistry.AnyLoaded)
+            return selectExecutor.ExecuteSQLQuery(ticket, metaOut, schemaOut);
+
+        return BindAsync(selectExecutor.ExecuteSQLQuery(ticket, metaOut, schemaOut));
+
+        async Task<(DatabaseDescriptor database, IAsyncEnumerable<QueryResultRow> cursor)> BindAsync(
+            Task<(DatabaseDescriptor database, IAsyncEnumerable<QueryResultRow> cursor)> query)
+        {
+            (DatabaseDescriptor database, IAsyncEnumerable<QueryResultRow> cursor) = await query.ConfigureAwait(false);
+            return (database, CamusDB.Core.Extensions.ExtensionScopedCursor.Bind(cursor, Extensions));
+        }
+    }
 
     /// <summary>
     /// Executes a peer coordinator's span-scan fragment on this node. Read path only: a zero-identity
@@ -1713,7 +1816,10 @@ public sealed class CommandExecutor : IAsyncDisposable
     /// </summary>
     public IAsyncEnumerable<QueryFragmentRow> ExecuteQueryFragment(
         QueryFragmentRequest request, CancellationToken cancellationToken = default)
-        => selectExecutor.ExecuteQueryFragment(request, cancellationToken);
+    {
+        EnterExtensionScope();
+        return CamusDB.Core.Extensions.ExtensionScopedCursor.Bind(selectExecutor.ExecuteQueryFragment(request, cancellationToken), Extensions);
+    }
 
     /// <summary>
     /// Binds a view body and returns its output schema and projections without reading any rows, so a
@@ -1721,7 +1827,10 @@ public sealed class CommandExecutor : IAsyncDisposable
     /// </summary>
     internal Task<SelectRowSource> BuildViewSourceAsync(
         DatabaseDescriptor database, NodeAst bodyAst, ExecuteSQLTicket ticket)
-        => selectExecutor.BuildViewSourceAsync(database, bodyAst, ticket);
+    {
+        EnterExtensionScope();
+        return selectExecutor.BuildViewSourceAsync(database, bodyAst, ticket);
+    }
 
     /// <summary>
     /// Opens a materialized view's body as a row source pinned to a snapshot, with the revision floor
@@ -1729,7 +1838,10 @@ public sealed class CommandExecutor : IAsyncDisposable
     /// </summary>
     internal Task<SelectRowSource> BuildMaterializedViewSourceAsync(
         DatabaseDescriptor database, NodeAst bodyAst, ExecuteSQLTicket ticket, HLCTimestamp snapshot)
-        => selectExecutor.BuildMaterializedViewSourceAsync(database, bodyAst, ticket, snapshot);
+    {
+        EnterExtensionScope();
+        return selectExecutor.BuildMaterializedViewSourceAsync(database, bodyAst, ticket, snapshot);
+    }
 
 
 

@@ -402,6 +402,18 @@ public sealed class CatalogsManager
         string? claimedIndexId)
         => await elements.ReplicateAddForeignKeyAsync(database, tableName, tableId, foreignKey, claimedIndexId).ConfigureAwait(false);
 
+    /// <summary>Proposes <c>CREATE TRIGGER</c>; see <c>SchemaElementReplicator.ReplicateCreateTriggerAsync</c>.</summary>
+    internal async Task ReplicateCreateTriggerAsync(
+        DatabaseDescriptor database,
+        string tableName,
+        string tableId,
+        TriggerDefinition trigger)
+        => await elements.ReplicateCreateTriggerAsync(database, tableName, tableId, trigger).ConfigureAwait(false);
+
+    /// <summary>Proposes <c>DROP TRIGGER</c>; see <c>SchemaElementReplicator.ReplicateDropTriggerAsync</c>.</summary>
+    internal async Task ReplicateDropTriggerAsync(DatabaseDescriptor database, string tableName, string triggerName)
+        => await elements.ReplicateDropTriggerAsync(database, tableName, triggerName).ConfigureAwait(false);
+
     public async Task ReplicateSetColumnStorageAsync(
         DatabaseDescriptor database,
         string tableName,

@@ -112,7 +112,9 @@ internal sealed class TableDropper
                 // per-row index deletes the delete path would otherwise issue are wasted mutations.
                 await rowDeleter.Delete(
                     queryExecutor, database, table, deleteTicket,
-                    allowMaterializedView: true, checkForeignKeys: false, maintainIndexes: false
+                    allowMaterializedView: true, checkForeignKeys: false, maintainIndexes: false,
+                    // Engine-internal removal of a table's own rows: no user trigger fires.
+                    fireTriggers: false
                 ).ConfigureAwait(false);
             }
         }

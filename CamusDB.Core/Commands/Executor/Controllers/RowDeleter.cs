@@ -37,13 +37,17 @@ internal sealed class RowDeleter
     /// <summary>Opens the child tables a foreign-key check probes.</summary>
     private readonly TableOpener tableOpener;
 
-    public RowDeleter(ILogger<ICamusDB> logger, TableOpener tableOpener, StatisticsManager? stats = null)
+    /// <summary>The engine's trigger runtime; null on a controller built without an engine.</summary>
+    private readonly Extensions.TriggerRuntime? triggers;
+
+    public RowDeleter(ILogger<ICamusDB> logger, TableOpener tableOpener, StatisticsManager? stats = null, Extensions.TriggerRuntime? triggers = null)
     {
         ArgumentNullException.ThrowIfNull(tableOpener);
 
         this.logger = logger;
         this.tableOpener = tableOpener;
         _stats = stats;
+        this.triggers = triggers;
     }
 
     /// <param name="allowMaterializedView">
@@ -74,7 +78,8 @@ internal sealed class RowDeleter
         bool allowMaterializedView = false,
         bool checkForeignKeys = true,
         bool maintainIndexes = true,
-        DML.WriteReturningPlan.ReturningRowCollector? returning = null)
+        DML.WriteReturningPlan.ReturningRowCollector? returning = null,
+        bool fireTriggers = true)
     {
         if (!allowMaterializedView)
             MaterializedViewAccessGuard.RequireWritable(table);
@@ -85,6 +90,12 @@ internal sealed class RowDeleter
             ? await ForeignKeyStatementChecker.ForParentDeletesAsync(database, table, tableOpener, ticket.TxnState).ConfigureAwait(false)
             : ForeignKeyStatementChecker.None;
 
+        // Bound before the first delete. An engine-internal removal (the rows of a table being
+        // dropped) fires no user trigger.
+        Extensions.StatementTriggers? rowTriggers = fireTriggers
+            ? triggers?.ForStatement(database, table, ticket.TxnState, TriggerEventSet.Delete)
+            : null;
+
         DeleteFluxState state = new(
             queryExecutor: queryExecutor,
             database: database,
@@ -94,7 +105,8 @@ internal sealed class RowDeleter
         {
             ForeignKeys = foreignKeys,
             MaintainIndexes = maintainIndexes,
-            Returning = returning
+            Returning = returning,
+            Triggers = rowTriggers
         };
 
         FluxMachine<DeleteFluxSteps, DeleteFluxState> machine = new(state);
@@ -104,6 +116,10 @@ internal sealed class RowDeleter
         // After the statement's last write, never before: see ForeignKeyStatementChecker.
         if (deleted > 0 && foreignKeys.HasWork)
             await foreignKeys.CompleteAsync(ticket.TxnState).ConfigureAwait(false);
+
+        // After the last delete and the constraint checks.
+        if (rowTriggers is not null)
+            await rowTriggers.FireAfterAsync().ConfigureAwait(false);
 
         return deleted;
     }
@@ -404,7 +420,8 @@ internal sealed class RowDeleter
             ? SchemaElementStateRules.CollectWritableIndexes(table.Schema, table.Indexes)
             : [];
         HashSet<string>? requiredColumns = null;
-        if (recheck.Columns is not null && (state.Returning is null || state.Returning.RequiredColumns is not null))
+        // A trigger reads all of OLD, so a table with delete triggers decodes the whole row (null).
+        if (state.Triggers is null && recheck.Columns is not null && (state.Returning is null || state.Returning.RequiredColumns is not null))
         {
             requiredColumns = CollectIndexKeyColumns(writableIndexes);
             requiredColumns.UnionWith(recheck.Columns);
@@ -418,6 +435,10 @@ internal sealed class RowDeleter
         }
         RowEncoder.DictionaryDecodeState decodeState = new();
 
+        // A nested statement run by an enclosing BEFORE trigger must not delete a row that statement
+        // still holds an image of; see TriggerReentrancyGuard.
+        Extensions.TriggerReentrancyGuard.ThrowIfProtected(table.Id, chunk);
+
         // Test-only interleaving point; see TestBeforeWriteHook. Read once so a concurrent clear cannot fault it.
         if (TestBeforeWriteHook is { } beforeWriteHook)
             await beforeWriteHook().ConfigureAwait(false);
@@ -426,6 +447,12 @@ internal sealed class RowDeleter
 
         List<KvTableStore.RowDelete> batch = new(chunk.Count);
         List<QueryResultRow>? returnedRows = state.Returning is not null ? new(chunk.Count) : null;
+        List<Dictionary<string, ColumnValue>>? returnedRowsForTriggers = state.Triggers is { HasAfter: true } ? new(chunk.Count) : null;
+
+        // While this chunk's BEFORE triggers run, their SQL must not change a row this chunk read.
+        object? reentrancy = state.Triggers is { HasBefore: true }
+            ? Extensions.TriggerReentrancyGuard.Protect(table.Id, chunk)
+            : null;
 
         for (int i = 0; i < chunk.Count; i++)
         {
@@ -448,6 +475,10 @@ internal sealed class RowDeleter
             if (!recheck.IsEmpty && !await recheck.MatchesAsync(state.QueryExecutor, state.Database, state.LocateTicket!, writableRow).ConfigureAwait(false))
                 continue;
 
+            // A BEFORE DELETE trigger can veto the row by throwing; it cannot change it.
+            if (state.Triggers is { HasBefore: true } beforeTriggers)
+                await beforeTriggers.FireBeforeAsync(writableRow, null).ConfigureAwait(false);
+
             batch.Add(new()
             {
                 RowId = rowId,
@@ -457,13 +488,24 @@ internal sealed class RowDeleter
 
             state.ForeignKeys.AddRemovedParentRow(writableRow);
             returnedRows?.Add(new QueryResultRow(rowId, writableRow));
+            returnedRowsForTriggers?.Add(writableRow);
         }
+
+        if (state.Triggers is { HasBefore: true })
+            Extensions.TriggerReentrancyGuard.Release(reentrancy);
 
         if (_stats is not null && batch.Count > _stats.DeleteBatchMaxChunkSeen)
             _stats.DeleteBatchMaxChunkSeen = batch.Count;
 
         await table.Store.DeleteRowsBatch(tx, batch).ConfigureAwait(false);
         state.DeletedRows += batch.Count;
+
+        // Queued only once the batch is deleted: the AFTER triggers see exactly the counted rows.
+        if (state.Triggers is { HasAfter: true } afterTriggers && returnedRowsForTriggers is not null)
+        {
+            foreach (Dictionary<string, ColumnValue> deletedRow in returnedRowsForTriggers)
+                afterTriggers.QueueAfter(deletedRow, null);
+        }
 
         if (returnedRows is not null)
             await state.Returning!.AddChunkAsync(returnedRows).ConfigureAwait(false);

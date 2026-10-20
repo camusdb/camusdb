@@ -707,6 +707,12 @@ public sealed class KvTransactionsManager : IDisposable
     {
         ArgumentNullException.ThrowIfNull(tx);
 
+        // Refused before anything is finalized; the caller then rolls the transaction back.
+        if (tx.RollbackOnlyReason is { } rollbackOnly)
+            throw new CamusDBException(
+                CamusDBErrorCodes.TransactionRollbackOnly,
+                $"Transaction {tx.UniqueId} can only roll back: {rollbackOnly}");
+
         if (tx.TransactionId == Kommander.Time.HLCTimestamp.Zero)
         {
             // Zero-snapshot fast path: no Kahuna transaction to finalize. Covers serializable read-only
@@ -1002,11 +1008,17 @@ public sealed class KvTransactionsManager : IDisposable
 
             // Aborted = definite non-commit (conflict/deadline). Nothing was committed, so replaying
             // the whole operation from a fresh BeginAsync is safe → CADB0502 (retried by
-            // SerializableRetryHelper for autocommit statements).
+            // SerializableRetryHelper for autocommit statements). The coordinator does not say which
+            // check refused the commit, so the message carries what this side knows: the size of the
+            // staged work and how long the finalize ran. A refusal that arrives at once is a conflict
+            // or a lost lock; one that arrives after seconds of a large finalize is the coordinator's
+            // decision deadline, which is sized from the finalizes it saw before this one.
             if (result == KeyValueResponseType.Aborted)
                 throw new CamusDBException(
                     CamusDBErrorCodes.TransactionConflict,
-                    $"Transaction {tx.UniqueId} commit was aborted by the coordinator (conflict or deadline); retry the operation from BeginAsync"
+                    $"Transaction {tx.UniqueId} commit of {tx.MutationCount} staged mutation(s) was aborted by the coordinator " +
+                    $"after {commitTimer.GetElapsedMilliseconds()} ms and {commitAttempts} attempt(s) (conflict or deadline); " +
+                    "retry the operation from BeginAsync"
                 );
 
             // Errored / anything else: the coordinator session is gone and the outcome is unavailable.

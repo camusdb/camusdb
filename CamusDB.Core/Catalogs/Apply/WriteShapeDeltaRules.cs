@@ -104,6 +104,16 @@ internal static class WriteShapeDeltaRules
                 return WriteShapeTargets.Of(table, SchemaDeltaApplier.FindRelationById(schema, payload.ForeignKey.ReferencedTableId));
             }
 
+            case SchemaOp.CreateTrigger:
+            {
+                // A write planned before the trigger did not fire it; the fence makes it retry and fire.
+                SchemaCreateTriggerPayload payload = SchemaDeltaApplier.DecodePayload<SchemaCreateTriggerPayload>(entry);
+
+                return schema.Tables.TryGetValue(payload.TableName, out TableSchema? table)
+                    ? WriteShapeTargets.Of(table)
+                    : WriteShapeTargets.None;
+            }
+
             case SchemaOp.AddCheckConstraint:
             {
                 SchemaCheckConstraintPayload payload = SchemaDeltaApplier.DecodePayload<SchemaCheckConstraintPayload>(entry);
@@ -159,6 +169,7 @@ internal static class WriteShapeDeltaRules
             case SchemaOp.DropIndex:
             case SchemaOp.RenameIndex:
             case SchemaOp.DropCheckConstraint:
+            case SchemaOp.DropTrigger:
             case SchemaOp.SetColumnStorage:
             case SchemaOp.SetTableSettings:
             case SchemaOp.SetComment:

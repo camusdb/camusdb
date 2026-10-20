@@ -220,6 +220,12 @@ internal sealed class ForeignKeyStatementChecker
     ///
     /// <para>The set of assigned columns is built only after the graph is known to hold a constraint, so
     /// an UPDATE in a database without one allocates nothing here.</para>
+    ///
+    /// <para><paramref name="assignsEveryColumn"/> is for a table with a BEFORE UPDATE trigger: the
+    /// trigger can change any column of NEW, so the statement's own SET list says nothing about which
+    /// keys may move. Every constraint on either side then takes part, and its tables are opened and
+    /// pinned here, before any trigger runs. The per-row comparison of OLD and NEW keys still skips
+    /// every row whose keys did not change, so a trigger that changes no key costs no probe.</para>
     /// </summary>
     internal static ValueTask<ForeignKeyStatementChecker> ForUpdatesAsync(
         DatabaseDescriptor database,
@@ -227,7 +233,8 @@ internal sealed class ForeignKeyStatementChecker
         TableOpener tableOpener,
         KvTransaction tx,
         Dictionary<string, ColumnValue>? plainValues,
-        Dictionary<string, NodeAst>? exprValues)
+        Dictionary<string, NodeAst>? exprValues,
+        bool assignsEveryColumn = false)
     {
         // Not async on purpose, as in ForChildWritesAsync. A table that no constraint touches needs no
         // look at the assigned columns either.
@@ -235,7 +242,7 @@ internal sealed class ForeignKeyStatementChecker
         if (graph.IsEmpty || (graph.ChildPlansOf(table.Id).Length == 0 && graph.ParentPlansOf(table.Id).Length == 0))
             return new ValueTask<ForeignKeyStatementChecker>(None);
 
-        return BuildUpdatesAsync(database, table, tableOpener, tx, graph, plainValues, exprValues);
+        return BuildUpdatesAsync(database, table, tableOpener, tx, graph, plainValues, exprValues, assignsEveryColumn);
     }
 
     private static async ValueTask<ForeignKeyStatementChecker> BuildUpdatesAsync(
@@ -245,7 +252,8 @@ internal sealed class ForeignKeyStatementChecker
         KvTransaction tx,
         ForeignKeyGraph graph,
         Dictionary<string, ColumnValue>? plainValues,
-        Dictionary<string, NodeAst>? exprValues)
+        Dictionary<string, NodeAst>? exprValues,
+        bool assignsEveryColumn)
     {
         HashSet<string> assignedColumns = new(StringComparer.OrdinalIgnoreCase);
 
@@ -254,6 +262,12 @@ internal sealed class ForeignKeyStatementChecker
 
         if (exprValues is not null)
             assignedColumns.UnionWith(exprValues.Keys);
+
+        if (assignsEveryColumn)
+        {
+            foreach (TableColumnSchema column in table.Schema.Columns!)
+                assignedColumns.Add(column.Name);
+        }
 
         if (assignedColumns.Count == 0)
             return None;

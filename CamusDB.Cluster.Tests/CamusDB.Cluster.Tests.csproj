@@ -30,6 +30,25 @@
     <ProjectReference Include="..\CamusDB\CamusDB.csproj" />
   </ItemGroup>
 
+  <!-- Extension fixtures, copied into extension-fixtures/<Fixture>/ and never referenced as
+       assemblies, exactly as in CamusDB.Tests (see the comment there). -->
+  <ItemGroup>
+    <ExtensionFixture Include="..\CamusDB.Tests.Extensions\*\*.csproj" />
+    <ProjectReference Include="@(ExtensionFixture)" ReferenceOutputAssembly="false" Private="false" />
+  </ItemGroup>
+
+  <Target Name="CopyExtensionFixtures" AfterTargets="Build">
+    <MSBuild Projects="@(ExtensionFixture)" Targets="GetTargetPath" Properties="Configuration=$(Configuration)">
+      <Output TaskParameter="TargetOutputs" ItemName="_ExtensionFixtureOutput" />
+    </MSBuild>
+    <ItemGroup>
+      <_ExtensionFixtureFile Include="%(_ExtensionFixtureOutput.RootDir)%(_ExtensionFixtureOutput.Directory)*.dll">
+        <FixtureName>%(_ExtensionFixtureOutput.Filename)</FixtureName>
+      </_ExtensionFixtureFile>
+    </ItemGroup>
+    <Copy SourceFiles="@(_ExtensionFixtureFile)" DestinationFolder="$(OutDir)extension-fixtures\%(_ExtensionFixtureFile.FixtureName)" SkipUnchangedFiles="true" />
+  </Target>
+
   <ItemGroup>
     <!-- The gRPC transport test doubles (call context, stream readers and writers) are shared with
          the main test project rather than duplicated, so the two suites drive the service the same way. -->

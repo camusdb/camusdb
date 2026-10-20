@@ -132,6 +132,9 @@ stat    : select_stmt { $$.n = $1.n; }
         | create_sequence_stmt { $$.n = $1.n; }
         | drop_sequence_stmt { $$.n = $1.n; }
         | alter_sequence_stmt { $$.n = $1.n; }
+        | create_trigger_stmt { $$.n = $1.n; }
+        | drop_trigger_stmt { $$.n = $1.n; }
+        | call_stmt { $$.n = $1.n; }
         ;
 
 opt_distinct : TDISTINCT { $$.s = "1"; }
@@ -1034,10 +1037,12 @@ show_stmt : TSHOW TCOLUMNS TFROM any_identifier { $$.n = new(NodeType.ShowColumn
                 $$.n = new(NodeType.ShowQueries, null, null, null, null, null, null, null, null);
             else if (string.Equals($2.s, "connections", System.StringComparison.OrdinalIgnoreCase))
                 $$.n = new(NodeType.ShowConnections, null, null, null, null, null, null, null, null);
+            else if (string.Equals($2.s, "extensions", System.StringComparison.OrdinalIgnoreCase))
+                $$.n = new(NodeType.ShowExtensions, null, null, null, null, null, null, null, null);
             else
                 throw new CamusDB.Core.CamusDBException(
                     CamusDB.Core.CamusDBErrorCodes.InvalidInput,
-                    "Expected: SHOW VARIABLES [LIKE '<pattern>'], SHOW USERS [LIKE '<pattern>'], SHOW QUERIES [LIKE '<pattern>'] or SHOW CONNECTIONS");
+                    "Expected: SHOW VARIABLES [LIKE '<pattern>'], SHOW USERS [LIKE '<pattern>'], SHOW QUERIES [LIKE '<pattern>'], SHOW CONNECTIONS or SHOW EXTENSIONS");
           }
           | TSHOW TIDENTIFIER TLIKE string
           {
@@ -1148,6 +1153,37 @@ cancel_stmt : TIDENTIFIER TIDENTIFIER string
               $$.n = new(NodeType.CancelQuery, $3.n, null, null, null, null, null, null, null);
             }
             ;
+
+/* CREATE TRIGGER <name> ON <table> {BEFORE|AFTER} <event>[, <event>...] EXTERNAL NAME '<Type>' and
+   DROP TRIGGER <name> ON <table>. No word is reserved: TRIGGER, BEFORE, AFTER, EXTERNAL and NAME are
+   plain identifiers that CreateTriggerStatement / DropTriggerStatement check, so each stays usable as
+   a table or column name. No other statement starts with CREATE or DROP followed by an identifier, so
+   the shapes cannot collide. The events are the INSERT, UPDATE and DELETE tokens. */
+create_trigger_stmt : TCREATE TIDENTIFIER any_identifier TON any_identifier TIDENTIFIER trigger_event_list TIDENTIFIER TIDENTIFIER string
+                      { $$.n = CreateTriggerStatement($2.s, $3.n, $5.n, $6.s, $7.s, $8.s, $9.s, $10.n); }
+                    ;
+
+drop_trigger_stmt : TDROP TIDENTIFIER any_identifier TON any_identifier
+                    { $$.n = DropTriggerStatement($2.s, $3.n, $5.n); }
+                  ;
+
+trigger_event_list : trigger_event_list TCOMMA trigger_event { $$.s = $1.s + "," + $3.s; }
+                   | trigger_event { $$.s = $1.s; }
+                   ;
+
+trigger_event : TINSERT { $$.s = "insert"; }
+              | TUPDATE { $$.s = "update"; }
+              | TDELETE { $$.s = "delete"; }
+              ;
+
+/* CALL <procedure>(<args>). CALL is a plain identifier checked in CallStatement, like FLUSH and
+   CANCEL. The procedure name is a bare TIDENTIFIER, not any_identifier: after two identifiers the
+   next token alone decides between FLUSH SESSIONS (end of input), CANCEL QUERY (a string) and CALL
+   (an opening parenthesis), with no reduction to choose first. The arguments reuse the function-call
+   argument list. */
+call_stmt : TIDENTIFIER TIDENTIFIER LPAREN RPAREN { $$.n = CallStatement($1.s, $2.s, null); }
+          | TIDENTIFIER TIDENTIFIER LPAREN fcall_argument_list RPAREN { $$.n = CallStatement($1.s, $2.s, $4.n); }
+          ;
 
 identifier_index_list : identifier_index_list TCOMMA identifier_index { $$.n = new(NodeType.IndexIdentifierList, $1.n, $3.n, null, null, null, null, null, null); }
                       | identifier_index { $$.n = $1.n; $$.s = $1.s; }

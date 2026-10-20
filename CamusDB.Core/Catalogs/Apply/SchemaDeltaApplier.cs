@@ -93,6 +93,8 @@ internal static class SchemaDeltaApplier
             SchemaOp.RenameSequence => SequenceDeltaApplier.ApplyRenameSequence(schema, SchemaDeltaApplier.DecodePayload<SchemaRenamePayload>(entry)),
             SchemaOp.AlterSequence => SequenceDeltaApplier.ApplyAlterSequence(schema, SchemaDeltaApplier.DecodePayload<SchemaAlterSequencePayload>(entry)),
             SchemaOp.AddForeignKey => ForeignKeyDeltaApplier.ApplyAddForeignKey(schema, SchemaDeltaApplier.DecodePayload<SchemaAddForeignKeyPayload>(entry)),
+            SchemaOp.CreateTrigger => TriggerDeltaApplier.ApplyCreateTrigger(schema, SchemaDeltaApplier.DecodePayload<SchemaCreateTriggerPayload>(entry)),
+            SchemaOp.DropTrigger => TriggerDeltaApplier.ApplyDropTrigger(schema, SchemaDeltaApplier.DecodePayload<SchemaDropTriggerPayload>(entry)),
             _ => throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Unknown schema operation '{entry.Op}'")
         };
 
@@ -199,6 +201,10 @@ internal static class SchemaDeltaApplier
             // Answered from the constraint's immutable id, so a constraint of the same name that a
             // later statement added is not mistaken for this one.
             SchemaOp.AddForeignKey => HasForeignKey(schema, DecodePayload<SchemaAddForeignKeyPayload>(entry)),
+            // Trigger ops do not move TableSchema.Version, so the version fallback would answer
+            // "applied" for any unrelated DDL that did. The table's own list is the proof.
+            SchemaOp.CreateTrigger => TriggerDeltaApplier.WasCreateApplied(schema, DecodePayload<SchemaCreateTriggerPayload>(entry)),
+            SchemaOp.DropTrigger => TriggerDeltaApplier.WasDropApplied(schema, DecodePayload<SchemaDropTriggerPayload>(entry)),
             _ => schema.SchemaVersion >= entry.ToVersion
         };
     }

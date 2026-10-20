@@ -1,0 +1,67 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!-- The contract that CamusDB extensions compile against. netstandard2.0 lets an extension
+         target netstandard or net10; the net10 server loads both. Extensions cannot reference
+         CamusDB.Core (it is net10 and internal), so every type an extension sees lives here, and
+         the value surface uses plain CLR types only. The server's extension load context hands
+         every extension the server's own copy of this assembly, so there is exactly one set of
+         contract types in the process. -->
+    <TargetFramework>netstandard2.0</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <!-- Versioned with the server: keep <Version> equal to CamusDB/CamusDB.csproj (a test fails the
+         build when they differ). The assembly version derived from it is the contract version, and
+         the loader refuses an extension compiled against a newer one: a newer major from 1.0 on, and
+         a newer major.minor while the major is 0, because a 0.x minor release may break the contract. -->
+    <Version>0.16.0</Version>
+    <RootNamespace>CamusDB.Extensions</RootNamespace>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <!-- CS1587: the repository's license header opens with "/**", which the documentation
+         generator reads as a misplaced XML comment. The header stays; the warning is noise. -->
+    <NoWarn>$(NoWarn);CS1587</NoWarn>
+  </PropertyGroup>
+
+  <!-- Published to nuget.org as CamusDB.Extensions.Abstractions, so an extension author references a
+       package instead of this source tree. scripts/publish-nuget.sh packs and pushes it with the
+       server tool, at the same version. The package carries the XML documentation, which is the
+       extension-author reference, and a symbols package for stepping into the contract types. A pack
+       whose package version differs from the assembly version is refused (CheckContractPackageVersion). -->
+  <PropertyGroup>
+    <IsPackable>true</IsPackable>
+    <PackageId>CamusDB.Extensions.Abstractions</PackageId>
+    <PackageOutputPath>$(MSBuildThisFileDirectory)..\artifacts\nupkg</PackageOutputPath>
+
+    <Authors>CamusDB</Authors>
+    <Description>The contract for CamusDB C# extensions: attributes and interfaces for SQL scalar functions, row triggers and stored procedures that a CamusDB server loads from operator-deployed assemblies.</Description>
+    <PackageTags>camusdb;database;sql;extensions;udf;trigger;stored-procedure</PackageTags>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageLicenseFile>LICENSE.txt</PackageLicenseFile>
+    <PackageProjectUrl>https://github.com/camusdb/camusdb/blob/main/docs/csharp-extensions.md</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/camusdb/camusdb</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+
+    <IncludeSymbols>true</IncludeSymbols>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+    <Deterministic>true</Deterministic>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="README.md" Pack="true" PackagePath="/" />
+    <None Include="../LICENSE.txt" Pack="true" PackagePath="/" Visible="false" />
+  </ItemGroup>
+
+  <!-- The loader judges an extension by the contract assembly's version, so a package whose version
+       differs from the assembly's would install a contract the server judges by another number. A
+       pack with such a version (for example -p:PackageVersion=0.17.0 while the assembly is 0.16.0)
+       fails here instead of publishing a misleading package. Pre-release suffixes are ignored. -->
+  <Target Name="CheckContractPackageVersion" BeforeTargets="GenerateNuspec">
+    <PropertyGroup>
+      <_ContractVersion>$([System.Version]::Parse('$(AssemblyVersion)').ToString(3))</_ContractVersion>
+      <_PackageCore>$(PackageVersion.Split('-')[0])</_PackageCore>
+    </PropertyGroup>
+    <Error Condition="'$(_ContractVersion)' != '$(_PackageCore)'"
+           Text="Package version $(PackageVersion) differs from the contract assembly version $(AssemblyVersion). Change the contract's &lt;Version&gt; together with the server's." />
+  </Target>
+
+</Project>

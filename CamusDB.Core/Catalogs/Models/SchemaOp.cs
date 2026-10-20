@@ -227,5 +227,21 @@ public enum SchemaOp
     /// ordered against it in log order. Touches only the child table. Does not bump
     /// <c>TableSchema.Version</c>: a constraint is not part of the row encoding.</para>
     /// </summary>
-    AddForeignKey = 28
+    AddForeignKey = 28,
+
+    /// <summary>
+    /// Add a row trigger to an existing table (payload: <c>SchemaCreateTriggerPayload</c>), from
+    /// <c>CREATE TRIGGER</c>. The proposer resolved the extension type and recorded its assembly hash;
+    /// the apply stores metadata only and every node binds lazily at the first DML. Touches only the
+    /// target table, addressed by name and checked by id. Does not bump <c>TableSchema.Version</c>: a
+    /// trigger is not part of the row encoding. Fences writes planned before it, because those did
+    /// not fire the trigger.
+    /// </summary>
+    CreateTrigger = 29,
+
+    /// <summary>
+    /// Remove a row trigger from a table (payload: <c>SchemaDropTriggerPayload</c>), from
+    /// <c>DROP TRIGGER</c>. Removes a duty, so it fences nothing.
+    /// </summary>
+    DropTrigger = 30
 }

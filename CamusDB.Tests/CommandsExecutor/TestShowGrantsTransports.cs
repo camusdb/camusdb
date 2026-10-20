@@ -430,6 +430,7 @@ internal sealed class TestShowGrantsTransports : BaseTest
             (NodeType.ShowUsers,           "SHOW USERS"),
             (NodeType.ShowEngineStats,     "SHOW ENGINE STATS"),
             (NodeType.ShowVariables,       "SHOW VARIABLES"),
+            (NodeType.ShowExtensions,      "SHOW EXTENSIONS"),
             (NodeType.ShowSlowQueries,     "SHOW SLOW QUERIES"),
         ];
 

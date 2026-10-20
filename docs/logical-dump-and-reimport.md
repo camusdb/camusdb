@@ -112,6 +112,7 @@ statements shown, and recreate them after the reimport.
 | Materialized views | `SHOW MATERIALIZED VIEWS;` then `SHOW CREATE MATERIALIZED VIEW name;` | Run the printed statement, then `REFRESH MATERIALIZED VIEW name;` |
 | Users | `SHOW USERS;` as a superuser; passwords cannot be exported | `CREATE USER name IDENTIFIED BY '…';` |
 | Grants | `SHOW GRANTS FOR *;` as a superuser | `GRANT … ON … TO name;` |
+| Triggers | Keep the `CREATE TRIGGER` statements you ran; deploy the same extension files on the new server (see [csharp-extensions.md](csharp-extensions.md)) | Run each `CREATE TRIGGER` after the rows are loaded, so the reimport fires no trigger |
 | Cluster settings | `SHOW VARIABLES LIKE '%';` and keep the rows whose source is not the default | `SET CLUSTER SETTING name = value;` |
 | Table statistics | Nothing to record | `ANALYZE table;` per table after the rows are loaded |
 | Database branches | `SHOW BRANCHES FROM parent;` | See the note below |

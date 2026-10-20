@@ -15,7 +15,8 @@ The host project is `CamusDB.Wasm/`.
   data set.
 - It runs on the **default single-threaded** .NET WebAssembly runtime. It needs no special HTTP
   headers, so any static host can serve it, for example GitHub Pages.
-- Features that need a file system or the network are not available: backups, and anything that
+- Features that need a file system or the network are not available: backups, C# extensions
+  (functions, triggers and `CALL` procedures, which load assemblies from files), and anything that
   reads or writes files outside memory.
 
 ## How it works

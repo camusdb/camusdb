@@ -95,6 +95,7 @@ Features
 - **Sequences** — `CREATE SEQUENCE` with `nextval`, `currval`, and `setval`, usable as a column default (`DEFAULT nextval('order_no')`); `SHOW SEQUENCES` and `SHOW CREATE SEQUENCE`.
 - **Vector search** — embeddings stored as `bytes` columns, ranked with exact `l2_distance`, `cosine_distance`, and `inner_product` in an ordinary `ORDER BY … LIMIT`.
 - **Row-level TTL** — a table names an expiry column (`ALTER TABLE t SET (ttl_expiration_expression = 'expires_at')`) and a background sweep deletes expired rows; the parameters follow CockroachDB's row-level TTL.
+- **C# extensions** — scalar functions, row triggers (`CREATE TRIGGER … EXTERNAL NAME`) and stored procedures (`CALL`) written in C#, loaded from operator-deployed assemblies at startup, with a SAFE check for reviewed code. See [C# extensions](docs/csharp-extensions.md).
 - **Large values** — `string`, `bytes`, and array cells are compressed with LZ4 and moved out of the row when they are large, with a per-column storage strategy; query results do not change.
 - **Authentication and authorization** — off by default; `CREATE USER` / `ALTER USER` / `DROP USER`, `GRANT` / `REVOKE` privileges, `SHOW GRANTS`, `SHOW USERS`, and token-based access over both APIs.
 - **Backups and point-in-time recovery** — node-wide full and incremental backups and restore through a server-admin HTTP API, with retention and garbage collection.
@@ -102,7 +103,7 @@ Features
 - **Distributed queries** — with key-range sharding and `distributed_query_execution` enabled, eligible scans run as fragments on span leaders. Peers can filter rows, compute partial aggregates, and probe eligible inner hash joins before the coordinator gathers results. See [query planning](docs/query-planner.md#part-iv--distributed-ready-plan-properties) for the supported shapes.
 - **Standalone mode** — runs as a single embedded process with no cluster configuration required.
 - **APIs** — all database operations are accessible over a JSON/HTTP endpoint and over a gRPC endpoint (streaming query results and a duplex batch-execute channel with per-transaction chains).
-- **Observability** — `SHOW ENGINE STATS`, `SHOW SLOW QUERIES`, `SHOW STATISTICS FOR`, `SHOW RANGES`, and `SHOW VARIABLES` from a SQL prompt; a read-only operator dashboard on each node's HTTP port; and opt-in OpenTelemetry metrics and traces.
+- **Observability** — `SHOW ENGINE STATS`, `SHOW SLOW QUERIES`, `SHOW STATISTICS FOR`, `SHOW RANGES`, `SHOW VARIABLES`, and `SHOW EXTENSIONS` from a SQL prompt; a read-only operator dashboard on each node's HTTP port; and opt-in OpenTelemetry metrics and traces.
 - **Runtime cluster settings** — `SET CLUSTER SETTING` / `RESET CLUSTER SETTING` change a defined subset of the configuration on every node without a restart.
 - **Learned client routing** — servers attach advisory routing metadata to SQL responses, so a multi-endpoint client sends repeated statements straight to the node that leads their data.
 - **Logical dump and reimport** — move data across storage revisions or machines with `camus-dump` and `camus-cli`.

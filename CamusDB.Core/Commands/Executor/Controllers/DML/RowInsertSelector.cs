@@ -171,6 +171,10 @@ internal sealed class RowInsertSelector
         ForeignKeyStatementChecker foreignKeys = await rowInserter
             .CreateStatementCheckerAsync(database, table, ticket.TxnState).ConfigureAwait(false);
 
+        // Owned here for the same reason as the checker: the AFTER triggers of the statement fire once,
+        // after the last page, not after each page.
+        Extensions.StatementTriggers? triggers = rowInserter.CreateStatementTriggers(database, table, ticket.TxnState);
+
         // Write in pages so a large copy does not hold every serialized row at once. All pages share
         // the caller's transaction, so a failure in a later page rolls back the earlier ones.
         int pageSize = Math.Max(1, database.Options.SpillEffectiveThreshold);
@@ -187,12 +191,15 @@ internal sealed class RowInsertSelector
                 values: page
             );
 
-            inserted += await rowInserter.Insert(database, table, pageTicket, foreignKeys, insertedRows).ConfigureAwait(false);
+            inserted += await rowInserter.Insert(database, table, pageTicket, foreignKeys, insertedRows, triggers).ConfigureAwait(false);
             statisticsManager.TrackInsert(database, table, page.Count, page);
         }
 
         if (foreignKeys.HasWork)
             await foreignKeys.CompleteAsync(ticket.TxnState, statementTicket.CancellationToken).ConfigureAwait(false);
+
+        if (triggers is not null)
+            await triggers.FireAfterAsync().ConfigureAwait(false);
 
         return inserted;
     }

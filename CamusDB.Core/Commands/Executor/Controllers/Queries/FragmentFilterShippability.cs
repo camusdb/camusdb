@@ -22,6 +22,12 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 ///   them needs a value wire-codec that partial aggregation will introduce later).</item>
 ///   <item>No volatile functions (NOW() etc. must be evaluated exactly once, in one place —
 ///   two nodes evaluating it would disagree).</item>
+///   <item>No function that is not a built-in. A C# extension function is deployed per node: a peer
+///   may not load the assembly at all (the call would fail there) or may load a different build
+///   (the peer would return rows the coordinator's version would not). Nothing on the fragment wire
+///   names the assembly, so the only safe rule is to evaluate such a call on the coordinator. The
+///   check reads the built-in table directly, not the flow's extension scope, so the answer does not
+///   depend on which engine's flow asks.</item>
 /// </list>
 ///
 /// A non-shippable filter is not an error: the coordinator simply scans that span locally,
@@ -44,6 +50,10 @@ internal static class FragmentFilterShippability
 
         switch (node.nodeType)
         {
+            case NodeType.ExprFuncCall
+                when node.leftAst?.yytext is not { } name || !ScalarFunctionEvaluator.IsBuiltInScalarFunction(name):
+                return false;
+
             case NodeType.Placeholder:
             case NodeType.ExprScalarSubquery:
             case NodeType.ExprInSubquery:

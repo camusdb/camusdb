@@ -93,6 +93,18 @@ public static class ConfigResolver
             config.RecordSource("http_peers", ConfigValueSource.CommandLine);
         }
 
+        if (cli.ExtensionAssemblies is { Count: > 0 })
+        {
+            config.ExtensionAssemblies = [.. cli.ExtensionAssemblies];
+            config.RecordSource("extension_assemblies", ConfigValueSource.CommandLine);
+        }
+
+        if (cli.UnsafeExtensionAssemblies is { Count: > 0 })
+        {
+            config.UnsafeExtensionAssemblies = [.. cli.UnsafeExtensionAssemblies];
+            config.RecordSource("unsafe_extension_assemblies", ConfigValueSource.CommandLine);
+        }
+
         if (cli.JoinExisting is bool joinExisting)
         {
             config.JoinExisting = joinExisting;
@@ -205,6 +217,9 @@ public static class ConfigResolver
         DataDirectory = !string.IsNullOrEmpty(config.DataDir) ? config.DataDir : CamusDBOptions.Default.DataDirectory,
 
         MemoryProfile = config.ParseMemoryProfile(),
+
+        ExtensionAssemblies = [.. config.ExtensionAssemblies],
+        UnsafeExtensionAssemblies = [.. config.UnsafeExtensionAssemblies],
 
         StatsFlushIntervalMs = config.StatsFlushIntervalMs,
         StatsAnalyzeSampleRows = config.StatsAnalyzeSampleRows,

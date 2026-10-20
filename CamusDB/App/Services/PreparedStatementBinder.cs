@@ -71,6 +71,7 @@ public static class PreparedStatementBinder
         NodeType.ShowEngineStats or
         NodeType.ShowSlowQueries or
         NodeType.ShowVariables or
+        NodeType.ShowExtensions or
         NodeType.ShowClusterSettings or
         NodeType.ShowQueries or NodeType.ShowClusterQueries or
         NodeType.ShowConnections or NodeType.ShowClusterConnections or

@@ -429,6 +429,17 @@ internal sealed class SelectStatementExecutor
             return (null!, schemaQuerier.ShowConnections(rows));
         }
 
+        // SHOW EXTENSIONS reports the C# extensions this engine loaded when it was constructed. Node-local:
+        // each node deploys its own files, and comparing the hashes node by node is how an operator
+        // finds a node that runs a different build.
+        if (ast.nodeType == NodeType.ShowExtensions)
+        {
+            if (schemaOut is not null)
+                schemaOut.Schema = DerivedTableSchemaBuilder.ShowExtensionsSchema;
+
+            return (null!, schemaQuerier.ShowExtensions(context.Extensions));
+        }
+
         // SHOW VARIABLES reports the configuration this engine was constructed with. Node-local for the
         // same reason as the metrics above, and it opens no database and no transaction.
         if (ast.nodeType == NodeType.ShowVariables)

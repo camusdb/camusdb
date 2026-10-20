@@ -94,6 +94,14 @@ public class ConfigDefinition
     /// </summary>
     public List<string> HttpPeers { get; set; } = [];
 
+    /// <summary>Absolute paths of SAFE extension assemblies. Maps to
+    /// <c>CamusDBOptions.ExtensionAssemblies</c>.</summary>
+    public List<string> ExtensionAssemblies { get; set; } = [];
+
+    /// <summary>Absolute paths of extension assemblies loaded without the SAFE check. Maps to
+    /// <c>CamusDBOptions.UnsafeExtensionAssemblies</c>.</summary>
+    public List<string> UnsafeExtensionAssemblies { get; set; } = [];
+
     /// <summary>
     /// Join a <b>running</b> cluster as a new member instead of bootstrapping one, using
     /// <see cref="Peers"/> as the seed list. The node enters the committed roster as a learner and

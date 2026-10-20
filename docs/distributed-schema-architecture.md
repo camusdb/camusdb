@@ -762,6 +762,11 @@ To scale to databases with many tables, metadata is stored per object, not as on
 {db}/meta/schema                        → LEGACY single-blob schema (migrated on load)
 ```
 
+- **Triggers have no key of their own.** A row trigger (`CREATE TRIGGER`) is a `TriggerDefinition`
+  in `TableSchema.Triggers`, so it is persisted inside the table's own blob and replicated by the
+  `CreateTrigger` / `DropTrigger` deltas. The record holds metadata only (type name, assembly name
+  and SHA-256); each node binds it to its own loaded extension at the first DML that fires it. See
+  [csharp-extensions.md](csharp-extensions.md).
 - Keyed by **immutable `tableId`**, so renaming a table never moves its key.
 - `LoadMetaAsync` range-scans `{db}/meta/table/` to rebuild `Schema.Tables`, and lazily
   loads history on demand via `SchemaHistoryLoader` (a row written under an old version

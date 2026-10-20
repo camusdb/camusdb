@@ -69,9 +69,20 @@ public static class GrpcErrorMapper
         CamusDBErrorCodes.CheckConstraintViolation => StatusCode.InvalidArgument,
         CamusDBErrorCodes.InvalidForeignKeyDefinition => StatusCode.InvalidArgument,
         CamusDBErrorCodes.ForeignKeyCycle => StatusCode.InvalidArgument,
+        CamusDBErrorCodes.ExtensionFunctionFailed => StatusCode.InvalidArgument,
+        CamusDBErrorCodes.TriggerTypeNotFound => StatusCode.InvalidArgument,
+        CamusDBErrorCodes.TriggerTypeAmbiguous => StatusCode.InvalidArgument,
+        CamusDBErrorCodes.TriggerTypeInvalid => StatusCode.InvalidArgument,
+        CamusDBErrorCodes.TriggerTargetInvalid => StatusCode.InvalidArgument,
+        CamusDBErrorCodes.TriggerFailed => StatusCode.InvalidArgument,
+        CamusDBErrorCodes.ExtensionNestingTooDeep => StatusCode.InvalidArgument,
+        CamusDBErrorCodes.ExtensionStatementRefused => StatusCode.InvalidArgument,
+        CamusDBErrorCodes.ProcedureFailed => StatusCode.InvalidArgument,
+        CamusDBErrorCodes.ExtensionCaughtSqlError => StatusCode.InvalidArgument,
 
         // A NUMERIC value outside the type's range, as Spanner reports it.
         CamusDBErrorCodes.NumericValueOutOfRange => StatusCode.OutOfRange,
+        CamusDBErrorCodes.ExtensionValueOutOfRange => StatusCode.OutOfRange,
 
         // Not found
         CamusDBErrorCodes.DatabaseDoesntExist => StatusCode.NotFound,
@@ -80,12 +91,15 @@ public static class GrpcErrorMapper
         CamusDBErrorCodes.UnknownKey          => StatusCode.NotFound,
         CamusDBErrorCodes.OrphanNotFound      => StatusCode.NotFound,
         CamusDBErrorCodes.QueryNotFound       => StatusCode.NotFound,
+        CamusDBErrorCodes.TriggerNotFound     => StatusCode.NotFound,
+        CamusDBErrorCodes.ProcedureNotFound   => StatusCode.NotFound,
 
         // Already exists
         CamusDBErrorCodes.DuplicateUniqueKeyValue => StatusCode.AlreadyExists,
         CamusDBErrorCodes.DuplicatePrimaryKey     => StatusCode.AlreadyExists,
         CamusDBErrorCodes.DatabaseAlreadyExists   => StatusCode.AlreadyExists,
         CamusDBErrorCodes.TableAlreadyExists      => StatusCode.AlreadyExists,
+        CamusDBErrorCodes.TriggerAlreadyExists    => StatusCode.AlreadyExists,
 
         // Failed precondition (non-retryable transaction state)
         CamusDBErrorCodes.TransactionAlreadyCompleted => StatusCode.FailedPrecondition,
@@ -102,12 +116,18 @@ public static class GrpcErrorMapper
         // The node that may own the statement did not answer; the same cancel can be tried again.
         CamusDBErrorCodes.QueryOwnerUnreachable => StatusCode.Unavailable,
 
+        // The trigger's extension is missing here or differs from the one it was created with; a
+        // node that deploys the right file can run the same statement.
+        CamusDBErrorCodes.TriggerBindingMismatch => StatusCode.Unavailable,
+
         // Refused because of what the data or the schema holds right now, not because of the
         // statement text: the same statement succeeds once the dependent rows or objects are gone.
         CamusDBErrorCodes.ForeignKeyViolation      => StatusCode.FailedPrecondition,
         CamusDBErrorCodes.ForeignKeyRestrictDelete => StatusCode.FailedPrecondition,
         CamusDBErrorCodes.ForeignKeyRestrictUpdate => StatusCode.FailedPrecondition,
         CamusDBErrorCodes.DependentObjectsExist    => StatusCode.FailedPrecondition,
+        CamusDBErrorCodes.TransactionRollbackOnly  => StatusCode.FailedPrecondition,
+        CamusDBErrorCodes.TriggerMutationConflict  => StatusCode.FailedPrecondition,
 
         // Retryable transaction conflicts → ABORTED (trailer code disambiguates)
         CamusDBErrorCodes.TransactionConflict        => StatusCode.Aborted,
@@ -118,6 +138,7 @@ public static class GrpcErrorMapper
         // Resource exhaustion (permanent for this operation)
         CamusDBErrorCodes.TransactionMutationLimitExceeded => StatusCode.ResourceExhausted,
         CamusDBErrorCodes.ReturningResultTooLarge           => StatusCode.ResourceExhausted,
+        CamusDBErrorCodes.TriggerQueueTooLarge              => StatusCode.ResourceExhausted,
         CamusDBErrorCodes.SpillStorageUnavailable           => StatusCode.ResourceExhausted,
         CamusDBErrorCodes.SpillLimitExceeded                => StatusCode.ResourceExhausted,
         CamusDBErrorCodes.TooManyAuthAttempts               => StatusCode.ResourceExhausted,

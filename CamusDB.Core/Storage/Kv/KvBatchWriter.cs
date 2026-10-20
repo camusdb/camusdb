@@ -902,6 +902,7 @@ internal sealed class KvBatchWriter
 
             // Second pass: queue transient failures for retry; throw on hard failures.
             List<(string, int, KeyValueDurability)> retryBatch = [];
+            TransientAnswers transients = default;
             if (responses is null)
                 retryBatch.AddRange(pending);
 
@@ -912,6 +913,7 @@ internal sealed class KvBatchWriter
 
                 if (type is KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication)
                 {
+                    transients.Count(type);
                     retryBatch.Add((key, 0, durability));
                     continue;
                 }
@@ -945,7 +947,7 @@ internal sealed class KvBatchWriter
                 RetryableAbortSink.Raise(aborts,
                     new CamusDBException(
                         CamusDBErrorCodes.TransactionMustRetry,
-                        messages.LockWaitDeadlineMessage(tx, "batched exclusive lock acquisition", retryBatch.Select(r => r.Item1).ToList(), retryBatch.Count)),
+                        messages.LockWaitDeadlineMessage(tx, transients.Describe("batched exclusive lock acquisition"), retryBatch.Select(r => r.Item1).ToList(), retryBatch.Count)),
                     ServerDiagnostics.Tags.AbortSite.AcquireMany);
                 return false;
             }
@@ -1009,6 +1011,7 @@ internal sealed class KvBatchWriter
             // resend only the keys that came back MustRetry/WaitingForReplication.
             List<KahunaSetKeyValueRequestItem> retryBatch = [];
             Dictionary<string, KahunaSetKeyValueRequestItem>? byKey = null;
+            TransientAnswers transients = default;
 
             if (responses is null)
                 retryBatch.AddRange(pending);
@@ -1029,6 +1032,7 @@ internal sealed class KvBatchWriter
 
                     case KeyValueResponseType.MustRetry:
                     case KeyValueResponseType.WaitingForReplication:
+                        transients.Count(resp.Type);
                         byKey ??= pending.ToDictionary(i => i.Key!, i => i);
                         if (byKey.TryGetValue(key, out KahunaSetKeyValueRequestItem? item))
                             retryBatch.Add(item);
@@ -1063,7 +1067,7 @@ internal sealed class KvBatchWriter
                 RetryableAbortSink.Raise(aborts,
                     new CamusDBException(
                         CamusDBErrorCodes.TransactionMustRetry,
-                        messages.LockWaitDeadlineMessage(tx, "batched write", retryBatch.Select(i => i.Key ?? "").ToList(), retryBatch.Count)),
+                        messages.LockWaitDeadlineMessage(tx, transients.Describe("batched write"), retryBatch.Select(i => i.Key ?? "").ToList(), retryBatch.Count)),
                     ServerDiagnostics.Tags.AbortSite.SetMany);
                 return false;
             }
@@ -1115,6 +1119,7 @@ internal sealed class KvBatchWriter
 
             List<KahunaDeleteKeyValueRequestItem> retryBatch = [];
             Dictionary<string, KahunaDeleteKeyValueRequestItem>? byKey = null;
+            TransientAnswers transients = default;
 
             if (responses is null)
                 retryBatch.AddRange(pending);
@@ -1131,6 +1136,7 @@ internal sealed class KvBatchWriter
 
                     case KeyValueResponseType.MustRetry:
                     case KeyValueResponseType.WaitingForReplication:
+                        transients.Count(resp.Type);
                         byKey ??= pending.ToDictionary(i => i.Key!, i => i);
                         if (byKey.TryGetValue(key, out KahunaDeleteKeyValueRequestItem? item))
                             retryBatch.Add(item);
@@ -1162,7 +1168,7 @@ internal sealed class KvBatchWriter
                 RetryableAbortSink.Raise(aborts,
                     new CamusDBException(
                         CamusDBErrorCodes.TransactionMustRetry,
-                        messages.LockWaitDeadlineMessage(tx, "batched delete", retryBatch.Select(i => i.Key ?? "").ToList(), retryBatch.Count)),
+                        messages.LockWaitDeadlineMessage(tx, transients.Describe("batched delete"), retryBatch.Select(i => i.Key ?? "").ToList(), retryBatch.Count)),
                     ServerDiagnostics.Tags.AbortSite.DeleteMany);
                 return false;
             }
@@ -1188,5 +1194,34 @@ internal sealed class KvBatchWriter
         }
 
         return true;
+    }
+
+    /// <summary>
+    /// How the keys a batched call could not finish were answered in its last round, kept apart by
+    /// kind because the two transient answers point at different causes: <c>MustRetry</c> is what a key
+    /// under another transaction's range lock answers, and what the partition answers when its write
+    /// aggregator turned the proposal away (queue full, persistence backlog); <c>WaitingForReplication</c>
+    /// is a write still replicating or a predecessor's committed intent still settling. The lock-wait
+    /// deadline message names the counts, so a failure on a loaded node reads as backpressure or lag
+    /// instead of as a conflict.
+    /// </summary>
+    private struct TransientAnswers
+    {
+        private int mustRetry;
+        private int waitingForReplication;
+
+        public void Count(KeyValueResponseType type)
+        {
+            if (type == KeyValueResponseType.MustRetry)
+                mustRetry++;
+            else if (type == KeyValueResponseType.WaitingForReplication)
+                waitingForReplication++;
+        }
+
+        /// <summary>The operation name followed by the last round's transient counts, when there were any.</summary>
+        public readonly string Describe(string operation) =>
+            mustRetry == 0 && waitingForReplication == 0
+                ? operation
+                : $"{operation} (last round: {mustRetry} MustRetry, {waitingForReplication} WaitingForReplication)";
     }
 }

@@ -58,6 +58,12 @@ internal sealed class DeleteFluxState
     /// </summary>
     internal Controllers.DML.WriteReturningPlan.ReturningRowCollector? Returning { get; init; }
 
+    /// <summary>
+    /// The statement's DELETE triggers, or null when the table has none. With any, the write phase
+    /// decodes the whole row instead of only the columns it needs, so a trigger sees all of OLD.
+    /// </summary>
+    internal Extensions.StatementTriggers? Triggers { get; init; }
+
     public DeleteFluxState(DatabaseDescriptor database, TableDescriptor table, DeleteTicket ticket, QueryExecutor queryExecutor)
     {
         Database = database;

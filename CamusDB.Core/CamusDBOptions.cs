@@ -1883,6 +1883,32 @@ public sealed record CamusDBOptions
     public MemoryProfile MemoryProfile { get; init; } = MemoryProfile.Prod;
 
     /// <summary>
+    /// Absolute paths of the C# extension assemblies this node loads at startup in SAFE mode. A SAFE
+    /// assembly passes a static metadata check first (an allow-list of referenced assemblies and a
+    /// ban on file, network, process, reflection-invoke and P/Invoke APIs), and its load context
+    /// refuses any other assembly at run time. The check is a guardrail for operator-reviewed code,
+    /// not a sandbox: an extension runs in the server process with the server's rights.
+    ///
+    /// <para>Restart-class: the <c>CommandExecutor</c> constructor loads the assemblies and compiles
+    /// their functions once, and nothing reloads them. Node-scoped because each node deploys its own
+    /// files; every node of a cluster must still deploy the same files, which the trigger binding
+    /// checks by SHA-256. A relative path, a missing file and a path that is also in
+    /// <see cref="UnsafeExtensionAssemblies"/> each fail the engine's construction.</para>
+    /// </summary>
+    [ConfigSetting(ConfigMutability.Restart, ConfigScope.Node)]
+    public IReadOnlyList<string> ExtensionAssemblies { get; init; } = [];
+
+    /// <summary>
+    /// Absolute paths of C# extension assemblies this node loads at startup <b>without</b> the SAFE
+    /// check: no metadata scan and no load-time allow-list. Use it only for reviewed code that needs
+    /// an API the SAFE rules refuse. Each unsafe load logs a warning, and <c>SHOW EXTENSIONS</c>
+    /// reports its trust as <c>unsafe</c>. Restart-class and node-scoped for the reasons given on
+    /// <see cref="ExtensionAssemblies"/>.
+    /// </summary>
+    [ConfigSetting(ConfigMutability.Restart, ConfigScope.Node)]
+    public IReadOnlyList<string> UnsafeExtensionAssemblies { get; init; } = [];
+
+    /// <summary>
     /// Resolved Kahuna engine overrides from <c>config.yml</c>. Applied when constructing embedded
     /// nodes in cluster and standalone modes.
     /// </summary>

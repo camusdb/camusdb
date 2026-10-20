@@ -89,6 +89,62 @@ internal partial class sqlParser
     }
 
     /// <summary>
+    /// Builds a <see cref="NodeType.CreateTrigger"/> node after checking the plain-identifier words
+    /// (TRIGGER, BEFORE or AFTER, EXTERNAL NAME) and refusing a repeated event. The timing travels
+    /// in <c>yytext</c> ("before" or "after"), the comma-joined events in <c>extendedOne.yytext</c>,
+    /// and the EXTERNAL NAME string literal in <c>extendedTwo</c>, still quoted as the user wrote it.
+    /// </summary>
+    private static NodeAst CreateTriggerStatement(
+        string? triggerWord, NodeAst name, NodeAst table, string? timing, string events,
+        string? externalWord, string? nameWord, NodeAst externalName)
+    {
+        const string guidance =
+            "Expected: CREATE TRIGGER <name> ON <table> {BEFORE|AFTER} {INSERT|UPDATE|DELETE}[, ...] EXTERNAL NAME '<Namespace.Type>'";
+
+        if (!string.Equals(triggerWord, "trigger", StringComparison.OrdinalIgnoreCase) ||
+            !string.Equals(externalWord, "external", StringComparison.OrdinalIgnoreCase) ||
+            !string.Equals(nameWord, "name", StringComparison.OrdinalIgnoreCase))
+            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, guidance);
+
+        string normalizedTiming;
+        if (string.Equals(timing, "before", StringComparison.OrdinalIgnoreCase))
+            normalizedTiming = "before";
+        else if (string.Equals(timing, "after", StringComparison.OrdinalIgnoreCase))
+            normalizedTiming = "after";
+        else
+            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, guidance);
+
+        string[] parts = events.Split(',');
+        if (parts.Distinct(StringComparer.Ordinal).Count() != parts.Length)
+            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "CREATE TRIGGER names an event more than once");
+
+        NodeAst eventNode = new(NodeType.String, null, null, null, null, null, null, null, events);
+        return new NodeAst(NodeType.CreateTrigger, name, table, eventNode, externalName, null, null, null, normalizedTiming);
+    }
+
+    /// <summary>Builds a <see cref="NodeType.DropTrigger"/> node after checking the word TRIGGER.</summary>
+    private static NodeAst DropTriggerStatement(string? triggerWord, NodeAst name, NodeAst table)
+    {
+        if (!string.Equals(triggerWord, "trigger", StringComparison.OrdinalIgnoreCase))
+            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Expected: DROP TRIGGER <name> ON <table>");
+
+        return new NodeAst(NodeType.DropTrigger, name, table, null, null, null, null, null, null);
+    }
+
+    /// <summary>
+    /// Builds a <see cref="NodeType.Call"/> node after checking the word CALL. <c>leftAst</c> is the
+    /// procedure name identifier and <c>rightAst</c> the argument list, null for no arguments.
+    /// </summary>
+    private static NodeAst CallStatement(string? callWord, string? procedure, NodeAst? arguments)
+    {
+        if (!string.Equals(callWord, "call", StringComparison.OrdinalIgnoreCase))
+            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Expected: CALL <procedure>(<arguments>)");
+
+        NodeAst name = new(NodeType.Identifier, null, null, null, null, null, null, null, procedure);
+        return new NodeAst(NodeType.Call, name, arguments, null, null, null, null, null, null);
+    }
+
+    /// <summary>
     /// Validates the word written where a column's type belongs when that word is a plain
     /// identifier rather than a type token. Only the serial shorthands are accepted there.
     /// </summary>

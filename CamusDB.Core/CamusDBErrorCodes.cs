@@ -740,6 +740,168 @@ public static class CamusDBErrorCodes
     /// </summary>
     public const string PitrBootstrapFailed = "CADB0710";
 
+    // ─── C# extensions (CADB08xx) ─────────────────────────────────────────────
+    // Codes CADB0800-CADB0808 are startup failures: the engine refuses to construct, so they never
+    // reach an API caller. The rest are statement errors.
+
+    /// <summary>
+    /// An extension path in <c>extension_assemblies</c> or <c>unsafe_extension_assemblies</c> is
+    /// relative, or is listed in both. A relative path changes meaning with the working directory, so
+    /// only absolute paths are accepted. A startup failure.
+    /// </summary>
+    public const string ExtensionPathInvalid = "CADB0800";
+
+    /// <summary>A configured extension assembly file does not exist. A startup failure.</summary>
+    public const string ExtensionFileNotFound = "CADB0801";
+
+    /// <summary>
+    /// A configured extension file is not a .NET assembly, or the runtime could not load it. A
+    /// startup failure.
+    /// </summary>
+    public const string ExtensionNotAnAssembly = "CADB0802";
+
+    /// <summary>
+    /// An extension was compiled against a newer <c>CamusDB.Extensions.Abstractions</c> than this server
+    /// carries: a newer major version, or a newer minor version while the major is 0. A startup failure.
+    /// </summary>
+    public const string ExtensionContractMismatch = "CADB0803";
+
+    /// <summary>
+    /// Two configured extension assemblies have the same simple name. One node loads one version of
+    /// an extension. A startup failure.
+    /// </summary>
+    public const string ExtensionDuplicateAssembly = "CADB0804";
+
+    /// <summary>
+    /// An extension function or procedure name collides with a built-in function, a table function,
+    /// or a member of another loaded extension. Shadowing a built-in is never allowed. A startup
+    /// failure.
+    /// </summary>
+    public const string ExtensionDuplicateMember = "CADB0805";
+
+    /// <summary>
+    /// A SAFE extension assembly failed the static metadata check. The message lists every finding.
+    /// Move the path to <c>unsafe_extension_assemblies</c> only after a review. A startup failure.
+    /// </summary>
+    public const string ExtensionVerificationFailed = "CADB0806";
+
+    /// <summary>
+    /// At run time, a SAFE extension asked its load context for an assembly that is not on the SAFE
+    /// allow-list. The load context throws instead of falling back to the default context, which would
+    /// hand the extension the whole framework.
+    /// </summary>
+    public const string ExtensionAssemblyRefused = "CADB0807";
+
+    /// <summary>
+    /// An extension member has a shape the server cannot bind: a function parameter or return type
+    /// outside the value mapping, or a trigger or procedure type without a public parameterless
+    /// constructor. A startup failure.
+    /// </summary>
+    public const string ExtensionInvalidSignature = "CADB0808";
+
+    /// <summary>
+    /// An extension function threw. The message carries the function name and the exception message.
+    /// The statement ends. Maps to HTTP 400.
+    /// </summary>
+    public const string ExtensionFunctionFailed = "CADB0809";
+
+    /// <summary>
+    /// A NUMERIC value does not fit the <c>decimal</c> an extension member receives, or a
+    /// <c>decimal</c> an extension returned does not fit NUMERIC. Values are never truncated. Maps to
+    /// HTTP 400.
+    /// </summary>
+    public const string ExtensionValueOutOfRange = "CADB0810";
+
+    /// <summary><c>CREATE TRIGGER</c> named a type that no loaded extension defines. Maps to HTTP 400.</summary>
+    public const string TriggerTypeNotFound = "CADB0811";
+
+    /// <summary>
+    /// <c>CREATE TRIGGER</c> named a type that two loaded extensions define. Maps to HTTP 400.
+    /// </summary>
+    public const string TriggerTypeAmbiguous = "CADB0812";
+
+    /// <summary>
+    /// <c>CREATE TRIGGER</c> named a type that does not implement the trigger interface or has no
+    /// public parameterless constructor. Maps to HTTP 400.
+    /// </summary>
+    public const string TriggerTypeInvalid = "CADB0813";
+
+    /// <summary>The table already has a trigger with this name. Maps to HTTP 409.</summary>
+    public const string TriggerAlreadyExists = "CADB0814";
+
+    /// <summary><c>DROP TRIGGER</c> named a trigger the table does not have. Maps to HTTP 404.</summary>
+    public const string TriggerNotFound = "CADB0815";
+
+    /// <summary>
+    /// A trigger can be created only on a plain table, not on a view or a materialized view. Maps to
+    /// HTTP 400.
+    /// </summary>
+    public const string TriggerTargetInvalid = "CADB0816";
+
+    /// <summary>
+    /// DML on a table with a trigger whose extension this node does not load, or loads with a
+    /// different SHA-256 than the trigger recorded when it was created. Every node must deploy the same
+    /// extension files; running a different version would fire different code on different nodes.
+    /// Maps to HTTP 503: the statement can succeed on a node that deploys the right file.
+    /// </summary>
+    public const string TriggerBindingMismatch = "CADB0817";
+
+    /// <summary>
+    /// A trigger threw. The message carries the trigger name and the exception message. The statement
+    /// ends and nothing it wrote persists. Maps to HTTP 400.
+    /// </summary>
+    public const string TriggerFailed = "CADB0818";
+
+    /// <summary>
+    /// Triggers and procedures nested SQL deeper than the fixed limit of 16 levels, for example a
+    /// trigger whose own write fires it again. Maps to HTTP 400.
+    /// </summary>
+    public const string ExtensionNestingTooDeep = "CADB0819";
+
+    /// <summary>
+    /// A trigger or a procedure tried to run a statement its SQL session does not accept: anything
+    /// other than SELECT, INSERT, UPDATE or DELETE. Maps to HTTP 400.
+    /// </summary>
+    public const string ExtensionStatementRefused = "CADB0820";
+
+    /// <summary><c>CALL</c> named a procedure that no loaded extension defines. Maps to HTTP 404.</summary>
+    public const string ProcedureNotFound = "CADB0821";
+
+    /// <summary>
+    /// A procedure threw. The message carries the procedure name and the exception message. Everything
+    /// the <c>CALL</c> wrote rolls back. Maps to HTTP 400.
+    /// </summary>
+    public const string ProcedureFailed = "CADB0822";
+
+    /// <summary>
+    /// A trigger or a procedure caught an error from its own SQL session and returned normally. There
+    /// are no savepoints, so the failed statement's partial writes cannot be undone alone: the statement
+    /// that called the extension fails, and its transaction can only roll back. Maps to HTTP 400.
+    /// </summary>
+    public const string ExtensionCaughtSqlError = "CADB0823";
+
+    /// <summary>
+    /// A commit of a transaction that was marked rollback-only, because SQL that an extension ran in it
+    /// failed. The writes of that SQL may be partly staged, so the only safe outcome is a rollback.
+    /// Maps to HTTP 409.
+    /// </summary>
+    public const string TransactionRollbackOnly = "CADB0824";
+
+    /// <summary>
+    /// A BEFORE trigger's SQL changed or deleted a row that the statement that fired the trigger had
+    /// already read and was about to write. The statement would write from a stale image of that row,
+    /// so it fails instead. Maps to HTTP 409.
+    /// </summary>
+    public const string TriggerMutationConflict = "CADB0825";
+
+    /// <summary>
+    /// The rows a statement keeps for its AFTER triggers exceed the byte budget
+    /// (<c>spill_threshold_bytes</c>). The queue is held in memory until the statement's last write, so it
+    /// is bounded instead of growing with the statement. Write fewer rows per statement, or raise the
+    /// budget. Maps to HTTP 400.
+    /// </summary>
+    public const string TriggerQueueTooLarge = "CADB0826";
+
     /// <summary>
     /// Returns the HTTP status code that should be used when surfacing <paramref name="code"/>
     /// to an API caller. Client errors (permanent, non-retryable caller mistakes) map to 400;
@@ -832,6 +994,25 @@ public static class CamusDBErrorCodes
         TableAlreadyExists => 409,
         UserAlreadyExists => 409,
         TooManyAuthAttempts => 429,
+        ExtensionFunctionFailed => 400,
+        ExtensionValueOutOfRange => 400,
+        ExtensionAssemblyRefused => 500,
+        TriggerTypeNotFound => 400,
+        TriggerTypeAmbiguous => 400,
+        TriggerTypeInvalid => 400,
+        TriggerAlreadyExists => 409,
+        TriggerNotFound => 404,
+        TriggerTargetInvalid => 400,
+        TriggerBindingMismatch => 503,
+        TriggerFailed => 400,
+        ExtensionNestingTooDeep => 400,
+        ExtensionStatementRefused => 400,
+        ProcedureNotFound => 404,
+        ProcedureFailed => 400,
+        ExtensionCaughtSqlError => 400,
+        TransactionRollbackOnly => 409,
+        TriggerMutationConflict => 409,
+        TriggerQueueTooLarge => 400,
         _ => 500
     };
 }

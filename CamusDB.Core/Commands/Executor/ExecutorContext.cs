@@ -66,6 +66,14 @@ internal sealed class ExecutorContext
     /// <summary>True when this process is a Raft cluster node; false for standalone.</summary>
     internal bool IsClusterMode { get; }
 
+    /// <summary>
+    /// The C# extensions this engine loaded at construction (empty when none are configured).
+    /// Immutable, so it belongs here with the other collaborators: <c>SHOW EXTENSIONS</c>, trigger
+    /// DDL and trigger binding, and <c>CALL</c> read it directly, while the static expression
+    /// evaluator reaches the functions through <see cref="CamusDB.Core.Extensions.ExtensionFunctionScope"/>.
+    /// </summary>
+    internal CamusDB.Core.Extensions.ExtensionRegistry Extensions { get; }
+
     internal ExecutorContext(
         ILogger<ICamusDB> logger,
         EmbeddedKahuna? sharedNode,
@@ -74,7 +82,8 @@ internal sealed class ExecutorContext
         TableOpener tableOpener,
         StatisticsManager statistics,
         CommandValidator validator,
-        bool isClusterMode
+        bool isClusterMode,
+        CamusDB.Core.Extensions.ExtensionRegistry extensions
     )
     {
         Logger = logger;
@@ -85,5 +94,6 @@ internal sealed class ExecutorContext
         Statistics = statistics;
         Validator = validator;
         IsClusterMode = isClusterMode;
+        Extensions = extensions;
     }
 }

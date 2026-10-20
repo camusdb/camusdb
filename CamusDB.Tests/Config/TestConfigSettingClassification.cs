@@ -96,6 +96,8 @@ internal sealed class TestConfigSettingClassification
             nameof(CamusDBOptions.AccessTokenServerKey),
             nameof(CamusDBOptions.NodeSecret),
             nameof(CamusDBOptions.ForceSpillThresholdRows),
+            nameof(CamusDBOptions.ExtensionAssemblies),
+            nameof(CamusDBOptions.UnsafeExtensionAssemblies),
         ];
 
         foreach (string name in restartBound)

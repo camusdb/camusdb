@@ -983,4 +983,34 @@ public enum NodeType
     /// sends the member's number between nodes.
     /// </summary>
     TableFunctionReference,
+
+    /// <summary>
+    /// <c>SHOW EXTENSIONS</c>: one row per C# extension assembly this node loaded at startup. A
+    /// server-level query: node-local (each node deploys its own files), superuser-only, and answered
+    /// before any database is opened. Appended at the end because <see cref="NodeAstWireCodec"/>
+    /// sends the member's number between nodes.
+    /// </summary>
+    ShowExtensions,
+
+    /// <summary>
+    /// <c>CREATE TRIGGER name ON table {BEFORE|AFTER} events EXTERNAL NAME 'Type'</c>.
+    /// <c>leftAst</c> = the trigger name identifier, <c>rightAst</c> = the table identifier,
+    /// <c>extendedOne.yytext</c> = the comma-joined events ("insert,update"), <c>extendedTwo</c> =
+    /// the EXTERNAL NAME string literal, <c>yytext</c> = "before" or "after". Schema DDL that
+    /// replicates through the schema log.
+    /// </summary>
+    CreateTrigger,
+
+    /// <summary>
+    /// <c>DROP TRIGGER name ON table</c>. <c>leftAst</c> = the trigger name identifier,
+    /// <c>rightAst</c> = the table identifier.
+    /// </summary>
+    DropTrigger,
+
+    /// <summary>
+    /// <c>CALL procedure(args)</c>: runs a C# extension procedure inside the statement's transaction.
+    /// <c>leftAst</c> = the procedure name identifier, <c>rightAst</c> = the argument expression or
+    /// <see cref="ExprArgumentList"/>, null for no arguments. A database-scoped, non-query statement.
+    /// </summary>
+    Call,
 }

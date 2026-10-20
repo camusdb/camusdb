@@ -660,14 +660,15 @@ Domain errors are surfaced two ways depending on the call shape:
 
 | gRPC `StatusCode` | Meaning | Example CamusDB codes |
 |-------------------|---------|-----------------------|
-| `INVALID_ARGUMENT` | Bad client input | invalid input, SQL syntax error, invalid AST, unknown column, unknown type, value too long, schema limit exceeded, statement too deeply nested (`CADB0413`), NOT NULL violation, CHECK constraint violation |
-| `NOT_FOUND` | Missing object | database/table/index doesn't exist, unknown key, no running query with the id given to `CANCEL QUERY` (`CADB0551`) |
-| `ALREADY_EXISTS` | Duplicate | duplicate unique key, duplicate primary key, database/table already exists |
-| `FAILED_PRECONDITION` | Non-retryable transaction/state precondition | transaction already completed, database has live descendants, `CANCEL QUERY` of a write (`CADB0552`) |
+| `INVALID_ARGUMENT` | Bad client input | invalid input, SQL syntax error, invalid AST, unknown column, unknown type, value too long, schema limit exceeded, statement too deeply nested (`CADB0413`), NOT NULL violation, CHECK constraint violation, a C# extension function, trigger or procedure that threw (`CADB0809`, `CADB0818`, `CADB0822`), trigger DDL refusals (`CADB0811`-`CADB0813`, `CADB0816`), extension nesting too deep (`CADB0819`), a statement an extension's SQL session refuses (`CADB0820`), an extension that caught an error from its own SQL (`CADB0823`) |
+| `OUT_OF_RANGE` | A value outside its type's range | NUMERIC out of range, a NUMERIC that does not fit an extension's `decimal` (`CADB0810`) |
+| `NOT_FOUND` | Missing object | database/table/index doesn't exist, unknown key, no running query with the id given to `CANCEL QUERY` (`CADB0551`), unknown trigger on `DROP TRIGGER` (`CADB0815`), unknown procedure on `CALL` (`CADB0821`) |
+| `ALREADY_EXISTS` | Duplicate | duplicate unique key, duplicate primary key, database/table already exists, trigger already exists (`CADB0814`) |
+| `FAILED_PRECONDITION` | Non-retryable transaction/state precondition | transaction already completed, database has live descendants, `CANCEL QUERY` of a write (`CADB0552`), a commit of a rollback-only transaction (`CADB0824`), a trigger's SQL changing a row its statement still holds (`CADB0825`) |
 | `CANCELLED` | `CANCEL QUERY` stopped the statement | query cancelled (`CADB0554`) |
-| `UNAVAILABLE` | The node that may own a statement did not answer a cancel | query owner unreachable (`CADB0553`); the cancel can be sent again |
+| `UNAVAILABLE` | The node that may own a statement did not answer a cancel, or this node cannot run the statement | query owner unreachable (`CADB0553`); the cancel can be sent again. A table's trigger needs an extension this node does not load or loads in another build (`CADB0817`); a node that deploys the right file can run it |
 | `ABORTED` | **Retryable** transaction family | transaction conflict (`CADB0502`), must-retry (`CADB0504`), lifetime exceeded (`CADB0505`), finalize unresolved (`CADB0509`) |
-| `RESOURCE_EXHAUSTED` | Permanent for this op | mutation limit exceeded, spill storage unavailable |
+| `RESOURCE_EXHAUSTED` | Permanent for this op | mutation limit exceeded, spill storage unavailable, AFTER-trigger rows over the byte budget (`CADB0826`) |
 | `INTERNAL` | Unexpected server error | `CADB0000` |
 
 ### 8.2 The retryable family — how to retry (read `camus-error-code`)

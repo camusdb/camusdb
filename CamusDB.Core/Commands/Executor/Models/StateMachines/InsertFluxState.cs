@@ -41,6 +41,12 @@ public sealed class InsertFluxState
     /// </summary>
     internal List<QueryResultRow>? ReturningRows { get; init; }
 
+    /// <summary>
+    /// The statement's AFTER INSERT triggers, which queue each written row; null when the table has
+    /// none for INSERT. BEFORE triggers already ran, on every row, before validation.
+    /// </summary>
+    internal Extensions.StatementTriggers? Triggers { get; init; }
+
     public InsertFluxState(DatabaseDescriptor database, TableDescriptor table, InsertTicket ticket)
     {
         Database = database;

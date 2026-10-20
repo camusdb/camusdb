@@ -147,6 +147,22 @@ public sealed class TestSchemaChangeLogEntryCodec
             NewName = "order_number"
         });
         yield return (SchemaOp.AddForeignKey, AddForeignKeyPayload());
+        yield return (SchemaOp.CreateTrigger, new SchemaCreateTriggerPayload
+        {
+            TableName = "robots",
+            TableId = "A0",
+            Trigger = new TriggerDefinition
+            {
+                Name = "audit",
+                Timing = TriggerFireTiming.Before,
+                Events = TriggerEventSet.Insert | TriggerEventSet.Delete,
+                TypeName = "Ext.AuditTrigger",
+                AssemblyName = "Ext",
+                AssemblySha256 = new string('f', 64),
+                CreatedAt = new HLCTimestamp(1, 2, 3),
+            },
+        });
+        yield return (SchemaOp.DropTrigger, new SchemaDropTriggerPayload { TableName = "robots", TableId = "A0", TriggerName = "audit" });
         yield return (SchemaOp.AlterSequence, new SchemaAlterSequencePayload
         {
             SequenceId = "A2",

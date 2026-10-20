@@ -46,6 +46,8 @@ Example: YAML `mode: cluster` with `--mode standalone` starts in standalone mode
 | `initial_partitions` | `--initial-cluster-partitions` | `1` standalone, `3` cluster |
 | `peers` | `--initial-cluster` | `[]` |
 | `http_peers` | `--http-peers` | `[]` |
+| `extension_assemblies` | `--extension-assemblies` | `[]` (absolute paths of SAFE C# extensions; see [csharp-extensions.md](csharp-extensions.md)) |
+| `unsafe_extension_assemblies` | `--unsafe-extension-assemblies` | `[]` (absolute paths of extensions loaded without the SAFE check) |
 | `join_existing` | `--join-existing` | `false` |
 | `pitr_bootstrap_from` | `--pitr-bootstrap-from` | unset (see [backups-and-point-in-time-recovery.md](backups-and-point-in-time-recovery.md)) |
 | `pitr_bootstrap_target_time_ms` | `--pitr-bootstrap-target-time-ms` | `0` (the latest point the chain covers) |

@@ -246,6 +246,20 @@ internal sealed class TestHttpAuth : BaseTest
     /// database name no matter how correct the engine is.
     /// </summary>
     [Test]
+    public async Task ShowExtensions_SuperuserOverRest_ReaderForbidden()
+    {
+        (_, CommandExecutor ex) = await Setup();
+
+        string root = await TokenFor(ex, "root", "root-pw");
+        JsonResult ok = await QueryRest(ex, "", "SHOW EXTENSIONS", root);
+        Assert.AreEqual(200, ok.StatusCode ?? 200);
+
+        string reader = await TokenFor(ex, "reader", "reader-pw");
+        JsonResult denied = await QueryRest(ex, "", "SHOW EXTENSIONS", reader);
+        Assert.AreEqual(403, denied.StatusCode);
+    }
+
+    [Test]
     public async Task ShowVariables_SuperuserOverRest_ReaderForbidden()
     {
         (_, CommandExecutor ex) = await Setup();

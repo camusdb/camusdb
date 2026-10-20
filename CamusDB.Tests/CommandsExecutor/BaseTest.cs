@@ -13,6 +13,7 @@ using System.Threading;
 using System.Threading.Tasks;
 
 using NUnit.Framework;
+using NUnit.Framework.Interfaces;
 using Microsoft.Extensions.Logging;
 
 using Kahuna;
@@ -25,6 +26,7 @@ using CamusDB.Core.CommandsExecutor.Controllers;
 using CamusDB.Core.CommandsValidator;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
+using CamusDB.Tests.Diagnostics;
 using CamusConfig = CamusDB.Core.CamusDBConfig;
 
 namespace CamusDB.Tests.CommandsExecutor;
@@ -34,7 +36,7 @@ public abstract class BaseTest
     // One logger factory for the entire test run — avoids spawning a ConsoleLoggerProvider
     // thread per fixture, which previously caused OutOfMemoryException after ~166 tests.
     protected static readonly ILoggerFactory SharedLoggerFactory = LoggerFactory.Create(builder =>
-        builder.AddFilter("Camus", LogLevel.Warning).AddConsole());
+        builder.SetMinimumLevel(LogLevel.Warning).AddFilter("Camus", LogLevel.Warning).AddConsole());
 
     protected readonly ILogger<ICamusDB> logger;
 
@@ -49,6 +51,10 @@ public abstract class BaseTest
     // Every engine handed out by the factories below, whether or not a database was ever created
     // through it — disposed in TearDown. See CreateCommandExecutor for why this list exists.
     private readonly List<CommandExecutor> createdExecutors = new();
+
+    // The Kahuna commit-refusal counters as they stood when the test began; a failed test reports
+    // how they moved, which names the coordinator arm behind a bare "aborted by the coordinator".
+    private Dictionary<string, KahunaAbortAttribution.Reading>? kahunaRefusalsAtStart;
 
     protected BaseTest()
     {
@@ -99,6 +105,8 @@ public abstract class BaseTest
     [SetUp]
     public async Task SetUpTestEnvironment()
     {
+        kahunaRefusalsAtStart = KahunaAbortAttribution.Capture();
+
         tempDir = Path.Combine(Path.GetTempPath(), "camusdb-test-" + Guid.NewGuid().ToString("n"));
         Directory.CreateDirectory(tempDir);
         CamusConfig.DataDirectory = tempDir;
@@ -117,7 +125,9 @@ public abstract class BaseTest
 
             ConfigureNodeOptions(nodeOptions);
 
-            testNode = new EmbeddedKahuna(nodeOptions);
+            // The node logs through the run's factory, so a Kahuna warning (a refused commit and why,
+            // an abandoned lock renewal) lands in the test output instead of nowhere.
+            testNode = new EmbeddedKahuna(nodeOptions, SharedLoggerFactory);
             await testNode.StartAsync(CancellationToken.None).ConfigureAwait(false);
             await testNode.WaitForLeaderAsync("warmup", CancellationToken.None).ConfigureAwait(false);
             await testNode.FlushAsync().ConfigureAwait(false);
@@ -259,6 +269,8 @@ public abstract class BaseTest
     [TearDown]
     public async Task CloseAllDatabases()
     {
+        ReportKahunaRefusalsOfAFailedTest();
+
         // Collect unique executors for disposal.
         HashSet<CommandExecutor> executors = new(ReferenceEqualityComparer.Instance);
 
@@ -319,5 +331,23 @@ public abstract class BaseTest
             try { Directory.Delete(tempDir, recursive: true); } catch { }
             tempDir = null;
         }
+    }
+
+    /// <summary>
+    /// Prints the Kahuna commit-refusal counters that moved during a test that failed, so a
+    /// "commit was aborted by the coordinator" failure on CI names the arm that refused it (see
+    /// <see cref="KahunaAbortAttribution"/>). Silent for a passing test and when nothing moved.
+    /// </summary>
+    private void ReportKahunaRefusalsOfAFailedTest()
+    {
+        if (kahunaRefusalsAtStart is null || TestContext.CurrentContext.Result.Outcome.Status != TestStatus.Failed)
+            return;
+
+        string? report = KahunaAbortAttribution.Describe(kahunaRefusalsAtStart, KahunaAbortAttribution.Capture());
+        if (report is null)
+            return;
+
+        // The test's own output: the console logger prints it under the failed test, and the TRX keeps it.
+        TestContext.Out.WriteLine(report);
     }
 }

@@ -340,6 +340,7 @@ internal static class SchemaMetaStore
             Indexes = tableSchema.Indexes,
             CheckConstraints = tableSchema.CheckConstraints,
             ForeignKeys = tableSchema.ForeignKeys,
+            Triggers = tableSchema.Triggers,
             Settings = tableSchema.Settings,
             Comment = tableSchema.Comment,
             StorageId = tableSchema.StorageId,

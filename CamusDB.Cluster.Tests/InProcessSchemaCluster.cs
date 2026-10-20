@@ -61,7 +61,8 @@ public sealed class InProcessSchemaCluster : IAsyncDisposable
         ILogger<ICamusDB>? logger = null,
         bool wireLeaderForwarder = false,
         CamusDBOptions? options = null,
-        Action<EmbeddedKahunaOptions>? configureNode = null
+        Action<EmbeddedKahunaOptions>? configureNode = null,
+        Func<int, CamusDBOptions, CamusDBOptions>? configureNodeOptions = null
     )
     {
         // Every node in the cluster is built with the same configuration, fixed when the cluster
@@ -179,12 +180,15 @@ public sealed class InProcessSchemaCluster : IAsyncDisposable
             Node[] nodes = kahunaNodes
                 .Select((kahuna, index) =>
                 {
-                    CommandValidator validator = new(effective);
+                    // A test that needs nodes to differ (one node without an extension, say) states
+                    // it here; the default is the same configuration everywhere.
+                    CamusDBOptions nodeOptions = configureNodeOptions?.Invoke(index, effective) ?? effective;
+                    CommandValidator validator = new(nodeOptions);
                     CatalogsManager catalogs = new(logger);
                     CommandExecutor executor = new(
                         validator,
                         catalogs,
-                        logger, effective,
+                        logger, nodeOptions,
                         sharedNode: kahuna,
                         schemaDdlForwarder: forwarder,
                         isClusterMode: true,
@@ -226,6 +230,13 @@ public sealed class InProcessSchemaCluster : IAsyncDisposable
         internal RecordingFragmentTransport(IQueryFragmentTransport inner) => this.inner = inner;
 
         internal int ExecutedCount { get { lock (executed) return executed.Count; } }
+
+        /// <summary>A copy of the fragment requests executed since the last reset, so a test can read
+        /// what was shipped (the filter, the aggregates).</summary>
+        internal IReadOnlyList<CamusDB.Core.CommandsExecutor.Models.Queries.QueryFragmentRequest> ExecutedRequests
+        {
+            get { lock (executed) return executed.ToList(); }
+        }
 
         /// <summary>Executed fragments that were broadcast-join probes (request carried a join spec).</summary>
         internal int ExecutedJoinCount { get { lock (executed) return executed.Count(r => r.Join is not null); } }

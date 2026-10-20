@@ -68,6 +68,19 @@ internal static class QueryExpressionClassifier
         };
 
     /// <summary>
+    /// Every name some part of the engine treats as an aggregate: the aggregates the query pipeline
+    /// computes, and the names the CHECK-constraint validator refuses as aggregates. A C# extension may
+    /// not register a scalar function under one of them, because the classifier would route the call
+    /// to the aggregate path and the scalar function would never run.
+    /// </summary>
+    internal static bool IsReservedAggregateName(string funcName) =>
+        IsAggregateName(funcName) || funcName.ToLowerInvariant() switch
+        {
+            "count_distinct" or "group_concat" or "string_agg" or "array_agg" => true,
+            _ => false,
+        };
+
+    /// <summary>
     /// Returns true when any node in the expression tree is an aggregate function call
     /// (count/max/min/sum/avg), regardless of its depth. Does not recurse into subqueries.
     /// </summary>

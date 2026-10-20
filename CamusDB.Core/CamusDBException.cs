@@ -16,4 +16,14 @@ public class CamusDBException : Exception
     {
         Code = code;
     }
+
+    /// <summary>
+    /// Keeps the exception that caused this one, for example an exception thrown by extension code,
+    /// so a log shows the original stack trace. The message an API caller sees is still
+    /// <paramref name="msg"/> alone.
+    /// </summary>
+    public CamusDBException(string code, string? msg, Exception? inner) : base(msg, inner)
+    {
+        Code = code;
+    }
 }

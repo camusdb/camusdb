@@ -550,6 +550,33 @@ public sealed class SchemaAddForeignKeyPayload
 }
 
 /// <summary>
+/// Payload for <see cref="SchemaOp.CreateTrigger"/>: the table, by name and id, and the complete
+/// trigger record the proposer resolved.
+/// </summary>
+public sealed class SchemaCreateTriggerPayload
+{
+    public string TableName { get; set; } = "";
+
+    /// <summary>The apply refuses the delta when the table under <see cref="TableName"/> has another
+    /// id, so a trigger created on one table never lands on a table that replaced it.</summary>
+    public string TableId { get; set; } = "";
+
+    public TriggerDefinition? Trigger { get; set; }
+}
+
+/// <summary>
+/// Payload for <see cref="SchemaOp.DropTrigger"/>: the table, by name and id, and the trigger name.
+/// </summary>
+public sealed class SchemaDropTriggerPayload
+{
+    public string TableName { get; set; } = "";
+
+    public string TableId { get; set; } = "";
+
+    public string TriggerName { get; set; } = "";
+}
+
+/// <summary>
 /// Payload for <see cref="SchemaOp.SetColumnStorage"/>: the target column and its new storage
 /// strategy. The column is matched by name, case-insensitively, like every other column delta.
 /// </summary>

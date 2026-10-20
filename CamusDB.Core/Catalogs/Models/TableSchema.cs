@@ -161,6 +161,15 @@ public sealed class TableSchema : IWriteShapeSource
     public List<ForeignKeySchema>? ForeignKeys { get; set; }
 
     /// <summary>
+    /// Row triggers on this table (<c>CREATE TRIGGER</c>), in creation order, which is also the firing
+    /// order. Null for a table with none, so a DML statement on such a table pays one null check. Like
+    /// the constraint lists it rides the table blob and does <b>not</b> bump <c>Version</c>: a trigger
+    /// does not affect row encoding. The list is replaced, never edited in place, so a statement that
+    /// read it keeps a consistent list. See <see cref="TriggerDefinition"/>.
+    /// </summary>
+    public List<TriggerDefinition>? Triggers { get; set; }
+
+    /// <summary>
     /// Table storage parameters (<c>ALTER TABLE t SET (key = value)</c>). A free-form string→string bag
     /// so new settings need no schema-model change. Like <c>Indexes</c> / <c>CheckConstraints</c> it
     /// rides the table blob and does <b>not</b> bump <c>Version</c> — settings do not affect row

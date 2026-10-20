@@ -313,6 +313,22 @@ public class TestGrpcSqlService : BaseTest
     }
 
     /// <summary>
+    /// Same coverage for SHOW EXTENSIONS. The engine loads no extensions, so the stream carries the
+    /// schema and no rows: proof that the statement was routed without a database.
+    /// </summary>
+    [Test]
+    public async Task ExecuteQuery_ShowExtensions_ReturnsSchemaWithoutDatabase()
+    {
+        await CreateTestDatabaseAsync();
+
+        (List<QueryStreamMessage> msgs, _) = await QueryAsync("", "SHOW EXTENSIONS");
+
+        Assert.That(msgs.Count, Is.GreaterThanOrEqualTo(1));
+        Assert.That(msgs[0].PayloadCase, Is.EqualTo(QueryStreamMessage.PayloadOneofCase.Schema));
+        Assert.That(msgs.Skip(1).All(m => m.PayloadCase == QueryStreamMessage.PayloadOneofCase.Row), Is.True);
+    }
+
+    /// <summary>
     /// Same coverage for SHOW VARIABLES, which is dispatched the same way and would fail the same way
     /// if the gRPC path did not recognise it.
     /// </summary>

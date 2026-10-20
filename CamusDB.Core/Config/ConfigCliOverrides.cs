@@ -35,6 +35,10 @@ public sealed class ConfigCliOverrides
 
     public IReadOnlyList<string>? HttpPeers { get; init; }
 
+    public IReadOnlyList<string>? ExtensionAssemblies { get; init; }
+
+    public IReadOnlyList<string>? UnsafeExtensionAssemblies { get; init; }
+
     /// <summary>
     /// Null leaves the YAML/default value alone; <c>true</c> makes the node join a running cluster
     /// (seeded from the peer list) instead of bootstrapping one.

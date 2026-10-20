@@ -26,6 +26,27 @@
     <ProjectReference Include="..\CamusDB\CamusDB.csproj" />
     <ProjectReference Include="..\CamusDB.Grpc.Client\CamusDB.Grpc.Client.csproj" />
   </ItemGroup>
+
+  <!-- Extension fixtures: built first, never referenced as assemblies. A normal reference would load a
+       fixture into the default load context and hide load-context bugs, so each DLL is copied into
+       extension-fixtures/<Fixture>/ and the tests load it only through the server's extension loader.
+       Each fixture gets its own folder because two fixtures may carry the same dependency. -->
+  <ItemGroup>
+    <ExtensionFixture Include="..\CamusDB.Tests.Extensions\*\*.csproj" />
+    <ProjectReference Include="@(ExtensionFixture)" ReferenceOutputAssembly="false" Private="false" />
+  </ItemGroup>
+
+  <Target Name="CopyExtensionFixtures" AfterTargets="Build">
+    <MSBuild Projects="@(ExtensionFixture)" Targets="GetTargetPath" Properties="Configuration=$(Configuration)">
+      <Output TaskParameter="TargetOutputs" ItemName="_ExtensionFixtureOutput" />
+    </MSBuild>
+    <ItemGroup>
+      <_ExtensionFixtureFile Include="%(_ExtensionFixtureOutput.RootDir)%(_ExtensionFixtureOutput.Directory)*.dll">
+        <FixtureName>%(_ExtensionFixtureOutput.Filename)</FixtureName>
+      </_ExtensionFixtureFile>
+    </ItemGroup>
+    <Copy SourceFiles="@(_ExtensionFixtureFile)" DestinationFolder="$(OutDir)extension-fixtures\%(_ExtensionFixtureFile.FixtureName)" SkipUnchangedFiles="true" />
+  </Target>
   
   <ItemGroup>
     <None Remove="BufferPool\" />

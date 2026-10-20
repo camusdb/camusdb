@@ -524,7 +524,14 @@ public sealed class KvTransaction
     /// </summary>
     public void ReserveMutations(int count)
     {
-        if (mutationLimit <= 0 || count == 0) 
+        if (count == 0)
+            return;
+
+        // Counted whatever the limit: the statement retry boundary reads it to tell an attempt that
+        // wrote nothing from one that did. See WriteCount.
+        Interlocked.Increment(ref writeBatches);
+
+        if (mutationLimit <= 0)
             return;
 
         WriteAdmissionGate?.Invoke();
@@ -542,6 +549,34 @@ public sealed class KvTransaction
 
     /// <summary>Running total of mutations reserved so far in this transaction.</summary>
     public int MutationCount { get { lock (trackSync) return mutationCount; } }
+
+    private long writeBatches;
+
+    /// <summary>
+    /// How many write batches this transaction reserved, counted even when the mutation limit is off.
+    /// A statement that retries a transient error in the <b>same</b> transaction compares it before and
+    /// after an attempt: the retry is safe only when the attempt wrote nothing, because nothing undoes
+    /// a failed attempt's writes short of a rollback. That covers writes made by triggers and
+    /// procedures too, since their SQL reserves on this transaction.
+    /// </summary>
+    public long WriteCount => Interlocked.Read(ref writeBatches);
+
+    private string? rollbackOnlyReason;
+
+    /// <summary>
+    /// Why this transaction may only roll back, or null. Set by <see cref="MarkRollbackOnly"/>; a
+    /// commit of a marked transaction is refused with <see cref="CamusDBErrorCodes.TransactionRollbackOnly"/>.
+    /// </summary>
+    public string? RollbackOnlyReason => Volatile.Read(ref rollbackOnlyReason);
+
+    /// <summary>
+    /// Marks the transaction rollback-only. Used when SQL that a C# extension ran in it failed: the
+    /// failed statement may have staged part of its writes (a foreign-key check runs after the row
+    /// writes), there are no savepoints to undo them alone, and extension code may have caught the
+    /// error. The first reason is kept.
+    /// </summary>
+    public void MarkRollbackOnly(string reason) =>
+        Interlocked.CompareExchange(ref rollbackOnlyReason, reason, null);
 
     public KvTransaction(
         HLCTimestamp transactionId,

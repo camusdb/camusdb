@@ -33,13 +33,27 @@ internal sealed class RowInserter
     /// <summary>Opens the parent tables a foreign-key check reads.</summary>
     private readonly TableOpener tableOpener;
 
-    public RowInserter(ILogger<ICamusDB> logger, TableOpener tableOpener)
+    private readonly Extensions.TriggerRuntime? triggers;
+
+    /// <param name="triggers">The engine's trigger runtime. Null on a controller built without an
+    /// engine (unit tests), where no table can have a bound trigger.</param>
+    public RowInserter(ILogger<ICamusDB> logger, TableOpener tableOpener, Extensions.TriggerRuntime? triggers = null)
     {
         ArgumentNullException.ThrowIfNull(tableOpener);
 
         this.logger = logger;
         this.tableOpener = tableOpener;
+        this.triggers = triggers;
     }
+
+    /// <summary>
+    /// The statement's INSERT triggers on <paramref name="table"/>, or null. A caller that splits one
+    /// statement into several <see cref="Insert"/> calls (<c>INSERT … SELECT</c>) creates them once,
+    /// passes them to each call, and fires the AFTER triggers itself after the last page, the same as
+    /// it owns the foreign-key checker.
+    /// </summary>
+    internal Extensions.StatementTriggers? CreateStatementTriggers(DatabaseDescriptor database, TableDescriptor table, KvTransaction tx) =>
+        triggers?.ForStatement(database, table, tx, TriggerEventSet.Insert);
 
     /// <summary>
     /// Builds the foreign-key checker for a statement that calls <see cref="Insert"/> more than once —
@@ -208,18 +222,50 @@ internal sealed class RowInserter
     /// Receives one (row id, stored values) pair for each written row, in insert order, for an
     /// <c>INSERT … RETURNING</c>. Null when the statement returns no rows, which costs nothing.
     /// </param>
+    /// <param name="statementTriggers">
+    /// The statement's triggers when the caller owns the statement (see
+    /// <see cref="CreateStatementTriggers"/>); the caller then fires the AFTER triggers. Null makes this
+    /// call the whole statement: it resolves the triggers and fires the AFTER ones after its last write
+    /// and its foreign-key checks.
+    /// </param>
     public async Task<int> Insert(
         DatabaseDescriptor database,
         TableDescriptor table,
         InsertTicket ticket,
         ForeignKeyStatementChecker? statementChecker = null,
-        List<QueryResultRow>? insertedRows = null)
+        List<QueryResultRow>? insertedRows = null,
+        Extensions.StatementTriggers? statementTriggers = null)
     {
         MaterializedViewAccessGuard.RequireWritable(table);
-        Validate(table, ticket);
 
+        bool ownsTriggers = statementChecker is null && statementTriggers is null;
+        Extensions.StatementTriggers? rowTriggers = statementTriggers
+            ?? (ownsTriggers ? CreateStatementTriggers(database, table, ticket.TxnState) : null);
+
+        // Before any BEFORE trigger runs: the checker opens and pins the parent tables, and an open can
+        // throw SchemaCatchingUp, which the dispatcher retries in this same transaction. A trigger that
+        // had already written would then write again.
         ForeignKeyStatementChecker checker = statementChecker
             ?? await ForeignKeyStatementChecker.ForChildWritesAsync(database, table, tableOpener, ticket.TxnState).ConfigureAwait(false);
+
+        // Before validation, so what a BEFORE trigger writes must still pass NOT NULL, length and CHECK.
+        // The rows are copied first: a transport keeps the request's rows for a retry, and a trigger's
+        // change must not leak into the next attempt.
+        if (rowTriggers is { HasBefore: true })
+        {
+            List<Dictionary<string, ColumnValue>> rows = new(ticket.Values.Count);
+
+            foreach (Dictionary<string, ColumnValue> values in ticket.Values)
+            {
+                Dictionary<string, ColumnValue> row = new(values, values.Comparer);
+                await rowTriggers.FireBeforeAsync(null, row).ConfigureAwait(false);
+                rows.Add(row);
+            }
+
+            ticket = new InsertTicket(ticket.TxnState, ticket.DatabaseName, ticket.TableName, rows);
+        }
+
+        Validate(table, ticket);
 
         InsertFluxState state = new(
             database: database,
@@ -228,7 +274,8 @@ internal sealed class RowInserter
         )
         {
             ForeignKeys = checker,
-            ReturningRows = insertedRows
+            ReturningRows = insertedRows,
+            Triggers = rowTriggers is { HasAfter: true } ? rowTriggers : null
         };
 
         FluxMachine<InsertFluxSteps, InsertFluxState> machine = new(state);
@@ -237,6 +284,11 @@ internal sealed class RowInserter
 
         if (statementChecker is null && checker.HasWork)
             await checker.CompleteAsync(ticket.TxnState).ConfigureAwait(false);
+
+        // After the last write and the constraint checks: an AFTER trigger sees only a statement that
+        // is going to stand.
+        if (ownsTriggers && rowTriggers is not null)
+            await rowTriggers.FireAfterAsync().ConfigureAwait(false);
 
         return inserted;
     }
@@ -302,6 +354,7 @@ internal sealed class RowInserter
 
             state.ForeignKeys.AddChildRow(values);
             state.ReturningRows?.Add(new QueryResultRow(rowId, values));
+            state.Triggers?.QueueAfter(null, values);
 
             chunk.Add(new KvTableStore.RowWrite
             {

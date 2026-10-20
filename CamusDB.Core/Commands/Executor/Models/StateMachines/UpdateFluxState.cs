@@ -51,6 +51,14 @@ internal sealed class UpdateFluxState
     internal Controllers.DML.WriteReturningPlan.ReturningRowCollector? Returning { get; init; }
 
     /// <summary>
+    /// The statement's UPDATE triggers, or null when the table has none. With any, the write phase
+    /// decodes the whole old row so a trigger sees every column. A row whose BEFORE trigger changes a
+    /// carried large column is encoded from NEW in full; every other row keeps copying its stored
+    /// cells.
+    /// </summary>
+    internal Extensions.StatementTriggers? Triggers { get; init; }
+
+    /// <summary>
     /// Where the statement's retryable Kahuna abort is recorded instead of thrown, or null to throw.
     /// Each step tests it after every call it passes it to and aborts the machine when it is set.
     /// See <see cref="Transactions.RetryableAbortSink"/>.

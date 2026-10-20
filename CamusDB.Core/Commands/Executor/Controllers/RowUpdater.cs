@@ -40,13 +40,17 @@ public sealed class RowUpdater
     /// <summary>Opens the related tables a foreign-key check reads.</summary>
     private readonly TableOpener tableOpener;
 
-    internal RowUpdater(ILogger<ICamusDB> logger, TableOpener tableOpener, StatisticsManager? stats = null)
+    /// <summary>The engine's trigger runtime; null on a controller built without an engine.</summary>
+    private readonly Extensions.TriggerRuntime? triggers;
+
+    internal RowUpdater(ILogger<ICamusDB> logger, TableOpener tableOpener, StatisticsManager? stats = null, Extensions.TriggerRuntime? triggers = null)
     {
         ArgumentNullException.ThrowIfNull(tableOpener);
 
         this.logger = logger;
         this.tableOpener = tableOpener;
         _stats = stats;
+        this.triggers = triggers;
     }
 
     private static void ValidateIfColumnExists(List<TableColumnSchema> columns, Dictionary<string, TableIndexSchema> indexes, string columnName)
@@ -80,13 +84,16 @@ public sealed class RowUpdater
         }
     }
 
-    private static void ValidatePlainValues(List<TableColumnSchema> columns, Dictionary<string, TableIndexSchema> indexes, Dictionary<string, ColumnValue> plainValues)
+    private static void ValidatePlainValues(List<TableColumnSchema> columns, Dictionary<string, TableIndexSchema> indexes, Dictionary<string, ColumnValue> plainValues, bool checkNotNull)
     {
         if (plainValues.Count == 0)
             throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Missing columns list to update");
 
         foreach (KeyValuePair<string, ColumnValue> columnValue in plainValues)
             ValidateIfColumnExists(columns, indexes, columnValue.Key);
+
+        if (!checkNotNull)
+            return;
 
         foreach (TableColumnSchema columnSchema in columns)
         {
@@ -109,13 +116,16 @@ public sealed class RowUpdater
         }
     }
 
-    private static void ValidateExprValues(List<TableColumnSchema> columns, Dictionary<string, TableIndexSchema> indexes, Dictionary<string, NodeAst> exprValues)
+    private static void ValidateExprValues(List<TableColumnSchema> columns, Dictionary<string, TableIndexSchema> indexes, Dictionary<string, NodeAst> exprValues, bool checkNotNull)
     {
         if (exprValues.Count == 0)
             throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Missing columns list to update");
 
         foreach (KeyValuePair<string, NodeAst> columnValue in exprValues)
             ValidateIfColumnExists(columns, indexes, columnValue.Key);
+
+        if (!checkNotNull)
+            return;
 
         foreach (TableColumnSchema columnSchema in columns)
         {
@@ -133,7 +143,14 @@ public sealed class RowUpdater
         }
     }
 
-    private static void Validate(TableDescriptor table, UpdateTicket ticket)
+    /// <param name="checkNotNull">
+    /// False when the table has a BEFORE UPDATE trigger: the trigger runs before the row is validated
+    /// and may replace a NULL the statement assigns, so the early NOT NULL refusal of a literal NULL
+    /// would refuse a statement the trigger repairs. The structural checks (the column exists, the
+    /// primary key is not assigned) still run here, and every written row still passes the NOT NULL
+    /// check after the trigger ran.
+    /// </param>
+    private static void Validate(TableDescriptor table, UpdateTicket ticket, bool checkNotNull = true)
     {
         if (ticket.PlainValues is not null && ticket.ExprValues is not null)
             throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Cannot specify both plan and sql expr values at the same time");
@@ -142,10 +159,10 @@ public sealed class RowUpdater
         Dictionary<string, TableIndexSchema> indexes = table.Indexes;
 
         if (ticket.PlainValues is not null)
-            ValidatePlainValues(columns, indexes, ticket.PlainValues);
+            ValidatePlainValues(columns, indexes, ticket.PlainValues, checkNotNull);
 
         if (ticket.ExprValues is not null)
-            ValidateExprValues(columns, indexes, ticket.ExprValues);
+            ValidateExprValues(columns, indexes, ticket.ExprValues, checkNotNull);
     }
 
     /// <summary>
@@ -169,12 +186,20 @@ public sealed class RowUpdater
         DML.WriteReturningPlan.ReturningRowCollector? returning = null)
     {
         MaterializedViewAccessGuard.RequireWritable(table);
-        Validate(table, ticket);
+
+        // Bound before the first write, so a trigger that cannot bind on this node refuses the
+        // statement before it changes anything. Bound before validation and the foreign-key checker,
+        // too: a BEFORE trigger can repair a NULL and can change any column, which widens the checks
+        // the checker must prepare.
+        Extensions.StatementTriggers? rowTriggers = triggers?.ForStatement(database, table, ticket.TxnState, TriggerEventSet.Update);
+
+        Validate(table, ticket, checkNotNull: rowTriggers is not { HasBefore: true });
 
         // Decided from the assigned columns before any row is read, and built before the first write:
         // it opens and pins the related tables, which may throw SchemaCatchingUp.
         ForeignKeyStatementChecker foreignKeys = await ForeignKeyStatementChecker.ForUpdatesAsync(
-            database, table, tableOpener, ticket.TxnState, ticket.PlainValues, ticket.ExprValues).ConfigureAwait(false);
+            database, table, tableOpener, ticket.TxnState, ticket.PlainValues, ticket.ExprValues,
+            assignsEveryColumn: rowTriggers is { HasBefore: true }).ConfigureAwait(false);
 
         UpdateFluxState state = new(
             database: database,
@@ -185,7 +210,8 @@ public sealed class RowUpdater
         )
         {
             ForeignKeys = foreignKeys,
-            Returning = returning
+            Returning = returning,
+            Triggers = rowTriggers
         };
 
         FluxMachine<UpdateFluxSteps, UpdateFluxState> machine = new(state);
@@ -196,6 +222,10 @@ public sealed class RowUpdater
         // that recorded a retryable abort did not complete, and is not checked.
         if (updated > 0 && foreignKeys.HasWork && aborts is not { HasAbort: true })
             await foreignKeys.CompleteAsync(ticket.TxnState).ConfigureAwait(false);
+
+        // After the last write and the constraint checks; never for a statement that did not complete.
+        if (rowTriggers is not null && aborts is not { HasAbort: true })
+            await rowTriggers.FireAfterAsync().ConfigureAwait(false);
 
         return updated;
     }
@@ -534,6 +564,10 @@ public sealed class RowUpdater
         MutationRowRecheck recheck = MutationRowRecheck.Build(table.Schema, ticket.Where, ticket.Filters);
         IReadOnlySet<string>? evaluatedColumns = AddReturnedColumns(CollectEvaluatedColumns(table.Schema, ticket, recheck), state.Returning);
 
+        // A trigger reads all of OLD, so a row decodes every column (a carried cell is still carried).
+        if (state.Triggers is not null)
+            evaluatedColumns = null;
+
         // Drain the matched-row buffer in bounded chunks so the heap retains at most chunkSize
         // writable rows and their index mutation sets simultaneously. Mirrors the delete path.
         int chunkSize = state.Database.Options.SpillEffectiveThreshold;
@@ -648,6 +682,10 @@ public sealed class RowUpdater
         for (int i = 0; i < chunkRows.Count; i++)
             rowIds.Add(chunkRows[i].RowId);
 
+        // A nested statement run by an enclosing BEFORE trigger must not change a row that statement
+        // still holds an image of; see TriggerReentrancyGuard.
+        Extensions.TriggerReentrancyGuard.ThrowIfProtected(table.Id, rowIds);
+
         // Test-only interleaving point; see TestBeforeWriteHook. Read once so a concurrent clear cannot fault it.
         if (TestBeforeWriteHook is { } beforeWriteHook)
             await beforeWriteHook().ConfigureAwait(false);
@@ -668,6 +706,8 @@ public sealed class RowUpdater
         // so filter once per chunk instead of re-evaluating per index per row.
         List<TableIndexSchema> writableIndexes = SchemaElementStateRules.CollectWritableIndexes(table.Schema, table.Indexes);
 
+        // With triggers, evaluatedColumns is null, so a carried row still decodes every column. A row
+        // whose BEFORE trigger changes a carried column stops carrying below.
         UpdateCarryPlan carry = UpdateCarryPlan.Build(table, ticket, writableIndexes, evaluatedColumns, state.ForeignKeys);
         
         (ReadOnlyMemory<byte>?[] oldRows, ReadOnlyMemory<byte>?[] storedRows, List<int>?[] oldOutOfLine, bool[] carried) =
@@ -675,12 +715,19 @@ public sealed class RowUpdater
 
         List<KvTableStore.RowUpdate> batch = new(chunkRows.Count);
         List<QueryResultRow>? returnedRows = state.Returning is not null ? new(chunkRows.Count) : null;
+        List<(Dictionary<string, ColumnValue> Old, Dictionary<string, ColumnValue> New)>? triggeredRows =
+            state.Triggers is { HasAfter: true } ? new(chunkRows.Count) : null;
 
         // Per-chunk decode-plan caches: every row at the same stored schema version shares one resolved
         // plan instead of re-running schema-history lookups and visibility resolution per row. A row that
         // carries its untouched large values decodes a narrower column set, so it has its own cache.
         RowEncoder.DictionaryDecodeState decodeState = new();
         RowEncoder.DictionaryDecodeState carryDecodeState = new();
+
+        // While this chunk's BEFORE triggers run, their SQL must not change a row this chunk read.
+        object? reentrancy = state.Triggers is { HasBefore: true }
+            ? Extensions.TriggerReentrancyGuard.Protect(table.Id, rowIds)
+            : null;
 
         for (int i = 0; i < chunkRows.Count; i++)
         {
@@ -707,6 +754,17 @@ public sealed class RowUpdater
 
             Dictionary<string, ColumnValue> newRow = GetNewUpdatedRow(oldRow, ticket);
 
+            // Before coercion and validation, so what a BEFORE trigger writes must still pass them. A
+            // trigger that changed a carried column turns carrying off for this row only: its stored cell
+            // no longer holds the value to write, so the row is encoded from NEW in full. Every other row
+            // keeps copying its untouched large values.
+            bool carryRow = carried[i];
+
+            if (state.Triggers is { HasBefore: true } beforeTriggers &&
+                await beforeTriggers.FireBeforeAsync(oldRow, newRow).ConfigureAwait(false) is { } changedByTrigger &&
+                carryRow && carry.CarriesAny(schemaColumns, changedByTrigger))
+                carryRow = false;
+
             CoerceRowValues(table, newRow);
             CheckForNotNulls(table, newRow);
             CheckEnforcer.EnforceOnRow(table, newRow);
@@ -715,7 +773,7 @@ public sealed class RowUpdater
             // A carried cell is copied from the row as stored, never from the resolved row: resolution
             // clears the marks of a cell the update decodes, and copying that plain cell would write the
             // large value inline again instead of keeping its pointer.
-            EncodedRow encoded = carried[i]
+            EncodedRow encoded = carryRow
                 ? codec.EncodeStorageValue(RowSlotAdapter.FromRow(schemaColumns, newRow), largeValuePolicy, storedRows[i]!.Value.Span, carry.CarryMask)
                 : codec.EncodeStorageValue(RowSlotAdapter.FromRow(schemaColumns, newRow), largeValuePolicy);
 
@@ -730,12 +788,16 @@ public sealed class RowUpdater
                 OldIndexEntries = oldIndexEntries,
                 NewIndexEntries = newIndexEntries,
                 LargeValues = encoded.OutOfLine,
-                LargeValueDeletes = UnreferencedLargeValues(oldOutOfLine[i], encoded, carried[i] ? carry.CarriedVariableOrdinals : null),
+                LargeValueDeletes = UnreferencedLargeValues(oldOutOfLine[i], encoded, carryRow ? carry.CarriedVariableOrdinals : null),
             });
 
             // The coerced new row is the value the encoder stored, so RETURNING reports the stored value.
             returnedRows?.Add(new QueryResultRow(rowId, newRow));
+            triggeredRows?.Add((oldRow, newRow));
         }
+
+        if (state.Triggers is { HasBefore: true })
+            Extensions.TriggerReentrancyGuard.Release(reentrancy);
 
         await table.Store.UpdateRowsBatch(tx, batch, default, state.RetryableAborts).ConfigureAwait(false);
         if (state.RetryableAborts is { HasAbort: true })
@@ -745,6 +807,13 @@ public sealed class RowUpdater
 
         if (returnedRows is not null)
             await state.Returning!.AddChunkAsync(returnedRows).ConfigureAwait(false);
+
+        // Queued only once the batch is written: the AFTER triggers see exactly the counted rows.
+        if (triggeredRows is not null)
+        {
+            foreach ((Dictionary<string, ColumnValue> oldImage, Dictionary<string, ColumnValue> newImage) in triggeredRows)
+                state.Triggers!.QueueAfter(oldImage, newImage);
+        }
 
         foreach (KvTableStore.RowUpdate row in batch)
             Log.LogRowUpdated(logger, row.RowId);
@@ -780,6 +849,28 @@ public sealed class RowUpdater
         public required IReadOnlySet<string> DecodedColumns { get; init; }
 
         public bool IsEmpty => CarriedVariableOrdinals.Count == 0;
+
+        /// <summary>
+        /// True when any of <paramref name="changed"/> is a carried column: a BEFORE trigger set it, so
+        /// the row's stored cell no longer holds the value to write. <paramref name="columns"/> is the
+        /// current schema's column list, whose positions the mask follows.
+        /// </summary>
+        public bool CarriesAny(List<TableColumnSchema> columns, IReadOnlyList<TableColumnSchema> changed)
+        {
+            for (int i = 0; i < columns.Count; i++)
+            {
+                if (!CarryMask[i])
+                    continue;
+
+                foreach (TableColumnSchema column in changed)
+                {
+                    if (string.Equals(columns[i].Name, column.Name, StringComparison.OrdinalIgnoreCase))
+                        return true;
+                }
+            }
+
+            return false;
+        }
 
         /// <param name="evaluatedColumns">
         /// The columns the write phase evaluates on the locked read (predicate re-check and SET

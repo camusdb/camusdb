@@ -201,6 +201,25 @@ internal sealed class StatementAuthorizer
             return;
         }
 
+        // A procedure is extension code that runs SQL as its caller; which procedures a user may run has
+        // no grant model yet, so CALL is superuser-only in this version.
+        if (ast.nodeType is NodeType.Call)
+        {
+            if (!principal.IsSuperuser)
+                throw new CamusDBException(CamusDBErrorCodes.InsufficientPrivilege, "CALL requires a superuser");
+            return;
+        }
+
+        // The loaded extensions are held to the same bar: file paths, hashes and the trust level of
+        // the code running inside the server are deployment detail that no per-database grant scopes
+        // down.
+        if (ast.nodeType is NodeType.ShowExtensions)
+        {
+            if (!principal.IsSuperuser)
+                throw new CamusDBException(CamusDBErrorCodes.InsufficientPrivilege, "Loaded extensions require a superuser");
+            return;
+        }
+
         // Changing configuration fleet-wide is gated harder still in effect: several of these knobs
         // bound memory, concurrency and background work, so a non-superuser who could SET one has a
         // denial-of-service lever on every node. Reading the overlay follows SHOW VARIABLES' bar so
@@ -530,7 +549,9 @@ internal sealed class StatementAuthorizer
             or NodeType.AlterTableSetColumnStorage or NodeType.AlterTableRewriteStorage
             or NodeType.AlterTableAddPrimaryKey or NodeType.AlterTableDropPrimaryKey
             or NodeType.AlterTableSetSetting or NodeType.AlterTableResetSetting or NodeType.AnalyzeTable
-            or NodeType.CommentOnTable or NodeType.CommentOnColumn or NodeType.CommentOnIndex => Privilege.Alter,
+            or NodeType.CommentOnTable or NodeType.CommentOnColumn or NodeType.CommentOnIndex
+            // A trigger changes what every write to the table does, which is the ALTER TABLE bar.
+            or NodeType.CreateTrigger or NodeType.DropTrigger => Privilege.Alter,
         NodeType.ShowTables or NodeType.ShowTablesFrom or NodeType.ShowColumns or NodeType.ShowIndexes or NodeType.ShowCreateTable
             or NodeType.ShowDatabase or NodeType.ShowOrphanTables => Privilege.Select,
         // Statistics report bounds drawn from real column values, so reading them is a read of the

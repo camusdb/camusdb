@@ -92,7 +92,8 @@ public static class StatementScope
         NodeType.AlterMaterializedViewRenameTo or
         NodeType.CreateSequence or NodeType.CreateSequenceIfNotExists or
         NodeType.DropSequence or NodeType.DropSequenceIfExists or
-        NodeType.AlterSequence or NodeType.AlterSequenceRenameTo;
+        NodeType.AlterSequence or NodeType.AlterSequenceRenameTo or
+        NodeType.CreateTrigger or NodeType.DropTrigger;
 
     /// <summary>
     /// True for the row-returning statements the query executor answers <b>before</b> opening a
@@ -125,6 +126,8 @@ public static class StatementScope
         NodeType.ShowEngineStats or
         // Per-process configuration; likewise not read from any database.
         NodeType.ShowVariables or
+        // The C# extensions this process loaded at startup; per node, not read from any database.
+        NodeType.ShowExtensions or
         // This process's own slow query log; not read from any database either.
         NodeType.ShowSlowQueries or
         // The cluster-wide settings overlay; not read from any database either.

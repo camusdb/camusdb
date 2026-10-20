@@ -284,6 +284,10 @@ public sealed class SchemaReplicator
         // TableDescriptor.Indexes is rebuilt with the updated index state on next access.
         // Column SetElementState does not need this because DML reads column state directly
         // from table.Schema.Columns (updated in place by ApplyElementState).
+        // Trigger ops need no eviction: DML reads the trigger list from the descriptor's TableSchema,
+        // which the apply mutated in place, and the per-node binding lives on the trigger record
+        // itself, so the replaced list takes any stale binding with it.
+
         // A new constraint can take ownership of an index, which changes that index's entry.
         if (entry.Op == SchemaOp.AddForeignKey)
             database.TableDescriptors.TryRemove(DecodePayload<SchemaAddForeignKeyPayload>(entry).TableName, out _);
@@ -542,6 +546,8 @@ public sealed class SchemaReplicator
             // re-delivered entry "already applied" only by accident. Compare the storage id instead.
             SchemaOp.TruncateTable => WasTruncateApplied(schema, DecodePayload<SchemaTruncateTablePayload>(entry)),
             SchemaOp.AddForeignKey => SchemaDeltaApplier.HasForeignKey(schema, DecodePayload<SchemaAddForeignKeyPayload>(entry)),
+            SchemaOp.CreateTrigger => TriggerDeltaApplier.WasCreateApplied(schema, DecodePayload<SchemaCreateTriggerPayload>(entry)),
+            SchemaOp.DropTrigger => TriggerDeltaApplier.WasDropApplied(schema, DecodePayload<SchemaDropTriggerPayload>(entry)),
             _ => schema.SchemaVersion >= entry.ToVersion
         };
     }
@@ -690,6 +696,9 @@ public sealed class SchemaReplicator
             // ForeignKeySchema is immutable too, so a shallow list copy is sufficient. A clone that
             // dropped the list would dry-run a delta against a schema in which nothing is referenced.
             ForeignKeys = table.ForeignKeys is null ? null : [.. table.ForeignKeys],
+            // TriggerDefinition is immutable, so a shallow list copy is sufficient. A clone without
+            // the list would dry-run a DROP TRIGGER against a table that has none.
+            Triggers = table.Triggers is null ? null : [.. table.Triggers],
             // Preserve table settings so a clone promoted to a live schema (or used for validation)
             // does not silently lose the opt-out; matches the Indexes/CheckConstraints treatment.
             Settings = table.Settings is null ? null : new Dictionary<string, string>(table.Settings, StringComparer.Ordinal),

@@ -30,6 +30,8 @@ public class ConfigReader
         "initial_partitions",
         "peers",
         "http_peers",
+        "extension_assemblies",
+        "unsafe_extension_assemblies",
         "join_existing",
         "pitr_bootstrap_from",
         "pitr_bootstrap_target_time_ms",

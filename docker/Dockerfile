@@ -8,6 +8,7 @@ FROM --platform=$BUILDPLATFORM mcr.microsoft.com/dotnet/sdk:10.0 AS build-env
 ARG TARGETARCH
 
 RUN rm -fr /src && mkdir -p /src
+COPY CamusDB.Extensions.Abstractions /src/CamusDB.Extensions.Abstractions/
 COPY CamusDB.Core /src/CamusDB.Core/
 COPY CamusDB.Grpc.Contracts /src/CamusDB.Grpc.Contracts/
 COPY CamusDB /src/CamusDB/

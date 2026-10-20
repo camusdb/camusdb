@@ -1,0 +1,6 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <ItemGroup>
+    <ProjectReference Include="..\..\CamusDB.Extensions.Abstractions\CamusDB.Extensions.Abstractions.csproj" />
+    <ProjectReference Include="..\Fixture.Helper\Fixture.Helper.csproj" />
+  </ItemGroup>
+</Project>

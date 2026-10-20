@@ -55,6 +55,14 @@ public class CamusCommandLineOptions
     [Option("http-peers", Required = false, HelpText = "Per-peer HTTP host:port list (parallel to --initial-cluster)", Separator = ' ')]
     public IEnumerable<string>? HttpPeers { get; set; }
 
+    [Option("extension-assemblies", Required = false, Separator = ' ',
+        HelpText = "Absolute paths of C# extension assemblies to load in SAFE mode")]
+    public IEnumerable<string>? ExtensionAssemblies { get; set; }
+
+    [Option("unsafe-extension-assemblies", Required = false, Separator = ' ',
+        HelpText = "Absolute paths of C# extension assemblies to load without the SAFE check")]
+    public IEnumerable<string>? UnsafeExtensionAssemblies { get; set; }
+
     [Option("join-existing", Required = false,
         HelpText = "true|false. Join a RUNNING cluster as a new node using --initial-cluster as the seed list, " +
                    "instead of bootstrapping via static discovery (default false). Never guessed: a would-be " +
@@ -105,6 +113,14 @@ public class CamusCommandLineOptions
         if (httpPeers is { Count: 0 })
             httpPeers = null;
 
+        IReadOnlyList<string>? extensionAssemblies = ExtensionAssemblies?.ToList();
+        if (extensionAssemblies is { Count: 0 })
+            extensionAssemblies = null;
+
+        IReadOnlyList<string>? unsafeExtensionAssemblies = UnsafeExtensionAssemblies?.ToList();
+        if (unsafeExtensionAssemblies is { Count: 0 })
+            unsafeExtensionAssemblies = null;
+
         return new CamusDB.Core.Config.ConfigCliOverrides
         {
             Mode = Mode,
@@ -117,6 +133,8 @@ public class CamusCommandLineOptions
             InitialPartitions = InitialClusterPartitions,
             Peers = peers,
             HttpPeers = httpPeers,
+            ExtensionAssemblies = extensionAssemblies,
+            UnsafeExtensionAssemblies = unsafeExtensionAssemblies,
             JoinExisting = JoinExisting,
             PitrBootstrapFrom = PitrBootstrapFrom,
             PitrBootstrapTargetTimeMs = PitrBootstrapTargetTimeMs,

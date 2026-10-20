@@ -41,6 +41,8 @@ internal sealed class DdlStatementDispatcher
 
     private readonly CatalogsManager catalogs;
 
+    private readonly TriggerDdlService triggerDdl;
+
     private readonly SqlExecutor sqlExecutor;
 
     private readonly SqlParserCache sqlParserCache;
@@ -131,6 +133,7 @@ internal sealed class DdlStatementDispatcher
 
         this.context = context;
         this.catalogs = catalogs;
+        triggerDdl = new TriggerDdlService(context, catalogs);
         this.sqlExecutor = sqlExecutor;
         this.sqlParserCache = sqlParserCache;
         this.statementAuthorizer = statementAuthorizer;
@@ -587,6 +590,18 @@ internal sealed class DdlStatementDispatcher
                     },
                     postCommitInvalidate: () => database.Cache?.InvalidateByTableId(database.Id, renameTableDesc.Id)
                     ).ConfigureAwait(false);
+                }
+
+            case NodeType.CreateTrigger:
+                {
+                    await triggerDdl.CreateAsync(database, ast).ConfigureAwait(false);
+                    return new ExecuteDDLSQLResult(database, true);
+                }
+
+            case NodeType.DropTrigger:
+                {
+                    await triggerDdl.DropAsync(database, ast).ConfigureAwait(false);
+                    return new ExecuteDDLSQLResult(database, true);
                 }
 
             case NodeType.CommentOnSequence:

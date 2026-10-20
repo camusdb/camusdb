@@ -220,6 +220,70 @@ internal sealed class TestSqlAuthEnforcement : BaseTest
     /// secret settings masked, the output describes the node's whole security posture and limits, which
     /// no per-database grant scopes down.
     /// </summary>
+    /// <summary>
+    /// A trigger changes what every write to its table does, so CREATE and DROP TRIGGER need the
+    /// ALTER privilege on the table. The check runs when the table is opened, before the trigger type
+    /// is resolved, so it holds on an engine that loads no extension at all.
+    /// </summary>
+    [Test]
+    public async Task TriggerDdl_RequiresAlterOnTheTable()
+    {
+        (string dbname, CommandExecutor executor, Principal root) = await SetupWithSuperuser();
+
+        await RunDdl(executor, "", "CREATE USER trigger_writer IDENTIFIED BY 'trigger-pw'", root);
+        await RunDdl(executor, "", $"GRANT SELECT, INSERT ON {dbname}.* TO trigger_writer", root);
+        Principal writer = await LoginAsync(executor, "trigger_writer", "trigger-pw");
+
+        CamusDBException create = Assert.ThrowsAsync<CamusDBException>(async () =>
+            await RunDdl(executor, dbname, "CREATE TRIGGER audit ON items AFTER INSERT EXTERNAL NAME 'Some.Type'", writer))!;
+        Assert.AreEqual(CamusDBErrorCodes.InsufficientPrivilege, create.Code);
+
+        CamusDBException drop = Assert.ThrowsAsync<CamusDBException>(async () =>
+            await RunDdl(executor, dbname, "DROP TRIGGER audit ON items", writer))!;
+        Assert.AreEqual(CamusDBErrorCodes.InsufficientPrivilege, drop.Code);
+    }
+
+    /// <summary>
+    /// CALL runs extension code that issues SQL as its caller, and there is no grant model for
+    /// procedures yet, so it is superuser-only. The gate runs before the procedure is looked up.
+    /// </summary>
+    [Test]
+    public async Task Call_RequiresSuperuser()
+    {
+        (string dbname, CommandExecutor executor, Principal root) = await SetupWithSuperuser();
+
+        await RunDdl(executor, "", "CREATE USER caller IDENTIFIED BY 'caller-pw'", root);
+        await RunDdl(executor, "", $"GRANT SELECT, INSERT, UPDATE, DELETE ON {dbname}.* TO caller", root);
+        Principal caller = await LoginAsync(executor, "caller", "caller-pw");
+
+        CamusDBException ex = Assert.ThrowsAsync<CamusDBException>(async () =>
+            await RunNonQuery(executor, dbname, "CALL any_procedure(1)", caller))!;
+        Assert.AreEqual(CamusDBErrorCodes.InsufficientPrivilege, ex.Code);
+
+        // The superuser passes the gate and meets the next check: this engine loads no procedures.
+        CamusDBException missing = Assert.ThrowsAsync<CamusDBException>(async () =>
+            await RunNonQuery(executor, dbname, "CALL any_procedure(1)", root))!;
+        Assert.AreEqual(CamusDBErrorCodes.ProcedureNotFound, missing.Code);
+    }
+
+    [Test]
+    public async Task ShowExtensions_RequiresSuperuser()
+    {
+        (string dbname, CommandExecutor executor, Principal root) = await SetupWithSuperuser();
+
+        await RunDdl(executor, "", "CREATE USER ext_reader IDENTIFIED BY 'ext-pw'", root);
+        await RunDdl(executor, "", $"GRANT SELECT ON {dbname}.* TO ext_reader", root);
+        Principal granted = await LoginAsync(executor, "ext_reader", "ext-pw");
+
+        CamusDBException ex = Assert.ThrowsAsync<CamusDBException>(async () =>
+            await RunServerQuery(executor, "SHOW EXTENSIONS", granted))!;
+        Assert.AreEqual(CamusDBErrorCodes.InsufficientPrivilege, ex.Code);
+
+        // The superuser is admitted. The engine under test loads no extensions, so it returns no
+        // rows rather than an error.
+        await RunServerQuery(executor, "SHOW EXTENSIONS", root);
+    }
+
     [Test]
     public async Task ShowVariables_RequiresSuperuser()
     {

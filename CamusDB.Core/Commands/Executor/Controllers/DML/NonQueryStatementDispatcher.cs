@@ -203,6 +203,31 @@ internal sealed class NonQueryStatementDispatcher
     }
 
     /// <summary>
+    /// Decides whether a <see cref="CamusDBErrorCodes.SchemaCatchingUp"/> fence error may be retried in
+    /// the same transaction. The retry reuses the transaction, which is safe only when the failed
+    /// attempt wrote nothing: the fence usually fires while the target table opens, before any write,
+    /// but a trigger, a procedure, or a related-table open later in the statement can meet it after a
+    /// write, and a retry would then repeat that write. Such an attempt is turned into
+    /// <see cref="CamusDBErrorCodes.TransactionMustRetry"/>, which the caller retries from a new
+    /// transaction.
+    /// </summary>
+    /// <remarks>Two separate catch clauses use this pair, because an exception thrown inside an
+    /// exception filter is swallowed: <see cref="FenceAfterWrite"/> converts, this one retries.</remarks>
+    internal static bool RetryFenceInSameTransaction(CamusDBException ex, int fenceAttempt, Transactions.KvTransaction tx, long writesBefore) =>
+        ex.Code == CamusDBErrorCodes.SchemaCatchingUp
+        && fenceAttempt < SelectStatementExecutor.MaxFenceRetries
+        && tx.WriteCount == writesBefore;
+
+    /// <summary>True for a fence error met after the attempt wrote: it must not be retried here.</summary>
+    internal static bool FenceAfterWrite(CamusDBException ex, Transactions.KvTransaction tx, long writesBefore) =>
+        ex.Code == CamusDBErrorCodes.SchemaCatchingUp && tx.WriteCount != writesBefore;
+
+    private static CamusDBException MustRetryAfterWrite(CamusDBException fence) =>
+        new(CamusDBErrorCodes.TransactionMustRetry,
+            "A schema change in progress interrupted the statement after it wrote; retry the transaction",
+            fence);
+
+    /// <summary>
     /// Execute a SQL statement that doesn't return rows
     /// </summary>
     /// <param name="ticket"></param>
@@ -267,6 +292,10 @@ internal sealed class NonQueryStatementDispatcher
 
                     for (int fenceAttempt = 0; ; fenceAttempt++)
                     {
+                        // Read before the attempt: a fence error is retried in this transaction only
+                        // when the attempt wrote nothing; see RetryFenceInSameTransaction.
+                        long writesBefore = ticket.TxnState.WriteCount;
+
                         try
                         {
                             // Captured before the table is opened; see WriteShapeClock for why the order matters.
@@ -292,7 +321,11 @@ internal sealed class NonQueryStatementDispatcher
                             context.Statistics.TrackInsert(database, table, inserted, insertTicket.Values);
                             return await CompleteInsertAsync(database, table, inserted, warning: null, returning, insertedRows).ConfigureAwait(false);
                         }
-                        catch (CamusDBException ex) when (ex.Code == CamusDBErrorCodes.SchemaCatchingUp && fenceAttempt < SelectStatementExecutor.MaxFenceRetries)
+                        catch (CamusDBException ex) when (FenceAfterWrite(ex, ticket.TxnState, writesBefore))
+                        {
+                            throw MustRetryAfterWrite(ex);
+                        }
+                        catch (CamusDBException ex) when (RetryFenceInSameTransaction(ex, fenceAttempt, ticket.TxnState, writesBefore))
                         {
                             await Task.Delay(TimeSpan.FromMilliseconds(100 << fenceAttempt)).ConfigureAwait(false);
                         }
@@ -310,6 +343,10 @@ internal sealed class NonQueryStatementDispatcher
 
                     for (int fenceAttempt = 0; ; fenceAttempt++)
                     {
+                        // Read before the attempt: a fence error is retried in this transaction only
+                        // when the attempt wrote nothing; see RetryFenceInSameTransaction.
+                        long writesBefore = ticket.TxnState.WriteCount;
+
                         try
                         {
                             // Captured before the table is opened; see WriteShapeClock for why the order matters.
@@ -342,7 +379,11 @@ internal sealed class NonQueryStatementDispatcher
 
                             return await CompleteInsertAsync(database, table, insertedFromSelect, insertWarning, returning, insertedRows).ConfigureAwait(false);
                         }
-                        catch (CamusDBException ex) when (ex.Code == CamusDBErrorCodes.SchemaCatchingUp && fenceAttempt < SelectStatementExecutor.MaxFenceRetries)
+                        catch (CamusDBException ex) when (FenceAfterWrite(ex, ticket.TxnState, writesBefore))
+                        {
+                            throw MustRetryAfterWrite(ex);
+                        }
+                        catch (CamusDBException ex) when (RetryFenceInSameTransaction(ex, fenceAttempt, ticket.TxnState, writesBefore))
                         {
                             await Task.Delay(TimeSpan.FromMilliseconds(100 << fenceAttempt)).ConfigureAwait(false);
                         }
@@ -361,6 +402,10 @@ internal sealed class NonQueryStatementDispatcher
 
                     for (int fenceAttempt = 0; ; fenceAttempt++)
                     {
+                        // Read before the attempt: a fence error is retried in this transaction only
+                        // when the attempt wrote nothing; see RetryFenceInSameTransaction.
+                        long writesBefore = ticket.TxnState.WriteCount;
+
                         try
                         {
                             // Captured before the table is opened; see WriteShapeClock for why the order matters.
@@ -390,7 +435,11 @@ internal sealed class NonQueryStatementDispatcher
                             context.Statistics.TrackUpdate(database, table, updated, updateTicket.PlainValues);
                             return CompleteChangeResult(database, table, updated, returning, collector);
                         }
-                        catch (CamusDBException ex) when (ex.Code == CamusDBErrorCodes.SchemaCatchingUp && fenceAttempt < SelectStatementExecutor.MaxFenceRetries)
+                        catch (CamusDBException ex) when (FenceAfterWrite(ex, ticket.TxnState, writesBefore))
+                        {
+                            throw MustRetryAfterWrite(ex);
+                        }
+                        catch (CamusDBException ex) when (RetryFenceInSameTransaction(ex, fenceAttempt, ticket.TxnState, writesBefore))
                         {
                             await Task.Delay(TimeSpan.FromMilliseconds(100 << fenceAttempt)).ConfigureAwait(false);
                         }
@@ -430,6 +479,10 @@ internal sealed class NonQueryStatementDispatcher
 
                     for (int fenceAttempt = 0; ; fenceAttempt++)
                     {
+                        // Read before the attempt: a fence error is retried in this transaction only
+                        // when the attempt wrote nothing; see RetryFenceInSameTransaction.
+                        long writesBefore = ticket.TxnState.WriteCount;
+
                         try
                         {
                             // Captured before the table is opened; see WriteShapeClock for why the order matters.
@@ -452,11 +505,22 @@ internal sealed class NonQueryStatementDispatcher
                             context.Statistics.TrackDelete(database, table, deleted);
                             return CompleteChangeResult(database, table, deleted, returning, collector);
                         }
-                        catch (CamusDBException ex) when (ex.Code == CamusDBErrorCodes.SchemaCatchingUp && fenceAttempt < SelectStatementExecutor.MaxFenceRetries)
+                        catch (CamusDBException ex) when (FenceAfterWrite(ex, ticket.TxnState, writesBefore))
+                        {
+                            throw MustRetryAfterWrite(ex);
+                        }
+                        catch (CamusDBException ex) when (RetryFenceInSameTransaction(ex, fenceAttempt, ticket.TxnState, writesBefore))
                         {
                             await Task.Delay(TimeSpan.FromMilliseconds(100 << fenceAttempt)).ConfigureAwait(false);
                         }
                     }
+                }
+
+            case NodeType.Call:
+                {
+                    // Runs inside this statement's transaction; the transport commits or rolls it back.
+                    int affected = await Extensions.ProcedureRunner.CallAsync(executor, database, ticket, ast).ConfigureAwait(false);
+                    return new(database, null!, affected);
                 }
 
             case NodeType.EvictCache:
