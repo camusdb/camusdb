@@ -227,9 +227,14 @@ public static class Program
             Console.Error.WriteLine($"--isolation must be read_committed or serializable (got '{o.Isolation}').");
             return RunOutcome.Rejected;
         }
-        if (o.Workload is not ("accounts" or "bank" or "fanout" or "append"))
+        if (o.Workload is not ("accounts" or "bank" or "fanout" or "append" or "tokens"))
         {
-            Console.Error.WriteLine($"--workload must be accounts, bank, fanout or append (got '{o.Workload}').");
+            Console.Error.WriteLine($"--workload must be accounts, bank, fanout, append or tokens (got '{o.Workload}').");
+            return RunOutcome.Rejected;
+        }
+        if (o.Workload == "tokens" && o.Tokens < 1)
+        {
+            Console.Error.WriteLine($"--tokens must be >= 1 (got {o.Tokens}).");
             return RunOutcome.Rejected;
         }
         if (o.Workload == "append" && (o.AppendKeys < 1 || o.AppendMaxWritesPerKey < 1 || o.AppendMaxTxnLength < 1))
@@ -382,6 +387,21 @@ public static class Program
         // attributed to exact rows and moments; see TransferLedger. Only a transfer workload keeps one.
         Metrics.TransferLedger? transferLedger = transfers ? new Metrics.TransferLedger(attribution) : null;
 
+        // The token shape seeds its own table here, before the scan probe starts: the probe counts it, and
+        // it must hold exactly --tokens rows from the first probe on. Like the append table, it is part of
+        // this run's setup, so a dataset seeded by an older init is still usable.
+        bool tokens = o.Workload == "tokens";
+        Metrics.TokenLedger? tokenLedger = null;
+        if (tokens)
+        {
+            await using (CamusConnection tokenSetup = await OpenSingleAsync(o, ct, o.ReconcileRequestTimeout).ConfigureAwait(false))
+            {
+                Console.WriteLine($"Seeding {o.Tokens:N0} token(s) into {TokenOperation.TableName}...");
+                await TokenOperation.EnsureSeededAsync(tokenSetup, connections, o.Tokens, 500, TimeSpan.FromMinutes(5), ct).ConfigureAwait(false);
+            }
+            tokenLedger = new Metrics.TokenLedger(o.Tokens);
+        }
+
         // The in-window scan-visibility probe (see ScanProbe). Started here, before warm-up, and stopped
         // after drain: a short count during warm-up is exactly as wrong as one inside the window. Its
         // connections are its own — one per gateway, routing off, on the probe's deadline.
@@ -393,7 +413,8 @@ public static class Program
             scanProbe = new ScanProbe(
                 probeGateways, o.Database, o.Protocol,
                 new ConnectionSettings(NoAutoPrepare: o.NoAutoPrepare, RequestTimeoutSeconds: o.ScanProbeTimeout, ConnectionOptions: o.ConnectionOptions),
-                dataset, probeEvery, Path.Combine(o.Output, "scan-probe.csv"));
+                dataset, probeEvery, Path.Combine(o.Output, "scan-probe.csv"),
+                tokens ? [(TokenOperation.TableName, o.Tokens)] : null);
             scanProbe.Start();
             Console.WriteLine($"Scan probe: COUNT(*) on {probeGateways.Count} gateway(s) every " +
                               $"{Math.Max(probeEvery.TotalSeconds, ScanProbe.MinInterval.TotalSeconds):F0}s for the whole run.");
@@ -425,9 +446,14 @@ public static class Program
         AppendOperation? appendOperation = append
             ? new AppendOperation(connections, appendKeys!, elleHistory!, appendRunTag, locking, isolation)
             : null;
+        TokenOperation? tokenOperation = tokens
+            ? new TokenOperation(connections, tokenLedger!, locking, isolation)
+            : null;
         IWriteOperation writeOperation;
         if (appendOperation is not null)
             writeOperation = appendOperation;
+        else if (tokenOperation is not null)
+            writeOperation = tokenOperation;
         else if (transfers)
             writeOperation = new TransferOperation(
                 connections, dataset, o.Rows, locking, isolation, ledger: transferLedger, crossTable: crossTable, pipeline: o.Pipeline);
@@ -436,7 +462,9 @@ public static class Program
 
         IReadOperation readOperation = appendOperation is not null
             ? appendOperation
-            : new ReadOperation(connections, dataset);
+            : tokenOperation is not null
+                ? tokenOperation
+                : new ReadOperation(connections, dataset);
         OperationDispatcher dispatcher = new(readOperation, writeOperation);
 
         TimeSpan warmup = DurationParser.Parse(o.Warmup);
@@ -651,7 +679,7 @@ public static class Program
         // downgrade the verdict to "could not verify".
         // The append shape's unknown commits wrote only to its own table, so they cannot widen the band
         // for the seeded rows. The seeded rows must be exactly as they were.
-        long datasetIndeterminate = append ? 0 : writeOperation.IndeterminateTxns;
+        long datasetIndeterminate = append || tokens ? 0 : writeOperation.IndeterminateTxns;
 
         ReconciliationResult reconciliation;
         try
@@ -676,6 +704,35 @@ public static class Program
                 $"the reconciliation connection could not be opened — {ex.GetType().Name}: {ex.Message}",
                 datasetIndeterminate, metrics.Conflicts,
                 baselineBalanceSum, rowAttributionExpected: attribution is not null, scanProbe: scanProbeResult);
+        }
+
+        // The token verdict joins reconciliation like the scan probe: its own reads of its own table, judged
+        // against the journal, and a failure that fails the run.
+        if (tokenLedger is not null)
+        {
+            Metrics.TokenResult tokenResult;
+            try
+            {
+                await using CamusConnection tokenVerify = await OpenSingleAsync(o, ct, o.ReconcileRequestTimeout).ConfigureAwait(false);
+                (IReadOnlyList<Metrics.TokenRow> rows, IReadOnlyList<string> indexIds) = await TokenOperation
+                    .ReadFinalAsync(tokenVerify, TimeSpan.FromSeconds(Math.Max(1, o.ReconcileTimeout)), ct).ConfigureAwait(false);
+                tokenResult = tokenLedger.Judge(rows, indexIds);
+            }
+            catch (Exception ex) when (!ct.IsCancellationRequested)
+            {
+                tokenResult = Metrics.TokenResult.Unavailable($"{ex.GetType().Name}: {ex.Message}", tokenLedger, o.Tokens);
+            }
+
+            reconciliation = reconciliation with
+            {
+                Tokens = tokenResult,
+                Failures = reconciliation.Failures.Concat(tokenResult.Failures).ToList(),
+            };
+            await tokenLedger.WriteAsync(o.Output, ct).ConfigureAwait(false);
+            Console.WriteLine(
+                $"Tokens: {(tokenResult.Passed ? "PASS" : "FAIL")} — {tokenResult.Rows:N0} row(s) for {tokenResult.Tokens:N0} token(s), " +
+                $"{tokenResult.Committed:N0} move(s) committed, {tokenResult.Indeterminate:N0} indeterminate, " +
+                $"{tokenResult.Reads:N0} lookup(s) with {tokenResult.ReadViolations:N0} violation(s) -> token-ledger.csv");
         }
 
         if (reconciliation.RowAttribution is RowAttributionResult rowResult)

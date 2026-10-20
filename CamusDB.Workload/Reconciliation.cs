@@ -42,7 +42,8 @@ public sealed record ReconciliationResult(
     int RowsPerTransaction = 1,
     RowAttributionResult? RowAttribution = null,
     ScanProbeResult? ScanProbe = null,
-    IReadOnlyList<AggregateRead>? Aggregates = null)
+    IReadOnlyList<AggregateRead>? Aggregates = null,
+    TokenResult? Tokens = null)
 {
     // BalanceConserved is the bank-transfer atomicity invariant: SUM(balance) must be unchanged after a
     // transfer run. It is never waived — unlike conflicts, an atomicity break is a correctness failure a
@@ -70,6 +71,10 @@ public sealed record ReconciliationResult(
     // when the run did not probe; when it did, a short count or (on a fault-free run) a failed read
     // fails reconciliation exactly like a broken invariant.
     //
+    // Tokens is the token workload's verdict on its own table (see TokenLedger): every slot holds one
+    // row at the generation its committed moves account for, and no delete came back. Null for every
+    // other shape; like the invariants above, a violation is never waived.
+    //
     // Aggregates records how each verification read went — value, client-observed time, attempts — so
     // scan-time growth is visible run to run instead of surfacing only once a read crosses a deadline.
 
@@ -79,7 +84,8 @@ public sealed record ReconciliationResult(
     public bool Passed => VersionsMatch
         && RowCountMatches && AccountingBalances && (NoConflicts || ConflictsWaived) && BalanceConserved
         && (RowAttribution is null || RowAttribution.Passed)
-        && (ScanProbe is null || ScanProbe.Passed);
+        && (ScanProbe is null || ScanProbe.Passed)
+        && (Tokens is null || Tokens.Passed);
 }
 
 /// <summary>

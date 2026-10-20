@@ -17,7 +17,7 @@ namespace CamusDB.Workload.Metrics;
 
 /// <summary>One <c>SELECT COUNT(*)</c> answer from one gateway for one table.</summary>
 /// <param name="Rows">The count returned, or null when the statement failed.</param>
-/// <param name="Status">"ok", "short" (a count below the expected rows), or "error".</param>
+/// <param name="Status">"ok", "short" (a count below the expected rows), "over" (a count above them), or "error".</param>
 /// <param name="Code">The error code the failure classified to; empty on success.</param>
 public sealed record ScanProbeSample(
     DateTime TsUtc,
@@ -32,8 +32,10 @@ public sealed record ScanProbeSample(
 /// <summary>
 /// The in-window scan-visibility verdict, written into <c>reconciliation.json</c>.
 ///
-/// <para>A short count is never tolerated: the workload never deletes a row, so a scan that
-/// returns fewer rows than exist has failed to see committed data, whatever else was going on. An
+/// <para>A short count is never tolerated: the seeded dataset never loses a row, so a scan that
+/// returns fewer rows than exist has failed to see committed data, whatever else was going on. The
+/// token table deletes and inserts constantly but holds exactly its token count at every committed
+/// state, so for it a count above (<c>Over</c>) is as wrong as a count below. An
 /// error is a gateway that could not answer a read-only aggregate at all; under
 /// <c>--expect-faults</c> a killed node is expected to refuse for a while, so errors are reported
 /// and waived there, but on a fault-free run a read that aborts is the defect this probe exists to
@@ -54,9 +56,10 @@ public sealed record ScanProbeResult(
     double IntervalSeconds,
     bool ErrorsWaived,
     IReadOnlyList<string> Failures,
-    string? ProbeFailure)
+    string? ProbeFailure,
+    long Over = 0)
 {
-    public bool Passed => Short == 0 && (Errors == 0 || ErrorsWaived) && ProbeFailure is null && Probes > 0;
+    public bool Passed => Short == 0 && Over == 0 && (Errors == 0 || ErrorsWaived) && ProbeFailure is null && Probes > 0;
 }
 
 /// <summary>
@@ -83,7 +86,7 @@ public sealed class ScanProbe : IAsyncDisposable
     private readonly string _database;
     private readonly string _protocol;
     private readonly ConnectionSettings _settings;
-    private readonly Dataset _dataset;
+    private readonly IReadOnlyList<(string Table, long Expected, bool Snapshot)> _targets;
     private readonly TimeSpan _interval;
     private readonly string _csvPath;
     private readonly CamusConnection?[] _connections;
@@ -102,13 +105,19 @@ public sealed class ScanProbe : IAsyncDisposable
 
     public ScanProbe(
         IReadOnlyList<string> endpoints, string database, string protocol, ConnectionSettings settings,
-        Dataset dataset, TimeSpan interval, string csvPath)
+        Dataset dataset, TimeSpan interval, string csvPath, IReadOnlyList<(string Table, long Expected)>? extraTables = null)
     {
         _endpoints = endpoints;
         _database = database;
         _protocol = protocol;
         _settings = settings;
-        _dataset = dataset;
+        // The dataset is counted the way it always was. An extra table is one whose rows are deleted and
+        // inserted under load, so it is counted inside a snapshot: a read-committed scan reads the latest
+        // committed version of each key and can see a delete without its insert, or both.
+        _targets = Enumerable.Range(0, dataset.TableNames.Count)
+            .Select(t => (dataset.TableNames[t], dataset.TableRowCount(t), false))
+            .Concat((extraTables ?? []).Select(x => (x.Table, x.Expected, true)))
+            .ToList();
         _interval = interval < MinInterval ? MinInterval : interval;
         _csvPath = csvPath;
         _connections = new CamusConnection?[endpoints.Count];
@@ -173,7 +182,7 @@ public sealed class ScanProbe : IAsyncDisposable
                 long roundStart = Stopwatch.GetTimestamp();
 
                 for (int e = 0; e < _endpoints.Count && !ct.IsCancellationRequested; e++)
-                    for (int t = 0; t < _dataset.TableNames.Count && !ct.IsCancellationRequested; t++)
+                    for (int t = 0; t < _targets.Count && !ct.IsCancellationRequested; t++)
                         await ProbeOnceAsync(e, t, ct).ConfigureAwait(false);
 
                 TimeSpan remaining = _interval - Stopwatch.GetElapsedTime(roundStart);
@@ -194,8 +203,7 @@ public sealed class ScanProbe : IAsyncDisposable
     private async Task ProbeOnceAsync(int endpointIndex, int tableIndex, CancellationToken ct)
     {
         string endpoint = _endpoints[endpointIndex];
-        string table = _dataset.TableNames[tableIndex];
-        long expected = _dataset.TableRowCount(tableIndex);
+        (string table, long expected, bool snapshot) = _targets[tableIndex];
         DateTime ts = DateTime.UtcNow;
         long started = Stopwatch.GetTimestamp();
 
@@ -204,12 +212,32 @@ public sealed class ScanProbe : IAsyncDisposable
             CamusConnection conn = _connections[endpointIndex]
                 ??= await ConnectionSet.OpenProbeAsync(endpoint, _database, _protocol, _settings, ct).ConfigureAwait(false);
 
-            using CamusCommand cmd = conn.CreateCamusCommand($"SELECT COUNT(*) FROM {table}");
-            using CamusDataReader reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
-            long rows = await reader.ReadAsync(ct).ConfigureAwait(false) && !reader.IsDBNull(0) ? reader.GetInt64(0) : 0;
+            long rows;
+            if (snapshot)
+            {
+                CamusTransaction tx = await conn.BeginTransactionAsync(TokenOperation.SnapshotRead, ct).ConfigureAwait(false);
+                try
+                {
+                    using CamusCommand cmd = conn.CreateCamusCommand($"SELECT COUNT(*) FROM {table}");
+                    cmd.Transaction = tx;
+                    using CamusDataReader reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
+                    rows = await reader.ReadAsync(ct).ConfigureAwait(false) && !reader.IsDBNull(0) ? reader.GetInt64(0) : 0;
+                }
+                finally
+                {
+                    try { await tx.RollbackAsync(ct).ConfigureAwait(false); }
+                    catch { /* a read-only snapshot holds nothing to release */ }
+                }
+            }
+            else
+            {
+                using CamusCommand cmd = conn.CreateCamusCommand($"SELECT COUNT(*) FROM {table}");
+                using CamusDataReader reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
+                rows = await reader.ReadAsync(ct).ConfigureAwait(false) && !reader.IsDBNull(0) ? reader.GetInt64(0) : 0;
+            }
 
             double elapsed = Stopwatch.GetElapsedTime(started).TotalMilliseconds;
-            Record(new ScanProbeSample(ts, endpoint, table, expected, rows, elapsed, rows == expected ? "ok" : "short", ""));
+            Record(new ScanProbeSample(ts, endpoint, table, expected, rows, elapsed, rows == expected ? "ok" : rows < expected ? "short" : "over", ""));
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
@@ -255,12 +283,13 @@ public sealed class ScanProbe : IAsyncDisposable
         DateTime windowEnd = measureStartUtc.AddSeconds(measureSeconds);
         bool InWindow(ScanProbeSample s) => measureStartUtc != DateTime.MinValue && s.TsUtc >= measureStartUtc && s.TsUtc <= windowEnd;
 
-        long exact = 0, shortCount = 0, errors = 0, inWindow = 0, inWindowShort = 0, inWindowErrors = 0;
+        long exact = 0, shortCount = 0, overCount = 0, errors = 0, inWindow = 0, inWindowShort = 0, inWindowErrors = 0;
         long minRows = long.MaxValue;
         double sumElapsed = 0, maxElapsed = 0;
         int answered = 0;
         List<string> failures = [];
         List<ScanProbeSample> shortSamples = [];
+        List<ScanProbeSample> overSamples = [];
         Dictionary<string, int> errorCodes = new(StringComparer.Ordinal);
 
         foreach (ScanProbeSample s in samples)
@@ -278,6 +307,11 @@ public sealed class ScanProbe : IAsyncDisposable
                 if (rows == s.Expected)
                 {
                     exact++;
+                }
+                else if (rows > s.Expected)
+                {
+                    overCount++;
+                    overSamples.Add(s);
                 }
                 else
                 {
@@ -305,6 +339,15 @@ public sealed class ScanProbe : IAsyncDisposable
                 $"(lowest {minRows}); a read-committed scan under load skipped committed rows. First: {sample}.");
         }
 
+        if (overCount > 0)
+        {
+            string sample = string.Join("; ", overSamples.Take(5).Select(s =>
+                $"{s.TsUtc:HH:mm:ss}Z {s.Endpoint} {s.Table}: {s.Rows} of {s.Expected}"));
+            failures.Add(
+                $"scan probe: {overCount} of {samples.Count} COUNT(*) probe(s) returned more rows than exist; " +
+                $"a scan saw a deleted row next to its successor. First: {sample}.");
+        }
+
         if (errors > 0)
         {
             string codes = string.Join(", ", errorCodes.OrderByDescending(kv => kv.Value).Select(kv => $"{kv.Key}×{kv.Value}"));
@@ -324,7 +367,7 @@ public sealed class ScanProbe : IAsyncDisposable
             answered == 0 ? 0 : sumElapsed / answered, maxElapsed,
             gateways, interval.TotalSeconds,
             ErrorsWaived: expectFaults,
-            failures, probeFailure);
+            failures, probeFailure, overCount);
     }
 
     public async ValueTask DisposeAsync()
