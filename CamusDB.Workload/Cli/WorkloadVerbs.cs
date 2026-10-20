@@ -161,7 +161,7 @@ public sealed class RunOptions : CommonOptions
     [Option("pipeline", Default = false, HelpText = "Send each write transaction as pipelined frames instead of one round trip per statement: [BEGIN, reads] then [updates, conditional COMMIT] — two exchanges per transaction instead of six on the bank shape. Applies to the accounts, bank and fanout shapes over gRPC against a server that reads the pipeline contract; elsewhere the client falls back to one exchange per step and summary.json's exchangesPerWriteTxn shows it. Recorded in manifest.json; runs that differ here are different clients.")]
     public bool Pipeline { get; set; }
 
-    [Option("workload", Default = "accounts", HelpText = "Write shape: accounts (shard-disjoint read-modify-write, conflict-free), bank (contended transfers within the dataset with a conserved SUM(balance) invariant), fanout (bank transfers whose two legs always land in different tables; needs --tables >= 2), or append (Elle list-append transactions on a separate table, recorded to history.edn for an Elle check; reads become read-only list-append transactions).")]
+    [Option("workload", Default = "accounts", HelpText = "Write shape: accounts (shard-disjoint read-modify-write, conflict-free), bank (contended transfers within the dataset with a conserved SUM(balance) invariant), fanout (bank transfers whose two legs always land in different tables; needs --tables >= 2), append (Elle list-append transactions on a separate table, recorded to history.edn for an Elle check; reads become read-only list-append transactions), or tokens (each write deletes a token row and inserts its successor in one transaction on a separate table of --tokens rows, checked per slot after the run; reads look a slot up in a read-only transaction and must find exactly one row).")]
     public string Workload { get; set; } = "accounts";
 
     [Option("append-keys", Default = 10, HelpText = "Append workload: lists active at one time. Fewer keys means more contention, and more dependency edges for Elle.")]
@@ -172,6 +172,9 @@ public sealed class RunOptions : CommonOptions
 
     [Option("append-max-txn-length", Default = 4, HelpText = "Append workload: most read/append steps in one transaction (each transaction has 1 to this many).")]
     public int AppendMaxTxnLength { get; set; }
+
+    [Option("tokens", Default = 2000L, HelpText = "Token workload: tokens in workload_tokens, one row per slot. Fewer tokens means more moves racing for the same row.")]
+    public long Tokens { get; set; }
 }
 
 /// <summary>

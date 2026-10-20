@@ -175,4 +175,16 @@ public sealed class ScanProbeTests
         string canceled = ErrorClassifier.DescribeReadFailure(new TaskCanceledException("A task was canceled."), deadline);
         Assert.That(canceled, Does.Contain("per-request deadline"));
     }
+
+    [Test]
+    public void CountAboveTheExpected_FailsAsOver_NotAsShort()
+    {
+        ScanProbeSample over = new(WindowStart.AddSeconds(60), "http://g2", "workload_tokens", 500, 501, 120, "over", "");
+        ScanProbeResult r = Summarize([Ok(30), over, Ok(90)]);
+
+        Assert.That(r.Passed, Is.False);
+        Assert.That(r.Over, Is.EqualTo(1));
+        Assert.That(r.Short, Is.EqualTo(0));
+        Assert.That(r.Failures.Single(), Does.Contain("more rows than exist").And.Contains("workload_tokens: 501 of 500"));
+    }
 }
