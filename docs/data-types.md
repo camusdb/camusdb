@@ -23,7 +23,7 @@ and reserved keywords.
 | `string` | UTF-16 text | yes | Length-bounded — see [String and bytes length](#string-and-bytes-length-bounds). |
 | `string(N)` | UTF-16 text, max `N` chars | yes | `N` is a positive integer count of characters. |
 | `date` | calendar date (no time) | yes | Stored as UTC ticks truncated to midnight. |
-| `datetime` | instant in time (UTC) | yes | Stored as UTC ticks. |
+| `datetime` | instant in time (UTC) | yes | Stored as UTC ticks. A `date` value written to a `datetime` column (INSERT, UPDATE, DEFAULT) becomes midnight UTC of that day. A `datetime` value written to a `date` column is refused, because it would lose the time of day. |
 | `bytes` | opaque byte string | yes | Length-bounded (default 10 MB). |
 | `array(T)` | ordered list of `T` | **no** | `T` is a scalar type; see [Arrays](#arrays). |
 
@@ -251,9 +251,30 @@ How a value is written depends on the path. **The SQL literal form and the JSON 
 
 Numeric literals are parsed with the invariant culture (`.` is always the decimal separator,
 independent of server locale). Date/datetime strings are parsed as UTC; a value with no timezone is
-assumed to be UTC. Unparseable date/datetime/bytes literals raise `InvalidInput`. A decimal number
+assumed to be UTC. A `datetime` string can also be a bare date, `'2026-03-15'`, which is midnight UTC
+of that day. Unparseable date/datetime/bytes literals raise `InvalidInput`. A decimal number
 can group its digits with underscores, `200_000`; see
 [PostgreSQL expression syntax](sql-expression-syntax.md#digit-separators).
+
+#### Comparing dates, datetimes and strings
+
+A comparison (`=`, `<>`, `<`, `BETWEEN`, `IN`, a simple `CASE`, a `CHECK`) between a `date` and a
+`datetime` compares the date as midnight UTC of that day, as in PostgreSQL. A string compared with a
+`date` or a `datetime` is parsed into that type with the literal forms above, so no `CAST` is needed:
+
+```sql
+SELECT * FROM events WHERE day = '2026-03-15';                 -- date column
+SELECT * FROM events WHERE created >= '2026-03-01'             -- datetime column, from midnight UTC
+                       AND created <  '2026-04-01';
+SELECT * FROM events WHERE created = day;                      -- true only at midnight
+SELECT * FROM events WHERE day < make_timestamp(2026, 3, 15, 10, 0, 0);  -- includes 2026-03-15
+```
+
+A string that does not parse is an `InvalidInput` error, not a row that fails to match: with a
+silent non-match, `created >= '2026-13-01'` would look like a valid empty result. A `date` takes only
+the `yyyy-MM-dd` form, so `day = '2026-03-15T00:00:00Z'` is an error too. An index on a `date` or
+`datetime` column serves these comparisons, because the planner converts the constant into the
+column's type before it builds the index key.
 
 #### String literals
 

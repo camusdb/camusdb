@@ -47,6 +47,7 @@ internal static class KahunaAbortAttribution
         "kahuna.durable_tx.prepare_retry_loops",
         "kahuna.durable_tx.helping_settled_nothing",
         "kahuna.durable_tx.decision_deadline_margin_ms",
+        "kahuna.durable_tx.deadline_extensions",
         "kahuna.transactions.lost_lock_aborts",
         "kahuna.transactions.lost_staged_intent_aborts",
         "kahuna.kv.staged_revision_collisions",

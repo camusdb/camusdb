@@ -326,6 +326,7 @@ public static class ConfigResolver
         GrpcMaxPreparedStatementBytesPerStream = config.GrpcMaxPreparedStatementBytesPerStream,
         LockEscalationThreshold = config.LockEscalationThreshold,
         LockWaitDeadlineMs = config.LockWaitDeadlineMs,
+        ReplicationWaitDeadlineMs = config.ReplicationWaitDeadlineMs,
 
         KeyRangeShardingEnabled = keyRangeSharding,
         DistributedQueryExecutionEnabled = config.DistributedQueryExecution,

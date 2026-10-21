@@ -53,7 +53,7 @@ public sealed class TestCommitTransportFaultUnresolved
             this.exceptionFactory = exceptionFactory;
         }
 
-        public override Task<(KeyValueResponseType, string?)> LocateAndCommitTransaction(
+        public override Task<TransactionCommitAnswer> LocateAndCommitTransaction(
             TransactionHandle handle, CancellationToken cancellationToken)
         {
             Interlocked.Increment(ref CommitAttempts);

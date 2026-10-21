@@ -244,8 +244,10 @@ internal static class CheckEvaluator
     /// Compares two column values, first coercing a bare string literal to the other operand's
     /// type for the types where a string is a valid literal form (Uuid, Id, Date, DateTime) —
     /// so <c>CHECK (birth_date &gt; '1900-01-01')</c> and <c>CHECK (id = '…')</c> work without an
-    /// explicit CAST, matching the WHERE evaluator's intent. A malformed literal orders
-    /// deterministically (it can equal no real value). A genuinely incomparable pair with no
+    /// explicit CAST, matching the WHERE evaluator's intent. A malformed Uuid or Id literal orders
+    /// deterministically (it can equal no real value); a malformed date or datetime literal is an
+    /// <see cref="CamusDBErrorCodes.InvalidInput"/> error, as in a WHERE clause
+    /// (<see cref="TemporalComparison"/>). A genuinely incomparable pair with no
     /// string-literal coercion (e.g. a String column vs a numeric literal) surfaces a domain
     /// <see cref="CamusDBException"/> rather than letting <see cref="ColumnValue.CompareTo"/>
     /// escape as a raw <see cref="ArgumentException"/>.
@@ -256,6 +258,11 @@ internal static class CheckEvaluator
         // compare numerically by widening both to double.
         if (TryCompareNumeric(left, right, out int numericCmp))
             return numericCmp;
+
+        // A date against a datetime, or a string against either, uses the WHERE clause's rule, so a
+        // malformed date string is an error here too (see TemporalComparison).
+        if (TemporalComparison.TryCompare(left, right, out int temporalCmp))
+            return temporalCmp;
 
         try
         {
@@ -294,7 +301,7 @@ internal static class CheckEvaluator
     private static ColumnValue CoerceStringOperand(ColumnValue str, ColumnType target) => target switch
     {
         ColumnType.Uuid => ColumnValue.FromUuidString(str.StrValue!),
-        ColumnType.Id or ColumnType.Date or ColumnType.DateTime => CastScalarFunctions.CoerceToColumnType(str, target),
+        ColumnType.Id => CastScalarFunctions.CoerceToColumnType(str, target),
         _ => str,
     };
 

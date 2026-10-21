@@ -224,9 +224,13 @@ internal sealed class InsertRowShaper
                 continue;
             }
 
-            row[col.Name] = col.DefaultFunction is not null
+            // The default goes through the same coercion as a supplied value. A function default is
+            // evaluated here, so its type is known only now (CURRENT_DATE() on a datetime column),
+            // and a constant stored by an older schema can predate a coercion rule.
+            ColumnValue value = col.DefaultFunction is not null
                 ? ScalarFunctionEvaluator.EvaluateNullary(col.DefaultFunction, parameters)
                 : col.DefaultValue!;
+            row[col.Name] = CastScalarFunctions.CoerceToColumnType(value, col);
         }
     }
 }

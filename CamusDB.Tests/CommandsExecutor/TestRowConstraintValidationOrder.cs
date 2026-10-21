@@ -363,7 +363,7 @@ public sealed class TestRowConstraintValidationOrderCluster : SharedNodeBaseTest
         (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
         await RowConstraintValidationScenarios.CreateItems(executor, dbname, rows: 3);
         await RowConstraintValidationScenarios.Dml(executor, dbname, "INSERT INTO items (id, price) VALUES (50, -7)");
-        string tableId = (await RowConstraintValidationScenarios.Table(executor, dbname)).Id;
+        string tableId = (await RowConstraintValidationScenarios.Table(executor, dbname)).Id!;
 
         await PersistJob(executor, database, tableId, "items_price_pos", SchemaElementKind.Check);
         await executor.Catalogs.ReplicateAddCheckConstraintAsync(database, "items", "items_price_pos", "price > 0", ["price"]);
@@ -381,7 +381,7 @@ public sealed class TestRowConstraintValidationOrderCluster : SharedNodeBaseTest
         (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
         await RowConstraintValidationScenarios.CreateItems(executor, dbname, rows: 3);
         await RowConstraintValidationScenarios.Dml(executor, dbname, "INSERT INTO items (id, price) VALUES (50, NULL)");
-        string tableId = (await RowConstraintValidationScenarios.Table(executor, dbname)).Id;
+        string tableId = (await RowConstraintValidationScenarios.Table(executor, dbname)).Id!;
 
         await PersistJob(executor, database, tableId, "items_price_not_null", SchemaElementKind.NotNull);
         await executor.Catalogs.ReplicateSetColumnNotNullAsync(database, "items", "price", notNull: true, "items_price_not_null");
@@ -400,7 +400,7 @@ public sealed class TestRowConstraintValidationOrderCluster : SharedNodeBaseTest
     {
         (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
         await RowConstraintValidationScenarios.CreateItems(executor, dbname, rows: 3);
-        string tableId = (await RowConstraintValidationScenarios.Table(executor, dbname)).Id;
+        string tableId = (await RowConstraintValidationScenarios.Table(executor, dbname)).Id!;
 
         await PersistJob(executor, database, tableId, "items_price_not_null", SchemaElementKind.NotNull);
         await executor.Catalogs.ReplicateSetColumnNotNullAsync(database, "items", "price", notNull: true, "items_price_not_null");
@@ -417,7 +417,7 @@ public sealed class TestRowConstraintValidationOrderCluster : SharedNodeBaseTest
     {
         (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
         await RowConstraintValidationScenarios.CreateItems(executor, dbname, rows: 3);
-        string tableId = (await RowConstraintValidationScenarios.Table(executor, dbname)).Id;
+        string tableId = (await RowConstraintValidationScenarios.Table(executor, dbname)).Id!;
 
         await PersistJob(executor, database, tableId, "items_price_pos", SchemaElementKind.Check);
 
@@ -436,7 +436,7 @@ public sealed class TestRowConstraintValidationOrderCluster : SharedNodeBaseTest
     {
         (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
         await RowConstraintValidationScenarios.CreateItems(executor, dbname, rows: 3);
-        string tableId = (await RowConstraintValidationScenarios.Table(executor, dbname)).Id;
+        string tableId = (await RowConstraintValidationScenarios.Table(executor, dbname)).Id!;
 
         await PersistJob(executor, database, tableId, "items_price_pos", SchemaElementKind.Check);
         await executor.Catalogs.ReplicateAddCheckConstraintAsync(database, "items", "items_price_pos", "price > 0", ["price"]);
@@ -463,7 +463,7 @@ public sealed class TestRowConstraintValidationOrderCluster : SharedNodeBaseTest
     {
         (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
         await RowConstraintValidationScenarios.CreateItems(executor, dbname, rows: 3);
-        string tableId = (await RowConstraintValidationScenarios.Table(executor, dbname)).Id;
+        string tableId = (await RowConstraintValidationScenarios.Table(executor, dbname)).Id!;
 
         await PersistJob(executor, database, tableId, "items_price_not_null", SchemaElementKind.NotNull, SchemaChangeCoordinator.MaxResumeAttempts);
         await executor.Catalogs.ReplicateSetColumnNotNullAsync(database, "items", "price", notNull: true, "items_price_not_null");

@@ -73,6 +73,32 @@ internal sealed class KvConflictMessageBuilder
     }
 
     /// <summary>
+    /// Builds the message for <paramref name="operation"/> when its keys kept answering
+    /// <c>WaitingForReplication</c> for the whole replication-wait deadline: a value still
+    /// replicating, or a committed predecessor whose settlement has not reached the keys. Nothing
+    /// conflicts, so the message says so and names the budget that ran out, not a lock.
+    /// </summary>
+    internal string ReplicationWaitDeadlineMessage(
+        KvTransaction? tx,
+        string operation,
+        IReadOnlyList<string>? conflictKeys = null,
+        int conflictingKeys = 0)
+    {
+        StringBuilder message = new();
+
+        message.Append("Replication-wait deadline exceeded after ")
+               .Append(options.ReplicationWaitDeadlineMs)
+               .Append(" ms on ")
+               .Append(operation);
+
+        AppendConflictContext(message, tx, conflictKeys, conflictingKeys);
+
+        message.Append("; the keys still wait on a value that is replicating or on a committed transaction that is settling, not on a lock — retry the transaction from BeginAsync");
+
+        return message.ToString();
+    }
+
+    /// <summary>
     /// Builds the message for a retry-budget exhaustion (as opposed to a wall-clock deadline):
     /// the operation kept receiving transient conflict responses for the whole retry budget.
     /// Carries the same diagnostic context as <see cref="LockWaitDeadlineMessage"/> — which

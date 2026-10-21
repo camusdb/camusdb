@@ -21,7 +21,9 @@ internal static class CastScalarFunctions
     private const string DateFormat = "yyyy-MM-dd";
 
     // DateTime formats accepted by CamusDB for datetime literals (UTC only). The seven-digit form is
-    // the text form a datetime casts to (ScalarTextForm), so a datetime round-trips through text.
+    // the text form a datetime casts to (ScalarTextForm), so a datetime round-trips through text. A
+    // bare date is midnight UTC of that day, as in PostgreSQL, so `created >= '2026-01-01'` compares a
+    // datetime column with the start of the day. It is last because it is the least common form.
     private static readonly string[] DateTimeFormats =
     [
         "yyyy-MM-ddTHH:mm:ssZ",
@@ -34,6 +36,7 @@ internal static class CastScalarFunctions
         "yyyy-MM-ddTHH:mm:ss.fZ",
         "yyyy-MM-ddTHH:mm:sszzz",
         "yyyy-MM-ddTHH:mm:ss",
+        "yyyy-MM-dd",
     ];
 
     public static void Register(ScalarFunctionRegistry registry)
@@ -183,6 +186,10 @@ internal static class CastScalarFunctions
             (ColumnType.Integer64, ColumnType.Float32)  => CastToFloat32("coerce", value),
             (ColumnType.String,    ColumnType.Date)     => CastToDate("coerce", value),
             (ColumnType.String,    ColumnType.DateTime) => CastToDateTime("coerce", value),
+            // A date widens to midnight UTC of that day, as in PostgreSQL and MySQL, so a datetime
+            // column accepts make_date(...) or a date column. The reverse would drop the time of day,
+            // so a datetime written into a date column is still refused.
+            (ColumnType.Date,      ColumnType.DateTime) => CastToDateTime("coerce", value),
             (ColumnType.String,    ColumnType.Bytes)    => CastToBytes("coerce", value),
             (ColumnType.String,    ColumnType.Uuid)     => CastToUuid("coerce", value),
             // A NUMERIC column accepts an integer, a float (a literal converts from its source text)
@@ -394,7 +401,9 @@ internal static class CastScalarFunctions
         return value.Type switch
         {
             ColumnType.DateTime => value,
-            ColumnType.Date     => value, // Date is already stored as ticks at midnight UTC
+            // A date is stored as the ticks of midnight UTC, so only the type changes. Returning the
+            // input as-is would keep the Date type, and the cast result would still read as a date.
+            ColumnType.Date     => new ColumnValue(ColumnType.DateTime, value.LongValue),
             ColumnType.String   => FromStringToDateTime(castName, value.StrValue!),
             _ => throw InvalidConversion(castName, value.Type, ColumnType.DateTime),
         };
@@ -423,26 +432,56 @@ internal static class CastScalarFunctions
 
     private static ColumnValue FromStringToDate(string castName, string text)
     {
-        if (!DateTimeOffset.TryParseExact(text, DateFormat, CultureInfo.InvariantCulture,
-                DateTimeStyles.AssumeUniversal, out DateTimeOffset dto))
+        if (!TryParseTemporalText(text, ColumnType.Date, out ColumnValue value))
             throw new CamusDBException(
                 CamusDBErrorCodes.InvalidInput,
-                $"Function '{castName}' cannot parse '{text}' as date — expected format: yyyy-MM-dd");
+                $"Function '{castName}' cannot parse '{text}' as date — expected format: {TemporalTextForm(ColumnType.Date)}");
 
-        long ticks = TruncateToMidnight(dto.UtcDateTime.Ticks);
-        return new ColumnValue(ColumnType.Date, ticks);
+        return value;
     }
 
     private static ColumnValue FromStringToDateTime(string castName, string text)
     {
-        if (!DateTimeOffset.TryParseExact(text, DateTimeFormats, CultureInfo.InvariantCulture,
-                DateTimeStyles.AssumeUniversal, out DateTimeOffset dto))
+        if (!TryParseTemporalText(text, ColumnType.DateTime, out ColumnValue value))
             throw new CamusDBException(
                 CamusDBErrorCodes.InvalidInput,
-                $"Function '{castName}' cannot parse '{text}' as datetime — expected ISO-8601 UTC format, e.g. 2026-01-01T12:00:00Z");
+                $"Function '{castName}' cannot parse '{text}' as datetime — expected {TemporalTextForm(ColumnType.DateTime)}");
 
-        return new ColumnValue(ColumnType.DateTime, dto.UtcTicks);
+        return value;
     }
+
+    /// <summary>
+    /// Parses the text form of a <see cref="ColumnType.Date"/> or <see cref="ColumnType.DateTime"/>
+    /// value, the one parse that CAST, assignment and comparison share (see
+    /// <see cref="TemporalComparison"/>). Returns false, without an exception, when the text is not a
+    /// valid value of <paramref name="target"/>. A date keeps the UTC day of the text.
+    /// </summary>
+    internal static bool TryParseTemporalText(string text, ColumnType target, out ColumnValue value)
+    {
+        value = ColumnValue.Null;
+
+        if (target == ColumnType.Date)
+        {
+            if (!DateTimeOffset.TryParseExact(text, DateFormat, CultureInfo.InvariantCulture,
+                    DateTimeStyles.AssumeUniversal, out DateTimeOffset date))
+                return false;
+
+            value = new ColumnValue(ColumnType.Date, TruncateToMidnight(date.UtcDateTime.Ticks));
+            return true;
+        }
+
+        if (!DateTimeOffset.TryParseExact(text, DateTimeFormats, CultureInfo.InvariantCulture,
+                DateTimeStyles.AssumeUniversal, out DateTimeOffset instant))
+            return false;
+
+        value = new ColumnValue(ColumnType.DateTime, instant.UtcTicks);
+        return true;
+    }
+
+    /// <summary>The text form <see cref="TryParseTemporalText"/> expects, for an error message.</summary>
+    internal static string TemporalTextForm(ColumnType target) => target == ColumnType.Date
+        ? "yyyy-MM-dd"
+        : "ISO-8601 UTC format, e.g. 2026-01-01T12:00:00Z or 2026-01-01";
 
     // Bytes text is hex behind a 0x prefix ('0xABCD01') or the PostgreSQL \x prefix ('\xabcd01').
     // The \x form is what a bytes value casts to (ScalarTextForm), so bytes round-trip through text.

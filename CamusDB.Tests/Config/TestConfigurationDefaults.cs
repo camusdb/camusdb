@@ -103,6 +103,7 @@ public class TestConfigurationDefaults
         Assert.AreEqual(8L * 1024 * 1024, CamusDBOptions.Default.GrpcMaxPreparedStatementBytesPerStream, nameof(CamusDBOptions.Default.GrpcMaxPreparedStatementBytesPerStream));
         Assert.AreEqual(20_000, CamusDBOptions.Default.MaxMutationsPerTransaction, nameof(CamusDBOptions.Default.MaxMutationsPerTransaction));
         Assert.AreEqual(500, CamusDBOptions.Default.LockWaitDeadlineMs, nameof(CamusDBOptions.Default.LockWaitDeadlineMs));
+        Assert.AreEqual(5_000, CamusDBOptions.Default.ReplicationWaitDeadlineMs, nameof(CamusDBOptions.Default.ReplicationWaitDeadlineMs));
         Assert.AreEqual(64, CamusDBOptions.Default.MaxIdentifierLength, nameof(CamusDBOptions.Default.MaxIdentifierLength));
         Assert.AreEqual(512, CamusDBOptions.Default.MaxColumnsPerTable, nameof(CamusDBOptions.Default.MaxColumnsPerTable));
         Assert.AreEqual(false, CamusDBOptions.Default.SpillEnabled, nameof(CamusDBOptions.Default.SpillEnabled));

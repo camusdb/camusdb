@@ -639,11 +639,11 @@ public sealed class TestKvTransactionsManager
     {
         private int mustRetryRemaining = mustRetryCount;
 
-        public override Task<(KeyValueResponseType, string?)> LocateAndCommitTransaction(
+        public override Task<TransactionCommitAnswer> LocateAndCommitTransaction(
             TransactionHandle handle, CancellationToken cancellationToken)
         {
             if (Interlocked.Decrement(ref mustRetryRemaining) >= 0)
-                return Task.FromResult<(KeyValueResponseType, string?)>((KeyValueResponseType.MustRetry, null));
+                return Task.FromResult(TransactionCommitAnswer.Of(KeyValueResponseType.MustRetry, null));
             return inner.LocateAndCommitTransaction(handle, cancellationToken);
         }
     }
@@ -676,7 +676,7 @@ public sealed class TestKvTransactionsManager
 
         public List<string?> ReceivedAnchors { get; } = [];
 
-        public override Task<(KeyValueResponseType, string?)> LocateAndCommitTransaction(
+        public override Task<TransactionCommitAnswer> LocateAndCommitTransaction(
             TransactionHandle handle, CancellationToken cancellationToken)
         {
             lock (ReceivedAnchors)
@@ -686,7 +686,7 @@ public sealed class TestKvTransactionsManager
                 ? KeyValueResponseType.MustRetry
                 : KeyValueResponseType.Committed;
 
-            return Task.FromResult<(KeyValueResponseType, string?)>((type, anchor));
+            return Task.FromResult(TransactionCommitAnswer.Of(type, anchor));
         }
     }
 }

@@ -1370,6 +1370,23 @@ public sealed record CamusDBOptions
     public int LockWaitDeadlineMs { get; init; } = 500;
 
     /// <summary>
+    /// Wall-clock cap, in milliseconds, for a lock or write that keeps waiting on a key whose value is
+    /// still replicating, or whose previous writer has committed but not yet settled (Kahuna answers
+    /// <c>WaitingForReplication</c>). Such a wait is not a lock conflict: no other transaction holds the
+    /// key, the store only has not caught up, so it gets its own budget instead of
+    /// <see cref="LockWaitDeadlineMs"/>, which stays short to resolve deadlocks (a foreign range lock
+    /// answers <c>MustRetry</c>, and a round that meets one is bounded by that deadline whatever else it
+    /// met). Sized like Kahuna's own page retry budget for the same answer on a scan. A node that
+    /// rewrites many rows a large transaction committed an instant earlier settles that commit in the
+    /// background for longer than a lock conflict is allowed to last; a budget below that settlement
+    /// fails the statement with <see cref="CamusDBErrorCodes.TransactionMustRetry"/> although nothing
+    /// conflicts.
+    /// Default: 5000 ms.
+    /// </summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Cluster)]
+    public int ReplicationWaitDeadlineMs { get; init; } = 5_000;
+
+    /// <summary>
     /// Maximum length (in UTF-16 <c>string.Length</c> units) for any user-facing identifier:
     /// database names, table names, column names, and index names (including rename targets).
     /// <para>

@@ -893,6 +893,13 @@ public sealed class KvTransactionsManager : IDisposable
         using System.Diagnostics.Activity? commitSpan =
             Diagnostics.ServerDiagnostics.StartSpan(Diagnostics.ServerDiagnostics.Spans.Commit);
         int commitAttempts = 0;
+
+        // The coordinator names the check that refused the last attempt (a conflict, the decision
+        // deadline, an exhausted prepare, a lost lock, settlement lag, ...) beside the response type.
+        // Kept for the messages below, so a refusal can be read from the exception instead of from
+        // the coordinator's log or counters.
+        CommitRefusalClass lastRefusal = CommitRefusalClass.None;
+        string? lastReason = null;
         try
         {
             try
@@ -906,11 +913,16 @@ public sealed class KvTransactionsManager : IDisposable
                     commitAttempts++;
 
                     Diagnostics.QueryStageProfile.KahunaScope commitCall = Diagnostics.QueryStageProfile.MeasureKahuna(Diagnostics.KahunaCallKind.Commit);
-                    (result, string? anchor) = await kahuna.LocateAndCommitTransaction(
+                    TransactionCommitAnswer answer = await kahuna.LocateAndCommitTransaction(
                             tx.Handle,
                             cancellationToken
                         ).ConfigureAwait(false);
                     commitCall.Dispose();
+
+                    result = answer.Type;
+                    string? anchor = answer.RecordAnchorKey;
+                    lastRefusal = answer.Refusal;
+                    lastReason = answer.Reason;
 
                     // Fold the coordinator's canonical record anchor onto the handle the moment it is known —
                     // including alongside a non-terminal MustRetry — so a finalize retried after the live
@@ -999,7 +1011,7 @@ public sealed class KvTransactionsManager : IDisposable
                 throw new CamusDBException(
                     CamusDBErrorCodes.TransactionFinalizeUnresolved,
                     $"Transaction {tx.UniqueId} commit outcome is not yet resolved after {commitAttempts} attempts " +
-                    $"over {commitTimer.GetElapsedMilliseconds()} ms; " +
+                    $"over {commitTimer.GetElapsedMilliseconds()} ms ({DescribeRefusal(lastRefusal, lastReason, "no refusal reported")}); " +
                     "retry COMMIT on the same transaction (do not re-run the operation)"
                 );
             }
@@ -1027,16 +1039,15 @@ public sealed class KvTransactionsManager : IDisposable
 
             // Aborted = definite non-commit (conflict/deadline). Nothing was committed, so replaying
             // the whole operation from a fresh BeginAsync is safe → CADB0502 (retried by
-            // SerializableRetryHelper for autocommit statements). The coordinator does not say which
-            // check refused the commit, so the message carries what this side knows: the size of the
-            // staged work and how long the finalize ran. A refusal that arrives at once is a conflict
-            // or a lost lock; one that arrives after seconds of a large finalize is the coordinator's
-            // decision deadline, which is sized from the finalizes it saw before this one.
+            // SerializableRetryHelper for autocommit statements). The message carries the refusal class
+            // and reason the coordinator reported, beside what this side knows: the size of the staged
+            // work and how long the finalize ran.
             if (result == KeyValueResponseType.Aborted)
                 throw new CamusDBException(
                     CamusDBErrorCodes.TransactionConflict,
                     $"Transaction {tx.UniqueId} commit of {tx.MutationCount} staged mutation(s) was aborted by the coordinator " +
-                    $"after {commitTimer.GetElapsedMilliseconds()} ms and {commitAttempts} attempt(s) (conflict or deadline); " +
+                    $"after {commitTimer.GetElapsedMilliseconds()} ms and {commitAttempts} attempt(s) " +
+                    $"({DescribeRefusal(lastRefusal, lastReason, "conflict or deadline")}); " +
                     "retry the operation from BeginAsync"
                 );
 
@@ -1044,7 +1055,8 @@ public sealed class KvTransactionsManager : IDisposable
             // Do NOT reinterpret it as a conflict (no auto-replay) — surface it as a non-retryable error.
             throw new CamusDBException(
                 CamusDBErrorCodes.TransactionAlreadyCompleted,
-                $"Transaction {tx.UniqueId} commit returned {result}; the coordinator session is gone and the outcome is unavailable"
+                $"Transaction {tx.UniqueId} commit returned {result} ({DescribeRefusal(lastRefusal, lastReason, "no refusal reported")}); " +
+                "the coordinator session is gone and the outcome is unavailable"
             );
         }
         finally
@@ -1062,6 +1074,19 @@ public sealed class KvTransactionsManager : IDisposable
                     _cache!.PublishGate.AbortWrite(keyspaces!);
             }
         }
+    }
+
+    /// <summary>
+    /// The refusal the coordinator reported for a commit answer, as message text: the class and, when
+    /// the coordinator gave one, its reason; <paramref name="whenNone"/> when the answer carried no
+    /// class (an older node, or an answer that was not a refusal).
+    /// </summary>
+    private static string DescribeRefusal(CommitRefusalClass refusal, string? reason, string whenNone)
+    {
+        if (refusal == CommitRefusalClass.None)
+            return whenNone;
+
+        return string.IsNullOrEmpty(reason) ? refusal.ToString() : $"{refusal}: {reason}";
     }
 
     /// <summary>

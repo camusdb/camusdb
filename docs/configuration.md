@@ -74,6 +74,7 @@ Example: YAML `mode: cluster` with `--mode standalone` starts in standalone mode
 | `max_serializable_transaction_lifetime_ms` | — | `3600000` |
 | `lock_escalation_threshold` | — | `50` |
 | `lock_wait_deadline_ms` | — | `500` |
+| `replication_wait_deadline_ms` | — | `5000`; cap on a lock or write that waits on a value still replicating or a committed predecessor still settling (Kahuna's `WaitingForReplication`), kept apart from the lock-conflict cap so settlement lag on a loaded node does not fail a statement that conflicts with nothing |
 | `key_range_sharding` | — (`CAMUS_KEY_RANGE_SHARDING` env) | `false` |
 | `distributed_query_execution` | — | `false`; fragments eligible key-range scans across cluster nodes (see [query planning](query-planner.md#part-iv--distributed-ready-plan-properties)) |
 | `broadcast_join_max_build_rows` | — | `10000`; maximum build-side rows for a remote inner-join probe; `0` disables broadcast probes |

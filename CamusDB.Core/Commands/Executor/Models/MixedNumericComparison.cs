@@ -111,7 +111,9 @@ public static class MixedNumericComparison
 
     /// <summary>
     /// SQL equality for <c>x IN (...)</c> membership: NULL equals nothing, a mixed numeric pair is
-    /// equal when the widened values are equal, a String against a Uuid or Id is equal when the
+    /// equal when the widened values are equal, a date, a datetime and a string compare by the
+    /// temporal rule (<see cref="TemporalComparison"/>, which throws for a string that does not parse),
+    /// a String against a Uuid or Id is equal when the
     /// string parses to that value (<see cref="StringOperandCoercion"/>, the rule <c>=</c> uses), a
     /// same-type pair uses <see cref="ColumnValue.CompareTo"/>, and any other cross-type pair
     /// (<c>5 = 'foo'</c>) is a non-match rather than an error.
@@ -125,6 +127,9 @@ public static class MixedNumericComparison
         if (left.Type == ColumnType.Null || right.Type == ColumnType.Null)
             return false;
 
+        if (TemporalComparison.TryCompare(left, right, out int temporalCmp))
+            return temporalCmp == 0;
+
         if (left.Type != right.Type
             && StringOperandCoercion.TryAlign(ref left, ref right) == StringOperandCoercion.Alignment.Malformed)
             return false;
@@ -133,8 +138,9 @@ public static class MixedNumericComparison
     }
 
     /// <summary>
-    /// <see cref="EqualsForMembership"/> without the String-to-Uuid/Id step: a String never equals a
-    /// Uuid or Id here. A hash set of list items needs this narrower equality, because a String and
+    /// <see cref="EqualsForMembership"/> without the string parse steps: a String never equals a
+    /// Uuid, an Id, a date or a datetime here, but a date still equals the datetime at its midnight.
+    /// A hash set of list items needs this narrower equality, because a String and
     /// the Uuid it spells hash differently; the caller converts the probe or the items before a
     /// lookup instead (see <c>PreparedInSet</c>).
     /// </summary>
@@ -144,6 +150,9 @@ public static class MixedNumericComparison
             return false;
 
         if (TryCompare(left, right, out int cmp))
+            return cmp == 0;
+
+        if (TemporalComparison.TryCompareDateAndDateTime(left, right, out cmp))
             return cmp == 0;
 
         if (left.Type != right.Type)

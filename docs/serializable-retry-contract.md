@@ -221,6 +221,18 @@ access order).
 The `TransactionLifetimeExceeded` error (CADB0505) means the transaction was open for longer than
 25 seconds. Shorten long-running serializable transactions so they complete within the deadline.
 
+A wait that is not a conflict runs on its own budget. A key whose value is still replicating, or
+whose previous writer has committed but not yet settled, answers the store's `WaitingForReplication`
+instead of a lock refusal: no transaction holds it, so there is no deadlock to resolve, and the
+engine waits up to `replication_wait_deadline_ms` (5 s by default) before it fails the statement
+with `TransactionMustRetry` (CADB0504). A round in which even one key answered a lock refusal
+stays on `lock_wait_deadline_ms`. The CADB0504 message names which budget ran out and how many
+keys answered each way in the last round.
+
+A commit the Kahuna coordinator refuses (CADB0502) names the refusal class in its message — a
+conflict, a moved staged base, the decision deadline, an exhausted prepare, a lost lock or staged
+intent — with the coordinator's reason, the number of staged mutations and how long the finalize ran.
+
 ---
 
 ## Configuration

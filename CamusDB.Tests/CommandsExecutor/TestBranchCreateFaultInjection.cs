@@ -337,7 +337,7 @@ public sealed class TestBranchCreateFaultInjection : BaseTest
 
         public CommitThrowsKahuna(IKahuna inner) : base(inner) { }
 
-        public override Task<(KeyValueResponseType, string?)> LocateAndCommitTransaction(
+        public override Task<TransactionCommitAnswer> LocateAndCommitTransaction(
             TransactionHandle handle, CancellationToken cancellationToken)
         {
             if (Armed)

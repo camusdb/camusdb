@@ -872,7 +872,9 @@ internal sealed class KvBatchWriter
 
         List<(string, int, KeyValueDurability)> pending = new(lockKeys);
         long deadline = retry.LockWaitDeadlineTicks();
+        long replicationDeadline = retry.ReplicationWaitDeadlineTicks();
         int retries = 0;
+        int rounds = 0;
 
         // Bind one operation id to the current pending batch declaration. It folds every acquired
         // exclusive point lock into the coordinator working set as one registered operation, so
@@ -942,17 +944,17 @@ internal sealed class KvBatchWriter
             if (retryBatch.Count == 0)
                 return true;
 
-            if (Stopwatch.GetTimestamp() >= deadline)
+            if (transients.DeadlinePassed(deadline, replicationDeadline))
             {
                 RetryableAbortSink.Raise(aborts,
                     new CamusDBException(
                         CamusDBErrorCodes.TransactionMustRetry,
-                        messages.LockWaitDeadlineMessage(tx, transients.Describe("batched exclusive lock acquisition"), retryBatch.Select(r => r.Item1).ToList(), retryBatch.Count)),
+                        transients.DeadlineMessage(messages, tx, "batched exclusive lock acquisition", retryBatch.Select(r => r.Item1).ToList(), retryBatch.Count)),
                     ServerDiagnostics.Tags.AbortSite.AcquireMany);
                 return false;
             }
 
-            if (++retries >= KahunaRetryPolicy.MaxKahunaRetries)
+            if (transients.CountsAgainstRetryBudget && ++retries >= KahunaRetryPolicy.MaxKahunaRetries)
             {
                 RetryableAbortSink.Raise(aborts,
                     new CamusDBException(
@@ -963,7 +965,7 @@ internal sealed class KvBatchWriter
             }
 
             ServerDiagnostics.AddKvRetryWait("acquire_many");
-            await Task.Delay(KahunaRetryPolicy.RetryDelayMs(retries), ct).ConfigureAwait(false);
+            await Task.Delay(KahunaRetryPolicy.RetryDelayMs(rounds++), ct).ConfigureAwait(false);
 
             // A shrinking pending set (some keys were confirmed Locked) is a new, smaller declaration —
             // register it under a fresh id. An unchanged set (every key transient) is the identical batch
@@ -992,7 +994,9 @@ internal sealed class KvBatchWriter
     {
         List<KahunaSetKeyValueRequestItem> pending = new(items);
         long deadline = retry.LockWaitDeadlineTicks();
+        long replicationDeadline = retry.ReplicationWaitDeadlineTicks();
         int retries = 0;
+        int rounds = 0;
 
         // Bind one operation id to the current pending batch declaration; see the class summary.
         TransactionOperationId batchOperationId = TransactionOperationId.NewRandom();
@@ -1062,17 +1066,17 @@ internal sealed class KvBatchWriter
             if (retryBatch.Count == 0)
                 return true;
 
-            if (Stopwatch.GetTimestamp() >= deadline)
+            if (transients.DeadlinePassed(deadline, replicationDeadline))
             {
                 RetryableAbortSink.Raise(aborts,
                     new CamusDBException(
                         CamusDBErrorCodes.TransactionMustRetry,
-                        messages.LockWaitDeadlineMessage(tx, transients.Describe("batched write"), retryBatch.Select(i => i.Key ?? "").ToList(), retryBatch.Count)),
+                        transients.DeadlineMessage(messages, tx, "batched write", retryBatch.Select(i => i.Key ?? "").ToList(), retryBatch.Count)),
                     ServerDiagnostics.Tags.AbortSite.SetMany);
                 return false;
             }
 
-            if (++retries >= KahunaRetryPolicy.MaxKahunaRetries)
+            if (transients.CountsAgainstRetryBudget && ++retries >= KahunaRetryPolicy.MaxKahunaRetries)
             {
                 RetryableAbortSink.Raise(aborts,
                     new CamusDBException(
@@ -1083,7 +1087,7 @@ internal sealed class KvBatchWriter
             }
 
             ServerDiagnostics.AddKvRetryWait("set_many");
-            await Task.Delay(KahunaRetryPolicy.RetryDelayMs(retries), ct).ConfigureAwait(false);
+            await Task.Delay(KahunaRetryPolicy.RetryDelayMs(rounds++), ct).ConfigureAwait(false);
 
             // Shrinking set (some keys confirmed Set/NotSet) → new, smaller declaration under a fresh id.
             // Unchanged set (every key transient) → identical resend of a lost ack → keep the same id.
@@ -1104,7 +1108,9 @@ internal sealed class KvBatchWriter
     {
         List<KahunaDeleteKeyValueRequestItem> pending = new(items);
         long deadline = retry.LockWaitDeadlineTicks();
+        long replicationDeadline = retry.ReplicationWaitDeadlineTicks();
         int retries = 0;
+        int rounds = 0;
 
         // Bind one operation id to the current pending batch declaration; see the class summary.
         TransactionOperationId deleteBatchOperationId = TransactionOperationId.NewRandom();
@@ -1163,17 +1169,17 @@ internal sealed class KvBatchWriter
             if (retryBatch.Count == 0)
                 return true;
 
-            if (Stopwatch.GetTimestamp() >= deadline)
+            if (transients.DeadlinePassed(deadline, replicationDeadline))
             {
                 RetryableAbortSink.Raise(aborts,
                     new CamusDBException(
                         CamusDBErrorCodes.TransactionMustRetry,
-                        messages.LockWaitDeadlineMessage(tx, transients.Describe("batched delete"), retryBatch.Select(i => i.Key ?? "").ToList(), retryBatch.Count)),
+                        transients.DeadlineMessage(messages, tx, "batched delete", retryBatch.Select(i => i.Key ?? "").ToList(), retryBatch.Count)),
                     ServerDiagnostics.Tags.AbortSite.DeleteMany);
                 return false;
             }
 
-            if (++retries >= KahunaRetryPolicy.MaxKahunaRetries)
+            if (transients.CountsAgainstRetryBudget && ++retries >= KahunaRetryPolicy.MaxKahunaRetries)
             {
                 RetryableAbortSink.Raise(aborts,
                     new CamusDBException(
@@ -1184,7 +1190,7 @@ internal sealed class KvBatchWriter
             }
 
             ServerDiagnostics.AddKvRetryWait("delete_many");
-            await Task.Delay(KahunaRetryPolicy.RetryDelayMs(retries), ct).ConfigureAwait(false);
+            await Task.Delay(KahunaRetryPolicy.RetryDelayMs(rounds++), ct).ConfigureAwait(false);
 
             // Shrinking set (some deletes confirmed) → new, smaller declaration under a fresh id.
             // Unchanged set (every key transient) → identical resend of a lost ack → keep the same id.
@@ -1201,9 +1207,10 @@ internal sealed class KvBatchWriter
     /// kind because the two transient answers point at different causes: <c>MustRetry</c> is what a key
     /// under another transaction's range lock answers, and what the partition answers when its write
     /// aggregator turned the proposal away (queue full, persistence backlog); <c>WaitingForReplication</c>
-    /// is a write still replicating or a predecessor's committed intent still settling. The lock-wait
-    /// deadline message names the counts, so a failure on a loaded node reads as backpressure or lag
-    /// instead of as a conflict.
+    /// is a write still replicating or a predecessor's committed intent still settling. The kinds pick
+    /// the budget of the round (see <see cref="OnlyWaitingForReplication"/>), and the deadline message
+    /// names the counts, so a failure on a loaded node reads as backpressure or lag instead of as a
+    /// conflict.
     /// </summary>
     private struct TransientAnswers
     {
@@ -1223,5 +1230,31 @@ internal sealed class KvBatchWriter
             mustRetry == 0 && waitingForReplication == 0
                 ? operation
                 : $"{operation} (last round: {mustRetry} MustRetry, {waitingForReplication} WaitingForReplication)";
+
+        /// <summary>
+        /// True when the last round waited only on replication or settlement: no key answered
+        /// <c>MustRetry</c>, and at least one answered <c>WaitingForReplication</c>. Such a round runs
+        /// on the replication-wait deadline. One <c>MustRetry</c> in the round keeps the whole batch on
+        /// the lock-wait deadline, so a deadlock behind a foreign range lock still resolves in time.
+        /// </summary>
+        public readonly bool OnlyWaitingForReplication => mustRetry == 0 && waitingForReplication > 0;
+
+        /// <summary>
+        /// Whether the last round spends one of the <see cref="KahunaRetryPolicy.MaxKahunaRetries"/>
+        /// attempts. A round that only waits on replication is bounded by its deadline instead: the
+        /// attempt budget with its capped backoff adds up to less than that deadline, and ending the
+        /// wait early would report settlement lag as a conflict.
+        /// </summary>
+        public readonly bool CountsAgainstRetryBudget => !OnlyWaitingForReplication;
+
+        /// <summary>Whether the deadline the last round runs on has passed.</summary>
+        public readonly bool DeadlinePassed(long lockDeadline, long replicationDeadline) =>
+            Stopwatch.GetTimestamp() >= (OnlyWaitingForReplication ? replicationDeadline : lockDeadline);
+
+        /// <summary>The message of the deadline the last round ran on, with the round's transient counts in the operation name.</summary>
+        public readonly string DeadlineMessage(KvConflictMessageBuilder messages, KvTransaction tx, string operation, IReadOnlyList<string> keys, int conflicting) =>
+            OnlyWaitingForReplication
+                ? messages.ReplicationWaitDeadlineMessage(tx, Describe(operation), keys, conflicting)
+                : messages.LockWaitDeadlineMessage(tx, Describe(operation), keys, conflicting);
     }
 }

@@ -356,6 +356,9 @@ public static class PredicateAnalyzer
     ///   domain by <see cref="NumericBoundNormalizer"/>. The evaluator widens a mixed comparison to
     ///   double, but an index key does not, so an unconverted Float64 literal on an Integer64 column
     ///   builds a key that addresses no entry or a bound the scan cannot compare.</item>
+    ///   <item>A String, Date or DateTime constant on a date or datetime column is moved into the
+    ///   column's type by <see cref="NormalizeTemporalConstant"/>, the conversion the evaluator applies
+    ///   (<see cref="TemporalComparison"/>).</item>
     /// </list>
     /// A comparison with no exact rewrite (a fractional equality on an integer column, NaN, a value
     /// outside the <c>long</c> range, a float constant on a NUMERIC column, a Uuid or Id constant on a
@@ -388,15 +391,30 @@ public static class PredicateAnalyzer
             }
             else if (column is not null)
             {
-                switch (NumericBoundNormalizer.Normalize(mapped.Operator, mapped.Constant, column.Type, out string newOp, out ColumnValue newConstant))
+                switch (NormalizeTemporalConstant(mapped.Constant, column.Type, out ColumnValue temporalConstant))
                 {
-                    case NumericBoundNormalizer.Outcome.Converted:
-                        mapped = new AnalyzedComparison(mapped.ColumnName, newOp, newConstant, mapped.Conjunct);
+                    case TemporalConstantOutcome.Converted:
+                        mapped = new AnalyzedComparison(mapped.ColumnName, mapped.Operator, temporalConstant, mapped.Conjunct);
                         break;
 
-                    case NumericBoundNormalizer.Outcome.LeaveToEvaluator:
+                    case TemporalConstantOutcome.LeaveToEvaluator:
+                    case TemporalConstantOutcome.NoExactDate:
                         (demotedConjuncts ??= new()).Add(mapped.Conjunct);
                         mapped = null;
+                        break;
+
+                    default:
+                        switch (NumericBoundNormalizer.Normalize(mapped.Operator, mapped.Constant, column.Type, out string newOp, out ColumnValue newConstant))
+                        {
+                            case NumericBoundNormalizer.Outcome.Converted:
+                                mapped = new AnalyzedComparison(mapped.ColumnName, newOp, newConstant, mapped.Conjunct);
+                                break;
+
+                            case NumericBoundNormalizer.Outcome.LeaveToEvaluator:
+                                (demotedConjuncts ??= new()).Add(mapped.Conjunct);
+                                mapped = null;
+                                break;
+                        }
                         break;
                 }
             }
@@ -479,8 +497,16 @@ public static class PredicateAnalyzer
 
         ColumnType? stringTarget = column.Type is ColumnType.Uuid or ColumnType.Id ? column.Type : null;
         bool numericColumn = NumericBoundNormalizer.IsNumeric(column.Type);
-        if (stringTarget is null && !numericColumn && !HasUnmatchableIdentityItem(inList.Values, column.Type))
+        bool temporalColumn = TemporalComparison.IsTemporal(column.Type);
+        if (stringTarget is null && !numericColumn && !temporalColumn && !HasUnmatchableIdentityItem(inList.Values, column.Type))
+        {
+            // A date or datetime item on a String column parses each stored string, so a seek, which
+            // finds one spelling, cannot answer it.
+            if (column.Type == ColumnType.String && HasTemporalItem(inList.Values))
+                return null;
+
             return inList;
+        }
 
         List<ColumnValue>? values = null;
         for (int i = 0; i < inList.Values.Count; i++)
@@ -506,6 +532,24 @@ public static class PredicateAnalyzer
                 {
                     // An invalid literal stays as-is; it simply matches nothing.
                     replacement = TryCoerceStringTo(original, stringTarget.Value) ?? original;
+                }
+            }
+            else if (temporalColumn)
+            {
+                switch (NormalizeTemporalConstant(original, column.Type, out ColumnValue converted))
+                {
+                    case TemporalConstantOutcome.Converted:
+                        replacement = converted;
+                        break;
+
+                    // A string that does not parse: the filter raises the parse error.
+                    case TemporalConstantOutcome.LeaveToEvaluator:
+                        return null;
+
+                    // A datetime that is not a midnight equals no date, so the item is dropped.
+                    case TemporalConstantOutcome.NoExactDate:
+                        replacement = null;
+                        break;
                 }
             }
             else if (numericColumn)
@@ -571,6 +615,85 @@ public static class PredicateAnalyzer
         }
 
         return false;
+    }
+
+    private static bool HasTemporalItem(IReadOnlyList<ColumnValue> values)
+    {
+        for (int i = 0; i < values.Count; i++)
+        {
+            if (TemporalComparison.IsTemporal(values[i].Type))
+                return true;
+        }
+
+        return false;
+    }
+
+    /// <summary>The result of <see cref="NormalizeTemporalConstant"/>.</summary>
+    private enum TemporalConstantOutcome
+    {
+        /// <summary>The pair is not covered by the temporal rule. The constant is unchanged.</summary>
+        NotApplicable,
+
+        /// <summary>The constant was converted into the column's type exactly.</summary>
+        Converted,
+
+        /// <summary>The evaluator must decide: a string that does not parse (the evaluator raises the
+        /// parse error), or a date or datetime constant on a String column.</summary>
+        LeaveToEvaluator,
+
+        /// <summary>A datetime that is not a midnight, on a date column. It equals no stored date, and
+        /// as a range bound it has no exact date key, so a comparison leaves index selection and an IN
+        /// item is dropped.</summary>
+        NoExactDate,
+    }
+
+    /// <summary>
+    /// Moves a constant compared to a date or datetime column into the column's type, by the rule the
+    /// evaluator applies (<see cref="TemporalComparison"/>): a string is parsed with the CAST parse, a
+    /// date widens to the datetime at its midnight, and a datetime at midnight becomes that date. An
+    /// index key built from an unconverted constant uses the constant's encoding, so a seek could miss
+    /// rows the table scan returns.
+    /// </summary>
+    private static TemporalConstantOutcome NormalizeTemporalConstant(ColumnValue constant, ColumnType columnType, out ColumnValue converted)
+    {
+        converted = constant;
+
+        if (constant.Type == columnType || constant.Type == ColumnType.Null)
+            return TemporalConstantOutcome.NotApplicable;
+
+        if (columnType == ColumnType.String)
+            return TemporalComparison.IsTemporal(constant.Type)
+                ? TemporalConstantOutcome.LeaveToEvaluator
+                : TemporalConstantOutcome.NotApplicable;
+
+        if (!TemporalComparison.IsTemporal(columnType))
+            return TemporalConstantOutcome.NotApplicable;
+
+        switch (constant.Type)
+        {
+            case ColumnType.String:
+                if (!CastScalarFunctions.TryParseTemporalText(constant.StrValue ?? "", columnType, out converted))
+                {
+                    converted = constant;
+                    return TemporalConstantOutcome.LeaveToEvaluator;
+                }
+
+                return TemporalConstantOutcome.Converted;
+
+            case ColumnType.Date:
+                converted = TemporalComparison.WidenDate(constant);
+                return TemporalConstantOutcome.Converted;
+
+            case ColumnType.DateTime:
+                if (constant.LongValue % TimeSpan.TicksPerDay != 0)
+                    return TemporalConstantOutcome.NoExactDate;
+
+                converted = new ColumnValue(ColumnType.Date, constant.LongValue);
+                return TemporalConstantOutcome.Converted;
+
+            default:
+                return TemporalConstantOutcome.NotApplicable;
+        }
     }
 
     private static AnalyzedComparison CoerceStringConstant(AnalyzedComparison comparison, TableDescriptor table)

@@ -208,6 +208,7 @@ public sealed class TestConfigResolver
             // collection interval), so use a valid value that still exercises the round-trip.
             string yml =
                 "lock_wait_deadline_ms: 250\n" +
+                "replication_wait_deadline_ms: 1500\n" +
                 "lock_escalation_threshold: 12\n" +
                 "range_lock_expires_ms: 150000";
 
@@ -215,6 +216,7 @@ public sealed class TestConfigResolver
             CamusDBOptions resolved = ConfigResolver.Resolve(config);
 
             Assert.That(resolved.LockWaitDeadlineMs, Is.EqualTo(250));
+            Assert.That(resolved.ReplicationWaitDeadlineMs, Is.EqualTo(1500));
             Assert.That(resolved.LockEscalationThreshold, Is.EqualTo(12));
             Assert.That(resolved.RangeLockExpiresMs, Is.EqualTo(150_000));
     }

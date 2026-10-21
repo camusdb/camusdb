@@ -173,6 +173,15 @@ internal sealed class KahunaRetryPolicy
         => Stopwatch.GetTimestamp() + (long)(Stopwatch.Frequency * (options.LockWaitDeadlineMs / 1000.0));
 
     /// <summary>
+    /// The instant past which a loop stops waiting on a key that is still replicating or still settling
+    /// a committed predecessor (<see cref="KeyValueResponseType.WaitingForReplication"/>). Longer than
+    /// <see cref="LockWaitDeadlineTicks"/>: that wait is not a lock conflict and has no deadlock to
+    /// resolve. See <see cref="CamusDBOptions.ReplicationWaitDeadlineMs"/>.
+    /// </summary>
+    internal long ReplicationWaitDeadlineTicks()
+        => Stopwatch.GetTimestamp() + (long)(Stopwatch.Frequency * (options.ReplicationWaitDeadlineMs / 1000.0));
+
+    /// <summary>
     /// Retries a Kahuna call that reports only a response type (no value), on the fixed budget.
     /// </summary>
     internal static async Task<KeyValueResponseType> RetryOnMustRetry(
@@ -322,6 +331,8 @@ internal sealed class KahunaRetryPolicy
     /// wall-clock deadline and throws <see cref="CamusDBErrorCodes.TransactionMustRetry"/> the moment
     /// it elapses, so a deadlocked pair both abort within roughly
     /// <see cref="CamusDBOptions.LockWaitDeadlineMs"/> instead of after the full retry budget.
+    /// A <see cref="KeyValueResponseType.WaitingForReplication"/> answer is a wait on the store, not
+    /// on another transaction, and runs on the replication-wait deadline instead, with no attempt cap.
     /// </summary>
     internal async Task<(KeyValueResponseType, long, HLCTimestamp)> RetryOnMustRetryLocked(
         KvTransaction? tx,
@@ -331,25 +342,50 @@ internal sealed class KahunaRetryPolicy
         CancellationToken ct)
     {
         long deadline = LockWaitDeadlineTicks();
+        long replicationDeadline = ReplicationWaitDeadlineTicks();
         KeyValueResponseType type;
         long revision;
         HLCTimestamp ts;
         int retries = 0;
+        int rounds = 0;
 
         do
         {
             (type, revision, ts) = await InvokeOrTransient(fn, (KeyValueResponseType.MustRetry, 0L, HLCTimestamp.Zero), ct).ConfigureAwait(false);
             if (type is KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication)
             {
-                if (Stopwatch.GetTimestamp() >= deadline)
-                    throw new CamusDBException(CamusDBErrorCodes.TransactionMustRetry, messages.LockWaitDeadlineMessage(tx, operation, [key]));
+                ThrowIfTransientDeadlinePassed(tx, operation, key, type, deadline, replicationDeadline);
                 ServerDiagnostics.AddKvRetryWait("mustretry_locked_2831");
-                await Task.Delay(RetryDelayMs(retries), ct).ConfigureAwait(false);
+                await Task.Delay(RetryDelayMs(rounds++), ct).ConfigureAwait(false);
             }
         }
-        while (type is KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication && ++retries < MaxKahunaRetries);
+        // A lag answer spends no attempt of the budget: its loop is bounded by the replication-wait
+        // deadline alone, and the backoff keeps growing on its own round counter up to the cap.
+        while (type is KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication
+               && (type == KeyValueResponseType.WaitingForReplication || ++retries < MaxKahunaRetries));
 
         return (type, revision, ts);
+    }
+
+    /// <summary>
+    /// Ends a single-key retry loop whose budget ran out: the lock-wait deadline for a
+    /// <see cref="KeyValueResponseType.MustRetry"/> answer (a conflict, or a proposal the store turned
+    /// away), the replication-wait deadline for a <see cref="KeyValueResponseType.WaitingForReplication"/>
+    /// answer. Each throws the message of its own budget.
+    /// </summary>
+    private void ThrowIfTransientDeadlinePassed(KvTransaction? tx, string operation, string key, KeyValueResponseType type, long lockDeadline, long replicationDeadline)
+    {
+        long now = Stopwatch.GetTimestamp();
+
+        if (type == KeyValueResponseType.WaitingForReplication)
+        {
+            if (now >= replicationDeadline)
+                throw new CamusDBException(CamusDBErrorCodes.TransactionMustRetry, messages.ReplicationWaitDeadlineMessage(tx, operation, [key]));
+            return;
+        }
+
+        if (now >= lockDeadline)
+            throw new CamusDBException(CamusDBErrorCodes.TransactionMustRetry, messages.LockWaitDeadlineMessage(tx, operation, [key]));
     }
 
     /// <summary>
@@ -363,24 +399,26 @@ internal sealed class KahunaRetryPolicy
         CancellationToken ct)
     {
         long deadline = LockWaitDeadlineTicks();
+        long replicationDeadline = ReplicationWaitDeadlineTicks();
         KeyValueResponseType type;
         string endpoint;
         KeyValueDurability durability;
         HLCTimestamp holder;
         int retries = 0;
+        int rounds = 0;
 
         do
         {
             (type, endpoint, durability, holder) = await InvokeOrTransient(fn, (KeyValueResponseType.MustRetry, "", KeyValueDurability.Persistent, HLCTimestamp.Zero), ct).ConfigureAwait(false);
             if (type is KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication)
             {
-                if (Stopwatch.GetTimestamp() >= deadline)
-                    throw new CamusDBException(CamusDBErrorCodes.TransactionMustRetry, messages.LockWaitDeadlineMessage(tx, operation, [key]));
+                ThrowIfTransientDeadlinePassed(tx, operation, key, type, deadline, replicationDeadline);
                 ServerDiagnostics.AddKvRetryWait("mustretry_locked_2860");
-                await Task.Delay(RetryDelayMs(retries), ct).ConfigureAwait(false);
+                await Task.Delay(RetryDelayMs(rounds++), ct).ConfigureAwait(false);
             }
         }
-        while (type is KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication && ++retries < MaxKahunaRetries);
+        while (type is KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication
+               && (type == KeyValueResponseType.WaitingForReplication || ++retries < MaxKahunaRetries));
 
         return (type, endpoint, durability, holder);
     }

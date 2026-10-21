@@ -50,11 +50,11 @@ public sealed class TestFinalizeRetryBudget
 
         internal UnresolvedFinalizeKahuna(IKahuna inner) : base(inner) { }
 
-        public override Task<(KeyValueResponseType, string?)> LocateAndCommitTransaction(
+        public override Task<TransactionCommitAnswer> LocateAndCommitTransaction(
             TransactionHandle handle, CancellationToken cancellationToken)
         {
             Interlocked.Increment(ref CommitAttempts);
-            return Task.FromResult<(KeyValueResponseType, string?)>((KeyValueResponseType.MustRetry, null));
+            return Task.FromResult(TransactionCommitAnswer.Of(KeyValueResponseType.MustRetry, null));
         }
 
         public override Task<KeyValueResponseType> LocateAndRollbackTransaction(

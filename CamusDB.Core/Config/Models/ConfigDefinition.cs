@@ -791,6 +791,9 @@ public class ConfigDefinition
     /// <summary>Wall-clock cap per lock-acquire retry loop for Serializable conflicts. Default 500 ms.</summary>
     public int LockWaitDeadlineMs { get; set; } = 500;
 
+    /// <summary>Wall-clock cap for a lock or write waiting on replication or on a committed predecessor's settlement. Default 5000 ms.</summary>
+    public int ReplicationWaitDeadlineMs { get; set; } = 5_000;
+
     /// <summary>
     /// Opt tables into Kahuna key-range routing. Overridden by <c>CAMUS_KEY_RANGE_SHARDING</c> when set.
     /// </summary>
@@ -1475,6 +1478,9 @@ public class ConfigDefinition
 
         if (LockWaitDeadlineMs <= 0)
             throw Invalid($"'lock_wait_deadline_ms' must be > 0, got {LockWaitDeadlineMs}");
+
+        if (ReplicationWaitDeadlineMs <= 0)
+            throw Invalid($"'replication_wait_deadline_ms' must be > 0, got {ReplicationWaitDeadlineMs}");
 
         if (TransactionReaperIntervalMs <= 0)
             throw Invalid($"'transaction_reaper_interval_ms' must be > 0, got {TransactionReaperIntervalMs}");

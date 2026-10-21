@@ -69,6 +69,11 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 /// is the mixed rule for each pair of domains, so the result is the OR over every item, as on the
 /// reference path.</para>
 ///
+/// <para><b>Temporal items.</b> A date equals the datetime at its midnight, and a string equals the
+/// date or datetime it spells (<see cref="TemporalComparison"/>). The hash includes the type, so the
+/// set stores every date item as that datetime and widens a date probe the same way; string items are
+/// converted for a date or datetime probe as they are for a Uuid one.</para>
+///
 /// <para>Thread safety: a set is shared by every worker of a parallel scan. The converted item sets
 /// are built on first use and published once; a race builds the same set twice and keeps one.</para>
 /// </summary>
@@ -85,14 +90,20 @@ public sealed class PreparedInSet
     private readonly HashSet<double>? _floatItems;      // FLOAT64 and FLOAT32 items, widened
     private HashSet<double>? _exactItemsAsDouble;       // the exact items widened, built on the first float probe
 
-    // Item types that take part in the String-to-Uuid/Id rule; see the class summary.
+    // Item types that take part in the String-to-Uuid/Id rule and the temporal rule; see the class
+    // summary.
     private readonly bool _hasStringItems;
     private readonly bool _hasUuidItems;
     private readonly bool _hasIdItems;
+    private readonly bool _hasDateItems;
+    private readonly bool _hasDateTimeItems;
 
-    // The string items converted into Uuid or Id, built on the first probe of that type.
+    // The string items converted into Uuid, Id, Date or DateTime, built on the first probe of that
+    // type. The temporal sets hold every value as a datetime, as _set does (see "Temporal items").
     private HashSet<ColumnValue>? _stringItemsAsUuid;
     private HashSet<ColumnValue>? _stringItemsAsId;
+    private HashSet<ColumnValue>? _stringItemsAsDate;
+    private HashSet<ColumnValue>? _stringItemsAsDateTime;
 
     /// <param name="values">The list items. NULL items are allowed and are dropped.</param>
     /// <param name="containsNull">True when the caller already dropped a NULL item from
@@ -122,6 +133,8 @@ public sealed class PreparedInSet
                 case ColumnType.String: _hasStringItems = true; break;
                 case ColumnType.Uuid: _hasUuidItems = true; break;
                 case ColumnType.Id: _hasIdItems = true; break;
+                case ColumnType.Date: _hasDateItems = true; break;
+                case ColumnType.DateTime: _hasDateTimeItems = true; break;
             }
         }
 
@@ -146,7 +159,7 @@ public sealed class PreparedInSet
                         break;
 
                     default:
-                        _set.Add(value);
+                        _set.Add(TemporalComparison.WidenDate(value));
                         break;
                 }
             }
@@ -232,7 +245,8 @@ public sealed class PreparedInSet
             }
         }
 
-        if (_set.Contains(lhs))
+        ColumnValue probe = TemporalComparison.WidenDate(lhs);
+        if (_set.Contains(probe))
             return true;
 
         switch (lhs.Type)
@@ -243,9 +257,17 @@ public sealed class PreparedInSet
             case ColumnType.Id when _hasStringItems:
                 return (_stringItemsAsId ?? BuildStringItemsAs(ColumnType.Id, ref _stringItemsAsId)).Contains(lhs);
 
+            case ColumnType.Date when _hasStringItems:
+                return (_stringItemsAsDate ?? BuildStringItemsAs(ColumnType.Date, ref _stringItemsAsDate)).Contains(probe);
+
+            case ColumnType.DateTime when _hasStringItems:
+                return (_stringItemsAsDateTime ?? BuildStringItemsAs(ColumnType.DateTime, ref _stringItemsAsDateTime)).Contains(probe);
+
             case ColumnType.String:
                 return (_hasUuidItems && ContainsCoerced(lhs, ColumnType.Uuid))
-                    || (_hasIdItems && ContainsCoerced(lhs, ColumnType.Id));
+                    || (_hasIdItems && ContainsCoerced(lhs, ColumnType.Id))
+                    || (_hasDateItems && _set.Contains(TemporalComparison.WidenDate(TemporalComparison.ParseOperand(lhs, ColumnType.Date))))
+                    || (_hasDateTimeItems && _set.Contains(TemporalComparison.ParseOperand(lhs, ColumnType.DateTime)));
 
             default:
                 return false;
@@ -275,8 +297,10 @@ public sealed class PreparedInSet
 
     /// <summary>
     /// Builds the set of string items that parse as <paramref name="target"/>, converted into it, and
-    /// publishes it in <paramref name="field"/>. A string that does not parse can equal no value of
-    /// that type and is left out.
+    /// publishes it in <paramref name="field"/>. A string that does not parse as a Uuid or Id can equal
+    /// no value of that type and is left out. A string that does not parse as a Date or DateTime is an
+    /// error, as it is for <c>=</c> (<see cref="TemporalComparison"/>), and a parsed date is stored as
+    /// a datetime, as the probe is.
     /// </summary>
     private HashSet<ColumnValue> BuildStringItemsAs(ColumnType target, ref HashSet<ColumnValue>? field)
     {
@@ -284,7 +308,12 @@ public sealed class PreparedInSet
 
         foreach (ColumnValue value in _values)
         {
-            if (StringOperandCoercion.TryCoerce(value, target, out ColumnValue coerced))
+            if (TemporalComparison.IsTemporal(target))
+            {
+                if (value.Type == ColumnType.String)
+                    converted.Add(TemporalComparison.WidenDate(TemporalComparison.ParseOperand(value, target)));
+            }
+            else if (StringOperandCoercion.TryCoerce(value, target, out ColumnValue coerced))
                 converted.Add(coerced);
         }
 

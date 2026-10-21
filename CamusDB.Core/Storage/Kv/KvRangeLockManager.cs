@@ -383,6 +383,7 @@ internal sealed class KvRangeLockManager
                 $"({options.MaxSerializableTransactionLifetimeMs} ms); roll back and retry from BeginAsync");
 
         long deadline = retry.LockWaitDeadlineTicks();
+        long replicationDeadline = retry.ReplicationWaitDeadlineTicks();
         int retries = 0;
 
         // Register the range-lock acquisition with the coordinator so it folds into the session working
@@ -431,14 +432,20 @@ internal sealed class KvRangeLockManager
                 return;
             }
 
-            // Transient (routing flip / replication-not-ready): bounded-wait, then surface MustRetry.
+            // Transient: a routing flip answers MustRetry and is waited out on the lock-wait deadline; a
+            // covered key still settling a committed predecessor answers WaitingForReplication and is
+            // waited out on the longer replication-wait deadline, because no transaction holds it.
             if (type is KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication)
             {
-                if (Stopwatch.GetTimestamp() >= deadline)
+                bool replicationWait = type == KeyValueResponseType.WaitingForReplication;
+                if (Stopwatch.GetTimestamp() >= (replicationWait ? replicationDeadline : deadline))
+                {
+                    string operation = $"{mode} range-lock acquisition on {messages.DescribeBucket(bucketPrefix)} over " +
+                                       $"[{KvConflictMessageBuilder.Printable(startKey ?? "-∞")}, {KvConflictMessageBuilder.Printable(endKey ?? "+∞")}]";
                     throw new CamusDBException(
                         CamusDBErrorCodes.TransactionMustRetry,
-                        messages.LockWaitDeadlineMessage(tx, $"{mode} range-lock acquisition on {messages.DescribeBucket(bucketPrefix)} over " +
-                                                    $"[{KvConflictMessageBuilder.Printable(startKey ?? "-∞")}, {KvConflictMessageBuilder.Printable(endKey ?? "+∞")}]"));
+                        replicationWait ? messages.ReplicationWaitDeadlineMessage(tx, operation) : messages.LockWaitDeadlineMessage(tx, operation));
+                }
                 ServerDiagnostics.AddKvRetryWait("rangelock_transient");
                 await Task.Delay(KahunaRetryPolicy.RetryDelayMs(retries++), cancellationToken).ConfigureAwait(false);
                 continue;

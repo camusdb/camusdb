@@ -179,6 +179,90 @@ public sealed class TestDateConstructorFunctions : SharedNodeBaseTest
     }
 
     [Test]
+    public async Task MakeDate_CastToDateTime_GivesADateTimeAtMidnight()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+
+        // Every spelling of the cast changes the type, not only the value.
+        await AssertDateTime(executor, database, dbname, "CAST(make_date(2000, 1, 1) AS DATETIME)", "2000-01-01T00:00:00.0000000Z");
+        await AssertDateTime(executor, database, dbname, "CAST(make_date(2000, 1, 1) AS TIMESTAMP)", "2000-01-01T00:00:00.0000000Z");
+        await AssertDateTime(executor, database, dbname, "make_date(2024, 2, 29)::datetime", "2024-02-29T00:00:00.0000000Z");
+        await AssertDateTime(executor, database, dbname, "to_datetime(make_date(1969, 12, 31))", "1969-12-31T00:00:00.0000000Z");
+        await AssertDateTime(executor, database, dbname, "CAST(CAST('2026-10-20' AS DATE) AS DATETIME)", "2026-10-20T00:00:00.0000000Z");
+        await AssertNull(executor, database, dbname, "CAST(make_date(NULL, 1, 1) AS DATETIME)");
+
+        // The round trip back to a date keeps the day.
+        await AssertDate(executor, database, dbname, "CAST(CAST(make_date(2000, 1, 1) AS DATETIME) AS DATE)", "2000-01-01");
+    }
+
+    [Test]
+    public async Task DateValue_WrittenToADateTimeColumn_WidensToMidnight()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+
+        await ExecDdl(executor, database, dbname,
+            "CREATE TABLE shifts (id int64 PRIMARY KEY, starts datetime, day date, " +
+            "opens datetime DEFAULT (make_date(2010, 3, 3)), stamped datetime DEFAULT (CURRENT_DATE()))");
+        await ExecDdl(executor, database, dbname, "CREATE INDEX shifts_starts ON shifts (starts)");
+
+        await ExecNonQuery(executor, database, dbname,
+            "INSERT INTO shifts (id, starts, day) VALUES (1, make_date(2000, 1, 1), make_date(2000, 1, 1))");
+        await ExecNonQuery(executor, database, dbname,
+            "INSERT INTO shifts (id, starts, day) VALUES (2, '2000-01-02T10:00:00Z', '2000-01-02')");
+        await ExecNonQuery(executor, database, dbname, "UPDATE shifts SET starts = make_date(2001, 5, 5) WHERE id = 2");
+
+        List<QueryResultRow> rows = await ExecQuery(executor, database, dbname,
+            "SELECT id, starts, opens, stamped FROM shifts ORDER BY id");
+
+        Assert.AreEqual(2, rows.Count);
+        Assert.AreEqual(ColumnType.DateTime, rows[0].Row["starts"].Type);
+        Assert.AreEqual("2000-01-01T00:00:00.0000000Z", rows[0].Row["starts"].IsoValue);
+        Assert.AreEqual("2001-05-05T00:00:00.0000000Z", rows[1].Row["starts"].IsoValue);
+
+        // A constant default is evaluated once at DDL time; a function default once per row.
+        Assert.AreEqual(ColumnType.DateTime, rows[0].Row["opens"].Type);
+        Assert.AreEqual("2010-03-03T00:00:00.0000000Z", rows[0].Row["opens"].IsoValue);
+        Assert.AreEqual(ColumnType.DateTime, rows[0].Row["stamped"].Type);
+        Assert.That(rows[0].Row["stamped"].IsoValue, Does.EndWith("T00:00:00.0000000Z"));
+
+        // The index entry holds the widened value, so a seek by the datetime finds the row.
+        List<QueryResultRow> seek = await ExecQuery(executor, database, dbname,
+            "SELECT id FROM shifts WHERE starts = make_timestamp(2001, 5, 5, 0, 0, 0)");
+        Assert.That(seek.Select(r => r.Row["id"].LongValue).ToArray(), Is.EqualTo(new long[] { 2 }));
+
+        // INSERT ... SELECT from a date column widens each row the same way.
+        await ExecDdl(executor, database, dbname, "CREATE TABLE copies (id int64 PRIMARY KEY, at datetime)");
+        await ExecNonQuery(executor, database, dbname, "INSERT INTO copies (id, at) SELECT id, day FROM shifts");
+        List<QueryResultRow> copies = await ExecQuery(executor, database, dbname, "SELECT id, at FROM copies ORDER BY id");
+        Assert.AreEqual(ColumnType.DateTime, copies[1].Row["at"].Type);
+        Assert.AreEqual("2000-01-02T00:00:00.0000000Z", copies[1].Row["at"].IsoValue);
+    }
+
+    [Test]
+    public async Task DateTimeValue_WrittenToADateColumn_IsRefused()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+
+        await ExecDdl(executor, database, dbname, "CREATE TABLE days (id int64 PRIMARY KEY, day date)");
+
+        // The time of day would be lost, so the write is refused instead of truncated.
+        KvTransaction tx = await database.Transactions.BeginAsync();
+        ExecuteSQLTicket ticket = new(txnState: tx, database: dbname,
+            sql: "INSERT INTO days (id, day) VALUES (1, make_timestamp(2000, 1, 1, 10, 30, 0))", parameters: null);
+        CamusDBException? ex = Assert.ThrowsAsync<CamusDBException>(async () => await executor.ExecuteNonSQLQuery(ticket));
+        await database.Transactions.RollbackIfNotCompletedAsync(tx);
+        Assert.That(ex!.Message, Does.Contain("Type DateTime cannot be assigned to day (Date)"));
+
+        // A function default that would need the same narrowing fails at DDL time, not at insert.
+        tx = await database.Transactions.BeginAsync();
+        ticket = new(txnState: tx, database: dbname,
+            sql: "CREATE TABLE logs (id int64 PRIMARY KEY, day date DEFAULT (now()))", parameters: null);
+        ex = Assert.ThrowsAsync<CamusDBException>(async () => await executor.ExecuteDDLSQL(ticket));
+        await database.Transactions.RollbackIfNotCompletedAsync(tx);
+        Assert.That(ex!.Message, Does.Contain("returns DateTime but column 'day' is Date"));
+    }
+
+    [Test]
     public async Task MakeDate_ComparesWithADateColumn()
     {
         (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();

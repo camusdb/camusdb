@@ -217,6 +217,7 @@ initial_partitions: 1      # Raft partition count (>= 1). Unset, it is 1 in stan
 # max_serializable_transaction_lifetime_ms: 3600000  # <= 0 disables the cap; also the Kahuna session timeout (kahuna.max_transaction_timeout_ms is derived from it unless set larger)
 # lock_escalation_threshold: 50               # shared point locks in one bucket before whole-bucket escalation (> 0)
 # lock_wait_deadline_ms: 500                  # per-operation cap on waiting for a Serializable conflict (> 0)
+# replication_wait_deadline_ms: 5000          # cap on waiting for a key still replicating or a committed predecessor still settling (> 0)
 # key_range_sharding: false                   # opt tables into Kahuna key-range routing; needs initial_partitions >= 2 to distribute anything (docs/key-range-sharding.md)
 
 # ── Retry budgets ─────────────────────────────────────────────────────────────

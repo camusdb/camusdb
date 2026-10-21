@@ -74,19 +74,18 @@ public sealed class TestQueryResultCacheUnknownCommitOutcome
         /// <summary>Outcomes the real node returned, before hiding. Proves the commit landed.</summary>
         public List<KeyValueResponseType> InnerOutcomes { get; } = [];
 
-        public override async Task<(KeyValueResponseType, string?)> LocateAndCommitTransaction(
+        public override async Task<TransactionCommitAnswer> LocateAndCommitTransaction(
             TransactionHandle handle, CancellationToken cancellationToken)
         {
-            (KeyValueResponseType type, string? anchor) =
-                await inner.LocateAndCommitTransaction(handle, cancellationToken);
+            TransactionCommitAnswer answer = await inner.LocateAndCommitTransaction(handle, cancellationToken);
 
             lock (InnerOutcomes)
-                InnerOutcomes.Add(type);
+                InnerOutcomes.Add(answer.Type);
 
             if (Interlocked.Decrement(ref hidesRemaining) >= 0)
-                return (hideAs, anchor);
+                return answer with { Type = hideAs };
 
-            return (type, anchor);
+            return answer;
         }
     }
 
@@ -96,9 +95,9 @@ public sealed class TestQueryResultCacheUnknownCommitOutcome
     private sealed class AbortingCommitKahuna(IKahuna inner)
         : CamusDB.Tests.Storage.DelegatingKahuna(inner)
     {
-        public override Task<(KeyValueResponseType, string?)> LocateAndCommitTransaction(
+        public override Task<TransactionCommitAnswer> LocateAndCommitTransaction(
             TransactionHandle handle, CancellationToken cancellationToken)
-            => Task.FromResult<(KeyValueResponseType, string?)>((KeyValueResponseType.Aborted, null));
+            => Task.FromResult(TransactionCommitAnswer.Of(KeyValueResponseType.Aborted, null));
     }
 
     private static async Task<EmbeddedKahuna> StartNodeAsync(string warmupKey)

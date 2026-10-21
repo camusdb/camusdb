@@ -54,7 +54,7 @@ public sealed class TestCoordinatorJobPersistence : SharedNodeBaseTest
 
         public int CommitCalls => Volatile.Read(ref commitCalls);
 
-        public override async Task<(KeyValueResponseType, string?)> LocateAndCommitTransaction(
+        public override async Task<TransactionCommitAnswer> LocateAndCommitTransaction(
             TransactionHandle handle, CancellationToken cancellationToken)
         {
             Interlocked.Increment(ref commitCalls);
@@ -62,7 +62,7 @@ public sealed class TestCoordinatorJobPersistence : SharedNodeBaseTest
             if (Interlocked.Decrement(ref abortsRemaining) >= 0)
             {
                 await inner.LocateAndRollbackTransaction(handle, cancellationToken);
-                return (KeyValueResponseType.Aborted, null);
+                return TransactionCommitAnswer.Of(KeyValueResponseType.Aborted, null);
             }
 
             return await inner.LocateAndCommitTransaction(handle, cancellationToken);

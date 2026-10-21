@@ -19,6 +19,7 @@ using Kahuna;
 using Kahuna.Server.KeyValues;
 using Kahuna.Server.KeyValues.Data;
 using Kahuna.Server.KeyValues.Transactions.Data;
+using Kahuna.Server.KeyValues.Watch;
 using Kahuna.Server.KeyValues.Writes;
 using Kahuna.Server.Locks;
 using Kahuna.Server.Locks.Data;
@@ -96,7 +97,7 @@ internal abstract class DelegatingKahuna : IKahuna
         public virtual Task<(KeyValueResponseType, long)> LocateAndTryRollbackMutations(HLCTimestamp transactionId, string key, HLCTimestamp ticketId, KeyValueDurability durability, CancellationToken cancellationToken) => inner.LocateAndTryRollbackMutations(transactionId, key, ticketId, durability, cancellationToken);
         public virtual Task<List<(KeyValueResponseType, string, long, KeyValueDurability)>> LocateAndTryRollbackManyMutations(HLCTimestamp transactionId, List<(string key, HLCTimestamp ticketId, KeyValueDurability durability)> keys, CancellationToken cancellationToken) => inner.LocateAndTryRollbackManyMutations(transactionId, keys, cancellationToken);
         public virtual Task<(KeyValueResponseType, TransactionHandle)> LocateAndStartTransaction(KeyValueTransactionOptions options, CancellationToken cancellationToken) => inner.LocateAndStartTransaction(options, cancellationToken);
-        public virtual Task<(KeyValueResponseType, string?)> LocateAndCommitTransaction(TransactionHandle handle, CancellationToken cancellationToken) => inner.LocateAndCommitTransaction(handle, cancellationToken);
+        public virtual Task<TransactionCommitAnswer> LocateAndCommitTransaction(TransactionHandle handle, CancellationToken cancellationToken) => inner.LocateAndCommitTransaction(handle, cancellationToken);
         public virtual Task<KeyValueResponseType> LocateAndRollbackTransaction(TransactionHandle handle, CancellationToken cancellationToken) => inner.LocateAndRollbackTransaction(handle, cancellationToken);
         public virtual Task<(OperationRegistrationOutcome outcome, KeyValueResponseType cachedType, long cachedRevision, HLCTimestamp cachedTimestamp, string? recordAnchorKey, TransactionConflictPolicy conflictPolicy)> LocateAndBeginOperation(string coordinatorKey, HLCTimestamp transactionId, TransactionOperationId operationId, OperationKind kind, byte[]? payloadDigest, CancellationToken cancellationToken) => inner.LocateAndBeginOperation(coordinatorKey, transactionId, operationId, kind, payloadDigest, cancellationToken);
         public virtual Task<(KeyValueResponseType outcome, string? anchor)> LocateAndCompleteOperation(string coordinatorKey, HLCTimestamp transactionId, TransactionOperationId operationId, OperationCompletionPayload payload, CancellationToken cancellationToken) => inner.LocateAndCompleteOperation(coordinatorKey, transactionId, operationId, payload, cancellationToken);
@@ -133,7 +134,7 @@ internal abstract class DelegatingKahuna : IKahuna
         public virtual Task<KeyValueGetByBucketResult> ScanByPrefix(string prefixKeyName, HLCTimestamp readTimestamp, KeyValueDurability durability, bool includeTombstones = false) => inner.ScanByPrefix(prefixKeyName, readTimestamp, durability, includeTombstones);
         public virtual Task<KeyValueGetByBucketResult> ScanAllByPrefix(string prefixKeyName, HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken cancellationToken) => inner.ScanAllByPrefix(prefixKeyName, readTimestamp, durability, cancellationToken);
         public virtual Task<(KeyValueResponseType, TransactionHandle)> StartTransaction(KeyValueTransactionOptions options) => inner.StartTransaction(options);
-        public virtual Task<(KeyValueResponseType, string?)> CommitTransaction(TransactionHandle handle) => inner.CommitTransaction(handle);
+        public virtual Task<TransactionCommitAnswer> CommitTransaction(TransactionHandle handle) => inner.CommitTransaction(handle);
         public virtual Task<KeyValueResponseType> RollbackTransaction(TransactionHandle handle) => inner.RollbackTransaction(handle);
         public virtual Task<(SequenceResponseType, ReadOnlySequenceEntry?)> LocateAndGetSequence(string name, SequenceDurability durability, CancellationToken cancellationToken) => inner.LocateAndGetSequence(name, durability, cancellationToken);
         public virtual Task<(SequenceResponseType, long)> LocateAndCreateSequence(string name, long initialValue, long increment, long? maxValue, int? blockSize, SequenceDurability durability, CancellationToken cancellationToken) => inner.LocateAndCreateSequence(name, initialValue, increment, maxValue, blockSize, durability, cancellationToken);
@@ -177,4 +178,6 @@ internal abstract class DelegatingKahuna : IKahuna
         public virtual Task<(KeyValueResponseType Type, HLCTimestamp EffectiveFloor, int LiveHolds)> GetSnapshotFloor(CancellationToken ct) => inner.GetSnapshotFloor(ct);
         public virtual Task<(KeyValueResponseType Type, KeyValueApplyFingerprint Fingerprint)> GetPartitionApplyFingerprint(int partitionId, CancellationToken ct) => inner.GetPartitionApplyFingerprint(partitionId, ct);
         public virtual Task<(KeyValueResponseType Type, bool Held, long AppliedLogId)> GetPreparedIntentPresence(int partitionId, HLCTimestamp transactionId, long epoch, string key, CancellationToken ct) => inner.GetPreparedIntentPresence(partitionId, transactionId, epoch, key, ct);
+        public virtual Task<KeyValueWatchOpening> WatchKeyValues(KeyValueWatchRequest request, CancellationToken ct) => inner.WatchKeyValues(request, ct);
+        public virtual Task<HistoryHoldAnswer> HistoryHold(HistoryHoldRequest request, CancellationToken ct) => inner.HistoryHold(request, ct);
 }

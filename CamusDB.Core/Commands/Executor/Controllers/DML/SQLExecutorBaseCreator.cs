@@ -171,6 +171,8 @@ internal abstract class SQLExecutorBaseCreator
     /// the string to that type. This lets <c>WHERE uuid_col = '…'</c> / <c>WHERE id = '…'</c> (and
     /// range comparisons) work without an explicit CAST, and — for Id — normalizes the literal to the
     /// canonical lowercase 24-hex form so it matches the stored value regardless of input casing.
+    /// A date against a datetime, or a string against either, compares by
+    /// <see cref="TemporalComparison"/>, where a string that does not parse is an error.
     ///
     /// <para>A pair of different types with no conversion rule (a Uuid and an Id, an integer and a
     /// string) has no order, so an ordering operator (<c>&lt;</c>, <c>BETWEEN</c>) on it is a
@@ -205,6 +207,11 @@ internal abstract class SQLExecutorBaseCreator
         // cross-type comparison. One shared rule, so IN membership, CHECK constraints and the
         // planner's index bounds all agree with this comparison.
         if (MixedNumericComparison.TryCompare(left, right, out cmp))
+            return true;
+
+        // A date against a datetime, or a string against either, compares as that temporal type.
+        // A string that does not parse is an error here, not a non-match (see TemporalComparison).
+        if (TemporalComparison.TryCompare(left, right, out cmp))
             return true;
 
         // Coercion is best-effort. If a String operand is not a valid Uuid/Id it can equal no such
@@ -1443,7 +1450,8 @@ internal abstract class SQLExecutorBaseCreator
 
     /// <summary>
     /// Validates that a <c>DEFAULT(fn())</c> function is a supported zero-argument volatile function
-    /// whose return type matches the column's declared type (e.g. <c>gen_uuid_v7</c> → <c>uuid</c>).
+    /// whose return type matches the column's declared type (e.g. <c>gen_uuid_v7</c> → <c>uuid</c>),
+    /// or is a date for a datetime column, which the insert path widens to midnight UTC.
     /// Throws <c>InvalidInput</c> otherwise. Called at DDL time so a bad default fails at CREATE/ALTER,
     /// not at insert.
     /// </summary>
@@ -1453,7 +1461,11 @@ internal abstract class SQLExecutorBaseCreator
             throw new CamusDBException(CamusDBErrorCodes.InvalidInput,
                 $"DEFAULT function '{functionName}()' on column '{columnName}' is not a supported zero-argument volatile function");
 
-        if (returnType != columnType)
+        // A date widens to a datetime on assignment (CastScalarFunctions.CoerceToColumnType), and the
+        // insert path coerces a function default the same way, so CURRENT_DATE() fits a datetime column.
+        bool widens = returnType == ColumnType.Date && columnType == ColumnType.DateTime;
+
+        if (returnType != columnType && !widens)
             throw new CamusDBException(CamusDBErrorCodes.InvalidInput,
                 $"DEFAULT function '{functionName}()' returns {returnType} but column '{columnName}' is {columnType}");
     }

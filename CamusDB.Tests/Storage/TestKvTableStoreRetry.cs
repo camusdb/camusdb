@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Linq;
 using System.Runtime.CompilerServices;
 using System.Threading;
@@ -77,6 +78,15 @@ public sealed class TestKvTableStoreRetry
         public int InjectAcquireManyFaults;
         public int InjectSetManyFaults;
         public int InjectDeleteManyFaults;
+
+        // Lag answers: the key is still replicating, or a committed predecessor is still settling. Kahuna
+        // answers WaitingForReplication, which the engine waits out on its own, longer budget.
+        public int InjectSetKeyValueLagFaults;
+        public int InjectSetManyLagFaults;
+
+        // A mixed round: the first key answers MustRetry (a conflict or a turned-away proposal), every
+        // other key WaitingForReplication. One MustRetry keeps the whole batch on the lock-wait deadline.
+        public int InjectSetManyMixedFaults;
         public int InjectRangeLockFaults;
 
         // The answer an injected range-lock fault returns. MustRetry by default, like every other injected fault.
@@ -179,6 +189,8 @@ public sealed class TestKvTableStoreRetry
         {
             if (InjectSetKeyValueFaults-- > 0)
                 return Task.FromResult((KeyValueResponseType.MustRetry, -1L, HLCTimestamp.Zero));
+            if (InjectSetKeyValueLagFaults-- > 0)
+                return Task.FromResult((KeyValueResponseType.WaitingForReplication, -1L, HLCTimestamp.Zero));
             return inner.LocateAndTrySetKeyValue(txId, key, value, compareValue, compareRevision, flags, expiresMs, durability, ct, routedGeneration, coordinatorKey, operationId);
         }
 
@@ -231,6 +243,16 @@ public sealed class TestKvTableStoreRetry
 
             if (InjectSetManyFaults-- > 0)
                 return items.Select(i => new KahunaSetKeyValueResponseItem { Key = i.Key, Type = KeyValueResponseType.MustRetry }).ToList();
+
+            if (InjectSetManyLagFaults-- > 0)
+                return items.Select(i => new KahunaSetKeyValueResponseItem { Key = i.Key, Type = KeyValueResponseType.WaitingForReplication }).ToList();
+
+            if (InjectSetManyMixedFaults-- > 0)
+                return items.Select((i, index) => new KahunaSetKeyValueResponseItem
+                {
+                    Key = i.Key,
+                    Type = index == 0 ? KeyValueResponseType.MustRetry : KeyValueResponseType.WaitingForReplication,
+                }).ToList();
 
             if (InjectSetManyTerminalFaults-- > 0)
                 return items.Select(i => new KahunaSetKeyValueResponseItem { Key = i.Key, Type = SetManyTerminalType }).ToList();
@@ -299,13 +321,13 @@ public sealed class TestKvTableStoreRetry
     // Node / store factory
     // -----------------------------------------------------------------------
 
-    private static async Task<(EmbeddedKahuna node, FaultInjectingKahuna stub, KvTableStore store)> CreateStoreAsync(string tableId)
+    private static async Task<(EmbeddedKahuna node, FaultInjectingKahuna stub, KvTableStore store)> CreateStoreAsync(string tableId, CamusDBOptions? options = null)
     {
         EmbeddedKahuna node = new();
         await node.StartAsync(CancellationToken.None);
         await node.WaitForLeaderAsync($"{tableId}/warmup", CancellationToken.None);
         FaultInjectingKahuna stub = new(node.Kahuna);
-        return (node, stub, new KvTableStore(stub, CamusDBOptions.Default, "testdb", tableId));
+        return (node, stub, new KvTableStore(stub, options ?? CamusDBOptions.Default, "testdb", tableId));
     }
 
     // -----------------------------------------------------------------------
@@ -1038,6 +1060,115 @@ public sealed class TestKvTableStoreRetry
         Assert.That(ex.Message, Does.Contain("table 'robots'"));
         Assert.That(ex.Message, Does.Contain("database 'inventory'"));
         Assert.That(ex.Message, Does.Contain("diag_batch_w"));
+        Assert.That(ex.Message, Does.Contain("5 MustRetry, 0 WaitingForReplication"), "the last round's answer kinds are named");
+
+        await stub.LocateAndRollbackTransaction(tx.Handle, CancellationToken.None);
+    }
+
+    // -----------------------------------------------------------------------
+    // Replication lag: a key still replicating, or still settling a committed predecessor, answers
+    // WaitingForReplication. No transaction holds it, so the wait runs on the replication-wait
+    // deadline, not on the short lock-wait deadline that resolves deadlocks.
+    // -----------------------------------------------------------------------
+
+    // Short enough that the injected rounds (1, 2, 4, 8, 16, 32, then 50 ms each) outlive it many
+    // times over, so a loop still bounded by it would fail these tests.
+    private static readonly CamusDBOptions ShortLockWait = CamusDBOptions.Default with { LockWaitDeadlineMs = 40 };
+
+    private static List<KvTableStore.RowWrite> FiveRows() => Enumerable.Range(0, 5)
+        .Select(i => new KvTableStore.RowWrite
+        {
+            RowId = Generate(),
+            RowData = BranchKvCodec.EncodeValue([(byte)i]),
+        })
+        .ToList();
+
+    [Test]
+    public async Task WriteRowsBatch_ReplicationLag_OutlivesTheLockWaitDeadline()
+    {
+        (EmbeddedKahuna node, FaultInjectingKahuna stub, KvTableStore store) = await CreateStoreAsync("tbl_lag_batch", ShortLockWait);
+        await using EmbeddedKahuna __ = node;
+
+        List<KvTableStore.RowWrite> batch = FiveRows();
+
+        // 14 rounds of lag ≈ 460 ms of backoff, more than ten lock-wait deadlines.
+        stub.InjectSetManyLagFaults = 14;
+
+        KvTransaction tx = await BeginTransaction(stub, "lag_batch_w");
+        await store.WriteRowsBatch(tx, batch);
+        await CommitTransaction(stub, tx);
+
+        Assert.AreEqual(-1, stub.InjectSetManyLagFaults, "every lag answer was waited out");
+
+        KvTransaction readTx = await BeginTransaction(stub, "lag_batch_r");
+        foreach (KvTableStore.RowWrite row in batch)
+            Assert.IsNotNull(await store.GetRow(readTx, row.RowId), $"Row {row.RowId} must be readable after the lag");
+        await CommitTransaction(stub, readTx);
+    }
+
+    [Test]
+    public async Task InsertRow_ReplicationLag_OutlivesTheLockWaitDeadline()
+    {
+        (EmbeddedKahuna node, FaultInjectingKahuna stub, KvTableStore store) = await CreateStoreAsync("tbl_lag_row", ShortLockWait);
+        await using EmbeddedKahuna __ = node;
+
+        stub.InjectSetKeyValueLagFaults = 14;
+
+        ObjectIdValue rowId = Generate();
+        KvTransaction tx = await BeginTransaction(stub, "lag_row_w");
+        await store.InsertRow(tx, rowId, [1, 2, 3]);
+        await CommitTransaction(stub, tx);
+
+        Assert.AreEqual(-1, stub.InjectSetKeyValueLagFaults, "every lag answer was waited out");
+
+        KvTransaction readTx = await BeginTransaction(stub, "lag_row_r");
+        Assert.IsNotNull(await store.GetRow(readTx, rowId));
+        await CommitTransaction(stub, readTx);
+    }
+
+    [Test]
+    public async Task WriteRowsBatch_ReplicationLag_PastItsOwnDeadline_NamesTheWaitNotALock()
+    {
+        (EmbeddedKahuna node, FaultInjectingKahuna stub, KvTableStore store) =
+            await CreateStoreAsync("tbl_lag_deadline", ShortLockWait with { ReplicationWaitDeadlineMs = 150 });
+        await using EmbeddedKahuna __ = node;
+
+        stub.InjectSetManyLagFaults = int.MaxValue;
+
+        KvTransaction tx = await BeginTransaction(stub, "lag_deadline_w");
+
+        CamusDBException ex = Assert.ThrowsAsync<CamusDBException>(
+            async () => await store.WriteRowsBatch(tx, FiveRows()))!;
+
+        Assert.AreEqual(CamusDBErrorCodes.TransactionMustRetry, ex.Code);
+        Assert.That(ex.Message, Does.Contain("Replication-wait deadline exceeded after 150 ms"));
+        Assert.That(ex.Message, Does.Not.Contain("Lock-wait deadline"));
+        Assert.That(ex.Message, Does.Contain("0 MustRetry, 5 WaitingForReplication"));
+        Assert.That(ex.Message, Does.Contain("5 key(s) still conflicting"));
+
+        await stub.LocateAndRollbackTransaction(tx.Handle, CancellationToken.None);
+    }
+
+    [Test]
+    public async Task WriteRowsBatch_OneMustRetryInARound_KeepsTheLockWaitDeadline()
+    {
+        (EmbeddedKahuna node, FaultInjectingKahuna stub, KvTableStore store) =
+            await CreateStoreAsync("tbl_lag_mixed", ShortLockWait with { ReplicationWaitDeadlineMs = 60_000 });
+        await using EmbeddedKahuna __ = node;
+
+        stub.InjectSetManyMixedFaults = int.MaxValue;
+
+        KvTransaction tx = await BeginTransaction(stub, "lag_mixed_w");
+
+        Stopwatch elapsed = Stopwatch.StartNew();
+        CamusDBException ex = Assert.ThrowsAsync<CamusDBException>(
+            async () => await store.WriteRowsBatch(tx, FiveRows()))!;
+        elapsed.Stop();
+
+        Assert.AreEqual(CamusDBErrorCodes.TransactionMustRetry, ex.Code);
+        Assert.That(ex.Message, Does.Contain("Lock-wait deadline exceeded after 40 ms"));
+        Assert.That(ex.Message, Does.Contain("1 MustRetry, 4 WaitingForReplication"));
+        Assert.That(elapsed.ElapsedMilliseconds, Is.LessThan(5_000), "a round with a MustRetry must not wait out the replication-wait deadline");
 
         await stub.LocateAndRollbackTransaction(tx.Handle, CancellationToken.None);
     }

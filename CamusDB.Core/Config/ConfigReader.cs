@@ -112,6 +112,7 @@ public class ConfigReader
         "grpc_max_prepared_statement_bytes_per_stream",
         "lock_escalation_threshold",
         "lock_wait_deadline_ms",
+        "replication_wait_deadline_ms",
         "key_range_sharding",
         "distributed_query_execution",
         "max_identifier_length",
