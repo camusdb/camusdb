@@ -68,7 +68,10 @@ if (optsResult is NotParsed<CamusCommandLineOptions> notParsed)
 
 CamusCommandLineOptions opts = optsResult.Value;
 
-StartupBanner.Print();
+// A workstation-GC child relaunched by its parent inherits the parent's console, where the banner
+// is already printed.
+if (!WorkstationGcRelauncher.IsRelaunchedChild)
+    StartupBanner.Print();
 
 // Read and merge config before building the host so cluster-mode detection can gate DI service
 // registration. The lookup is ordered and first-hit-wins (--config, CAMUS_CONFIG_PATH, the working
@@ -91,6 +94,16 @@ ConfigResolver.ApplyEffectiveDefaults(config);
 config.Validate();
 CamusDBOptions camusOptions = ConfigResolver.ApplyToCamusDBConfig(config);
 
+// The dev profile also selects workstation GC, which only a fresh process can do: the runtime fixes
+// the GC mode before Main. Decided here, once the profile is resolved from every layer and before
+// anything is created on disk, so the parent leaves no state behind for the child to trip over.
+if (WorkstationGcRelauncher.ShouldRelaunch(camusOptions.MemoryProfile, System.Runtime.GCSettings.IsServerGC, Environment.GetEnvironmentVariable))
+{
+    int? childExitCode = await WorkstationGcRelauncher.TryRunChildAsync(args);
+    if (childExitCode is not null)
+        return childExitCode.Value;
+}
+
 // Rebuilds the local layers (file text captured above, then CLI flags, then context-dependent
 // defaults) as a fresh definition. The cluster-settings overlay is applied on top of this and the
 // result re-validated and re-resolved, so a runtime change flows through the same chain a boot
@@ -109,18 +122,22 @@ Func<ConfigDefinition> baseDefinitionFactory = () =>
 Console.WriteLine($"Configuration: {configLocation.Describe()}");
 Console.WriteLine($"Data directory: {camusOptions.DataDirectory}");
 
-// The small profile is worth stating, and stating alongside its limit: it caps the caches this node
-// allocates, not the managed heap the runtime grows under a burst of large statements. With server GC
-// (one heap per core, the build default) that heap is what dominates peak RSS, and no configuration
-// value the node reads can change it — the setting is read by the runtime before Main. Naming the
-// environment variable here is the difference between "the profile did nothing" and "the profile did
-// its half".
+// The small profile is worth stating together with the GC mode it ended up with. The caches are only
+// half of the footprint: with server GC (one heap per core, the build default) the managed heap a burst
+// grows is what dominates RSS, and it is not returned to the OS when the burst ends. The dev profile
+// relaunches under workstation GC to avoid that, so a dev node still on server GC is either an explicit
+// DOTNET_gcServer choice or a relaunch that could not happen, and the two need different advice.
 if (camusOptions.MemoryProfile == MemoryProfile.Dev)
 {
-    Console.WriteLine("Memory profile: dev (caches capped at ~96 MiB; not for production)");
-
-    if (System.Runtime.GCSettings.IsServerGC)
-        Console.WriteLine("  For a smaller managed heap too, start with DOTNET_gcServer=0 in the environment.");
+    if (!System.Runtime.GCSettings.IsServerGC)
+        Console.WriteLine("Memory profile: dev (caches capped at ~96 MiB, workstation GC; not for production)");
+    else
+    {
+        Console.WriteLine("Memory profile: dev (caches capped at ~96 MiB; not for production)");
+        Console.WriteLine(WorkstationGcRelauncher.GcModeSetByEnvironment
+            ? "  Server GC kept because DOTNET_gcServer is set in the environment."
+            : "  For a smaller managed heap too, start with DOTNET_gcServer=0 in the environment.");
+    }
 }
 
 Console.WriteLine();

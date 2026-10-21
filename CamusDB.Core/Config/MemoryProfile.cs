@@ -16,9 +16,11 @@ namespace CamusDB.Core.Config;
 /// combined with a hand-tuned override without the two fighting.</para>
 ///
 /// <para>It deliberately does not touch worker counts, IO threads, or anything else that changes how
-/// the node behaves rather than how much it caches: a smaller cache makes a workload slower, whereas
-/// fewer workers makes it concurrent in a different way, and only the first belongs behind a memory
-/// switch.</para>
+/// the node behaves rather than how much memory it holds: a smaller cache makes a workload slower,
+/// whereas fewer workers makes it concurrent in a different way, and only the first belongs behind a
+/// memory switch. The GC mode is on the memory side of that line: <see cref="Dev"/> also runs the
+/// server under workstation GC, which the host does by relaunching itself because the runtime fixes
+/// the GC mode before configuration is read.</para>
 /// </summary>
 public enum MemoryProfile
 {
@@ -34,6 +36,9 @@ public enum MemoryProfile
     /// compiler, and the application under development. Correctness is unaffected; a working set
     /// larger than the block cache is served from disk instead of memory, so throughput on a real
     /// dataset is materially lower. Not for production.
+    /// <para>Also selects workstation GC unless <c>DOTNET_gcServer</c> is set: server GC keeps one heap
+    /// per core and does not return what a burst grew, which on a developer machine outweighs the
+    /// caches themselves.</para>
     /// </summary>
     Dev = 1,
 }

@@ -30,7 +30,8 @@ public class CamusCommandLineOptions
 
     [Option("memory-profile", Required = false,
         HelpText = "How the unset cache budgets are sized: prod (default) scales them to the machine's " +
-                   "memory; dev pins them to ~96 MiB of caches for a node sharing a developer machine. " +
+                   "memory; dev pins them to ~96 MiB of caches and runs under workstation GC, for a node sharing " +
+                   "a developer machine. " +
                    "An explicit kahuna.* budget always wins over the profile")]
     public string? MemoryProfile { get; set; }
 

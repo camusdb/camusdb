@@ -301,9 +301,10 @@ back (branch forks) pin their own snapshot floors, which pruning honors.
 
 ### Memory profile
 
-`memory_profile` (`--memory-profile`) selects *how* the four cache-sizing knobs below are defaulted.
-It changes nothing else — not worker counts, not durability, not any behavior an application can
-observe other than how often a read is served from cache instead of disk.
+`memory_profile` (`--memory-profile`) selects *how* the four cache-sizing knobs below are defaulted,
+and under `dev` it also selects workstation GC (see below). It changes nothing else — not worker
+counts, not durability, not any behavior an application can observe other than how often a read is
+served from cache instead of disk.
 
 | Profile | Block cache | Memtable sub-budget | Actor caches | Total |
 |---------|-------------|---------------------|--------------|-------|
@@ -315,9 +316,18 @@ budgets are fixed, so the same node is the same size on a 64 GiB workstation and
 container. The cost is throughput once the working set outgrows the cache — the TPC-C run that
 motivated proportional sizing was ~5x slower against a 320 MiB block cache — so it is not a server
 setting. Note that the caches are ceilings filled lazily: a burst of large writes can still push
-process RSS well above the cache total, because transient managed allocations and the .NET GC (server
-GC by default, one heap per core) dominate the peak. `DOTNET_gcServer=0` in the environment is the
-lever for that half of the footprint; it is a runtime setting, not a CamusDB one.
+process RSS well above the cache total, because transient managed allocations and the .NET GC
+dominate the peak. Server GC (the build default, one heap per core) also keeps the space a burst grew
+after the burst ends: an idle dev node on a 10-core machine was measured at 2.1 GB committed for a
+~160 MB live heap.
+
+So `dev` also runs the node under workstation GC. The GC mode is fixed by the runtime before any
+configuration is read, so the server starts itself again as a child process with `DOTNET_gcServer=0`
+and the original arguments, and the first process only waits for it and passes its exit code
+through. SIGINT, SIGTERM and SIGQUIT sent to the first process are forwarded to the child, so
+`docker stop`, systemd and `kill` still shut the node down gracefully; a SIGKILL cannot be forwarded
+and leaves the child running. Setting `DOTNET_gcServer` (either value) yourself turns the relaunch
+off and keeps the GC mode you chose. The startup banner states which GC the node runs under.
 
 An explicit `kahuna.*` budget always beats the profile, so `dev` plus one raised budget is a valid
 combination rather than a conflict.
