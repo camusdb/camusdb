@@ -9,6 +9,7 @@
 using Nito.AsyncEx;
 using CamusDB.Core;
 using CamusDB.Core.Cache;
+using CamusDB.Core.Catalogs;
 using CamusDB.Core.Storage.Kv;
 using CamusDB.Core.Transactions;
 using System.Collections.Concurrent;
@@ -191,7 +192,20 @@ public sealed record DatabaseDescriptor : IDisposable
 
     public KvTransactionsManager Transactions { get; }
 
-    public SemaphoreSlim SchemaDdlSemaphore { get; } = new(1, 1);
+    /// <summary>
+    /// The DDL gate of this database on this node: the semaphore that serializes schema proposals and
+    /// "resolve, then mutate" sequences, plus the tables a staged change holds while its backfill or
+    /// validation runs outside that semaphore. A DDL that names a table enters through
+    /// <see cref="SchemaDdlGate.EnterAsync(string, Microsoft.Extensions.Logging.ILogger?)"/>, so it
+    /// waits for a staged change on that table and on no other.
+    /// </summary>
+    public SchemaDdlGate DdlGate { get; }
+
+    /// <summary>
+    /// The semaphore of <see cref="DdlGate"/>, for the callers that take it directly around a short
+    /// metadata change that names no table.
+    /// </summary>
+    public SemaphoreSlim SchemaDdlSemaphore => DdlGate.Semaphore;
 
     public SemaphoreSlim SystemSchemaSemaphore { get; } = new(1, 1);
 
@@ -636,6 +650,7 @@ public sealed record DatabaseDescriptor : IDisposable
         TableDescriptors = tableDescriptors;
         Ancestors = ancestors ?? [];
         SnapshotProtection = snapshotProtection;
+        DdlGate = new SchemaDdlGate(name);
     }
 
     public void SetSchemaReplicationSubscription(IDisposable subscription)
@@ -656,7 +671,7 @@ public sealed record DatabaseDescriptor : IDisposable
         Transactions?.Dispose();
 
         Schema?.Dispose();
-        SchemaDdlSemaphore?.Dispose();
+        DdlGate?.Dispose();
         SystemSchemaSemaphore?.Dispose();
     }
 }

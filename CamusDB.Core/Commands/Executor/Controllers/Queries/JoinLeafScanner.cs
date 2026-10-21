@@ -173,9 +173,9 @@ internal sealed class JoinLeafScanner
         using CancellationTokenSource? linked = JoinCancellation.Link(plan, cancellationToken);
         CancellationToken scanToken = linked?.Token ?? plan.Ticket.CancellationToken;
 
-        JoinLeafRowPage page = new(services, plan, source, executionFilter, stats: stats);
+        JoinLeafRowPage page = new(services, plan, source, executionFilter, stats: stats, index: index);
 
-        await foreach ((CompositeColumnValue _, ObjectIdValue rowId, ReadOnlyMemory<byte> _) in table.Store.ScanIndex(
+        await foreach ((CompositeColumnValue entryKey, ObjectIdValue rowId, ReadOnlyMemory<byte> _) in table.Store.ScanIndex(
             plan.Ticket.TxnState,
             index.KvId,
             keyTypes,
@@ -190,7 +190,7 @@ internal sealed class JoinLeafScanner
             // to a non-indexed projected column must invalidate this result even if the row is skipped.
             deps?.RecordPoint(table.Store.RowPointKey(rowId));
 
-            page.Add(rowId);
+            page.Add(rowId, entryKey);
 
             if (!page.IsFull)
                 continue;
@@ -232,9 +232,9 @@ internal sealed class JoinLeafScanner
         using CancellationTokenSource? linked = JoinCancellation.Link(plan, cancellationToken);
         CancellationToken scanToken = linked?.Token ?? plan.Ticket.CancellationToken;
 
-        JoinLeafRowPage page = new(services, plan, source, rangeNode.ExecutionFilter, stats: stats);
+        JoinLeafRowPage page = new(services, plan, source, rangeNode.ExecutionFilter, stats: stats, index: rangeNode.Index);
 
-        await foreach ((CompositeColumnValue _, ObjectIdValue rowId, ReadOnlyMemory<byte> _) in table.Store.ScanIndex(
+        await foreach ((CompositeColumnValue entryKey, ObjectIdValue rowId, ReadOnlyMemory<byte> _) in table.Store.ScanIndex(
             plan.Ticket.TxnState,
             rangeNode.Index.KvId,
             keyTypes,
@@ -251,7 +251,7 @@ internal sealed class JoinLeafScanner
 
             deps?.RecordPoint(table.Store.RowPointKey(rowId));
 
-            page.Add(rowId);
+            page.Add(rowId, entryKey);
 
             if (!page.IsFull)
                 continue;
@@ -299,7 +299,7 @@ internal sealed class JoinLeafScanner
         // One page spans the whole IN list: ids are appended in list order (and, per value, in index
         // order), so a page can hold the tail of one value's matches and the head of the next. Order
         // and the index-side `seen` dedup are unaffected — both happen before an id is buffered.
-        JoinLeafRowPage page = new(services, plan, source, inListNode.ExecutionFilter, stats: stats);
+        JoinLeafRowPage page = new(services, plan, source, inListNode.ExecutionFilter, stats: stats, index: inListNode.Index);
 
         foreach (ColumnValue value in inListNode.Values)
         {
@@ -320,7 +320,7 @@ internal sealed class JoinLeafScanner
 
                 deps?.RecordPoint(table.Store.RowPointKey(rowId.Value));
 
-                page.Add(rowId.Value);
+                page.Add(rowId.Value, lookupKey);
 
                 if (!page.IsFull)
                     continue;
@@ -334,7 +334,7 @@ internal sealed class JoinLeafScanner
                 // non-empty in the index's own key order, which a descending column reverses.
                 (CompositeColumnValue toBound, bool toInclusive) = IndexScanSelector.EqualitySeekUpperBound(table, inListNode.Index, lookupKey);
 
-                await foreach ((CompositeColumnValue _, ObjectIdValue rowId, ReadOnlyMemory<byte> _) in table.Store.ScanIndex(
+                await foreach ((CompositeColumnValue entryKey, ObjectIdValue rowId, ReadOnlyMemory<byte> _) in table.Store.ScanIndex(
                     plan.Ticket.TxnState, inListNode.Index.KvId, keyTypes,
                     lookupKey, toBound, unique: false,
                     fromInclusive: true, toInclusive: toInclusive,
@@ -350,7 +350,7 @@ internal sealed class JoinLeafScanner
 
                     deps?.RecordPoint(table.Store.RowPointKey(rowId));
 
-                    page.Add(rowId);
+                    page.Add(rowId, entryKey);
 
                     if (!page.IsFull)
                         continue;

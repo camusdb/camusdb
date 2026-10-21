@@ -196,6 +196,12 @@ public static class ServerDiagnostics
     private static readonly Counter<long> RowIdCache =
         Meter.CreateCounter<long>("camus.point_read.row_id_cache.requests", unit: "{lookup}", description: "Primary-key point lookups by row-id cache outcome.");
 
+    // ── Index reads ─────────────────────────────────────────────────────────────
+    // A row fetched through an index entry disagreed with the entry's key and was skipped; see
+    // CommandsExecutor.Controllers.Queries.IndexEntryCheck. Any count here is a defect to chase.
+    private static readonly Counter<long> StaleIndexEntries =
+        Meter.CreateCounter<long>("camus.index_read.stale_entries", unit: "{entry}", description: "Index entries whose row no longer matched their key, skipped by an index read.");
+
     // ── Transactions ────────────────────────────────────────────────────────────
     // Both instruments below are recorded from the one place that owns the transaction manager's
     // tracking map, so a transaction is counted once on entry and once on exit and the gauge equals
@@ -364,6 +370,13 @@ public static class ServerDiagnostics
         if (!Enabled)
             return;
         QueryCache.Add(1, new TagList { { "result", result } });
+    }
+
+    public static void RecordStaleIndexEntry(string table, string index)
+    {
+        if (!Enabled)
+            return;
+        StaleIndexEntries.Add(1, new TagList { { "table", table }, { "index", index } });
     }
 
     public static void RecordRowIdCache(string result)

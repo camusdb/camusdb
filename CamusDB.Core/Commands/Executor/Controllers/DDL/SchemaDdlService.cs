@@ -37,12 +37,17 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.DDL;
 /// where one node writes an element another node cannot read, and a column is never readable before
 /// its existing rows are filled.</para>
 ///
-/// <para><b>Every path holds <c>SchemaDdlSemaphore</c> and every path releases it in a
-/// <c>finally</c> that also fires the deferred step-down.</b> The semaphore is what makes
-/// "resolve the target, then mutate it" atomic against a concurrent drop/recreate of the same name —
-/// which is why it is taken in standalone mode too, not only in cluster mode. The step-down must fire
-/// after the KV transaction has settled, never before, or leadership can move while a write is still
-/// in flight.</para>
+/// <para><b>Every path enters the database's <see cref="SchemaDdlGate"/> for the tables it names,
+/// and every path releases it in a <c>finally</c> that also fires the deferred step-down.</b> The gate's
+/// semaphore is what makes "resolve the target, then mutate it" atomic against a concurrent
+/// drop/recreate of the same name — which is why it is taken in standalone mode too, not only in
+/// cluster mode. Entering for a table also waits for a staged change in progress on that table: a
+/// staged job holds its table and takes the semaphore only around each delta it proposes, so its
+/// backfill or validation pass, the part that takes minutes on a loaded table, no longer holds every
+/// other DDL of the database. A statement that hands a job to the coordinator says so with
+/// <c>gateHeldByCaller: true</c> and finds the gate held again when the job returns. The step-down
+/// must fire after the KV transaction has settled, never before, or leadership can move while a write
+/// is still in flight.</para>
 ///
 /// <para>Partial failures compensate rather than unwind: a backfill that spans batches has already
 /// committed the earlier ones, so an aborted ADD INDEX purges the orphaned entries
@@ -174,11 +179,18 @@ internal sealed partial class SchemaDdlService
     /// will be evicted on the very first subsequent probe when its schema version is found stale,
     /// so it can never be served.
     /// </remarks>
+    /// <param name="tableNames">
+    /// The tables the statement names: the one it changes, and for a rename the new name too. The gate
+    /// waits for a staged change in progress on any of them before the transaction starts, so a drop,
+    /// a rename or a column change never runs under a backfill of the same table. Null for a change
+    /// that names no table.
+    /// </param>
     internal async Task<T> ExecuteDdlInTransaction<T>(
         DatabaseDescriptor database,
         Func<KvTransaction, Task<T>> action,
         Func<Task>? onAbort = null,
-        Action? postCommitInvalidate = null
+        Action? postCommitInvalidate = null,
+        IReadOnlyList<string>? tableNames = null
     )
     {
         // Acquired in BOTH modes. It used to be cluster-only, on the reasoning that a standalone node
@@ -188,7 +200,10 @@ internal sealed partial class SchemaDdlService
         // ALTER TABLE SET) serialized against nothing there, and could persist a blob for a table that
         // had just been dropped. One discipline in both modes; DDL is rare enough that the added
         // serialization costs nothing that matters.
-        await database.SchemaDdlSemaphore.WaitAsync().ConfigureAwait(false);
+        if (tableNames is not null)
+            await database.DdlGate.EnterAsync(tableNames, context.Logger).ConfigureAwait(false);
+        else
+            await database.SchemaDdlSemaphore.WaitAsync().ConfigureAwait(false);
 
         KvTransaction tx = await database.Transactions.BeginAsync(
             CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite,
@@ -306,7 +321,8 @@ internal sealed partial class SchemaDdlService
                 bool ok = await tableCreator.Create(
                     queryExecutor, context.TableOpener, tableIndexAlterer, database, ticket, tx, tableId, foreignKeyState).ConfigureAwait(false);
                 return new CreateTableResult(database, ok);
-            }).ConfigureAwait(false);
+            },
+            tableNames: [ticket.TableName]).ConfigureAwait(false);
 
             created = result.Success;
 
@@ -355,7 +371,7 @@ internal sealed partial class SchemaDdlService
     {
         CamusDBException? firstViolation = null;
 
-        await database.SchemaDdlSemaphore.WaitAsync().ConfigureAwait(false);
+        await database.DdlGate.EnterAsync(ticket.TableName, context.Logger).ConfigureAwait(false);
         try
         {
             SchemaChangeCoordinator coordinator = new(catalogs, context.Logger)
@@ -370,7 +386,8 @@ internal sealed partial class SchemaDdlService
                 {
                     await coordinator.RunJobAsync(
                         database,
-                        new SchemaChangeJob(database.Name, ticket.TableName, tableId, foreignKey.Name, SchemaElementState.Public, SchemaElementKind.ForeignKey)
+                        new SchemaChangeJob(database.Name, ticket.TableName, tableId, foreignKey.Name, SchemaElementState.Public, SchemaElementKind.ForeignKey),
+                        gateHeldByCaller: true
                     ).ConfigureAwait(false);
                 }
                 catch (CamusDBException ex) when (ex.Code == CamusDBErrorCodes.ForeignKeyViolation)
@@ -670,7 +687,8 @@ internal sealed partial class SchemaDdlService
 
         bool altered = await ExecuteDdlInTransaction(database,
             tx => tableColumnAlterer.Alter(queryExecutor, database, table, ticket, tx),
-            postCommitInvalidate: () => database.Cache?.InvalidateByTableId(database.Id, table.Id)
+            postCommitInvalidate: () => database.Cache?.InvalidateByTableId(database.Id, table.Id),
+            tableNames: [ticket.TableName]
         ).ConfigureAwait(false);
 
         if (altered)
@@ -719,7 +737,7 @@ internal sealed partial class SchemaDdlService
         List<string> createdSequences = [];
         ColumnInfo? resolved = null;
 
-        await database.SchemaDdlSemaphore.WaitAsync().ConfigureAwait(false);
+        await database.DdlGate.EnterAsync(ticket.TableName, context.Logger).ConfigureAwait(false);
         try
         {
             // Opened under the gate: another ADD COLUMN may have committed since the caller opened it.
@@ -731,10 +749,12 @@ internal sealed partial class SchemaDdlService
 
             SchemaChangeCoordinator coordinator = NewColumnCoordinator();
 
+            // The gate is released while the rows are filled; see SchemaChangeCoordinator.RunJobAsync.
             await coordinator.RunJobAsync(
                 database,
                 new SchemaChangeJob(database.Name, gated.Name, gated.Id, resolved.Name, SchemaElementState.Public),
-                columnDefinition: resolved
+                columnDefinition: resolved,
+                gateHeldByCaller: true
             ).ConfigureAwait(false);
 
             database.Cache?.InvalidateByTableId(database.Id, gated.Id);
@@ -890,11 +910,11 @@ internal sealed partial class SchemaDdlService
     /// definition comes from the live schema, which a resumed job's rebuilt <see cref="ColumnInfo"/> may
     /// describe less completely.
     /// </summary>
-    internal async Task BackfillColumnDefaultsAsync(DatabaseDescriptor database, string tableName, ColumnInfo column)
+    internal async Task BackfillColumnDefaultsAsync(DatabaseDescriptor database, string tableName, ColumnInfo column, CancellationToken cancellationToken)
     {
         TableDescriptor table = await context.TableOpener.Open(database, tableName).ConfigureAwait(false);
 
-        await tableColumnAlterer.FillAddedColumnAsync(database, table, column.Name).ConfigureAwait(false);
+        await tableColumnAlterer.FillAddedColumnAsync(database, table, column.Name, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -933,7 +953,8 @@ internal sealed partial class SchemaDdlService
         string tableName,
         IndexBuildInfo indexInfo,
         string? startOffset,
-        Func<string, Task>? onCheckpoint = null
+        Func<string, Task>? onCheckpoint = null,
+        CancellationToken cancellationToken = default
     )
     {
         CamusDBOptions currentOptions = options;
@@ -968,7 +989,7 @@ internal sealed partial class SchemaDdlService
             Checkpoint,
             context.Logger,
             currentOptions,
-            CancellationToken.None).ConfigureAwait(false);
+            cancellationToken).ConfigureAwait(false);
 
         Log.LogIndexBackfillComplete(context.Logger, result.Rows, indexInfo.IndexName);
     }
@@ -1014,7 +1035,7 @@ internal sealed partial class SchemaDdlService
 
         IndexBuildInfo indexInfo = new(indexId, ticket.IndexName, columnIds, columnNames, indexType, IndexColumnOrder.Extract(ticket.Columns), IncludeColumnIds: includeColumnIds, IncludeColumnNames: includeColumnNames);
 
-        await database.SchemaDdlSemaphore.WaitAsync().ConfigureAwait(false);
+        await database.DdlGate.EnterAsync(ticket.TableName, context.Logger).ConfigureAwait(false);
         try
         {
             await StageIndexWithinGateAsync(database, table.Id, ticket.TableName, indexInfo).ConfigureAwait(false);
@@ -1033,21 +1054,30 @@ internal sealed partial class SchemaDdlService
     /// <summary>
     /// Drives one new index through <c>Absent → DeleteOnly → WriteOnly → [backfill] → Public</c> with the
     /// schema-change coordinator, and removes it again if the sequence fails before Public. The caller
-    /// holds <c>SchemaDdlSemaphore</c>; the cluster add-index path and the foreign-key add path both
-    /// call it.
+    /// entered the DDL gate for the table; the coordinator releases the gate while the backfill runs and
+    /// holds it again when it returns (see <see cref="SchemaChangeCoordinator.RunJobAsync"/>), so the
+    /// compensation below proposes under it. The cluster add-index path and the foreign-key add path
+    /// both call it.
     /// </summary>
     private async Task StageIndexWithinGateAsync(DatabaseDescriptor database, string tableId, string tableName, IndexBuildInfo indexInfo)
     {
         SchemaChangeCoordinator coordinator = new(catalogs, context.Logger);
-        coordinator.IndexBackfillAsync = (db, tbl, info, start, checkpoint) => BackfillIndexEntriesAsync(db, tbl, info, start, checkpoint);
+        coordinator.IndexBackfillAsync = (db, tbl, info, start, checkpoint, cancellationToken) => BackfillIndexEntriesAsync(db, tbl, info, start, checkpoint, cancellationToken);
 
         try
         {
             await coordinator.RunJobAsync(
                 database,
                 new SchemaChangeJob(database.Name, tableName, tableId, indexInfo.IndexName, SchemaElementState.Public, SchemaElementKind.Index),
-                indexBuildInfo: indexInfo
+                indexBuildInfo: indexInfo,
+                gateHeldByCaller: true
             ).ConfigureAwait(false);
+        }
+        catch (SchemaChangeHandedOverException)
+        {
+            // The job was handed over to the next schema leader and answered from its outcome: the
+            // index is that leader's, built or dropped there, and nothing here is this node's to undo.
+            throw;
         }
         catch
         {
@@ -1057,7 +1087,7 @@ internal sealed partial class SchemaDdlService
             // Note: if this node is now degraded, compensation may be skipped by the
             // degraded gate in ReplicateDropIndexAsync; a healthy peer's ResumeJobsAsync
             // will reconcile the state after the step-down below.
-            await CompensateClusterAddIndexAsync(database, tableId, tableName, indexInfo.IndexName).ConfigureAwait(false);
+            await CompensateClusterAddIndexAsync(database, tableId, tableName, indexInfo.IndexName, coordinator.LeaderTerm).ConfigureAwait(false);
             throw;
         }
     }
@@ -1082,7 +1112,7 @@ internal sealed partial class SchemaDdlService
         }
     }
 
-    private async Task CompensateClusterAddIndexAsync(DatabaseDescriptor database, string tableId, string tableName, string indexName)
+    private async Task CompensateClusterAddIndexAsync(DatabaseDescriptor database, string tableId, string tableName, string indexName, long leaderTerm = 0)
     {
         try
         {
@@ -1099,7 +1129,9 @@ internal sealed partial class SchemaDdlService
 
         try
         {
-            await catalogs.DeleteCoordinatorJobAsync(database, tableId, indexName).ConfigureAwait(false);
+            // Fenced by the term the statement drove the job under: a record the next schema leader
+            // took over meanwhile is that leader's, and stays for its resume.
+            await catalogs.DeleteCoordinatorJobAsync(database, tableId, indexName, leaderTerm).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
@@ -1158,7 +1190,8 @@ internal sealed partial class SchemaDdlService
         if (ticket.Operation == AlterIndexOperation.RenameIndex)
             return await ExecuteDdlInTransaction(database,
                 tx => tableIndexAlterer.Alter(queryExecutor, database, table, ticket, tx),
-                postCommitInvalidate: () => database.Cache?.InvalidateByTableId(database.Id, table.Id)
+                postCommitInvalidate: () => database.Cache?.InvalidateByTableId(database.Id, table.Id),
+                tableNames: [ticket.TableName]
             ).ConfigureAwait(false);
 
         bool addIndexOperation = ticket.Operation is
@@ -1244,8 +1277,9 @@ internal sealed partial class SchemaDdlService
     /// <summary>
     /// Two-phase execution for cluster index DDL. Phase 1 commits the backfill data
     /// (tx1) so the index KV entries are visible before Phase 2 replicates the schema
-    /// delta. Both phases run under <c>SchemaDdlSemaphore</c> so <c>SchemaVersion</c>
-    /// stays stable across the pair. Only called in cluster mode.
+    /// delta. Both phases run under the DDL gate so <c>SchemaVersion</c> stays stable across the
+    /// pair; a standalone index build therefore still holds every DDL of its database for the length of
+    /// its backfill, unlike the staged cluster build. Only called in cluster mode.
     /// </summary>
     internal async Task<bool> ExecuteClusteredIndexDdlAsync(
         DatabaseDescriptor database,
@@ -1255,7 +1289,7 @@ internal sealed partial class SchemaDdlService
         Func<KvTransaction, Task<bool>> localWork
     )
     {
-        await database.SchemaDdlSemaphore.WaitAsync().ConfigureAwait(false);
+        await database.DdlGate.EnterAsync(ticket.TableName, context.Logger).ConfigureAwait(false);
         try
         {
             return await RunIndexDdlWithinGateAsync(database, table, ticket, compensateOnAbort, localWork).ConfigureAwait(false);
@@ -1430,7 +1464,7 @@ internal sealed partial class SchemaDdlService
         bool dropped = await ExecuteDdlInTransaction(database,
             tx =>
             {
-                // Under the DDL semaphore and before the dropper removes any row or index entry, so a
+                // Under the DDL gate and before the dropper removes any row or index entry, so a
                 // refusal costs nothing to undo. The ticket API, the SQL path and a forwarded drop on
                 // the leader all reach this point.
                 RequireDroppableAsTable(table, ticket);
@@ -1439,7 +1473,8 @@ internal sealed partial class SchemaDdlService
 
                 return tableDropper.Drop(queryExecutor, rowDeleter, database, table, ticket, tx);
             },
-            postCommitInvalidate: () => database.Cache?.InvalidateByTableId(database.Id, table.Id)
+            postCommitInvalidate: () => database.Cache?.InvalidateByTableId(database.Id, table.Id),
+            tableNames: [table.Name]
         ).ConfigureAwait(false);
 
         if (dropped)
@@ -1535,7 +1570,7 @@ internal sealed partial class SchemaDdlService
         DatabaseRegistry registry = await context.Registry.ConfigureAwait(false);
         string newStorageId = await registry.AllocateTableIdAsync().ConfigureAwait(false);
 
-        await database.SchemaDdlSemaphore.WaitAsync().ConfigureAwait(false);
+        await database.DdlGate.EnterAsync(ticket.TableName, context.Logger).ConfigureAwait(false);
 
         KvTransaction fenceTx = await database.Transactions.BeginAsync(
             CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite,
@@ -1817,7 +1852,8 @@ internal sealed partial class SchemaDdlService
 
             await ExecuteDdlInTransaction(database,
                 tx => catalogs.RelinkTable(database, orphan, ticket.NewTableName, tx),
-                postCommitInvalidate: () => database.Cache?.InvalidateByTableId(database.Id, orphan.TableId)
+                postCommitInvalidate: () => database.Cache?.InvalidateByTableId(database.Id, orphan.TableId),
+                tableNames: [ticket.NewTableName]
             ).ConfigureAwait(false);
         }
         finally
@@ -1890,7 +1926,8 @@ internal sealed partial class SchemaDdlService
 
         await ExecuteDdlInTransaction(database,
             tx => catalogs.RelinkRetiredContents(database, record, targetId, ticket.NewTableName, tx),
-            postCommitInvalidate: () => database.Cache?.InvalidateByTableId(database.Id, targetId)
+            postCommitInvalidate: () => database.Cache?.InvalidateByTableId(database.Id, targetId),
+            tableNames: [ticket.NewTableName]
         ).ConfigureAwait(false);
 
         return true;
@@ -1938,7 +1975,8 @@ internal sealed partial class SchemaDdlService
 
         return await ExecuteDdlInTransaction(database,
             tx => catalogs.RenameTable(database, ticket, tx, dependentViews),
-            postCommitInvalidate: () => database.Cache?.InvalidateByTableId(database.Id, renameTable.Id)
+            postCommitInvalidate: () => database.Cache?.InvalidateByTableId(database.Id, renameTable.Id),
+            tableNames: [ticket.TableName, ticket.NewName]
         ).ConfigureAwait(false);
     }
 
@@ -2021,7 +2059,7 @@ internal sealed partial class SchemaDdlService
     /// <summary>
     /// Applies a table/column/index comment against an already-opened database, forwarding to the
     /// schema leader first when this node is a follower. Serialized against other DDL on this
-    /// database by <c>SchemaDdlSemaphore</c>, exactly like <c>ALTER TABLE … SET</c>.
+    /// database by the DDL gate, exactly like <c>ALTER TABLE … SET</c>.
     /// </summary>
     internal async Task<ExecuteDDLSQLResult> Comment(DatabaseDescriptor database, CommentTicket ticket)
     {
@@ -2034,7 +2072,7 @@ internal sealed partial class SchemaDdlService
         // looking at the old object while the delta — which names its target by table name, not id —
         // lands on the replacement. The apply deliberately no-ops on a missing column/index (for
         // replay safety), so that mismatch would report success while doing nothing at all.
-        await database.SchemaDdlSemaphore.WaitAsync().ConfigureAwait(false);
+        await database.DdlGate.EnterAsync(ticket.TableName!, context.Logger).ConfigureAwait(false);
         try
         {
             TableDescriptor table = await context.TableOpener.Open(database, ticket.TableName!).ConfigureAwait(false);

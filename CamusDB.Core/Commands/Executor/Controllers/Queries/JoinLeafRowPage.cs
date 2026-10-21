@@ -71,6 +71,12 @@ internal sealed class JoinLeafRowPage
     private readonly int pageSize;
     private readonly PlanNodeStats? stats;
 
+    // The index the ids came from and, positionally with rowIds, the entry key each id was read
+    // under, so a fetched row is checked against its entry (see IndexEntryCheck). Null for a page
+    // that is not fed by an index, or for an id added without its key.
+    private readonly TableIndexSchema? index;
+    private readonly List<CompositeColumnValue?> entryKeys;
+
     /// <param name="decode">
     /// The decode plan and alias-qualified layout to use. A caller that also decodes right rows
     /// elsewhere passes its own state so the join builds one plan and one layout, not two; a
@@ -87,7 +93,8 @@ internal sealed class JoinLeafRowPage
         BoundTableSource source,
         NodeAst? executionFilter,
         RightDecodeState? decode = null,
-        PlanNodeStats? stats = null)
+        PlanNodeStats? stats = null,
+        TableIndexSchema? index = null)
     {
         this.services = services;
         this.plan = plan;
@@ -95,23 +102,35 @@ internal sealed class JoinLeafRowPage
         this.executionFilter = executionFilter;
         this.decode = decode ?? new RightDecodeState();
         this.stats = stats;
+        this.index = index;
 
         // Pinned once for the whole scan, like every other reader of the published options record.
         options = services.Options;
         required = JoinAliasMetadata.GetRequiredColumnsForAlias(plan, source.Alias);
+        if (index is not null)
+            required = IndexEntryCheck.RequiredColumns(required, index);
         schemaVersion = JoinAliasMetadata.GetTableSchemaVersionForAlias(plan, source.Alias);
         txId = plan.Ticket.TxnState.TransactionId;
 
         // A non-positive configured size degrades to one row per fetch instead of an unbounded buffer.
         pageSize = Math.Max(1, options.IndexScanFetchBatchSize);
         rowIds = new List<ObjectIdValue>(pageSize);
+        entryKeys = new List<CompositeColumnValue?>(pageSize);
     }
 
     internal int Count => rowIds.Count;
 
     internal bool IsFull => rowIds.Count >= pageSize;
 
-    internal void Add(ObjectIdValue rowId) => rowIds.Add(rowId);
+    /// <summary>
+    /// Buffers a row id. <paramref name="entryKey"/> is the key of the index entry the id was read
+    /// under, when the page was built for an index; the fetched row is checked against it.
+    /// </summary>
+    internal void Add(ObjectIdValue rowId, CompositeColumnValue? entryKey = null)
+    {
+        rowIds.Add(rowId);
+        entryKeys.Add(entryKey);
+    }
 
     /// <summary>
     /// Fetches the buffered page in one call, then yields the rows that survive the residual
@@ -131,7 +150,7 @@ internal sealed class JoinLeafRowPage
             {
                 cancellationToken.ThrowIfCancellationRequested();
 
-                QueryResultRow? row = await DecodeAcceptedAsync(rowIds[i], batch[i]).ConfigureAwait(false);
+                QueryResultRow? row = await DecodeAcceptedAsync(rowIds[i], batch[i], entryKeys[i]).ConfigureAwait(false);
 
                 if (row is { } accepted)
                     yield return accepted;
@@ -140,6 +159,7 @@ internal sealed class JoinLeafRowPage
         finally
         {
             rowIds.Clear();
+            entryKeys.Clear();
         }
     }
 
@@ -181,7 +201,7 @@ internal sealed class JoinLeafRowPage
     /// and the filter accepts it, null otherwise. Every row the store answered counts as read, whether or
     /// not the filter keeps it.
     /// </summary>
-    private async ValueTask<QueryResultRow?> DecodeAcceptedAsync(ObjectIdValue rowId, ReadOnlyMemory<byte>? dataOpt)
+    private async ValueTask<QueryResultRow?> DecodeAcceptedAsync(ObjectIdValue rowId, ReadOnlyMemory<byte>? dataOpt, CompositeColumnValue? entryKey = null)
     {
         if (dataOpt is null || dataOpt.Value.Length == 0)
             return null;
@@ -201,6 +221,11 @@ internal sealed class JoinLeafRowPage
         plan.Ticket.Probe?.AddRowRead();
         if (stats is not null)
             stats.RowsRead++;
+
+        // The entry answered the seek; the row must still hold its key (see IndexEntryCheck).
+        if (index is not null && entryKey is not null
+            && !IndexEntryCheck.Confirms(table, index, entryKey, row, services.Logger ?? Microsoft.Extensions.Logging.Abstractions.NullLogger<ICamusDB>.Instance))
+            return null;
 
         if (executionFilter is not null)
         {

@@ -36,7 +36,10 @@ namespace CamusDB.Tests.CommandsExecutor;
 ///
 /// <para>The scenarios run on a standalone engine and on a cluster-mode engine, and under each engine
 /// default for the locking mode. The optimistic default is the one under which a backfill used to
-/// take no lock at all and lose its batches at commit.</para>
+/// take no lock at all and lose its batches at commit. They run at Read Committed, the production
+/// shape and the weakest protection: a Serializable read-write statement holds shared point locks on
+/// the rows it read, which keep it off a batch's rows and hide the interleavings tested here. Two
+/// fixtures repeat them at Serializable for the lock-upgrade path.</para>
 /// </summary>
 [NonParallelizable]
 internal abstract class OnlineBackfillUnderWritesScenarios : SharedNodeBaseTest
@@ -54,8 +57,23 @@ internal abstract class OnlineBackfillUnderWritesScenarios : SharedNodeBaseTest
 
     protected abstract KeyValueTransactionLocking WriterLocking { get; }
 
+    protected virtual CamusIsolationLevel Isolation => CamusIsolationLevel.ReadCommitted;
+
+    /// <summary>
+    /// How long a writer waits for a row a backfill batch holds before it gives up with a retryable
+    /// refusal. Long enough for the batch to commit while the writer is waiting, which is the
+    /// interleaving the single-row tests below set up; the sustained-writes test sees fewer refusals.
+    /// </summary>
+    private const int LockWaitDeadlineMs = 5_000;
+
+    /// <summary>
+    /// Time a statement started on the after-read seam is given to reach its row write before the batch
+    /// resumes: enough for it to be planned, to read its row and to stage what comes before that write.
+    /// </summary>
+    private const int WriterReachesRowWriteMs = 500;
+
     protected override CamusDBOptions ConfigureOptions(CamusDBOptions defaults)
-        => defaults with { DefaultTransactionLocking = WriterLocking };
+        => defaults with { DefaultTransactionLocking = WriterLocking, DefaultIsolationLevel = Isolation, LockWaitDeadlineMs = LockWaitDeadlineMs };
 
     protected override CommandExecutor BuildCommandExecutor(CamusDBOptions options)
     {
@@ -95,6 +113,29 @@ internal abstract class OnlineBackfillUnderWritesScenarios : SharedNodeBaseTest
         finally
         {
             await database.Transactions.RollbackIfNotCompletedAsync(tx);
+        }
+    }
+
+    /// <summary>
+    /// Runs one autocommit statement until it commits, re-running it after a retryable refusal the
+    /// way a client does. A refusal is what a pessimistic writer gets when it meets a lock it cannot
+    /// wait out, so the statement's effect is the same under either engine default.
+    /// </summary>
+    private static async Task ExecuteUntilApplied(CommandExecutor executor, string dbname, string sql)
+    {
+        while (true)
+        {
+            try
+            {
+                await ExecuteNonQuery(executor, dbname, sql);
+                Progress("statement committed");
+                return;
+            }
+            catch (CamusDBException ex) when (SerializableRetryHelper.IsRetryable(ex))
+            {
+                Progress($"statement refused, retrying: {ex.Code} {ex.Message}");
+                await Task.Delay(5);
+            }
         }
     }
 
@@ -340,6 +381,114 @@ internal abstract class OnlineBackfillUnderWritesScenarios : SharedNodeBaseTest
     }
 
     // -----------------------------------------------------------------------
+    // A row written by a statement while its batch holds it
+    // -----------------------------------------------------------------------
+
+    /// <summary>
+    /// Starts <paramref name="sql"/> under the engine default the moment the first batch has locked and
+    /// read its rows, and lets the batch resume once the statement has had time to reach the row write
+    /// the batch's lock refuses. Returns the statement's task; the caller awaits it after the build.
+    /// </summary>
+    private static Task RunWhileFirstBatchHoldsItsRows(CommandExecutor executor, string dbname, string sql)
+    {
+        TaskCompletionSource<Task> started = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        IndexBackfiller.TestInterceptAfterBatchRead = async () =>
+        {
+            IndexBackfiller.TestInterceptAfterBatchRead = null;
+            Progress("batch read its rows; starting the statement");
+            started.SetResult(Task.Run(() => ExecuteUntilApplied(executor, dbname, sql)));
+            await Task.Delay(WriterReachesRowWriteMs);
+            Progress("batch resumes");
+        };
+
+        return started.Task.Unwrap();
+    }
+
+    /// <summary>
+    /// An UPDATE of a row changes it after the batch read it and before the batch wrote its entry. The
+    /// UPDATE removes the entry for the value it read, which does not exist yet, writes the entry for
+    /// its new value, and its write of the row is refused until the batch commits. The batch then
+    /// writes the entry for the value it read, and the UPDATE commits after it. The index must hold one
+    /// entry for the row, at the committed value: the UPDATE must stage its row write, which the batch's
+    /// lock refuses until the batch is done, before it removes the entries of the row it read, so that
+    /// the entry the batch wrote is there to be removed. Under the pessimistic default the UPDATE waits
+    /// at its row lock instead, which is the same order.
+    /// </summary>
+    [Test]
+    public async Task IndexBuild_RowUpdatedWhileItsBatchHoldsIt_HoldsOneEntryAtTheCommittedValue()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupTable(SmallRows);
+
+        Task update = RunWhileFirstBatchHoldsItsRows(executor, dbname, "UPDATE items SET val = 1000 WHERE id = 7");
+        try
+        {
+            await ExecuteDdl(executor, dbname, "CREATE INDEX val_idx ON items (val)");
+            await update.WaitAsync(TimeSpan.FromSeconds(60));
+        }
+        finally
+        {
+            IndexBackfiller.TestInterceptAfterBatchRead = null;
+        }
+
+        Assert.That(await UsedIndex(executor, dbname, "SELECT id FROM items WHERE val = 1000"), Is.True, "the lookups must be served by the new index");
+        Assert.That(await IdsWhere(executor, dbname, "val = 1000"), Is.EqualTo(new long[] { 7 }), "the committed update is indexed");
+        Assert.That(await IdsWhere(executor, dbname, "val = 7"), Is.Empty, "no entry survives for the value the batch read");
+        Assert.That(await CountIndexEntries(executor, dbname, database, "val_idx", unique: false), Is.EqualTo(SmallRows), "one entry per row, no stale entry");
+    }
+
+    /// <summary>
+    /// The same interleaving with a DELETE: it removes the row and the entry for the value it read, the
+    /// entry does not exist yet, and the row delete is refused until the batch commits. The index must
+    /// hold no entry for the deleted row: the DELETE must stage its row delete before the entry deletes,
+    /// so that the entry the batch wrote is there to be removed.
+    /// </summary>
+    [Test]
+    public async Task IndexBuild_RowDeletedWhileItsBatchHoldsIt_HoldsNoEntryForTheRow()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupTable(SmallRows);
+
+        Task delete = RunWhileFirstBatchHoldsItsRows(executor, dbname, "DELETE FROM items WHERE id = 7");
+        try
+        {
+            await ExecuteDdl(executor, dbname, "CREATE INDEX val_idx ON items (val)");
+            await delete.WaitAsync(TimeSpan.FromSeconds(60));
+        }
+        finally
+        {
+            IndexBackfiller.TestInterceptAfterBatchRead = null;
+        }
+
+        Assert.That(await IdsWhere(executor, dbname, "val = 7"), Is.Empty, "no entry survives for the deleted row");
+        Assert.That((await Query(executor, dbname, "SELECT id FROM items")).Count, Is.EqualTo(SmallRows - 1));
+        Assert.That(await CountIndexEntries(executor, dbname, database, "val_idx", unique: false), Is.EqualTo(SmallRows - 1), "one entry per remaining row, none for the deleted one");
+    }
+
+    /// <summary>
+    /// The read-only scan that lists the next batch's row ids can be refused by the store with the
+    /// retryable code under concurrent writes. Such a refusal must not end the build: the scan is run
+    /// again, and the index comes out complete.
+    /// </summary>
+    [Test]
+    public async Task IndexBuild_RowIdScanRefused_ScansAgainAndCompletes()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupTable(SmallRows);
+
+        BackfillBatchRunner.TestScanRefusals = 3;
+        try
+        {
+            await ExecuteDdl(executor, dbname, "CREATE INDEX val_idx ON items (val)");
+        }
+        finally
+        {
+            BackfillBatchRunner.TestScanRefusals = 0;
+        }
+
+        Assert.That(await CountIndexEntries(executor, dbname, database, "val_idx", unique: false), Is.EqualTo(SmallRows), "one entry per row after the refused scans were retried");
+        Assert.That(await IdsWhere(executor, dbname, "val = 7"), Is.EqualTo(new long[] { 7 }));
+    }
+
+    // -----------------------------------------------------------------------
     // Sustained writes
     // -----------------------------------------------------------------------
 
@@ -566,4 +715,28 @@ internal sealed class TestOnlineBackfillUnderWritesClusterOptimistic : OnlineBac
     protected override bool ClusterMode => true;
 
     protected override KeyValueTransactionLocking WriterLocking => KeyValueTransactionLocking.Optimistic;
+}
+
+/// <summary><see cref="OnlineBackfillUnderWritesScenarios"/> on a standalone engine at Serializable with pessimistic writers.</summary>
+[TestFixture]
+[NonParallelizable]
+internal sealed class TestOnlineBackfillUnderWritesStandaloneSerializable : OnlineBackfillUnderWritesScenarios
+{
+    protected override bool ClusterMode => false;
+
+    protected override KeyValueTransactionLocking WriterLocking => KeyValueTransactionLocking.Pessimistic;
+
+    protected override CamusIsolationLevel Isolation => CamusIsolationLevel.Serializable;
+}
+
+/// <summary><see cref="OnlineBackfillUnderWritesScenarios"/> on a standalone engine at Serializable with optimistic writers: the hybrid that still takes shared read locks.</summary>
+[TestFixture]
+[NonParallelizable]
+internal sealed class TestOnlineBackfillUnderWritesStandaloneSerializableOptimistic : OnlineBackfillUnderWritesScenarios
+{
+    protected override bool ClusterMode => false;
+
+    protected override KeyValueTransactionLocking WriterLocking => KeyValueTransactionLocking.Optimistic;
+
+    protected override CamusIsolationLevel Isolation => CamusIsolationLevel.Serializable;
 }

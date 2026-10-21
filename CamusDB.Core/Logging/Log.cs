@@ -6,6 +6,7 @@
  * file that was distributed with this source code.
  */
 
+using CamusDB.Core.Catalogs;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
@@ -98,6 +99,9 @@ internal static partial class Log
     [LoggerMessage(Level = LogLevel.Warning, Message = "Remote query fragment on {Endpoint} failed; resuming span locally: {Reason}")]
     public static partial void LogRemoteFragmentFellBackToLocal(ILogger logger, string endpoint, string reason);
 
+    [LoggerMessage(Level = LogLevel.Warning, Message = "Index {IndexName} of table {TableName} holds an entry for row {RowId} whose key the row no longer matches; the row was skipped (further occurrences on this index are counted, not logged, for a minute)")]
+    public static partial void LogStaleIndexEntrySkipped(ILogger logger, string indexName, string tableName, ObjectIdValue rowId);
+
     // DML
 
     [LoggerMessage(Level = LogLevel.Debug, Message = "Row with rowid {RowId} deleted")]
@@ -134,6 +138,42 @@ internal static partial class Log
 
     [LoggerMessage(Level = LogLevel.Warning, Message = "Backfill of {Element} lost {Losses} consecutive attempts over {Rows} rows to concurrent writers and keeps retrying; a lock on one of the rows is held longer than a statement: {Reason}")]
     public static partial void LogBackfillBatchWaiting(ILogger logger, string element, int losses, int rows, string reason);
+
+    [LoggerMessage(Level = LogLevel.Debug, Message = "Backfill of {Element} could not list its next rows ({Losses} in a row); scanning again in {DelayMs} ms: {Reason}")]
+    public static partial void LogBackfillScanLost(ILogger logger, string element, int losses, int delayMs, string reason);
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "Backfill of {Element} failed {Losses} consecutive attempts to list its next rows and keeps retrying: {Reason}")]
+    public static partial void LogBackfillScanWaiting(ILogger logger, string element, int losses, string reason);
+
+    [LoggerMessage(Level = LogLevel.Information, Message = "DDL on table {TableName} of database {DbName} waits for the staged change to {Element} in progress on that table")]
+    public static partial void LogDdlWaitsForStagedChange(ILogger logger, string tableName, string element, string dbName);
+
+    [LoggerMessage(Level = LogLevel.Debug, Message = "Staged change to {Element} of table {TableName} runs its {Phase} outside the DDL gate of database {DbName}; DDL on other tables proceeds")]
+    public static partial void LogStagedChangeReleasesDdlGate(ILogger logger, string element, string tableName, string phase, string dbName);
+
+    [LoggerMessage(Level = LogLevel.Information, Message = "Skipping coordinator job {TableName}.{ElementName} on database {DbName}: a staged change already holds the table on this node")]
+    public static partial void LogResumeSkipsHeldTable(ILogger logger, string tableName, string elementName, string dbName);
+
+    [LoggerMessage(Level = LogLevel.Information, Message = "No coordinator jobs to resume on database {DbName} ({Trigger})")]
+    public static partial void LogNoCoordinatorJobsToResume(ILogger logger, string dbName, CoordinatorResumeTrigger trigger);
+
+    [LoggerMessage(Level = LogLevel.Information, Message = "Coordinator job {TableName}.{ElementName} → {TargetState} on database {DbName} failed attempt {Attempt}; it is driven again after {Backoff}")]
+    public static partial void LogResumeRetryScheduled(ILogger logger, string tableName, string elementName, SchemaElementState targetState, string dbName, int attempt, TimeSpan backoff);
+
+    [LoggerMessage(Level = LogLevel.Debug, Message = "Coordinator job {TableName}.{ElementName} on database {DbName} is not driven before {NotBefore:O}: its last attempt on this node failed")]
+    public static partial void LogResumeDeferredByBackoff(ILogger logger, string tableName, string elementName, string dbName, DateTime notBefore);
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "Coordinator job sweep failed for database {DbName}; retrying next tick")]
+    public static partial void LogCoordinatorJobSweepFailed(ILogger logger, Exception exception, string dbName);
+
+    [LoggerMessage(Level = LogLevel.Information, Message = "The change to {Element} of table {TableName} on database {DbName} was handed over to the next schema leader (this node drove it under term {Term}: {Reason}); waiting for that leader's outcome")]
+    public static partial void LogSchemaChangeHandedOver(ILogger logger, string element, string tableName, string dbName, long term, string reason);
+
+    [LoggerMessage(Level = LogLevel.Information, Message = "The change to {Element} of table {TableName} on database {DbName} was completed by the schema leader that followed this node")]
+    public static partial void LogSchemaChangeCompletedBySuccessor(ILogger logger, string element, string tableName, string dbName);
+
+    [LoggerMessage(Level = LogLevel.Information, Message = "The fill of {Element} of table {TableName} on database {DbName} stopped: this node lost the schema leadership it held in term {Term}; the job stays for the current leader")]
+    public static partial void LogFillStoppedByLeadershipLoss(ILogger logger, string element, string tableName, string dbName, long term);
 
     [LoggerMessage(Level = LogLevel.Information, Message = "Added index {IndexName} to {TableName}, Time taken: {Time}")]
     public static partial void LogIndexAdded(ILogger logger, string indexName, string tableName, TimeSpan time);

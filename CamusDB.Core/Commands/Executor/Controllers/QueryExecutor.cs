@@ -1183,7 +1183,8 @@ internal sealed class QueryExecutor
         }
 
         CancellationToken cancellationToken = ticket.CancellationToken;
-        LargeValueFetch? largeValues = LargeValueFetch.Columns(table.Schema, plan.ScanRequiredColumns);
+        IReadOnlySet<string>? requiredColumns = IndexEntryCheck.RequiredColumns(plan.ScanRequiredColumns, index);
+        LargeValueFetch? largeValues = LargeValueFetch.Columns(table.Schema, requiredColumns);
 
         // A primary-key lookup may remember the row id the key resolved to last time and read the row
         // directly. Only the primary key qualifies: its value cannot change for the life of the row and
@@ -1285,11 +1286,13 @@ internal sealed class QueryExecutor
                 resolvedRowId,
                 data.Value,
                 options,
-                plan.ScanRequiredColumns,
+                requiredColumns,
                 plan.TableSchemaVersion,
                 decodeState).ConfigureAwait(false);
 
-            meets = await queryFilterer.MeetPlanFilterAsync(plan, row).ConfigureAwait(false);
+            // The entry answered the lookup; the row must still hold the key (see IndexEntryCheck).
+            meets = IndexEntryCheck.Confirms(table, index, lookupKey, row, logger)
+                && await queryFilterer.MeetPlanFilterAsync(plan, row).ConfigureAwait(false);
         }
 
         if (meets)
@@ -1388,11 +1391,15 @@ internal sealed class QueryExecutor
         };
         int batchSize = options.IndexScanFetchBatchSize;
         List<ObjectIdValue> pageBuf = new(batchSize);
+        // The entry keys of the page, positionally, so each fetched row is checked against its entry.
+        List<CompositeColumnValue> pageKeys = new(batchSize);
+        IReadOnlySet<string>? requiredColumns = IndexEntryCheck.RequiredColumns(plan.ScanRequiredColumns, index);
+        LargeValueFetch? largeValues = LargeValueFetch.Columns(table.Schema, requiredColumns);
 
-        async IAsyncEnumerable<QueryResultRow> flushPageAsync(List<ObjectIdValue> page)
+        async IAsyncEnumerable<QueryResultRow> flushPageAsync(List<ObjectIdValue> page, List<CompositeColumnValue> keys)
         {
             ReadOnlyMemory<byte>?[] batchResult = await table.Store.GetRowsBatch(
-                ticket.TxnState, page, cancellationToken, LargeValueFetch.Columns(table.Schema, plan.ScanRequiredColumns)).ConfigureAwait(false);
+                ticket.TxnState, page, cancellationToken, largeValues).ConfigureAwait(false);
             for (int i = 0; i < page.Count; i++)
             {
                 cancellationToken.ThrowIfCancellationRequested();
@@ -1407,13 +1414,14 @@ internal sealed class QueryExecutor
                 QueryRow row = await RowEncoder.DecodeToQueryRowAsync(
                     table.Schema, txId, batchRowId, data.Value,
                     options,
-                    plan.ScanRequiredColumns, plan.TableSchemaVersion, decodeState).ConfigureAwait(false);
-                if (await queryFilterer.MeetPlanFilterAsync(plan, row).ConfigureAwait(false))
+                    requiredColumns, plan.TableSchemaVersion, decodeState).ConfigureAwait(false);
+                if (IndexEntryCheck.Confirms(table, index, keys[i], row, logger)
+                    && await queryFilterer.MeetPlanFilterAsync(plan, row).ConfigureAwait(false))
                     yield return new(batchRowId, row);
             }
         }
 
-        await foreach ((CompositeColumnValue _, ObjectIdValue rowId, ReadOnlyMemory<byte> _) in table.Store.ScanIndex(
+        await foreach ((CompositeColumnValue entryKey, ObjectIdValue rowId, ReadOnlyMemory<byte> _) in table.Store.ScanIndex(
             ticket.TxnState,
             index.KvId,
             keyTypes,
@@ -1431,17 +1439,19 @@ internal sealed class QueryExecutor
                 scanStats.KvScanEntries++;
 
             pageBuf.Add(rowId);
+            pageKeys.Add(entryKey);
 
             if (pageBuf.Count < batchSize)
                 continue;
 
-            await foreach (QueryResultRow r in flushPageAsync(pageBuf))
+            await foreach (QueryResultRow r in flushPageAsync(pageBuf, pageKeys))
                 yield return r;
             pageBuf.Clear();
+            pageKeys.Clear();
         }
 
         if (pageBuf.Count > 0)
-            await foreach (QueryResultRow r in flushPageAsync(pageBuf))
+            await foreach (QueryResultRow r in flushPageAsync(pageBuf, pageKeys))
                 yield return r;
     }
 
@@ -1482,6 +1492,8 @@ internal sealed class QueryExecutor
             SlotBackedDecode = options.SlotBackedDecode || plan.ExecutionFilter is not null,
             BorrowedDecode = QueryScanner.ShouldUseBorrowedDecode(plan),
         };
+        IReadOnlySet<string>? requiredColumns = IndexEntryCheck.RequiredColumns(plan.ScanRequiredColumns, index);
+        LargeValueFetch? largeValues = LargeValueFetch.Columns(table.Schema, requiredColumns);
 
         // For a non-unique IN-list scan, acquire a range lock covering [min, max] of the IN values.
         // Shared for SELECT; Exclusive for UPDATE/DELETE. Unique IN-list uses per-key point
@@ -1524,7 +1536,7 @@ internal sealed class QueryExecutor
                 if (rowId is null || !seen.Add(rowId.Value))
                     continue;
 
-                ReadOnlyMemory<byte>? data = await table.Store.GetRow(ticket.TxnState, rowId.Value, cancellationToken, LargeValueFetch.Columns(table.Schema, plan.ScanRequiredColumns)).ConfigureAwait(false);
+                ReadOnlyMemory<byte>? data = await table.Store.GetRow(ticket.TxnState, rowId.Value, cancellationToken, largeValues).ConfigureAwait(false);
                 if (data is null || data.Value.Length == 0)
                     continue;
 
@@ -1537,9 +1549,10 @@ internal sealed class QueryExecutor
                 QueryRow row = await RowEncoder.DecodeToQueryRowAsync(
                     table.Schema, txId, rowId.Value, data.Value,
                     options,
-                    plan.ScanRequiredColumns, plan.TableSchemaVersion, decodeState).ConfigureAwait(false);
+                    requiredColumns, plan.TableSchemaVersion, decodeState).ConfigureAwait(false);
 
-                if (await queryFilterer.MeetPlanFilterAsync(plan, row).ConfigureAwait(false))
+                if (IndexEntryCheck.Confirms(table, index, lookupKey, row, logger)
+                    && await queryFilterer.MeetPlanFilterAsync(plan, row).ConfigureAwait(false))
                     yield return new(rowId.Value, row);
             }
             else
@@ -1548,7 +1561,7 @@ internal sealed class QueryExecutor
                 // non-empty in the index's own key order, which a descending column reverses.
                 (CompositeColumnValue toBound, bool toInclusive) = IndexScanSelector.EqualitySeekUpperBound(table, index, lookupKey);
 
-                await foreach ((CompositeColumnValue _, ObjectIdValue rowId, ReadOnlyMemory<byte> _) in table.Store.ScanIndex(
+                await foreach ((CompositeColumnValue entryKey, ObjectIdValue rowId, ReadOnlyMemory<byte> _) in table.Store.ScanIndex(
                     ticket.TxnState, index.KvId, keyTypes,
                     lookupKey, toBound, unique: false,
                     fromInclusive: true, toInclusive: toInclusive,
@@ -1562,7 +1575,7 @@ internal sealed class QueryExecutor
                     if (!seen.Add(rowId))
                         continue;
 
-                    ReadOnlyMemory<byte>? data = await table.Store.GetRow(ticket.TxnState, rowId, cancellationToken, LargeValueFetch.Columns(table.Schema, plan.ScanRequiredColumns)).ConfigureAwait(false);
+                    ReadOnlyMemory<byte>? data = await table.Store.GetRow(ticket.TxnState, rowId, cancellationToken, largeValues).ConfigureAwait(false);
                     if (data is null || data.Value.Length == 0)
                         continue;
 
@@ -1575,9 +1588,10 @@ internal sealed class QueryExecutor
                     QueryRow row = await RowEncoder.DecodeToQueryRowAsync(
                         table.Schema, txId, rowId, data.Value,
                         options,
-                        plan.ScanRequiredColumns, plan.TableSchemaVersion, decodeState).ConfigureAwait(false);
+                        requiredColumns, plan.TableSchemaVersion, decodeState).ConfigureAwait(false);
 
-                    if (await queryFilterer.MeetPlanFilterAsync(plan, row).ConfigureAwait(false))
+                    if (IndexEntryCheck.Confirms(table, index, entryKey, row, logger)
+                        && await queryFilterer.MeetPlanFilterAsync(plan, row).ConfigureAwait(false))
                         yield return new(rowId, row);
                 }
             }

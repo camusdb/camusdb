@@ -159,7 +159,8 @@ internal sealed class CreateTableAsSelectExecutor
 
             created = await schemaDdl.ExecuteDdlInTransaction(database, async tx =>
                 await tableCreator.Create(queryExecutor, context.TableOpener, tableIndexAlterer, database, createTableTicket, tx, ctasTableId)
-                    .ConfigureAwait(false)
+                    .ConfigureAwait(false),
+                tableNames: [createTableTicket.TableName]
             ).ConfigureAwait(false);
         }
 
@@ -282,7 +283,8 @@ internal sealed class CreateTableAsSelectExecutor
         using AuthorizationContext.PrivilegeSwap _ = AuthorizationContext.SuspendTableCheck();
 
         return await schemaDdl.ExecuteDdlInTransaction(database, tx =>
-            tableCreator.Create(queryExecutor, context.TableOpener, tableIndexAlterer, database, ticket, tx, tableId))
+            tableCreator.Create(queryExecutor, context.TableOpener, tableIndexAlterer, database, ticket, tx, tableId),
+            tableNames: [ticket.TableName])
             .ConfigureAwait(false);
     }
 

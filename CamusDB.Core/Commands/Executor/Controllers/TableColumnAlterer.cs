@@ -90,8 +90,9 @@ internal sealed class TableColumnAlterer
     internal Task<int> FillAddedColumnAsync(
         DatabaseDescriptor database,
         TableDescriptor table,
-        string columnName
-    ) => tableColumnAdder.FillAddedColumnAsync(database, table, columnName);
+        string columnName,
+        CancellationToken cancellationToken = default
+    ) => tableColumnAdder.FillAddedColumnAsync(database, table, columnName, cancellationToken);
 
     private async Task<bool> RenameColumn(DatabaseDescriptor database, TableDescriptor table, AlterTableTicket ticket, KvTransaction tx)
     {

@@ -586,7 +586,7 @@ public sealed class TestEmbeddedKahunaOptionsBuilder
     {
         // Kahuna's own default is direct I/O; CamusDB turns it off so a block-cache miss is served from
         // the page cache rather than queued on the device behind the Raft WAL's fsyncs (the leader
-        // read stall measured in the 45-minute bank soaks, feature 80af367a).
+        // read stall measured in the 45-minute bank soaks).
         string dataPath = "/tmp/direct-reads-test";
         ConfigDefinition config = new() { DataDir = dataPath };
 

@@ -472,7 +472,8 @@ internal sealed class DdlStatementDispatcher
                         bool ok = await tableColumnAlterer.Alter(queryExecutor, database, tableForRenameCol, renameColumnTicket, tx).ConfigureAwait(false);
                         return new ExecuteDDLSQLResult(database, ok);
                     },
-                    postCommitInvalidate: () => database.Cache?.InvalidateByTableId(database.Id, tableForRenameCol.Id)
+                    postCommitInvalidate: () => database.Cache?.InvalidateByTableId(database.Id, tableForRenameCol.Id),
+                    tableNames: [renameColumnTicket.TableName]
                     ).ConfigureAwait(false);
                 }
 
@@ -492,7 +493,8 @@ internal sealed class DdlStatementDispatcher
                         bool ok = await tableIndexAlterer.Alter(queryExecutor, database, tableForRenameIdx, renameIndexTicket, tx).ConfigureAwait(false);
                         return new ExecuteDDLSQLResult(database, ok);
                     },
-                    postCommitInvalidate: () => database.Cache?.InvalidateByTableId(database.Id, tableForRenameIdx.Id)
+                    postCommitInvalidate: () => database.Cache?.InvalidateByTableId(database.Id, tableForRenameIdx.Id),
+                    tableNames: [renameIndexTicket.TableName]
                     ).ConfigureAwait(false);
                 }
 
@@ -588,7 +590,8 @@ internal sealed class DdlStatementDispatcher
                         bool ok = await catalogs.RenameTable(database, renameTableTicket, tx, renameRewrites).ConfigureAwait(false);
                         return new ExecuteDDLSQLResult(database, ok);
                     },
-                    postCommitInvalidate: () => database.Cache?.InvalidateByTableId(database.Id, renameTableDesc.Id)
+                    postCommitInvalidate: () => database.Cache?.InvalidateByTableId(database.Id, renameTableDesc.Id),
+                    tableNames: [renameTableTicket.TableName, renameTableTicket.NewName]
                     ).ConfigureAwait(false);
                 }
 

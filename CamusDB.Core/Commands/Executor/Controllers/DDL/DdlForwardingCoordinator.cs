@@ -33,6 +33,13 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.DDL;
 ///
 /// <para>Every method answers <c>null</c> for "not forwarded — this node should execute it locally",
 /// which is the standalone case and the this-node-is-leader case alike.</para>
+///
+/// <para><b>A forward holds nothing on this node.</b> The leader serializes the statement against
+/// every other DDL of the database through its own DDL gate; a hold here would only make the other
+/// statements of this node wait for the leader's answer, which for a <c>CREATE INDEX</c> is the whole
+/// index build. It used to: a forwarded index build then made every DDL sent through the same follower
+/// wait for the build. The pre-forward version is read without a lock, since it serves only as a lower
+/// bound for the apply wait.</para>
 /// </summary>
 internal sealed class DdlForwardingCoordinator
 {
@@ -176,59 +183,52 @@ internal sealed class DdlForwardingCoordinator
         // recognise retransmissions of the same logical operation.
         string operationId = Guid.NewGuid().ToString("N");
 
-        await database.SchemaDdlSemaphore.WaitAsync().ConfigureAwait(false);
-        try
+        long fromVersion = database.Schema.SchemaVersion;
+
+        // Each attempt resolves the leader afresh. On a node that hosts the schema partition the
+        // answer is Raft's own; on a node that does not host it (replica placement) the answer
+        // is a best-effort placement hint, which the target may refute with not-leader. A
+        // refuted target is skipped on later attempts so a stale hint cannot be retried three
+        // times in a row while a replica that does lead is never tried: the attempts then walk
+        // the committed replica set instead.
+        HashSet<string>? refuted = null;
+        IReadOnlyList<string> replicas = database.Kahuna.SchemaLogReplicaEndpoints(database.Id);
+        string localEndpoint = database.Kahuna.Raft.GetLocalEndpoint();
+        int attempts = Math.Max(3, replicas.Count + 1);
+
+        for (int attempt = 0; attempt < attempts; attempt++)
         {
-            long fromVersion = database.Schema.SchemaVersion;
+            string leader = await database.Kahuna.WaitForSchemaLeaderAsync(database.Id, CancellationToken.None).ConfigureAwait(false);
 
-            // Each attempt resolves the leader afresh. On a node that hosts the schema partition the
-            // answer is Raft's own; on a node that does not host it (replica placement) the answer
-            // is a best-effort placement hint, which the target may refute with not-leader. A
-            // refuted target is skipped on later attempts so a stale hint cannot be retried three
-            // times in a row while a replica that does lead is never tried: the attempts then walk
-            // the committed replica set instead.
-            HashSet<string>? refuted = null;
-            IReadOnlyList<string> replicas = database.Kahuna.SchemaLogReplicaEndpoints(database.Id);
-            string localEndpoint = database.Kahuna.Raft.GetLocalEndpoint();
-            int attempts = Math.Max(3, replicas.Count + 1);
+            if ((refuted is not null && refuted.Contains(leader)) || string.Equals(leader, localEndpoint, StringComparison.Ordinal))
+                leader = NextUntriedReplica(replicas, refuted, localEndpoint) ?? leader;
 
-            for (int attempt = 0; attempt < attempts; attempt++)
+            if (string.Equals(leader, localEndpoint, StringComparison.Ordinal))
             {
-                string leader = await database.Kahuna.WaitForSchemaLeaderAsync(database.Id, CancellationToken.None).ConfigureAwait(false);
+                // This node is the only candidate left, yet the leadership check above said it does
+                // not lead. A forward to itself would re-enter this method for the same database and
+                // run the ticket against a node that just said it does not lead, a round trip that
+                // ends in a refusal at best and, when this method still held the DDL semaphore while
+                // it waited, in a deadlock that only the transport timeout ended. Either leadership
+                // arrived meanwhile, and the ticket runs here, or the view is stale, and the next
+                // attempt resolves again after a short pause.
+                if (await database.Kahuna.AmISchemaLeaderAsync(database.Id, CancellationToken.None).ConfigureAwait(false))
+                    return null;
 
-                if ((refuted is not null && refuted.Contains(leader)) || string.Equals(leader, localEndpoint, StringComparison.Ordinal))
-                    leader = NextUntriedReplica(replicas, refuted, localEndpoint) ?? leader;
-
-                if (string.Equals(leader, localEndpoint, StringComparison.Ordinal))
-                {
-                    // This node is the only candidate left, yet the leadership check above said it does
-                    // not lead. A forward to itself would re-enter this method for the same database and
-                    // wait on the DDL semaphore this call holds: a deadlock that only the transport
-                    // timeout ends, which is how a forwarded DDL once took 100 s. Either leadership
-                    // arrived meanwhile, and the ticket runs here, or the view is stale, and the next
-                    // attempt resolves again after a short pause.
-                    if (await database.Kahuna.AmISchemaLeaderAsync(database.Id, CancellationToken.None).ConfigureAwait(false))
-                        return null;
-
-                    await Task.Delay(100).ConfigureAwait(false);
-                    continue;
-                }
-
-                bool? result = await forward(leader, operationId, CancellationToken.None).ConfigureAwait(false);
-                if (result is not null)
-                {
-                    if (result.Value)
-                        await WaitForForwardedSchemaApplyAsync(database, fromVersion, wasApplied).ConfigureAwait(false);
-
-                    return result;
-                }
-
-                (refuted ??= new(StringComparer.Ordinal)).Add(leader);
+                await Task.Delay(100).ConfigureAwait(false);
+                continue;
             }
-        }
-        finally
-        {
-            database.SchemaDdlSemaphore.Release();
+
+            bool? result = await forward(leader, operationId, CancellationToken.None).ConfigureAwait(false);
+            if (result is not null)
+            {
+                if (result.Value)
+                    await WaitForForwardedSchemaApplyAsync(database, fromVersion, wasApplied).ConfigureAwait(false);
+
+                return result;
+            }
+
+            (refuted ??= new(StringComparer.Ordinal)).Add(leader);
         }
 
         throw new CamusDBException(
@@ -239,8 +239,8 @@ internal sealed class DdlForwardingCoordinator
 
     /// <summary>
     /// The first replica that neither refused the ticket nor is this node. The local node is never a
-    /// forward target: the caller already knows it does not lead, and a forward to itself deadlocks on
-    /// the DDL semaphore the caller holds.
+    /// forward target: the caller already knows it does not lead, so a forward to itself can only be
+    /// refused.
     /// </summary>
     private static string? NextUntriedReplica(IReadOnlyList<string> replicas, HashSet<string>? refuted, string localEndpoint)
     {

@@ -78,7 +78,11 @@ not overwritten, and a concurrent DELETE is not undone. A batch that loses a loc
 writer is retried until it wins: the batch is halved on each loss, so the rows that are free are
 written while the busy ones wait, and a lost batch waits only as long as the writers that hold its
 rows. A table under sustained writes is therefore still filled; the fill is slower, never abandoned.
-The statement holds the database's DDL gate until the column is `Public`.
+The statement enters the database's DDL gate for its table and hands the column to the schema-change
+coordinator, which takes the gate for each of the three schema steps and holds the table for the
+whole statement. While the rows are filled, the gate itself is released: `CREATE TABLE`, and any
+DDL on another table of the database, runs at once. DDL on the table being filled waits until the
+column is `Public`, and the caller of the `ADD COLUMN` waits for the whole fill.
 
 ## When the statement fails
 
@@ -90,8 +94,35 @@ A failed `ADD COLUMN` leaves no column, and the same statement can run again.
 4. The job is deleted.
 
 If a step fails, the job stays. The next schema leader finishes the removal and never adds the column
-again. On a standalone node, a job that a crash left is finished when the database opens next, in the
-background. A cluster node resumes jobs when it becomes the schema leader.
+again. A job is resumed by whichever of three triggers reaches it first: the node becomes the schema
+leader; the database opens on a node that leads already (a crash on a standalone node, or a cluster
+node that restarted and won the schema partition before any request opened the database); or the
+leader's periodic sweep (`coordinator_job_sweep_interval_ms`, 10 s by default) finds the job, which is
+also what retries a resume that failed on a transient. A failed attempt waits a backoff that doubles
+per attempt before it is driven again.
+
+## When the schema leader moves during the fill
+
+The job record carries the schema-leader term of the node that drives it. The next leader's resume
+stamps its own, newer term on the record before it drives, and from then on no write of the former
+driver lands on the record: not a take-back, not a checkpoint, not the final delete. The former
+driver's fill is cancelled the moment its node stops leading, so it stops at its next batch instead
+of running beside its successor.
+
+The statement that started the change is then answered from what the successor did, because the
+change is the successor's from that point on and may well have been made:
+
+- The successor published the column: the statement **succeeds**. It is not answered "nothing was
+  committed, retry", which would make a retrying client run the statement again and meet
+  `Duplicate column`.
+- The successor took the column back: the statement fails with the error the successor recorded,
+  for example the `NOT NULL` violation it found, and the column is gone, so the statement can run
+  again.
+- The successor is still driving the job after ten minutes: the statement fails with an error that
+  says so. The change completes in the background; check the table's schema before running the
+  statement again.
+
+A node that lost the leadership and leads again finishes its own job through the resume.
 
 The column is never readable during these steps, so no statement can have written a value into it
 that the removal loses.

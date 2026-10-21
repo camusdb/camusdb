@@ -43,8 +43,10 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.DDL;
 /// that finds the job validates again, so a constraint that is enforced but was never proven cannot
 /// stay after a crash.</para>
 ///
-/// <para>Both run under <see cref="DatabaseDescriptor.SchemaDdlSemaphore"/>, as a foreign key ADD does,
-/// so two ALTERs of one database cannot interleave their checks and their replication.</para>
+/// <para>Both enter the database's DDL gate for their table, as a foreign key ADD does, so two ALTERs
+/// of one database cannot interleave their checks and their replication. In a cluster the read of the
+/// rows runs with the gate released and the table held (<see cref="SchemaChangeCoordinator.ValidateRowConstraintAsync"/>),
+/// so DDL on other tables proceeds while the rows are read; a standalone node reads under the gate.</para>
 ///
 /// <para><b>DROP CONSTRAINT</b>: resolves the name against <see cref="TableSchema.CheckConstraints"/>
 /// AND each column's <see cref="TableColumnSchema.NotNullConstraintName"/>. Immediate — no
@@ -106,7 +108,7 @@ internal sealed class TableConstraintAlterer
 
         SQLParser.NodeAst parsedCondition = SQLParser.SQLParserProcessor.ParseCondition(ticket.Expression!);
 
-        await database.SchemaDdlSemaphore.WaitAsync().ConfigureAwait(false);
+        await database.DdlGate.EnterAsync(ticket.TableName, logger).ConfigureAwait(false);
         try
         {
             if (isClusterMode)
@@ -419,7 +421,7 @@ internal sealed class TableConstraintAlterer
         string constraintName = $"{table.Name}_{columnName}_not_null";
         ConstraintNameRules.RequireUnusedForNotNull(table.Schema, constraintName, column.Id);
 
-        await database.SchemaDdlSemaphore.WaitAsync().ConfigureAwait(false);
+        await database.DdlGate.EnterAsync(ticket.TableName, logger).ConfigureAwait(false);
         try
         {
             if (isClusterMode)
@@ -579,9 +581,12 @@ internal sealed class TableConstraintAlterer
             }
         };
 
+        // The caller holds the gate; the coordinator releases it while the rows are read and holds it
+        // again on return.
         await coordinator.ValidateRowConstraintAsync(
             database,
-            new SchemaChangeJob(database.Name, tableName, tableId, constraintName, SchemaElementState.Public, kind)
+            new SchemaChangeJob(database.Name, tableName, tableId, constraintName, SchemaElementState.Public, kind),
+            gateHeldByCaller: true
         ).ConfigureAwait(false);
     }
 

@@ -83,7 +83,7 @@ public sealed class SchemaReplicator
                 {
                     try
                     {
-                        await coordinator.ResumeJobsAsync(database).ConfigureAwait(false);
+                        await coordinator.ResumeJobsAsync(database, CoordinatorResumeTrigger.LeaderElected).ConfigureAwait(false);
                     }
                     finally
                     {

@@ -42,6 +42,13 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.DDL;
 /// <para>A loss is logged at Debug. Every <see cref="LossesPerWarning"/> consecutive losses are
 /// logged at Warning with the last refusal, because by then the backfill waits on a lock that is
 /// held longer than a statement, such as an open explicit transaction.</para>
+///
+/// <para><b>The row-id scan is retried the same way.</b> Each batch starts with a read-only scan of
+/// the next row ids (<see cref="ScanRowIdsAsync"/>). Kahuna can refuse a page of that scan under
+/// concurrent writes, and the store reports the refusal with the retryable code. The scan keeps
+/// nothing and commits nothing, so it is simply run again after the same delay; a refusal that
+/// escaped here used to fail the whole schema change on the busiest tables, the ones an online
+/// build exists for.</para>
 /// </summary>
 internal static class BackfillBatchRunner
 {
@@ -64,6 +71,13 @@ internal static class BackfillBatchRunner
     /// after use.
     /// </summary>
     internal static Action<int, CamusDBException>? TestObserveLoss;
+
+    /// <summary>
+    /// Test-only seam: the number of upcoming row-id scans to refuse with a retryable code before they
+    /// run, so a test can show that a refused scan is retried rather than failing the backfill. Zero in
+    /// production; each refusal decrements it.
+    /// </summary>
+    internal static int TestScanRefusals;
 
     /// <summary>
     /// Runs <paramref name="attempt"/> over <paramref name="rowIds"/> until every row is done, as the
@@ -123,15 +137,56 @@ internal static class BackfillBatchRunner
     /// The next row ids in row-id order after <paramref name="afterRowId"/>, at most
     /// <paramref name="maxRows"/>. Read without a lock in a read-only transaction: only the ids are
     /// kept, and the batch reads each row again under its lock, so a row that changed or disappeared
-    /// after this scan is seen as it is then.
+    /// after this scan is seen as it is then. A scan Kahuna refuses with a retryable code is run again
+    /// after the delay of a lost batch, as the class summary describes; any other error ends the
+    /// backfill.
     /// </summary>
     internal static async Task<List<ObjectIdValue>> ScanRowIdsAsync(
         DatabaseDescriptor database,
         TableDescriptor table,
         ObjectIdValue? afterRowId,
         int maxRows,
+        ILogger logger,
+        string element,
         CancellationToken cancellationToken)
     {
+        int consecutiveLosses = 0;
+
+        while (true)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            try
+            {
+                return await ScanRowIdsOnceAsync(database, table, afterRowId, maxRows, cancellationToken).ConfigureAwait(false);
+            }
+            catch (CamusDBException ex) when (SerializableRetryHelper.IsRetryable(ex))
+            {
+                consecutiveLosses++;
+
+                int delayMs = DelayFor(consecutiveLosses);
+
+                Log.LogBackfillScanLost(logger, element, consecutiveLosses, delayMs, ex.Message);
+
+                if (consecutiveLosses % LossesPerWarning == 0)
+                    Log.LogBackfillScanWaiting(logger, element, consecutiveLosses, ex.Message);
+
+                await Task.Delay(delayMs, cancellationToken).ConfigureAwait(false);
+            }
+        }
+    }
+
+    /// <summary>One attempt of <see cref="ScanRowIdsAsync"/>.</summary>
+    private static async Task<List<ObjectIdValue>> ScanRowIdsOnceAsync(
+        DatabaseDescriptor database,
+        TableDescriptor table,
+        ObjectIdValue? afterRowId,
+        int maxRows,
+        CancellationToken cancellationToken)
+    {
+        if (TestScanRefusals > 0 && Interlocked.Decrement(ref TestScanRefusals) >= 0)
+            throw new CamusDBException(CamusDBErrorCodes.TransactionMustRetry, "Row-id scan refused by the test seam");
+
         List<ObjectIdValue> rowIds = new(maxRows);
 
         KvTransaction tx = await database.Transactions.BeginAsync(

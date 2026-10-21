@@ -93,13 +93,13 @@ internal sealed class DatabaseOpener
             // Wire column backfill: leader-change resume re-runs it at WriteOnly before
             // advancing to Public so existing rows carry the default before the column
             // becomes visible.
-            BackfillAsync = (db, tableName, column) =>
-                commandExecutor.BackfillColumnDefaultsAsync(db, tableName, column),
+            BackfillAsync = (db, tableName, column, cancellationToken) =>
+                commandExecutor.BackfillColumnDefaultsAsync(db, tableName, column, cancellationToken),
 
             // Wire index backfill: same guarantee for the index add sequence — backfill
             // existing rows with the index entries before the index is published.
-            IndexBackfillAsync = (db, tableName, indexInfo, startOffset, onCheckpoint) =>
-                commandExecutor.BackfillIndexEntriesAsync(db, tableName, indexInfo, startOffset, onCheckpoint),
+            IndexBackfillAsync = (db, tableName, indexInfo, startOffset, onCheckpoint, cancellationToken) =>
+                commandExecutor.BackfillIndexEntriesAsync(db, tableName, indexInfo, startOffset, onCheckpoint, cancellationToken),
 
             // Wire the foreign-key validation pass: a constraint left in WriteOnly by a failed leader
             // is validated before the resumed job publishes it.
@@ -129,6 +129,12 @@ internal sealed class DatabaseOpener
         this.evictTableStatistics = evictTableStatistics;
         this.diskSpace = diskSpace;
     }
+
+    /// <summary>
+    /// The coordinator that resumes the persisted jobs of a database on this node, with every fill,
+    /// backfill and validation delegate wired. The sweep drives jobs through it.
+    /// </summary>
+    internal SchemaChangeCoordinator ResumeCoordinator => coordinator;
 
     public async ValueTask<DatabaseDescriptor> Open(string name, bool recoveryMode = false)
     {
@@ -281,8 +287,7 @@ internal sealed class DatabaseOpener
                 name);
         }
 
-        if (!isClusterMode)
-            ResumeLeftoverJobsInBackground(databaseDescriptor);
+        ResumeLeftoverJobsInBackground(databaseDescriptor);
 
         Log.LogDatabaseOpened(logger, name);
 
@@ -290,18 +295,23 @@ internal sealed class DatabaseOpener
     }
 
     /// <summary>
-    /// Finishes, on a standalone node, the schema-change jobs that a previous process left: an ADD
-    /// COLUMN stopped by a crash, for example, whose column is unreadable until it is filled or removed.
+    /// Finishes the schema-change jobs that a previous driver left, when this node is the schema leader
+    /// of the database as it opens: an ADD COLUMN stopped by a crash, for example, whose column is
+    /// unreadable until it is filled or removed, or a CREATE INDEX whose index stays WriteOnly.
     ///
-    /// <para><b>Why at open.</b> A job is otherwise resumed when this node becomes the schema leader.
-    /// A standalone node becomes leader once, when it starts, before any database is open, so that
-    /// callback never reaches a database opened later.</para>
+    /// <para><b>Why at open.</b> A job is otherwise resumed when this node becomes the schema leader,
+    /// through the callback the open registers. A node that leads before its database is open never
+    /// gets that callback for it: a standalone node becomes leader once, when it starts, before any
+    /// database is open; and a cluster node that restarts can win the schema partition seconds before
+    /// the first request opens the database, which is exactly what a rolling kill produces. In both
+    /// cases the jobs would wait for a leadership change that may never come. The leader's periodic
+    /// sweep (<see cref="CoordinatorJobSweeper"/>) backs this up.</para>
     ///
     /// <para><b>Why in the background.</b> A resumed fill can rewrite a whole table, and a database must
     /// not wait for that to open. The resume reaches the database through this descriptor, after the
-    /// open has completed. The job list is read first, so a database with no job, which is every
-    /// database after a clean shutdown, starts no resume. A failure is logged; the job stays, and the
-    /// next open tries again.</para>
+    /// open has completed. A database with no job, which is every database after a clean shutdown,
+    /// costs one read of its job list. A failure is logged; the job stays, and the sweep or the next
+    /// open tries again.</para>
     /// </summary>
     private void ResumeLeftoverJobsInBackground(DatabaseDescriptor database)
     {
@@ -312,11 +322,9 @@ internal sealed class DatabaseOpener
                 if (!await sharedNode.AmISchemaLeaderAsync(database.Id).ConfigureAwait(false))
                     return;
 
-                List<PersistedCoordinatorJob> jobs = await catalogs.LoadCoordinatorJobsAsync(database).ConfigureAwait(false);
-                if (jobs.Count == 0)
-                    return;
-
-                await coordinator.ResumeJobsAsync(database).ConfigureAwait(false);
+                // The resume reads the job list itself and logs when it is empty, so an open that
+                // found nothing to finish shows in the log next to the open.
+                await coordinator.ResumeJobsAsync(database, CoordinatorResumeTrigger.DatabaseOpened).ConfigureAwait(false);
             }
             catch (Exception ex)
             {

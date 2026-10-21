@@ -950,6 +950,58 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
     }
 
     /// <summary>
+    /// The current term of the Raft partition that carries the schema log of <paramref name="db"/>, as
+    /// this node knows it. A schema-change coordinator reads it when it takes a job on, stamps the
+    /// job's record with it, and stops at its next record write when the record carries a newer term:
+    /// the leadership moved and the job is the next leader's. The term alone does not prove
+    /// leadership (a follower has a term too); it is read alongside <see cref="AmISchemaLeaderAsync"/>.
+    /// Zero when this node does not host the partition.
+    /// </summary>
+    public long SchemaLeaderTerm(string db)
+    {
+        int partitionId = SchemaLogPartition(db);
+
+        if (!Raft.HostsPartition(partitionId))
+            return 0;
+
+        try
+        {
+            return Raft.GetPartitionTerm(partitionId);
+        }
+        catch (PartitionNotHostedException)
+        {
+            return 0;
+        }
+    }
+
+    /// <summary>
+    /// Registers a callback that fires when THIS node stops leading the schema-log partition of
+    /// <paramref name="db"/>, with the term it led in. Every demotion raises it: a step-down, a transfer,
+    /// a lost quorum, a higher term seen on any message. A coordinator that fills a table under its
+    /// leadership cancels the fill from it, so a driver that lost the leadership stops writing rows
+    /// at its next batch instead of running on beside its successor. Returns an <see cref="IDisposable"/>
+    /// that unhooks the handler on dispose. The callback runs on the thread pool, not on the partition's
+    /// executor thread.
+    /// </summary>
+    public IDisposable RegisterSchemaLeadershipLostCallback(string db, Func<long, Task> onLeadershipLost)
+    {
+        ArgumentNullException.ThrowIfNull(onLeadershipLost);
+
+        int schemaPartition = SchemaLogPartition(db);
+
+        Func<int, long, Task> handler = (partitionId, term) =>
+        {
+            if (partitionId == schemaPartition)
+                _ = Task.Run(() => onLeadershipLost(term));
+
+            return Task.CompletedTask;
+        };
+
+        Raft.OnLeadershipLost += handler;
+        return new LeadershipLostSubscription(Raft, handler);
+    }
+
+    /// <summary>
     /// Returns true when this node is the Raft leader of the partition that owns <paramref name="key"/>.
     /// Used to elect a single node for process-wide singleton background work keyed on a stable KV key
     /// (e.g. the branch snapshot-hold renewer, elected on the database-registry key's partition), so
@@ -2266,6 +2318,28 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
 
             disposed = true;
             raft.OnLeaderChanged -= handler;
+        }
+    }
+
+    private sealed class LeadershipLostSubscription : IDisposable
+    {
+        private readonly IRaft raft;
+        private readonly Func<int, long, Task> handler;
+        private bool disposed;
+
+        public LeadershipLostSubscription(IRaft raft, Func<int, long, Task> handler)
+        {
+            this.raft = raft;
+            this.handler = handler;
+        }
+
+        public void Dispose()
+        {
+            if (disposed)
+                return;
+
+            disposed = true;
+            raft.OnLeadershipLost -= handler;
         }
     }
 

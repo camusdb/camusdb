@@ -246,12 +246,14 @@ This is the cluster path (`isClusterMode == true`). Entry point:
 │       └─ if this node is NOT the schema leader → forward to leader        │
 │          over the production forwarder, await the forwarded apply, return │
 │                                                                           │
-│  2. ExecuteDdlInTransaction(database, tx => ...Alter..., onAbort: ...)    │
-│       ├─ acquire database.SchemaDdlSemaphore (serialize DDL on this node) │
+│  2. ExecuteDdlInTransaction(database, tx => ...Alter..., tableNames: …)   │
+│       ├─ enter database.DdlGate for the tables the statement names (§4.1) │
+│       │    = take the DDL semaphore, after any staged change in progress  │
+│       │      on one of those tables has finished                          │
 │       ├─ begin KvTransaction                                              │
 │       ├─ run the action (→ CatalogsManager.AlterTableReplicatedAsync)     │
 │       ├─ commit; on exception: rollback + run onAbort compensation        │
-│       └─ release SchemaDdlSemaphore                                       │
+│       └─ release the semaphore                                            │
 └─────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -290,6 +292,63 @@ including a node outside the schema partition's replica set, which reaches the v
 durable checkpoint (§6.5). The gate learns a node's progress from the ack the node pushes after each
 apply and, when no ack has arrived, by asking the node directly (§6.2, "pull probes"). A read on any
 node that held the database open before the DDL returned therefore sees the change.
+
+### 4.1 The DDL gate: what is serialized, and for how long
+
+Every DDL statement of a database runs on the schema leader under that database's
+`SchemaDdlGate` (`DatabaseDescriptor.DdlGate`). The gate has two parts, at two granularities:
+
+- **The semaphore** (`SchemaDdlSemaphore`, one per database per node) makes "resolve the target,
+  then propose the delta" atomic against every other DDL of the database, and keeps two proposals
+  from being built against the same schema version. It is taken in standalone mode too. Every
+  proposal is short: one Raft round trip and its acks.
+- **A table hold** (`SchemaDdlGate.HoldTable`) is what a staged change takes for its whole run. A
+  staged change — the cluster `CREATE INDEX`, `ADD COLUMN` in both modes, a foreign key's validation,
+  a `CHECK` or `SET NOT NULL` validation in a cluster — proposes two or three deltas and, between
+  `WriteOnly` and `Public`, visits every row of its table. That phase proposes nothing, and at the
+  rate a loaded table allows it takes minutes. The coordinator **releases the semaphore for that
+  phase** and takes it again for each delta (`SchemaChangeCoordinator.RunJobAsync`,
+  `ValidateRowConstraintAsync`); the table hold stays for the whole job.
+
+A DDL statement enters the gate for the tables it names (`SchemaDdlGate.EnterAsync`): it takes the
+semaphore and, when one of those tables is held, releases it again, waits for the hold to end, and
+tries once more. The hold is taken and looked up under the semaphore, so a statement that saw no hold
+and a change about to take one cannot both proceed. The consequences, in order of how often they
+matter:
+
+- **DDL on another table runs at once.** A `CREATE TABLE`, or any statement on a table with no
+  staged change in progress, no longer waits for a backfill elsewhere in the database. Before this,
+  the coordinator ran inside the semaphore and a `CREATE TABLE` of an unrelated table waited 87 s
+  behind a 20,000-row index build; a migration that created a table during a build stalled behind
+  it, and every statement that depended on the table failed meanwhile.
+- **DDL on the same table waits, as before.** A running job names its table and its element by name
+  and assumes both exist until it is done. `RENAME TABLE` would make its next step miss the table
+  and its compensation delete the job with the element half-built; `DROP TABLE` or `TRUNCATE` would
+  purge rows under a batch writing their entries; `DROP INDEX` of the index being built would leave
+  the entries of the last batches; a second staged change on the table would run two backfills over
+  the same rows. So the statement waits for the hold and then runs. The caller of the staged
+  statement itself blocks for the whole build, as it always did.
+- **`DROP DATABASE` and a branch create wait for every staged change** (`EnterExclusiveAsync`), as
+  they did when the change held the semaphore. The fork then copies the element in `Public` rather
+  than being refused by its stability checks for a change about to complete (database-branching.md §7).
+- **A follower holds nothing while it forwards.** The leader serializes the forwarded statement
+  through its own gate. `TryForwardDdlAsync` used to hold the follower's semaphore for the length of
+  the leader's answer, so a forwarded `CREATE INDEX` made every DDL sent through that follower wait
+  for the build as well.
+- **The resume takes the gate too.** `ResumeJobsAsync` on a new leader drives each job the same way:
+  the gate for each delta, the table hold for the job, the semaphore released for the backfill. A job
+  whose table is already held on this node — the statement that started it is still running here —
+  is skipped, not driven twice.
+
+Two long phases still run under the semaphore, because they do not go through the coordinator: the
+standalone two-phase `CREATE INDEX` (`ExecuteClusteredIndexDdlAsync`, whose two phases need a stable
+`SchemaVersion`) and the standalone `ADD CHECK` / `SET NOT NULL` row scan. Both are single-node paths;
+see §13.
+
+The gate is observable: the leader logs `DDL on table X of database D waits for the staged change
+to index 'ix' in progress on that table` (Information) when a statement waits for a hold, and
+`Staged change to index 'ix' of table X runs its backfill outside the DDL gate` (Debug) when a job
+releases the semaphore.
 
 ---
 
@@ -387,12 +446,18 @@ Leader SchemaDdlForwardController
     controller opens the database to learn its id before it asks. A name-keyed check refused the
     real leader, so every forward ended in CADB0099 until a client reached the leader directly,
     and accepted a node that was not the leader, which then forwarded the ticket again.
-  - **A node never forwards to itself.** `TryForwardDdlAsync` holds the database's
-    `SchemaDdlSemaphore` while it waits for the leader's answer. A forward that lands back on the
-    same node re-enters that path and waits on the held semaphore, so the request only ends when
-    the HTTP client gives up (100 s). The walk over the replica set after a refusal therefore
-    skips the local endpoint; when it is the only candidate left, the coordinator re-checks its
-    own leadership and either runs the ticket locally or resolves again after a pause.
+  - **A node never forwards to itself.** A forward that lands back on the same node re-enters
+    that path on a node that just said it does not lead, so at best it is refused; while
+    `TryForwardDdlAsync` still held the database's `SchemaDdlSemaphore` during the forward, it
+    waited on its own hold and the request only ended when the HTTP client gave up (100 s). The
+    walk over the replica set after a refusal therefore skips the local endpoint; when it is the
+    only candidate left, the coordinator re-checks its own leadership and either runs the ticket
+    locally or resolves again after a pause.
+  - **A forward holds nothing on the follower.** The leader serializes the statement through its
+    DDL gate (§4.1). The follower reads the pre-forward schema version without a lock, forwards,
+    and waits for the local apply; two forwards from one node run concurrently. A hold here only
+    made every DDL sent through the follower wait for the leader's answer, which for a forwarded
+    `CREATE INDEX` was the whole build.
 - **`DdlOperationIdCache`** (`CamusDB/App/Services`) is the two-layer dedup: a stable op id
   makes a lost-response retry replay the prior result instead of bumping the schema version
   twice, and an in-flight reservation collapses concurrent duplicates. This is the
@@ -805,9 +870,10 @@ persists them. `TableOpener` falls back to `SystemSchema` only for descriptors o
 `LoadMetaAsync` runs.
 
 **Index DDL is replicated and staged.** On a cluster node, `CommandExecutor.AlterIndex`
-routes an **add** through `ExecuteClusterAddIndexAsync`, which (under `SchemaDdlSemaphore`) hands
-a `SchemaChangeJob{ kind: Index, target: Public }` to the `SchemaChangeCoordinator` with an
-`IndexBackfillAsync` delegate wired. The coordinator drives the staged online sequence (§8.2):
+routes an **add** through `ExecuteClusterAddIndexAsync`, which enters the DDL gate for the table
+(§4.1) and hands a `SchemaChangeJob{ kind: Index, target: Public }` to the `SchemaChangeCoordinator`
+with an `IndexBackfillAsync` delegate wired. The coordinator drives the staged online sequence
+(§8.2), releasing the gate's semaphore while the backfill runs:
 
 ```
 AddIndex(DeleteOnly)  → ack gate → SetElementState(WriteOnly) → ack gate
@@ -825,16 +891,34 @@ AddIndex(DeleteOnly)  → ack gate → SetElementState(WriteOnly) → ack gate
   both the initial run and a leader-change resume that starts from `WriteOnly`. Each batch scans
   a run of row ids without a lock, takes an exclusive lock on each row, reads the rows under the
   lock (`KvTableStore.LockAndReadRowsForMutationAsync`), decodes them with *writable* visibility,
-  writes index entries with `PutIndexEntry(backfillMode: true)` and commits. The lock is what
-  makes every entry match a committed row: an unlocked read would let an UPDATE commit between
-  the read and the entry write, so the UPDATE removes an entry that does not exist yet, writes the
-  entry for its new value, and the backfill then writes the old value's entry, which stays as a
-  stale entry. The batch transaction is pessimistic whatever the engine default is; under an
-  optimistic default it would take no lock, and a writer that touched any of its rows first would
-  abort it at commit. Backfilled entries replicate to followers through Kahuna's Raft KV (each
-  node sees the index via `FORCE_INDEX` without rebuilding); the metadata converges via the schema
-  delta. Because the backfill commits **before** the `Public` delta is proposed, the ack gate on
-  the `Public` version implies backfill-done cluster-wide.
+  writes index entries with `PutIndexEntry(backfillMode: true)` and commits. The lock is half of
+  what makes every entry match a committed row: an unlocked read would let an UPDATE commit
+  between the read and the entry write, so the UPDATE removes an entry that does not exist yet,
+  writes the entry for its new value, and the backfill then writes the old value's entry, which
+  stays as a stale entry. The batch transaction is pessimistic whatever the engine default is;
+  under an optimistic default it would take no lock, and a writer that touched any of its rows
+  first would abort it at commit. The other half is the **order of the writer's own writes**
+  (`KvBatchWriter`): a pessimistic UPDATE or DELETE locks its row before it does anything, but an
+  optimistic one takes no lock, and the only thing the batch's lock refuses is its *row write*. An
+  optimistic UPDATE that deleted its old index entries first deleted nothing (the entry did not
+  exist yet, and Kahuna stages no intent for a delete of a missing key), then waited at its row
+  write for the batch to commit, then committed after the batch had written exactly that entry.
+  So a root-database UPDATE now writes the row blob (with its new entries) first and deletes the
+  old entries second, and an optimistic DELETE deletes the row key in a round trip of its own
+  before the entries: the row write is where a conflicting batch is waited out, so the entry it
+  wrote is there to be removed, and a batch that arrives after the row write is refused by the
+  write intent and reads the row again later. Backfilled entries replicate to followers through
+  Kahuna's Raft KV (each node sees the index via `FORCE_INDEX` without rebuilding); the metadata
+  converges via the schema delta. Because the backfill commits **before** the `Public` delta is
+  proposed, the ack gate on the `Public` version implies backfill-done cluster-wide.
+- **Index reads check the row against its entry.** Every read that fetches a primary row through
+  an index entry (`IndexEntryCheck`: unique lookups, range and equality scans, IN-list seeks,
+  forced index scans and the join leaf scans) compares the entry's key columns with the fetched
+  row and skips a row that disagrees, counting it in `camus.index_read.stale_entries` and logging
+  it once a minute per index. The planner drops the predicate an index answered from the residual
+  filter, so without the check a stale entry surfaced as a row that did not match its `WHERE`.
+  This is defence in depth, not a substitute for the ordering above: a covering (index-only) read
+  never fetches the row and answers from the entry alone.
 - **A lost batch is retried, never abandoned.** A batch loses only at its locks, before any work,
   when a writer holds one of its rows. `BackfillBatchRunner` retries it after a jittered backoff,
   halving the batch on each loss and doubling it on each win, so the free rows are written while
@@ -842,7 +926,10 @@ AddIndex(DeleteOnly)  → ack gate → SetElementState(WriteOnly) → ack gate
   Kahuna expires an abandoned lock with its lease, so every row is free again within a bounded
   time. A table under sustained writes is still indexed; the build is slower, not failed. Only a
   non-retryable error (a duplicate key, a cancellation) ends the build and triggers compensation.
-  The fill of an added column uses the same runner (`TableColumnAdder`).
+  The fill of an added column uses the same runner (`TableColumnAdder`). The read-only scan that
+  lists each batch's row ids is retried under the same policy: Kahuna can refuse a page of it under
+  concurrent writes (reported as `CADB0504`), and the scan keeps nothing, so it is simply run
+  again instead of failing the schema change on the busiest tables.
 - **Idempotent backfill (no duplicates on resume, none after a concurrent UPDATE).**
   `PutIndexEntry(backfillMode: true)` makes a re-run safe: on a unique index a `NotSet` response
   triggers a read-back — same `rowId` ⇒ this is an idempotent re-write of a row a previous partial
@@ -1054,24 +1141,95 @@ Firing the backfill at exactly this point means it runs **after** `WriteOnly` is
 on both the initial run and a `WriteOnly`-start resume, closing the crash window between the
 `WriteOnly` ack and the backfill commit.
 
+**The gate during the drive.** The coordinator takes the database's DDL gate (§4.1) for the state
+read, the job record and each delta, and holds the table for the whole job. The settle wait and
+the backfill, the validation pass of a foreign key or a row constraint, run with the gate's
+semaphore **released**, so DDL on the other tables of the database proceeds while they run; a
+compensation inside that phase (a column taken back, a foreign key removed) takes the semaphore
+again before it proposes. A statement that hands the job over passes `gateHeldByCaller: true` and
+finds the semaphore held again on return, so its own compensation and its `finally` release are
+balanced; the resume passes nothing and gets it back released.
+
 **Persistence & leader-change resume.** The durable job is `PersistedCoordinatorJob`
 (`{db}/meta/coordinator/...`): table, element, `targetState`, `ElementKind`, the column fields
 (`ColumnType/NotNull/Default`) or index fields (`IndexId/IndexColumnIds/IndexType/StartOffset`),
-and an `Attempts` counter. `SchemaReplicator` registers a leader-change callback
-(`RegisterSchemaLeaderCallback` → `EmbeddedKahuna.OnLeaderChanged`); when this node wins
-schema leadership it runs `ResumeJobsAsync`:
+and an `Attempts` counter. Three triggers run `ResumeJobsAsync` on the schema leader
+(`CoordinatorResumeTrigger`), and any one of them is enough to reach a job:
 
-- Loads all persisted jobs (with bounded retry/backoff — `OnLeaderChanged` can fire before the
-  new leader's KV state machine has applied every committed entry, so the job written by the
-  previous leader may not be visible on the first read).
+- **The leader election.** `SchemaReplicator` registers a leader-change callback
+  (`RegisterSchemaLeaderCallback` → `EmbeddedKahuna.OnLeaderChanged`) when the database opens; when
+  this node wins the schema leadership it resumes. This trigger alone re-reads an empty job list for
+  a short while: `OnLeaderChanged` can fire before the new leader's KV state machine has applied
+  every committed entry, so the job written by the previous leader may not be visible on the first
+  read.
+- **The open.** `DatabaseOpener` resumes, in the background, the jobs of a database that opens on a
+  node that already leads its schema partition, in both modes. A standalone node leads once, when it
+  starts, before any database is open. A cluster node that restarts can win the partition seconds
+  before the first request opens the database, which is what a rolling kill produces: the callback
+  is then registered *after* the election it needed, and without the open-time resume the job sat
+  until the next leadership change, which may never come (an index left `WriteOnly` for good,
+  "already exists" to `CREATE` and missing to every query).
+- **The sweep.** `CoordinatorJobSweeper` runs every `coordinator_job_sweep_interval_ms` (10 s) on
+  every open database this node leads: one local leadership check per database, one small KV scan of
+  the job records on the databases it leads, and a resume of whatever it finds. It backs up the two
+  triggers above and is the only retry of a resume that failed on a transient (a peer down during
+  the ack wait, a forward cut by the kill of its target). A statement waiting for a job it handed
+  over (`AnswerFromHandedOverJobAsync`) is a fourth caller, for the node that leads again.
+
+One resume runs at a time per database on a node. The triggers overlap by design, and two resumes
+running together would each pick the same job up, bump its attempts twice and run two backfills over
+the same rows; so a request that finds a resume running marks it pending and returns, and the
+running resume reads the jobs again before it ends. A caller turned away cannot assume the work is
+done when its call returns.
+
+Each resume:
+
+- Loads all persisted jobs and skips a job whose table a staged change holds on this node (a
+  statement is driving it right now) and a job whose last attempt failed here and is still inside
+  its backoff.
 - For each job: reconstructs `ColumnInfo`/`IndexBuildInfo` (index column **names** are resolved
   from the persisted immutable `ColumnIds` against the current schema), recomputes the remaining
   path from the *current* element state, bumps and persists `Attempts` **before** driving (so a
   crash mid-resume still counts against the budget), and re-drives to target.
-- A job that keeps failing is abandoned after `MaxResumeAttempts` (5): it is deleted and logged
-  loudly rather than retried on every future election — a poison job can't loop forever. A CHECK or
-  NOT NULL job also removes its constraint when it is abandoned. Those constraints have no element
-  state, so a constraint kept after the job is gone would look valid over rows nobody proved.
+- A failed attempt is retried after a node-local backoff that doubles per attempt
+  (`ResumeRetryBackoff` 5 s up to `ResumeRetryBackoffMax` 2 min), so the sweep cannot burn the
+  budget in a few ticks. A job that keeps failing is abandoned after `MaxResumeAttempts` (8), some
+  six minutes of retries with the defaults: it is deleted and logged loudly rather than retried
+  forever — a poison job can't loop forever. The element stays in its current state and must be
+  dropped by hand before it can be created again. A CHECK or NOT NULL job also removes its
+  constraint when it is abandoned. Those constraints have no element state, so a constraint kept
+  after the job is gone would look valid over rows nobody proved.
+- A resume that finds no job logs that for an election or an open, so a resume that saw nothing
+  shows in the log next to the event that caused it; the sweep is silent when there is nothing.
+
+**The record is fenced by the schema-leader term.** The schema log refuses a proposal from a node that
+no longer leads, but the job record, a checkpoint and a take-back intent are ordinary KV writes, and
+the fill's batches are ordinary KV transactions. A driver that lost the leadership without noticing
+(a paused process that wakes) used to keep filling beside its successor and could record a take-back
+over the job the successor was driving to `Public`. Now:
+
+- Every record write carries `PersistedCoordinatorJob.LeaderTerm`, the term the writer read
+  (`EmbeddedKahuna.SchemaLeaderTerm`) when it took the job on: the statement's run at its first
+  persist, the resume at its attempt bump. `CoordinatorJobStore` reads the stored record under the
+  key's lock and refuses a write or a delete whose term is older than the stored one
+  (`CoordinatorJobTakenOverException`). A writer that states no term (zero: a record from before the
+  field, a cleanup that acts on no leadership) is not fenced.
+- The coordinator registers `EmbeddedKahuna.RegisterSchemaLeadershipLostCallback` for the long
+  phase and cancels the fill or the backfill when its node stops leading, so the former driver stops
+  at its next batch. Row correctness never depended on this: every batch locks and re-reads its rows,
+  and the successor's batches do the same, so no row is filled twice. The cancellation is about not
+  fighting the successor for row locks, and about stopping promptly.
+- A driver whose job failed after the term moved, or whose record write was refused, does not take
+  the element back and does not report the failure as its own. `RunJobAsync` releases the gate and
+  waits for the job's outcome (`AnswerFromHandedOverJobAsync`): it returns normally when the
+  successor brought the element to the target, and throws `SchemaChangeHandedOverException`, with the
+  failure the successor recorded in the take-back intent (`FailureCode`/`FailureMessage`), when the
+  successor took it back, or when the job is still in progress after `HandoverOutcomeWait`. The
+  statement's compensation does not run on that exception: the change is not its to undo. A node that
+  leads again in a newer term, with nobody holding the table, drives the record itself through the
+  resume. Before this, a step refused as not-leader reached the client as `CADB0504` "nothing was
+  committed, retry the statement", and a retrying client met `Duplicate column` for a change its own
+  statement had made.
 
 **Adds start in `DeleteOnly`.** Because the coordinator exists, `AddColumn`/`AddIndex` never
 land directly in `Public`. The cluster entry points
@@ -1297,7 +1455,9 @@ the change on the leader).
 - **Coordinator interruption (leader loss mid-sequence):** the durable job survives; the new
   schema leader's `ResumeJobsAsync` re-drives the element to `Public` (re-running backfill
   idempotently), or abandons the job after `MaxResumeAttempts` and logs loudly — never a column
-  or index left stuck in an intermediate state (§8.2).
+  or index left stuck in an intermediate state (§8.2). The former driver, if it is still running,
+  is fenced from the record by the successor's newer term, has its fill cancelled, and answers its
+  statement from the successor's outcome rather than with "nothing was committed" (§8.2).
 - **Two-version gate timeout:** if a live node never acks `FromVersion`/`ToVersion` within
   `SchemaAckWaitTimeout`, the DDL throws. Under the strict infinite live-node lease (opt-in) this is
   also how a dead-but-un-evicted member surfaces; the default finite lease (30 s) instead ages a dead
@@ -1319,7 +1479,7 @@ Client → Node B (a follower)
       → SchemaDdlForwardController on A: leader-check ✔, DdlOperationIdCache.TryGetOrReserve(G) ✔
       → A executes the DDL as leader (below); B awaits the result and returns it to the client
 
-Node A (schema leader): AddColumnAsync (holds SchemaDdlSemaphore; a standalone node runs the same path)
+Node A (schema leader): AddColumnAsync (entered the DDL gate for robots; a standalone node runs the same path)
   coordinator = new SchemaChangeCoordinator; coordinator.BackfillAsync = BackfillColumnDefaultsAsync
   RunJobAsync(job{ robots, age, kind=Column, target=Public }, columnDefinition=age INT DEFAULT 0)
     current = Absent;  path = [DeleteOnly, WriteOnly, Public]
@@ -1335,7 +1495,7 @@ Node A (schema leader): AddColumnAsync (holds SchemaDdlSemaphore; a standalone n
     ── step 2: DeleteOnly → WriteOnly ──
       ReplicateElementStateAsync(age, WriteOnly, Column)     // SetElementState; v8 → v9, ack-gated
 
-    ── backfill (current==WriteOnly, next==Public) ──
+    ── backfill (current==WriteOnly, next==Public; the gate's semaphore released, robots held) ──
       BackfillColumnDefaultsAsync: fill each row that needs `age` (no column in its layout, a
         DeleteOnly placeholder, or a NULL under a NOT NULL / function / sequence default), in
         256-row batches that lock, re-read, write and commit, before age becomes readable. A
@@ -1393,6 +1553,10 @@ on an older layout decode with their own version and read `age` with current vis
 11. **A forwarded DDL is applied at most once**: forward with a stable `operationId` and dedup
     on the leader (`DdlOperationIdCache`) so a lost-response retry never double-bumps the
     schema version.
+12. **Every delta is proposed under the DDL gate's semaphore, and no backfill or validation pass
+    runs under it** (§4.1). A staged change holds its table instead; a DDL that names a table enters
+    the gate for that table. A new long-running phase inside a DDL statement must release the
+    semaphore and hold the table, never hold the semaphore across rows.
 
 ---
 
@@ -1446,6 +1610,15 @@ on an older layout decode with their own version and read `age` with current vis
   server does not yet replay it transparently against the new version.
 - **Staged `DROP INDEX`.** Drops are a single delta; an online-safe
   `Public → WriteOnly → DeleteOnly → Absent` drop is a possible future refinement.
+- **Two standalone scans still hold the DDL semaphore.** The standalone two-phase `CREATE INDEX`
+  builds its entries under the semaphore because its second phase needs the `SchemaVersion` it
+  captured, and the standalone `ADD CHECK` / `SET NOT NULL` reads its rows under it. Both are
+  single-node paths and neither goes through the coordinator (§4.1); routing them through a table
+  hold is the remaining piece of that change.
+- **Backfill cost per row.** A staged backfill writes each entry with a lock and a set, and a batch
+  holds its row locks for the length of the batch; under a foreground load a 20,000-row index build
+  took 134–148 s and cost the load a quarter of its throughput. Batching the entry writes of a batch
+  into one Kahuna call is the lever that has not been pulled.
 - **Legacy index cleanup.** `SystemSchema` index storage is read-only legacy (§7.3); remove it
   once all databases are known to be migrated.
 - **Broader failure-injection coverage.** The in-process harness supports concurrent DML during

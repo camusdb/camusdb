@@ -57,6 +57,8 @@ public sealed class CommandExecutor : IAsyncDisposable
 
     private readonly SchemaFreshnessSweeper schemaFreshnessSweeper;
 
+    private readonly CoordinatorJobSweeper coordinatorJobSweeper;
+
     private readonly DatabaseDropper databaseDroper;
 
     private readonly DatabaseDescriptors databaseDescriptors;
@@ -511,6 +513,13 @@ public sealed class CommandExecutor : IAsyncDisposable
             options.UnhostedControlLogProbeIntervalMs);
         if (isClusterMode)
             schemaFreshnessSweeper.Start();
+
+        // Finishes a staged schema change whose driver died and whose record the leader election did
+        // not reach: the election fired before this node opened the database, or before the record
+        // was visible here, or the resume failed on a transient. Runs in both modes; a standalone
+        // node is its own schema leader.
+        coordinatorJobSweeper = new(databaseDescriptors, databaseOpener.ResumeCoordinator, logger, options.CoordinatorJobSweepIntervalMs);
+        coordinatorJobSweeper.Start();
         databaseDroper = new(databaseDescriptors, logger, options);
         databaseCreator = new(logger);
         tableOpener = new(catalogs, logger);
@@ -862,6 +871,12 @@ public sealed class CommandExecutor : IAsyncDisposable
     /// the configured timer tick.
     /// </summary>
     internal Task<int> SweepSchemaFreshnessForTests() => schemaFreshnessSweeper.SweepOnceAsync();
+
+    /// <summary>
+    /// Test-only seam: runs one coordinator job sweep over every open database this node leads and
+    /// returns how many databases were swept, driving the sweep instead of waiting out its timer.
+    /// </summary>
+    internal Task<int> SweepCoordinatorJobsForTests() => coordinatorJobSweeper.SweepOnceAsync();
 
     /// <summary>
     /// Test-only seam: attempts to release one database and reports why it was or was not released, so
@@ -1241,10 +1256,10 @@ public sealed class CommandExecutor : IAsyncDisposable
     /// Reachable here because <see cref="Controllers.DatabaseOpener"/> wires it into the
     /// leader-change resume coordinator.
     /// </summary>
-    internal Task BackfillColumnDefaultsAsync(DatabaseDescriptor database, string tableName, ColumnInfo column)
+    internal Task BackfillColumnDefaultsAsync(DatabaseDescriptor database, string tableName, ColumnInfo column, CancellationToken cancellationToken)
     {
         EnterExtensionScope();
-        return schemaDdl.BackfillColumnDefaultsAsync(database, tableName, column);
+        return schemaDdl.BackfillColumnDefaultsAsync(database, tableName, column, cancellationToken);
     }
 
     /// <summary>
@@ -1338,8 +1353,9 @@ public sealed class CommandExecutor : IAsyncDisposable
         string tableName,
         IndexBuildInfo indexInfo,
         string? startOffset,
-        Func<string, Task>? onCheckpoint = null
-    ) => schemaDdl.BackfillIndexEntriesAsync(database, tableName, indexInfo, startOffset, onCheckpoint);
+        Func<string, Task>? onCheckpoint = null,
+        CancellationToken cancellationToken = default
+    ) => schemaDdl.BackfillIndexEntriesAsync(database, tableName, indexInfo, startOffset, onCheckpoint, cancellationToken);
 
     /// <summary>
     /// Runs the foreign-key validation pass for one constraint. Reachable here because
@@ -1909,6 +1925,9 @@ public sealed class CommandExecutor : IAsyncDisposable
         // Same ordering argument: the freshness sweep probes descriptors, so it must stop before
         // the closer disposes them.
         await schemaFreshnessSweeper.DisposeAsync().ConfigureAwait(false);
+
+        // The job sweep drives schema changes through descriptors; it stops before they are closed.
+        await coordinatorJobSweeper.DisposeAsync().ConfigureAwait(false);
 
         await databaseCloser.DisposeAsync();
         await sqlParserCache.DisposeAsync().ConfigureAwait(false);

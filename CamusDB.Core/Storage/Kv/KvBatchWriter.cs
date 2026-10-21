@@ -27,8 +27,22 @@ namespace CamusDB.Core.Storage.Kv;
 /// index entries still use <c>SetIfNotExists</c>, and a <c>NotSet</c> on one still raises
 /// <see cref="CamusDBErrorCodes.DuplicateUniqueKeyValue"/>.</para>
 ///
-/// <para><b>Root and branch databases take different phase-2 shapes.</b> A root database deletes old
-/// index entries physically and writes everything else in one batch. A branch writes a tombstone
+/// <para><b>The row write goes first.</b> A statement's exclusion of every other writer of a row is
+/// its exclusive lock on the row's key, taken in phase 1, or, under optimistic locking, the write
+/// intent its row write plants: an optimistic statement takes no lock before it writes, and Kahuna
+/// refuses the row write while another transaction holds the row. Everything that depends on no
+/// other writer touching the row is therefore staged after the row write. The deletes of a row's old
+/// index entries are the case that bit: a delete of an entry that does not exist stages nothing
+/// (Kahuna plants no intent for a missing key), so an UPDATE that deleted its old entries before it
+/// wrote the row could delete nothing, wait at its row write for an index backfill batch that held
+/// the row, and commit after the batch had written exactly that entry. The entry stayed, and an
+/// equality lookup on the old value returned a row that no longer matched it. With the row write
+/// staged first, the UPDATE waits before it deletes, and the entry the batch wrote is found; a batch
+/// that arrives after the row write is refused by the intent and reads the row again later.</para>
+///
+/// <para><b>Root and branch databases take different phase-2 shapes.</b> A root database writes the
+/// row blobs and the new index entries, then deletes the old entries physically, then writes any new
+/// unique entry whose key an old entry of the same batch still holds. A branch writes a tombstone
 /// where a root would delete — a physical delete leaves no level-0 entry, so the ancestry merge would
 /// resurface the inherited row — and writes each <em>unique</em> index entry individually, because
 /// <c>SetIfNotExists</c> alone is wrong on a branch twice over: a level-0 tombstone makes it refuse a
@@ -294,9 +308,14 @@ internal sealed class KvBatchWriter
     /// for root databases with old-index deletes) <see cref="IKahuna.LocateAndTrySetManyKeyValue"/>
     /// — instead of one acquire+delete/set per key.
     ///
-    /// <para>For root databases: old index entries are physically deleted via
-    /// <see cref="IKahuna.LocateAndTryDeleteManyKeyValue"/> then row blobs and new index entries
-    /// are written via <see cref="IKahuna.LocateAndTrySetManyKeyValue"/>.</para>
+    /// <para>For root databases, in this order (see the class summary for why the row write leads):
+    /// row blobs, out-of-line values and new index entries are written via
+    /// <see cref="IKahuna.LocateAndTrySetManyKeyValue"/>; old index entries and out-of-line values are
+    /// physically deleted via <see cref="IKahuna.LocateAndTryDeleteManyKeyValue"/>; and a new unique
+    /// entry whose key is also an old entry of this batch (two rows exchanging unique values) is
+    /// written last, once the old entry is gone, so that its <c>SetIfNotExists</c> does not report the
+    /// batch's own entry as a duplicate. A non-unique entry carries its row id in the key, and an
+    /// in-place rewrite of a unique entry targets the row's own key, so both can be written first.</para>
     ///
     /// <para>For branch databases: old entries receive a tombstone (same reasoning as
     /// <see cref="DeleteRowsBatch"/>), row blobs and non-unique new entries are written in a
@@ -333,8 +352,10 @@ internal sealed class KvBatchWriter
         // Pre-size to the row-count floor: every row contributes at least its own row-blob key.
         HashSet<string> seenLockKeys = new(StringComparer.Ordinal);
         List<(string key, int expiresMs, KeyValueDurability durability)> lockKeys = new(rows.Count);
-        List<KahunaSetKeyValueRequestItem> setItems = new(rows.Count);          // row + new index
+        List<KahunaSetKeyValueRequestItem> setItems = new(rows.Count);          // rows, large values, then new index entries
         List<KahunaDeleteKeyValueRequestItem> deleteItems = [];    // old index (root only)
+        List<(KahunaSetKeyValueRequestItem Item, string Key, bool UniqueInsert)>? newEntryItems = null; // root only
+        HashSet<string>? deleteKeys = null;                        // keys of deleteItems (root only)
         Dictionary<string, bool> uniqueByKey = new();             // root only
         HashSet<string> seenUniqueNew = [];                        // within-batch new unique guard
 
@@ -404,7 +425,10 @@ internal sealed class KvBatchWriter
                 AddLockKey(kvKey, upgradeReads ? keys.BuildIndexBucketPrefix(old.IndexId) : null);
 
                 if (!isBranch)
+                {
                     deleteItems.Add(new KahunaDeleteKeyValueRequestItem { TransactionId = tx.TransactionId, Key = kvKey, Durability = KeyValueDurability.Persistent });
+                    (deleteKeys ??= new(StringComparer.Ordinal)).Add(kvKey);
+                }
             }
 
             IReadOnlyList<KvTableStore.IndexWrite>? newIndexEntries = row.NewIndexEntries;
@@ -424,8 +448,12 @@ internal sealed class KvBatchWriter
                 {
                     // Overwrite = include-only rewrite of an existing unique key owned by this row:
                     // Set (overwrite), not SetIfNotExists which would no-op on the existing key.
-                    uniqueByKey[kvKey] = newIx.Unique && !newIx.Overwrite;
-                    setItems.Add(new KahunaSetKeyValueRequestItem { TransactionId = tx.TransactionId, Key = kvKey, Value = BranchKvCodec.EncodeIndexRowId(row.RowId, newIx.IncludeTuple ?? default), CompareValue = null, CompareRevision = -1, Flags = (newIx.Unique && !newIx.Overwrite) ? KeyValueFlags.SetIfNotExists : KeyValueFlags.Set, ExpiresMs = 0, Durability = KeyValueDurability.Persistent });
+                    bool uniqueInsert = newIx.Unique && !newIx.Overwrite;
+                    uniqueByKey[kvKey] = uniqueInsert;
+                    (newEntryItems ??= []).Add((
+                        new KahunaSetKeyValueRequestItem { TransactionId = tx.TransactionId, Key = kvKey, Value = BranchKvCodec.EncodeIndexRowId(row.RowId, newIx.IncludeTuple ?? default), CompareValue = null, CompareRevision = -1, Flags = uniqueInsert ? KeyValueFlags.SetIfNotExists : KeyValueFlags.Set, ExpiresMs = 0, Durability = KeyValueDurability.Persistent },
+                        kvKey,
+                        uniqueInsert));
                 }
             }
         }
@@ -440,12 +468,29 @@ internal sealed class KvBatchWriter
 
         if (!isBranch)
         {
-            // Phase 2a (root) — physically delete old index entries.
+            // A new unique entry whose key an old entry of this batch still holds is written after the
+            // deletes; every other new entry rides with the rows.
+            List<KahunaSetKeyValueRequestItem>? afterDeletes = null;
+            for (int e = 0; newEntryItems is not null && e < newEntryItems.Count; e++)
+            {
+                (KahunaSetKeyValueRequestItem item, string key, bool uniqueInsert) = newEntryItems[e];
+                if (uniqueInsert && deleteKeys is not null && deleteKeys.Contains(key))
+                    (afterDeletes ??= []).Add(item);
+                else
+                    setItems.Add(item);
+            }
+
+            // Phase 2a (root) — write the row blobs first (see the class summary), with the out-of-line
+            // values and the new index entries that need no old entry gone.
+            if (!await SetManyWithRetry(tx, setItems, uniqueByKey, cancellationToken, aborts).ConfigureAwait(false))
+                return;
+
+            // Phase 2b (root) — physically delete old index entries and old out-of-line values.
             if (!await DeleteManyWithRetry(tx, deleteItems, cancellationToken, aborts).ConfigureAwait(false))
                 return;
 
-            // Phase 2b (root) — write row blobs and new index entries.
-            if (!await SetManyWithRetry(tx, setItems, uniqueByKey, cancellationToken, aborts).ConfigureAwait(false))
+            // Phase 2c (root) — new unique entries on keys the deletes just freed.
+            if (afterDeletes is not null && !await SetManyWithRetry(tx, afterDeletes, uniqueByKey, cancellationToken, aborts).ConfigureAwait(false))
                 return;
         }
         else
@@ -597,7 +642,11 @@ internal sealed class KvBatchWriter
     ///
     /// For root databases, issues a physical batch KV delete via two round-trips
     /// (<see cref="IKahuna.LocateAndTryAcquireManyExclusiveLocks"/> then
-    /// <see cref="IKahuna.LocateAndTryDeleteManyKeyValue"/>).
+    /// <see cref="IKahuna.LocateAndTryDeleteManyKeyValue"/>). An optimistic transaction, which takes
+    /// no lock in the first of them, deletes the row keys in a round trip of their own before the
+    /// index entries and out-of-line values: the row delete is the write that is refused while
+    /// another transaction holds the row, and an entry delete evaluated before it could find nothing
+    /// where an index backfill batch holding the row is about to write (see the class summary).
     ///
     /// For branch databases, writes a <see cref="BranchKvKind.Tombstone"/> to every key
     /// in the level-0 overlay instead.  Physical deletes would leave no level-0 entry,
@@ -611,6 +660,7 @@ internal sealed class KvBatchWriter
         await tx.EnsureSessionStartedAsync(cancellationToken, keys.TableKeyPrefix).ConfigureAwait(false);
 
         List<string> deleteKeys = [];
+        List<string> rowKeys = new(rows.Count);
 
         // Rows the write phase re-read, and index slots a lookup read, carry this transaction's Shared
         // point locks; they are upgraded before the delete (see UpgradeSharedPointLocksAsync).
@@ -621,6 +671,7 @@ internal sealed class KvBatchWriter
         {
             string rowKey = keys.BuildRowKey(row.RowId);
             deleteKeys.Add(rowKey);
+            rowKeys.Add(rowKey);
 
             if (upgradeReads)
                 CollectSharedPointLock(tx, keys.RowBucketPrefix, rowKey, ref upgrades);
@@ -677,7 +728,7 @@ internal sealed class KvBatchWriter
         }
         else
         {
-            await DeleteKeysBatch(tx, deleteKeys, cancellationToken).ConfigureAwait(false);
+            await DeleteKeysBatch(tx, deleteKeys, cancellationToken, rowKeysFirst: rowKeys).ConfigureAwait(false);
         }
     }
 
@@ -814,7 +865,14 @@ internal sealed class KvBatchWriter
     /// already decided that a physical delete is correct here — on a branch that is only true for a
     /// key space being abandoned outright, never for a row a scan could still inherit.
     /// </summary>
-    private async Task DeleteKeysBatch(KvTransaction tx, List<string> deleteKeys, CancellationToken cancellationToken)
+    /// <summary>
+    /// Locks and physically deletes <paramref name="deleteKeys"/>. With <paramref name="rowKeysFirst"/>,
+    /// an optimistic transaction (which the lock phase skips) deletes those keys in a round trip of
+    /// their own before the rest, so that its exclusion of the rows' other writers is established
+    /// before anything that depends on it is evaluated (see <see cref="DeleteRowsBatch"/>). A
+    /// pessimistic transaction holds every key before the first delete, and deletes them in one.
+    /// </summary>
+    private async Task DeleteKeysBatch(KvTransaction tx, List<string> deleteKeys, CancellationToken cancellationToken, List<string>? rowKeysFirst = null)
     {
         if (deleteKeys.Count == 0)
             return;
@@ -825,19 +883,34 @@ internal sealed class KvBatchWriter
         List<(string key, int expiresMs, KeyValueDurability durability)> lockKeys =
             deleteKeys.Select(k => (k, 0, KeyValueDurability.Persistent)).ToList();
 
-        List<KahunaDeleteKeyValueRequestItem> deleteItems = deleteKeys.Select(k => new KahunaDeleteKeyValueRequestItem
+        await AcquireManyWithRetry(tx, lockKeys, cancellationToken).ConfigureAwait(false);
+
+        bool rowsLead = rowKeysFirst is { Count: > 0 }
+            && rowKeysFirst.Count < deleteKeys.Count
+            && tx.Locking == KeyValueTransactionLocking.Optimistic;
+
+        if (rowsLead)
+        {
+            HashSet<string> leading = new(rowKeysFirst!, StringComparer.Ordinal);
+            await DeleteManyWithRetry(tx, DeleteItems(tx, rowKeysFirst!), cancellationToken).ConfigureAwait(false);
+            await DeleteManyWithRetry(tx, DeleteItems(tx, deleteKeys.Where(k => !leading.Contains(k)).ToList()), cancellationToken).ConfigureAwait(false);
+        }
+        else
+        {
+            await DeleteManyWithRetry(tx, DeleteItems(tx, deleteKeys), cancellationToken).ConfigureAwait(false);
+        }
+
+        // Locks were already tracked inside AcquireManyWithRetry.
+        tx.TrackModifiedRange(deleteKeys, KeyValueDurability.Persistent);
+    }
+
+    private static List<KahunaDeleteKeyValueRequestItem> DeleteItems(KvTransaction tx, List<string> deleteKeys)
+        => deleteKeys.Select(k => new KahunaDeleteKeyValueRequestItem
         {
             TransactionId = tx.TransactionId,
             Key = k,
             Durability = KeyValueDurability.Persistent
         }).ToList();
-
-        await AcquireManyWithRetry(tx, lockKeys, cancellationToken).ConfigureAwait(false);
-        await DeleteManyWithRetry(tx, deleteItems, cancellationToken).ConfigureAwait(false);
-
-        // Locks were already tracked inside AcquireManyWithRetry.
-        tx.TrackModifiedRange(deleteKeys, KeyValueDurability.Persistent);
-    }
 
     /// <summary>
     /// Acquires every exclusive lock of a batch in one round-trip, retrying only the transient

@@ -75,7 +75,7 @@ internal sealed class TableSettingsService
 
         // Serialize with all other schema changes for this database, exactly like the established DDL
         // paths: the version capture, proposal (cluster), and blob rewrite must not race another DDL.
-        await database.SchemaDdlSemaphore.WaitAsync().ConfigureAwait(false);
+        await database.DdlGate.EnterAsync(ticket.TableName, context.Logger).ConfigureAwait(false);
         try
         {
             // Open the table and validate INSIDE the semaphore. Validating first would be a
@@ -140,7 +140,7 @@ internal sealed class TableSettingsService
 
         string tableId;
 
-        await database.SchemaDdlSemaphore.WaitAsync().ConfigureAwait(false);
+        await database.DdlGate.EnterAsync(ticket.TableName, context.Logger).ConfigureAwait(false);
         try
         {
             // Opened inside the semaphore for the same reason as the SET path: the table must not change

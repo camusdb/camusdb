@@ -68,7 +68,7 @@ public sealed record ScanProbeResult(
 ///
 /// <para>Why it exists: the post-run reconciliation counts rows on a quiet cluster and cannot see a
 /// scan that drops rows only while writes are in flight — which is exactly what happened
-/// (feature e31cf9bc: 151 of 207 in-window counts short on every gateway, 2,000 every time idle).
+/// (151 of 207 in-window counts short on every gateway, 2,000 every time idle).
 /// The probe is the run's own witness for that class: it asks each gateway directly (routing off,
 /// so the count runs where it was sent), never retries, and records the raw answer. It is not a
 /// measurement of throughput and it never fails the run by itself — its verdict is folded into

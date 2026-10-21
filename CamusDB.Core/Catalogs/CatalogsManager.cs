@@ -493,8 +493,11 @@ public sealed class CatalogsManager
     public async Task PersistCoordinatorJobAsync(DatabaseDescriptor database, PersistedCoordinatorJob job)
         => await CoordinatorJobStore.PersistCoordinatorJobAsync(database, job).ConfigureAwait(false);
 
-    public async Task DeleteCoordinatorJobAsync(DatabaseDescriptor database, string tableId, string elementName)
-        => await CoordinatorJobStore.DeleteCoordinatorJobAsync(database, tableId, elementName).ConfigureAwait(false);
+    public async Task DeleteCoordinatorJobAsync(DatabaseDescriptor database, string tableId, string elementName, long leaderTerm = 0)
+        => await CoordinatorJobStore.DeleteCoordinatorJobAsync(database, tableId, elementName, leaderTerm).ConfigureAwait(false);
+
+    public async Task<PersistedCoordinatorJob?> TryLoadCoordinatorJobAsync(DatabaseDescriptor database, string tableId, string elementName)
+        => await CoordinatorJobStore.TryLoadCoordinatorJobAsync(database, tableId, elementName).ConfigureAwait(false);
 
     public async Task DeleteCoordinatorJobsForTableAsync(
         DatabaseDescriptor database,

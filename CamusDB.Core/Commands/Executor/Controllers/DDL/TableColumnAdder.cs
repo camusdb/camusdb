@@ -122,7 +122,7 @@ public sealed class TableColumnAdder
             cancellationToken.ThrowIfCancellationRequested();
 
             List<ObjectIdValue> rowIds = await BackfillBatchRunner.ScanRowIdsAsync(
-                database, table, afterRowId, StoredRowRewriter.BatchRows, cancellationToken).ConfigureAwait(false);
+                database, table, afterRowId, StoredRowRewriter.BatchRows, logger, element, cancellationToken).ConfigureAwait(false);
             if (rowIds.Count == 0)
                 break;
 

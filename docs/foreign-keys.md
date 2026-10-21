@@ -338,6 +338,11 @@ is not affected. `CREATE INDEX` uses the same rule, so an index never misses a r
 In standalone mode the same steps run on the one node. `CREATE TABLE` with a constraint goes
 through the same states in a cluster, and is Public at once in standalone mode.
 
+**Other DDL during the ADD.** The statement enters the database's DDL gate for the child table.
+While the index of step 2 is built and the rows of step 5 are read, the gate itself is released:
+DDL on other tables of the database runs at once. DDL on the child table waits until the constraint
+is Public, and the caller of the ADD waits for every step.
+
 ### DROP CONSTRAINT
 
 `DROP CONSTRAINT name` stops the enforcement in one step, because an early stop is always safe.

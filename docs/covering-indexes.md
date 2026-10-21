@@ -118,6 +118,12 @@ scanner then synthesizes each output row from the decoded key (key columns) and 
 tuple (included columns), and never fetches the primary row — that is the `rows_read = 0` you see in
 `EXPLAIN (ANALYZE)`. Both the range-scan and the unique-lookup paths support covering.
 
+A read that does fetch the primary row checks it against the entry it came from and skips a row
+whose key columns no longer match (`IndexEntryCheck`; the planner has dropped the predicate the index
+answered from the residual filter, so the check is what keeps a stale entry from surfacing as a wrong
+row). A covering read has no row to check and trusts the entry, key and payload alike: that is the
+one place a stale entry would still show, which is why the writers are built never to leave one.
+
 ### Persistence & replication
 
 Included columns are stored in the per-table schema as immutable column **ids** (`IncludeColumnIds`),

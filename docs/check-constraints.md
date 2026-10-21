@@ -374,8 +374,11 @@ constraint enforced before the scan, and every write planned without it settled 
 fence ([distributed-schema-architecture.md](distributed-schema-architecture.md) §9.1), each such
 write was checked by its own statement. In the opposite order, a short autocommit `UPDATE` can commit
 a violating value between the scan and the start of enforcement, and the constraint is then
-published over a row that breaks it. Both operations hold `SchemaDdlSemaphore` for the whole
-statement, as a foreign-key ADD does.
+published over a row that breaks it. Both operations enter the DDL gate for their table, as a
+foreign-key ADD does. In a cluster the scan runs with the gate's semaphore released and the table
+held (`SchemaChangeCoordinator.ValidateRowConstraintAsync`), so DDL on other tables of the database
+runs meanwhile and DDL on this table waits for the scan; a standalone node scans under the
+semaphore.
 
 Two paths, selected by `isClusterMode`:
 

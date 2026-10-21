@@ -199,6 +199,12 @@ initial_partitions: 1      # Raft partition count (>= 1). Unset, it is 1 in stan
 #   standalone mode; <= 0 disables the sweep.
 # schema_freshness_check_interval_ms: 10000
 #
+# coordinator_job_sweep_interval_ms: how often the schema leader of each open database looks for a
+#   staged schema change (CREATE INDEX, ADD COLUMN, a constraint validation) whose driver died, and
+#   finishes it. The leader election resumes such a job too, but can miss it when it fires before the
+#   database is open on the new leader; the sweep bounds the wait to one tick. <= 0 disables the sweep.
+# coordinator_job_sweep_interval_ms: 10000
+#
 # unhosted_control_log_probe_interval_ms: how often a node probes the durable checkpoint of a
 #   control log (a database's schema log, or the cluster-settings log) whose Raft partition it does
 #   not host. Only matters with kahuna.replication_factor below the node count: such a node never

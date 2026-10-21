@@ -21,7 +21,8 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.DDL;
 ///
 /// <para><b>ADD is a staged rollout, in this order:</b></para>
 /// <list type="number">
-/// <item>Resolve the constraint against the live schema, under <c>SchemaDdlSemaphore</c>.</item>
+/// <item>Resolve the constraint against the live schema, under the DDL gate, entered for the child
+/// table.</item>
 /// <item>When no index can serve the parent-side probe, build <c>~fk_{name}</c> with the staged index
 /// build and its backfill, and publish it, unowned, before the constraint exists.</item>
 /// <item>Record the rollout job, then propose <see cref="SchemaOp.AddForeignKey"/> in <c>WriteOnly</c>,
@@ -30,6 +31,10 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.DDL;
 /// it removes the constraint and its owned index and fails the statement with
 /// <see cref="CamusDBErrorCodes.ForeignKeyViolation"/>.</item>
 /// </list>
+///
+/// <para>The index build of step 2 and the validation pass of step 4 run with the DDL gate released
+/// and the child table held, like every staged change (<see cref="SchemaChangeCoordinator.RunJobAsync"/>):
+/// DDL on other tables of the database proceeds meanwhile, DDL on the child table waits.</para>
 ///
 /// <para>A standalone node runs the same steps: it is the only member of its schema group, so each
 /// proposal costs a single-node commit and the ack gate passes at once. Its index build uses the
@@ -82,7 +87,7 @@ internal sealed partial class SchemaDdlService
         ForeignKeyInfo info = ticket.ForeignKey
             ?? throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "A foreign key definition is required for ADD FOREIGN KEY");
 
-        await database.SchemaDdlSemaphore.WaitAsync().ConfigureAwait(false);
+        await database.DdlGate.EnterAsync(ticket.TableName, context.Logger).ConfigureAwait(false);
         try
         {
             // Opened inside the gate: a drop and re-create of the same name between an open outside
@@ -173,7 +178,8 @@ internal sealed partial class SchemaDdlService
 
             await coordinator.RunJobAsync(
                 database,
-                new SchemaChangeJob(database.Name, tableName, table.Id, foreignKey.Name, SchemaElementState.Public, SchemaElementKind.ForeignKey)
+                new SchemaChangeJob(database.Name, tableName, table.Id, foreignKey.Name, SchemaElementState.Public, SchemaElementKind.ForeignKey),
+                gateHeldByCaller: true
             ).ConfigureAwait(false);
 
             if (context.Logger.IsEnabled(LogLevel.Information))
@@ -266,7 +272,7 @@ internal sealed partial class SchemaDdlService
 
     private async Task<bool> DropForeignKeyAsync(DatabaseDescriptor database, AlterConstraintTicket ticket)
     {
-        await database.SchemaDdlSemaphore.WaitAsync().ConfigureAwait(false);
+        await database.DdlGate.EnterAsync(ticket.TableName, context.Logger).ConfigureAwait(false);
         try
         {
             TableDescriptor table = await context.TableOpener.Open(database, ticket.TableName).ConfigureAwait(false);

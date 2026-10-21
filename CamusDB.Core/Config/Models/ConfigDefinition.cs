@@ -467,6 +467,15 @@ public class ConfigDefinition
     public int SchemaFreshnessCheckIntervalMs { get; set; } = 10_000;
 
     /// <summary>
+    /// Interval of the sweep that resumes staged schema changes (index builds, column fills,
+    /// constraint validations) whose driver is gone, on every open database this node leads, in
+    /// milliseconds. <c>&lt;= 0</c> disables the sweep. Maps to
+    /// <c>CamusDBOptions.CoordinatorJobSweepIntervalMs</c> (yml <c>coordinator_job_sweep_interval_ms</c>).
+    /// Default 10 seconds.
+    /// </summary>
+    public int CoordinatorJobSweepIntervalMs { get; set; } = 10_000;
+
+    /// <summary>
     /// Interval at which a node probes the durable checkpoint of a control log (a database's schema
     /// log, or the cluster-settings log) whose Raft partition it does not host under replica
     /// placement, in milliseconds. <c>&lt;= 0</c> disables the fast probe. Maps to

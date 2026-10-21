@@ -490,6 +490,22 @@ public sealed record CamusDBOptions
     public int SchemaFreshnessCheckIntervalMs { get; init; } = 10_000;
 
     /// <summary>
+    /// Interval, in milliseconds, of the sweep that finishes staged schema changes whose driver is
+    /// gone. A <c>CREATE INDEX</c> or <c>ALTER TABLE ADD COLUMN</c> records a job before it runs, and
+    /// the node that wins the schema leadership after the driver dies resumes it from that record. The
+    /// election alone can miss the job: it fires before the new leader has opened the database, or
+    /// before the record is visible to its reads, and a resume that fails on a transient has no second
+    /// trigger. Each tick, on every open database this node leads, the sweep reads the job records
+    /// (one small KV scan per database) and drives any job that no statement is driving here, so an
+    /// interrupted change completes within a tick of becoming resumable instead of waiting for the next
+    /// leadership change. A failed attempt is retried with a backoff that doubles per attempt. A value
+    /// <c>&lt;= 0</c> disables the sweep (used by tests that drive it by hand). Runs in both modes.
+    /// Default is 10 seconds.
+    /// </summary>
+    [ConfigSetting(ConfigMutability.Restart, ConfigScope.Node)]
+    public int CoordinatorJobSweepIntervalMs { get; init; } = 10_000;
+
+    /// <summary>
     /// Interval, in milliseconds, at which a node probes the durable checkpoint of a control log whose
     /// Raft partition it does not host: a database's schema log, or the cluster-settings log. Under
     /// replica placement (<c>kahuna.replication_factor</c> below the node count) a partition lives on

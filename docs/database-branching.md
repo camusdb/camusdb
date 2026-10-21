@@ -311,8 +311,10 @@ turn that into a hard error instead:
    constraint is enforced but its existing rows are not validated yet. The copy leaves out the
    coordinator job that validates it, so a branch that inherited it would keep a constraint that
    nothing ever validates. The state check holds even when no job is left. A fork that arrives while
-   `ALTER TABLE ... ADD CONSTRAINT` runs on the same node waits on the `SchemaDdlSemaphore`, and
-   then copies the constraint in `Public`.
+   `ALTER TABLE ... ADD CONSTRAINT` runs on the same node waits for it: the fork enters the
+   source's DDL gate exclusively, so a staged change that holds its table while its rows are read
+   (distributed-schema-architecture.md §4.1) finishes first, and the fork then copies the constraint
+   in `Public`.
 3. **Mint `forkT`** (begin+rollback a source transaction — the causal fence) and **allocate
    `branchId`** from the monotonic id sequence.
 4. **Acquire the snapshot hold** on the source at `forkT`; block if not `Set`.
@@ -374,9 +376,10 @@ several layered fences:
   dropped. `HasLiveDescendantsAsync` checks the in-memory cache *then* does a persistent registry
   scan (to see branches registered on other nodes). Drop leaf-first: leaf → parent → root.
 - **Same-node fence (semaphore).** `DropDatabase` opens the target and holds its
-  `SchemaDdlSemaphore` across the descendant re-check and `UnregisterAsync`; branch-create holds
-  the *source's* semaphore across its own publish — the same id-keyed descriptor, so they mutually
-  exclude on one node.
+  `SchemaDdlSemaphore` across the descendant re-check and `UnregisterAsync`, entering it
+  exclusively so a staged schema change in progress on any table of the database (an index build,
+  a column fill) finishes first; branch-create holds the *source's* semaphore across its own
+  publish — the same id-keyed descriptor, so they mutually exclude on one node.
 - **Cross-node fence (drop-intent lease).** Before its descendant scan, `DropDatabase` takes a
   Raft-replicated `drop-intent:{dbId}` (`SetIfNotExists`) and holds it through the keyspace purge;
   branch-create checks it *after* `RegisterAsync`. Raft linearizability guarantees exactly one

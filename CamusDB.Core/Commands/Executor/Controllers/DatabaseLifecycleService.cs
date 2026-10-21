@@ -227,7 +227,12 @@ internal sealed class DatabaseLifecycleService
 
         DatabaseDescriptor sourceDescriptor = await context.DatabaseOpener.Open(ticket.BranchFrom!).ConfigureAwait(false);
 
-        await sourceDescriptor.SchemaDdlSemaphore.WaitAsync().ConfigureAwait(false);
+        // Entered exclusively: a staged schema change in progress on a table of the source (an index
+        // build, a column fill, a constraint validation) holds its table rather than the semaphore
+        // while it runs, and the fork waits for it to finish, as it did when the change held the
+        // semaphore itself. It then copies the element in Public, instead of being refused by the
+        // stability checks below for a change that is about to complete.
+        await sourceDescriptor.DdlGate.EnterExclusiveAsync(context.Logger).ConfigureAwait(false);
         try
         {
             // Re-validate the source is still registered under the semaphore. DropDatabase acquires
@@ -582,7 +587,10 @@ internal sealed class DatabaseLifecycleService
 
         // Acquire the target's SchemaDdlSemaphore before the descendant check so that a concurrent
         // CreateBranchDatabaseAsync — which holds the source's SchemaDdlSemaphore through
-        // RegisterAsync — cannot slip between the check and the Unregister on this node.
+        // RegisterAsync — cannot slip between the check and the Unregister on this node. It is
+        // entered exclusively: a staged schema change in progress on any table of the database
+        // (an index build, a column fill) holds its table rather than the semaphore, and the drop
+        // waits for it to finish, as it did when the change held the semaphore itself.
         // The semaphore is released before the heavier Drop/drain step so long-running DML on the
         // database can drain while the schema lock is no longer held.
         //
@@ -659,7 +667,7 @@ internal sealed class DatabaseLifecycleService
         try
         {
             if (targetDescriptor is not null)
-                await targetDescriptor.SchemaDdlSemaphore.WaitAsync().ConfigureAwait(false);
+                await targetDescriptor.DdlGate.EnterExclusiveAsync(context.Logger).ConfigureAwait(false);
             try
             {
                 // Re-check descendants under the semaphore (single-node guard) and after the intent

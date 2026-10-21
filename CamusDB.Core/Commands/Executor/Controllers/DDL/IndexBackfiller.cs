@@ -25,10 +25,14 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.DDL;
 /// <para><b>Each batch locks its rows before it reads them.</b> A batch scans a run of row ids without
 /// a lock, takes an exclusive lock on each row
 /// (<see cref="KvTableStore.LockAndReadRowsForMutationAsync"/>), reads the rows under the lock,
-/// writes one entry per row and commits. No writer can change a row between that read and the
-/// commit, so an entry always matches a committed row. An unlocked read would let an UPDATE commit
-/// between the read and the entry write: the UPDATE removes the entry for its old value, which does
-/// not exist yet, writes the entry for its new value, and the backfill then writes the old value's
+/// writes one entry per row and commits. The lock refuses every other writer's write of the row
+/// until the batch is done: a pessimistic writer at its own lock, an optimistic one at its row
+/// write, which is the only write of its statement the lock meets. So an entry always matches a
+/// committed row, provided a writer's other writes are ordered after its row write; see
+/// <see cref="Storage.Kv.KvBatchWriter"/>, which stages the row write before the deletes of the
+/// row's old entries for exactly this reason. An unlocked read would let an UPDATE commit between
+/// the read and the entry write: the UPDATE removes the entry for its old value, which does not
+/// exist yet, writes the entry for its new value, and the backfill then writes the old value's
 /// entry, where it stays. Such a stale entry sends an equality lookup to a row that no longer
 /// matches, and on a unique index it refuses the next row that takes the value. A row that a DELETE
 /// removed between the scan and the lock reads back null and gets no entry.</para>
@@ -67,6 +71,14 @@ internal static class IndexBackfiller
     /// attempts. Null in production; a test clears it after use.
     /// </summary>
     internal static Func<Task>? TestInterceptBeforeBatchLock;
+
+    /// <summary>
+    /// Test-only seam: runs after an attempt locked and read the rows of its batch and before it
+    /// writes the first entry. A test starts a competing statement there, so the statement runs
+    /// against rows the batch holds and is about to index. Null in production; a test clears it after
+    /// use.
+    /// </summary>
+    internal static Func<Task>? TestInterceptAfterBatchRead;
 
     /// <summary>
     /// The index to build. <paramref name="KeyColumns"/> are the key columns in index order and
@@ -125,7 +137,7 @@ internal static class IndexBackfiller
         {
             cancellationToken.ThrowIfCancellationRequested();
 
-            List<ObjectIdValue> rowIds = await BackfillBatchRunner.ScanRowIdsAsync(database, table, afterRowId, BatchRows, cancellationToken).ConfigureAwait(false);
+            List<ObjectIdValue> rowIds = await BackfillBatchRunner.ScanRowIdsAsync(database, table, afterRowId, BatchRows, logger, element, cancellationToken).ConfigureAwait(false);
             if (rowIds.Count == 0)
                 break;
 
@@ -186,6 +198,9 @@ internal static class IndexBackfiller
         try
         {
             ReadOnlyMemory<byte>?[] current = await table.Store.LockAndReadRowsForMutationAsync(tx, rowIds, cancellationToken, largeValues).ConfigureAwait(false);
+
+            if (TestInterceptAfterBatchRead is { } afterRead)
+                await afterRead().ConfigureAwait(false);
 
             // Per-batch decode-plan cache; the visibility version is re-read from the live schema
             // for each batch.

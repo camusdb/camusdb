@@ -1162,12 +1162,16 @@ internal sealed class QueryScanner
             };
         int batchSize = plan.Database.Options.IndexScanFetchBatchSize;
         List<ObjectIdValue> pageBuf = new(batchSize);
+        // The entry keys of the page, positionally, so each fetched row is checked against its entry.
+        List<CompositeColumnValue> pageKeys = new(batchSize);
+        IReadOnlySet<string>? requiredColumns = IndexEntryCheck.RequiredColumns(plan.ScanRequiredColumns, index);
+        LargeValueFetch? largeValues = LargeValueFetch.Columns(table.Schema, requiredColumns);
 
         // Fetch and decode one buffered page; yields rows in the order they appear in the page.
-        async IAsyncEnumerable<QueryResultRow> flushPageAsync(List<ObjectIdValue> page)
+        async IAsyncEnumerable<QueryResultRow> flushPageAsync(List<ObjectIdValue> page, List<CompositeColumnValue> keys)
         {
             ReadOnlyMemory<byte>?[] batchResult = await table.Store.GetRowsBatch(
-                ticket.TxnState, page, cancellationToken, LargeValueFetch.Columns(table.Schema, plan.ScanRequiredColumns)).ConfigureAwait(false);
+                ticket.TxnState, page, cancellationToken, largeValues).ConfigureAwait(false);
             for (int i = 0; i < page.Count; i++)
             {
                 cancellationToken.ThrowIfCancellationRequested();
@@ -1185,13 +1189,14 @@ internal sealed class QueryScanner
                 QueryRow queryRow = await RowEncoder.DecodeToQueryRowAsync(
                     table.Schema, txId, batchRowId, data.Value,
             plan.Database.Options,
-                    plan.ScanRequiredColumns, visibilityVersion, decodeState).ConfigureAwait(false);
-                if (await queryFilterer.MeetPlanFilterAsync(plan, queryRow).ConfigureAwait(false))
+                    requiredColumns, visibilityVersion, decodeState).ConfigureAwait(false);
+                if (IndexEntryCheck.Confirms(table, index, keys[i], queryRow, logger)
+                    && await queryFilterer.MeetPlanFilterAsync(plan, queryRow).ConfigureAwait(false))
                     yield return new QueryResultRow(batchRowId, queryRow);
             }
         }
 
-        await foreach ((CompositeColumnValue _, ObjectIdValue rowId, ReadOnlyMemory<byte> _) in table.Store.ScanIndex(
+        await foreach ((CompositeColumnValue entryKey, ObjectIdValue rowId, ReadOnlyMemory<byte> _) in table.Store.ScanIndex(
             ticket.TxnState,
             index.KvId,
             keyTypes,
@@ -1210,19 +1215,21 @@ internal sealed class QueryScanner
                 scanStats.KvScanEntries++;
 
             pageBuf.Add(rowId);
+            pageKeys.Add(entryKey);
 
             if (pageBuf.Count < batchSize)
                 continue;
 
             // Page full — flush, then reset for the next page.
-            await foreach (QueryResultRow r in flushPageAsync(pageBuf))
+            await foreach (QueryResultRow r in flushPageAsync(pageBuf, pageKeys))
                 yield return r;
             pageBuf.Clear();
+            pageKeys.Clear();
         }
 
         // Flush the remaining partial page (skipped when the scan yielded a full multiple of batchSize).
         if (pageBuf.Count > 0)
-            await foreach (QueryResultRow r in flushPageAsync(pageBuf))
+            await foreach (QueryResultRow r in flushPageAsync(pageBuf, pageKeys))
                 yield return r;
         }
         finally

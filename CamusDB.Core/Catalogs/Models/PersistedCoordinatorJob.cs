@@ -113,4 +113,26 @@ public sealed class PersistedCoordinatorJob
     /// must not poison leader changes forever.
     /// </summary>
     public int Attempts { get; set; }
+
+    /// <summary>
+    /// The schema-leader term of the node that wrote this record, read when it took the job over
+    /// (the statement's run, or a resume). A record is never overwritten or deleted by a writer whose
+    /// term is older than the term stored here (<c>CoordinatorJobStore</c>): a driver that lost the
+    /// schema leadership, and kept running until it noticed, finds the job owned by its successor at
+    /// its next write and stops. The schema log refuses a stale term's proposals on its own; this
+    /// extends the fence to the job record, which is an ordinary KV write. Zero in records written
+    /// before the field existed, and by a writer that states no term; such a write is not fenced.
+    /// </summary>
+    public long LeaderTerm { get; set; }
+
+    /// <summary>
+    /// The error that made the driver take the element back, recorded with the removal intent
+    /// (<see cref="TargetState"/> = <c>Absent</c>). A driver that handed the job over to the next
+    /// schema leader reads it while it waits for the outcome, and answers its client with the actual
+    /// reason rather than a generic one. Null for a job that is not a removal.
+    /// </summary>
+    public string? FailureCode { get; set; }
+
+    /// <summary>The message of the error recorded in <see cref="FailureCode"/>.</summary>
+    public string? FailureMessage { get; set; }
 }

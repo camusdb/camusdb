@@ -35,7 +35,7 @@ namespace CamusDB.Tests.Storage;
 /// <para>A scan that carries the transaction id pins every visited key's revision server-side, and a
 /// page retried after a transient aborts the read once one of those keys has been overwritten — the
 /// mechanism that turned a read-only <c>COUNT(*)</c> under replication lag into a <c>CADB0504</c>
-/// (feature e31cf9bc). The id is therefore carried only when the scan has something to observe
+/// under concurrent writes. The id is therefore carried only when the scan has something to observe
 /// through it: folded reads (optimistic / TrackAndValidate) or the transaction's own pending writes.
 /// </para>
 /// </summary>
