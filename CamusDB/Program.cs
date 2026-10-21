@@ -694,36 +694,66 @@ if (config.IsClusterMode)
 if (config.PitrBootstrapLeafBackupId is Guid pitrBootstrapLeaf)
     await sharedNode.BootstrapFromBackupAsync(pitrBootstrapLeaf, config.PitrBootstrapTargetTimeMs);
 
-await sharedNode.StartAsync();
+// The node's startup proper. It can wait for as long as the cluster takes to elect leaders — the
+// embedded Kahuna node keeps waiting through undecided election rounds rather than giving up, since
+// a node that exits also withdraws the vote its peers may need — so the wait is bound to the host's
+// shutdown: a stop signal that arrives meanwhile ends the start as a clean exit. Any other startup
+// failure is logged as one and exits non-zero instead of escaping as an unhandled exception (and a
+// crash dump) as if the process had faulted.
+ILogger<ICamusDB> startupLogger = app.Services.GetRequiredService<ILogger<ICamusDB>>();
+CancellationToken hostStopping = app.Lifetime.ApplicationStopping;
 
-// Load the persisted cluster-settings overlay and publish the merged configuration NOW — after the
-// store is readable, before the executor below is resolved — so everything the executor constructs
-// (schedulers, caches, table stores) is built from the merged snapshot and never holds a boot-only
-// value. This is the whole boot-window hazard reduced to an ordering constraint.
-CamusDB.Core.Config.ClusterSettingsService clusterSettingsService =
-    app.Services.GetRequiredService<CamusDB.Core.Config.ClusterSettingsService>();
-await clusterSettingsService.StartAsync();
+try
+{
+    await sharedNode.StartAsync(hostStopping);
 
-SpillFileManager.AcquireInstanceLock(camusOptions.DataDirectory);
-SpillFileManager.RunStartupSweep(camusOptions.DataDirectory);
+    // Load the persisted cluster-settings overlay and publish the merged configuration NOW — after the
+    // store is readable, before the executor below is resolved — so everything the executor constructs
+    // (schedulers, caches, table stores) is built from the merged snapshot and never holds a boot-only
+    // value. This is the whole boot-window hazard reduced to an ordering constraint.
+    CamusDB.Core.Config.ClusterSettingsService clusterSettingsService =
+        app.Services.GetRequiredService<CamusDB.Core.Config.ClusterSettingsService>();
+    await clusterSettingsService.StartAsync();
 
-// Initialize DB system
-CamusStartup camus = new(
-    app.Services.GetRequiredService<CommandExecutor>()
-);
+    SpillFileManager.AcquireInstanceLock(camusOptions.DataDirectory);
+    SpillFileManager.RunStartupSweep(camusOptions.DataDirectory);
 
-await camus.Initialize();
+    // Initialize DB system
+    CamusStartup camus = new(
+        app.Services.GetRequiredService<CommandExecutor>()
+    );
+
+    await camus.Initialize();
+
+    // Seed the bootstrap superuser when auth is enabled and the catalog is empty; fail-closed (refuse to
+    // start) if enabled with an empty catalog and no bootstrap secret. No-op when auth is disabled.
+    //
+    // The credentials are passed explicitly from this scope's unscrubbed copy: the CamusDBOptions in DI is
+    // registered with the password blanked, so the executor cannot read it back off its injected options.
+    await app.Services.GetRequiredService<CommandExecutor>().EnsureBootstrapSuperuserAsync(
+        camusOptions.BootstrapSuperuser,
+        camusOptions.BootstrapSuperuserPassword);
+}
+catch (OperationCanceledException) when (hostStopping.IsCancellationRequested)
+{
+    startupLogger.LogInformation("Shutdown requested before the node finished starting; exiting");
+
+    SpillFileManager.ReleaseInstanceLock();
+    await sharedNode.DisposeAsync();
+    await app.StopAsync();
+    return 0;
+}
+catch (Exception ex)
+{
+    startupLogger.LogCritical(ex, "Startup failed: {Message}", ex.Message);
+
+    SpillFileManager.ReleaseInstanceLock();
+    await sharedNode.DisposeAsync();
+    await app.StopAsync();
+    return 1;
+}
 
 CommandExecutor commandExecutor = app.Services.GetRequiredService<CommandExecutor>();
-
-// Seed the bootstrap superuser when auth is enabled and the catalog is empty; fail-closed (refuse to
-// start) if enabled with an empty catalog and no bootstrap secret. No-op when auth is disabled.
-//
-// The credentials are passed explicitly from this scope's unscrubbed copy: the CamusDBOptions in DI is
-// registered with the password blanked, so the executor cannot read it back off its injected options.
-await commandExecutor.EnsureBootstrapSuperuserAsync(
-    camusOptions.BootstrapSuperuser,
-    camusOptions.BootstrapSuperuserPassword);
 
 // The bootstrap password was only needed to seed the first hash — drop it from process memory.
 // Only this scope's copy still carries it: the holder was seeded scrubbed, and the settings
