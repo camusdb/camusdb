@@ -275,3 +275,24 @@ public sealed class SchemaAppliedProbeResponse
     public bool Open { get; set; }
     public long AppliedSchemaVersion { get; set; }
 }
+
+/// <summary>
+/// One extension build a node loaded at boot, as the extension peer probe reports it: the manifest
+/// name and version and the SHA-256 of the assembly bytes.
+/// </summary>
+public sealed class LoadedExtensionProbeEntry
+{
+    public string Name { get; set; } = "";
+    public string Version { get; set; } = "";
+    public string Sha256 { get; set; } = "";
+}
+
+/// <summary>
+/// Answer of a node's <c>/internal/schema-ddl/loaded-extensions</c> endpoint: every extension build it
+/// loaded at boot. <see cref="Status"/> is <c>"ok"</c> when the node answered for itself.
+/// </summary>
+public sealed class LoadedExtensionsProbeResponse
+{
+    public string Status { get; set; } = "";
+    public List<LoadedExtensionProbeEntry> Extensions { get; set; } = [];
+}

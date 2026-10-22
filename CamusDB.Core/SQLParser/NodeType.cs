@@ -1013,4 +1013,22 @@ public enum NodeType
     /// <see cref="ExprArgumentList"/>, null for no arguments. A database-scoped, non-query statement.
     /// </summary>
     Call,
+
+    /// <summary>
+    /// <c>CREATE EXTENSION name [VERSION 'v']</c>: installs a C# extension in the current database.
+    /// <c>leftAst</c> = the extension name identifier, <c>rightAst</c> = the version string literal
+    /// (still quoted), or null for the highest version the node loads. Schema DDL that replicates
+    /// through the schema log.
+    /// </summary>
+    CreateExtension,
+
+    /// <summary>
+    /// <c>ALTER EXTENSION name UPDATE [TO 'v']</c>: moves an installed extension to another loaded
+    /// version. <c>leftAst</c> = the extension name, <c>rightAst</c> = the target version literal, or
+    /// null for the highest version the node loads.
+    /// </summary>
+    AlterExtensionUpdate,
+
+    /// <summary><c>DROP EXTENSION name</c>. <c>leftAst</c> = the extension name identifier.</summary>
+    DropExtension,
 }

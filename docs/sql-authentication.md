@@ -291,7 +291,9 @@ With auth enabled, every statement is checked before it runs:
 - **C# extensions** — `CREATE TRIGGER` and `DROP TRIGGER` need `ALTER` on the table, the same as
   `ALTER TABLE`. `CALL` requires a superuser, because procedures have no grant model yet. SQL that a
   trigger or a procedure runs is checked with the privileges of the user whose statement fired or
-  called it. `SHOW EXTENSIONS` requires a superuser. See [csharp-extensions.md](csharp-extensions.md).
+  called it. `SHOW EXTENSIONS` and `CREATE`, `ALTER` and `DROP EXTENSION` require a superuser: an
+  installed extension decides which operator-deployed code every statement of the database may run.
+  See [csharp-extensions.md](csharp-extensions.md).
 - **User / database administration** — `CREATE/ALTER/DROP USER`, `GRANT`/`REVOKE`, and database
   lifecycle DDL require superuser. So do the HTTP routes `/create-db`, `/drop-db` and `/close-db`.
   Closing is in that list because it rolls back every transaction still active in that database on

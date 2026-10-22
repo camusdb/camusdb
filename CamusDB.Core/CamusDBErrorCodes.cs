@@ -767,15 +767,16 @@ public static class CamusDBErrorCodes
     public const string ExtensionContractMismatch = "CADB0803";
 
     /// <summary>
-    /// Two configured extension assemblies have the same simple name. One node loads one version of
-    /// an extension. A startup failure.
+    /// Two configured extension assemblies declare the same extension name and version in their
+    /// manifests. A node loads one build of each version. A startup failure.
     /// </summary>
     public const string ExtensionDuplicateAssembly = "CADB0804";
 
     /// <summary>
-    /// An extension function or procedure name collides with a built-in function, a table function,
-    /// or a member of another loaded extension. Shadowing a built-in is never allowed. A startup
-    /// failure.
+    /// An extension function name collides with a built-in function, a table function or an
+    /// aggregate, or one extension defines a member name twice. Shadowing a built-in is never allowed.
+    /// Two extensions that share a member name both load; <c>CREATE EXTENSION</c> refuses to install
+    /// both in one database (<see cref="ExtensionMemberConflict"/>). A startup failure.
     /// </summary>
     public const string ExtensionDuplicateMember = "CADB0805";
 
@@ -903,6 +904,68 @@ public static class CamusDBErrorCodes
     public const string TriggerQueueTooLarge = "CADB0826";
 
     /// <summary>
+    /// An extension assembly has no <c>[assembly: CamusExtension]</c> manifest, or its manifest has a
+    /// name that is not a plain identifier, a version that is not SemVer, or an invalid
+    /// <c>Requires</c> entry. A startup failure.
+    /// </summary>
+    public const string ExtensionManifestInvalid = "CADB0827";
+
+    /// <summary>
+    /// <c>CREATE EXTENSION</c> or <c>ALTER EXTENSION ... UPDATE</c> names an extension, or a version of
+    /// one, that the node running the statement does not load. Deploy the file and list it in
+    /// <c>extension_assemblies</c> first. Maps to HTTP 400.
+    /// </summary>
+    public const string ExtensionNotAvailable = "CADB0828";
+
+    /// <summary><c>CREATE EXTENSION</c> names an extension already installed in the database. Maps to HTTP 409.</summary>
+    public const string ExtensionAlreadyInstalled = "CADB0829";
+
+    /// <summary>
+    /// <c>ALTER</c> or <c>DROP EXTENSION</c> names an extension that is not installed in the database,
+    /// or <c>CREATE TRIGGER</c> names a type whose extension is loaded but not installed there. Maps
+    /// to HTTP 404.
+    /// </summary>
+    public const string ExtensionNotInstalled = "CADB0830";
+
+    /// <summary>
+    /// <c>CREATE</c> or <c>ALTER EXTENSION</c> needs an extension that its manifest's <c>Requires</c>
+    /// lists and that is not installed in the database. Install the required extension first. Maps
+    /// to HTTP 400.
+    /// </summary>
+    public const string ExtensionRequirementMissing = "CADB0831";
+
+    /// <summary>
+    /// <c>CREATE</c> or <c>ALTER EXTENSION</c> would install a function or a procedure whose name a
+    /// different installed extension already defines. Names resolve per database, so two installed
+    /// extensions cannot share one. Maps to HTTP 409.
+    /// </summary>
+    public const string ExtensionMemberConflict = "CADB0832";
+
+    /// <summary>
+    /// <c>DROP EXTENSION</c> is refused while another installed extension requires it, or while a
+    /// column default, a CHECK constraint, a view, a materialized view or a trigger uses one of its
+    /// members; <c>ALTER EXTENSION ... UPDATE</c> is refused when the target version lacks a member
+    /// such an object uses. The message lists the dependent objects. Maps to HTTP 409.
+    /// </summary>
+    public const string ExtensionHasDependents = "CADB0833";
+
+    /// <summary>
+    /// A statement uses a member of an extension that is installed in the database, but this node
+    /// does not load the installed build: no assembly with that extension name and version, or one
+    /// whose SHA-256 differs from the installed record. Deploy the same file on every node. The node
+    /// still serves every statement that does not use the extension. Maps to HTTP 503.
+    /// </summary>
+    public const string ExtensionNotLoadedOnNode = "CADB0834";
+
+    /// <summary>
+    /// In cluster mode, <c>CREATE</c> or <c>ALTER EXTENSION ... UPDATE</c> is refused because a live
+    /// node does not load the target build (the same name, version and SHA-256). The message names
+    /// the nodes. Deploy the file there and restart them, then run the statement again. Maps to HTTP
+    /// 409.
+    /// </summary>
+    public const string ExtensionClusterMismatch = "CADB0835";
+
+    /// <summary>
     /// Returns the HTTP status code that should be used when surfacing <paramref name="code"/>
     /// to an API caller. Client errors (permanent, non-retryable caller mistakes) map to 400;
     /// all other codes map to 500.
@@ -1013,6 +1076,14 @@ public static class CamusDBErrorCodes
         TransactionRollbackOnly => 409,
         TriggerMutationConflict => 409,
         TriggerQueueTooLarge => 400,
+        ExtensionNotAvailable => 400,
+        ExtensionAlreadyInstalled => 409,
+        ExtensionNotInstalled => 404,
+        ExtensionRequirementMissing => 400,
+        ExtensionMemberConflict => 409,
+        ExtensionHasDependents => 409,
+        ExtensionNotLoadedOnNode => 503,
+        ExtensionClusterMismatch => 409,
         _ => 500
     };
 }

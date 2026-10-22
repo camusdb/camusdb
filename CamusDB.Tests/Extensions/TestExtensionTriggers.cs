@@ -58,8 +58,7 @@ public sealed class TestExtensionTriggers : ExtensionTestBase
         Assert.AreEqual(TriggerFireTiming.After, trigger.Timing);
         Assert.AreEqual(TriggerEventSet.Insert | TriggerEventSet.Delete, trigger.Events);
         Assert.AreEqual(Fixture + "AuditTrigger", trigger.TypeName);
-        Assert.AreEqual("Fixture.Good", trigger.AssemblyName);
-        Assert.AreEqual(executor.Extensions.Extensions[0].Sha256, trigger.AssemblySha256);
+        Assert.AreEqual("good", trigger.ExtensionName, "the trigger names its extension; the hash lives on the extension record");
 
         await ExecDdl(executor, db, "DROP TRIGGER audit ON t");
         Assert.IsNull((await Schema(executor, db, "t")).Triggers);
@@ -109,6 +108,18 @@ public sealed class TestExtensionTriggers : ExtensionTestBase
     }
 
     [Test]
+    public async Task CreateTrigger_LoadedButNotInstalled_NamesTheExtensionToInstall()
+    {
+        (string db, _, CommandExecutor executor) = await CreateDatabase(WithExtensions("Fixture.Good"));
+        await CreateTables(executor, db);
+
+        CamusDBException ex = Assert.ThrowsAsync<CamusDBException>(
+            () => ExecDdl(executor, db, $"CREATE TRIGGER x ON t AFTER INSERT EXTERNAL NAME '{Fixture}AuditTrigger'"))!;
+        Assert.AreEqual(CamusDBErrorCodes.ExtensionNotInstalled, ex.Code);
+        StringAssert.Contains("CREATE EXTENSION good", ex.Message);
+    }
+
+    [Test]
     public async Task TriggerWords_StayUsableAsNames()
     {
         // No word was reserved for triggers or CALL.
@@ -139,7 +150,7 @@ public sealed class TestExtensionTriggers : ExtensionTestBase
     public async Task AfterInsert_FiresAfterTheWholeStatement_AcrossChunks()
     {
         // Chunks of two rows: an AFTER trigger that fired per chunk would count 2 or 4.
-        (string db, _, CommandExecutor executor) = await CreateDatabase(
+        (string db, _, CommandExecutor executor) = await CreateDatabaseWithGood(
             WithExtensions("Fixture.Good") with { SpillEnabled = true, ForceSpillThresholdRows = 2 });
         await CreateTables(executor, db);
         await ExecDdl(executor, db, $"CREATE TRIGGER counter ON t AFTER INSERT EXTERNAL NAME '{Fixture}CountRowsTrigger'");
@@ -155,7 +166,7 @@ public sealed class TestExtensionTriggers : ExtensionTestBase
     [Test]
     public async Task InsertSelect_FiresAfterTheWholeStatement()
     {
-        (string db, _, CommandExecutor executor) = await CreateDatabase(
+        (string db, _, CommandExecutor executor) = await CreateDatabaseWithGood(
             WithExtensions("Fixture.Good") with { SpillEnabled = true, ForceSpillThresholdRows = 2 });
         await CreateTables(executor, db);
         await ExecDdl(executor, db, "CREATE TABLE src (id INT64 PRIMARY KEY, name STRING)");
@@ -360,7 +371,7 @@ public sealed class TestExtensionTriggers : ExtensionTestBase
 
         CamusDBException ex = Assert.ThrowsAsync<CamusDBException>(
             () => ExecNonQuery(bare, db, "INSERT INTO t (name) VALUES ('x')"))!;
-        Assert.AreEqual(CamusDBErrorCodes.TriggerBindingMismatch, ex.Code);
+        Assert.AreEqual(CamusDBErrorCodes.ExtensionNotLoadedOnNode, ex.Code);
 
         // DML on a table without triggers is not affected, and reads never bind.
         await ExecNonQuery(bare, db, "INSERT INTO audit_log (op) VALUES ('manual')");
@@ -374,18 +385,25 @@ public sealed class TestExtensionTriggers : ExtensionTestBase
         await CreateTables(executor, db);
         await ExecDdl(executor, db, $"CREATE TRIGGER audit ON t AFTER INSERT EXTERNAL NAME '{Fixture}AuditTrigger'");
 
-        // The record as another build would have stored it: same type, another hash.
-        TableSchema schema = await Schema(executor, db, "t");
-        TriggerDefinition original = schema.Triggers!.Single();
-        schema.Triggers = [new TriggerDefinition
-        {
-            Name = original.Name, Timing = original.Timing, Events = original.Events, TypeName = original.TypeName,
-            AssemblyName = original.AssemblyName, AssemblySha256 = new string('0', 64), CreatedAt = original.CreatedAt,
-        }];
+        // The extension record as another build would have stored it: same name and version, another
+        // hash. The trigger holds no hash of its own, so it follows the extension record.
+        DatabaseDescriptor database = await executor.OpenDatabase(db);
+        ExtensionDefinition installed = database.Schema.Extensions["good"];
+        database.Schema.ExtensionCatalog.Publish(
+            new Dictionary<string, ExtensionDefinition>(StringComparer.OrdinalIgnoreCase)
+            {
+                ["good"] = new()
+                {
+                    Name = installed.Name, Version = installed.Version, Sha256 = new string('0', 64),
+                    Requires = installed.Requires, Members = installed.Members,
+                    InstalledAt = installed.InstalledAt, UpdatedAt = installed.UpdatedAt,
+                },
+            },
+            database.Schema.SchemaVersion + 1000);
 
         CamusDBException ex = Assert.ThrowsAsync<CamusDBException>(
             () => ExecNonQuery(executor, db, "INSERT INTO t (name) VALUES ('x')"))!;
-        Assert.AreEqual(CamusDBErrorCodes.TriggerBindingMismatch, ex.Code);
+        Assert.AreEqual(CamusDBErrorCodes.ExtensionNotLoadedOnNode, ex.Code);
         StringAssert.Contains("sha256", ex.Message);
     }
 

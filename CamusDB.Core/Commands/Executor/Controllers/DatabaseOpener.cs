@@ -178,6 +178,12 @@ internal sealed class DatabaseOpener
         // resolving it and referencing it.
         descriptor.Touch();
 
+        // The statement entered its function-scope frame by database name before this open; give it
+        // the database now, so its extension calls resolve against what this database installed. The
+        // frame object is shared with the caller's flow, so the write reaches it (see
+        // ExtensionFunctionScope). A frame entered for another database ignores this.
+        Extensions.ExtensionFunctionScope.Current?.Attach(name, descriptor.Schema.ExtensionCatalog);
+
         return descriptor;
     }
 

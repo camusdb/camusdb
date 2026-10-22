@@ -79,6 +79,8 @@ public static class GrpcErrorMapper
         CamusDBErrorCodes.ExtensionStatementRefused => StatusCode.InvalidArgument,
         CamusDBErrorCodes.ProcedureFailed => StatusCode.InvalidArgument,
         CamusDBErrorCodes.ExtensionCaughtSqlError => StatusCode.InvalidArgument,
+        CamusDBErrorCodes.ExtensionNotAvailable => StatusCode.InvalidArgument,
+        CamusDBErrorCodes.ExtensionRequirementMissing => StatusCode.InvalidArgument,
 
         // A NUMERIC value outside the type's range, as Spanner reports it.
         CamusDBErrorCodes.NumericValueOutOfRange => StatusCode.OutOfRange,
@@ -93,6 +95,7 @@ public static class GrpcErrorMapper
         CamusDBErrorCodes.QueryNotFound       => StatusCode.NotFound,
         CamusDBErrorCodes.TriggerNotFound     => StatusCode.NotFound,
         CamusDBErrorCodes.ProcedureNotFound   => StatusCode.NotFound,
+        CamusDBErrorCodes.ExtensionNotInstalled => StatusCode.NotFound,
 
         // Already exists
         CamusDBErrorCodes.DuplicateUniqueKeyValue => StatusCode.AlreadyExists,
@@ -100,6 +103,7 @@ public static class GrpcErrorMapper
         CamusDBErrorCodes.DatabaseAlreadyExists   => StatusCode.AlreadyExists,
         CamusDBErrorCodes.TableAlreadyExists      => StatusCode.AlreadyExists,
         CamusDBErrorCodes.TriggerAlreadyExists    => StatusCode.AlreadyExists,
+        CamusDBErrorCodes.ExtensionAlreadyInstalled => StatusCode.AlreadyExists,
 
         // Failed precondition (non-retryable transaction state)
         CamusDBErrorCodes.TransactionAlreadyCompleted => StatusCode.FailedPrecondition,
@@ -119,6 +123,7 @@ public static class GrpcErrorMapper
         // The trigger's extension is missing here or differs from the one it was created with; a
         // node that deploys the right file can run the same statement.
         CamusDBErrorCodes.TriggerBindingMismatch => StatusCode.Unavailable,
+        CamusDBErrorCodes.ExtensionNotLoadedOnNode => StatusCode.Unavailable,
 
         // Refused because of what the data or the schema holds right now, not because of the
         // statement text: the same statement succeeds once the dependent rows or objects are gone.
@@ -128,6 +133,9 @@ public static class GrpcErrorMapper
         CamusDBErrorCodes.DependentObjectsExist    => StatusCode.FailedPrecondition,
         CamusDBErrorCodes.TransactionRollbackOnly  => StatusCode.FailedPrecondition,
         CamusDBErrorCodes.TriggerMutationConflict  => StatusCode.FailedPrecondition,
+        CamusDBErrorCodes.ExtensionMemberConflict  => StatusCode.FailedPrecondition,
+        CamusDBErrorCodes.ExtensionHasDependents   => StatusCode.FailedPrecondition,
+        CamusDBErrorCodes.ExtensionClusterMismatch => StatusCode.FailedPrecondition,
 
         // Retryable transaction conflicts → ABORTED (trailer code disambiguates)
         CamusDBErrorCodes.TransactionConflict        => StatusCode.Aborted,

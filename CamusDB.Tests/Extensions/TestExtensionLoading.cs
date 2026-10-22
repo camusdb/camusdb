@@ -6,6 +6,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Reflection;
@@ -62,7 +63,9 @@ public sealed class TestExtensionLoading : ExtensionTestBase
         CommandExecutor executor = CreateCommandExecutor(WithExtensions("Fixture.Good"));
 
         LoadedExtension extension = executor.Extensions.Extensions.Single();
-        Assert.AreEqual("Fixture.Good", extension.Name);
+        Assert.AreEqual("good", extension.Name, "the manifest names the extension");
+        Assert.AreEqual("1.0.0", extension.Version);
+        Assert.AreEqual("Fixture.Good", extension.AssemblyName);
         Assert.AreEqual(ExtensionTrust.Safe, extension.Trust);
         Assert.AreEqual(64, extension.Sha256.Length);
         Assert.AreEqual(FixturePath("Fixture.Good"), extension.Path);
@@ -73,7 +76,8 @@ public sealed class TestExtensionLoading : ExtensionTestBase
         CollectionAssert.Contains(extension.Procedures, "fx_transfer");
         CollectionAssert.DoesNotContain(extension.Triggers, "CamusDB.Fixtures.Good.NotATrigger");
 
-        Assert.IsTrue(executor.Extensions.HasFunction("FX_SLUGIFY"), "function names are case-insensitive");
+        Assert.IsTrue(extension.FunctionTable.ContainsKey("FX_SLUGIFY"), "function names are case-insensitive");
+        Assert.AreSame(extension, executor.Extensions.Find("GOOD", "1.0.0"), "extension names are case-insensitive");
     }
 
     [Test]
@@ -89,7 +93,9 @@ public sealed class TestExtensionLoading : ExtensionTestBase
         var rows = await ExecQuery(executor, db, "SHOW EXTENSIONS");
         Assert.AreEqual(2, rows.Count);
 
-        var good = rows.Single(r => r["name"].StrValue == "Fixture.Good");
+        var good = rows.Single(r => r["name"].StrValue == "good");
+        Assert.AreEqual("1.0.0", good["version"].StrValue);
+        Assert.AreEqual("available", good["status"].StrValue, "loaded but not installed in this database");
         Assert.AreEqual("safe", good["trust"].StrValue);
         Assert.AreEqual(executor.Extensions.Extensions[0].Sha256, good["sha256"].StrValue);
         Assert.AreEqual(FixturePath("Fixture.Good"), good["path"].StrValue);
@@ -97,7 +103,7 @@ public sealed class TestExtensionLoading : ExtensionTestBase
         StringAssert.Contains("CamusDB.Fixtures.Good.AuditTrigger", good["triggers"].StrValue);
         StringAssert.Contains("fx_transfer", good["procedures"].StrValue);
 
-        Assert.AreEqual("unsafe", rows.Single(r => r["name"].StrValue == "Fixture.BannedApis")["trust"].StrValue);
+        Assert.AreEqual("unsafe", rows.Single(r => r["name"].StrValue == "banned_apis")["trust"].StrValue);
     }
 
     [Test]
@@ -168,17 +174,71 @@ public sealed class TestExtensionLoading : ExtensionTestBase
     }
 
     [Test]
-    public void CollisionBetweenExtensions_FailsBoot()
+    public void SharedMemberNameBetweenExtensions_BothLoad()
     {
-        CamusDBException ex = AssertBootFails(WithExtensions("Fixture.Good", "Fixture.Duplicate"));
-        Assert.AreEqual(CamusDBErrorCodes.ExtensionDuplicateMember, ex.Code);
-        StringAssert.Contains("fx_slugify", ex.Message);
+        // Both define fx_slugify. Loading makes them available only; installing both in one database
+        // is what is refused (see TestExtensionPackaging).
+        CommandExecutor executor = CreateCommandExecutor(WithExtensions("Fixture.Good", "Fixture.Duplicate"));
+        Assert.AreEqual(2, executor.Extensions.Extensions.Count);
     }
 
     [Test]
-    public void DuplicateAssemblyName_FailsBoot()
+    public void MissingManifest_FailsBoot()
     {
-        // The same assembly copied to a second path is a second configured file with the same name.
+        CamusDBException ex = AssertBootFails(WithExtensions("Fixture.NoManifest"));
+        Assert.AreEqual(CamusDBErrorCodes.ExtensionManifestInvalid, ex.Code);
+        StringAssert.Contains("CamusExtension", ex.Message);
+    }
+
+    [Test]
+    public void TwoVersionsOfOneExtension_LoadSideBySide()
+    {
+        CommandExecutor executor = CreateCommandExecutor(WithExtensions("Fixture.Good", "Fixture.GoodV2"));
+
+        IReadOnlyList<LoadedExtension> versions = executor.Extensions.GetVersions("good");
+        Assert.AreEqual(2, versions.Count);
+        Assert.AreEqual("2.0.0", versions[0].Version, "highest version first");
+        Assert.AreEqual("1.0.0", versions[1].Version);
+        Assert.AreNotEqual(versions[0].Sha256, versions[1].Sha256);
+        Assert.IsTrue(versions[1].FunctionTable.ContainsKey("fx_v1_only"));
+        Assert.IsFalse(versions[0].FunctionTable.ContainsKey("fx_v1_only"));
+    }
+
+    [Test]
+    public void Manifest_IsReadFromMetadata()
+    {
+        ExtensionAssemblyIdentity identity = ExtensionAssemblyVerifier.ReadIdentity(File.ReadAllBytes(FixturePath("Fixture.Requires")), "x");
+
+        Assert.AreEqual("needs_good", identity.Manifest!.Name);
+        Assert.AreEqual("1.0.0", identity.Manifest.Version);
+        CollectionAssert.AreEqual(new[] { "good" }, identity.Manifest.Requires);
+
+        Assert.IsNull(ExtensionAssemblyVerifier.ReadIdentity(File.ReadAllBytes(FixturePath("Fixture.NoManifest")), "x").Manifest);
+    }
+
+    [Test]
+    public void ExtensionVersion_FollowsSemVerPrecedence()
+    {
+        static ExtensionVersion V(string text)
+        {
+            Assert.IsTrue(ExtensionVersion.TryParse(text, out ExtensionVersion version), text);
+            return version;
+        }
+
+        string[] ordered = ["1.0.0-alpha", "1.0.0-alpha.1", "1.0.0-alpha.beta", "1.0.0-beta", "1.0.0-beta.2", "1.0.0-beta.11", "1.0.0-rc.1", "1.0.0", "1.0.1", "1.2.0", "2.0.0", "10.0.0"];
+
+        for (int i = 1; i < ordered.Length; i++)
+            Assert.Less(V(ordered[i - 1]).CompareTo(V(ordered[i])), 0, $"{ordered[i - 1]} < {ordered[i]}");
+
+        foreach (string invalid in new[] { "", "1", "1.0", "1.0.0.0", "01.0.0", "1.0.0+build", "1.0.0-", "1.0.0-a..b", "a.b.c" })
+            Assert.IsFalse(ExtensionVersion.TryParse(invalid, out _), invalid);
+    }
+
+    [Test]
+    public void DuplicateExtensionVersion_FailsBoot()
+    {
+        // The same assembly copied to a second path is a second configured file with the same
+        // extension name and version.
         string copyDirectory = Path.Combine(Path.GetTempPath(), "camusdb-ext-" + Guid.NewGuid().ToString("n"));
         Directory.CreateDirectory(copyDirectory);
         string copy = Path.Combine(copyDirectory, "Fixture.Good.dll");
@@ -280,6 +340,8 @@ public sealed class TestExtensionLoading : ExtensionTestBase
             Options with { UnsafeExtensionAssemblies = [FixturePath("Fixture.UsesHelper")] });
 
         Assert.AreEqual(ExtensionTrust.Unsafe, executor.Extensions.Extensions.Single().Trust);
+
+        await ExecDdl(executor, dbname, "CREATE EXTENSION uses_helper");
         Assert.AreEqual("hello world", (await Scalar(executor, dbname, "SELECT fx_helper_hello('world')")).StrValue);
     }
 
@@ -289,7 +351,7 @@ public sealed class TestExtensionLoading : ExtensionTestBase
         CommandExecutor executor = CreateCommandExecutor(
             Options with { UnsafeExtensionAssemblies = [FixturePath("Fixture.BannedApis")] });
 
-        Assert.IsTrue(executor.Extensions.HasFunction("fx_banned_file"));
+        Assert.IsTrue(executor.Extensions.Extensions.Single().FunctionTable.ContainsKey("fx_banned_file"));
     }
 
     [Test]

@@ -20,7 +20,7 @@ namespace CamusDB.Core.Cache;
 ///
 /// <para>The fingerprint encodes all inputs that distinguish one result from another:
 /// database identity, cache family name, query shape, typed parameter values, schema
-/// versions, and cache options. Two queries that differ in any of these produce different
+/// versions, the stamp of the database's installed C# extensions, and cache options. Two queries that differ in any of these produce different
 /// fingerprints; two that are identical in all of them map to the same cache slot.</para>
 ///
 /// <para><b>Important invariants:</b></para>
@@ -76,7 +76,8 @@ public static class ResultFingerprintBuilder
         string? queryShapeId,
         Dictionary<string, ColumnValue>? parameters,
         IReadOnlyList<(string TableId, int SchemaVersion)>? schemaDeps,
-        CacheHintOptions hint)
+        CacheHintOptions hint,
+        long extensionStamp = 0)
     {
         var sb = new StringBuilder(256);
 
@@ -135,6 +136,12 @@ public static class ResultFingerprintBuilder
         {
             sb.Append("schema:\n");
         }
+
+        // The installed C# extensions of the database: a result computed with one set of extension
+        // functions must not be served once that set changes. Left out while nothing is installed, so
+        // the fingerprint of a database without extensions is the same as before extensions existed.
+        if (extensionStamp != 0)
+            sb.Append("ext:").Append(extensionStamp).Append('\n');
 
         // Cache options (both are scalars — no injection risk).
         sb.Append("strict:").Append(hint.IsStrict ? '1' : '0').Append('\n');

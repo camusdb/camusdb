@@ -55,6 +55,7 @@ public sealed class TestExtensionTransports : ExtensionTestBase
     private async Task<(string db, CommandExecutor executor)> SetupAsync()
     {
         (string db, _, CommandExecutor executor) = await CreateDatabase();
+        await ExecDdl(executor, db, "CREATE EXTENSION good");
         await ExecDdl(executor, db, "CREATE TABLE accounts (id OID PRIMARY KEY DEFAULT (gen_id()), name STRING, balance INT64)");
         await ExecNonQuery(executor, db, "INSERT INTO accounts (name, balance) VALUES ('alice', 100), ('bob', 0)");
         return (db, executor);
@@ -104,6 +105,26 @@ public sealed class TestExtensionTransports : ExtensionTestBase
         Assert.AreEqual("ok", ((ExecuteNonSQLQueryResponse)dropped.Value!).Status);
 
         JsonResult missing = await Controller(executor, db, "DROP TRIGGER guard ON accounts").ExecuteSQLDDL();
+        Assert.AreEqual(404, missing.StatusCode);
+    }
+
+    [Test]
+    public async Task Rest_ExtensionDdl_OnTheDdlAndNonQueryEndpoints()
+    {
+        (string db, _, CommandExecutor executor) = await CreateDatabase();
+
+        JsonResult created = await Controller(executor, db, "CREATE EXTENSION good VERSION '1.0.0'").ExecuteSQLDDL();
+        Assert.AreEqual(200, created.StatusCode ?? 200);
+        Assert.AreEqual("a-b", (await Scalar(executor, db, "SELECT fx_slugify('A B')")).StrValue);
+
+        JsonResult again = await Controller(executor, db, "CREATE EXTENSION good").ExecuteSQLDDL();
+        Assert.AreEqual(409, again.StatusCode, "already installed");
+
+        // Schema DDL is also accepted by the non-query endpoint.
+        JsonResult dropped = await Controller(executor, db, "DROP EXTENSION good").ExecuteNonSQLQuery();
+        Assert.AreEqual("ok", ((ExecuteNonSQLQueryResponse)dropped.Value!).Status);
+
+        JsonResult missing = await Controller(executor, db, "DROP EXTENSION good").ExecuteSQLDDL();
         Assert.AreEqual(404, missing.StatusCode);
     }
 

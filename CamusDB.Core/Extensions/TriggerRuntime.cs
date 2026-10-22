@@ -20,14 +20,14 @@ namespace CamusDB.Core.Extensions;
 /// triggers that fire on their table and operation; a table without triggers costs one null check
 /// and allocates nothing.
 ///
-/// <para><b>Binding.</b> A <see cref="TriggerDefinition"/> is bound to this engine's loaded
-/// extensions the first time a statement fires it, and the result is cached on the record
-/// (<see cref="TriggerDefinition.Binding"/>). The record names the type, its assembly and the SHA-256
-/// of that assembly on the node that created it; a node that does not load the type, or loads a
-/// build with another hash, refuses the DML with <see cref="CamusDBErrorCodes.TriggerBindingMismatch"/>.
-/// The failure is cached too: the extension set is fixed for the life of the engine, so the answer
-/// cannot change. A schema change that replaces the trigger list drops the cached bindings with the
-/// records.</para>
+/// <para><b>Binding.</b> A <see cref="TriggerDefinition"/> names its type and its installed extension.
+/// It is bound to this engine's loaded build of the installed version the first time a statement
+/// fires it, and the result is cached on the record (<see cref="TriggerDefinition.Binding"/>) together
+/// with the extension record it was resolved against. <c>ALTER EXTENSION ... UPDATE</c> publishes a new
+/// extension record, so the next DML binds the trigger to the new build with no change to the trigger.
+/// A node that does not load the installed build refuses the DML with
+/// <see cref="CamusDBErrorCodes.ExtensionNotLoadedOnNode"/>; that failure is cached too, because the
+/// loaded set is fixed for the life of the engine.</para>
 ///
 /// <para><b>Where triggers fire.</b> On the node that runs the statement, inside its transaction,
 /// once per affected row. No SQL-layer DML is forwarded between nodes, so a statement's triggers run
@@ -47,7 +47,8 @@ internal sealed class TriggerRuntime
     /// <summary>
     /// The triggers that fire for <paramref name="operation"/> on <paramref name="table"/> in this
     /// statement, bound and ready, or null when there are none. Throws
-    /// <see cref="CamusDBErrorCodes.TriggerBindingMismatch"/> before any row is written when a trigger
+    /// <see cref="CamusDBErrorCodes.ExtensionNotLoadedOnNode"/> (or
+    /// <see cref="CamusDBErrorCodes.TriggerBindingMismatch"/>) before any row is written when a trigger
     /// cannot bind on this node.
     /// </summary>
     public StatementTriggers? ForStatement(DatabaseDescriptor database, TableDescriptor table, KvTransaction transaction, TriggerEventSet operation)
@@ -63,7 +64,7 @@ internal sealed class TriggerRuntime
             if (!definition.FiresOn(operation))
                 continue;
 
-            BoundTrigger bound = Bind(definition);
+            BoundTrigger bound = Bind(database, definition);
 
             if (definition.Timing == TriggerFireTiming.Before)
                 (before ??= []).Add(bound);
@@ -90,54 +91,66 @@ internal sealed class TriggerRuntime
             queueBudget);
     }
 
-    private BoundTrigger Bind(TriggerDefinition definition)
+    private BoundTrigger Bind(DatabaseDescriptor database, TriggerDefinition definition)
     {
         ExtensionRegistry registry = executor.Extensions;
+        database.Schema.Extensions.TryGetValue(definition.ExtensionName, out ExtensionDefinition? record);
 
-        // Cached per registry, so a record shared by two engines in one process (never in production)
-        // still binds against each engine's own extensions.
-        if (definition.Binding is TriggerBinding cached && ReferenceEquals(cached.Registry, registry))
+        // Cached per registry and per extension record: a record shared by two engines in one process
+        // (never in production) still binds against each engine's own extensions, and an update of the
+        // extension, which publishes a new record, makes the trigger bind again.
+        if (definition.Binding is TriggerBinding cached && ReferenceEquals(cached.Registry, registry) && ReferenceEquals(cached.Record, record))
             return cached.Bound ?? throw cached.Error!;
 
-        TriggerBinding binding = Resolve(definition, registry);
+        TriggerBinding binding = Resolve(executor.ExtensionScopes, database, definition, record, registry);
         definition.Binding = binding;
 
         return binding.Bound ?? throw binding.Error!;
     }
 
-    private static TriggerBinding Resolve(TriggerDefinition definition, ExtensionRegistry registry)
+    private static TriggerBinding Resolve(
+        ExtensionScopeFrames scopes, DatabaseDescriptor database, TriggerDefinition definition, ExtensionDefinition? record, ExtensionRegistry registry)
     {
-        TriggerTypeLookup lookup = registry.FindTriggerType(definition.TypeName, out ExtensionTriggerType? type);
-
-        if (lookup != TriggerTypeLookup.Found)
-            return TriggerBinding.Failed(registry, new CamusDBException(
+        if (record is null)
+            return TriggerBinding.Failed(registry, record, new CamusDBException(
                 CamusDBErrorCodes.TriggerBindingMismatch,
-                $"Trigger '{definition.Name}' needs type '{definition.TypeName}' from extension '{definition.AssemblyName}', " +
-                "which this node does not load. Deploy the same extension files on every node."));
+                $"Trigger '{definition.Name}' needs extension '{definition.ExtensionName}', which is not installed in this database"));
 
-        if (!string.Equals(type!.Source.Name, definition.AssemblyName, StringComparison.OrdinalIgnoreCase) ||
-            !string.Equals(type.Source.Sha256, definition.AssemblySha256, StringComparison.OrdinalIgnoreCase))
-            return TriggerBinding.Failed(registry, new CamusDBException(
+        LoadedExtension? build;
+
+        try
+        {
+            build = scopes.Resolve(database).GetBound(record.Name, "trigger '" + definition.Name + "'");
+        }
+        catch (CamusDBException ex)
+        {
+            return TriggerBinding.Failed(registry, record, ex);
+        }
+
+        if (build is null || build.FindTriggerType(definition.TypeName, out ExtensionTriggerType? type) != TriggerTypeLookup.Found)
+            return TriggerBinding.Failed(registry, record, new CamusDBException(
                 CamusDBErrorCodes.TriggerBindingMismatch,
-                $"Trigger '{definition.Name}' was created with extension '{definition.AssemblyName}' sha256 {definition.AssemblySha256}, " +
-                $"but this node loads '{type.Source.Name}' sha256 {type.Source.Sha256}. Deploy the same extension files on every node, " +
-                "or drop and re-create the trigger after an upgrade."));
+                $"Trigger '{definition.Name}' needs type '{definition.TypeName}', which extension '{record.Name}' {record.Version} does not define"));
 
-        return TriggerBinding.Succeeded(registry, new BoundTrigger(definition, type));
+        return TriggerBinding.Succeeded(registry, record, new BoundTrigger(definition, type!));
     }
 
-    /// <summary>The cached outcome of binding one record on one engine.</summary>
+    /// <summary>The cached outcome of binding one record on one engine against one extension record.</summary>
     private sealed class TriggerBinding
     {
         public required ExtensionRegistry Registry { get; init; }
+
+        public required ExtensionDefinition? Record { get; init; }
 
         public BoundTrigger? Bound { get; init; }
 
         public CamusDBException? Error { get; init; }
 
-        public static TriggerBinding Succeeded(ExtensionRegistry registry, BoundTrigger bound) => new() { Registry = registry, Bound = bound };
+        public static TriggerBinding Succeeded(ExtensionRegistry registry, ExtensionDefinition record, BoundTrigger bound) =>
+            new() { Registry = registry, Record = record, Bound = bound };
 
-        public static TriggerBinding Failed(ExtensionRegistry registry, CamusDBException error) => new() { Registry = registry, Error = error };
+        public static TriggerBinding Failed(ExtensionRegistry registry, ExtensionDefinition? record, CamusDBException error) =>
+            new() { Registry = registry, Record = record, Error = error };
     }
 }
 

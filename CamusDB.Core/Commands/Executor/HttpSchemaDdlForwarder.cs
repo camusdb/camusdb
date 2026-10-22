@@ -30,7 +30,7 @@ namespace CamusDB.Core.CommandsExecutor;
 /// <c>Program.cs</c> with a resolver that substitutes the HTTP port; in tests,
 /// inject the fake server URI directly.
 /// </summary>
-public sealed class HttpSchemaDdlForwarder : ISchemaDdlForwarder, ISchemaAckSender
+public sealed class HttpSchemaDdlForwarder : ISchemaDdlForwarder, ISchemaAckSender, IExtensionPeerProbe
 {
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
@@ -477,5 +477,38 @@ public sealed class HttpSchemaDdlForwarder : ISchemaDdlForwarder, ISchemaAckSend
             };
         }
         return result;
+    }
+
+    /// <summary>
+    /// Asks a peer's <c>/internal/schema-ddl/loaded-extensions</c> endpoint which extension builds it
+    /// loaded. Any transport failure, timeout or malformed answer is reported as null (unreachable).
+    /// </summary>
+    async Task<IReadOnlyList<LoadedExtensionProbeEntry>?> IExtensionPeerProbe.ProbeLoadedExtensionsAsync(
+        string nodeEndpoint,
+        CancellationToken cancellationToken)
+    {
+        Uri endpoint = new(endpointResolver(nodeEndpoint), "/internal/schema-ddl/loaded-extensions");
+
+        HttpResponseMessage? response = null;
+        try
+        {
+            response = await PostJsonAsync(endpoint, new { }, cancellationToken).ConfigureAwait(false);
+
+            LoadedExtensionsProbeResponse? body = response.IsSuccessStatusCode
+                ? await response.Content.ReadFromJsonAsync<LoadedExtensionsProbeResponse>(JsonOptions, cancellationToken).ConfigureAwait(false)
+                : null;
+
+            return body is not null && string.Equals(body.Status, "ok", StringComparison.Ordinal) ? body.Extensions : null;
+        }
+        catch (Exception ex) when (ex is HttpRequestException or System.Text.Json.JsonException
+                                   || (ex is TaskCanceledException && !cancellationToken.IsCancellationRequested))
+        {
+            Log.LogLoadedExtensionsProbeFailed(logger, ex, endpoint);
+            return null;
+        }
+        finally
+        {
+            response?.Dispose();
+        }
     }
 }

@@ -50,6 +50,12 @@ CamusDB.Tests.Extensions/Fixture.Unsafe/bin
 CamusDB.Tests.Extensions/Fixture.Unsafe/obj
 CamusDB.Tests.Extensions/Fixture.UsesHelper/bin
 CamusDB.Tests.Extensions/Fixture.UsesHelper/obj
+CamusDB.Tests.Extensions/Fixture.Requires/bin
+CamusDB.Tests.Extensions/Fixture.Requires/obj
+CamusDB.Tests.Extensions/Fixture.NoManifest/bin
+CamusDB.Tests.Extensions/Fixture.NoManifest/obj
+CamusDB.Tests.Extensions/Fixture.GoodV2/obj
+CamusDB.Tests.Extensions/Fixture.GoodV2/bin
 BenchmarkDotNet.Artifacts/
 .vs/
 .idea/

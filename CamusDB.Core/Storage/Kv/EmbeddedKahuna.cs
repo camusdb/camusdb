@@ -1566,6 +1566,18 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
         return members;
     }
 
+    /// <summary>
+    /// Asks a peer which extension builds it loaded, through the same node-to-node channel as the
+    /// schema-ack pull probe. Null when this node has no such channel (standalone, or before the
+    /// transport is wired); read when a statement needs it, because the transport is installed after
+    /// the engine is built.
+    /// </summary>
+    internal CamusDB.Core.CommandsExecutor.IExtensionPeerProbe? ExtensionPeerProbe =>
+        isClusterMode ? schemaAckSender as CamusDB.Core.CommandsExecutor.IExtensionPeerProbe : null;
+
+    /// <summary>Every configured peer except the local node: the nodes the extension cluster check asks.</summary>
+    internal IReadOnlyList<string> GetRosterPeerEndpoints() => GetRosterPeers();
+
     /// <summary>Every configured peer except the local node; the universe a gate may discover members in.</summary>
     private IReadOnlyList<string> GetRosterPeers()
     {

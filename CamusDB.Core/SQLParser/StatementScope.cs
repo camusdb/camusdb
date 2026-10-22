@@ -93,7 +93,8 @@ public static class StatementScope
         NodeType.CreateSequence or NodeType.CreateSequenceIfNotExists or
         NodeType.DropSequence or NodeType.DropSequenceIfExists or
         NodeType.AlterSequence or NodeType.AlterSequenceRenameTo or
-        NodeType.CreateTrigger or NodeType.DropTrigger;
+        NodeType.CreateTrigger or NodeType.DropTrigger or
+        NodeType.CreateExtension or NodeType.AlterExtensionUpdate or NodeType.DropExtension;
 
     /// <summary>
     /// True for the row-returning statements the query executor answers <b>before</b> opening a

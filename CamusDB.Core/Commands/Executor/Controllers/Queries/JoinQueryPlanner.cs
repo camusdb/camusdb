@@ -110,10 +110,14 @@ internal sealed class JoinQueryPlanner
         Dictionary<string, ColumnValue>? clockValues = ClockScalarFunctions.ClockValuesOnly(ticket.Parameters);
 
         JoinOrderChoice? choice = null;
+        // Read once, before the lookup, and used again for the store: a plan built while an
+        // extension install or update lands is then filed under the stamp it was built with.
+        long extensionStamp = database.Schema.ExtensionCatalog.Stamp;
+
         bool fromCache = false;
 
         if (planCacheEnabled
-            && _cache!.TryGet(database.Id, shapeId, cacheDeps!, out PlanCacheEntry? cached)
+            && _cache!.TryGet(database.Id, shapeId, cacheDeps!, out PlanCacheEntry? cached, extensionStamp)
             && cached!.JoinAliasOrder is { } cachedAliasOrder)
         {
             // Re-apply the cached ordering to the CURRENT bound.Query.Source so that ON-predicate
@@ -171,7 +175,8 @@ internal sealed class JoinQueryPlanner
                 new PlanCacheEntry(cacheDeps!, SingleTable: null,
                     JoinAliasOrder: CollectAliasOrder(orderedSource),
                     JoinBuild: choice.Mode,
-                    JoinKeyRowsBounds: CollectKeyRowsBounds(orderedSource, choice.StepEstimates)));
+                    JoinKeyRowsBounds: CollectKeyRowsBounds(orderedSource, choice.StepEstimates)),
+                extensionStamp);
 
         return plan;
     }

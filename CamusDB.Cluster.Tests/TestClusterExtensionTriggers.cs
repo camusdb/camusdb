@@ -86,6 +86,7 @@ public sealed class TestClusterExtensionTriggers
             // The table name is unique per run: the counting trigger keeps a static count per name.
             string table = "t" + Guid.NewGuid().ToString("N")[..8];
 
+            await DdlOnLeaderAsync(cluster, db, "CREATE EXTENSION good");
             await DdlOnLeaderAsync(cluster, db, $"CREATE TABLE {table} (id OID PRIMARY KEY DEFAULT (gen_id()), name STRING)");
             await DdlOnLeaderAsync(cluster, db,
                 $"CREATE TRIGGER counter ON {table} AFTER INSERT EXTERNAL NAME 'CamusDB.Fixtures.Good.CountingTrigger'");

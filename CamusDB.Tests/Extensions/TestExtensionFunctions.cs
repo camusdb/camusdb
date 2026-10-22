@@ -308,10 +308,10 @@ public sealed class TestExtensionFunctions : ExtensionTestBase
     }
 
     [Test]
-    public void Shippability_RefusesExtensionCallsEvenInsideTheScope()
+    public async Task Shippability_RefusesExtensionCallsEvenInsideTheScope()
     {
-        CommandExecutor executor = CreateCommandExecutor(WithExtensions("Fixture.Good"));
-        ExtensionFunctionScope.Enter(executor.Extensions);
+        (_, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabaseWithGoodFixture();
+        executor.EnterExtensionScope(database);
 
         try
         {
@@ -329,15 +329,15 @@ public sealed class TestExtensionFunctions : ExtensionTestBase
     }
 
     [Test]
-    public void VolatilityWalk_SeesExtensionFunctionsOnlyInsideTheScope()
+    public async Task VolatilityWalk_SeesExtensionFunctionsOnlyInsideTheScope()
     {
-        CommandExecutor executor = CreateCommandExecutor(WithExtensions("Fixture.Good"));
+        (_, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabaseWithGoodFixture();
         NodeAst ast = SQLParserProcessor.Parse("SELECT fx_counter()");
 
         ExtensionFunctionScope.Enter(null);
         Assert.IsFalse(ScalarFunctionEvaluator.ContainsVolatileFunction(ast), "an unknown name counts as non-volatile");
 
-        ExtensionFunctionScope.Enter(executor.Extensions);
+        executor.EnterExtensionScope(database);
         Assert.IsTrue(ScalarFunctionEvaluator.ContainsVolatileFunction(ast));
         Assert.IsTrue(ScalarFunctionEvaluator.IsRegisteredScalarFunction("fx_counter"));
         Assert.IsFalse(ScalarFunctionEvaluator.IsBuiltInScalarFunction("fx_counter"));

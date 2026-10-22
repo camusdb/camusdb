@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- Test-only: version 2.0.0 of the "good" extension, built from Fixture.Good's own sources with
+       GOOD_V2 defined. The assembly name differs so both builds can sit in extension-fixtures/; the
+       manifest name is what makes them two versions of one extension. -->
+  <PropertyGroup>
+    <DefineConstants>$(DefineConstants);GOOD_V2</DefineConstants>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="..\Fixture.Good\*.cs" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\..\CamusDB.Extensions.Abstractions\CamusDB.Extensions.Abstractions.csproj" />
+  </ItemGroup>
+</Project>

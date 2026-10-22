@@ -131,6 +131,44 @@ internal partial class sqlParser
         return new NodeAst(NodeType.DropTrigger, name, table, null, null, null, null, null, null);
     }
 
+    private const string ExtensionGuidance =
+        "Expected: CREATE EXTENSION <name> [VERSION '<version>'], ALTER EXTENSION <name> UPDATE [TO '<version>'] or DROP EXTENSION <name>";
+
+    /// <summary>
+    /// Builds a <see cref="NodeType.CreateExtension"/> node after checking the plain-identifier words
+    /// EXTENSION and VERSION. <c>leftAst</c> is the extension name and <c>rightAst</c> the version
+    /// string literal, still quoted, or null when the statement names no version.
+    /// </summary>
+    private static NodeAst CreateExtensionStatement(string? extensionWord, NodeAst name, string? versionWord, NodeAst? version)
+    {
+        if (!string.Equals(extensionWord, "extension", StringComparison.OrdinalIgnoreCase) ||
+            (version is not null && !string.Equals(versionWord, "version", StringComparison.OrdinalIgnoreCase)))
+            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, ExtensionGuidance);
+
+        return new NodeAst(NodeType.CreateExtension, name, version, null, null, null, null, null, null);
+    }
+
+    /// <summary>
+    /// Builds a <see cref="NodeType.AlterExtensionUpdate"/> node after checking the word EXTENSION.
+    /// <c>rightAst</c> is the target version literal, or null for the highest loaded version.
+    /// </summary>
+    private static NodeAst AlterExtensionStatement(string? extensionWord, NodeAst name, NodeAst? version)
+    {
+        if (!string.Equals(extensionWord, "extension", StringComparison.OrdinalIgnoreCase))
+            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, ExtensionGuidance);
+
+        return new NodeAst(NodeType.AlterExtensionUpdate, name, version, null, null, null, null, null, null);
+    }
+
+    /// <summary>Builds a <see cref="NodeType.DropExtension"/> node after checking the word EXTENSION.</summary>
+    private static NodeAst DropExtensionStatement(string? extensionWord, NodeAst name)
+    {
+        if (!string.Equals(extensionWord, "extension", StringComparison.OrdinalIgnoreCase))
+            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, ExtensionGuidance);
+
+        return new NodeAst(NodeType.DropExtension, name, null, null, null, null, null, null, null);
+    }
+
     /// <summary>
     /// Builds a <see cref="NodeType.Call"/> node after checking the word CALL. <c>leftAst</c> is the
     /// procedure name identifier and <c>rightAst</c> the argument list, null for no arguments.

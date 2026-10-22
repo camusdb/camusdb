@@ -829,6 +829,7 @@ To scale to databases with many tables, metadata is stored per object, not as on
 {db}/meta/history/{tableId}/{version}   → one past column layout (TableSchemaHistory)
 {db}/meta/coordinator/...               → PersistedCoordinatorJob(s) for in-flight staged
                                           changes, so a new leader can resume them (§8.2)
+{db}/meta/extension:{name}              → ExtensionDefinition — one installed C# extension
 {db}/meta/system                        → SystemSchema — LEGACY index storage, read-only;
                                           only migrated from on load (see §7.3)
 {db}/meta/schema                        → LEGACY single-blob schema (migrated on load)
@@ -836,9 +837,16 @@ To scale to databases with many tables, metadata is stored per object, not as on
 
 - **Triggers have no key of their own.** A row trigger (`CREATE TRIGGER`) is a `TriggerDefinition`
   in `TableSchema.Triggers`, so it is persisted inside the table's own blob and replicated by the
-  `CreateTrigger` / `DropTrigger` deltas. The record holds metadata only (type name, assembly name
-  and SHA-256); each node binds it to its own loaded extension at the first DML that fires it. See
-  [csharp-extensions.md](csharp-extensions.md).
+  `CreateTrigger` / `DropTrigger` deltas. The record holds metadata only (type name and the name of
+  its installed extension); each node binds it to its own loaded build of that extension at the first
+  DML that fires it. See [csharp-extensions.md](csharp-extensions.md).
+- **Installed extensions** (`CREATE EXTENSION`) have one key each, `{db}/meta/extension:{name}`, in
+  the meta bucket. The `ExtensionDefinition` holds the name, the installed version, the SHA-256 of the
+  build, the requirements and the member list, and is replicated by the `CreateExtension` /
+  `UpdateExtension` / `DropExtension` deltas. The apply never looks at the node's loaded files, so it
+  cannot fail on a node without them; resolution against the loaded builds happens per node, when a
+  statement resolves a member. An update replaces the one record, which moves every trigger of the
+  extension to the new build at the same schema version.
 - Keyed by **immutable `tableId`**, so renaming a table never moves its key.
 - `LoadMetaAsync` range-scans `{db}/meta/table/` to rebuild `Schema.Tables`, and lazily
   loads history on demand via `SchemaHistoryLoader` (a row written under an old version

@@ -102,7 +102,27 @@ public static class Functions
     [CamusFunction("fx_throw")]
     public static string Throw(string message) => throw new InvalidOperationException(message);
 
+    /// <summary>The build that runs: "1.0.0" here, "2.0.0" in Fixture.GoodV2.</summary>
+    [CamusFunction("fx_good_version")]
+    public static string GoodVersion() => Build.Version;
+
+#if !GOOD_V2
+    /// <summary>Defined by version 1.0.0 only, so an update to 2.0.0 is refused while an object uses it.</summary>
+    [CamusFunction("fx_v1_only")]
+    public static long V1Only(long value) => value;
+#endif
+
     /// <summary>How many times the counting trigger fired for a table name.</summary>
     [CamusFunction("fx_trigger_count", IsVolatile = true)]
     public static long TriggerCount(string table) => CountingTrigger.Count(table);
+}
+
+/// <summary>The fixture build's version, shared by the functions and the triggers.</summary>
+internal static class Build
+{
+#if GOOD_V2
+    public const string Version = "2.0.0";
+#else
+    public const string Version = "1.0.0";
+#endif
 }

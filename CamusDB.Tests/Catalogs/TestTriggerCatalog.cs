@@ -5,6 +5,8 @@
  * file that was distributed with this source code.
  */
 
+using System;
+using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
 
@@ -43,6 +45,14 @@ public sealed class TestTriggerCatalog
             Kind = kind,
             Columns = [new TableColumnSchema("c-id", "id", ColumnType.Integer64, notNull: true, defaultValue: null)],
         };
+
+        // A trigger names an installed extension, so the extension is installed first.
+        schema.ExtensionCatalog.Publish(
+            new Dictionary<string, ExtensionDefinition>(StringComparer.OrdinalIgnoreCase)
+            {
+                ["ext"] = new() { Name = "ext", Version = "1.0.0", Sha256 = new string('a', 64), InstalledAt = new HLCTimestamp(1, 1, 1) },
+            },
+            1);
         return schema;
     }
 
@@ -52,8 +62,7 @@ public sealed class TestTriggerCatalog
         Timing = TriggerFireTiming.After,
         Events = TriggerEventSet.Insert,
         TypeName = type,
-        AssemblyName = "Ext",
-        AssemblySha256 = new string('a', 64),
+        ExtensionName = "ext",
         CreatedAt = new HLCTimestamp(1, 2, 3),
     };
 
@@ -92,7 +101,7 @@ public sealed class TestTriggerCatalog
 
         TriggerDefinition stored = schema.Tables["t"].Triggers!.Single();
         Assert.AreEqual("audit", stored.Name);
-        Assert.AreEqual(new string('a', 64), stored.AssemblySha256, "the payload round-trips through the JSON codec");
+        Assert.AreEqual("ext", stored.ExtensionName, "the payload round-trips through the JSON codec");
         Assert.IsTrue(SchemaDeltaApplier.WasSchemaDeltaApplied(schema, create));
         Assert.IsTrue(ReplicatorWasApplied(schema, create));
 

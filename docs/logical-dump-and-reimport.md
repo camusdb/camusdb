@@ -76,6 +76,15 @@ columns, and the row-level TTL configuration of the table.
 A dump taken from a server older than this release loses sequence defaults and identity columns:
 that server's `SHOW CREATE TABLE` did not render them, so the restored columns have no default.
 
+**C# extensions.** The dump writes `CREATE EXTENSION name VERSION 'version'` for each extension
+installed in the database, before the first table, so the column defaults, CHECK constraints and views
+that call its functions resolve when they are created. It does not write the members: those come from
+the extension file, which the dump never contains. Deploy the same extension files on the new server,
+list them in `extension_assemblies`, and restart it before you load the dump; a server that does not load
+the named version refuses the statement. Reading the installed extensions needs `SHOW EXTENSIONS`, which
+requires a superuser; a dump taken by another user carries none and says so. Triggers are not carried
+(see the table below). See [csharp-extensions.md](csharp-extensions.md#installing-an-extension-in-a-database).
+
 **Foreign keys and the load order.** A `CREATE TABLE` with a foreign key fails when its parent table
 does not exist yet, and a child `INSERT` fails when its parent row is not loaded yet. The
 `WITHOUT INDEXES` form, which `--defer-indexes` uses, keeps the foreign keys too. Load a dump with
@@ -112,7 +121,7 @@ statements shown, and recreate them after the reimport.
 | Materialized views | `SHOW MATERIALIZED VIEWS;` then `SHOW CREATE MATERIALIZED VIEW name;` | Run the printed statement, then `REFRESH MATERIALIZED VIEW name;` |
 | Users | `SHOW USERS;` as a superuser; passwords cannot be exported | `CREATE USER name IDENTIFIED BY '…';` |
 | Grants | `SHOW GRANTS FOR *;` as a superuser | `GRANT … ON … TO name;` |
-| Triggers | Keep the `CREATE TRIGGER` statements you ran; deploy the same extension files on the new server (see [csharp-extensions.md](csharp-extensions.md)) | Run each `CREATE TRIGGER` after the rows are loaded, so the reimport fires no trigger |
+| Triggers | Keep the `CREATE TRIGGER` statements you ran; deploy the same extension files on the new server (see [csharp-extensions.md](csharp-extensions.md)). The dump installs the extensions themselves | Run each `CREATE TRIGGER` after the rows are loaded, so the reimport fires no trigger |
 | Cluster settings | `SHOW VARIABLES LIKE '%';` and keep the rows whose source is not the default | `SET CLUSTER SETTING name = value;` |
 | Table statistics | Nothing to record | `ANALYZE table;` per table after the rows are loaded |
 | Database branches | `SHOW BRANCHES FROM parent;` | See the note below |

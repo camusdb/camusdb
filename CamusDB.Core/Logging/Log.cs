@@ -195,6 +195,9 @@ internal static partial class Log
     [LoggerMessage(Level = LogLevel.Debug, Message = "Schema applied-version probe to {Endpoint} failed; the gate keeps what it knows about the peer")]
     public static partial void LogSchemaAppliedProbeFailed(ILogger logger, Exception ex, Uri endpoint);
 
+    [LoggerMessage(Level = LogLevel.Warning, Message = "Loaded-extensions probe to {Endpoint} failed; the peer counts as unreachable for this statement")]
+    public static partial void LogLoadedExtensionsProbeFailed(ILogger logger, Exception ex, Uri endpoint);
+
     [LoggerMessage(Level = LogLevel.Debug, Message = "Schema applied-version probe to {Endpoint} answered HTTP {StatusCode} with status '{Status}'; the gate keeps what it knows about the peer")]
     public static partial void LogSchemaAppliedProbeRejected(ILogger logger, Uri endpoint, int statusCode, string? status);
 

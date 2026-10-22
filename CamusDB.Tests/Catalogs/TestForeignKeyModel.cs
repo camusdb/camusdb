@@ -424,7 +424,7 @@ public sealed class TestForeignKeyModel
                 nameof(TableSchema.Columns) => weather.Columns!,
                 nameof(TableSchema.Indexes) => weather.Indexes!,
                 nameof(TableSchema.ForeignKeys) => weather.ForeignKeys!,
-                nameof(TableSchema.Triggers) => new List<TriggerDefinition> { new() { Name = "audit", Events = TriggerEventSet.Insert, TypeName = "Ext.Audit", AssemblyName = "Ext", AssemblySha256 = "ab" } },
+                nameof(TableSchema.Triggers) => new List<TriggerDefinition> { new() { Name = "audit", Events = TriggerEventSet.Insert, TypeName = "Ext.Audit", ExtensionName = "ext" } },
                 nameof(TableSchema.CheckConstraints) => new List<CheckConstraintSchema> { new() { Name = "c", Expression = "id > 0", ReferencedColumns = ["id"] } },
                 nameof(TableSchema.Settings) => new Dictionary<string, string> { ["k"] = "v" },
                 nameof(TableSchema.ViewDefinition) => new ViewDefinition(),

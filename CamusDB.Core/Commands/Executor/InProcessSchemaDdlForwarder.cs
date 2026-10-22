@@ -5,6 +5,7 @@
  * file that was distributed with this source code.
  */
 
+using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.Storage.Kv;
 
@@ -38,7 +39,7 @@ public delegate ValueTask<CommandExecutor> InProcessDdlLeaderResolver(
 /// crosses a wire, so it cannot be delivered twice. The leader executor's own schema-leader check
 /// is what stops a forward loop if leadership moves while the ticket is in flight.</para>
 /// </summary>
-public sealed class InProcessSchemaDdlForwarder : ISchemaDdlForwarder, ISchemaAckSender
+public sealed class InProcessSchemaDdlForwarder : ISchemaDdlForwarder, ISchemaAckSender, IExtensionPeerProbe
 {
     private readonly InProcessClusterNodes nodes;
 
@@ -154,6 +155,20 @@ public sealed class InProcessSchemaDdlForwarder : ISchemaDdlForwarder, ISchemaAc
         long? applied = target.Node.GetLocalSchemaApplied(database);
 
         return Task.FromResult(applied is null ? SchemaAppliedProbe.NotOpen : SchemaAppliedProbe.OpenAt(applied.Value));
+    }
+
+    /// <summary>
+    /// Reads the asked node's loaded extensions straight from its engine, exactly what the HTTP
+    /// endpoint answers from. A node that is no longer registered counts as unreachable.
+    /// </summary>
+    Task<IReadOnlyList<LoadedExtensionProbeEntry>?> IExtensionPeerProbe.ProbeLoadedExtensionsAsync(
+        string nodeEndpoint,
+        CancellationToken cancellationToken)
+    {
+        if (!nodes.TryGet(nodeEndpoint, out InProcessClusterNode? target))
+            return Task.FromResult<IReadOnlyList<LoadedExtensionProbeEntry>?>(null);
+
+        return Task.FromResult<IReadOnlyList<LoadedExtensionProbeEntry>?>(target.Executor.DescribeLoadedExtensions());
     }
 
     private ValueTask<CommandExecutor> LeaderAsync(string leaderEndpoint, string databaseName, CancellationToken cancellationToken)

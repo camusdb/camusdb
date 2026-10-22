@@ -5,16 +5,20 @@ procedures. The code ships as a .NET assembly (a DLL) that the operator deploys 
 and lists in the configuration. The server loads it when it starts.
 
 The DLL is **never stored in the database** and never replicated between nodes. Each node loads
-the files its own configuration names. Every node of a cluster must therefore deploy the same
-files; the server checks this for triggers (see [Deployment](#deployment)).
+the files its own configuration names, which makes the extension **available** on that node. A
+database uses an extension only after `CREATE EXTENSION` **installs** it there; the installed record
+names the version and the SHA-256 of the build, and every node runs that exact build or refuses the
+statements that need it (see [Installing an extension in a database](#installing-an-extension-in-a-database)).
 
 - [Writing an extension](#writing-an-extension)
   - [The contract package](#the-contract-package)
+  - [The manifest](#the-manifest)
   - [Scalar functions](#scalar-functions)
   - [Value mapping](#value-mapping)
   - [Triggers](#triggers)
   - [Procedures](#procedures)
   - [The SQL session](#the-sql-session)
+- [Installing an extension in a database](#installing-an-extension-in-a-database)
 - [Deployment](#deployment)
 - [SAFE and UNSAFE assemblies](#safe-and-unsafe-assemblies)
 - [Transactions, retries and side effects](#transactions-retries-and-side-effects)
@@ -58,12 +62,34 @@ extension its own copy of the contract, so an extension can ship with any copy o
 An extension compiled against a newer contract than the server carries is refused at startup (see
 above for what "newer" means).
 
+### The manifest
+
+Every extension assembly declares its name and version once, at assembly level:
+
+```csharp
+[assembly: CamusExtension("geo", "1.2.0", Requires = new[] { "units" })]
+```
+
+- The **name** is how SQL refers to the extension: `CREATE EXTENSION geo`, and the qualified call
+  `geo.distance(a, b)`. It must be a plain identifier (a letter or underscore, then letters, digits
+  and underscores). Names are case-insensitive.
+- The **version** is SemVer: `major.minor.patch` with an optional `-prerelease` suffix and no
+  `+build` metadata. A node can load two versions of one extension side by side; each database
+  picks one.
+- **Requires** names extensions that must be installed in a database before this one can be.
+
+The server reads the manifest from the assembly's metadata before it loads the assembly, so no
+extension code runs to read it. An assembly without a manifest, with a name that is not an
+identifier, or with a version that is not SemVer stops the server at startup (`CADB0827`).
+
 ### Scalar functions
 
 Mark a public static method with `[CamusFunction("name")]`:
 
 ```csharp
 using CamusDB.Extensions;
+
+[assembly: CamusExtension("text_utils", "1.0.0")]
 
 public static class TextFunctions
 {
@@ -80,6 +106,7 @@ public static class TextFunctions
 ```
 
 ```sql
+CREATE EXTENSION text_utils;  -- once per database; see "Installing an extension in a database"
 SELECT slugify(title) FROM posts WHERE slugify(title) = 'hello-world';
 SELECT greet(NULL), hello('ann', 'hi');
 ```
@@ -276,6 +303,69 @@ CALL transfer(@from, @to, 10 * 3);
   or a procedure argument gave you changes nothing stored, and the server copies every array you
   hand it.
 
+## Installing an extension in a database
+
+Loading an extension makes it **available** on a node. Its functions, triggers and procedures
+resolve only in a database where it is **installed**:
+
+```sql
+CREATE EXTENSION geo;                  -- the highest version this node loads
+CREATE EXTENSION geo VERSION '1.2.0';  -- an exact version
+ALTER EXTENSION geo UPDATE;            -- move to the highest loaded version
+ALTER EXTENSION geo UPDATE TO '1.3.0'; -- or to an exact one
+DROP EXTENSION geo;
+
+SELECT distance(a, b) FROM routes;     -- plain name
+SELECT geo.distance(a, b) FROM routes; -- qualified with the extension name
+```
+
+The three statements are schema DDL: they replicate through the schema log, so every node of a
+cluster changes at the same schema version, and they survive a restart. In cluster mode they run on
+the database's schema leader, the same as trigger DDL. Only a superuser may run them.
+
+- **One name, one member.** A plain name resolves against the built-ins and the extensions
+  installed in the current database. No extension can shadow a built-in (the boot refuses it), and
+  `CREATE EXTENSION` refuses an extension that defines a function or procedure name that another
+  installed extension already defines (`CADB0832`). Two extensions that share a name can both be
+  loaded on a node and installed in different databases.
+- **Requirements.** `CREATE EXTENSION` refuses while an extension in the manifest's `Requires` list
+  is not installed (`CADB0831`). `DROP EXTENSION` refuses while another installed extension requires
+  this one.
+- **Dependencies.** `DROP EXTENSION` refuses while a column default, a CHECK constraint, a view, a
+  materialized view or a trigger uses one of the extension's members, and the error lists them
+  (`CADB0833`). Drop those objects first; there is no `CASCADE`. `ALTER EXTENSION ... UPDATE` is
+  refused the same way when the target version does not define a member that such an object uses.
+- **Triggers follow the extension.** A trigger names its extension, not a build. The version and the
+  hash live in the extension's record only, so `ALTER EXTENSION ... UPDATE` moves every function,
+  procedure and trigger of the extension to the new build in one step. No trigger is dropped or
+  re-created.
+- **Caches.** Cached results, bound statements and cached plans are keyed on the database's
+  installed extensions, so none of them is served after an install, an update or a drop changes what
+  a function call means.
+
+### Rolling upgrade
+
+1. Deploy the new file on every node next to the old one, add it to `extension_assemblies`, and
+   restart each node in turn. Both versions are now loaded; databases still use the old one.
+2. Run `ALTER EXTENSION geo UPDATE TO '2.0.0'` in each database. All nodes switch at the same
+   schema version.
+3. Later, remove the old file from the configuration and restart the nodes again.
+
+In cluster mode the node that runs `CREATE EXTENSION` or `ALTER EXTENSION ... UPDATE` first asks
+every other node in the cluster which builds it loaded, and refuses (`CADB0835`) while a node that
+answers does not load the target build: the same name, version and SHA-256. The error names those
+nodes. A node that does not answer is skipped; if it comes back without the file, see the next
+section.
+
+### A node without the installed build
+
+A node that does not load the installed build of an extension (no file with that name and version,
+or a file with another SHA-256) still starts and still serves every statement that does not use the
+extension. It logs an error that names the database and the extension when it opens the database.
+A statement there that calls one of the extension's functions or procedures, or writes to a table
+with one of its triggers, fails with `CADB0834`. `SHOW EXTENSIONS` lists the extension with the
+status `missing`.
+
 ## Deployment
 
 Two configuration lists name the files to load:
@@ -291,25 +381,24 @@ The command-line flags are `--extension-assemblies` and `--unsafe-extension-asse
 separated). See [configuration.md](configuration.md).
 
 - Paths must be **absolute**. A relative path, a missing file, a file that is not a .NET assembly, a
-  path listed twice, and two files with the same assembly name each stop the server at startup with
-  a `CADB080x` error that names the path. A node never starts without code it was told to load.
+  path listed twice, a file without a manifest, and two files with the same extension name and
+  version each stop the server at startup with a `CADB080x` or `CADB0827` error that names the path.
+  A node never starts without code it was told to load.
 - Both settings are restart-class: the server reads them once, when it starts. To change an
   extension, replace the file and restart the node.
 - A private dependency of an UNSAFE extension resolves from the extension's own folder (through its
   `.deps.json` when there is one). Each extension loads into its own load context, so two
   extensions can carry different versions of one dependency.
-- **Every node must deploy the same files.** A trigger records the SHA-256 of the assembly that
-  defined it on the node that created it. A node that does not load that type, or loads a build with
-  another hash, refuses DML on the table with `CADB0817` instead of firing different code. **The hash
-  covers that one assembly file only.** The private dependencies of an UNSAFE extension, which load
-  from its folder, are not hashed: two nodes with the same extension file and different dependency
-  files are not told apart. Deploy the whole extension folder as one unit. To upgrade
-  a trigger's extension, deploy the new file on every node, restart them, then drop and re-create the
-  trigger. Functions and procedures have no such check in this version: a function never runs on a
-  peer node, but two nodes with different builds give different answers to the statements they
-  coordinate.
+- **Every node must deploy the same files.** An installed extension records the SHA-256 of its
+  build. A node that loads another build of the same version refuses the statements that use the
+  extension (`CADB0834`) instead of running different code; this covers functions, procedures and
+  triggers alike. **The hash covers that one assembly file only.** The private dependencies of an
+  UNSAFE extension, which load from their folder, are not hashed: two nodes with the same extension
+  file and different dependency files are not told apart. Deploy the whole extension folder as one
+  unit. To upgrade an extension, follow the [rolling upgrade](#rolling-upgrade).
 - The browser playground has no extensions.
-- The logical dump does not carry triggers; see
+- The logical dump carries `CREATE EXTENSION name VERSION 'v'` for each installed extension, not
+  its members, and does not carry triggers; see
   [logical-dump-and-reimport.md](logical-dump-and-reimport.md).
 
 ## SAFE and UNSAFE assemblies
@@ -370,10 +459,14 @@ the real security boundary.
 
 ## Observability
 
-`SHOW EXTENSIONS` lists the assemblies the node loaded, one row per assembly: `name`, `version`,
-`path`, `sha256`, `trust` (`safe` or `unsafe`), and the comma-separated `functions`, `triggers` and
-`procedures` it registered. A node without extensions returns no rows. The statement is node-local
-(compare the `sha256` column across nodes to find a node with another build) and requires a superuser.
+`SHOW EXTENSIONS` lists the builds the node loaded, one row per build: `name` and `version` (from
+the manifest), `status`, `path`, `sha256`, `trust` (`safe` or `unsafe`), `requires`, and the
+comma-separated `functions`, `triggers` and `procedures` it registered. When the statement runs in a
+database, `status` is `installed` for the build that database uses and `available` for the others,
+and a row with status `missing` (and no path or trust) reports an extension the database installed
+that this node does not load. A node without extensions, in a database without installed
+extensions, returns no rows. The statement is node-local (compare the `sha256` column across nodes
+to find a node with another build) and requires a superuser.
 
 The triggers of a table are part of its schema record. The server also logs each loaded extension
 and its members at startup.
@@ -386,26 +479,35 @@ and its members at startup.
 | `CADB0801` | An extension file does not exist (startup) |
 | `CADB0802` | An extension file is not a loadable .NET assembly (startup) |
 | `CADB0803` | An extension was built against a newer contract than the server's (startup) |
-| `CADB0804` | Two extension files have the same assembly name (startup) |
-| `CADB0805` | A function or procedure name collides with a built-in or another extension (startup) |
+| `CADB0804` | Two extension files declare the same extension name and version (startup) |
+| `CADB0805` | A function name collides with a built-in, or one extension defines a member twice (startup) |
 | `CADB0806` | A SAFE extension failed the SAFE check; the message lists every finding (startup) |
 | `CADB0807` | A SAFE extension tried to load an assembly outside the allow-list (run time) |
 | `CADB0808` | An extension member has a shape the server cannot bind (startup) |
 | `CADB0809` | An extension function threw (HTTP 400) |
 | `CADB0810` | A NUMERIC value does not fit a `decimal`, or the reverse (HTTP 400) |
-| `CADB0811` | `CREATE TRIGGER` named a type that no loaded extension defines (HTTP 400) |
-| `CADB0812` | `CREATE TRIGGER` named a type that two extensions define (HTTP 400) |
+| `CADB0811` | `CREATE TRIGGER` named a type that no installed extension defines (HTTP 400) |
+| `CADB0812` | `CREATE TRIGGER` named a type that two installed extensions define (HTTP 400) |
 | `CADB0813` | `CREATE TRIGGER` named a type that is not a trigger (HTTP 400) |
 | `CADB0814` | The table already has a trigger with that name (HTTP 409) |
 | `CADB0815` | `DROP TRIGGER` named a trigger the table does not have (HTTP 404) |
 | `CADB0816` | The target of `CREATE TRIGGER` is a view or a materialized view (HTTP 400) |
-| `CADB0817` | This node does not load the trigger's extension, or loads another build (HTTP 503) |
+| `CADB0817` | The installed version of a trigger's extension does not define its type (HTTP 503) |
 | `CADB0818` | A trigger threw; nothing the statement wrote persists (HTTP 400) |
 | `CADB0819` | Triggers and procedures nested more than 16 levels (HTTP 400) |
 | `CADB0820` | The SQL session refused a statement that is not SELECT, INSERT, UPDATE or DELETE (HTTP 400) |
-| `CADB0821` | `CALL` named a procedure that no loaded extension defines (HTTP 404) |
+| `CADB0821` | `CALL` named a procedure that no installed extension defines (HTTP 404) |
 | `CADB0822` | A procedure threw; everything the `CALL` wrote rolls back (HTTP 400) |
 | `CADB0823` | A trigger or procedure caught an error from its own SQL and returned; the statement fails (HTTP 400) |
 | `CADB0824` | A commit of a transaction in which an extension's SQL failed; roll it back (HTTP 409) |
 | `CADB0825` | A BEFORE trigger's SQL changed a row its statement already read and is still writing (HTTP 409) |
 | `CADB0826` | The rows kept for AFTER triggers exceed `spill_threshold_bytes` (HTTP 400) |
+| `CADB0827` | An extension assembly has no manifest, or an invalid one (startup) |
+| `CADB0828` | `CREATE` or `ALTER EXTENSION` named an extension or a version this node does not load (HTTP 400) |
+| `CADB0829` | The extension is already installed in the database (HTTP 409) |
+| `CADB0830` | The extension is not installed in the database, or `CREATE TRIGGER` named a type of an extension that is loaded but not installed (HTTP 404) |
+| `CADB0831` | An extension the manifest requires is not installed (HTTP 400) |
+| `CADB0832` | Another installed extension defines one of the extension's function or procedure names (HTTP 409) |
+| `CADB0833` | Objects depend on the extension, or on a member the target version lacks; the message lists them (HTTP 409) |
+| `CADB0834` | The database installed an extension build that this node does not load (HTTP 503) |
+| `CADB0835` | A live node does not load the target build of `CREATE` or `ALTER EXTENSION` (HTTP 409) |

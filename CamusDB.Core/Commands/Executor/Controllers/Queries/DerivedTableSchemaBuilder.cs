@@ -358,15 +358,20 @@ internal static class DerivedTableSchemaBuilder
         new("scope",      ColumnType.String),
     ];
 
-    // SHOW EXTENSIONS: one row per loaded extension assembly. The member lists are comma-joined text so
-    // one assembly stays one row whatever it registered.
+    // SHOW EXTENSIONS: one row per loaded extension build, plus one row per extension the current
+    // database installed that this node does not load. status is "installed" (the build the current
+    // database uses), "available" (loaded, not installed in this database at this version) or "missing"
+    // (installed, but this node has no matching build; path and trust are then NULL). The member lists
+    // are comma-joined text so one build stays one row whatever it registered.
     internal static readonly IReadOnlyList<DerivedColumnSchema> ShowExtensionsSchema =
     [
         new("name",       ColumnType.String),
         new("version",    ColumnType.String),
+        new("status",     ColumnType.String),
         new("path",       ColumnType.String),
         new("sha256",     ColumnType.String),
         new("trust",      ColumnType.String),
+        new("requires",   ColumnType.String),
         new("functions",  ColumnType.String),
         new("triggers",   ColumnType.String),
         new("procedures", ColumnType.String),

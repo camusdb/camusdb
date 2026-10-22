@@ -29,6 +29,21 @@ public sealed class TestSchemaChangeLogEntryCodec
     /// entry, and every payload type is registered for source-generated serialization — an
     /// unregistered one throws instead of silently falling back to reflection.
     /// </summary>
+    private static ExtensionDefinition ExtensionRecord() => new()
+    {
+        Name = "geo",
+        Version = "1.2.0",
+        Sha256 = new string('e', 64),
+        Requires = ["units"],
+        Members =
+        [
+            new() { Kind = ExtensionMemberKind.Function, Name = "distance" },
+            new() { Kind = ExtensionMemberKind.Trigger, Name = "Geo.AuditTrigger" },
+        ],
+        InstalledAt = new HLCTimestamp(1, 2, 3),
+        UpdatedAt = new HLCTimestamp(4, 5, 6),
+    };
+
     private static IEnumerable<TestCaseData> EveryOp()
     {
         foreach ((SchemaOp op, object payload) in Payloads())
@@ -157,12 +172,14 @@ public sealed class TestSchemaChangeLogEntryCodec
                 Timing = TriggerFireTiming.Before,
                 Events = TriggerEventSet.Insert | TriggerEventSet.Delete,
                 TypeName = "Ext.AuditTrigger",
-                AssemblyName = "Ext",
-                AssemblySha256 = new string('f', 64),
+                ExtensionName = "ext",
                 CreatedAt = new HLCTimestamp(1, 2, 3),
             },
         });
         yield return (SchemaOp.DropTrigger, new SchemaDropTriggerPayload { TableName = "robots", TableId = "A0", TriggerName = "audit" });
+        yield return (SchemaOp.CreateExtension, new SchemaExtensionPayload { Extension = ExtensionRecord() });
+        yield return (SchemaOp.UpdateExtension, new SchemaExtensionPayload { Extension = ExtensionRecord(), FromVersion = "0.9.0" });
+        yield return (SchemaOp.DropExtension, new SchemaDropExtensionPayload { ExtensionName = "geo", Version = "1.2.0", InstalledAt = new HLCTimestamp(1, 2, 3) });
         yield return (SchemaOp.AlterSequence, new SchemaAlterSequencePayload
         {
             SequenceId = "A2",

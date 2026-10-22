@@ -288,6 +288,12 @@ public sealed class SchemaReplicator
         // which the apply mutated in place, and the per-node binding lives on the trigger record
         // itself, so the replaced list takes any stale binding with it.
 
+        // A change to the installed extensions changes what function calls mean. The result cache
+        // keys on the extension stamp too, so this only frees the entries no lookup can reach any
+        // more; it runs here, in the replicated apply, so every node frees its own.
+        if (entry.Op is SchemaOp.CreateExtension or SchemaOp.UpdateExtension or SchemaOp.DropExtension)
+            database.Cache?.InvalidateDatabase(database.Id);
+
         // A new constraint can take ownership of an index, which changes that index's entry.
         if (entry.Op == SchemaOp.AddForeignKey)
             database.TableDescriptors.TryRemove(DecodePayload<SchemaAddForeignKeyPayload>(entry).TableName, out _);
@@ -548,6 +554,9 @@ public sealed class SchemaReplicator
             SchemaOp.AddForeignKey => SchemaDeltaApplier.HasForeignKey(schema, DecodePayload<SchemaAddForeignKeyPayload>(entry)),
             SchemaOp.CreateTrigger => TriggerDeltaApplier.WasCreateApplied(schema, DecodePayload<SchemaCreateTriggerPayload>(entry)),
             SchemaOp.DropTrigger => TriggerDeltaApplier.WasDropApplied(schema, DecodePayload<SchemaDropTriggerPayload>(entry)),
+            SchemaOp.CreateExtension => ExtensionDeltaApplier.WasCreateApplied(schema, DecodePayload<SchemaExtensionPayload>(entry)),
+            SchemaOp.UpdateExtension => ExtensionDeltaApplier.WasUpdateApplied(schema, DecodePayload<SchemaExtensionPayload>(entry)),
+            SchemaOp.DropExtension => ExtensionDeltaApplier.WasDropApplied(schema, DecodePayload<SchemaDropExtensionPayload>(entry)),
             _ => schema.SchemaVersion >= entry.ToVersion
         };
     }
@@ -656,6 +665,10 @@ public sealed class SchemaReplicator
         // and a DROP of a live sequence fail.
         foreach ((string sequenceName, SequenceSchema sequence) in schema.Sequences)
             clone.Sequences[sequenceName] = sequence.Clone();
+
+        // The installed-extension map is an immutable snapshot, so the clone shares it; the dry-run
+        // apply publishes a new map into the clone's own catalog and never touches the live one.
+        clone.ExtensionCatalog.Publish(schema.Extensions, schema.ExtensionCatalog.Stamp);
 
         return clone;
     }

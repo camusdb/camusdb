@@ -37,17 +37,20 @@ public enum TriggerEventSet
 /// separate key family for triggers.
 ///
 /// <para><b>Only metadata is stored.</b> The trigger's code is never in the database; the record names
-/// the CLR type, the assembly that defined it on the node that created it, and the SHA-256 of that
-/// assembly's bytes. Each node binds the record to its own loaded extensions on the first DML that
-/// fires it, and refuses the DML when the type is missing or the hash differs
-/// (<see cref="CamusDBErrorCodes.TriggerBindingMismatch"/>), so two nodes cannot fire different builds
-/// of the defining assembly. The hash covers that root assembly only: a private dependency that an
-/// UNSAFE extension loads from its folder is not hashed, so two nodes with the same root file and
-/// different dependency files are not told apart.</para>
+/// the CLR type and the installed extension (<see cref="ExtensionDefinition"/>) that defines it, and
+/// nothing else. The build is fixed by the extension's record, which holds the version and the SHA-256
+/// in one place: <c>ALTER EXTENSION ... UPDATE</c> moves every trigger of the extension to the new
+/// build in the same delta, with no trigger dropped or re-created. Each node binds the record to the
+/// build it loads for the installed version on the first DML that fires it, and refuses the DML when
+/// it loads no such build (<see cref="CamusDBErrorCodes.ExtensionNotLoadedOnNode"/>). The hash covers
+/// the root assembly only: a private dependency that an UNSAFE extension loads from its folder is not
+/// hashed, so two nodes with the same root file and different dependency files are not told
+/// apart.</para>
 ///
 /// <para><b>Immutable once created.</b> A change is a drop and a new create. The apply replaces the
-/// table's list instead of editing an element, so the per-node binding cached in
-/// <see cref="Binding"/> goes away with the record it belongs to.</para>
+/// table's list instead of editing an element. The per-node binding cached in <see cref="Binding"/>
+/// is keyed by the extension record it was resolved against, so an update of the extension makes the
+/// next DML bind again.</para>
 ///
 /// <para>A recovered (relinked) table comes back without its triggers, the same as without its
 /// foreign keys: they are re-created by the user. A materialized view never has triggers.</para>
@@ -66,11 +69,8 @@ public sealed class TriggerDefinition
     /// <summary>The full CLR name of the trigger type, as <c>EXTERNAL NAME</c> gave it.</summary>
     public string TypeName { get; set; } = "";
 
-    /// <summary>The simple name of the assembly that defined the type on the creating node.</summary>
-    public string AssemblyName { get; set; } = "";
-
-    /// <summary>The lowercase hex SHA-256 of that assembly's bytes.</summary>
-    public string AssemblySha256 { get; set; } = "";
+    /// <summary>The name of the installed extension that defines the type.</summary>
+    public string ExtensionName { get; set; } = "";
 
     /// <summary>When the trigger was created, on the creating node's clock.</summary>
     public HLCTimestamp CreatedAt { get; set; }
@@ -80,8 +80,8 @@ public sealed class TriggerDefinition
 
     /// <summary>
     /// This node's resolved binding of the record to a loaded trigger type, or the reason it cannot
-    /// bind. Not persisted, and set at most once per record instance; see
-    /// <c>TriggerBinder</c>.
+    /// bind. Not persisted; replaced when the extension record it was resolved against changes. See
+    /// <c>TriggerRuntime</c>.
     /// </summary>
     [JsonIgnore]
     internal object? Binding { get; set; }

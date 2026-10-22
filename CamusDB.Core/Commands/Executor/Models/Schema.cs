@@ -53,6 +53,16 @@ public sealed class Schema : IDisposable
     /// </summary>
     public Dictionary<string, SequenceSchema> Sequences { get; set; } = new(StringComparer.OrdinalIgnoreCase);
 
+    /// <summary>
+    /// The C# extensions installed in this database (<c>CREATE EXTENSION</c>), with the per-node
+    /// resolution of their members. Owned by this schema instance and never replaced; its content is
+    /// published as immutable snapshots. See <see cref="CamusDB.Core.Extensions.InstalledExtensionCatalog"/>.
+    /// </summary>
+    internal CamusDB.Core.Extensions.InstalledExtensionCatalog ExtensionCatalog { get; } = new();
+
+    /// <summary>The installed extensions keyed by name (case-insensitive). An immutable snapshot.</summary>
+    public IReadOnlyDictionary<string, ExtensionDefinition> Extensions => ExtensionCatalog.Installed;
+
     // Published as one finished dictionary that is never mutated after publication, for the same
     // reason relationNamesById is: the map it indexes is mutated in place by an applying delta,
     // and enumerating one while it is being written throws.

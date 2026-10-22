@@ -66,7 +66,7 @@ internal static class ScalarFunctionEvaluator
     public static bool IsRegisteredScalarFunction(string functionName)
     {
         return Registry.IsRegisteredScalarFunction(functionName) ||
-               (Extensions.ExtensionFunctionScope.Current?.HasFunction(functionName) ?? false);
+               (Extensions.ExtensionFunctionScope.CurrentInstalled?.HasFunction(functionName) ?? false);
     }
 
     /// <summary>
@@ -80,19 +80,22 @@ internal static class ScalarFunctionEvaluator
     }
 
     /// <summary>
-    /// Resolves a function name: the built-in table first, then the extension functions of the engine
-    /// whose statement this flow runs (<see cref="Extensions.ExtensionFunctionScope"/>). The loader
-    /// refuses an extension name that collides with a built-in, so the order never changes which
-    /// function a name means; it keeps a built-in lookup exactly as cheap as before. A flow with no
-    /// scope resolves built-ins only, so a missing scope fails closed ("Function not found").
+    /// Resolves a function name: the built-in table first, then the functions of the extensions
+    /// installed in the database whose statement this flow runs, as this engine loaded them
+    /// (<see cref="Extensions.ExtensionFunctionScope"/>). A name may be qualified with its extension
+    /// (<c>geo.distance</c>). The loader refuses an extension name that collides with a built-in, so the
+    /// order never changes which function a name means; it keeps a built-in lookup exactly as cheap as
+    /// before. A flow with no scope resolves built-ins only, so a missing scope fails closed ("Function
+    /// not found"). A member of an installed extension this node does not load throws
+    /// <see cref="CamusDBErrorCodes.ExtensionNotLoadedOnNode"/>.
     /// </summary>
     private static bool TryResolve(string functionName, out ScalarFunctionDescriptor descriptor)
     {
         if (Registry.TryGet(functionName, out descriptor))
             return true;
 
-        Extensions.ExtensionRegistry? extensions = Extensions.ExtensionFunctionScope.Current;
-        return extensions is not null && extensions.TryGetFunction(functionName, out descriptor);
+        Extensions.InstalledExtensionSet? installed = Extensions.ExtensionFunctionScope.CurrentInstalled;
+        return installed is not null && installed.TryGetFunction(functionName, out descriptor);
     }
 
     /// <summary>

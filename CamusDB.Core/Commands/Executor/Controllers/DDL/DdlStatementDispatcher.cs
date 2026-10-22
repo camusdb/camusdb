@@ -43,6 +43,8 @@ internal sealed class DdlStatementDispatcher
 
     private readonly TriggerDdlService triggerDdl;
 
+    private readonly ExtensionDdlService extensionDdl;
+
     private readonly SqlExecutor sqlExecutor;
 
     private readonly SqlParserCache sqlParserCache;
@@ -134,6 +136,7 @@ internal sealed class DdlStatementDispatcher
         this.context = context;
         this.catalogs = catalogs;
         triggerDdl = new TriggerDdlService(context, catalogs);
+        extensionDdl = new ExtensionDdlService(context, catalogs, sqlParserCache);
         this.sqlExecutor = sqlExecutor;
         this.sqlParserCache = sqlParserCache;
         this.statementAuthorizer = statementAuthorizer;
@@ -604,6 +607,24 @@ internal sealed class DdlStatementDispatcher
             case NodeType.DropTrigger:
                 {
                     await triggerDdl.DropAsync(database, ast).ConfigureAwait(false);
+                    return new ExecuteDDLSQLResult(database, true);
+                }
+
+            case NodeType.CreateExtension:
+                {
+                    await extensionDdl.CreateAsync(database, ast).ConfigureAwait(false);
+                    return new ExecuteDDLSQLResult(database, true);
+                }
+
+            case NodeType.AlterExtensionUpdate:
+                {
+                    await extensionDdl.UpdateAsync(database, ast).ConfigureAwait(false);
+                    return new ExecuteDDLSQLResult(database, true);
+                }
+
+            case NodeType.DropExtension:
+                {
+                    await extensionDdl.DropAsync(database, ast).ConfigureAwait(false);
                     return new ExecuteDDLSQLResult(database, true);
                 }
 

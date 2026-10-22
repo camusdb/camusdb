@@ -340,6 +340,16 @@ public sealed class SchemaDdlForwardController : CommandsController
         });
     }
 
+    /// <summary>
+    /// Answers the extension peer probe with the extension builds this node loaded at boot: the
+    /// proposer of <c>CREATE EXTENSION</c> or <c>ALTER EXTENSION ... UPDATE</c> refuses unless every
+    /// live node loads the target build. No leader check: the question is about this node alone.
+    /// </summary>
+    [HttpPost]
+    [Route("/internal/schema-ddl/loaded-extensions")]
+    public JsonResult ProbeLoadedExtensions() =>
+        new(new LoadedExtensionsProbeResponse { Status = "ok", Extensions = executor.DescribeLoadedExtensions() });
+
     [HttpPost]
     [Route("/internal/schema-ddl/rename-table")]
     public async Task<JsonResult> ForwardRenameTable()

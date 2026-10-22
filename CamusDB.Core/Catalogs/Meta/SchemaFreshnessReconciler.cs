@@ -99,6 +99,7 @@ internal static class SchemaFreshnessReconciler
                 database.Schema.Tables = snapshot.Tables;
                 database.Schema.Views = snapshot.Views;
                 database.Schema.Sequences = snapshot.Sequences;
+                database.Schema.ExtensionCatalog.Publish(snapshot.Extensions, snapshot.SchemaVersion);
                 if (snapshot.System is not null)
                     database.SystemSchema = snapshot.System;
 

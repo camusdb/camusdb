@@ -15,10 +15,18 @@ using System.Reflection.PortableExecutable;
 namespace CamusDB.Core.Extensions;
 
 /// <summary>
-/// What the server reads from an extension file before it loads it: the simple name, the version,
-/// and the version of the contract assembly it was compiled against.
+/// What the server reads from an extension file before it loads it: the assembly's simple name and
+/// version, the version of the contract assembly it was compiled against, and its
+/// <c>[assembly: CamusExtension]</c> manifest (null when the assembly carries none).
 /// </summary>
-internal sealed record ExtensionAssemblyIdentity(string Name, Version Version, Version? ContractVersion);
+internal sealed record ExtensionAssemblyIdentity(string Name, Version Version, Version? ContractVersion, ExtensionManifestData? Manifest);
+
+/// <summary>
+/// The raw arguments of an assembly's <c>CamusExtensionAttribute</c>, as the metadata holds them.
+/// Not validated here: the loader checks the name and parses the version, so every rule and its
+/// error message live in one place.
+/// </summary>
+internal sealed record ExtensionManifestData(string? Name, string? Version, IReadOnlyList<string> Requires);
 
 /// <summary>
 /// The SAFE-mode check for an extension assembly, modeled on SQL Server's CLR permission sets. It
@@ -146,12 +154,80 @@ internal static class ExtensionAssemblyVerifier
                     contract = reference.Version;
             }
 
-            return new ExtensionAssemblyIdentity(reader.GetString(definition.Name), definition.Version, contract);
+            return new ExtensionAssemblyIdentity(reader.GetString(definition.Name), definition.Version, contract, ReadManifest(reader, definition));
         }
         catch (BadImageFormatException ex)
         {
             throw NotAnAssembly(path, ex.Message);
         }
+    }
+
+    /// <summary>The full name of the contract's manifest attribute.</summary>
+    private const string ManifestAttributeName = "CamusDB.Extensions.CamusExtensionAttribute";
+
+    /// <summary>
+    /// Decodes the assembly-level <c>CamusExtensionAttribute</c> from the metadata blob, or returns
+    /// null when the assembly has none. The blob decoder reads constants only; no extension code runs.
+    /// A second manifest attribute cannot occur: the attribute's usage forbids it, and the compiler
+    /// enforces that.
+    /// </summary>
+    private static ExtensionManifestData? ReadManifest(MetadataReader reader, AssemblyDefinition definition)
+    {
+        foreach (CustomAttributeHandle handle in definition.GetCustomAttributes())
+        {
+            CustomAttribute attribute = reader.GetCustomAttribute(handle);
+
+            if (AttributeTypeName(reader, attribute) != ManifestAttributeName)
+                continue;
+
+            CustomAttributeValue<string> value = attribute.DecodeValue(ManifestTypeProvider.Instance);
+
+            string? name = value.FixedArguments.Length > 0 ? value.FixedArguments[0].Value as string : null;
+            string? version = value.FixedArguments.Length > 1 ? value.FixedArguments[1].Value as string : null;
+            List<string> requires = [];
+
+            foreach (CustomAttributeNamedArgument<string> named in value.NamedArguments)
+            {
+                if (named.Name != "Requires" || named.Value is not ImmutableArray<CustomAttributeTypedArgument<string>> items)
+                    continue;
+
+                foreach (CustomAttributeTypedArgument<string> item in items)
+                {
+                    if (item.Value is string required)
+                        requires.Add(required);
+                }
+            }
+
+            return new ExtensionManifestData(name, version, requires);
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// The smallest type provider the attribute blob decoder needs for the manifest's arguments
+    /// (strings and a string array). Types are named by their full name; an enum argument cannot
+    /// occur in the manifest, so its underlying type is never asked for.
+    /// </summary>
+    private sealed class ManifestTypeProvider : ICustomAttributeTypeProvider<string>
+    {
+        public static readonly ManifestTypeProvider Instance = new();
+
+        public string GetPrimitiveType(PrimitiveTypeCode typeCode) => typeCode.ToString();
+
+        public string GetSystemType() => "System.Type";
+
+        public string GetSZArrayType(string elementType) => elementType + "[]";
+
+        public string GetTypeFromDefinition(MetadataReader reader, TypeDefinitionHandle handle, byte rawTypeKind) => DefinitionName(reader, handle);
+
+        public string GetTypeFromReference(MetadataReader reader, TypeReferenceHandle handle, byte rawTypeKind) => TypeReferenceName(reader, handle);
+
+        public string GetTypeFromSerializedName(string name) => name;
+
+        public PrimitiveTypeCode GetUnderlyingEnumType(string type) => PrimitiveTypeCode.Int32;
+
+        public bool IsSystemType(string type) => type == "System.Type";
     }
 
     /// <summary>

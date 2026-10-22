@@ -27,10 +27,11 @@ using Kahuna.Shared.Communication.Rest;
 namespace CamusDB.Tests.Cluster;
 
 /// <summary>
-/// A C# extension function in a WHERE filter of a span-fragmented (Gather) scan. Only node 0
-/// loads the extension, so a peer that evaluated the call would fail. The function must therefore
+/// A C# extension function in a WHERE filter of a span-fragmented (Gather) scan. The function must
 /// never reach a fragment: every fragment request ships without it, the coordinator evaluates it
-/// locally, and the result equals the same filter written with built-ins.
+/// locally, and the result equals the same filter written with built-ins. Every node loads the
+/// extension (installing it requires that), so the proof is the filter text the peers received, not
+/// a failure on a peer.
 /// </summary>
 [TestFixture]
 // Serial: boots a multi-node in-process cluster (port contention / Raft timing).
@@ -70,10 +71,12 @@ public sealed class TestClusterExtensionFunctions
     {
         InProcessSchemaCluster cluster = await InProcessSchemaCluster.StartAsync(
             nodeCount: 3, partitions: 2, loggerFactory: sharedLoggerFactory, logger: logger,
-            options: CamusDBOptions.Default with { KeyRangeShardingEnabled = true, DistributedQueryExecutionEnabled = true },
-            configureNodeOptions: (index, options) => index == 0
-                ? options with { ExtensionAssemblies = [FixturePath("Fixture.Good")] }
-                : options);
+            options: CamusDBOptions.Default with
+            {
+                KeyRangeShardingEnabled = true,
+                DistributedQueryExecutionEnabled = true,
+                ExtensionAssemblies = [FixturePath("Fixture.Good")],
+            });
 
         try
         {
@@ -91,7 +94,10 @@ public sealed class TestClusterExtensionFunctions
                 constraints: [new ConstraintInfo(ConstraintType.PrimaryKey, "~pk", [new ColumnIndexInfo("id", OrderType.Ascending)])],
                 ifNotExists: false)).WaitAsync(TimeSpan.FromSeconds(20)));
 
-            await cluster.WaitForSchemaConvergenceAsync(db, version: 1);
+            await cluster.RunOnSchemaLeaderAsync(db, leader => leader.Executor.ExecuteDDLSQL(
+                new ExecuteSQLTicket(txnState: null!, database: db, sql: "CREATE EXTENSION good", parameters: null)).WaitAsync(TimeSpan.FromSeconds(60)));
+
+            await cluster.WaitForSchemaConvergenceAsync(db, version: 2);
 
             List<string> ids = new(RowCount);
             InProcessSchemaCluster.Node writer = cluster.Nodes[0];
@@ -157,12 +163,6 @@ public sealed class TestClusterExtensionFunctions
 
             foreach (var request in cluster.FragmentTransport.ExecutedRequests)
                 StringAssert.DoesNotContain("fx_add", request.FilterJson, "an extension call must never be shipped to a peer");
-
-            // A node that does not load the extension cannot run the statement at all: proof that a
-            // shipped call would have failed on the peers.
-            CamusDBException ex = Assert.ThrowsAsync<CamusDBException>(() => RunSql(cluster.Nodes[1], db,
-                "SELECT id FROM readings WHERE fx_add(num, 0) >= 50"))!;
-            StringAssert.Contains("Function not found", ex.Message);
         }
         finally
         {

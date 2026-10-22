@@ -688,6 +688,50 @@ internal static class SchemaChangeEntryFactory
         };
     }
 
+    /// <summary>Installs an extension: the complete record the proposer built from its loaded build.</summary>
+    internal static SchemaChangeLogEntry CreateExtensionEntry(DatabaseDescriptor database, ExtensionDefinition extension)
+    {
+        return new()
+        {
+            Database = database.Id,
+            FromVersion = database.Schema.SchemaVersion,
+            ToVersion = database.Schema.SchemaVersion + 1,
+            Op = SchemaOp.CreateExtension,
+            Payload = SchemaChangeLogEntryCodec.EncodePayload(new SchemaExtensionPayload { Extension = extension })
+        };
+    }
+
+    /// <summary>Moves an installed extension from <paramref name="fromVersion"/> to the record's version.</summary>
+    internal static SchemaChangeLogEntry UpdateExtensionEntry(DatabaseDescriptor database, ExtensionDefinition extension, string fromVersion)
+    {
+        return new()
+        {
+            Database = database.Id,
+            FromVersion = database.Schema.SchemaVersion,
+            ToVersion = database.Schema.SchemaVersion + 1,
+            Op = SchemaOp.UpdateExtension,
+            Payload = SchemaChangeLogEntryCodec.EncodePayload(new SchemaExtensionPayload { Extension = extension, FromVersion = fromVersion })
+        };
+    }
+
+    /// <summary>Removes an installed extension, identified by the record the proposer saw.</summary>
+    internal static SchemaChangeLogEntry DropExtensionEntry(DatabaseDescriptor database, ExtensionDefinition extension)
+    {
+        return new()
+        {
+            Database = database.Id,
+            FromVersion = database.Schema.SchemaVersion,
+            ToVersion = database.Schema.SchemaVersion + 1,
+            Op = SchemaOp.DropExtension,
+            Payload = SchemaChangeLogEntryCodec.EncodePayload(new SchemaDropExtensionPayload
+            {
+                ExtensionName = extension.Name,
+                Version = extension.Version,
+                InstalledAt = extension.InstalledAt
+            })
+        };
+    }
+
     /// <summary>Removes a row trigger from a table, by name.</summary>
     internal static SchemaChangeLogEntry DropTriggerEntry(DatabaseDescriptor database, TableSchema table, string triggerName)
     {

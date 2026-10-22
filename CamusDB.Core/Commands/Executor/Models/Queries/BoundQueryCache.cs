@@ -33,7 +33,8 @@ namespace CamusDB.Core.CommandsExecutor.Models.Queries;
 /// <para><b>Validation contract.</b> A slot must never be served without the consumer re-validating
 /// it: the current table descriptor must be the same instance the slot was built over, and the
 /// schema stamp (<see cref="Catalogs.Models.TableSchema.Version"/> plus
-/// <see cref="Catalogs.Models.TableSchema.ContentsGeneration"/>) must be unchanged. A rename
+/// <see cref="Catalogs.Models.TableSchema.ContentsGeneration"/>) and the database's installed-extension
+/// stamp must be unchanged. A rename
 /// rewrites schema history in place and a materialized-view refresh swaps columns while reusing
 /// version numbers — each bumps one of the two stamp fields, which is the same pair the row decode
 /// plan cache relies on. On any mismatch the consumer rebinds and replaces the slot wholesale;
@@ -78,12 +79,14 @@ internal sealed class BoundQuerySlot
         TableDescriptor table,
         BoundSelectQuery bound,
         int schemaVersion,
-        long contentsGeneration)
+        long contentsGeneration,
+        long extensionStamp)
     {
         Table = table;
         Bound = bound;
         SchemaVersion = schemaVersion;
         ContentsGeneration = contentsGeneration;
+        ExtensionStamp = extensionStamp;
         RequiredColumns = new SingleTableRequiredColumnsMemo();
     }
 
@@ -102,6 +105,12 @@ internal sealed class BoundQuerySlot
 
     /// <summary>Contents-generation stamp captured at bind time; see the class contract.</summary>
     internal long ContentsGeneration { get; }
+
+    /// <summary>
+    /// The database's installed-extension stamp captured at bind time. A binding resolves function
+    /// calls, so <c>CREATE</c>, <c>ALTER</c> or <c>DROP EXTENSION</c> invalidates it.
+    /// </summary>
+    internal long ExtensionStamp { get; }
 
     /// <summary>
     /// The bound statement. Its <see cref="BoundSelectQuery.RowNames"/> resolver is frozen before the

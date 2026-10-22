@@ -39,9 +39,21 @@ public abstract class ExtensionTestBase : BaseTest
     protected CamusDBOptions WithExtensions(params string[] fixtures) =>
         Options with { ExtensionAssemblies = fixtures.Select(FixturePath).ToList() };
 
-    /// <summary>An engine and a database built with <c>Fixture.Good</c> loaded in SAFE mode.</summary>
+    /// <summary>
+    /// An engine and a database built with <c>Fixture.Good</c> loaded in SAFE mode and installed in the
+    /// database (<c>CREATE EXTENSION good</c>): a loaded extension is only available until a database
+    /// installs it.
+    /// </summary>
     protected Task<(string dbname, DatabaseDescriptor database, CommandExecutor executor)> CreateDatabaseWithGoodFixture() =>
-        CreateDatabase(WithExtensions("Fixture.Good"));
+        CreateDatabaseWithGood(WithExtensions("Fixture.Good"));
+
+    /// <summary>A database on an engine built with <paramref name="options"/>, with the extension "good" installed.</summary>
+    protected async Task<(string dbname, DatabaseDescriptor database, CommandExecutor executor)> CreateDatabaseWithGood(CamusDBOptions options)
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase(options);
+        await ExecDdl(executor, dbname, "CREATE EXTENSION good");
+        return (dbname, database, executor);
+    }
 
     protected static async Task ExecDdl(CommandExecutor executor, string dbname, string sql)
     {

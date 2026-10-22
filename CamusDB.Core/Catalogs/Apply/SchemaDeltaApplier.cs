@@ -95,6 +95,9 @@ internal static class SchemaDeltaApplier
             SchemaOp.AddForeignKey => ForeignKeyDeltaApplier.ApplyAddForeignKey(schema, SchemaDeltaApplier.DecodePayload<SchemaAddForeignKeyPayload>(entry)),
             SchemaOp.CreateTrigger => TriggerDeltaApplier.ApplyCreateTrigger(schema, SchemaDeltaApplier.DecodePayload<SchemaCreateTriggerPayload>(entry)),
             SchemaOp.DropTrigger => TriggerDeltaApplier.ApplyDropTrigger(schema, SchemaDeltaApplier.DecodePayload<SchemaDropTriggerPayload>(entry)),
+            SchemaOp.CreateExtension => ExtensionDeltaApplier.ApplyCreateExtension(schema, SchemaDeltaApplier.DecodePayload<SchemaExtensionPayload>(entry), entry.ToVersion),
+            SchemaOp.UpdateExtension => ExtensionDeltaApplier.ApplyUpdateExtension(schema, SchemaDeltaApplier.DecodePayload<SchemaExtensionPayload>(entry), entry.ToVersion),
+            SchemaOp.DropExtension => ExtensionDeltaApplier.ApplyDropExtension(schema, SchemaDeltaApplier.DecodePayload<SchemaDropExtensionPayload>(entry), entry.ToVersion),
             _ => throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Unknown schema operation '{entry.Op}'")
         };
 
@@ -170,6 +173,10 @@ internal static class SchemaDeltaApplier
         // Dry-run: apply to a throwaway clone so validation has no side effects on the live schema.
         Schema clone = SchemaReplicator.CloneSchema(database.Schema);
         ApplySchemaDelta(clone, database, entry);
+
+        // Proposer only, under the schema lock: a stored call to an extension function must still
+        // resolve, because a DROP EXTENSION can commit after the statement resolved it.
+        CamusDB.Core.Extensions.ExtensionReferenceGuard.Check(clone, entry);
     }
 
     internal static bool WasSchemaDeltaApplied(Schema schema, SchemaChangeLogEntry entry)
@@ -205,6 +212,11 @@ internal static class SchemaDeltaApplier
             // "applied" for any unrelated DDL that did. The table's own list is the proof.
             SchemaOp.CreateTrigger => TriggerDeltaApplier.WasCreateApplied(schema, DecodePayload<SchemaCreateTriggerPayload>(entry)),
             SchemaOp.DropTrigger => TriggerDeltaApplier.WasDropApplied(schema, DecodePayload<SchemaDropTriggerPayload>(entry)),
+            // Extension ops touch no relation, so the version fallback would answer "applied" for any
+            // unrelated DDL that moved the version. The installed record is the proof.
+            SchemaOp.CreateExtension => ExtensionDeltaApplier.WasCreateApplied(schema, DecodePayload<SchemaExtensionPayload>(entry)),
+            SchemaOp.UpdateExtension => ExtensionDeltaApplier.WasUpdateApplied(schema, DecodePayload<SchemaExtensionPayload>(entry)),
+            SchemaOp.DropExtension => ExtensionDeltaApplier.WasDropApplied(schema, DecodePayload<SchemaDropExtensionPayload>(entry)),
             _ => schema.SchemaVersion >= entry.ToVersion
         };
     }

@@ -152,6 +152,34 @@ internal static class SchemaMetaStore
         await MetaKeyWriter.DeleteMetaKey(kahuna, tx, MetaKeys.SequenceKey(database.Id, sequenceId)).ConfigureAwait(false);
     }
 
+    /// <summary>
+    /// Brings the record of one installed extension on disk in line with memory, in the caller's
+    /// transaction, and advances the persisted schema version: the record is written when the
+    /// extension is installed now, and its key is deleted when it is not. Reading the current state
+    /// rather than the delta keeps a checkpoint that runs after a later drop or re-install from
+    /// writing back a record memory no longer holds.
+    /// </summary>
+    internal static async Task PersistSchemaExtensionAsync(DatabaseDescriptor database, string extensionName, KvTransaction tx)
+    {
+        System.Diagnostics.Debug.Assert(
+            !database.Schema.IsHeldByCurrentFlow,
+            $"PersistSchemaExtensionAsync called while Schema lock is held on database '{database.Name}' — no replicated write may run under a schema lock"
+        );
+
+        IKahuna kahuna = database.Kahuna.Kahuna;
+
+        byte[] versionBytes = MetaJsonSerializer.Serialize(database.Schema.SchemaVersion, MetaJsonContext.Default.Int64);
+        await MetaKeyWriter.WriteMetaKey(kahuna, tx, MetaKeys.VersionKey(database.Id), versionBytes).ConfigureAwait(false);
+
+        if (database.Schema.Extensions.TryGetValue(extensionName, out ExtensionDefinition? extension))
+        {
+            byte[] extensionBytes = MetaJsonSerializer.Serialize(extension, MetaJsonContext.Default.ExtensionDefinition);
+            await MetaKeyWriter.WriteMetaKey(kahuna, tx, MetaKeys.ExtensionKey(database.Id, extension.Name), extensionBytes).ConfigureAwait(false);
+        }
+        else
+            await MetaKeyWriter.DeleteMetaKey(kahuna, tx, MetaKeys.ExtensionKey(database.Id, extensionName)).ConfigureAwait(false);
+    }
+
     internal static async Task PersistSchemaTableAsync(DatabaseDescriptor database, TableSchema tableSchema, KvTransaction tx)
         => await PersistSchemaTableAsync(database, tableSchema, database.Schema.SchemaVersion, tx).ConfigureAwait(false);
 

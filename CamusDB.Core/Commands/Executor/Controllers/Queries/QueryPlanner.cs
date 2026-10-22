@@ -446,6 +446,10 @@ public sealed class QueryPlanner
         plan.SchemaDeps = schemaDeps;
 
         // Cache lookup: skip access-path selection on a valid hit.
+        // Read once, before the lookup, and used again for the store: a plan built while an
+        // extension install or update lands is then filed under the stamp it was built with.
+        long extensionStamp = database.Schema.ExtensionCatalog.Stamp;
+
         bool fromCache = false;
         PhysicalPlanNode scanNode;
         QueryPlanStep? scanStep;
@@ -453,7 +457,7 @@ public sealed class QueryPlanner
 
         if (shapeId is not null
             && planCacheEnabled
-            && _cache!.TryGet(database.Id, shapeId, cacheDeps!, out PlanCacheEntry? cached)
+            && _cache!.TryGet(database.Id, shapeId, cacheDeps!, out PlanCacheEntry? cached, extensionStamp)
             && cached!.SingleTable is { } cachedDecision
             && !EstimateMovedFromCachedDecision(database, table, ticket, analysis, cachedDecision))
         {
@@ -764,7 +768,8 @@ public sealed class QueryPlanner
                         ClassifyDecision(s0),
                         guarded ? TryEstimateSelectivityForCache(database, table, analysis) : null,
                         guarded ? TryComputeRowDemand(ticket) : null),
-                    JoinAliasOrder: null));
+                    JoinAliasOrder: null),
+                extensionStamp);
         }
 
         return plan;

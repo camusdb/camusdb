@@ -16,7 +16,7 @@ using CamusDB.Extensions;
 namespace CamusDB.Core.Extensions;
 
 /// <summary>
-/// Runs <c>CALL name(args)</c>: resolves the procedure in the engine's extension registry, evaluates
+/// Runs <c>CALL name(args)</c>: resolves the procedure among the extensions installed in the database, evaluates
 /// the arguments, and runs the procedure inside the statement's transaction.
 ///
 /// <para><b>Arguments</b> are evaluated like the arguments of a function call in a FROM-less SELECT:
@@ -39,8 +39,10 @@ internal static class ProcedureRunner
     {
         string name = ast.leftAst?.yytext ?? "";
 
-        if (!executor.Extensions.TryGetProcedure(name, out ExtensionProcedure procedure))
-            throw new CamusDBException(CamusDBErrorCodes.ProcedureNotFound, $"No loaded extension defines the procedure '{name}'");
+        // Resolved against the extensions installed in this database, as this node loads them; a
+        // procedure of an extension that is only available here, not installed, is not found.
+        if (!executor.ExtensionScopes.Resolve(database).TryGetProcedure(name, out ExtensionProcedure procedure))
+            throw new CamusDBException(CamusDBErrorCodes.ProcedureNotFound, $"No extension installed in database '{database.Name}' defines the procedure '{name}'");
 
         IReadOnlyList<ColumnValue> values = ScalarFunctionArguments.EvaluateArgumentList(
             ast.rightAst,

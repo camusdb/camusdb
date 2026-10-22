@@ -85,6 +85,15 @@ internal static class MetaKeys
     /// </summary>
     internal static string KahunaSequenceName(string dbId, string sequenceId) => $"{dbId}/seq:{sequenceId}";
 
+    internal static string ExtensionKeyPrefix(string dbId) => $"{dbId}/meta/extension:";
+
+    /// <summary>
+    /// Holds one installed C# extension (<c>ExtensionDefinition</c>), keyed by the extension name. The
+    /// name is immutable for an installed extension (there is no rename), and a re-install after a
+    /// drop writes the same key again. Only metadata is stored: the code lives in files on each node.
+    /// </summary>
+    internal static string ExtensionKey(string dbId, string extensionName) => $"{ExtensionKeyPrefix(dbId)}{extensionName.ToLowerInvariant()}";
+
     internal static string CoordinatorKeyPrefix(string dbId) => $"{dbId}/meta/coordinator:";
 
     /// <summary>

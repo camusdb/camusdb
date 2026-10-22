@@ -23,21 +23,29 @@ public enum ExtensionTrust
 }
 
 /// <summary>
-/// One loaded extension assembly as an operator sees it in <c>SHOW EXTENSIONS</c>: where it came
-/// from, its identity, and what it registered.
+/// One loaded extension assembly: its manifest identity (name and version), where it came from, the
+/// hash of its bytes, and everything it registered. One per (name, version) on an engine; a node can
+/// load two versions of one extension side by side, each in its own load context.
+///
+/// <para><b>Available, not installed.</b> Loading makes the extension available on this node only.
+/// Its members resolve in a database only while that database's installed record
+/// (<see cref="Catalogs.Models.ExtensionDefinition"/>) names this exact name, version and
+/// <see cref="Sha256"/>; see <see cref="InstalledExtensionSet"/>.</para>
 ///
 /// <para><see cref="Sha256"/> is the hash of the exact bytes the server verified and loaded (the file
-/// is read once, and those bytes are both checked and loaded). Triggers record it when they are
-/// created and compare it when they bind, which is how a node with a different build of the same
-/// extension is detected.</para>
+/// is read once, and those bytes are both checked and loaded). It is how a node with a different build
+/// of the same name and version is told apart: such a node does not bind the database's record.</para>
 /// </summary>
 public sealed class LoadedExtension
 {
-    /// <summary>The assembly's simple name.</summary>
+    /// <summary>The extension name from the manifest.</summary>
     public required string Name { get; init; }
 
-    /// <summary>The assembly version.</summary>
+    /// <summary>The manifest version, as written.</summary>
     public required string Version { get; init; }
+
+    /// <summary>The assembly's simple name.</summary>
+    public required string AssemblyName { get; init; }
 
     /// <summary>The configured absolute path.</summary>
     public required string Path { get; init; }
@@ -47,6 +55,9 @@ public sealed class LoadedExtension
 
     /// <summary>SAFE or UNSAFE.</summary>
     public required ExtensionTrust Trust { get; init; }
+
+    /// <summary>The names of the extensions this one requires, from the manifest.</summary>
+    public required IReadOnlyList<string> Requires { get; init; }
 
     /// <summary>The SQL function names the assembly registered, aliases included.</summary>
     public required IReadOnlyList<string> Functions { get; init; }
@@ -59,6 +70,58 @@ public sealed class LoadedExtension
 
     /// <summary>The loaded assembly. Null only in registries built by tests without a load.</summary>
     internal Assembly? Assembly { get; init; }
+
+    /// <summary>The parsed manifest version, for ordering.</summary>
+    internal ExtensionVersion ParsedVersion { get; init; }
+
+    internal Dictionary<string, ScalarFunctionDescriptor> FunctionTable { get; } = new(StringComparer.OrdinalIgnoreCase);
+
+    internal List<ExtensionTriggerType> TriggerTypes { get; } = [];
+
+    internal Dictionary<string, ExtensionProcedure> ProcedureTable { get; } = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>The members, with their kinds, as an installed record lists them.</summary>
+    internal List<Catalogs.Models.ExtensionMemberDefinition> BuildMembers()
+    {
+        List<Catalogs.Models.ExtensionMemberDefinition> members = new(Functions.Count + Procedures.Count + Triggers.Count);
+
+        foreach (string name in Functions)
+            members.Add(new() { Kind = Catalogs.Models.ExtensionMemberKind.Function, Name = name });
+
+        foreach (string name in Procedures)
+            members.Add(new() { Kind = Catalogs.Models.ExtensionMemberKind.Procedure, Name = name });
+
+        foreach (string name in Triggers)
+            members.Add(new() { Kind = Catalogs.Models.ExtensionMemberKind.Trigger, Name = name });
+
+        return members;
+    }
+
+    /// <summary>
+    /// Finds a trigger type of this extension by full CLR name. A public type of that name that is
+    /// not a trigger reports <see cref="TriggerTypeLookup.NotATrigger"/>, so <c>CREATE TRIGGER</c> can
+    /// say why it refused.
+    /// </summary>
+    internal TriggerTypeLookup FindTriggerType(string fullName, out ExtensionTriggerType? type)
+    {
+        foreach (ExtensionTriggerType candidate in TriggerTypes)
+        {
+            if (string.Equals(candidate.FullName, fullName, StringComparison.Ordinal))
+            {
+                type = candidate;
+                return TriggerTypeLookup.Found;
+            }
+        }
+
+        type = null;
+
+        return Assembly?.GetType(fullName, throwOnError: false) is { IsPublic: true }
+            ? TriggerTypeLookup.NotATrigger
+            : TriggerTypeLookup.NotFound;
+    }
+
+    /// <summary>"name version" as messages print it.</summary>
+    public override string ToString() => Name + " " + Version;
 }
 
 /// <summary>
@@ -128,15 +191,17 @@ internal enum TriggerTypeLookup
 ///
 /// <para><b>One per engine, never static.</b> The <c>CommandExecutor</c> builds it from its
 /// <see cref="CamusDBOptions"/> and owns it; two engines in one process (tests, the in-process
-/// cluster) each see only their own extensions. Statement evaluation reaches it through
-/// <see cref="ExtensionFunctionScope"/>, because the expression evaluator is static.</para>
+/// cluster) each see only their own extensions.</para>
 ///
-/// <para>Function names are case-insensitive. The loader refuses a name that collides with a
-/// built-in, a table function or another extension, so a lookup here never shadows a built-in.</para>
+/// <para><b>No global name table.</b> A loaded extension is only available; its members resolve in a
+/// database where it is installed, through that database's <see cref="InstalledExtensionSet"/>. The
+/// registry answers which (name, version) pairs this node loads, and the boot only refuses a member
+/// name that would shadow a built-in or that one assembly defines twice. Two extensions may define
+/// the same member name: <c>CREATE EXTENSION</c> refuses to install both in one database.</para>
 /// </summary>
 internal sealed class ExtensionRegistry
 {
-    public static readonly ExtensionRegistry Empty = new([], new Dictionary<string, ScalarFunctionDescriptor>(), [], new Dictionary<string, ExtensionProcedure>());
+    public static readonly ExtensionRegistry Empty = new([]);
 
     private static volatile bool anyLoaded;
 
@@ -147,25 +212,27 @@ internal sealed class ExtensionRegistry
     /// </summary>
     public static bool AnyLoaded => anyLoaded;
 
-    /// <summary>Called by the loader when it built a non-empty registry.</summary>
+    /// <summary>Called by the loader when it built a non-empty registry, and by the database open when
+    /// a database has an installed extension (the node may load none, and a statement there must still
+    /// reach the scope that reports the missing extension).</summary>
     internal static void MarkLoaded() => anyLoaded = true;
 
-    private readonly Dictionary<string, ScalarFunctionDescriptor> functions;
+    private readonly Dictionary<string, List<LoadedExtension>> byName = new(StringComparer.OrdinalIgnoreCase);
 
-    private readonly IReadOnlyList<ExtensionTriggerType> triggerTypes;
-
-    private readonly Dictionary<string, ExtensionProcedure> procedures;
-
-    public ExtensionRegistry(
-        IReadOnlyList<LoadedExtension> extensions,
-        IReadOnlyDictionary<string, ScalarFunctionDescriptor> functions,
-        IReadOnlyList<ExtensionTriggerType> triggerTypes,
-        IReadOnlyDictionary<string, ExtensionProcedure> procedures)
+    public ExtensionRegistry(IReadOnlyList<LoadedExtension> extensions)
     {
         Extensions = extensions;
-        this.functions = new Dictionary<string, ScalarFunctionDescriptor>(functions, StringComparer.OrdinalIgnoreCase);
-        this.triggerTypes = triggerTypes;
-        this.procedures = new Dictionary<string, ExtensionProcedure>(procedures, StringComparer.OrdinalIgnoreCase);
+
+        foreach (LoadedExtension extension in extensions)
+        {
+            if (!byName.TryGetValue(extension.Name, out List<LoadedExtension>? versions))
+                byName[extension.Name] = versions = [];
+
+            versions.Add(extension);
+        }
+
+        foreach (List<LoadedExtension> versions in byName.Values)
+            versions.Sort((a, b) => b.ParsedVersion.CompareTo(a.ParsedVersion));
     }
 
     /// <summary>The loaded assemblies, in configuration order.</summary>
@@ -173,48 +240,19 @@ internal sealed class ExtensionRegistry
 
     public bool IsEmpty => Extensions.Count == 0;
 
-    public bool TryGetFunction(string name, out ScalarFunctionDescriptor descriptor) =>
-        functions.TryGetValue(name, out descriptor!);
+    /// <summary>The loaded versions of <paramref name="name"/>, highest first, or an empty list.</summary>
+    public IReadOnlyList<LoadedExtension> GetVersions(string name) =>
+        byName.TryGetValue(name, out List<LoadedExtension>? versions) ? versions : [];
 
-    public bool HasFunction(string name) => functions.ContainsKey(name);
-
-    public bool TryGetProcedure(string name, out ExtensionProcedure procedure) =>
-        procedures.TryGetValue(name, out procedure!);
-
-    /// <summary>
-    /// Finds a trigger type by its full CLR name across all loaded assemblies. A name defined in two
-    /// assemblies is ambiguous. A public type of that name that is not a trigger reports
-    /// <see cref="TriggerTypeLookup.NotATrigger"/>, so <c>CREATE TRIGGER</c> can say why it refused.
-    /// </summary>
-    public TriggerTypeLookup FindTriggerType(string fullName, out ExtensionTriggerType? type)
+    /// <summary>The loaded build with exactly this name and version text, or null.</summary>
+    public LoadedExtension? Find(string name, string version)
     {
-        type = null;
-        int matches = 0;
-
-        foreach (ExtensionTriggerType candidate in triggerTypes)
+        foreach (LoadedExtension extension in GetVersions(name))
         {
-            if (!string.Equals(candidate.FullName, fullName, StringComparison.Ordinal))
-                continue;
-
-            type = candidate;
-            matches++;
+            if (string.Equals(extension.Version, version, StringComparison.Ordinal))
+                return extension;
         }
 
-        if (matches > 1)
-        {
-            type = null;
-            return TriggerTypeLookup.Ambiguous;
-        }
-
-        if (matches == 1)
-            return TriggerTypeLookup.Found;
-
-        foreach (LoadedExtension extension in Extensions)
-        {
-            if (extension.Assembly?.GetType(fullName, throwOnError: false) is { IsPublic: true })
-                return TriggerTypeLookup.NotATrigger;
-        }
-
-        return TriggerTypeLookup.NotFound;
+        return null;
     }
 }

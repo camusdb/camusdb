@@ -84,14 +84,18 @@ internal sealed class PlanCache
     /// <paramref name="databaseId"/>. Returns false (and increments <see cref="Misses"/>)
     /// when no entry exists OR when the cached entry's schema dependencies no longer match
     /// the current schema versions supplied in <paramref name="currentDeps"/>.
+    /// <paramref name="extensionStamp"/> is the database's installed-extension stamp: a plan reads the
+    /// volatility of the functions it calls, and an extension install, update or drop changes it, so
+    /// the stamp is part of the key.
     /// </summary>
     public bool TryGet(
         string databaseId,
         string shapeId,
         IReadOnlyList<PlanCacheDep> currentDeps,
-        out PlanCacheEntry? entry)
+        out PlanCacheEntry? entry,
+        long extensionStamp = 0)
     {
-        string key = MakeKey(databaseId, shapeId);
+        string key = MakeKey(databaseId, shapeId, extensionStamp);
         lock (_lock)
         {
             if (!_map.TryGetValue(key, out LinkedListNode<Slot>? node))
@@ -123,9 +127,9 @@ internal sealed class PlanCache
     }
 
     /// <summary>Inserts or replaces the cache entry for the given key.</summary>
-    public void Put(string databaseId, string shapeId, PlanCacheEntry entry)
+    public void Put(string databaseId, string shapeId, PlanCacheEntry entry, long extensionStamp = 0)
     {
-        string key = MakeKey(databaseId, shapeId);
+        string key = MakeKey(databaseId, shapeId, extensionStamp);
         lock (_lock)
         {
             if (_map.TryGetValue(key, out LinkedListNode<Slot>? existing))
@@ -176,8 +180,10 @@ internal sealed class PlanCache
         }
     }
 
-    private static string MakeKey(string databaseId, string shapeId) =>
-        string.Concat(databaseId, ":", shapeId);
+    private static string MakeKey(string databaseId, string shapeId, long extensionStamp) =>
+        extensionStamp == 0
+            ? string.Concat(databaseId, ":", shapeId)
+            : string.Concat(databaseId, "@", extensionStamp.ToString(System.Globalization.CultureInfo.InvariantCulture), ":", shapeId);
 
     /// <summary>
     /// True when the cached dependency set still describes the current one. Order-insensitive: a

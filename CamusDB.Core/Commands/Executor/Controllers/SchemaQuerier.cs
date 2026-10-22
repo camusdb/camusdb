@@ -1564,31 +1564,66 @@ internal sealed class SchemaQuerier
     }
 
     /// <summary>
-    /// Lists the C# extension assemblies this engine loaded at startup, in configuration order: where
-    /// each came from, the SHA-256 of the bytes that were loaded, its trust level, and what it
-    /// registered. An engine without extensions returns no rows, which is a normal answer, not an
-    /// error. Node-local by nature: a cluster's nodes each load their own files, and the hash column
-    /// is how an operator compares them.
+    /// Lists the extension builds this node loaded and, given the current database's installed records
+    /// and their resolution on this node, marks the installed build and adds a row for each installed
+    /// extension this node cannot run. See <c>DerivedTableSchemaBuilder.ShowExtensionsSchema</c>.
     /// </summary>
-    internal async IAsyncEnumerable<QueryResultRow> ShowExtensions(Extensions.ExtensionRegistry extensions)
+    internal async IAsyncEnumerable<QueryResultRow> ShowExtensions(
+        Extensions.ExtensionRegistry extensions,
+        IReadOnlyDictionary<string, ExtensionDefinition>? installed,
+        Extensions.InstalledExtensionSet? resolved)
     {
         await Task.CompletedTask;
 
         foreach (Extensions.LoadedExtension extension in extensions.Extensions)
         {
-            yield return new QueryResultRow(default, new Dictionary<string, ColumnValue>(StringComparer.OrdinalIgnoreCase)
-            {
-                { "name",       new ColumnValue(ColumnType.String, extension.Name) },
-                { "version",    new ColumnValue(ColumnType.String, extension.Version) },
-                { "path",       new ColumnValue(ColumnType.String, extension.Path) },
-                { "sha256",     new ColumnValue(ColumnType.String, extension.Sha256) },
-                { "trust",      new ColumnValue(ColumnType.String, extension.Trust == Extensions.ExtensionTrust.Safe ? "safe" : "unsafe") },
-                { "functions",  new ColumnValue(ColumnType.String, string.Join(",", extension.Functions)) },
-                { "triggers",   new ColumnValue(ColumnType.String, string.Join(",", extension.Triggers)) },
-                { "procedures", new ColumnValue(ColumnType.String, string.Join(",", extension.Procedures)) },
-            });
+            bool isInstalled = resolved is not null
+                && resolved.Bound.TryGetValue(extension.Name, out Extensions.LoadedExtension? bound)
+                && ReferenceEquals(bound, extension);
+
+            yield return ExtensionRow(
+                extension.Name, extension.Version, isInstalled ? "installed" : "available",
+                Text(extension.Path), extension.Sha256,
+                Text(extension.Trust == Extensions.ExtensionTrust.Safe ? "safe" : "unsafe"),
+                extension.Requires, extension.Functions, extension.Triggers, extension.Procedures);
+        }
+
+        if (installed is null || resolved is null)
+            yield break;
+
+        foreach (string name in resolved.Missing.Keys)
+        {
+            if (!installed.TryGetValue(name, out ExtensionDefinition? record))
+                continue;
+
+            yield return ExtensionRow(
+                record.Name, record.Version, "missing", ColumnValue.Null, record.Sha256, ColumnValue.Null,
+                record.Requires,
+                Members(record, ExtensionMemberKind.Function),
+                Members(record, ExtensionMemberKind.Trigger),
+                Members(record, ExtensionMemberKind.Procedure));
         }
     }
+
+    private static List<string> Members(ExtensionDefinition record, ExtensionMemberKind kind) =>
+        record.Members.Where(m => m.Kind == kind).Select(m => m.Name).ToList();
+
+    private static QueryResultRow ExtensionRow(
+        string name, string version, string status, ColumnValue path, string sha256, ColumnValue trust,
+        IEnumerable<string> requires, IEnumerable<string> functions, IEnumerable<string> triggers, IEnumerable<string> procedures) =>
+        new(default, new Dictionary<string, ColumnValue>(StringComparer.OrdinalIgnoreCase)
+        {
+            { "name",       new ColumnValue(ColumnType.String, name) },
+            { "version",    new ColumnValue(ColumnType.String, version) },
+            { "status",     new ColumnValue(ColumnType.String, status) },
+            { "path",       path },
+            { "sha256",     new ColumnValue(ColumnType.String, sha256) },
+            { "trust",      trust },
+            { "requires",   new ColumnValue(ColumnType.String, string.Join(",", requires)) },
+            { "functions",  new ColumnValue(ColumnType.String, string.Join(",", functions)) },
+            { "triggers",   new ColumnValue(ColumnType.String, string.Join(",", triggers)) },
+            { "procedures", new ColumnValue(ColumnType.String, string.Join(",", procedures)) },
+        });
 
     /// <summary>
     /// Lists the runtime cluster-settings overlay: the entries <c>SET CLUSTER SETTING</c> put in

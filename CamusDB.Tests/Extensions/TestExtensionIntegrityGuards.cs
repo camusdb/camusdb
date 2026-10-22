@@ -169,7 +169,7 @@ public sealed class TestExtensionIntegrityGuards : ExtensionTestBase
     {
         // One-row chunks: when the trigger on row 1 runs, row 2 is not held by any chunk yet, so the
         // outer statement later reads row 2 fresh and nothing is stale.
-        (string db, _, CommandExecutor executor) = await CreateDatabase(
+        (string db, _, CommandExecutor executor) = await CreateDatabaseWithGood(
             WithExtensions("Fixture.Good") with { SpillEnabled = true, ForceSpillThresholdRows = 1 });
         await Reentrant(executor, db);
         await ExecDdl(executor, db, $"CREATE TRIGGER nested ON reentrant BEFORE UPDATE EXTERNAL NAME '{Fixture}UpdateNextRowTrigger'");
@@ -294,7 +294,7 @@ public sealed class TestExtensionIntegrityGuards : ExtensionTestBase
     [Test]
     public async Task AfterQueue_IsBoundedByTheByteBudget()
     {
-        (string db, _, CommandExecutor executor) = await CreateDatabase(
+        (string db, _, CommandExecutor executor) = await CreateDatabaseWithGood(
             WithExtensions("Fixture.Good") with { SpillThresholdBytes = 128 * 1024 });
         await ExecDdl(executor, db, "CREATE TABLE t (id OID PRIMARY KEY DEFAULT (gen_id()), name STRING NOT NULL, wide STRING(200000))");
         await ExecDdl(executor, db, $"CREATE TRIGGER count ON t AFTER INSERT EXTERNAL NAME '{Fixture}CountingTrigger'");

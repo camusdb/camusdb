@@ -135,6 +135,9 @@ stat    : select_stmt { $$.n = $1.n; }
         | create_trigger_stmt { $$.n = $1.n; }
         | drop_trigger_stmt { $$.n = $1.n; }
         | call_stmt { $$.n = $1.n; }
+        | create_extension_stmt { $$.n = $1.n; }
+        | alter_extension_stmt { $$.n = $1.n; }
+        | drop_extension_stmt { $$.n = $1.n; }
         ;
 
 opt_distinct : TDISTINCT { $$.s = "1"; }
@@ -1176,6 +1179,28 @@ trigger_event : TINSERT { $$.s = "insert"; }
               | TDELETE { $$.s = "delete"; }
               ;
 
+/* CREATE EXTENSION <name> [VERSION '<v>'], ALTER EXTENSION <name> UPDATE [TO '<v>'] and
+   DROP EXTENSION <name>. No word is reserved: EXTENSION and VERSION are plain identifiers that
+   CreateExtensionStatement / AlterExtensionStatement / DropExtensionStatement check, so each stays
+   usable as a table or column name. CREATE and DROP share the TCREATE/TDROP TIDENTIFIER any_identifier
+   prefix with the trigger statements; the token after the name (ON for a trigger) tells them apart.
+   UPDATE and TO are the existing keyword tokens. */
+create_extension_stmt : TCREATE TIDENTIFIER any_identifier
+                        { $$.n = CreateExtensionStatement($2.s, $3.n, null, null); }
+                      | TCREATE TIDENTIFIER any_identifier TIDENTIFIER string
+                        { $$.n = CreateExtensionStatement($2.s, $3.n, $4.s, $5.n); }
+                      ;
+
+alter_extension_stmt : TALTER TIDENTIFIER any_identifier TUPDATE
+                       { $$.n = AlterExtensionStatement($2.s, $3.n, null); }
+                     | TALTER TIDENTIFIER any_identifier TUPDATE TTO string
+                       { $$.n = AlterExtensionStatement($2.s, $3.n, $6.n); }
+                     ;
+
+drop_extension_stmt : TDROP TIDENTIFIER any_identifier
+                      { $$.n = DropExtensionStatement($2.s, $3.n); }
+                    ;
+
 /* CALL <procedure>(<args>). CALL is a plain identifier checked in CallStatement, like FLUSH and
    CANCEL. The procedure name is a bare TIDENTIFIER, not any_identifier: after two identifiers the
    next token alone decides between FLUSH SESSIONS (end of input), CANCEL QUERY (a string) and CALL
@@ -1901,13 +1926,18 @@ exists_subquery_expr : TEXISTS query_expr { $$.n = new(NodeType.ExprExistsSubque
 scalar_subquery_expr : query_expr { $$.n = new(NodeType.ExprScalarSubquery, $1.n, null, null, null, null, null, null, null); }
                      ;
 
-/* The third form, a call whose one argument is written as a bare subquery, exists for
+/* A qualified call, extension.function(...), names the C# extension whose function it calls; the name
+   node carries the dotted text, and the evaluator resolves it against the extensions installed in the
+   statement's database.
+   The fifth form, a call whose one argument is written as a bare subquery, exists for
    `x = ANY (SELECT ...)`: after `any(` an argument must be an expression, which a bare SELECT is not.
    Its argument is the same ExprScalarSubquery node that `any((SELECT ...))` builds, so the rewrite in
    NodeAst.Comparison sees one shape for both spellings. On any other function it is a call with a
    scalar-subquery argument, exactly as the doubly parenthesized form already was. */
 fcall_expr : identifier LPAREN RPAREN { $$.n = new(NodeType.ExprFuncCall, $1.n, null, null, null, null, null, null, null); }
            | identifier LPAREN fcall_argument_list RPAREN { $$.n = new(NodeType.ExprFuncCall, $1.n, $3.n, null, null, null, null, null, null); }
+           | qualified_identifier LPAREN RPAREN { $$.n = new(NodeType.ExprFuncCall, $1.n, null, null, null, null, null, null, null); }
+           | qualified_identifier LPAREN fcall_argument_list RPAREN { $$.n = new(NodeType.ExprFuncCall, $1.n, $3.n, null, null, null, null, null, null); }
            | identifier query_expr { $$.n = new(NodeType.ExprFuncCall, $1.n, new NodeAst(NodeType.ExprScalarSubquery, $2.n, null, null, null, null, null, null, null), null, null, null, null, null, null); }
            ;
 

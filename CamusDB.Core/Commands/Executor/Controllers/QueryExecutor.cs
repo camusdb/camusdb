@@ -246,7 +246,8 @@ internal sealed class QueryExecutor
 
         string fingerprint = ResultFingerprintBuilder.Build(
             database.Id, hint.CacheName, plan.QueryShapeId,
-            plan.Ticket.Parameters, plan.SchemaDeps, hint);
+            plan.Ticket.Parameters, plan.SchemaDeps, hint,
+            database.Schema.ExtensionCatalog.Stamp);
 
         // Tracks that a strict entry was found but evicted as stale; live re-execution follows.
         // Used to override the final status to StaleRevalidated rather than Miss.

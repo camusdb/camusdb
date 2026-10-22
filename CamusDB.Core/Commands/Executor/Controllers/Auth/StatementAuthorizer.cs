@@ -210,6 +210,16 @@ internal sealed class StatementAuthorizer
             return;
         }
 
+        // Installing, updating or removing an extension decides which operator-deployed code every
+        // statement of the database may run, and the code runs with the server's rights. That is not a
+        // per-database grant: it is the superuser bar Postgres sets for untrusted extensions.
+        if (ast.nodeType is NodeType.CreateExtension or NodeType.AlterExtensionUpdate or NodeType.DropExtension)
+        {
+            if (!principal.IsSuperuser)
+                throw new CamusDBException(CamusDBErrorCodes.InsufficientPrivilege, "CREATE, ALTER and DROP EXTENSION require a superuser");
+            return;
+        }
+
         // The loaded extensions are held to the same bar: file paths, hashes and the trust level of
         // the code running inside the server are deployment detail that no per-database grant scopes
         // down.

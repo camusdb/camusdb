@@ -72,6 +72,25 @@ public sealed class UppercaseTrigger : ICamusTrigger
     }
 }
 
+/// <summary>Test-only BEFORE trigger: sets the <c>build</c> column of NEW to the fixture build's
+/// version, so a test sees which build fired after an extension update.</summary>
+public sealed class BuildStampTrigger : ICamusTrigger
+{
+    public Task FireAsync(ITriggerContext context)
+    {
+        context.New?.Set("build", Build.Version);
+        return Task.CompletedTask;
+    }
+}
+
+#if !GOOD_V2
+/// <summary>Defined by version 1.0.0 only, so an update to 2.0.0 is refused while a trigger uses it.</summary>
+public sealed class V1OnlyTrigger : ICamusTrigger
+{
+    public Task FireAsync(ITriggerContext context) => Task.CompletedTask;
+}
+#endif
+
 /// <summary>Test-only BEFORE trigger: sets <c>name</c> to NULL, so a NOT NULL column must refuse
 /// the row.</summary>
 public sealed class NullNameTrigger : ICamusTrigger

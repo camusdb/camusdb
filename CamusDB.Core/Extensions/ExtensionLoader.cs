@@ -21,10 +21,15 @@ namespace CamusDB.Core.Extensions;
 /// misconfigured node refuses to start instead of starting without the code it was told to run.
 ///
 /// <para><b>Order per file:</b> check the path → read the bytes once → SHA-256 of those bytes → read
-/// the identity from metadata (not a .NET assembly, contract too new) → SAFE check of the same bytes
-/// → load the same bytes into a new <see cref="ExtensionLoadContext"/> → discover members. Hashing,
-/// checking and loading one byte array closes the window in which a file could change between the
-/// check and the load.</para>
+/// the identity and the <c>[assembly: CamusExtension]</c> manifest from metadata (not a .NET assembly,
+/// contract too new, manifest missing or invalid) → SAFE check of the same bytes → load the same bytes
+/// into a new <see cref="ExtensionLoadContext"/> → discover members. Hashing, checking and loading one
+/// byte array closes the window in which a file could change between the check and the load.</para>
+///
+/// <para><b>Versions.</b> The registry is keyed by the manifest's (name, version). Two files may carry
+/// two versions of one extension; each loads into its own context, which is what lets a rolling
+/// upgrade load the new version on every node before any database moves to it. Two files with the
+/// same name and version fail the boot.</para>
 ///
 /// <para><b>Discovery</b> uses reflection, at startup only: public static <see cref="CamusFunctionAttribute"/>
 /// methods (bound by <see cref="ExtensionFunctionBinder"/>), public concrete <see cref="ICamusTrigger"/>
@@ -32,8 +37,10 @@ namespace CamusDB.Core.Extensions;
 /// created later, on first use, through constructors compiled here; nothing in extension code runs
 /// during the load except the runtime's own type loading.</para>
 ///
-/// <para><b>Names.</b> A function or procedure name that collides with a built-in, a table function
-/// or another extension's member fails the boot. A built-in is never shadowed.</para>
+/// <para><b>Names.</b> A function name that collides with a built-in, a table function or an aggregate
+/// fails the boot, and so does a member name that one extension defines twice. A built-in is never
+/// shadowed. A name shared by two extensions is not a boot error: the extensions are only available,
+/// and <c>CREATE EXTENSION</c> refuses to install both in one database.</para>
 /// </summary>
 internal static class ExtensionLoader
 {
@@ -62,11 +69,7 @@ internal static class ExtensionLoader
         Version hostContract = typeof(ICamusTrigger).Assembly.GetName().Version ?? new Version(0, 0);
 
         List<LoadedExtension> extensions = new(entries.Count);
-        Dictionary<string, ScalarFunctionDescriptor> functions = new(StringComparer.OrdinalIgnoreCase);
-        Dictionary<string, string> functionOwners = new(StringComparer.OrdinalIgnoreCase);
-        List<ExtensionTriggerType> triggers = [];
-        Dictionary<string, ExtensionProcedure> procedures = new(StringComparer.OrdinalIgnoreCase);
-        HashSet<string> simpleNames = new(StringComparer.OrdinalIgnoreCase);
+        HashSet<(string, string)> identities = [];
 
         foreach ((string path, ExtensionTrust trust) in entries)
         {
@@ -80,10 +83,12 @@ internal static class ExtensionLoader
 
             CheckContractVersion(identity.ContractVersion, hostContract, path);
 
-            if (!simpleNames.Add(identity.Name))
+            (string name, ExtensionVersion version, IReadOnlyList<string> requires) = CheckManifest(identity.Manifest, path);
+
+            if (!identities.Add((name.ToLowerInvariant(), version.Text)))
                 throw new CamusDBException(
                     CamusDBErrorCodes.ExtensionDuplicateAssembly,
-                    $"Extension '{path}': another configured extension is also named '{identity.Name}'; a node loads one version of an extension");
+                    $"Extension '{path}': another configured file is also extension '{name}' version {version.Text}; a node loads one build of each version");
 
             if (trust == ExtensionTrust.Safe)
             {
@@ -98,14 +103,14 @@ internal static class ExtensionLoader
             }
             else
                 logger.LogWarning(
-                    "Loading extension {Name} from {Path} WITHOUT the SAFE check (unsafe_extension_assemblies); it runs with the server's full rights",
-                    identity.Name, path);
+                    "Loading extension {Name} {Version} from {Path} WITHOUT the SAFE check (unsafe_extension_assemblies); it runs with the server's full rights",
+                    name, version.Text, path);
 
             Assembly assembly;
 
             try
             {
-                ExtensionLoadContext context = new(identity.Name, path, trust);
+                ExtensionLoadContext context = new(name + "@" + version.Text, path, trust);
                 using MemoryStream stream = new(image, writable: false);
                 assembly = context.LoadFromStream(stream);
             }
@@ -121,14 +126,17 @@ internal static class ExtensionLoader
             List<string> procedureNames = [];
 
             // The record is built before its members so each member can point at it; the name lists
-            // are filled in place below.
+            // and member tables are filled in place below.
             LoadedExtension extension = new()
             {
-                Name = identity.Name,
-                Version = identity.Version.ToString(),
+                Name = name,
+                Version = version.Text,
+                ParsedVersion = version,
+                AssemblyName = identity.Name,
                 Path = path,
                 Sha256 = sha256,
                 Trust = trust,
+                Requires = requires,
                 Functions = functionNames,
                 Triggers = triggerNames,
                 Procedures = procedureNames,
@@ -148,12 +156,11 @@ internal static class ExtensionLoader
 
                     ScalarFunctionDescriptor descriptor = ExtensionFunctionBinder.Bind(method, attribute);
 
-                    foreach (string name in descriptor.AllNames)
+                    foreach (string functionName in descriptor.AllNames)
                     {
-                        CheckFunctionName(name, path, functionOwners);
-                        functions[name] = descriptor;
-                        functionOwners[name] = identity.Name;
-                        functionNames.Add(name);
+                        CheckFunctionName(functionName, path, extension);
+                        extension.FunctionTable[functionName] = descriptor;
+                        functionNames.Add(functionName);
                     }
                 }
 
@@ -162,7 +169,7 @@ internal static class ExtensionLoader
 
                 if (typeof(ICamusTrigger).IsAssignableFrom(type))
                 {
-                    triggers.Add(new ExtensionTriggerType(extension, type, CompileFactory<ICamusTrigger>(type, path)));
+                    extension.TriggerTypes.Add(new ExtensionTriggerType(extension, type, CompileFactory<ICamusTrigger>(type, path)));
                     triggerNames.Add(type.FullName!);
                 }
 
@@ -175,13 +182,13 @@ internal static class ExtensionLoader
                             CamusDBErrorCodes.ExtensionInvalidSignature,
                             $"Extension '{path}': [CamusProcedure] type {type.FullName} does not implement {nameof(ICamusProcedure)}");
 
-                    if (string.IsNullOrWhiteSpace(procedure.Name))
-                        throw new CamusDBException(CamusDBErrorCodes.ExtensionInvalidSignature, $"Extension '{path}': procedure {type.FullName} has an empty name");
+                    if (string.IsNullOrWhiteSpace(procedure.Name) || procedure.Name.Contains('.'))
+                        throw new CamusDBException(CamusDBErrorCodes.ExtensionInvalidSignature, $"Extension '{path}': procedure {type.FullName} has an invalid name '{procedure.Name}'");
 
-                    if (procedures.ContainsKey(procedure.Name))
+                    if (extension.ProcedureTable.ContainsKey(procedure.Name))
                         throw new CamusDBException(
                             CamusDBErrorCodes.ExtensionDuplicateMember,
-                            $"Extension '{path}': procedure '{procedure.Name}' is already defined by extension '{procedures[procedure.Name].Source.Name}'");
+                            $"Extension '{path}': procedure '{procedure.Name}' is defined twice");
 
                     int max = procedure.MaxArguments < 0 ? int.MaxValue : procedure.MaxArguments;
 
@@ -190,7 +197,7 @@ internal static class ExtensionLoader
                             CamusDBErrorCodes.ExtensionInvalidSignature,
                             $"Extension '{path}': procedure '{procedure.Name}' has an invalid argument range {procedure.MinArguments}..{procedure.MaxArguments}");
 
-                    procedures[procedure.Name] = new ExtensionProcedure(
+                    extension.ProcedureTable[procedure.Name] = new ExtensionProcedure(
                         extension, procedure.Name, procedure.MinArguments, max, CompileFactory<ICamusProcedure>(type, path));
                     procedureNames.Add(procedure.Name);
                 }
@@ -200,13 +207,13 @@ internal static class ExtensionLoader
 
             if (logger.IsEnabled(LogLevel.Information))
                 logger.LogInformation(
-                    "Loaded extension {Name} {Version} ({Trust}) from {Path}, sha256 {Sha256}: functions [{Functions}], triggers [{Triggers}], procedures [{Procedures}]",
-                    extension.Name, extension.Version, trust, path, sha256,
+                    "Loaded extension {Name} {Version} (assembly {Assembly}, {Trust}) from {Path}, sha256 {Sha256}: functions [{Functions}], triggers [{Triggers}], procedures [{Procedures}]",
+                    name, version.Text, identity.Name, trust, path, sha256,
                     string.Join(", ", functionNames), string.Join(", ", triggerNames), string.Join(", ", procedureNames));
         }
 
         ExtensionRegistry.MarkLoaded();
-        return new ExtensionRegistry(extensions, functions, triggers, procedures);
+        return new ExtensionRegistry(extensions);
 #endif
     }
 
@@ -254,20 +261,86 @@ internal static class ExtensionLoader
         return path;
     }
 
-    private static void CheckFunctionName(string name, string path, Dictionary<string, string> owners)
+    private static void CheckFunctionName(string name, string path, LoadedExtension extension)
     {
+        if (name.Contains('.'))
+            throw new CamusDBException(
+                CamusDBErrorCodes.ExtensionInvalidSignature,
+                $"Extension '{path}': function name '{name}' contains a dot; a dot separates the extension name in a qualified call");
+
         if (ScalarFunctionEvaluator.IsBuiltInScalarFunction(name) || TableFunctionRegistry.IsTableFunction(name) ||
             CommandsExecutor.Controllers.Queries.QueryExpressionClassifier.IsReservedAggregateName(name))
             throw new CamusDBException(
                 CamusDBErrorCodes.ExtensionDuplicateMember,
                 $"Extension '{path}': function '{name}' collides with a built-in function; extensions cannot shadow built-ins");
 
-        if (owners.TryGetValue(name, out string? owner))
+        if (extension.FunctionTable.ContainsKey(name))
             throw new CamusDBException(
                 CamusDBErrorCodes.ExtensionDuplicateMember,
-                $"Extension '{path}': function '{name}' is already defined by extension '{owner}'");
+                $"Extension '{path}': function '{name}' is defined twice");
     }
 
+    /// <summary>
+    /// Checks the manifest an extension file must carry and returns its parts. The name must be a
+    /// plain SQL identifier, because it appears unquoted in <c>CREATE EXTENSION</c> and before the dot
+    /// of a qualified call. The version must be SemVer without build metadata. A required name must
+    /// be an identifier too, and an extension cannot require itself.
+    /// </summary>
+    private static (string Name, ExtensionVersion Version, IReadOnlyList<string> Requires) CheckManifest(ExtensionManifestData? manifest, string path)
+    {
+        if (manifest is null)
+            throw new CamusDBException(
+                CamusDBErrorCodes.ExtensionManifestInvalid,
+                $"Extension '{path}' has no manifest; add [assembly: CamusExtension(\"<name>\", \"<major.minor.patch>\")] to the assembly");
+
+        if (!IsExtensionName(manifest.Name))
+            throw new CamusDBException(
+                CamusDBErrorCodes.ExtensionManifestInvalid,
+                $"Extension '{path}': manifest name '{manifest.Name}' is not a plain identifier (a letter or underscore, then letters, digits and underscores)");
+
+        if (!ExtensionVersion.TryParse(manifest.Version, out ExtensionVersion version))
+            throw new CamusDBException(
+                CamusDBErrorCodes.ExtensionManifestInvalid,
+                $"Extension '{path}': manifest version '{manifest.Version}' is not a SemVer version (major.minor.patch, optional -prerelease, no +build)");
+
+        List<string> requires = new(manifest.Requires.Count);
+
+        foreach (string required in manifest.Requires)
+        {
+            if (!IsExtensionName(required))
+                throw new CamusDBException(
+                    CamusDBErrorCodes.ExtensionManifestInvalid,
+                    $"Extension '{path}': required extension name '{required}' is not a plain identifier");
+
+            if (string.Equals(required, manifest.Name, StringComparison.OrdinalIgnoreCase))
+                throw new CamusDBException(
+                    CamusDBErrorCodes.ExtensionManifestInvalid,
+                    $"Extension '{path}': extension '{manifest.Name}' requires itself");
+
+            if (!requires.Contains(required, StringComparer.OrdinalIgnoreCase))
+                requires.Add(required);
+        }
+
+        return (manifest.Name!, version, requires);
+    }
+#endif
+
+    /// <summary>True when <paramref name="name"/> is a plain SQL identifier: the shape an extension name must have.</summary>
+    internal static bool IsExtensionName(string? name)
+    {
+        if (string.IsNullOrEmpty(name) || !(char.IsAsciiLetter(name[0]) || name[0] == '_'))
+            return false;
+
+        foreach (char c in name)
+        {
+            if (!char.IsAsciiLetterOrDigit(c) && c != '_')
+                return false;
+        }
+
+        return true;
+    }
+
+#if !CAMUSDB_BROWSER
     private static Type[] GetTypes(Assembly assembly, string path)
     {
         try

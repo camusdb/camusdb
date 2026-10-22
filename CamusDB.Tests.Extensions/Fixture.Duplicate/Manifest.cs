@@ -1,0 +1,11 @@
+/**
+ * This file is part of CamusDB
+ *
+ * For the full copyright and license information, please view the LICENSE.txt
+ * file that was distributed with this source code.
+ */
+
+using CamusDB.Extensions;
+
+// Defines fx_slugify too, so it cannot be installed in a database that has "good".
+[assembly: CamusExtension("duplicate", "1.0.0")]

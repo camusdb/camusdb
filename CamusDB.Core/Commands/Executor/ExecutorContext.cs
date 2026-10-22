@@ -68,11 +68,15 @@ internal sealed class ExecutorContext
 
     /// <summary>
     /// The C# extensions this engine loaded at construction (empty when none are configured).
-    /// Immutable, so it belongs here with the other collaborators: <c>SHOW EXTENSIONS</c>, trigger
-    /// DDL and trigger binding, and <c>CALL</c> read it directly, while the static expression
-    /// evaluator reaches the functions through <see cref="CamusDB.Core.Extensions.ExtensionFunctionScope"/>.
+    /// Immutable, so it belongs here with the other collaborators: <c>SHOW EXTENSIONS</c> and
+    /// extension DDL read it directly. A loaded extension is only available; what a statement may call
+    /// is what its database installed, through <see cref="ExtensionScopes"/>, and the static expression
+    /// evaluator reaches it through <see cref="CamusDB.Core.Extensions.ExtensionFunctionScope"/>.
     /// </summary>
     internal CamusDB.Core.Extensions.ExtensionRegistry Extensions { get; }
+
+    /// <summary>The engine's function-scope frames, and the per-database resolution of installed extensions.</summary>
+    internal CamusDB.Core.Extensions.ExtensionScopeFrames ExtensionScopes { get; }
 
     internal ExecutorContext(
         ILogger<ICamusDB> logger,
@@ -83,7 +87,8 @@ internal sealed class ExecutorContext
         StatisticsManager statistics,
         CommandValidator validator,
         bool isClusterMode,
-        CamusDB.Core.Extensions.ExtensionRegistry extensions
+        CamusDB.Core.Extensions.ExtensionRegistry extensions,
+        CamusDB.Core.Extensions.ExtensionScopeFrames extensionScopes
     )
     {
         Logger = logger;
@@ -95,5 +100,6 @@ internal sealed class ExecutorContext
         Validator = validator;
         IsClusterMode = isClusterMode;
         Extensions = extensions;
+        ExtensionScopes = extensionScopes;
     }
 }

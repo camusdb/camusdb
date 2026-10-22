@@ -243,5 +243,28 @@ public enum SchemaOp
     /// Remove a row trigger from a table (payload: <c>SchemaDropTriggerPayload</c>), from
     /// <c>DROP TRIGGER</c>. Removes a duty, so it fences nothing.
     /// </summary>
-    DropTrigger = 30
+    DropTrigger = 30,
+
+    /// <summary>
+    /// Install a C# extension in the database (payload: <c>SchemaExtensionPayload</c>), from
+    /// <c>CREATE EXTENSION</c>. The proposer resolved the loaded build and recorded its version, hash
+    /// and members; the apply stores the record only, and each node binds it to its own loaded
+    /// assemblies when a statement resolves a member. Touches no relation, so it does not bump any
+    /// <c>TableSchema.Version</c> and fences no writer.
+    /// </summary>
+    CreateExtension = 31,
+
+    /// <summary>
+    /// Replace the installed record of an extension with another version's record (payload:
+    /// <c>SchemaExtensionPayload</c>), from <c>ALTER EXTENSION ... UPDATE</c>. Every function,
+    /// procedure and trigger of the extension moves to the new build in this one delta.
+    /// </summary>
+    UpdateExtension = 32,
+
+    /// <summary>
+    /// Remove an installed extension from the database (payload: <c>SchemaDropExtensionPayload</c>),
+    /// from <c>DROP EXTENSION</c>. The proposer refused the statement while any object depended on
+    /// the extension.
+    /// </summary>
+    DropExtension = 33
 }

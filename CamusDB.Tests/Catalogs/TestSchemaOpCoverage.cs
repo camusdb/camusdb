@@ -226,7 +226,9 @@ public sealed class TestSchemaOpCoverage
             // for this one.
             SchemaOp.AddForeignKey,
             // Answered from the table's trigger list: a trigger change does not move TableSchema.Version.
-            SchemaOp.CreateTrigger, SchemaOp.DropTrigger
+            SchemaOp.CreateTrigger, SchemaOp.DropTrigger,
+            // Answered from the installed-extension records: an extension touches no relation.
+            SchemaOp.CreateExtension, SchemaOp.UpdateExtension, SchemaOp.DropExtension
         ];
 
         // A structurally checked op answers "not applied" against an empty schema even when the

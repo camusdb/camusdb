@@ -139,7 +139,13 @@ internal sealed class SchemaCheckpointWriter
             // asking it for one would throw on every view DDL.
             // Sequence ops write the sequence meta key family, not a table blob, and are checked
             // first for the same reason the view arm is: GetEntryTableName has no answer for them.
-            if (entry.Op is SchemaOp.CreateSequence or SchemaOp.RenameSequence or SchemaOp.AlterSequence)
+            // Extension ops write the extension meta key family, not a table blob, and are checked
+            // first for the same reason the sequence arm is.
+            if (entry.Op is SchemaOp.CreateExtension or SchemaOp.UpdateExtension or SchemaOp.DropExtension)
+            {
+                await SchemaMetaStore.PersistSchemaExtensionAsync(database, ExtensionDeltaApplier.GetExtensionName(entry), tx).ConfigureAwait(false);
+            }
+            else if (entry.Op is SchemaOp.CreateSequence or SchemaOp.RenameSequence or SchemaOp.AlterSequence)
             {
                 SequenceSchema? sequenceSchema = ResolveEntrySequence(database, entry);
 
@@ -399,6 +405,34 @@ internal sealed class SchemaCheckpointWriter
 
                 byte[] sequenceBytes = MetaJsonSerializer.Serialize(sequence, MetaJsonContext.Default.SequenceSchema);
                 await MetaKeyWriter.WriteMetaKey(kahuna, tx, MetaKeys.SequenceKey(database.Id, sequence.Id), sequenceBytes).ConfigureAwait(false);
+            }
+
+            // Installed extensions too, for the same reason as sequences: a full checkpoint is what a
+            // reopen reads. A record on disk that memory no longer holds is deleted: a replayed drop
+            // whose proposer never checkpointed it would otherwise come back as installed on reopen,
+            // and the log, which resumes after this checkpoint's version, would never remove it again.
+            IReadOnlyDictionary<string, ExtensionDefinition> installed = database.Schema.Extensions;
+            List<string> staleExtensionKeys = [];
+            string extensionKeyPrefix = MetaKeys.ExtensionKeyPrefix(database.Id);
+
+            // A plain read of the latest committed keys, outside the write transaction (no transaction
+            // id), so the scan adds nothing to what that transaction reads or locks.
+            await foreach ((string key, ReadOnlyKeyValueEntry stored) in kahuna.LocateAndScanRange(
+                HLCTimestamp.Zero, MetaKeys.MetaBucketPrefix(database.Id), null, true, null, true, 512,
+                HLCTimestamp.Zero, KeyValueDurability.Persistent, CancellationToken.None).ConfigureAwait(false))
+            {
+                if (stored.Value is not null && key.StartsWith(extensionKeyPrefix, StringComparison.Ordinal) &&
+                    !installed.ContainsKey(key[extensionKeyPrefix.Length..]))
+                    staleExtensionKeys.Add(key);
+            }
+
+            foreach (string staleKey in staleExtensionKeys)
+                await MetaKeyWriter.DeleteMetaKey(kahuna, tx, staleKey).ConfigureAwait(false);
+
+            foreach (ExtensionDefinition extension in installed.Values)
+            {
+                byte[] extensionBytes = MetaJsonSerializer.Serialize(extension, MetaJsonContext.Default.ExtensionDefinition);
+                await MetaKeyWriter.WriteMetaKey(kahuna, tx, MetaKeys.ExtensionKey(database.Id, extension.Name), extensionBytes).ConfigureAwait(false);
             }
 
             // Reconciled here, in the transaction that also rewrites the table blobs, and before any

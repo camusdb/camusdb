@@ -15,9 +15,10 @@ namespace CamusDB.Core.Catalogs.Apply;
 /// <see cref="SchemaOp.DropTrigger"/>).
 ///
 /// <para><b>Metadata only.</b> The apply never looks at the extension registry: the proposer already
-/// resolved the type and recorded its assembly hash, and each node binds the record to its own loaded
-/// code at the first DML. An apply that consulted the local registry could fail on a node that lacks
-/// the extension, and a committed schema delta must apply everywhere.</para>
+/// resolved the type and named its installed extension, and each node binds the record to its own
+/// loaded code at the first DML. An apply that consulted the local registry could fail on a node that
+/// lacks the extension, and a committed schema delta must apply everywhere. The apply checks only the
+/// replicated catalog: the named extension must be installed.</para>
 ///
 /// <para><b>Idempotent.</b> A re-delivered create finds its own trigger (same name and type) and returns;
 /// a re-delivered drop finds nothing to remove and returns. The checks that can fail — the table was
@@ -57,6 +58,13 @@ internal static class TriggerDeltaApplier
             throw new CamusDBException(
                 CamusDBErrorCodes.TriggerTargetInvalid,
                 $"'{table.Name}' is not a plain table; triggers can be created only on tables");
+
+        // In log order against DROP EXTENSION: a trigger must name an installed extension, and a drop
+        // proposed in between would otherwise leave it pointing at nothing.
+        if (!schema.Extensions.ContainsKey(trigger.ExtensionName))
+            throw new CamusDBException(
+                CamusDBErrorCodes.ExtensionNotInstalled,
+                $"Trigger '{trigger.Name}' names extension '{trigger.ExtensionName}', which is not installed in this database");
 
         table.Triggers = table.Triggers is null ? [trigger] : [.. table.Triggers, trigger];
         return table;

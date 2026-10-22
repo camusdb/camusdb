@@ -80,6 +80,8 @@ public sealed class CatalogsManager
 
     private readonly SequenceCatalog sequences;
 
+    private readonly ExtensionCatalog extensions;
+
     /// <summary>
     /// Test hook, written through to <see cref="SchemaCheckpointWriter"/>: when non-null, every
     /// checkpoint persist throws it instead of writing, so a test can drive the exhausted-retry path
@@ -100,6 +102,7 @@ public sealed class CatalogsManager
         relations = new(publisher);
         views = new(publisher);
         sequences = new(publisher);
+        extensions = new(publisher);
     }
 
     // -----------------------------------------------------------------------
@@ -409,6 +412,20 @@ public sealed class CatalogsManager
         string tableId,
         TriggerDefinition trigger)
         => await elements.ReplicateCreateTriggerAsync(database, tableName, tableId, trigger).ConfigureAwait(false);
+
+    /// <summary>Proposes <c>CREATE EXTENSION</c>; see <see cref="ExtensionCatalog.CreateExtensionAsync"/>.</summary>
+    internal async Task CreateExtensionAsync(DatabaseDescriptor database, ExtensionDefinition extension)
+        => await extensions.CreateExtensionAsync(database, extension).ConfigureAwait(false);
+
+    /// <summary>Proposes <c>ALTER EXTENSION ... UPDATE</c>; see <see cref="ExtensionCatalog.UpdateExtensionAsync"/>.</summary>
+    internal async Task<bool> UpdateExtensionAsync(
+        DatabaseDescriptor database, ExtensionDefinition extension, Action<Schema, ExtensionDefinition, ExtensionDefinition> checkDependents)
+        => await extensions.UpdateExtensionAsync(database, extension, checkDependents).ConfigureAwait(false);
+
+    /// <summary>Proposes <c>DROP EXTENSION</c>; see <see cref="ExtensionCatalog.DropExtensionAsync"/>.</summary>
+    internal async Task DropExtensionAsync(
+        DatabaseDescriptor database, string extensionName, Action<Schema, ExtensionDefinition> checkDependents)
+        => await extensions.DropExtensionAsync(database, extensionName, checkDependents).ConfigureAwait(false);
 
     /// <summary>Proposes <c>DROP TRIGGER</c>; see <c>SchemaElementReplicator.ReplicateDropTriggerAsync</c>.</summary>
     internal async Task ReplicateDropTriggerAsync(DatabaseDescriptor database, string tableName, string triggerName)

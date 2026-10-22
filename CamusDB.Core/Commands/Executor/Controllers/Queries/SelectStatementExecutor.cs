@@ -432,15 +432,33 @@ internal sealed class SelectStatementExecutor
             return (null!, schemaQuerier.ShowConnections(rows));
         }
 
-        // SHOW EXTENSIONS reports the C# extensions this engine loaded when it was constructed. Node-local:
-        // each node deploys its own files, and comparing the hashes node by node is how an operator
-        // finds a node that runs a different build.
+        // SHOW EXTENSIONS reports the C# extensions this engine loaded when it was constructed, and, when
+        // the statement names a database, which of them that database installed and which installed
+        // ones this node cannot run. Node-local: each node deploys its own files, and comparing the rows
+        // node by node is how an operator finds a node that runs a different build. A database that does
+        // not exist leaves only the node view.
         if (ast.nodeType == NodeType.ShowExtensions)
         {
             if (schemaOut is not null)
                 schemaOut.Schema = DerivedTableSchemaBuilder.ShowExtensionsSchema;
 
-            return (null!, schemaQuerier.ShowExtensions(context.Extensions));
+            DatabaseDescriptor? current = null;
+
+            if (!string.IsNullOrEmpty(ticket.DatabaseName))
+            {
+                try
+                {
+                    current = await context.DatabaseOpener.Open(ticket.DatabaseName).ConfigureAwait(false);
+                }
+                catch (CamusDBException ex) when (ex.Code == CamusDBErrorCodes.DatabaseDoesntExist)
+                {
+                }
+            }
+
+            return (null!, schemaQuerier.ShowExtensions(
+                context.Extensions,
+                current?.Schema.Extensions,
+                current is null ? null : context.ExtensionScopes.Resolve(current)));
         }
 
         // SHOW VARIABLES reports the configuration this engine was constructed with. Node-local for the
@@ -1098,6 +1116,10 @@ internal sealed class SelectStatementExecutor
         int stampVersion = 0;
         long stampGeneration = 0;
 
+        // The installed-extension stamp joins the schema stamp: a binding resolves function calls,
+        // and an install, update or drop changes what a call means.
+        long stampExtensions = database.Schema.ExtensionCatalog.Stamp;
+
         if (cacheCandidate)
         {
             stampTable = await context.TableOpener
@@ -1130,7 +1152,7 @@ internal sealed class SelectStatementExecutor
         BoundQuerySlot? newSlot = attemptCache
             ? TryStoreBoundQuerySlot(
                 database, ast, createdQuery, boundQuery, semiJoinSpecs, existsRegistry,
-                cacheCandidate, stampTable, stampVersion, stampGeneration)
+                cacheCandidate, stampTable, stampVersion, stampGeneration, stampExtensions)
             : null;
 
         QueryTicket queryTicket = QueryTicketAdapter.ToQueryTicket(
@@ -1168,7 +1190,8 @@ internal sealed class SelectStatementExecutor
         // refresh) discards the binding wholesale; the caller rebinds and stores a fresh slot.
         if (!ReferenceEquals(table, slot.Table)
             || table.Schema.Version != slot.SchemaVersion
-            || table.Schema.ContentsGeneration != slot.ContentsGeneration)
+            || table.Schema.ContentsGeneration != slot.ContentsGeneration
+            || database.Schema.ExtensionCatalog.Stamp != slot.ExtensionStamp)
             return null;
 
         MaterializedViewAccessGuard.RequireReadable(table);
@@ -1201,7 +1224,8 @@ internal sealed class SelectStatementExecutor
         bool cacheCandidate,
         TableDescriptor? stampTable,
         int stampVersion,
-        long stampGeneration)
+        long stampGeneration,
+        long stampExtensions)
     {
         bool shapeEligible = cacheCandidate
             && ReferenceEquals(boundQuery.Query, createdQuery)
@@ -1218,12 +1242,13 @@ internal sealed class SelectStatementExecutor
 
         if (!ReferenceEquals(boundQuery.Sources[0].Table, stampTable)
             || stampTable!.Schema.Version != stampVersion
-            || stampTable.Schema.ContentsGeneration != stampGeneration)
+            || stampTable.Schema.ContentsGeneration != stampGeneration
+            || database.Schema.ExtensionCatalog.Stamp != stampExtensions)
             return null;
 
         boundQuery.RowNames.FreezeForSharedReuse();
 
-        BoundQuerySlot slot = new(stampTable, boundQuery, stampVersion, stampGeneration);
+        BoundQuerySlot slot = new(stampTable, boundQuery, stampVersion, stampGeneration, stampExtensions);
         database.BoundQueries.Store(ast, slot);
         return slot;
     }

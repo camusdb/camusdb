@@ -577,6 +577,34 @@ public sealed class SchemaDropTriggerPayload
 }
 
 /// <summary>
+/// Payload for <see cref="SchemaOp.CreateExtension"/> and <see cref="SchemaOp.UpdateExtension"/>: the
+/// complete installed record the proposer built from its loaded build. An update carries the version
+/// it replaces, so a re-delivered update is recognized by the record it left behind and an update
+/// proposed against a version that is no longer installed applies as a no-op.
+/// </summary>
+public sealed class SchemaExtensionPayload
+{
+    public ExtensionDefinition? Extension { get; set; }
+
+    /// <summary>For an update, the version installed when the statement was proposed; null for a create.</summary>
+    public string? FromVersion { get; set; }
+}
+
+/// <summary>
+/// Payload for <see cref="SchemaOp.DropExtension"/>: the extension name and the version the proposer
+/// saw installed, so a re-delivered drop cannot remove a later re-install of the same name.
+/// </summary>
+public sealed class SchemaDropExtensionPayload
+{
+    public string ExtensionName { get; set; } = "";
+
+    public string Version { get; set; } = "";
+
+    /// <summary>The installed record's timestamp, which tells two installs of one version apart.</summary>
+    public HLCTimestamp InstalledAt { get; set; }
+}
+
+/// <summary>
 /// Payload for <see cref="SchemaOp.SetColumnStorage"/>: the target column and its new storage
 /// strategy. The column is matched by name, case-insensitively, like every other column delta.
 /// </summary>

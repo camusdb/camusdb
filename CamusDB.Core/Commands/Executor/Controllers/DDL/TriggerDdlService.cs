@@ -20,11 +20,12 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.DDL;
 /// <see cref="CatalogsManager"/>.
 ///
 /// <para><b>The proposer resolves the type.</b> <c>CREATE TRIGGER</c> succeeds only when the type
-/// named by <c>EXTERNAL NAME</c> is a trigger in one of this node's loaded extensions, and the record
-/// it proposes carries that assembly's name and SHA-256. Followers apply the record without looking at
-/// their own extensions; they bind it at the first DML that fires it, and refuse the DML when their
-/// copy differs. That keeps the schema apply infallible and still stops a node from firing other
-/// code.</para>
+/// named by <c>EXTERNAL NAME</c> is a trigger of an extension installed in the database, as this node
+/// loads the installed build, and the record it proposes names that extension. The extension's own
+/// record fixes the version and the hash, so an extension update rebinds the trigger without a change
+/// to it. Followers apply the record without looking at their own extensions; they bind it at the
+/// first DML that fires it, and refuse the DML when they do not load the installed build. That keeps
+/// the schema apply infallible and still stops a node from firing other code.</para>
 ///
 /// <para><b>Runs on the schema leader.</b> In cluster mode the statement must reach the database's
 /// schema leader, the same as <c>CREATE VIEW</c> and <c>CREATE SEQUENCE</c>: trigger DDL has no
@@ -57,19 +58,7 @@ internal sealed class TriggerDdlService
 
         TableDescriptor table = await OpenTargetAsync(database, tableName).ConfigureAwait(false);
 
-        ExtensionTriggerType type = context.Extensions.FindTriggerType(typeName, out ExtensionTriggerType? found) switch
-        {
-            TriggerTypeLookup.Found => found!,
-            TriggerTypeLookup.Ambiguous => throw new CamusDBException(
-                CamusDBErrorCodes.TriggerTypeAmbiguous,
-                $"Trigger type '{typeName}' is defined by more than one loaded extension"),
-            TriggerTypeLookup.NotATrigger => throw new CamusDBException(
-                CamusDBErrorCodes.TriggerTypeInvalid,
-                $"Type '{typeName}' does not implement ICamusTrigger, or is abstract"),
-            _ => throw new CamusDBException(
-                CamusDBErrorCodes.TriggerTypeNotFound,
-                $"No loaded extension defines the trigger type '{typeName}'"),
-        };
+        ExtensionTriggerType type = FindInstalledTriggerType(database, typeName);
 
         await RequireSchemaLeaderAsync(database, "CREATE TRIGGER").ConfigureAwait(false);
 
@@ -79,8 +68,7 @@ internal sealed class TriggerDdlService
             Timing = timing,
             Events = events,
             TypeName = type.FullName,
-            AssemblyName = type.Source.Name,
-            AssemblySha256 = type.Source.Sha256,
+            ExtensionName = type.Source.Name,
             CreatedAt = Now(),
         };
 
@@ -96,6 +84,68 @@ internal sealed class TriggerDdlService
 
         await RequireSchemaLeaderAsync(database, "DROP TRIGGER").ConfigureAwait(false);
         await catalogs.ReplicateDropTriggerAsync(database, table.Name, triggerName).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Finds the trigger type among the extensions installed in the database. A type defined by two
+    /// installed extensions is ambiguous. A type of an extension this node loads but the database has
+    /// not installed is refused with <see cref="CamusDBErrorCodes.ExtensionNotInstalled"/>, which names
+    /// the extension to install.
+    /// </summary>
+    private ExtensionTriggerType FindInstalledTriggerType(DatabaseDescriptor database, string typeName)
+    {
+        InstalledExtensionSet installed = context.ExtensionScopes.Resolve(database);
+
+        // A trigger of an installed extension that this node cannot bind cannot be checked here; the
+        // statement fails with the missing-build error rather than "type not found".
+        foreach (string extensionName in installed.Missing.Keys)
+        {
+            if (database.Schema.Extensions.TryGetValue(extensionName, out ExtensionDefinition? record) &&
+                record.HasMember(ExtensionMemberKind.Trigger, typeName))
+                installed.GetBound(extensionName, "trigger type '" + typeName + "'");
+        }
+
+        ExtensionTriggerType? found = null;
+        bool notATrigger = false;
+
+        foreach (LoadedExtension extension in installed.Bound.Values)
+        {
+            switch (extension.FindTriggerType(typeName, out ExtensionTriggerType? candidate))
+            {
+                case TriggerTypeLookup.Found when found is not null:
+                    throw new CamusDBException(
+                        CamusDBErrorCodes.TriggerTypeAmbiguous,
+                        $"Trigger type '{typeName}' is defined by installed extensions '{found.Source.Name}' and '{extension.Name}'");
+
+                case TriggerTypeLookup.Found:
+                    found = candidate;
+                    break;
+
+                case TriggerTypeLookup.NotATrigger:
+                    notATrigger = true;
+                    break;
+            }
+        }
+
+        if (found is not null)
+            return found;
+
+        if (notATrigger)
+            throw new CamusDBException(
+                CamusDBErrorCodes.TriggerTypeInvalid,
+                $"Type '{typeName}' does not implement ICamusTrigger, or is abstract");
+
+        foreach (LoadedExtension available in context.Extensions.Extensions)
+        {
+            if (available.FindTriggerType(typeName, out _) == TriggerTypeLookup.Found)
+                throw new CamusDBException(
+                    CamusDBErrorCodes.ExtensionNotInstalled,
+                    $"Trigger type '{typeName}' belongs to extension '{available.Name}', which is not installed in database '{database.Name}'; run CREATE EXTENSION {available.Name} first");
+        }
+
+        throw new CamusDBException(
+            CamusDBErrorCodes.TriggerTypeNotFound,
+            $"No extension installed in database '{database.Name}' defines the trigger type '{typeName}'");
     }
 
     /// <summary>
