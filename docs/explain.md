@@ -289,8 +289,10 @@ physical  index-range-scan   index=year_idx, from>=2023, to<2024
 ```
 
 For a **non-unique** index, an equality predicate is rewritten as a range scan. For numeric/ordinal
-types it is half-open (`>= value`, `< successor(value)`), as shown above. For **`String`/`Id`** columns
-there is no computable successor, so it uses an **inclusive `[value, value]`** range instead
+types it is half-open (`>= value`, `< successor(value)`), as shown above. When there is no computable
+successor — a **`String`/`Id`/`date`/`datetime`/`float32`/`bytes`** column, a value at its type's
+maximum (`true`, the largest `int64`), or a descending column — it uses an **inclusive
+`[value, value]`** range instead
 (`from>=value, to<=value`); the scan engine appends a high sentinel internally to capture every
 `encode(value)+rowId` index entry and then trims to exact-key matches. Either way the result is the same
 set of rows — only the bound rendering differs. The `index-lookup` node only appears for **unique** index

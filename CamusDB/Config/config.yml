@@ -135,9 +135,10 @@ initial_partitions: 1      # Raft partition count (>= 1). Unset, it is 1 in stan
 #
 # peers: Raft endpoint list. Each entry MUST be "host:raftPort" exactly as Raft reports it: the
 # endpoint map is a byte-exact match against the leader endpoint Raft returns. A mismatch falls back
-# to the uniform-port assumption below and logs a warning.
+# to the uniform-port assumption below and logs a warning. List only the OTHER nodes: an entry equal
+# to this node's raft_host:raft_port is refused at startup, because Kommander treats its own endpoint
+# in the peer list as corruption and stops partition 0.
 # peers:
-#   - 192.168.1.10:7070
 #   - 192.168.1.11:7070
 #   - 192.168.1.12:7070
 #
@@ -146,7 +147,6 @@ initial_partitions: 1      # Raft partition count (>= 1). Unset, it is 1 in stan
 # node's http_port. An entry may carry its own scheme (https://10.0.0.1:5095), which overrides
 # peer_tls_enabled for that peer alone.
 # http_peers:
-#   - 192.168.1.10:5095
 #   - 192.168.1.11:5095
 #   - 192.168.1.12:5095
 #

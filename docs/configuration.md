@@ -44,7 +44,7 @@ Example: YAML `mode: cluster` with `--mode standalone` starts in standalone mode
 | `raft_host` | `--raft-host` | `localhost` |
 | `raft_port` | `--raft-port` | `7070` |
 | `initial_partitions` | `--initial-cluster-partitions` | `1` standalone, `3` cluster |
-| `peers` | `--initial-cluster` | `[]` |
+| `peers` | `--initial-cluster` | `[]` (the Raft addresses of the other nodes; never this node's own `raft_host:raft_port`) |
 | `http_peers` | `--http-peers` | `[]` |
 | `extension_assemblies` | `--extension-assemblies` | `[]` (absolute paths of SAFE C# extensions; see [csharp-extensions.md](csharp-extensions.md)) |
 | `unsafe_extension_assemblies` | `--unsafe-extension-assemblies` | `[]` (absolute paths of extensions loaded without the SAFE check) |
@@ -533,6 +533,7 @@ combination silently.
 | Unknown `memory_profile` (not `prod`/`dev`) | `InvalidConfig` |
 | Port outside 1..65535 | `InvalidConfig` |
 | `http_peers` count ≠ `peers` count | `InvalidConfig` |
+| A `peers` entry equal to this node's `raft_host:raft_port` (checked after command-line flags apply) | `InvalidConfig` |
 | Invalid `default_isolation_level` | `InvalidConfig` |
 | `range_lock_expires_ms` > 0 and < 2 × effective `kahuna.collection_interval_ms` (60 s by default) | `InvalidConfig` |
 | `kahuna.max_transaction_timeout_ms` < `max_serializable_transaction_lifetime_ms` | `InvalidConfig` |

@@ -237,11 +237,14 @@ public sealed class TestTemporalComparison : SharedNodeBaseTest
         };
 
         // Each predicate must seek the index with the converted constant, and the seek must return
-        // the rows the scan returns. The planner does not seek a temporal index for a lone equality
-        // (it scans, whatever the constant's type), so equality is written as a closed range here.
+        // the rows the scan returns. A temporal type has no successor value, so an equality seeks the
+        // inclusive [v, v] range.
         List<string> failures = [];
         foreach ((string where, string index, long[] expected) in new[]
         {
+            ("dt = @day", "indexed_dt", new long[] { 1 }),
+            ("dt = @text", "indexed_dt", new long[] { 2 }),
+            ("dd = @midnight", "indexed_dd", new long[] { 3 }),
             ("dt >= @day AND dt <= @day", "indexed_dt", new long[] { 1 }),
             ("dt >= @text AND dt <= @text", "indexed_dt", new long[] { 2 }),
             ("dt >= '2000-01-02' AND dt < '2001-01-01'", "indexed_dt", new long[] { 2, 3 }),
@@ -259,13 +262,10 @@ public sealed class TestTemporalComparison : SharedNodeBaseTest
             await CollectMismatch(executor, database, dbname, where, parameters, expected, failures);
         }
 
-        // Equality, and a datetime that is not a midnight against a date column: equality matches
-        // nothing, and a range bound has no date key, so the filter compares with each midnight.
+        // A datetime that is not a midnight against a date column: equality matches nothing, and a
+        // range bound has no date key, so the filter compares with each midnight.
         foreach ((string where, long[] expected) in new[]
         {
-            ("dt = @day", new long[] { 1 }),
-            ("dt = @text", new long[] { 2 }),
-            ("dd = @midnight", new long[] { 3 }),
             ("dd = @morning", Array.Empty<long>()),
             ("dd < @morning", new long[] { 1, 2 }),
             ("dd IN ('2000-01-01') AND dd > @morning", Array.Empty<long>()),

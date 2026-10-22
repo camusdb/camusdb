@@ -195,27 +195,10 @@ internal static class IndexScanSelector
                 return true;
             }
 
-            CompositeColumnValue? upperBound;
-            bool equalityToInclusive;
-            if (IsAscending(index, equalityPrefixLength - 1) && SupportsExactEqualityPrefixUpperBound(table, columns, equalityPrefixLength))
-            {
-                upperBound = BuildPrefixScanUpperBound(table, columns, equalityValues, equalityPrefixLength);
-                if (upperBound is null)
-                    return false;
-                equalityToInclusive = false;
-            }
-            else if (!IsAscending(index, equalityPrefixLength - 1) || IsStringOrIdType(table, columns[equalityPrefixLength - 1]))
-            {
-                // No usable ascending successor: String/Id has none, and a descending column's
-                // successor would move the wrong way in encoded order. Use an inclusive [v, v]
-                // equality range instead — the same approach the IN-list path uses. ScanIndex appends
-                // a high sentinel for non-unique indexes so all {encode(v)+rowIdHex} entries are
-                // captured by the raw scan; the decoded-key bounds filter trims to key == v.
-                upperBound = lookupKey;
-                equalityToInclusive = true;
-            }
-            else
-                return false;
+            // [v, next(v)) when the last column is ascending and its type has a successor, otherwise
+            // the inclusive [v, v]. A type with no successor (String, Id, Date, DateTime, Float32,
+            // Bytes) or a value at its type's maximum still seeks the index.
+            (CompositeColumnValue upperBound, bool equalityToInclusive) = EqualitySeekUpperBound(table, index, lookupKey);
 
             step = new QueryPlanStep(
                 QueryPlanStepType.RangeScanFromIndex,
@@ -251,49 +234,31 @@ internal static class IndexScanSelector
 
             if (equalityPrefixLength > 0)
             {
-                if (IsAscending(index, equalityPrefixLength - 1) && SupportsExactEqualityPrefixUpperBound(table, columns, equalityPrefixLength))
-                {
-                    CompositeColumnValue? prefixUpperBound = BuildPrefixScanUpperBound(
-                        table,
-                        columns,
-                        equalityValues,
-                        equalityPrefixLength);
+                ColumnValue[] prefixVals = new ColumnValue[equalityPrefixLength];
+                Array.Copy(equalityValues, prefixVals, equalityPrefixLength);
+                CompositeColumnValue prefixBound = new(prefixVals);
 
-                    if (prefixUpperBound is null)
-                        return false;
+                (CompositeColumnValue prefixUpperBound, bool prefixUpperInclusive) = EqualitySeekUpperBound(table, index, prefixBound);
 
+                if (!prefixUpperInclusive)
                     (toBound, toInclusive) = TightenUpperBound(toBound, toInclusive, prefixUpperBound);
-
-                    // When the range column contributed only an upper bound (e.g. a = 5 AND b < 10),
-                    // the scan still needs a LOWER bound at the equality prefix: without it the scan
-                    // starts at the beginning of the index and reads (and discards via the residual
-                    // filter) every row below the prefix — and under Serializable the range lock
-                    // covers that whole low keyspace. The String/Id branch below already caps both
-                    // sides; this is the numeric-prefix mirror.
-                    if (fromBound is null)
-                    {
-                        ColumnValue[] prefixVals = new ColumnValue[equalityPrefixLength];
-                        Array.Copy(equalityValues, prefixVals, equalityPrefixLength);
-                        (fromBound, fromInclusive) = (new CompositeColumnValue(prefixVals), true);
-                    }
-                }
-                else if (!IsAscending(index, equalityPrefixLength - 1) || IsStringOrIdType(table, columns[equalityPrefixLength - 1]))
+                else if (toBound is null)
                 {
-                    // No computable ascending successor for the prefix column (String/Id, or a
-                    // descending column whose successor moves the wrong way), so cap any open side
-                    // with an inclusive prefix sentinel. ScanIndex appends U+FFFF for non-unique
-                    // indexes, so [prefix] inclusive bounds the scan to the prefix's rows exactly.
-                    ColumnValue[] prefixVals = new ColumnValue[equalityPrefixLength];
-                    Array.Copy(equalityValues, prefixVals, equalityPrefixLength);
-                    CompositeColumnValue prefixSentinel = new(prefixVals);
-                    if (toBound is null)
-                        (toBound, toInclusive) = (prefixSentinel, true);
-                    if (fromBound is null)
-                        (fromBound, fromInclusive) = (prefixSentinel, true);
-                    // Residual filter on the equality column guards against off-prefix rows.
+                    // No usable ascending successor for the prefix column (a type with none, a value
+                    // at its type's maximum, or a descending column whose successor moves the wrong
+                    // way), so an open upper side is capped with the inclusive prefix. ScanIndex
+                    // appends the index sentinel to a prefix bound, so [prefix] inclusive covers
+                    // every row of the prefix; the residual filter guards against off-prefix rows.
+                    (toBound, toInclusive) = (prefixBound, true);
                 }
-                else
-                    return false;
+
+                // When the range column contributed only an upper bound (e.g. a = 5 AND b < 10), the
+                // scan still needs a LOWER bound at the equality prefix: without it the scan starts at
+                // the beginning of the index and reads (and discards via the residual filter) every
+                // row below the prefix — and under Serializable the range lock covers that whole low
+                // keyspace.
+                if (fromBound is null)
+                    (fromBound, fromInclusive) = (prefixBound, true);
             }
 
             step = new QueryPlanStep(
@@ -316,24 +281,7 @@ internal static class IndexScanSelector
             Array.Copy(equalityValues, prefixValues, equalityPrefixLength);
             CompositeColumnValue prefixBound = new(prefixValues);
 
-            CompositeColumnValue? upperBound;
-            bool prefixToInclusive;
-            if (IsAscending(index, equalityPrefixLength - 1) && SupportsExactEqualityPrefixUpperBound(table, columns, equalityPrefixLength))
-            {
-                upperBound = BuildPrefixScanUpperBound(table, columns, equalityValues, equalityPrefixLength);
-                if (upperBound is null)
-                    return false;
-                prefixToInclusive = false;
-            }
-            else if (!IsAscending(index, equalityPrefixLength - 1) || IsStringOrIdType(table, columns[equalityPrefixLength - 1]))
-            {
-                // String/Id or descending prefix column: no usable ascending successor, so use an
-                // inclusive [v, v] equality range (ScanIndex's non-unique sentinel captures all rows).
-                upperBound = prefixBound;
-                prefixToInclusive = true;
-            }
-            else
-                return false;
+            (CompositeColumnValue upperBound, bool prefixToInclusive) = EqualitySeekUpperBound(table, index, prefixBound);
 
             step = new QueryPlanStep(
                 QueryPlanStepType.RangeScanFromIndex,
@@ -804,58 +752,20 @@ internal static class IndexScanSelector
         return (prefixUpperBound, rangeToInclusive && prefixUpperInclusive);
     }
 
-    private static CompositeColumnValue? BuildPrefixScanUpperBound(
-        TableDescriptor table,
-        string[] indexColumns,
-        ColumnValue[] equalityValues,
-        int prefixLength)
-    {
-        if (prefixLength <= 0)
-            return null;
-
-        ColumnValue[] upperValues = new ColumnValue[prefixLength];
-        Array.Copy(equalityValues, upperValues, prefixLength - 1);
-
-        string lastColumn = indexColumns[prefixLength - 1];
-        ColumnType columnType = GetColumnType(table, lastColumn);
-        ColumnValue? nextValue = NextSortValue(columnType, equalityValues[prefixLength - 1]);
-
-        if (nextValue is null)
-            return null;
-
-        upperValues[prefixLength - 1] = nextValue;
-        return new CompositeColumnValue(upperValues);
-    }
-
     private static ColumnType GetColumnType(TableDescriptor table, string columnName)
     {
         TableColumnSchema? column = table.Schema.Columns?.Find(c => string.Equals(c.Name, columnName, StringComparison.OrdinalIgnoreCase));
         return column?.Type ?? ColumnType.String;
     }
 
-    internal static bool IsStringOrIdType(TableDescriptor table, string columnName)
-    {
-        ColumnType columnType = GetColumnType(table, columnName);
-        return columnType is ColumnType.String or ColumnType.Id;
-    }
-
-    internal static bool SupportsExactEqualityPrefixUpperBound(
-        TableDescriptor table,
-        string[] indexColumns,
-        int prefixLength)
-    {
-        if (prefixLength <= 0)
-            return false;
-
-        ColumnType columnType = GetColumnType(table, indexColumns[prefixLength - 1]);
-        return columnType is not (ColumnType.String or ColumnType.Id);
-    }
-
     /// <summary>
     /// Returns the end bound of an executor seek for one key value: <paramref name="lookupKey"/> holds
     /// the leading key columns of <paramref name="index"/>, and the scan starts inclusive at that key.
-    /// Every executor path that seeks a single value through <see cref="KvIndexAccessor.ScanIndex"/>
-    /// (IN-list seeks, join-leaf IN lists, semi-join probes) must take its range from here. The
+    /// Every path that seeks a single value through <see cref="KvIndexAccessor.ScanIndex"/> must take
+    /// its range from here: the planner's equality and equality-prefix steps in
+    /// <see cref="TryMatchPredicateIndex"/>, IN-list seeks, join-leaf IN lists and semi-join probes.
+    /// The planner must never refuse an index because a value has no successor, since the inclusive
+    /// form below is always complete. The
     /// non-unique probe of an index nested-loop join uses <see cref="KvIndexAccessor.ScanIndexEquality"/>
     /// instead, whose window is <c>[v, v + sentinel]</c> in the index's own direction.
     /// <para>The exclusive successor bound <c>[v, next(v))</c> is used only when the last bound column
@@ -910,7 +820,7 @@ internal static class IndexScanSelector
     /// <summary>
     /// Computes the next-larger Uuid (unsigned 128-bit +1) so an exact-equality scan on a non-unique
     /// Uuid index can use the fixed-width upper bound <c>[v, v+1)</c>. Returns false at the maximum
-    /// value (no successor), which makes the caller fall back to a full scan.
+    /// value (no successor), which makes the caller use the inclusive <c>[v, v]</c> range.
     /// </summary>
     private static bool TryNextUuid(ColumnValue value, out ColumnValue? next)
     {

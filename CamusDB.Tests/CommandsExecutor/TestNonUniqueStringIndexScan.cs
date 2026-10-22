@@ -26,10 +26,9 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// Verifies that equality predicates on non-unique String/Id indexes use an
 /// index-range-scan rather than falling back to a full table scan.
 ///
-/// Prior to the fix, <c>SupportsExactEqualityPrefixUpperBound</c> returned
-/// false for String/Id columns, causing the planner to emit a FullScanFromTableIndex.
-/// These tests prove the fix: (1) plan shape changes from full-scan to range-scan,
-/// and (2) query results are identical to the full-scan baseline.
+/// String/Id has no successor value, so the planner seeks with the inclusive [v, v]
+/// range instead of a FullScanFromTableIndex. These tests prove (1) the plan is a
+/// range-scan, and (2) query results are identical to the full-scan baseline.
 /// </summary>
 public class TestNonUniqueStringIndexScan : BaseTest
 {

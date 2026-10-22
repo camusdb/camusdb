@@ -592,9 +592,8 @@ public class TestQueryPlanner
     [Test]
     public void PlanUsesIndexRangeScanForNonUniqueStringEquality()
     {
-        // Previously fell back to a full table scan because SupportsExactEqualityPrefixUpperBound
-        // returned false for String columns. The planner uses an inclusive [v, v] range scan —
-        // the same strategy the IN-list path uses — so the index is exploited.
+        // A String column has no successor value, so the planner uses an inclusive [v, v] range
+        // scan — the same strategy the IN-list path uses — so the index is exploited.
         QueryTicket ticket = CreateQueryTicketFromSelectSql("SELECT * FROM robots WHERE name = 'bob'");
         QueryPlan plan = queryPlanner.GetPlan(context!.Database, context.Table, ticket);
 
@@ -1101,8 +1100,8 @@ public class TestQueryPlanner
     public void StringEqualityOnNonUniqueIndexUsesRangeScan()
     {
         // name_idx is a Multi (non-unique) index on the String column `name`.
-        // SupportsExactEqualityPrefixUpperBound returns true for String, so the planner
-        // emits RangeScanFromIndex with inclusive [v, v] bounds rather than FullScanFromTableIndex.
+        // String has no successor value, so the planner emits RangeScanFromIndex with inclusive
+        // [v, v] bounds rather than FullScanFromTableIndex.
         QueryTicket ticket = CreateQueryTicketFromSelectSql("SELECT * FROM robots WHERE name = 'alice'");
         QueryPlan plan = queryPlanner.GetPlan(context!.Database, context.Table, ticket);
 

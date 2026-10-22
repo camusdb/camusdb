@@ -92,6 +92,11 @@ ConfigResolver.ApplyCliOverrides(config, opts.ToOverrides());
 ConfigResolver.ApplyEffectiveDefaults(config);
 
 config.Validate();
+
+// The file was validated before the flags applied, so a peer that is this node's own address can
+// only be seen now. See PeerListStartupCheck.
+PeerListStartupCheck.Validate(config);
+
 CamusDBOptions camusOptions = ConfigResolver.ApplyToCamusDBConfig(config);
 
 // The dev profile also selects workstation GC, which only a fresh process can do: the runtime fixes

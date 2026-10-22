@@ -396,14 +396,17 @@ on a multi index renders as `index-range-scan(... from>=2000, to<2001)`, while `
 unique PK renders as `index-lookup`. If a partial prefix is followed by a range predicate on the next
 column, both bounds are combined.
 
-**String/Id equality on a non-unique index** has no computable "next value" for an exclusive upper bound,
-so it uses an **inclusive `[v, v]`** range instead — `ScanIndex` appends a high (U+FFFF) sentinel so all
-`encode(v) + rowId` entries are captured, then the decoded-key bounds filter trims to `key == v` (the same
-mechanism the value-list `IN` path uses). This covers all three shapes — full equality, an equality prefix
-only, and an equality prefix before a trailing range. For a string-prefix + a *half-open* trailing range
-(`name = 'a' AND year > 2000`), the open side is capped at the inclusive prefix so the scan stays within
-the prefix rather than running to the end of the index. (Before this, non-unique `String`/`Id` equality
-fell back to a full table scan.)
+**Equality with no computable "next value"** uses an **inclusive `[v, v]`** range instead of an
+exclusive upper bound. That is the case for a type with no successor (`String`, `Id`, `date`,
+`datetime`, `float32`, `bytes`), for a value at its type's maximum (`true`, the largest `int64`, `uuid`
+or `NUMERIC`), and for a descending column, whose successor sorts the wrong way. `ScanIndex` appends a
+high (U+FFFF) sentinel so all `encode(v) + rowId` entries are captured, then the decoded-key bounds
+filter trims to `key == v` (the same mechanism the value-list `IN` path uses). This covers all three
+shapes — full equality, an equality prefix only, and an equality prefix before a trailing range. For
+such a prefix + a *half-open* trailing range (`name = 'a' AND year > 2000`), the open side is capped at
+the inclusive prefix so the scan stays within the prefix rather than running to the end of the index.
+The index is never refused because a value has no successor; one helper,
+`IndexScanSelector.EqualitySeekUpperBound`, picks the bound for the planner and for every executor seek.
 
 **ORDER BY scan elision:** if no predicate matches, `TrySelectOrderByScan` looks for an index whose
 leading columns equal the ORDER BY columns (ascending only) and returns an unbounded range scan;

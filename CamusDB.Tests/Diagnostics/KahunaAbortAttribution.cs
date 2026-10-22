@@ -57,6 +57,14 @@ internal static class KahunaAbortAttribution
         // aggregator turned away (queue full, unflushed persistence backlog, oversized, stopping) is
         // what makes a prepare fail and a batched write answer transient for its whole budget.
         "kahuna.kv.write.rejections",
+        // Whole-batch transients that are not aggregator rejections: a same-id resend of a batch the
+        // coordinator had already completed is refused rather than re-executed, and a key-range split
+        // fences and quiesces writes routed before it. Neither is logged above debug level, so without
+        // the counter a batched write that answered transient for its whole budget names nothing.
+        "kahuna.kv.completed_batch_redrive_refusals",
+        "kahuna.range.splits",
+        // A log entry refused at apply by the commit admission window (off unless the lag bound is set).
+        "kahuna.kv.commit_admission.refused_total",
     ];
 
     /// <summary>A row's running state: how many measurements it took, and the last value it saw.</summary>
