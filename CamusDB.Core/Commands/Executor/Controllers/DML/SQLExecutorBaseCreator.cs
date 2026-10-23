@@ -1179,6 +1179,12 @@ internal abstract class SQLExecutorBaseCreator
             // value comes from a run the insert path reserves in bulk, so the column stores the
             // sequence's immutable id and not a call. Matched before the generic volatile arm,
             // which would otherwise reject it for taking an argument.
+            // An aggregate (a built-in, or an extension aggregate installed in the database) has no
+            // rows to fold in a default; say so instead of letting the scalar evaluator call it unknown.
+            if (Queries.QueryExpressionClassifier.ContainsAggregate(defaultExpr))
+                throw new CamusDBException(CamusDBErrorCodes.InvalidInput,
+                    "A column DEFAULT cannot contain an aggregate function");
+
             if (TryReadNextValDefault(defaultExpr, out string? defaultSequenceName))
             {
                 constraintTypes.Add((ColumnConstraintType.DefaultSequence,

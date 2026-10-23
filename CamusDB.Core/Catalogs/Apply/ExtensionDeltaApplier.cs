@@ -122,8 +122,9 @@ internal static class ExtensionDeltaApplier
 
     /// <summary>
     /// The install rules for <paramref name="extension"/> against the other installed extensions: each
-    /// required extension is installed, and no other installed extension defines one of its function
-    /// or procedure names. Trigger types need no such check: a trigger names its extension.
+    /// required extension is installed, and no other installed extension defines one of its procedure
+    /// names, or one of its function, aggregate and table-function names (one shared name space).
+    /// Trigger types need no such check: a trigger names its extension.
     /// </summary>
     internal static void CheckRules(Schema schema, ExtensionDefinition extension)
     {
@@ -142,15 +143,26 @@ internal static class ExtensionDeltaApplier
 
             foreach (ExtensionMemberDefinition member in extension.Members)
             {
-                if (member.Kind is ExtensionMemberKind.Function or ExtensionMemberKind.Procedure && other.HasMember(member.Kind, member.Name))
+                if (member.Kind == ExtensionMemberKind.Procedure && other.HasMember(member.Kind, member.Name))
                     throw new CamusDBException(
                         CamusDBErrorCodes.ExtensionMemberConflict,
-                        $"Extension '{extension.Name}' defines {Describe(member.Kind)} '{member.Name}', which installed extension '{other.Name}' already defines");
+                        $"Extension '{extension.Name}' defines procedure '{member.Name}', which installed extension '{other.Name}' already defines");
+
+                if (!ExtensionMemberKinds.IsCallable(member.Kind))
+                    continue;
+
+                // Functions, aggregates and table functions share one name space.
+                foreach (ExtensionMemberDefinition theirs in other.Members)
+                {
+                    if (ExtensionMemberKinds.IsCallable(theirs.Kind) && string.Equals(theirs.Name, member.Name, StringComparison.OrdinalIgnoreCase))
+                        throw new CamusDBException(
+                            CamusDBErrorCodes.ExtensionMemberConflict,
+                            $"Extension '{extension.Name}' defines {ExtensionMemberKinds.Describe(member.Kind)} '{member.Name}', " +
+                            $"which installed extension '{other.Name}' already defines as {ExtensionMemberKinds.Describe(theirs.Kind)}");
+                }
             }
         }
     }
-
-    private static string Describe(ExtensionMemberKind kind) => kind == ExtensionMemberKind.Procedure ? "procedure" : "function";
 
     private static bool IsSameRecord(ExtensionDefinition a, ExtensionDefinition b) =>
         string.Equals(a.Version, b.Version, StringComparison.Ordinal)

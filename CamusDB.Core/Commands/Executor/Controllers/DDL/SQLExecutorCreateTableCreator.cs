@@ -739,12 +739,8 @@ internal sealed class SQLExecutorCreateTableCreator : SQLExecutorBaseCreator
         }
     }
 
-    private static bool IsAggregateFunction(string name) => name switch
-    {
-        "count" or "sum" or "avg" or "min" or "max" or "count_distinct"
-            or "group_concat" or "string_agg" or "array_agg" => true,
-        _ => false,
-    };
+    /// <summary>A built-in or reserved aggregate name, or an aggregate of an extension installed in the database.</summary>
+    private static bool IsAggregateFunction(string name) => Queries.AggregateFunctionCatalog.IsRefusedOutsideAggregation(name);
 
     /// <summary>
     /// Walks the condition AST and collects all column-reference identifiers into

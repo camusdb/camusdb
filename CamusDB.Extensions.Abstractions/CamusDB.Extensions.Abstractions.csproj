@@ -33,8 +33,8 @@
     <PackageOutputPath>$(MSBuildThisFileDirectory)..\artifacts\nupkg</PackageOutputPath>
 
     <Authors>CamusDB</Authors>
-    <Description>The contract for CamusDB C# extensions: attributes and interfaces for SQL scalar functions, row triggers and stored procedures that a CamusDB server loads from operator-deployed assemblies.</Description>
-    <PackageTags>camusdb;database;sql;extensions;udf;trigger;stored-procedure</PackageTags>
+    <Description>The contract for CamusDB C# extensions: attributes and interfaces for SQL scalar functions, aggregate functions, table functions, row triggers (untyped or typed) and stored procedures that a CamusDB server loads from operator-deployed assemblies.</Description>
+    <PackageTags>camusdb;database;sql;extensions;udf;udaf;table-function;trigger;stored-procedure</PackageTags>
     <PackageReadmeFile>README.md</PackageReadmeFile>
     <PackageLicenseFile>LICENSE.txt</PackageLicenseFile>
     <PackageProjectUrl>https://github.com/camusdb/camusdb/blob/main/docs/csharp-extensions.md</PackageProjectUrl>

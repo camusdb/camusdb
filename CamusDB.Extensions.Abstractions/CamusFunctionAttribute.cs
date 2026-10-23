@@ -15,8 +15,14 @@ namespace CamusDB.Extensions;
 ///
 /// <para><b>Signature.</b> Parameters and the return value use the plain CLR types of the value
 /// mapping: <c>long</c>, <c>double</c>, <c>float</c>, <c>bool</c>, <c>string</c>, <c>Guid</c>,
-/// <c>byte[]</c>, <c>DateTime</c> and <c>decimal</c>. Any other type (an array, <c>object</c>, a
-/// custom class) fails the server's boot with the method name.</para>
+/// <c>byte[]</c>, <c>DateTime</c> and <c>decimal</c>, and <c>IReadOnlyList&lt;T&gt;</c> of one of them
+/// (except <c>byte[]</c>) for a SQL array. Any other type (a CLR array such as <c>long[]</c>, a nested
+/// list, <c>object</c>, a custom class) fails the server's boot with the method name.</para>
+///
+/// <para><b>Arrays.</b> A NULL element reaches a reference element (<c>IReadOnlyList&lt;string&gt;</c>)
+/// as <c>null</c>, and a value element only when it is nullable (<c>IReadOnlyList&lt;long?&gt;</c>); a
+/// NULL element in an <c>IReadOnlyList&lt;long&gt;</c> fails the statement. The method receives a new
+/// read-only list, and a returned list is copied before the call returns.</para>
 ///
 /// <para><b>NULL.</b> A parameter of type <c>Nullable&lt;T&gt;</c>, or a reference parameter
 /// annotated nullable (<c>string?</c>, <c>byte[]?</c>), receives SQL NULL as <c>null</c>. For any
@@ -41,7 +47,9 @@ public sealed class CamusFunctionAttribute : Attribute
 {
     /// <summary>Creates the attribute with the SQL name the function is called by.</summary>
     /// <param name="name">The SQL name. Names are case-insensitive and must not collide with a
-    /// built-in function or a function of another loaded extension.</param>
+    /// built-in function or aggregate. Functions, aggregates and table functions share one name space:
+    /// one extension cannot use a name twice, and a database cannot install two extensions that
+    /// share one.</param>
     public CamusFunctionAttribute(string name)
     {
         Name = name;

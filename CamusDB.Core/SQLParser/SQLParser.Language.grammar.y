@@ -1179,16 +1179,21 @@ trigger_event : TINSERT { $$.s = "insert"; }
               | TDELETE { $$.s = "delete"; }
               ;
 
-/* CREATE EXTENSION <name> [VERSION '<v>'], ALTER EXTENSION <name> UPDATE [TO '<v>'] and
-   DROP EXTENSION <name>. No word is reserved: EXTENSION and VERSION are plain identifiers that
-   CreateExtensionStatement / AlterExtensionStatement / DropExtensionStatement check, so each stays
-   usable as a table or column name. CREATE and DROP share the TCREATE/TDROP TIDENTIFIER any_identifier
-   prefix with the trigger statements; the token after the name (ON for a trigger) tells them apart.
+/* CREATE EXTENSION [IF NOT EXISTS] <name> [VERSION '<v>'], ALTER EXTENSION <name> UPDATE [TO '<v>']
+   and DROP EXTENSION [IF EXISTS] <name>. No word is reserved: EXTENSION and VERSION are plain
+   identifiers that CreateExtensionStatement / AlterExtensionStatement / DropExtensionStatement check,
+   so each stays usable as a table or column name. CREATE and DROP share the TCREATE/TDROP TIDENTIFIER
+   any_identifier prefix with the trigger statements; the token after the name (ON for a trigger) tells
+   them apart. IF is a keyword token, never an identifier, so the IF forms do not overlap the others.
    UPDATE and TO are the existing keyword tokens. */
 create_extension_stmt : TCREATE TIDENTIFIER any_identifier
-                        { $$.n = CreateExtensionStatement($2.s, $3.n, null, null); }
+                        { $$.n = CreateExtensionStatement($2.s, $3.n, null, null, false); }
                       | TCREATE TIDENTIFIER any_identifier TIDENTIFIER string
-                        { $$.n = CreateExtensionStatement($2.s, $3.n, $4.s, $5.n); }
+                        { $$.n = CreateExtensionStatement($2.s, $3.n, $4.s, $5.n, false); }
+                      | TCREATE TIDENTIFIER TIF TNOT TEXISTS any_identifier
+                        { $$.n = CreateExtensionStatement($2.s, $6.n, null, null, true); }
+                      | TCREATE TIDENTIFIER TIF TNOT TEXISTS any_identifier TIDENTIFIER string
+                        { $$.n = CreateExtensionStatement($2.s, $6.n, $7.s, $8.n, true); }
                       ;
 
 alter_extension_stmt : TALTER TIDENTIFIER any_identifier TUPDATE
@@ -1198,7 +1203,9 @@ alter_extension_stmt : TALTER TIDENTIFIER any_identifier TUPDATE
                      ;
 
 drop_extension_stmt : TDROP TIDENTIFIER any_identifier
-                      { $$.n = DropExtensionStatement($2.s, $3.n); }
+                      { $$.n = DropExtensionStatement($2.s, $3.n, false); }
+                    | TDROP TIDENTIFIER TIF TEXISTS any_identifier
+                      { $$.n = DropExtensionStatement($2.s, $5.n, true); }
                     ;
 
 /* CALL <procedure>(<args>). CALL is a plain identifier checked in CallStatement, like FLUSH and

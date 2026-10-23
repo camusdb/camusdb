@@ -82,7 +82,9 @@ that call its functions resolve when they are created. It does not write the mem
 the extension file, which the dump never contains. Deploy the same extension files on the new server,
 list them in `extension_assemblies`, and restart it before you load the dump; a server that does not load
 the named version refuses the statement. Reading the installed extensions needs `SHOW EXTENSIONS`, which
-requires a superuser; a dump taken by another user carries none and says so. Triggers are not carried
+requires a superuser; a dump taken by another user carries none and says so. With `--add-drop-table`
+the dump also writes `DROP EXTENSION IF EXISTS` for each one, after the tables are dropped; that form needs
+a target server of this release or later. Triggers are not carried
 (see the table below). See [csharp-extensions.md](csharp-extensions.md#installing-an-extension-in-a-database).
 
 **Foreign keys and the load order.** A `CREATE TABLE` with a foreign key fails when its parent table

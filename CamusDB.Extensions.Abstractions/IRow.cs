@@ -19,7 +19,10 @@ namespace CamusDB.Extensions;
 /// <see cref="InvalidCastException"/>. The value mapping is: Integer64 → <c>long</c>,
 /// Float64 → <c>double</c>, Float32 → <c>float</c>, Bool → <c>bool</c>, String and Id →
 /// <c>string</c>, Uuid → <c>Guid</c>, Bytes → <c>byte[]</c>, Date and DateTime →
-/// <c>DateTime</c> (UTC), Numeric → <c>decimal</c>.</para>
+/// <c>DateTime</c> (UTC), Numeric → <c>decimal</c>, and <c>array(E)</c> → <c>IReadOnlyList&lt;T&gt;</c>
+/// of the element mapping. <see cref="GetValue"/> returns an array as a list with nullable elements
+/// (<c>IReadOnlyList&lt;long?&gt;</c>, <c>IReadOnlyList&lt;string?&gt;</c>); <see cref="GetArray{T}"/>
+/// reads it with the element type you choose.</para>
 /// </summary>
 public interface IRow
 {
@@ -62,6 +65,15 @@ public interface IRow
     /// <summary>A Numeric value. A value that does not fit <c>decimal</c> throws
     /// <see cref="OverflowException"/>.</summary>
     decimal? GetDecimal(string column);
+
+    /// <summary>
+    /// An array value as a new list of <typeparamref name="T"/>, a mapped element type: for example
+    /// <c>GetArray&lt;long&gt;("ids")</c> or <c>GetArray&lt;string?&gt;("tags")</c>. A NULL element needs a
+    /// nullable <typeparamref name="T"/> (<c>long?</c>) or a reference type; in an element type that
+    /// cannot hold it, and for an element of another type, the call throws
+    /// <see cref="InvalidCastException"/>. The list is a copy.
+    /// </summary>
+    IReadOnlyList<T>? GetArray<T>(string column);
 }
 
 /// <summary>
@@ -107,4 +119,11 @@ public interface IWritableRow : IRow
 
     /// <summary>Sets a numeric value.</summary>
     void Set(string column, decimal value);
+
+    /// <summary>
+    /// Sets an array value from a list of a mapped element type (<c>long</c>, <c>long?</c>,
+    /// <c>string</c>, ...). The element type of the value comes from <typeparamref name="T"/>.
+    /// <c>null</c> sets SQL NULL. The list is copied, so a later change to it has no effect.
+    /// </summary>
+    void SetArray<T>(string column, IReadOnlyList<T>? values);
 }

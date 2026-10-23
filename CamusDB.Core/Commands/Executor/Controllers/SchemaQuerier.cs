@@ -1585,7 +1585,8 @@ internal sealed class SchemaQuerier
                 extension.Name, extension.Version, isInstalled ? "installed" : "available",
                 Text(extension.Path), extension.Sha256,
                 Text(extension.Trust == Extensions.ExtensionTrust.Safe ? "safe" : "unsafe"),
-                extension.Requires, extension.Functions, extension.Triggers, extension.Procedures);
+                extension.Requires, extension.Functions, extension.Triggers, extension.Procedures,
+                extension.Aggregates, extension.TableFunctions, Text(string.Join("; ", extension.Signatures)));
         }
 
         if (installed is null || resolved is null)
@@ -1601,7 +1602,10 @@ internal sealed class SchemaQuerier
                 record.Requires,
                 Members(record, ExtensionMemberKind.Function),
                 Members(record, ExtensionMemberKind.Trigger),
-                Members(record, ExtensionMemberKind.Procedure));
+                Members(record, ExtensionMemberKind.Procedure),
+                Members(record, ExtensionMemberKind.Aggregate),
+                Members(record, ExtensionMemberKind.TableFunction),
+                ColumnValue.Null);
         }
     }
 
@@ -1610,7 +1614,8 @@ internal sealed class SchemaQuerier
 
     private static QueryResultRow ExtensionRow(
         string name, string version, string status, ColumnValue path, string sha256, ColumnValue trust,
-        IEnumerable<string> requires, IEnumerable<string> functions, IEnumerable<string> triggers, IEnumerable<string> procedures) =>
+        IEnumerable<string> requires, IEnumerable<string> functions, IEnumerable<string> triggers, IEnumerable<string> procedures,
+        IEnumerable<string> aggregates, IEnumerable<string> tableFunctions, ColumnValue signatures) =>
         new(default, new Dictionary<string, ColumnValue>(StringComparer.OrdinalIgnoreCase)
         {
             { "name",       new ColumnValue(ColumnType.String, name) },
@@ -1623,6 +1628,9 @@ internal sealed class SchemaQuerier
             { "functions",  new ColumnValue(ColumnType.String, string.Join(",", functions)) },
             { "triggers",   new ColumnValue(ColumnType.String, string.Join(",", triggers)) },
             { "procedures", new ColumnValue(ColumnType.String, string.Join(",", procedures)) },
+            { "aggregates", new ColumnValue(ColumnType.String, string.Join(",", aggregates)) },
+            { "table_functions", new ColumnValue(ColumnType.String, string.Join(",", tableFunctions)) },
+            { "signatures", signatures },
         });
 
     /// <summary>

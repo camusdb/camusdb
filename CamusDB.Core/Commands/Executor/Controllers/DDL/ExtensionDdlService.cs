@@ -15,9 +15,9 @@ using Kommander.Time;
 namespace CamusDB.Core.CommandsExecutor.Controllers.DDL;
 
 /// <summary>
-/// Runs <c>CREATE EXTENSION</c>, <c>ALTER EXTENSION ... UPDATE</c> and <c>DROP EXTENSION</c>: picks the
-/// loaded build the statement names, checks the cluster, and proposes the replicated delta through
-/// <see cref="CatalogsManager"/>.
+/// Runs <c>CREATE EXTENSION [IF NOT EXISTS]</c>, <c>ALTER EXTENSION ... UPDATE</c> and
+/// <c>DROP EXTENSION [IF EXISTS]</c>: picks the loaded build the statement names, checks the cluster,
+/// and proposes the replicated delta through <see cref="CatalogsManager"/>.
 ///
 /// <para><b>The proposer resolves the build.</b> The statement succeeds only when this node loads the
 /// named version (the highest loaded version when the statement names none). The record it proposes
@@ -59,6 +59,19 @@ internal sealed class ExtensionDdlService
     public async Task CreateAsync(DatabaseDescriptor database, NodeAst ast)
     {
         string name = RequireName(ast);
+        bool ifNotExists = ast.yytext == "if not exists";
+
+        // IF NOT EXISTS leaves an installed extension as it is, at its installed version, even when that
+        // is not the version the statement names or a build this node loads. The schema leader answers,
+        // so a follower that is behind the schema log cannot skip an install the leader does not have.
+        if (ifNotExists)
+        {
+            await RequireSchemaLeaderAsync(database, "CREATE EXTENSION").ConfigureAwait(false);
+
+            if (database.Schema.Extensions.ContainsKey(name))
+                return;
+        }
+
         LoadedExtension build = PickBuild(name, TargetVersion(ast));
 
         await RequireSchemaLeaderAsync(database, "CREATE EXTENSION").ConfigureAwait(false);
@@ -66,7 +79,14 @@ internal sealed class ExtensionDdlService
 
         HLCTimestamp now = Now();
 
-        await InDdlGateAsync(database, () => catalogs.CreateExtensionAsync(database, BuildRecord(build, now, now))).ConfigureAwait(false);
+        try
+        {
+            await InDdlGateAsync(database, () => catalogs.CreateExtensionAsync(database, BuildRecord(build, now, now))).ConfigureAwait(false);
+        }
+        catch (CamusDBException exception) when (ifNotExists && exception.Code == CamusDBErrorCodes.ExtensionAlreadyInstalled)
+        {
+            // A concurrent CREATE EXTENSION installed it between the check above and the proposal.
+        }
     }
 
     public async Task UpdateAsync(DatabaseDescriptor database, NodeAst ast)
@@ -101,9 +121,26 @@ internal sealed class ExtensionDdlService
     public async Task DropAsync(DatabaseDescriptor database, NodeAst ast)
     {
         string name = RequireName(ast);
+        bool ifExists = ast.yytext == "if exists";
 
         await RequireSchemaLeaderAsync(database, "DROP EXTENSION").ConfigureAwait(false);
 
+        // IF EXISTS only forgives an extension that is not installed. Dependents still refuse the drop.
+        if (ifExists && !database.Schema.Extensions.ContainsKey(name))
+            return;
+
+        try
+        {
+            await DropInstalledAsync(database, name).ConfigureAwait(false);
+        }
+        catch (CamusDBException exception) when (ifExists && exception.Code == CamusDBErrorCodes.ExtensionNotInstalled)
+        {
+            // A concurrent DROP EXTENSION removed it between the check above and the proposal.
+        }
+    }
+
+    private async Task DropInstalledAsync(DatabaseDescriptor database, string name)
+    {
         await InDdlGateAsync(database, () => catalogs.DropExtensionAsync(database, name, (schema, installed) =>
         {
             List<string> dependents = [];

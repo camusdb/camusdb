@@ -55,6 +55,17 @@ public abstract class ExtensionTestBase : BaseTest
         return (dbname, database, executor);
     }
 
+    /// <summary>
+    /// An engine and a database built with <c>Fixture.Rich</c> (arrays, table functions, aggregates and
+    /// typed triggers) loaded in SAFE mode and installed in the database (<c>CREATE EXTENSION rich</c>).
+    /// </summary>
+    protected async Task<(string dbname, DatabaseDescriptor database, CommandExecutor executor)> CreateDatabaseWithRichFixture(CamusDBOptions? options = null)
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase(options ?? WithExtensions("Fixture.Rich"));
+        await ExecDdl(executor, dbname, "CREATE EXTENSION rich");
+        return (dbname, database, executor);
+    }
+
     protected static async Task ExecDdl(CommandExecutor executor, string dbname, string sql)
     {
         DatabaseDescriptor db = await executor.OpenDatabase(dbname);

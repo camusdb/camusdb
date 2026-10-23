@@ -31,8 +31,9 @@ namespace CamusDB.Core.Extensions;
 /// committed delta applies.</para>
 ///
 /// <para><b>Which names it checks.</b> Only a name that is not a built-in and that one of this engine's
-/// loaded extensions defines (plain or qualified). Every other name (aggregates, sequence functions,
-/// table functions, built-ins) is out of scope, so the check cannot refuse a statement that never used
+/// loaded extensions defines (plain or qualified) as a function, an aggregate or a table function; a
+/// view body can call all three. Every other name (built-in aggregates, sequence functions, built-in
+/// table functions, built-in scalars) is out of scope, so the check cannot refuse a statement that never used
 /// an extension. Such a name must resolve against the extensions installed in the schema the delta is
 /// validated against; otherwise the delta is refused with
 /// <see cref="CamusDBErrorCodes.ExtensionNotInstalled"/>.</para>
@@ -123,7 +124,7 @@ internal static class ExtensionReferenceGuard
             if (ScalarFunctionEvaluator.IsBuiltInScalarFunction(lowered) || !IsExtensionFunction(registry, lowered))
                 return;
 
-            if (installed.HasFunction(lowered))
+            if (installed.HasFunction(lowered) || installed.HasAggregate(lowered) || installed.HasTableFunction(lowered))
                 return;
 
             throw new CamusDBException(
@@ -141,7 +142,7 @@ internal static class ExtensionReferenceGuard
         {
             NodeAstWalk.Any(ast, node =>
             {
-                if (node.nodeType == NodeType.ExprFuncCall && node.leftAst?.yytext is { } name)
+                if (node.nodeType is NodeType.ExprFuncCall or NodeType.TableFunctionReference && node.leftAst?.yytext is { } name)
                     Require(name);
 
                 return false;
@@ -164,7 +165,10 @@ internal static class ExtensionReferenceGuard
         }
     }
 
-    /// <summary>True when a loaded extension defines <paramref name="name"/>, plain or as <c>extension.function</c>.</summary>
+    /// <summary>
+    /// True when a loaded extension defines <paramref name="name"/> as a function, an aggregate or a
+    /// table function, plain or as <c>extension.member</c>.
+    /// </summary>
     private static bool IsExtensionFunction(ExtensionRegistry registry, string name)
     {
         int dot = name.IndexOf('.');
@@ -173,11 +177,11 @@ internal static class ExtensionReferenceGuard
         {
             if (dot < 0)
             {
-                if (extension.FunctionTable.ContainsKey(name))
+                if (extension.DefinesCallable(name))
                     return true;
             }
             else if (string.Equals(extension.Name, name[..dot], StringComparison.OrdinalIgnoreCase) &&
-                     extension.FunctionTable.ContainsKey(name[(dot + 1)..]))
+                     extension.DefinesCallable(name[(dot + 1)..]))
                 return true;
         }
 

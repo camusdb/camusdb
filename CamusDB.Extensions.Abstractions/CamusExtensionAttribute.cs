@@ -17,7 +17,7 @@ namespace CamusDB.Extensions;
 ///
 /// <para><b>Available and installed.</b> Listing the assembly in the server configuration makes the
 /// extension <i>available</i> on that node. <c>CREATE EXTENSION geo</c> makes it <i>installed</i> in
-/// one database, and its functions, triggers and procedures resolve only in a database where it is
+/// one database, and its functions, aggregates, table functions, triggers and procedures resolve only in a database where it is
 /// installed. A node can load two versions of one extension side by side; each database's installed
 /// version selects which one it uses, and <c>ALTER EXTENSION geo UPDATE TO '2.0.0'</c> moves a
 /// database to another version in one step.</para>

@@ -12,7 +12,9 @@ namespace CamusDB.Extensions;
 /// <summary>
 /// A row trigger. <c>CREATE TRIGGER name ON table {BEFORE|AFTER} event[, event...] EXTERNAL NAME
 /// 'Namespace.Type'</c> binds a public class that implements this interface to a table. The class
-/// needs a public parameterless constructor.
+/// needs a public parameterless constructor. To receive OLD and NEW as instances of your own row
+/// class instead of <see cref="IRow"/>, implement <see cref="ICamusTrigger{TRow}"/>; a class implements
+/// one of the two.
 ///
 /// <para><b>Firing.</b> A trigger fires once for each affected row, on the node that runs the
 /// statement, inside the statement's transaction.</para>

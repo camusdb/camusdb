@@ -22,8 +22,10 @@ namespace CamusDB.Core.Extensions;
 /// them when the statement runs, under the schema lock, gives the same answer a recorded edge list
 /// would, with no second copy that a replay or a crash could leave out of step.</para>
 ///
-/// <para><b>Names.</b> A call matches a function member by its plain name or by the qualified form
-/// <c>extension.member</c>. Plain names are unambiguous within a database: two installed extensions
+/// <para><b>Names.</b> A call matches a function or aggregate member by its plain name or by the
+/// qualified form <c>extension.member</c>, and a table-function member by the same names in a
+/// <c>FROM</c> reference. A view body is the only stored object that can name a table function or an
+/// aggregate: a default and a CHECK refuse both. Plain names are unambiguous within a database: two installed extensions
 /// cannot define the same function name, and no extension can shadow a built-in.</para>
 /// </summary>
 internal static class ExtensionDependencyFinder
@@ -39,15 +41,22 @@ internal static class ExtensionDependencyFinder
         IEnumerable<ExtensionMemberDefinition> members,
         Func<string, NodeAst> parseStatement)
     {
+        // Scalar functions and aggregates are both call nodes; a table function is a FROM reference.
         HashSet<string> functionNames = new(StringComparer.OrdinalIgnoreCase);
+        HashSet<string> tableFunctionNames = new(StringComparer.OrdinalIgnoreCase);
         HashSet<string> triggerTypes = new(StringComparer.Ordinal);
 
         foreach (ExtensionMemberDefinition member in members)
         {
-            if (member.Kind == ExtensionMemberKind.Function)
+            if (member.Kind is ExtensionMemberKind.Function or ExtensionMemberKind.Aggregate)
             {
                 functionNames.Add(member.Name);
                 functionNames.Add(extension.Name + "." + member.Name);
+            }
+            else if (member.Kind == ExtensionMemberKind.TableFunction)
+            {
+                tableFunctionNames.Add(member.Name);
+                tableFunctionNames.Add(extension.Name + "." + member.Name);
             }
             else if (member.Kind == ExtensionMemberKind.Trigger)
                 triggerTypes.Add(member.Name);
@@ -55,12 +64,16 @@ internal static class ExtensionDependencyFinder
 
         List<string> dependents = [];
 
-        if (functionNames.Count == 0 && triggerTypes.Count == 0)
+        if (functionNames.Count == 0 && tableFunctionNames.Count == 0 && triggerTypes.Count == 0)
             return dependents;
+
+        bool callsAny = functionNames.Count > 0 || tableFunctionNames.Count > 0;
 
         bool Calls(NodeAst? ast) =>
             ast is not null && NodeAstWalk.Any(ast, node =>
-                node.nodeType == NodeType.ExprFuncCall && node.leftAst?.yytext is { } name && functionNames.Contains(name));
+                node.leftAst?.yytext is { } name &&
+                ((node.nodeType == NodeType.ExprFuncCall && functionNames.Contains(name)) ||
+                 (node.nodeType == NodeType.TableFunctionReference && tableFunctionNames.Contains(name))));
 
         foreach (TableSchema table in schema.Tables.Values)
         {
@@ -86,10 +99,10 @@ internal static class ExtensionDependencyFinder
                             dependents.Add($"CHECK constraint {check.Name} on table {table.Name}");
                     }
                 }
-
-                if (table.ViewDefinition is { Sql.Length: > 0 } definition && Calls(parseStatement(definition.Sql)))
-                    dependents.Add($"materialized view {table.Name}");
             }
+
+            if (callsAny && table.ViewDefinition is { Sql.Length: > 0 } definition && Calls(parseStatement(definition.Sql)))
+                dependents.Add($"materialized view {table.Name}");
 
             if (table.Triggers is { } triggers)
             {
@@ -102,7 +115,7 @@ internal static class ExtensionDependencyFinder
             }
         }
 
-        if (functionNames.Count > 0)
+        if (callsAny)
         {
             foreach (ViewSchema view in schema.Views.Values)
             {

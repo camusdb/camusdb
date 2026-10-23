@@ -16,5 +16,11 @@ public enum QueryAggregationType
     Average,
     Min,
     Max,
-    Distinct
+    Distinct,
+
+    /// <summary>
+    /// An aggregate of a C# extension (<c>AggregateFunctionCatalog</c>). It has no fast path: the
+    /// aggregator runs it through the general workspace with one state object per group.
+    /// </summary>
+    Extension
 }

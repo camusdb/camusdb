@@ -37,8 +37,54 @@ internal static class TableFunctionRegistry
         "regexp_split_to_table",
     };
 
-    /// <summary>True when <paramref name="name"/> is a table function this registry resolves.</summary>
-    public static bool IsTableFunction(string name) => Functions.ContainsKey(name);
+    /// <summary>
+    /// True when <paramref name="name"/> is a table function a statement in this flow can call: a
+    /// built-in, or a table function of an extension installed in the statement's database.
+    /// </summary>
+    public static bool IsTableFunction(string name) =>
+        Functions.ContainsKey(name) ||
+        (Extensions.ExtensionFunctionScope.CurrentInstalled?.HasTableFunction(name) ?? false);
+
+    /// <summary>True when <paramref name="name"/> is a built-in table function, whatever extension scope the flow carries.</summary>
+    public static bool IsBuiltInTableFunction(string name) => Functions.ContainsKey(name);
+
+    /// <summary>
+    /// True when <paramref name="name"/> resolves to a volatile table function in this flow. A name
+    /// that does not resolve answers false; it fails later, where an unknown function belongs.
+    /// </summary>
+    public static bool IsVolatileTableFunction(string name)
+    {
+        try
+        {
+            return TryResolve(name, out TableFunction? function) && function.IsVolatile;
+        }
+        catch (CamusDBException)
+        {
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// The built-in table first, then the table functions of the extensions installed in the database
+    /// whose statement this flow runs (<see cref="Extensions.ExtensionFunctionScope"/>). The loader
+    /// refuses an extension name that collides with a built-in, so the order never changes what a name
+    /// means. A member of an installed extension this node does not load throws
+    /// <see cref="CamusDBErrorCodes.ExtensionNotLoadedOnNode"/>.
+    /// </summary>
+    private static bool TryResolve(string name, [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out TableFunction? function)
+    {
+        if (Functions.TryGetValue(name, out function))
+            return true;
+
+        if (Extensions.ExtensionFunctionScope.CurrentInstalled is { } installed && installed.TryGetTableFunction(name, out Extensions.ExtensionTableFunction? extension))
+        {
+            function = extension;
+            return true;
+        }
+
+        function = null;
+        return false;
+    }
 
     /// <summary>
     /// Returns the function named <paramref name="name"/> after checking the argument count. Throws
@@ -47,13 +93,15 @@ internal static class TableFunctionRegistry
     /// </summary>
     public static TableFunction Resolve(string name, int argumentCount)
     {
-        if (Functions.TryGetValue(name, out TableFunction? function))
+        if (TryResolve(name, out TableFunction? function))
         {
             if (argumentCount < function.MinArguments || argumentCount > function.MaxArguments)
             {
                 string expected = function.MinArguments == function.MaxArguments
                     ? function.MinArguments.ToString()
-                    : $"{function.MinArguments} or {function.MaxArguments}";
+                    : function.MaxArguments == function.MinArguments + 1
+                        ? $"{function.MinArguments} or {function.MaxArguments}"
+                        : $"{function.MinArguments} to {function.MaxArguments}";
 
                 throw new CamusDBException(
                     CamusDBErrorCodes.InvalidInput,

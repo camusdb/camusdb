@@ -1,7 +1,7 @@
-# C# extensions: functions, triggers and procedures
+# C# extensions: functions, aggregates, table functions, triggers and procedures
 
-CamusDB can run your own C# code as SQL scalar functions, as row triggers, and as stored
-procedures. The code ships as a .NET assembly (a DLL) that the operator deploys next to the server
+CamusDB can run your own C# code as SQL scalar functions, as aggregate functions, as table
+functions in `FROM`, as row triggers, and as stored procedures. The code ships as a .NET assembly (a DLL) that the operator deploys next to the server
 and lists in the configuration. The server loads it when it starts.
 
 The DLL is **never stored in the database** and never replicated between nodes. Each node loads
@@ -15,7 +15,10 @@ statements that need it (see [Installing an extension in a database](#installing
   - [The manifest](#the-manifest)
   - [Scalar functions](#scalar-functions)
   - [Value mapping](#value-mapping)
+  - [Table functions](#table-functions)
+  - [Aggregate functions](#aggregate-functions)
   - [Triggers](#triggers)
+  - [Typed trigger rows](#typed-trigger-rows)
   - [Procedures](#procedures)
   - [The SQL session](#the-sql-session)
 - [Installing an extension in a database](#installing-an-extension-in-a-database)
@@ -113,8 +116,10 @@ SELECT greet(NULL), hello('ann', 'hi');
 
 - **Names** are case-insensitive. A name or alias that collides with a built-in function, an
   aggregate (`count`, `sum`, `min`, `max`, `avg`, and the other aggregate names the engine reserves),
-  a table function, or a function of another loaded extension stops the server at startup. An extension
-  never replaces a built-in.
+  or a built-in table function stops the server at startup. An extension never replaces a built-in.
+  Scalar functions, aggregates and table functions share **one name space**: one extension cannot
+  use a name for two of them, and `CREATE EXTENSION` refuses a name that another installed
+  extension uses for any of the three.
 - **NULL.** A parameter of type `Nullable<T>` (`long?`) or a reference type annotated nullable
   (`string?`, `byte[]?`) receives SQL NULL as `null`. For any other parameter, a NULL argument makes
   the result NULL, and the method is not called. Returning `null` returns SQL NULL.
@@ -151,14 +156,156 @@ SELECT greet(NULL), hello('ann', 'hi');
 | `BYTES` (also vectors) | `byte[]` |
 | `DATE`, `DATETIME` | `DateTime` in UTC; a returned `DateTime` is a `DATETIME` |
 | `NUMERIC` | `decimal` (an `INT64` argument converts) |
+| `ARRAY(E)` | `IReadOnlyList<T>`, where `T` is the mapping of `E` |
 
-Arrays are not mapped in this version; a parameter or return type outside the table stops the server
-at startup with the method name. JSON values are `STRING`.
+A parameter or return type outside the table stops the server at startup with the method name and
+the reason. JSON values are `STRING`.
+
+**Arrays.** Declare an array as `IReadOnlyList<T>`, for example `IReadOnlyList<long>` or
+`IReadOnlyList<string>`; a CLR array type such as `long[]` in a signature is refused (you can still
+*return* a `long[]` from a method declared `IReadOnlyList<long>`).
+
+- A NULL **array** follows the parameter rule: it makes the result NULL for `IReadOnlyList<long>`, and
+  arrives as `null` for a parameter declared `IReadOnlyList<long>?`.
+- A NULL **element** arrives as `null` in a reference element (`IReadOnlyList<string>`), and in a value
+  element only when it is declared nullable (`IReadOnlyList<long?>`). A NULL element in an
+  `IReadOnlyList<long>` argument fails the statement with the function name, the argument and the
+  position.
+- Each element follows the scalar rules, so an `INT64` element reaches an `IReadOnlyList<double>` as
+  a double.
+- **Copies, both ways.** The function receives a new read-only list, never the engine's storage. A
+  returned list is copied into the engine value before the call returns, so a later change to it has
+  no effect.
+- A function that returns `IReadOnlyList<T>` declares its element type, so `CREATE TABLE … AS SELECT`
+  and a derived table over it get an `ARRAY(E)` column with the right element type.
+- **Not mapped:** nested arrays (`IReadOnlyList<IReadOnlyList<long>>`) and arrays of `byte[]`. Both
+  stop the server at startup.
+- `IRow.GetValue` and procedure arguments box an array as a list with nullable elements
+  (`IReadOnlyList<long?>`, `IReadOnlyList<string?>`). `IRow.GetArray<T>` reads it with the element
+  type you choose, and `IWritableRow.SetArray<T>` writes one in a BEFORE trigger. A session parameter
+  can be a `long[]`, a `List<string>`, or any other list of a mapped element type.
 
 **NUMERIC is never truncated.** NUMERIC holds 38 digits with 9 after the point; a .NET `decimal`
 holds 28 or 29 significant digits. A NUMERIC value whose digits do not fit a `decimal` fails with
 `CADB0810` instead of losing digits. A returned `decimal` with more than 9 fractional digits rounds
 half away from zero, the same as text cast to NUMERIC.
+
+### Table functions
+
+A table function is a public static method marked `[CamusTableFunction("name")]` that returns
+`IEnumerable<T>`. It stands as a relation in `FROM`, the same as the built-in `generate_series`:
+
+```csharp
+public static class TextTables
+{
+    [CamusTableFunction("split_words", Column = "word")]
+    public static IEnumerable<string> SplitWords(string text)
+    {
+        foreach (string word in text.Split(' ', StringSplitOptions.RemoveEmptyEntries))
+            yield return word;
+    }
+
+    [CamusTableFunction("count_to", CountRowsMethod = nameof(CountToRows))]
+    public static IEnumerable<long> CountTo(long n)
+    {
+        for (long i = 1; i <= n; i++)
+            yield return i;
+    }
+
+    public static long? CountToRows(long n) => n < 0 ? 0 : n;
+}
+```
+
+```sql
+SELECT word FROM split_words('a b c');
+SELECT w.word, d.weight FROM split_words(@text) AS w JOIN dictionary d ON d.term = w.word;
+SELECT n FROM count_to(1000) AS n WHERE n % 7 = 0 LIMIT 10;
+SELECT t FROM split_words('x y') AS s(t);   -- a column alias renames the column
+```
+
+- **One output column.** `T` is one mapped type, arrays included. `Column` names the column; without
+  it, the function name (or the relation alias) names it. A row class with several columns is not
+  supported in this version.
+- **Arguments** follow the scalar-function rules, but a call reads no column of another relation in
+  the same `FROM` (there is no `LATERAL`). A NULL argument for a parameter that does not accept NULL
+  gives zero rows, and so does a `null` return value. A `null` element is a NULL row value.
+- **Laziness and disposal.** The server pulls one value at a time and can stop at any point: a
+  `LIMIT`, a cancel, an error elsewhere in the query. It then disposes the enumerator, so a `finally`
+  block or a `using` in an iterator method runs. Do not build the whole output first. The server
+  checks the statement's cancellation between two values; a value that takes long to compute delays
+  a cancel, and the server cannot stop code that never yields. There is no row cap.
+- **Re-reads and volatility.** A join can read a relation more than once. A function that is not
+  `IsVolatile` is called again for each read, so it must give the same values for the same
+  arguments. The output of an `IsVolatile = true` function is kept for the statement after its first
+  read (it spills like other kept rows), so every read in one statement sees the same rows; the next
+  statement calls it again.
+- **Row estimate.** `CountRowsMethod` names a public static method of the same class, with the same
+  parameters, that returns `long?`. The planner calls it when the arguments are constants and uses
+  the result as the leaf's estimate; `EXPLAIN` shows it on the `function-scan` node. Without it the
+  leaf gets the default estimate. Keep the method cheap and free of effects.
+- **Errors.** An exception from the method or from the enumerator ends the statement with `CADB0809`
+  and the function name.
+- **Where it runs.** On the node that coordinates the statement; a table function never ships to a
+  peer.
+
+### Aggregate functions
+
+An aggregate is a public class marked `[CamusAggregate("name")]` that implements
+`ICamusAggregate<TState>`:
+
+```csharp
+[CamusAggregate("geomean")]
+public sealed class GeoMean : ICamusAggregate<GeoMean.State>
+{
+    public sealed class State { public double LogSum; public long Count; }
+
+    public State Create() => new State();
+
+    public void Accumulate(State state, double x)
+    {
+        if (x > 0) { state.LogSum += Math.Log(x); state.Count++; }
+    }
+
+    public double? Finish(State state) => state.Count == 0 ? null : Math.Exp(state.LogSum / state.Count);
+}
+```
+
+```sql
+SELECT geomean(price) FROM items;
+SELECT category, geomean(price) AS g, count(*) FROM items GROUP BY category HAVING geomean(price) > 10;
+INSERT INTO summary (category, g) SELECT category, geomean(price) FROM items GROUP BY category;
+```
+
+- **The methods.** `Create` comes from the interface. `Accumulate(TState state, ...)` takes the SQL
+  arguments after the state and returns `void`; it must be the only public method of that name.
+  `Finish(TState state)` returns the result, of a mapped type (an array too); `null` is SQL NULL. The
+  argument and result types are the aggregate's SQL signature, which is why the server finds these
+  two methods by name. An optional `Merge(TState into, TState other)` is accepted and not called in
+  this version (see below).
+- **NULL.** A row whose argument is NULL for a parameter that does not accept NULL is skipped, the
+  SQL rule for built-in aggregates. A `Nullable<T>` or nullable reference parameter receives the NULL.
+- **Groups and zero rows.** The server calls `Create` once per group, `Accumulate` once per row of the
+  group, and `Finish` once. A global aggregate over zero rows calls `Create` and then `Finish`. A
+  `GROUP BY` over zero rows has no group, so it calls nothing.
+- **State.** One instance of the class exists per engine and is shared by every statement; keep all
+  per-group data in the state object. One state is used by one thread at a time.
+- **Where it is allowed.** In the select list (bare or inside an expression, such as
+  `geomean(x) * 2`) and in `HAVING`, like a built-in aggregate. `WHERE`, `JOIN ON` and `GROUP BY`
+  refuse it, and so do a CHECK constraint and a column `DEFAULT`. There are no window functions and
+  no `DISTINCT` inside an aggregate call, for built-in and extension aggregates alike.
+- **Memory.** A spilling `GROUP BY` charges each group's state against the memory budget, but the
+  server cannot measure your state, so it charges `StateSizeHint` bytes (64 when you give none).
+  Give a larger hint for a state that holds a collection, so that a `GROUP BY` with many groups
+  spills to disk before it runs out of memory. A spilling `GROUP BY` writes raw rows to disk, never
+  your state, and gives the same result as one that does not spill.
+- **Not distributed in this version.** An extension aggregate always runs on the node that runs the
+  statement, over the gathered rows: the partial aggregation that splits a built-in `count`, `sum`,
+  `min`, `max` or `avg` across the nodes never splits an extension aggregate.
+- **Errors.** An exception from `Create`, `Accumulate` or `Finish` ends the statement with `CADB0809`
+  and the aggregate name. A wrong argument count fails before any row is read.
+- **Cost.** The server compiles the three calls once, when it loads the extension. A row costs one
+  delegate call and its argument conversions. A `GROUP BY` of 200,000 rows into 100 groups took the
+  same time with an extension aggregate as with `SUM`.
 
 ### Triggers
 
@@ -241,6 +388,63 @@ as `ALTER TABLE`.
 database's **schema leader**, the same as view and sequence DDL; a follower refuses it with an error
 that names the leader.
 
+### Typed trigger rows
+
+A trigger can receive OLD and NEW as instances of its own row class instead of `IRow`. Implement
+`ICamusTrigger<TRow>`:
+
+```csharp
+public sealed class OrderRow
+{
+    public string? Id { get; set; }
+    public string Name { get; set; } = "";
+    [CamusColumn("total_cents")] public long? Total { get; set; }
+    public IReadOnlyList<string>? Tags { get; set; }
+}
+
+public sealed class TrimOrderName : ICamusTrigger<OrderRow>
+{
+    public Task FireAsync(ITriggerContext<OrderRow> context)
+    {
+        if (context.New is { } row)
+            row.Name = row.Name.Trim();   // BEFORE: written back
+        return Task.CompletedTask;
+    }
+}
+```
+
+```sql
+CREATE TRIGGER trim ON orders BEFORE INSERT, UPDATE EXTERNAL NAME 'MyCompany.Ext.TrimOrderName';
+```
+
+- **Mapping.** Each public property with a public getter and a public setter maps to the column of the
+  same name (case-insensitive), or to the name in its `[CamusColumn("...")]`. Init-only properties,
+  fields and indexers are not mapped. Columns the class does not map are ignored, so a class can
+  model part of a row.
+- **Types.** A property type must be the [value mapping](#value-mapping) of its column, exactly:
+  `long` (or `long?`) for `INT64`, `DateTime` for `DATE` and `DATETIME`, `IReadOnlyList<string>` for
+  `ARRAY(STRING)`, and so on. `CREATE TRIGGER` refuses a property with no column and a property of
+  another type with `CADB0836`, and the message lists every problem and the type that fits.
+- **NULL.** A `Nullable<T>` property, or a reference property annotated nullable (`string?`),
+  receives NULL as `null`. A NULL in any other property fails the statement with `CADB0818` and the
+  column name. A column that has no value when the trigger fires is NULL too: a column the INSERT
+  omits, and the row id in BEFORE INSERT. Map such columns to nullable properties.
+- **BEFORE triggers write back changed properties only.** After the call the server compares each
+  property of NEW with the value it started with (byte arrays and lists by content) and writes back
+  only the ones that differ, through the same path as `IWritableRow.Set`: the values are converted to
+  the column types and the row must pass NOT NULL, length and CHECK rules. An unchanged property
+  costs no write. An AFTER trigger's changes to its objects are ignored. The untyped rows are still
+  there: cast the context to `ITriggerContext`.
+- **Schema changes.** The trigger record keeps the columns its class maps. While the trigger exists,
+  `ALTER TABLE … DROP COLUMN` and `RENAME COLUMN` of a mapped column are refused with `CADB0530`;
+  drop the trigger first. Other columns change freely. If `ALTER EXTENSION … UPDATE` brings a row
+  class that no longer fits the table, the first DML on each node that fires the trigger fails with
+  `CADB0836`.
+- **Cost.** Each fired row creates one object per image (OLD, NEW) and converts each mapped column.
+  The untyped `ICamusTrigger` reads the row without a copy; prefer it on a hot table. The rows that
+  wait for AFTER triggers are kept in the engine's form, so the `CADB0826` budget is the same for
+  both kinds. The mapping is compiled once per row class: no reflection runs per row.
+
 ### Procedures
 
 A procedure is a public class with a public parameterless constructor, marked
@@ -305,8 +509,8 @@ CALL transfer(@from, @to, 10 * 3);
 
 ## Installing an extension in a database
 
-Loading an extension makes it **available** on a node. Its functions, triggers and procedures
-resolve only in a database where it is **installed**:
+Loading an extension makes it **available** on a node. Its functions, aggregates, table functions,
+triggers and procedures resolve only in a database where it is **installed**:
 
 ```sql
 CREATE EXTENSION geo;                  -- the highest version this node loads
@@ -314,6 +518,9 @@ CREATE EXTENSION geo VERSION '1.2.0';  -- an exact version
 ALTER EXTENSION geo UPDATE;            -- move to the highest loaded version
 ALTER EXTENSION geo UPDATE TO '1.3.0'; -- or to an exact one
 DROP EXTENSION geo;
+
+CREATE EXTENSION IF NOT EXISTS geo;    -- a no-op when geo is installed, at any version
+DROP EXTENSION IF EXISTS geo;          -- a no-op when geo is not installed
 
 SELECT distance(a, b) FROM routes;     -- plain name
 SELECT geo.distance(a, b) FROM routes; -- qualified with the extension name
@@ -323,21 +530,29 @@ The three statements are schema DDL: they replicate through the schema log, so e
 cluster changes at the same schema version, and they survive a restart. In cluster mode they run on
 the database's schema leader, the same as trigger DDL. Only a superuser may run them.
 
+- **The IF forms.** `CREATE EXTENSION IF NOT EXISTS` does nothing when the extension is installed,
+  and it does not change the installed version, even when it names another version: use
+  `ALTER EXTENSION ... UPDATE` for that. When the extension is not installed, it acts as the plain form.
+  `DROP EXTENSION IF EXISTS` does nothing when the extension is not installed; when it is installed, it
+  acts as the plain form, so dependents still refuse it (`CADB0833`). Without the IF forms, the
+  statements refuse with `CADB0829` and `CADB0830`.
+
 - **One name, one member.** A plain name resolves against the built-ins and the extensions
   installed in the current database. No extension can shadow a built-in (the boot refuses it), and
-  `CREATE EXTENSION` refuses an extension that defines a function or procedure name that another
-  installed extension already defines (`CADB0832`). Two extensions that share a name can both be
+  `CREATE EXTENSION` refuses an extension that defines a procedure name, or a function, aggregate or
+  table-function name, that another installed extension already defines (`CADB0832`). Two extensions that share a name can both be
   loaded on a node and installed in different databases.
 - **Requirements.** `CREATE EXTENSION` refuses while an extension in the manifest's `Requires` list
   is not installed (`CADB0831`). `DROP EXTENSION` refuses while another installed extension requires
   this one.
 - **Dependencies.** `DROP EXTENSION` refuses while a column default, a CHECK constraint, a view, a
-  materialized view or a trigger uses one of the extension's members, and the error lists them
+  materialized view or a trigger uses one of the extension's members (a view or a materialized view
+  can also call its aggregates and table functions), and the error lists them
   (`CADB0833`). Drop those objects first; there is no `CASCADE`. `ALTER EXTENSION ... UPDATE` is
   refused the same way when the target version does not define a member that such an object uses.
 - **Triggers follow the extension.** A trigger names its extension, not a build. The version and the
   hash live in the extension's record only, so `ALTER EXTENSION ... UPDATE` moves every function,
-  procedure and trigger of the extension to the new build in one step. No trigger is dropped or
+  aggregate, table function, procedure and trigger of the extension to the new build in one step. No trigger is dropped or
   re-created.
 - **Caches.** Cached results, bound statements and cached plans are keyed on the database's
   installed extensions, so none of them is served after an install, an update or a drop changes what
@@ -455,13 +670,18 @@ the real security boundary.
   anyway.
 - **Runaway code cannot be stopped.** A loop that never returns holds its statement forever, and a
   stack overflow ends the server process. Neither can be caught.
-- **Aggregates, table functions and arrays** are not supported as extensions in this version.
+- **Not supported in this version:** window functions, `DISTINCT` inside an aggregate call, table
+  functions with more than one column, and the distributed partial aggregation of an extension
+  aggregate.
 
 ## Observability
 
 `SHOW EXTENSIONS` lists the builds the node loaded, one row per build: `name` and `version` (from
-the manifest), `status`, `path`, `sha256`, `trust` (`safe` or `unsafe`), `requires`, and the
-comma-separated `functions`, `triggers` and `procedures` it registered. When the statement runs in a
+the manifest), `status`, `path`, `sha256`, `trust` (`safe` or `unsafe`), `requires`, the
+comma-separated `functions`, `triggers`, `procedures`, `aggregates` and `table_functions` it
+registered, and `signatures`: the SQL signature of each function, aggregate and table function,
+joined by `; ` (for example `split_words(STRING) -> SETOF STRING` and
+`sum_list(ARRAY(INT64)) -> INT64`; an optional parameter is in brackets). When the statement runs in a
 database, `status` is `installed` for the build that database uses and `available` for the others,
 and a row with status `missing` (and no path or trust) reports an extension the database installed
 that this node does not load. A node without extensions, in a database without installed
@@ -480,11 +700,11 @@ and its members at startup.
 | `CADB0802` | An extension file is not a loadable .NET assembly (startup) |
 | `CADB0803` | An extension was built against a newer contract than the server's (startup) |
 | `CADB0804` | Two extension files declare the same extension name and version (startup) |
-| `CADB0805` | A function name collides with a built-in, or one extension defines a member twice (startup) |
+| `CADB0805` | A function, aggregate or table-function name collides with a built-in, or one extension defines a name twice (startup) |
 | `CADB0806` | A SAFE extension failed the SAFE check; the message lists every finding (startup) |
 | `CADB0807` | A SAFE extension tried to load an assembly outside the allow-list (run time) |
 | `CADB0808` | An extension member has a shape the server cannot bind (startup) |
-| `CADB0809` | An extension function threw (HTTP 400) |
+| `CADB0809` | An extension function, aggregate or table function threw (HTTP 400) |
 | `CADB0810` | A NUMERIC value does not fit a `decimal`, or the reverse (HTTP 400) |
 | `CADB0811` | `CREATE TRIGGER` named a type that no installed extension defines (HTTP 400) |
 | `CADB0812` | `CREATE TRIGGER` named a type that two installed extensions define (HTTP 400) |
@@ -507,7 +727,8 @@ and its members at startup.
 | `CADB0829` | The extension is already installed in the database (HTTP 409) |
 | `CADB0830` | The extension is not installed in the database, or `CREATE TRIGGER` named a type of an extension that is loaded but not installed (HTTP 404) |
 | `CADB0831` | An extension the manifest requires is not installed (HTTP 400) |
-| `CADB0832` | Another installed extension defines one of the extension's function or procedure names (HTTP 409) |
+| `CADB0832` | Another installed extension defines one of the extension's procedure, function, aggregate or table-function names (HTTP 409) |
 | `CADB0833` | Objects depend on the extension, or on a member the target version lacks; the message lists them (HTTP 409) |
 | `CADB0834` | The database installed an extension build that this node does not load (HTTP 503) |
 | `CADB0835` | A live node does not load the target build of `CREATE` or `ALTER EXTENSION` (HTTP 409) |
+| `CADB0836` | A typed trigger's row class does not fit the table; the message lists every problem (HTTP 400) |

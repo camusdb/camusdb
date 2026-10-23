@@ -19,7 +19,35 @@ public enum ExtensionMemberKind
     Procedure = 1,
 
     /// <summary>A row trigger type, by full CLR name, that <c>CREATE TRIGGER ... EXTERNAL NAME</c> names.</summary>
-    Trigger = 2
+    Trigger = 2,
+
+    /// <summary>An aggregate function, by SQL name.</summary>
+    Aggregate = 3,
+
+    /// <summary>A set-returning function used as a relation in <c>FROM</c>, by SQL name.</summary>
+    TableFunction = 4
+}
+
+/// <summary>Rules over <see cref="ExtensionMemberKind"/> that several catalog checks share.</summary>
+public static class ExtensionMemberKinds
+{
+    /// <summary>
+    /// True for the kinds that a SQL call names: a scalar function, an aggregate and a table function
+    /// share one name space per database, because a call is resolved by name before its kind is known.
+    /// </summary>
+    public static bool IsCallable(ExtensionMemberKind kind) =>
+        kind is ExtensionMemberKind.Function or ExtensionMemberKind.Aggregate or ExtensionMemberKind.TableFunction;
+
+    /// <summary>The word a message uses for a member of <paramref name="kind"/>.</summary>
+    public static string Describe(ExtensionMemberKind kind) => kind switch
+    {
+        ExtensionMemberKind.Function => "function",
+        ExtensionMemberKind.Procedure => "procedure",
+        ExtensionMemberKind.Trigger => "trigger type",
+        ExtensionMemberKind.Aggregate => "aggregate",
+        ExtensionMemberKind.TableFunction => "table function",
+        _ => kind.ToString(),
+    };
 }
 
 /// <summary>One member of an installed extension, as the record lists it.</summary>
@@ -27,7 +55,7 @@ public sealed class ExtensionMemberDefinition
 {
     public ExtensionMemberKind Kind { get; set; }
 
-    /// <summary>The SQL name of a function or a procedure, or the full CLR name of a trigger type.</summary>
+    /// <summary>The SQL name of a function, an aggregate, a table function or a procedure, or the full CLR name of a trigger type.</summary>
     public string Name { get; set; } = "";
 }
 

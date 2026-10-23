@@ -69,6 +69,15 @@ internal sealed class ScalarFunctionDescriptor
 
     public required ScalarReturnTypeInferenceDelegate InferReturnType { get; init; }
 
+    /// <summary>
+    /// The element type of the result when <see cref="InferReturnType"/> reports
+    /// <see cref="ColumnType.Array"/> and the element type is fixed by the declaration (an extension
+    /// function that returns <c>IReadOnlyList&lt;long&gt;</c>). Null for a scalar result, and for an
+    /// array whose element type only its value knows. A CTAS or a derived table reads it to declare
+    /// the column's element type; without it a CTAS refuses the array column.
+    /// </summary>
+    public ColumnType? ArrayElementType { get; init; }
+
     public bool IsVolatile { get; init; }
 
     /// <summary>

@@ -1015,10 +1015,10 @@ public enum NodeType
     Call,
 
     /// <summary>
-    /// <c>CREATE EXTENSION name [VERSION 'v']</c>: installs a C# extension in the current database.
-    /// <c>leftAst</c> = the extension name identifier, <c>rightAst</c> = the version string literal
-    /// (still quoted), or null for the highest version the node loads. Schema DDL that replicates
-    /// through the schema log.
+    /// <c>CREATE EXTENSION [IF NOT EXISTS] name [VERSION 'v']</c>: installs a C# extension in the current
+    /// database. <c>leftAst</c> = the extension name identifier, <c>rightAst</c> = the version string
+    /// literal (still quoted), or null for the highest version the node loads, <c>yytext</c> = "if not
+    /// exists" for that form. Schema DDL that replicates through the schema log.
     /// </summary>
     CreateExtension,
 
@@ -1029,6 +1029,9 @@ public enum NodeType
     /// </summary>
     AlterExtensionUpdate,
 
-    /// <summary><c>DROP EXTENSION name</c>. <c>leftAst</c> = the extension name identifier.</summary>
+    /// <summary>
+    /// <c>DROP EXTENSION [IF EXISTS] name</c>. <c>leftAst</c> = the extension name identifier,
+    /// <c>yytext</c> = "if exists" for that form.
+    /// </summary>
     DropExtension,
 }

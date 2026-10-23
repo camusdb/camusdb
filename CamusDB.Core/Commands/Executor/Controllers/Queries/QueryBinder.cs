@@ -147,7 +147,7 @@ internal sealed class QueryBinder
                     derivedSources.Add(new BoundDerivedTableSource(
                         derivedSource,
                         derivedSource.Alias,
-                        [new DerivedColumnSchema(call.ColumnName, function.OutputType)],
+                        [new DerivedColumnSchema(call.ColumnName, function.OutputType) { ElementType = function.OutputElementType }],
                         new BoundSelectQuery(derivedSource.Query, [], new QueryRowNameResolver([]))));
                     return;
                 }

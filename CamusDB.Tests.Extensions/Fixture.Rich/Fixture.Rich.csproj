@@ -1,0 +1,5 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <ItemGroup>
+    <ProjectReference Include="..\..\CamusDB.Extensions.Abstractions\CamusDB.Extensions.Abstractions.csproj" />
+  </ItemGroup>
+</Project>

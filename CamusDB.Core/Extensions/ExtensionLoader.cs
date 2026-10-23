@@ -32,13 +32,16 @@ namespace CamusDB.Core.Extensions;
 /// same name and version fail the boot.</para>
 ///
 /// <para><b>Discovery</b> uses reflection, at startup only: public static <see cref="CamusFunctionAttribute"/>
-/// methods (bound by <see cref="ExtensionFunctionBinder"/>), public concrete <see cref="ICamusTrigger"/>
-/// types, and public <see cref="CamusProcedureAttribute"/> types. Trigger and procedure instances are
+/// methods (bound by <see cref="ExtensionFunctionBinder"/>), public static <see cref="CamusTableFunctionAttribute"/>
+/// methods (<see cref="ExtensionTableFunctionBinder"/>), public <see cref="CamusAggregateAttribute"/> types
+/// (<see cref="ExtensionAggregateBinder"/>), public concrete <see cref="ICamusTrigger"/> and
+/// <see cref="ICamusTrigger{TRow}"/> types, and public <see cref="CamusProcedureAttribute"/> types. Trigger and procedure instances are
 /// created later, on first use, through constructors compiled here; nothing in extension code runs
 /// during the load except the runtime's own type loading.</para>
 ///
-/// <para><b>Names.</b> A function name that collides with a built-in, a table function or an aggregate
-/// fails the boot, and so does a member name that one extension defines twice. A built-in is never
+/// <para><b>Names.</b> A function, aggregate or table-function name that collides with a built-in
+/// function, table function or aggregate fails the boot, and so does a name that one extension defines
+/// twice, across the three kinds. A built-in is never
 /// shadowed. A name shared by two extensions is not a boot error: the extensions are only available,
 /// and <c>CREATE EXTENSION</c> refuses to install both in one database.</para>
 /// </summary>
@@ -124,6 +127,9 @@ internal static class ExtensionLoader
             List<string> functionNames = [];
             List<string> triggerNames = [];
             List<string> procedureNames = [];
+            List<string> aggregateNames = [];
+            List<string> tableFunctionNames = [];
+            List<string> signatures = [];
 
             // The record is built before its members so each member can point at it; the name lists
             // and member tables are filled in place below.
@@ -140,6 +146,9 @@ internal static class ExtensionLoader
                 Functions = functionNames,
                 Triggers = triggerNames,
                 Procedures = procedureNames,
+                Aggregates = aggregateNames,
+                TableFunctions = tableFunctionNames,
+                Signatures = signatures,
                 Assembly = assembly,
             };
 
@@ -150,27 +159,61 @@ internal static class ExtensionLoader
 
                 foreach (MethodInfo method in type.GetMethods(BindingFlags.Public | BindingFlags.Static | BindingFlags.DeclaredOnly))
                 {
+                    if (method.GetCustomAttribute<CamusTableFunctionAttribute>() is { } tableAttribute)
+                    {
+                        if (method.GetCustomAttribute<CamusFunctionAttribute>() is not null)
+                            throw new CamusDBException(
+                                CamusDBErrorCodes.ExtensionInvalidSignature,
+                                $"Extension '{path}': method {type.FullName}.{method.Name} is marked both [CamusFunction] and [CamusTableFunction]");
+
+                        ExtensionTableFunction tableFunction = ExtensionTableFunctionBinder.Bind(method, tableAttribute);
+                        CheckCallableName(tableFunction.Name, "table function", path, extension);
+                        extension.TableFunctionTable[tableFunction.Name] = tableFunction;
+                        tableFunctionNames.Add(tableFunction.Name);
+                        signatures.Add(tableFunction.Signature);
+                        continue;
+                    }
+
                     CamusFunctionAttribute? attribute = method.GetCustomAttribute<CamusFunctionAttribute>();
                     if (attribute is null)
                         continue;
 
                     ScalarFunctionDescriptor descriptor = ExtensionFunctionBinder.Bind(method, attribute);
+                    ParameterInfo[] parameters = method.GetParameters();
+                    string result = ExtensionValueMapping.SqlTypeName(method.ReturnType);
 
                     foreach (string functionName in descriptor.AllNames)
                     {
-                        CheckFunctionName(functionName, path, extension);
+                        CheckCallableName(functionName, "function", path, extension);
                         extension.FunctionTable[functionName] = descriptor;
                         functionNames.Add(functionName);
+                        signatures.Add(ExtensionFunctionBinder.Signature(functionName, parameters, 0, result));
                     }
                 }
 
                 if (type.IsAbstract || type.IsInterface)
                     continue;
 
-                if (typeof(ICamusTrigger).IsAssignableFrom(type))
+                Type? rowType = TypedTriggerRowType(type, path);
+
+                if (typeof(ICamusTrigger).IsAssignableFrom(type) || rowType is not null)
                 {
-                    extension.TriggerTypes.Add(new ExtensionTriggerType(extension, type, CompileFactory<ICamusTrigger>(type, path)));
+                    if (rowType is not null && typeof(ICamusTrigger).IsAssignableFrom(type))
+                        throw new CamusDBException(
+                            CamusDBErrorCodes.ExtensionInvalidSignature,
+                            $"Extension '{path}': trigger type {type.FullName} implements both ICamusTrigger and ICamusTrigger<{rowType.Name}>; implement one");
+
+                    extension.TriggerTypes.Add(new ExtensionTriggerType(extension, type, CompileFactory<object>(type, path), rowType));
                     triggerNames.Add(type.FullName!);
+                }
+
+                if (type.GetCustomAttribute<CamusAggregateAttribute>() is { } aggregateAttribute)
+                {
+                    ExtensionAggregate aggregate = ExtensionAggregateBinder.Bind(type, aggregateAttribute, CompileFactory<object>(type, path));
+                    CheckCallableName(aggregate.Name, "aggregate", path, extension);
+                    extension.AggregateTable[aggregate.Name] = aggregate;
+                    aggregateNames.Add(aggregate.Name);
+                    signatures.Add(aggregate.Signature);
                 }
 
                 CamusProcedureAttribute? procedure = type.GetCustomAttribute<CamusProcedureAttribute>();
@@ -207,9 +250,10 @@ internal static class ExtensionLoader
 
             if (logger.IsEnabled(LogLevel.Information))
                 logger.LogInformation(
-                    "Loaded extension {Name} {Version} (assembly {Assembly}, {Trust}) from {Path}, sha256 {Sha256}: functions [{Functions}], triggers [{Triggers}], procedures [{Procedures}]",
+                    "Loaded extension {Name} {Version} (assembly {Assembly}, {Trust}) from {Path}, sha256 {Sha256}: functions [{Functions}], aggregates [{Aggregates}], table functions [{TableFunctions}], triggers [{Triggers}], procedures [{Procedures}]",
                     name, version.Text, identity.Name, trust, path, sha256,
-                    string.Join(", ", functionNames), string.Join(", ", triggerNames), string.Join(", ", procedureNames));
+                    string.Join(", ", functionNames), string.Join(", ", aggregateNames), string.Join(", ", tableFunctionNames),
+                    string.Join(", ", triggerNames), string.Join(", ", procedureNames));
         }
 
         ExtensionRegistry.MarkLoaded();
@@ -261,23 +305,28 @@ internal static class ExtensionLoader
         return path;
     }
 
-    private static void CheckFunctionName(string name, string path, LoadedExtension extension)
+    /// <summary>
+    /// Refuses a function, aggregate or table-function name that has a dot, that names a built-in
+    /// (a scalar function, a table function, or a name the engine treats as an aggregate), or that this
+    /// extension already defines as any of the three kinds, which share one name space.
+    /// </summary>
+    private static void CheckCallableName(string name, string kind, string path, LoadedExtension extension)
     {
         if (name.Contains('.'))
             throw new CamusDBException(
                 CamusDBErrorCodes.ExtensionInvalidSignature,
-                $"Extension '{path}': function name '{name}' contains a dot; a dot separates the extension name in a qualified call");
+                $"Extension '{path}': {kind} name '{name}' contains a dot; a dot separates the extension name in a qualified call");
 
-        if (ScalarFunctionEvaluator.IsBuiltInScalarFunction(name) || TableFunctionRegistry.IsTableFunction(name) ||
-            CommandsExecutor.Controllers.Queries.QueryExpressionClassifier.IsReservedAggregateName(name))
+        if (ScalarFunctionEvaluator.IsBuiltInScalarFunction(name) || TableFunctionRegistry.IsBuiltInTableFunction(name) ||
+            CommandsExecutor.Controllers.Queries.AggregateFunctionCatalog.IsReservedName(name))
             throw new CamusDBException(
                 CamusDBErrorCodes.ExtensionDuplicateMember,
-                $"Extension '{path}': function '{name}' collides with a built-in function; extensions cannot shadow built-ins");
+                $"Extension '{path}': {kind} '{name}' collides with a built-in function; extensions cannot shadow built-ins");
 
-        if (extension.FunctionTable.ContainsKey(name))
+        if (extension.DefinesCallable(name))
             throw new CamusDBException(
                 CamusDBErrorCodes.ExtensionDuplicateMember,
-                $"Extension '{path}': function '{name}' is defined twice");
+                $"Extension '{path}': {kind} '{name}' is defined twice (functions, aggregates and table functions share one name space)");
     }
 
     /// <summary>
@@ -360,6 +409,30 @@ internal static class ExtensionLoader
 
             throw new CamusDBException(CamusDBErrorCodes.ExtensionNotAnAssembly, $"Extension '{path}' has types that cannot load: {reasons}", ex);
         }
+    }
+
+    /// <summary>
+    /// The row class of a type that implements <see cref="ICamusTrigger{TRow}"/>, or null. A type that
+    /// implements it for two row classes fails the boot, because a trigger fires one way per row.
+    /// </summary>
+    private static Type? TypedTriggerRowType(Type type, string path)
+    {
+        Type? rowType = null;
+
+        foreach (Type implemented in type.GetInterfaces())
+        {
+            if (!implemented.IsGenericType || implemented.GetGenericTypeDefinition() != typeof(ICamusTrigger<>))
+                continue;
+
+            if (rowType is not null)
+                throw new CamusDBException(
+                    CamusDBErrorCodes.ExtensionInvalidSignature,
+                    $"Extension '{path}': trigger type {type.FullName} implements ICamusTrigger<T> for more than one row class");
+
+            rowType = implemented.GetGenericArguments()[0];
+        }
+
+        return rowType;
     }
 
     /// <summary>A constructor call compiled once, so creating the instance later needs no

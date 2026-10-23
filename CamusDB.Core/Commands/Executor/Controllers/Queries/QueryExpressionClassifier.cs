@@ -17,7 +17,8 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 /// Three classification levels:
 /// <list type="bullet">
 ///   <item><see cref="IsAggregateProjection"/> — the top-level call (after alias unwrap) is itself
-///     one of count/max/min/sum/avg. Existing fast-path accumulator code depends on this exact shape.</item>
+///     an aggregate: count/max/min/sum/avg or an installed extension aggregate. Existing fast-path
+///     accumulator code depends on this exact shape.</item>
 ///   <item><see cref="ContainsAggregate"/> — any node anywhere in the expression tree is an aggregate call.
 ///     Used to detect compound forms like COALESCE(SUM(x),0) or SUM(a)+1 where the aggregate is buried.</item>
 ///   <item><see cref="IsCompoundAggregateProjection"/> — contains an aggregate but is NOT the bare top-level
@@ -40,8 +41,10 @@ internal static class QueryExpressionClassifier
 
     /// <summary>
     /// Returns true when the expression (after alias unwrap) is a bare top-level aggregate call:
-    /// <c>count(…)</c>, <c>max(…)</c>, <c>min(…)</c>, <c>sum(…)</c>, or <c>avg(…)</c>.
-    /// Existing accumulator fast-paths depend on this exact shape — do not broaden it.
+    /// <c>count(…)</c>, <c>max(…)</c>, <c>min(…)</c>, <c>sum(…)</c>, <c>avg(…)</c>, or an aggregate of a
+    /// C# extension installed in the statement's database (<see cref="AggregateFunctionCatalog"/>).
+    /// Existing accumulator fast-paths depend on this exact shape — a single top-level call — so do
+    /// not broaden the shape; new aggregate names come from the catalog.
     /// </summary>
     public static bool IsAggregateProjection(NodeAst expression)
     {
@@ -50,39 +53,26 @@ internal static class QueryExpressionClassifier
         if (target.nodeType != NodeType.ExprFuncCall || target.leftAst?.yytext is null)
             return false;
 
-        return target.leftAst.yytext.ToLowerInvariant() switch
-        {
-            "count" or "max" or "min" or "sum" or "avg" => true,
-            _ => false,
-        };
+        return AggregateFunctionCatalog.IsAggregate(target.leftAst.yytext);
     }
 
     /// <summary>
-    /// Returns true when <paramref name="funcName"/> is the name of a SQL aggregate function.
+    /// Returns true when <paramref name="funcName"/> is the name of a SQL aggregate function in this
+    /// flow (see <see cref="AggregateFunctionCatalog.IsAggregate"/>).
     /// </summary>
-    internal static bool IsAggregateName(string funcName) =>
-        funcName.ToLowerInvariant() switch
-        {
-            "count" or "max" or "min" or "sum" or "avg" => true,
-            _ => false,
-        };
+    internal static bool IsAggregateName(string funcName) => AggregateFunctionCatalog.IsAggregate(funcName);
 
     /// <summary>
-    /// Every name some part of the engine treats as an aggregate: the aggregates the query pipeline
-    /// computes, and the names the CHECK-constraint validator refuses as aggregates. A C# extension may
-    /// not register a scalar function under one of them, because the classifier would route the call
-    /// to the aggregate path and the scalar function would never run.
+    /// Every name some part of the engine treats as an aggregate whatever the flow: the built-ins the
+    /// query pipeline computes, and the names the CHECK-constraint validator refuses as aggregates. A
+    /// C# extension may not register a member under one of them, because the classifier would route
+    /// the call to the aggregate path and the member would never run.
     /// </summary>
-    internal static bool IsReservedAggregateName(string funcName) =>
-        IsAggregateName(funcName) || funcName.ToLowerInvariant() switch
-        {
-            "count_distinct" or "group_concat" or "string_agg" or "array_agg" => true,
-            _ => false,
-        };
+    internal static bool IsReservedAggregateName(string funcName) => AggregateFunctionCatalog.IsReservedName(funcName);
 
     /// <summary>
     /// Returns true when any node in the expression tree is an aggregate function call
-    /// (count/max/min/sum/avg), regardless of its depth. Does not recurse into subqueries.
+    /// (see <see cref="IsAggregateName"/>), regardless of its depth. Does not recurse into subqueries.
     /// </summary>
     public static bool ContainsAggregate(NodeAst expression)
     {

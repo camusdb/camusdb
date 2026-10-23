@@ -124,7 +124,41 @@ internal sealed class TriggerRow : IWritableRow
         };
     }
 
+    public IReadOnlyList<T>? GetArray<T>(string column)
+    {
+        if (!TryGet(column, out ColumnValue? value) || value.Type == ColumnType.Null)
+            return null;
+
+        if (value.Type != ColumnType.Array)
+            throw WrongType(column, value, "Array");
+
+        IReadOnlyList<ColumnValue> items = value.ArrayValues ?? [];
+        T[] copy = new T[items.Count];
+
+        for (int i = 0; i < copy.Length; i++)
+        {
+            // The boxed form of each element, unboxed to T: a long element reads as long or long?.
+            object? element = items[i].Type == ColumnType.Null ? null : ExtensionValueMapping.ToObject(items[i]);
+
+            if (element is null)
+            {
+                if (default(T) is not null)
+                    throw new InvalidCastException($"Column '{column}' has a NULL element at position {i + 1}, which {typeof(T)} cannot hold");
+
+                copy[i] = default!;
+            }
+            else
+                copy[i] = element is T typed
+                    ? typed
+                    : throw new InvalidCastException($"Column '{column}' holds an array of {value.ArrayElementType}, not of {typeof(T)}");
+        }
+
+        return copy;
+    }
+
     public void SetNull(string column) => Write(column, ColumnValue.Null);
+
+    public void SetArray<T>(string column, IReadOnlyList<T>? values) => Write(column, ExtensionValueMapping.FromObject(values));
 
     public void Set(string column, long value) => Write(column, ExtensionValueMapping.FromInt64(value));
 
@@ -169,6 +203,9 @@ internal sealed class TriggerRow : IWritableRow
         value = null!;
         return false;
     }
+
+    /// <summary>Writes an engine value, for the typed write-back; the same checks and bookkeeping as a setter.</summary>
+    internal void WriteValue(string column, ColumnValue value) => Write(column, value);
 
     private void Write(string column, ColumnValue value)
     {

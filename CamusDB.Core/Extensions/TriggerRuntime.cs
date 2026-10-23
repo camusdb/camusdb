@@ -64,7 +64,7 @@ internal sealed class TriggerRuntime
             if (!definition.FiresOn(operation))
                 continue;
 
-            BoundTrigger bound = Bind(database, definition);
+            BoundTrigger bound = Bind(database, table, definition);
 
             if (definition.Timing == TriggerFireTiming.Before)
                 (before ??= []).Add(bound);
@@ -91,7 +91,7 @@ internal sealed class TriggerRuntime
             queueBudget);
     }
 
-    private BoundTrigger Bind(DatabaseDescriptor database, TriggerDefinition definition)
+    private BoundTrigger Bind(DatabaseDescriptor database, TableDescriptor table, TriggerDefinition definition)
     {
         ExtensionRegistry registry = executor.Extensions;
         database.Schema.Extensions.TryGetValue(definition.ExtensionName, out ExtensionDefinition? record);
@@ -99,17 +99,28 @@ internal sealed class TriggerRuntime
         // Cached per registry and per extension record: a record shared by two engines in one process
         // (never in production) still binds against each engine's own extensions, and an update of the
         // extension, which publishes a new record, makes the trigger bind again.
-        if (definition.Binding is TriggerBinding cached && ReferenceEquals(cached.Registry, registry) && ReferenceEquals(cached.Record, record))
+        //
+        // A typed trigger's mapping is also checked against the table's columns. The binding keeps the
+        // column list it was checked against, so a schema change binds the trigger again.
+        IReadOnlyList<TableColumnSchema> columns = table.Schema.Columns ?? [];
+
+        if (definition.Binding is TriggerBinding cached && ReferenceEquals(cached.Registry, registry) && ReferenceEquals(cached.Record, record)
+            && (cached.Bound?.Type.Typed is null || ReferenceEquals(cached.Columns, columns)))
             return cached.Bound ?? throw cached.Error!;
 
-        TriggerBinding binding = Resolve(executor.ExtensionScopes, database, definition, record, registry);
+        TriggerBinding binding = Resolve(executor.ExtensionScopes, database, definition, record, registry, columns);
         definition.Binding = binding;
 
         return binding.Bound ?? throw binding.Error!;
     }
 
     private static TriggerBinding Resolve(
-        ExtensionScopeFrames scopes, DatabaseDescriptor database, TriggerDefinition definition, ExtensionDefinition? record, ExtensionRegistry registry)
+        ExtensionScopeFrames scopes,
+        DatabaseDescriptor database,
+        TriggerDefinition definition,
+        ExtensionDefinition? record,
+        ExtensionRegistry registry,
+        IReadOnlyList<TableColumnSchema> columns)
     {
         if (record is null)
             return TriggerBinding.Failed(registry, record, new CamusDBException(
@@ -132,7 +143,25 @@ internal sealed class TriggerRuntime
                 CamusDBErrorCodes.TriggerBindingMismatch,
                 $"Trigger '{definition.Name}' needs type '{definition.TypeName}', which extension '{record.Name}' {record.Version} does not define"));
 
-        return TriggerBinding.Succeeded(registry, record, new BoundTrigger(definition, type!));
+        if (type!.RowType is not null)
+        {
+            try
+            {
+                List<string> problems = type.Typed!.Validate(columns);
+
+                if (problems.Count > 0)
+                    return TriggerBinding.Failed(registry, record, new CamusDBException(
+                        CamusDBErrorCodes.TriggerRowMappingInvalid,
+                        $"Trigger '{definition.Name}' cannot fire on this node: its row class {type.RowType.FullName} no longer fits the table ({string.Join("; ", problems)})"),
+                        columns);
+            }
+            catch (CamusDBException ex)
+            {
+                return TriggerBinding.Failed(registry, record, ex, columns);
+            }
+        }
+
+        return TriggerBinding.Succeeded(registry, record, new BoundTrigger(definition, type), columns);
     }
 
     /// <summary>The cached outcome of binding one record on one engine against one extension record.</summary>
@@ -146,11 +175,14 @@ internal sealed class TriggerRuntime
 
         public CamusDBException? Error { get; init; }
 
-        public static TriggerBinding Succeeded(ExtensionRegistry registry, ExtensionDefinition record, BoundTrigger bound) =>
-            new() { Registry = registry, Record = record, Bound = bound };
+        /// <summary>The table columns a typed trigger's mapping was checked against; null when it was not.</summary>
+        public IReadOnlyList<TableColumnSchema>? Columns { get; init; }
 
-        public static TriggerBinding Failed(ExtensionRegistry registry, ExtensionDefinition? record, CamusDBException error) =>
-            new() { Registry = registry, Record = record, Error = error };
+        public static TriggerBinding Succeeded(ExtensionRegistry registry, ExtensionDefinition record, BoundTrigger bound, IReadOnlyList<TableColumnSchema> columns) =>
+            new() { Registry = registry, Record = record, Bound = bound, Columns = columns };
+
+        public static TriggerBinding Failed(ExtensionRegistry registry, ExtensionDefinition? record, CamusDBException error, IReadOnlyList<TableColumnSchema>? columns = null) =>
+            new() { Registry = registry, Record = record, Error = error, Columns = columns };
     }
 }
 
@@ -169,6 +201,10 @@ internal sealed record BoundTrigger(TriggerDefinition Definition, ExtensionTrigg
 /// values in full — so the queue charges each row's estimated bytes (<c>RowMemoryEstimator</c>) against
 /// the per-operator budget, <c>spill_threshold_bytes</c>, and fails the statement with
 /// <see cref="CamusDBErrorCodes.TriggerQueueTooLarge"/> past it. It does not spill.</para>
+///
+/// <para><b>Typed triggers.</b> A trigger of <c>ICamusTrigger&lt;TRow&gt;</c> fires through its
+/// <see cref="TypedTriggerAdapter"/>. The AFTER queue still keeps the engine rows, not row objects, so
+/// its byte budget is the same for both forms; the objects are built when the trigger fires.</para>
 ///
 /// <para><b>BEFORE output is coerced and then validated.</b> The values a BEFORE trigger set are
 /// converted to their column types here, exactly as statement values are; the caller then runs its
@@ -236,7 +272,7 @@ internal sealed class StatementTriggers
         {
             TriggerRow? newAccessor = newRow is null ? null : new TriggerRow(newRow, table.Schema.Columns!);
 
-            await InvokeAsync(trigger, TriggerTiming.Before, oldAccessor, newAccessor).ConfigureAwait(false);
+            await InvokeAsync(trigger, TriggerTiming.Before, oldRow, oldAccessor, newRow, newAccessor).ConfigureAwait(false);
 
             if (newAccessor?.ChangedColumns is { } changed)
             {
@@ -285,11 +321,22 @@ internal sealed class StatementTriggers
             TriggerRow? newAccessor = newRow is null ? null : new TriggerRow(newRow);
 
             foreach (BoundTrigger trigger in after)
-                await InvokeAsync(trigger, TriggerTiming.After, oldAccessor, newAccessor).ConfigureAwait(false);
+                await InvokeAsync(trigger, TriggerTiming.After, oldRow, oldAccessor, newRow, newAccessor).ConfigureAwait(false);
         }
     }
 
-    private async Task InvokeAsync(BoundTrigger trigger, TriggerTiming timing, TriggerRow? oldRow, TriggerRow? newRow)
+    /// <summary>
+    /// Fires one trigger for one row. An untyped trigger gets the row accessors; a typed one gets row
+    /// objects built from the row dictionaries by its adapter, which writes the changed properties of a
+    /// BEFORE trigger's NEW back through <paramref name="newRow"/>.
+    /// </summary>
+    private async Task InvokeAsync(
+        BoundTrigger trigger,
+        TriggerTiming timing,
+        IReadOnlyDictionary<string, ColumnValue>? oldValues,
+        TriggerRow? oldRow,
+        IReadOnlyDictionary<string, ColumnValue>? newValues,
+        TriggerRow? newRow)
     {
         ExtensionNesting.Enter("Trigger '" + trigger.Definition.Name + "'");
 
@@ -297,7 +344,13 @@ internal sealed class StatementTriggers
 
         try
         {
-            await trigger.Type.Instance.FireAsync(context).ConfigureAwait(false);
+            if (trigger.Type.Typed is { } typed)
+                await typed.FireAsync(
+                    trigger.Type.Instance, context, oldValues, newValues,
+                    timing == TriggerTiming.Before && newRow is { IsWritable: true } ? newRow : null,
+                    trigger.Definition.Name).ConfigureAwait(false);
+            else
+                await ((ICamusTrigger)trigger.Type.Instance).FireAsync(context).ConfigureAwait(false);
 
             // The trigger caught an error from its own SQL and returned: the failed statement may have
             // left writes staged, so this statement cannot continue.

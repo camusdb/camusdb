@@ -132,20 +132,21 @@ internal partial class sqlParser
     }
 
     private const string ExtensionGuidance =
-        "Expected: CREATE EXTENSION <name> [VERSION '<version>'], ALTER EXTENSION <name> UPDATE [TO '<version>'] or DROP EXTENSION <name>";
+        "Expected: CREATE EXTENSION [IF NOT EXISTS] <name> [VERSION '<version>'], ALTER EXTENSION <name> UPDATE [TO '<version>'] or DROP EXTENSION [IF EXISTS] <name>";
 
     /// <summary>
     /// Builds a <see cref="NodeType.CreateExtension"/> node after checking the plain-identifier words
     /// EXTENSION and VERSION. <c>leftAst</c> is the extension name and <c>rightAst</c> the version
-    /// string literal, still quoted, or null when the statement names no version.
+    /// string literal, still quoted, or null when the statement names no version. <c>yytext</c> is
+    /// "if not exists" for the IF NOT EXISTS form.
     /// </summary>
-    private static NodeAst CreateExtensionStatement(string? extensionWord, NodeAst name, string? versionWord, NodeAst? version)
+    private static NodeAst CreateExtensionStatement(string? extensionWord, NodeAst name, string? versionWord, NodeAst? version, bool ifNotExists)
     {
         if (!string.Equals(extensionWord, "extension", StringComparison.OrdinalIgnoreCase) ||
             (version is not null && !string.Equals(versionWord, "version", StringComparison.OrdinalIgnoreCase)))
             throw new CamusDBException(CamusDBErrorCodes.InvalidInput, ExtensionGuidance);
 
-        return new NodeAst(NodeType.CreateExtension, name, version, null, null, null, null, null, null);
+        return new NodeAst(NodeType.CreateExtension, name, version, null, null, null, null, null, ifNotExists ? "if not exists" : null);
     }
 
     /// <summary>
@@ -160,13 +161,16 @@ internal partial class sqlParser
         return new NodeAst(NodeType.AlterExtensionUpdate, name, version, null, null, null, null, null, null);
     }
 
-    /// <summary>Builds a <see cref="NodeType.DropExtension"/> node after checking the word EXTENSION.</summary>
-    private static NodeAst DropExtensionStatement(string? extensionWord, NodeAst name)
+    /// <summary>
+    /// Builds a <see cref="NodeType.DropExtension"/> node after checking the word EXTENSION.
+    /// <c>yytext</c> is "if exists" for the IF EXISTS form.
+    /// </summary>
+    private static NodeAst DropExtensionStatement(string? extensionWord, NodeAst name, bool ifExists)
     {
         if (!string.Equals(extensionWord, "extension", StringComparison.OrdinalIgnoreCase))
             throw new CamusDBException(CamusDBErrorCodes.InvalidInput, ExtensionGuidance);
 
-        return new NodeAst(NodeType.DropExtension, name, null, null, null, null, null, null, null);
+        return new NodeAst(NodeType.DropExtension, name, null, null, null, null, null, null, ifExists ? "if exists" : null);
     }
 
     /// <summary>

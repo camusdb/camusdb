@@ -19,6 +19,12 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.DDL;
 /// schema and loaded extensions, then proposes the replicated delta through
 /// <see cref="CatalogsManager"/>.
 ///
+/// <para><b>Typed triggers.</b> For a type of <c>ICamusTrigger&lt;TRow&gt;</c> the proposer also checks
+/// the row class against the table and records the mapped columns on the trigger
+/// (<see cref="TriggerDefinition.RowColumns"/>). The schema-change validation then refuses to drop or
+/// rename those columns, and refuses the trigger itself if one of them went away before the proposal
+/// (<see cref="TypedTriggerColumnGuard"/>).</para>
+///
 /// <para><b>The proposer resolves the type.</b> <c>CREATE TRIGGER</c> succeeds only when the type
 /// named by <c>EXTERNAL NAME</c> is a trigger of an extension installed in the database, as this node
 /// loads the installed build, and the record it proposes names that extension. The extension's own
@@ -60,6 +66,8 @@ internal sealed class TriggerDdlService
 
         ExtensionTriggerType type = FindInstalledTriggerType(database, typeName);
 
+        List<string>? rowColumns = type.RowType is null ? null : CheckRowMapping(type, table);
+
         await RequireSchemaLeaderAsync(database, "CREATE TRIGGER").ConfigureAwait(false);
 
         TriggerDefinition trigger = new()
@@ -69,6 +77,7 @@ internal sealed class TriggerDdlService
             Events = events,
             TypeName = type.FullName,
             ExtensionName = type.Source.Name,
+            RowColumns = rowColumns,
             CreatedAt = Now(),
         };
 
@@ -133,7 +142,7 @@ internal sealed class TriggerDdlService
         if (notATrigger)
             throw new CamusDBException(
                 CamusDBErrorCodes.TriggerTypeInvalid,
-                $"Type '{typeName}' does not implement ICamusTrigger, or is abstract");
+                $"Type '{typeName}' does not implement ICamusTrigger or ICamusTrigger<TRow>, or is abstract");
 
         foreach (LoadedExtension available in context.Extensions.Extensions)
         {
@@ -146,6 +155,26 @@ internal sealed class TriggerDdlService
         throw new CamusDBException(
             CamusDBErrorCodes.TriggerTypeNotFound,
             $"No extension installed in database '{database.Name}' defines the trigger type '{typeName}'");
+    }
+
+    /// <summary>
+    /// Checks a typed trigger's row class against the table and returns the columns it maps, which the
+    /// record keeps so that a later <c>DROP COLUMN</c> or <c>RENAME COLUMN</c> of one is refused. A
+    /// property with no column, or of a type that cannot hold its column, is refused with
+    /// <see cref="CamusDBErrorCodes.TriggerRowMappingInvalid"/>, and the message lists every problem.
+    /// </summary>
+    private static List<string> CheckRowMapping(ExtensionTriggerType type, TableDescriptor table)
+    {
+        IReadOnlyList<TableColumnSchema> columns = table.Schema.Columns ?? [];
+        TypedTriggerAdapter adapter = type.Typed!;
+        List<string> problems = adapter.Validate(columns);
+
+        if (problems.Count > 0)
+            throw new CamusDBException(
+                CamusDBErrorCodes.TriggerRowMappingInvalid,
+                $"Trigger type '{type.FullName}' cannot fire on table '{table.Name}': its row class {type.RowType!.FullName} does not fit the table ({string.Join("; ", problems)})");
+
+        return adapter.MappedColumnNames(columns);
     }
 
     /// <summary>

@@ -72,6 +72,17 @@ public sealed class TriggerDefinition
     /// <summary>The name of the installed extension that defines the type.</summary>
     public string ExtensionName { get; set; } = "";
 
+    /// <summary>
+    /// For a typed trigger (<c>ICamusTrigger&lt;TRow&gt;</c>), the columns its row class maps, as the
+    /// table spelled them when the trigger was created; null for an untyped trigger. Recorded so the
+    /// schema-change validation can refuse a <c>DROP COLUMN</c> or a <c>RENAME COLUMN</c> of a mapped
+    /// column on any node, without the extension loaded: a working trigger cannot break silently. The
+    /// list is not updated by <c>ALTER EXTENSION ... UPDATE</c>; a new build whose row class maps other
+    /// columns is checked when a node binds it, and a mismatch fails the DML with
+    /// <see cref="CamusDBErrorCodes.TriggerRowMappingInvalid"/>.
+    /// </summary>
+    public List<string>? RowColumns { get; set; }
+
     /// <summary>When the trigger was created, on the creating node's clock.</summary>
     public HLCTimestamp CreatedAt { get; set; }
 

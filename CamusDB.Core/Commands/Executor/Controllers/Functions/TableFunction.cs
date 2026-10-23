@@ -18,7 +18,11 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Functions;
 /// <para><b>Contract.</b> <see cref="Generate"/> must be lazy: the caller pulls one value at a time and
 /// may stop at any point (a <c>LIMIT</c>, a cancelled statement), so an implementation must never
 /// build its whole output first. It must also be pure — a function of its arguments only — because the
-/// leaf scanner calls it again, from the start, each time a join re-reads its input.</para>
+/// leaf scanner calls it again, from the start, each time a join re-reads its input. A function that
+/// cannot be pure (an extension function declared volatile) says so with <see cref="IsVolatile"/>.</para>
+///
+/// <para>Built-ins live in <see cref="TableFunctionRegistry"/>; a C# extension adds its own through the
+/// extensions installed in the statement's database.</para>
 /// </summary>
 internal abstract class TableFunction
 {
@@ -31,6 +35,25 @@ internal abstract class TableFunction
 
     /// <summary>The declared type of the output column, which the binder reports before any row exists.</summary>
     public abstract ColumnType OutputType { get; }
+
+    /// <summary>The element type of an array output column, or null for a scalar output.</summary>
+    public virtual ColumnType? OutputElementType => null;
+
+    /// <summary>
+    /// The output column's name when the call has no column alias, or null to name it after the
+    /// relation (the function name, or its alias), as <c>generate_series</c> does.
+    /// </summary>
+    public virtual string? DefaultColumnName => null;
+
+    /// <summary>
+    /// True when <see cref="Generate"/> can yield other values for the same arguments, which breaks the
+    /// purity rule above. The leaf scan then keeps the output for the statement after the first read,
+    /// so every re-read sees the same rows, and the statement never uses the result cache.
+    /// </summary>
+    public virtual bool IsVolatile => false;
+
+    /// <summary>How many values the leaf scan pulls between two cancellation checks.</summary>
+    public virtual int CancellationCheckInterval => 1024;
 
     /// <summary>
     /// Yields the output values for already-evaluated <paramref name="arguments"/>. Argument errors

@@ -185,10 +185,6 @@ public sealed class QueryPlanner
         return cap <= 0 ? 0 : cap;
     }
 
-    /// <summary>Aggregate functions whose partial states merge by re-aggregation (COUNT by SUM).</summary>
-    private static readonly HashSet<string> PartialMergeableAggFunctions =
-        new(StringComparer.OrdinalIgnoreCase) { "count", "sum", "min", "max", "avg" };
-
     private static NodeAst Identifier(string name) =>
         new(NodeType.Identifier, null, null, null, null, null, null, null, name);
 
@@ -267,8 +263,9 @@ public sealed class QueryPlanner
                 || projection.rightAst?.yytext is not { } alias)
                 return null;
 
+            // Built-ins only (AggregateFunctionCatalog): an extension aggregate runs above the gather.
             string? funcName = funcCall.leftAst?.yytext;
-            if (funcName is null || !PartialMergeableAggFunctions.Contains(funcName))
+            if (funcName is null || !AggregateFunctionCatalog.IsPartialMergeable(funcName))
                 return null;
 
             // The argument runs on remote nodes: it must be a pure function of the row.

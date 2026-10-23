@@ -48,6 +48,10 @@ internal sealed class QueryAggregator
         NodeAst funcCall = GetSingleAggregationFuncCall(ticket.Projection);
         QueryAggregationType aggregationType = GetAggregationType(funcCall);
 
+        // An extension aggregate has no single-aggregate fast path; the workspace runs its state.
+        if (aggregationType == QueryAggregationType.Extension)
+            return AggregateGlobalWorkspace(ticket, dataCursor);
+
         return aggregationType switch
         {
             QueryAggregationType.Count => AggregateGlobalCount(funcCall, ticket, dataCursor),
@@ -747,18 +751,8 @@ internal sealed class QueryAggregator
         };
     }
 
-    private static QueryAggregationType GetAggregationType(NodeAst funcCall)
-    {
-        return funcCall.leftAst!.yytext!.ToLowerInvariant() switch
-        {
-            "count" => QueryAggregationType.Count,
-            "sum" => QueryAggregationType.Sum,
-            "avg" => QueryAggregationType.Average,
-            "min" => QueryAggregationType.Min,
-            "max" => QueryAggregationType.Max,
-            _ => QueryAggregationType.None,
-        };
-    }
+    private static QueryAggregationType GetAggregationType(NodeAst funcCall) =>
+        AggregateFunctionCatalog.GetAggregationType(funcCall.leftAst!.yytext!);
 
     private static bool IsCountAll(NodeAst funcCall)
     {
@@ -939,7 +933,49 @@ internal sealed class QueryAggregator
     /// What one aggregate call is: its node, its kind, and whether it is <c>COUNT(*)</c>. Decided
     /// once per query by <see cref="AggregateLayout"/>, not once per group.
     /// </summary>
-    private sealed record AggregateDescriptor(NodeAst FuncCall, QueryAggregationType Type, bool IsCountAll);
+    private sealed record AggregateDescriptor(NodeAst FuncCall, QueryAggregationType Type, bool IsCountAll)
+    {
+        /// <summary>The resolved extension aggregate and its argument expressions, for <see cref="QueryAggregationType.Extension"/>.</summary>
+        public ExtensionAggregateCall? Extension { get; init; }
+    }
+
+    /// <summary>
+    /// One call to an extension aggregate, resolved once per query: the aggregate, the name the call
+    /// used (for error messages), and the argument expressions in call order. The arity is checked
+    /// here, so a wrong call fails before any row is read.
+    /// </summary>
+    private sealed class ExtensionAggregateCall
+    {
+        public ExtensionAggregateCall(NodeAst funcCall)
+        {
+            CalledName = funcCall.leftAst!.yytext!;
+            Aggregate = AggregateFunctionCatalog.ResolveExtension(CalledName);
+
+            List<NodeAst> arguments = [];
+
+            if (funcCall.rightAst is { } argumentAst)
+            {
+                if (argumentAst.nodeType == NodeType.ExprAllFields)
+                    throw new CamusDBException(
+                        CamusDBErrorCodes.InvalidInput,
+                        $"Aggregate '{CalledName}' does not accept *; pass its arguments");
+
+                if (argumentAst.nodeType == NodeType.ExprArgumentList)
+                    ExpressionChains.Flatten(argumentAst, NodeType.ExprArgumentList, arguments);
+                else
+                    arguments.Add(argumentAst);
+            }
+
+            Functions.ScalarFunctionArguments.ValidateArity(CalledName, Aggregate.MinArity, Aggregate.MaxArity, arguments.Count);
+            Arguments = [.. arguments];
+        }
+
+        public string CalledName { get; }
+
+        public Extensions.ExtensionAggregate Aggregate { get; }
+
+        public NodeAst[] Arguments { get; }
+    }
 
     /// <summary>
     /// The part of grouped aggregation that is the same for every group, analyzed once per query:
@@ -1050,8 +1086,28 @@ internal sealed class QueryAggregator
                 GroupStateBytes = GroupTableEntryBytes
                     + AccumulatorBytes
                     + CapturedDictionaryBytes + (long)capturedValues * (CapturedEntryBytes + RowMemoryEstimator.ColumnValueBytes)
-                    + RowMemoryEstimator.ArrayHeaderBytes + (long)aggregates.Count * (RowMemoryEstimator.ReferenceBytes + AggregateStateBytes),
+                    + RowMemoryEstimator.ArrayHeaderBytes + (long)aggregates.Count * (RowMemoryEstimator.ReferenceBytes + AggregateStateBytes)
+                    + ExtensionStateBytes(aggregates),
             };
+        }
+
+        /// <summary>
+        /// The bytes charged for the state objects of the extension aggregates: the engine cannot
+        /// measure a user state, so each one costs its declared hint (or the default), plus the
+        /// argument scratch array the state keeps.
+        /// </summary>
+        private static long ExtensionStateBytes(List<AggregateDescriptor> aggregates)
+        {
+            long bytes = 0;
+
+            foreach (AggregateDescriptor aggregate in aggregates)
+            {
+                if (aggregate.Extension is { } call)
+                    bytes += call.Aggregate.StateSizeBytes + RowMemoryEstimator.ArrayHeaderBytes
+                             + (long)call.Arguments.Length * RowMemoryEstimator.ReferenceBytes;
+            }
+
+            return bytes;
         }
 
         /// <summary>
@@ -1066,7 +1122,13 @@ internal sealed class QueryAggregator
                     return i;
             }
 
-            aggregates.Add(new AggregateDescriptor(aggregateNode, GetAggregationType(aggregateNode), IsCountAll(aggregateNode)));
+            QueryAggregationType type = GetAggregationType(aggregateNode);
+
+            aggregates.Add(new AggregateDescriptor(aggregateNode, type, type != QueryAggregationType.Extension && IsCountAll(aggregateNode))
+            {
+                Extension = type == QueryAggregationType.Extension ? new ExtensionAggregateCall(aggregateNode) : null,
+            });
+
             return aggregates.Count - 1;
         }
     }
@@ -1396,12 +1458,27 @@ internal sealed class QueryAggregator
         private ColumnValue? min;
         private ColumnValue? max;
 
+        // An extension aggregate: the call, its user state, and the argument scratch reused per row
+        // (a state is fed by one thread, and the adapter converts the values before the user sees them).
+        private readonly ExtensionAggregateCall? extension;
+        private readonly object? extensionState;
+        private readonly ColumnValue[]? extensionArguments;
+
         /// <param name="descriptor">The call, decided once per query by <see cref="AggregateLayout"/>.</param>
         public AggregateMetricState(AggregateDescriptor descriptor)
         {
             funcCall = descriptor.FuncCall;
             aggregationType = descriptor.Type;
             isCountAll = descriptor.IsCountAll;
+
+            // The state exists from the first moment of the group, so a global aggregate over zero
+            // rows still finishes a created state, as the contract says.
+            if (descriptor.Extension is { } call)
+            {
+                extension = call;
+                extensionState = call.Aggregate.CreateState(call.CalledName);
+                extensionArguments = new ColumnValue[call.Arguments.Length];
+            }
         }
 
         public void AddRow(IReadOnlyDictionary<string, ColumnValue> row, QueryTicket ticket)
@@ -1451,6 +1528,21 @@ internal sealed class QueryAggregator
                     max = max is null || maxValue.CompareTo(max) > 0 ? maxValue : max;
                     return;
 
+                case QueryAggregationType.Extension:
+                {
+                    NodeAst[] arguments = extension!.Arguments;
+                    ColumnValue[] values = extensionArguments!;
+                    QueryRow? qr = row as QueryRow;
+
+                    for (int i = 0; i < arguments.Length; i++)
+                        values[i] = qr is not null
+                            ? SqlExecutor.EvalExpr(arguments[i], qr, ticket.Parameters, ticket.RowNameResolver)
+                            : SqlExecutor.EvalExpr(arguments[i], row, ticket.Parameters, ticket.RowNameResolver);
+
+                    extension.Aggregate.Accumulate(extensionState!, extension.CalledName, values);
+                    return;
+                }
+
                 default:
                     throw new CamusDBException(
                         CamusDBErrorCodes.InvalidInternalOperation,
@@ -1469,6 +1561,7 @@ internal sealed class QueryAggregator
                 QueryAggregationType.Average => average.Result(),
                 QueryAggregationType.Min => min ?? ColumnValue.Null,
                 QueryAggregationType.Max => max ?? ColumnValue.Null,
+                QueryAggregationType.Extension => extension!.Aggregate.Finish(extensionState!, extension.CalledName),
                 _ => throw new CamusDBException(
                     CamusDBErrorCodes.InvalidInternalOperation,
                     "Unsupported grouped aggregation type"),

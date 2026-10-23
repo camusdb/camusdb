@@ -100,8 +100,8 @@ internal sealed class InstalledExtensionCatalog
 
 /// <summary>
 /// The members a database can use on this node: for each installed extension, the loaded build with
-/// the same name, version and SHA-256, and the functions and procedures it registered, by plain name
-/// and by the qualified form <c>extension.member</c>. Immutable.
+/// the same name, version and SHA-256, and the functions, aggregates, table functions and procedures it
+/// registered, by plain name and by the qualified form <c>extension.member</c>. Immutable.
 ///
 /// <para><b>Missing builds.</b> An installed extension that this node does not load (no file with that
 /// name and version, or a file with another hash) is listed in <see cref="Missing"/>, and each member
@@ -122,6 +122,10 @@ internal sealed class InstalledExtensionSet
 
     private readonly Dictionary<string, ExtensionProcedure> procedures = new(StringComparer.OrdinalIgnoreCase);
 
+    private readonly Dictionary<string, ExtensionAggregate> aggregates = new(StringComparer.OrdinalIgnoreCase);
+
+    private readonly Dictionary<string, ExtensionTableFunction> tableFunctions = new(StringComparer.OrdinalIgnoreCase);
+
     private readonly Dictionary<string, LoadedExtension> bound = new(StringComparer.OrdinalIgnoreCase);
 
     private readonly Dictionary<string, string> missing = new(StringComparer.OrdinalIgnoreCase);
@@ -129,6 +133,10 @@ internal sealed class InstalledExtensionSet
     private readonly Dictionary<string, string> missingFunctions = new(StringComparer.OrdinalIgnoreCase);
 
     private readonly Dictionary<string, string> missingProcedures = new(StringComparer.OrdinalIgnoreCase);
+
+    private readonly Dictionary<string, string> missingAggregates = new(StringComparer.OrdinalIgnoreCase);
+
+    private readonly Dictionary<string, string> missingTableFunctions = new(StringComparer.OrdinalIgnoreCase);
 
     private InstalledExtensionSet() { }
 
@@ -171,6 +179,8 @@ internal sealed class InstalledExtensionSet
                     {
                         ExtensionMemberKind.Function => set.missingFunctions,
                         ExtensionMemberKind.Procedure => set.missingProcedures,
+                        ExtensionMemberKind.Aggregate => set.missingAggregates,
+                        ExtensionMemberKind.TableFunction => set.missingTableFunctions,
                         _ => null,
                     };
 
@@ -197,6 +207,18 @@ internal sealed class InstalledExtensionSet
                 set.procedures[name] = procedure;
                 set.procedures[build.Name + "." + name] = procedure;
             }
+
+            foreach ((string name, ExtensionAggregate aggregate) in build.AggregateTable)
+            {
+                set.aggregates[name] = aggregate;
+                set.aggregates[build.Name + "." + name] = aggregate;
+            }
+
+            foreach ((string name, ExtensionTableFunction function) in build.TableFunctionTable)
+            {
+                set.tableFunctions[name] = function;
+                set.tableFunctions[build.Name + "." + name] = function;
+            }
         }
 
         return set;
@@ -220,6 +242,41 @@ internal sealed class InstalledExtensionSet
 
     /// <summary>True when an installed extension defines a function of this name, whether or not this node binds it.</summary>
     public bool HasFunction(string name) => functions.ContainsKey(name) || missingFunctions.ContainsKey(name);
+
+    /// <summary>
+    /// True when an installed extension defines an aggregate of this name, whether or not this node
+    /// binds it. The aggregate classifier asks this, so a call to an aggregate whose build is missing
+    /// still routes to the aggregator, which then reports the missing build instead of "function not
+    /// found".
+    /// </summary>
+    public bool HasAggregate(string name) => aggregates.ContainsKey(name) || missingAggregates.ContainsKey(name);
+
+    /// <summary>Resolves an aggregate the same way <see cref="TryGetFunction"/> resolves a function.</summary>
+    public bool TryGetAggregate(string name, out ExtensionAggregate aggregate)
+    {
+        if (aggregates.TryGetValue(name, out aggregate!))
+            return true;
+
+        if (missingAggregates.TryGetValue(name, out string? extension))
+            throw NotLoaded(extension, "aggregate '" + name + "'");
+
+        return false;
+    }
+
+    /// <summary>True when an installed extension defines a table function of this name, whether or not this node binds it.</summary>
+    public bool HasTableFunction(string name) => tableFunctions.ContainsKey(name) || missingTableFunctions.ContainsKey(name);
+
+    /// <summary>Resolves a table function the same way <see cref="TryGetFunction"/> resolves a function.</summary>
+    public bool TryGetTableFunction(string name, out ExtensionTableFunction function)
+    {
+        if (tableFunctions.TryGetValue(name, out function!))
+            return true;
+
+        if (missingTableFunctions.TryGetValue(name, out string? extension))
+            throw NotLoaded(extension, "table function '" + name + "'");
+
+        return false;
+    }
 
     /// <summary>Resolves a procedure the same way <see cref="TryGetFunction"/> resolves a function.</summary>
     public bool TryGetProcedure(string name, out ExtensionProcedure procedure)

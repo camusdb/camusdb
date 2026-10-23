@@ -379,6 +379,23 @@ internal sealed class JoinLeafScanner
         // at once). A join that re-reads it simply generates it again.
         if (source.Source.Function is { } call)
         {
+            // A volatile function (an extension that declares it) may yield other rows on a second
+            // call, so its output is kept for the statement after the first read: every re-read of a
+            // join's inner side then sees the same rows. Spill rules apply to the kept rows.
+            if (TableFunctionRegistry.Resolve(call.FunctionName, call.Arguments.Count).IsVolatile)
+            {
+                if (!plan.DerivedMaterializations.TryGetValue(source, out SpillableRowList? spooled))
+                {
+                    spooled = await SpoolTableFunctionAsync(source, call, executionFilter, plan, ct).ConfigureAwait(false);
+                    plan.DerivedMaterializations[source] = spooled;
+                }
+
+                await foreach (QueryResultRow row in spooled.EnumerateAsync(ct).ConfigureAwait(false))
+                    yield return row;
+
+                yield break;
+            }
+
             await foreach (QueryResultRow row in ScanTableFunction(source, call, executionFilter, plan, ct).ConfigureAwait(false))
                 yield return row;
 
@@ -403,8 +420,9 @@ internal sealed class JoinLeafScanner
     /// here touches storage, so the scan takes no lock and records nothing in the read set.
     /// <para>The pushed-down filter is applied per row the same way a materialized derived table
     /// applies it, so a predicate on the series column filters before the join sees the row.
-    /// Cancellation is checked every <see cref="CancellationCheckInterval"/> rows, because a filter that
-    /// rejects every row would otherwise loop without ever reaching a consumer that checks it.</para>
+    /// Cancellation is checked every <see cref="TableFunction.CancellationCheckInterval"/> rows (each row
+    /// for an extension function, whose values can be slow), because a filter that rejects every row
+    /// would otherwise loop without ever reaching a consumer that checks it.</para>
     /// </summary>
     private async IAsyncEnumerable<QueryResultRow> ScanTableFunction(
         BoundDerivedTableSource source,
@@ -425,13 +443,17 @@ internal sealed class JoinLeafScanner
         RowLayout? qualifiedLayout = qualifyForFilter ? QueryRowMerger.BuildQualifiedLayout(layout, source.Alias) : null;
 
         CancellationToken statementToken = plan.Ticket.CancellationToken;
-        int untilCheck = CancellationCheckInterval;
+        int checkInterval = function.CancellationCheckInterval;
+        int untilCheck = checkInterval;
 
+        // The foreach disposes the function's enumerator when the consumer stops early (a LIMIT, a
+        // cancel, an error above this scan), which is what runs a finally block in an extension's
+        // iterator method.
         foreach (ColumnValue value in function.Generate(arguments))
         {
             if (--untilCheck == 0)
             {
-                untilCheck = CancellationCheckInterval;
+                untilCheck = checkInterval;
                 statementToken.ThrowIfCancellationRequested();
                 ct.ThrowIfCancellationRequested();
             }
@@ -452,6 +474,33 @@ internal sealed class JoinLeafScanner
         }
     }
 
-    /// <summary>How many generated rows a function scan produces between two cancellation checks.</summary>
-    private const int CancellationCheckInterval = 1024;
+    /// <summary>
+    /// Runs a volatile function scan once into a <see cref="SpillableRowList"/> that the plan owns and
+    /// disposes with its other materializations. On a failure the partial list is disposed here, the
+    /// same rule <see cref="DerivedTableExecutor.MaterializeAsync"/> follows.
+    /// </summary>
+    private async Task<SpillableRowList> SpoolTableFunctionAsync(
+        BoundDerivedTableSource source,
+        TableFunctionSource call,
+        NodeAst? executionFilter,
+        QueryPlan plan,
+        CancellationToken ct)
+    {
+        SpillableRowList rows = new(QueryExecutionContext.For(plan.Database, plan.Ticket));
+
+        try
+        {
+            await foreach (QueryResultRow row in ScanTableFunction(source, call, executionFilter, plan, ct).ConfigureAwait(false))
+                await rows.AddAsync(row, ct).ConfigureAwait(false);
+
+            await rows.SealAsync(ct).ConfigureAwait(false);
+        }
+        catch
+        {
+            await rows.DisposeAsync().ConfigureAwait(false);
+            throw;
+        }
+
+        return rows;
+    }
 }

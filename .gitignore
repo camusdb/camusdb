@@ -56,6 +56,12 @@ CamusDB.Tests.Extensions/Fixture.NoManifest/bin
 CamusDB.Tests.Extensions/Fixture.NoManifest/obj
 CamusDB.Tests.Extensions/Fixture.GoodV2/obj
 CamusDB.Tests.Extensions/Fixture.GoodV2/bin
+CamusDB.Tests.Extensions/Fixture.TableFunctionCollision/obj
+CamusDB.Tests.Extensions/Fixture.TableFunctionCollision/bin
+CamusDB.Tests.Extensions/Fixture.Rich/bin
+CamusDB.Tests.Extensions/Fixture.Rich/obj
+CamusDB.Tests.Extensions/Fixture.CrossKindDuplicate/bin
+CamusDB.Tests.Extensions/Fixture.CrossKindDuplicate/obj
 BenchmarkDotNet.Artifacts/
 .vs/
 .idea/

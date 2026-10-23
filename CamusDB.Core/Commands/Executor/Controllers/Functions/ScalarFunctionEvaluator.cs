@@ -156,6 +156,18 @@ internal static class ScalarFunctionEvaluator
     }
 
     /// <summary>
+    /// The declared element type of an array-returning function
+    /// (<see cref="ScalarFunctionDescriptor.ArrayElementType"/>), or null when the function is unknown,
+    /// returns no array, or leaves the element type to its value.
+    /// </summary>
+    internal static ColumnType? InferArrayElementType(string functionName)
+    {
+        return TryResolve(functionName.ToLowerInvariant(), out ScalarFunctionDescriptor descriptor)
+            ? descriptor.ArrayElementType
+            : null;
+    }
+
+    /// <summary>
     /// Returns <c>true</c> if <paramref name="ast"/> or any descendant contains a call to a
     /// volatile scalar function (one whose result changes across evaluations: <c>random</c>,
     /// <c>now</c>/<c>current_timestamp</c>, <c>statement_timestamp</c>, <c>clock_timestamp</c>,
@@ -184,8 +196,14 @@ internal static class ScalarFunctionEvaluator
     private static bool IsStatementScopedCall(NodeAst node)
         => TryGetCalledDescriptor(node, out ScalarFunctionDescriptor? d) && (d!.IsSessionScoped || d.ReadsStatementClock);
 
+    /// <summary>
+    /// A call to a volatile scalar function, or a volatile table function in <c>FROM</c> (an extension
+    /// function declared volatile), which a subquery inside the walked expression can hold.
+    /// </summary>
     private static bool IsVolatileCall(NodeAst node)
-        => TryGetCalledDescriptor(node, out ScalarFunctionDescriptor? d) && d!.IsVolatile;
+        => node.nodeType == NodeType.TableFunctionReference
+            ? node.leftAst?.yytext is { } name && TableFunctionRegistry.IsVolatileTableFunction(name)
+            : TryGetCalledDescriptor(node, out ScalarFunctionDescriptor? d) && d!.IsVolatile;
 
     /// <summary>
     /// Resolves the descriptor of the scalar function <paramref name="node"/> calls, or answers

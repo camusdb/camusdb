@@ -234,7 +234,8 @@ internal sealed class SelectQueryCreator
     /// <para><b>Alias rule.</b> A function with one output column names both the relation and the
     /// column after its alias, as PostgreSQL does: <c>generate_series(1, 3) AS i</c> exposes the column
     /// <c>i</c>, reachable as <c>i</c> or <c>i.i</c>. With no alias, both take the function's name.
-    /// <c>AS t(n)</c> names the relation <c>t</c> and the column <c>n</c>.</para>
+    /// <c>AS t(n)</c> names the relation <c>t</c> and the column <c>n</c>. A function that names its own
+    /// column (an extension's <c>Column = "word"</c>) keeps that name unless the alias renames it.</para>
     ///
     /// <para><b>Arguments read no column.</b> An argument that names a column would have to read a row
     /// of another relation in the same <c>FROM</c>, which is <c>LATERAL</c>; that, and a subquery
@@ -266,7 +267,7 @@ internal sealed class SelectQueryCreator
         }
 
         string relationName = alias ?? function.Name;
-        string columnName = columnAliases.Count == 1 ? columnAliases[0].yytext! : relationName;
+        string columnName = columnAliases.Count == 1 ? columnAliases[0].yytext! : function.DefaultColumnName ?? relationName;
 
         TableFunctionSource call = new(function.Name, arguments, columnName);
         NodeAst columnAst = new(NodeType.Identifier, null, null, null, null, null, null, null, columnName);

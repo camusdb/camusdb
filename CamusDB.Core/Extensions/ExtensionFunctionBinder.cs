@@ -29,6 +29,13 @@ namespace CamusDB.Core.Extensions;
 /// <para><b>Arity.</b> The evaluator checks the arity before it calls the adapter. Optional parameters
 /// make a range; a missing optional argument takes the method's default value.</para>
 ///
+/// <para><b>Arrays.</b> An <c>IReadOnlyList&lt;T&gt;</c> parameter or return type maps to <c>array(E)</c>
+/// (see <see cref="ExtensionValueMapping"/>). The adapter converts the list with a typed element
+/// delegate created here, once, so an array call holds no reflection either. A function that returns
+/// a list reports its element type on the descriptor
+/// (<see cref="ScalarFunctionDescriptor.ArrayElementType"/>), which is what lets a CTAS or a derived
+/// table declare the column's element type.</para>
+///
 /// <para><b>Errors.</b> A conversion error (a wrong argument type) is a <see cref="CamusDBException"/>
 /// raised before the user method runs. An exception from the user method becomes
 /// <see cref="CamusDBErrorCodes.ExtensionFunctionFailed"/> with the function name and the inner
@@ -37,12 +44,6 @@ namespace CamusDB.Core.Extensions;
 /// </summary>
 internal static class ExtensionFunctionBinder
 {
-    private static readonly MethodInfo CountGetter =
-        typeof(IReadOnlyCollection<ColumnValue>).GetProperty(nameof(IReadOnlyCollection<ColumnValue>.Count))!.GetMethod!;
-
-    private static readonly MethodInfo ItemGetter =
-        typeof(IReadOnlyList<ColumnValue>).GetProperty("Item")!.GetMethod!;
-
     private static readonly MethodInfo FailedFactory =
         typeof(ExtensionFunctionBinder).GetMethod(nameof(Failed), BindingFlags.NonPublic | BindingFlags.Static)!;
 
@@ -60,27 +61,14 @@ internal static class ExtensionFunctionBinder
         if (string.IsNullOrWhiteSpace(attribute.Name))
             throw InvalidSignature(where, "the function name is empty");
 
-        if (method.ReturnType == typeof(void) || !ExtensionValueMapping.IsMappedType(method.ReturnType))
-            throw InvalidSignature(where, $"the return type {method.ReturnType} is not in the extension value mapping");
+        if (method.ReturnType == typeof(void))
+            throw InvalidSignature(where, "the method returns void");
+
+        if (!ExtensionValueMapping.IsMappedType(method.ReturnType))
+            throw InvalidSignature(where, "the return value " + ExtensionValueMapping.DescribeUnmapped(method.ReturnType));
 
         ParameterInfo[] parameters = method.GetParameters();
-        int minArity = parameters.Length;
-
-        for (int i = 0; i < parameters.Length; i++)
-        {
-            ParameterInfo parameter = parameters[i];
-
-            if (parameter.ParameterType.IsByRef || parameter.IsOut)
-                throw InvalidSignature(where, $"parameter '{parameter.Name}' is passed by reference");
-
-            if (!ExtensionValueMapping.IsMappedType(parameter.ParameterType))
-                throw InvalidSignature(where, $"parameter '{parameter.Name}' has type {parameter.ParameterType}, which is not in the extension value mapping");
-
-            if (parameter.HasDefaultValue)
-                minArity = Math.Min(minArity, i);
-            else if (minArity < parameters.Length)
-                throw InvalidSignature(where, $"parameter '{parameter.Name}' has no default value but follows an optional parameter");
-        }
+        int minArity = ExtensionAdapterParts.CheckParameters(parameters, 0, where);
 
         ScalarFunctionEvaluatorDelegate evaluator = Compile(method, parameters, minArity);
         ColumnType returnType = ExtensionValueMapping.ColumnTypeOf(method.ReturnType);
@@ -94,6 +82,7 @@ internal static class ExtensionFunctionBinder
             Evaluator = evaluator,
             IsVolatile = attribute.IsVolatile,
             InferReturnType = _ => returnType,
+            ArrayElementType = ExtensionValueMapping.ArrayElementColumnTypeOf(method.ReturnType),
         };
     }
 
@@ -121,9 +110,126 @@ internal static class ExtensionFunctionBinder
         List<ParameterExpression> locals = new(parameters.Length + 1);
         List<Expression> body = new(parameters.Length * 2 + 3);
 
-        for (int i = 0; i < parameters.Length; i++)
+        ExtensionAdapterParts.EmitArguments(
+            parameters, 0, minArity, calledName, arguments,
+            Expression.Return(returnLabel, Expression.Constant(ColumnValue.Null)), locals, body);
+
+        ParameterExpression result = Expression.Variable(method.ReturnType, "result");
+        List<ParameterExpression> callArguments = [.. locals];
+        locals.Add(result);
+
+        body.Add(ExtensionAdapterParts.GuardUserCall(
+            Expression.Assign(result, Expression.Call(method, callArguments)),
+            caught => Expression.Call(FailedFactory, calledName, caught)));
+
+        body.Add(Expression.Label(returnLabel, ExtensionAdapterParts.ConvertResult(method.ReturnType, result)));
+
+        Expression<ScalarFunctionEvaluatorDelegate> lambda = Expression.Lambda<ScalarFunctionEvaluatorDelegate>(
+            Expression.Block(typeof(ColumnValue), locals, body),
+            calledName,
+            arguments);
+
+        return lambda.Compile();
+    }
+
+    /// <summary>
+    /// The SQL signature of a member, for <c>SHOW EXTENSIONS</c>: <c>name(INT64, ARRAY(STRING)) -&gt; STRING</c>.
+    /// An optional parameter is shown in brackets. <paramref name="skip"/> leading parameters are not
+    /// SQL arguments (an aggregate's state).
+    /// </summary>
+    internal static string Signature(string name, ParameterInfo[] parameters, int skip, string result)
+    {
+        System.Text.StringBuilder text = new(name.Length + 16 * parameters.Length);
+        text.Append(name).Append('(');
+
+        for (int i = skip; i < parameters.Length; i++)
+        {
+            if (i > skip)
+                text.Append(", ");
+
+            string type = ExtensionValueMapping.SqlTypeName(parameters[i].ParameterType);
+            text.Append(parameters[i].HasDefaultValue ? "[" + type + "]" : type);
+        }
+
+        return text.Append(") -> ").Append(result).ToString();
+    }
+
+    /// <summary>Called from compiled adapters when the user method throws.</summary>
+    private static CamusDBException Failed(string function, Exception inner) =>
+        new(CamusDBErrorCodes.ExtensionFunctionFailed, $"Function '{function}' failed: {inner.Message}", inner);
+
+    internal static CamusDBException InvalidSignature(string where, string reason) =>
+        new(CamusDBErrorCodes.ExtensionInvalidSignature, $"Extension function {where}: {reason}");
+}
+
+/// <summary>
+/// The expression-tree pieces that every extension adapter shares: the parameter checks, the NULL
+/// guards and argument conversions, the result conversion, and the exception guard around the user
+/// call. Scalar functions (<see cref="ExtensionFunctionBinder"/>), table functions
+/// (<see cref="ExtensionTableFunctionBinder"/>) and aggregates (<see cref="ExtensionAggregateBinder"/>)
+/// all build from here, so one value mapping and one NULL rule apply to every member kind.
+///
+/// <para><b>Startup only.</b> These methods use reflection to build the trees. The compiled delegates
+/// hold direct calls into <see cref="ExtensionValueMapping"/> and typed element delegates, so nothing
+/// built here reflects on the call path.</para>
+/// </summary>
+internal static class ExtensionAdapterParts
+{
+    private static readonly MethodInfo CountGetter =
+        typeof(IReadOnlyCollection<ColumnValue>).GetProperty(nameof(IReadOnlyCollection<ColumnValue>.Count))!.GetMethod!;
+
+    private static readonly MethodInfo ItemGetter =
+        typeof(IReadOnlyList<ColumnValue>).GetProperty("Item")!.GetMethod!;
+
+    /// <summary>
+    /// Checks the SQL parameters <c>parameters[skip..]</c> and returns the minimum arity: the count of
+    /// leading parameters without a default value. Throws for a by-reference parameter, an unmapped
+    /// type, or a required parameter after an optional one.
+    /// </summary>
+    public static int CheckParameters(ParameterInfo[] parameters, int skip, string where)
+    {
+        int count = parameters.Length - skip;
+        int minArity = count;
+
+        for (int i = skip; i < parameters.Length; i++)
         {
             ParameterInfo parameter = parameters[i];
+
+            if (parameter.ParameterType.IsByRef || parameter.IsOut)
+                throw ExtensionFunctionBinder.InvalidSignature(where, $"parameter '{parameter.Name}' is passed by reference");
+
+            if (!ExtensionValueMapping.IsMappedType(parameter.ParameterType))
+                throw ExtensionFunctionBinder.InvalidSignature(where, $"parameter '{parameter.Name}' {ExtensionValueMapping.DescribeUnmapped(parameter.ParameterType)}");
+
+            if (parameter.HasDefaultValue)
+                minArity = Math.Min(minArity, i - skip);
+            else if (minArity < count)
+                throw ExtensionFunctionBinder.InvalidSignature(where, $"parameter '{parameter.Name}' has no default value but follows an optional parameter");
+        }
+
+        return minArity;
+    }
+
+    /// <summary>
+    /// Adds one local per SQL parameter (<c>parameters[skip..]</c>, read from <c>arguments[i - skip]</c>)
+    /// and the statements that fill them: a NULL guard that runs <paramref name="onNull"/> for each
+    /// parameter that does not accept NULL, then the conversion. An absent optional argument takes the
+    /// method's default value. The locals are appended to <paramref name="locals"/> in parameter order.
+    /// </summary>
+    public static void EmitArguments(
+        ParameterInfo[] parameters,
+        int skip,
+        int minArity,
+        Expression calledName,
+        Expression arguments,
+        Expression onNull,
+        List<ParameterExpression> locals,
+        List<Expression> body)
+    {
+        for (int p = skip; p < parameters.Length; p++)
+        {
+            int i = p - skip;
+            ParameterInfo parameter = parameters[p];
             Expression argument = Expression.Call(arguments, ItemGetter, Expression.Constant(i));
             Expression present = Expression.GreaterThan(Expression.Call(arguments, CountGetter), Expression.Constant(i));
 
@@ -137,20 +243,13 @@ internal static class ExtensionFunctionBinder
 
                 // An absent optional argument is not NULL: guard the read with the count.
                 Expression test = i < minArity ? isNull : Expression.AndAlso(present, isNull);
-                body.Add(Expression.IfThen(test, Expression.Return(returnLabel, Expression.Constant(ColumnValue.Null))));
+                body.Add(Expression.IfThen(test, onNull));
             }
 
             ParameterExpression local = Expression.Variable(parameter.ParameterType, parameter.Name ?? "arg" + i);
             locals.Add(local);
 
-            Expression converted = Expression.Call(
-                ToClrConverter(parameter.ParameterType, acceptsNull),
-                argument,
-                calledName,
-                Expression.Constant(i));
-
-            if (converted.Type != parameter.ParameterType)
-                converted = Expression.Convert(converted, parameter.ParameterType);
+            Expression converted = ConvertArgument(parameter.ParameterType, acceptsNull, argument, calledName, Expression.Constant(i));
 
             if (i >= minArity)
             {
@@ -163,25 +262,19 @@ internal static class ExtensionFunctionBinder
 
             body.Add(Expression.Assign(local, converted));
         }
+    }
 
-        ParameterExpression result = Expression.Variable(method.ReturnType, "result");
-        locals.Add(result);
-
+    /// <summary>
+    /// <c>try { call; } catch (OperationCanceledException) { throw; } catch (Exception ex) { throw wrap(ex); }</c>
+    /// </summary>
+    public static Expression GuardUserCall(Expression call, Func<ParameterExpression, Expression> wrap)
+    {
         ParameterExpression caught = Expression.Variable(typeof(Exception), "ex");
 
-        body.Add(Expression.TryCatch(
-            Expression.Block(typeof(void), Expression.Assign(result, Expression.Call(method, locals.GetRange(0, parameters.Length)))),
+        return Expression.TryCatch(
+            Expression.Block(typeof(void), call),
             Expression.Catch(typeof(OperationCanceledException), Expression.Rethrow(typeof(void))),
-            Expression.Catch(caught, Expression.Throw(Expression.Call(FailedFactory, calledName, caught), typeof(void)))));
-
-        body.Add(Expression.Label(returnLabel, Expression.Call(FromClrConverter(method.ReturnType), result)));
-
-        Expression<ScalarFunctionEvaluatorDelegate> lambda = Expression.Lambda<ScalarFunctionEvaluatorDelegate>(
-            Expression.Block(typeof(ColumnValue), locals, body),
-            calledName,
-            arguments);
-
-        return lambda.Compile();
+            Expression.Catch(caught, Expression.Throw(wrap(caught), typeof(void))));
     }
 
     /// <summary>
@@ -189,7 +282,7 @@ internal static class ExtensionFunctionBinder
     /// type annotated nullable. A reference type in an assembly compiled without nullable annotations
     /// reads as "unknown" and propagates NULL, the safer default.
     /// </summary>
-    private static bool AcceptsNull(ParameterInfo parameter)
+    public static bool AcceptsNull(ParameterInfo parameter)
     {
         if (Nullable.GetUnderlyingType(parameter.ParameterType) is not null)
             return true;
@@ -201,7 +294,65 @@ internal static class ExtensionFunctionBinder
         return new NullabilityInfoContext().Create(parameter).ReadState == NullabilityState.Nullable;
     }
 
-    private static MethodInfo ToClrConverter(Type type, bool acceptsNull)
+    /// <summary>
+    /// The conversion of one engine argument into a CLR value of <paramref name="type"/>:
+    /// <c>ExtensionValueMapping.To{Type}(argument, calledName, index)</c> for a scalar, and
+    /// <c>ToList&lt;T&gt;(argument, calledName, index, elementConverter, nullElements)</c> for an array.
+    /// </summary>
+    public static Expression ConvertArgument(Type type, bool acceptsNull, Expression argument, Expression calledName, Expression index)
+    {
+        if (ExtensionValueMapping.ArrayElementOf(type) is { } element)
+        {
+            // Reference elements always accept NULL; a value element only as Nullable<T>.
+            bool nullElements = !element.IsValueType || Nullable.GetUnderlyingType(element) is not null;
+            Delegate elementConverter = ScalarToClr(element, acceptsNull: nullElements)
+                .CreateDelegate(typeof(Func<,,,>).MakeGenericType(typeof(ColumnValue), typeof(string), typeof(int), element));
+
+            MethodInfo list = typeof(ExtensionValueMapping)
+                .GetMethod(acceptsNull ? nameof(ExtensionValueMapping.ToNullableList) : nameof(ExtensionValueMapping.ToList))!
+                .MakeGenericMethod(element);
+
+            return Expression.Call(list, argument, calledName, index, Expression.Constant(elementConverter), Expression.Constant(nullElements));
+        }
+
+        Expression converted = Expression.Call(ScalarToClr(type, acceptsNull), argument, calledName, index);
+        return converted.Type == type ? converted : Expression.Convert(converted, type);
+    }
+
+    /// <summary>
+    /// The conversion of a CLR value of <paramref name="type"/> into an engine value:
+    /// <c>From{Type}(value)</c> for a scalar, and <c>FromList&lt;T&gt;(value, elementType, elementConverter)</c>
+    /// for an array.
+    /// </summary>
+    public static Expression ConvertResult(Type type, Expression value)
+    {
+        if (ExtensionValueMapping.ArrayElementOf(type) is { } element)
+        {
+            Delegate elementConverter = ScalarFromClr(element)
+                .CreateDelegate(typeof(Func<,>).MakeGenericType(element, typeof(ColumnValue)));
+
+            MethodInfo list = typeof(ExtensionValueMapping)
+                .GetMethod(nameof(ExtensionValueMapping.FromList))!
+                .MakeGenericMethod(element);
+
+            return Expression.Call(
+                list,
+                value,
+                Expression.Constant(ExtensionValueMapping.ColumnTypeOf(element)),
+                Expression.Constant(elementConverter));
+        }
+
+        return Expression.Call(ScalarFromClr(type), value);
+    }
+
+    /// <summary>A typed <c>Func&lt;T, ColumnValue&gt;</c> for a mapped type, for wrappers that convert outside a tree.</summary>
+    public static Func<T, ColumnValue> ResultConverter<T>()
+    {
+        ParameterExpression value = Expression.Parameter(typeof(T), "value");
+        return Expression.Lambda<Func<T, ColumnValue>>(ConvertResult(typeof(T), value), value).Compile();
+    }
+
+    private static MethodInfo ScalarToClr(Type type, bool acceptsNull)
     {
         Type underlying = Nullable.GetUnderlyingType(type) ?? type;
         bool nullable = acceptsNull || Nullable.GetUnderlyingType(type) is not null;
@@ -227,7 +378,7 @@ internal static class ExtensionFunctionBinder
                ?? throw new InvalidOperationException($"Missing converter {methodName}");
     }
 
-    private static MethodInfo FromClrConverter(Type type)
+    private static MethodInfo ScalarFromClr(Type type)
     {
         Type underlying = Nullable.GetUnderlyingType(type) ?? type;
         bool nullableValue = Nullable.GetUnderlyingType(type) is not null;
@@ -249,11 +400,4 @@ internal static class ExtensionFunctionBinder
         return typeof(ExtensionValueMapping).GetMethod(methodName, BindingFlags.Public | BindingFlags.Static)
                ?? throw new InvalidOperationException($"Missing converter {methodName}");
     }
-
-    /// <summary>Called from compiled adapters when the user method throws.</summary>
-    private static CamusDBException Failed(string function, Exception inner) =>
-        new(CamusDBErrorCodes.ExtensionFunctionFailed, $"Function '{function}' failed: {inner.Message}", inner);
-
-    private static CamusDBException InvalidSignature(string where, string reason) =>
-        new(CamusDBErrorCodes.ExtensionInvalidSignature, $"Extension function {where}: {reason}");
 }

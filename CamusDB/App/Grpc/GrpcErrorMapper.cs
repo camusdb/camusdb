@@ -75,6 +75,7 @@ public static class GrpcErrorMapper
         CamusDBErrorCodes.TriggerTypeInvalid => StatusCode.InvalidArgument,
         CamusDBErrorCodes.TriggerTargetInvalid => StatusCode.InvalidArgument,
         CamusDBErrorCodes.TriggerFailed => StatusCode.InvalidArgument,
+        CamusDBErrorCodes.TriggerRowMappingInvalid => StatusCode.InvalidArgument,
         CamusDBErrorCodes.ExtensionNestingTooDeep => StatusCode.InvalidArgument,
         CamusDBErrorCodes.ExtensionStatementRefused => StatusCode.InvalidArgument,
         CamusDBErrorCodes.ProcedureFailed => StatusCode.InvalidArgument,

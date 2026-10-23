@@ -362,7 +362,9 @@ internal static class DerivedTableSchemaBuilder
     // database installed that this node does not load. status is "installed" (the build the current
     // database uses), "available" (loaded, not installed in this database at this version) or "missing"
     // (installed, but this node has no matching build; path and trust are then NULL). The member lists
-    // are comma-joined text so one build stays one row whatever it registered.
+    // are comma-joined text so one build stays one row whatever it registered. signatures holds the SQL
+    // signature of each function, aggregate and table function, joined by "; " because a signature has
+    // commas of its own (NULL for a missing build, whose types this node cannot read).
     internal static readonly IReadOnlyList<DerivedColumnSchema> ShowExtensionsSchema =
     [
         new("name",       ColumnType.String),
@@ -375,6 +377,9 @@ internal static class DerivedTableSchemaBuilder
         new("functions",  ColumnType.String),
         new("triggers",   ColumnType.String),
         new("procedures", ColumnType.String),
+        new("aggregates", ColumnType.String),
+        new("table_functions", ColumnType.String),
+        new("signatures", ColumnType.String),
     ];
 
     // SHOW CLUSTER SETTINGS: one row per overlay entry the cluster currently carries — the keys a
@@ -500,9 +505,9 @@ internal static class DerivedTableSchemaBuilder
     /// evaluated cells can tell. Known for a column reference (a base-table array column declares its
     /// element type, and a derived-table column carries whatever its own projection knew) and for an
     /// <c>ARRAY[…]</c> literal whose first non-NULL element has a certain type (see
-    /// <see cref="InferArrayLiteralElementType"/>). Every other array expression, such as a function
-    /// result, is left null; the cells carry their element type, which is what a transport falls back
-    /// to.
+    /// <see cref="InferArrayLiteralElementType"/>), and for a call to a function that declares it
+    /// (<see cref="ScalarFunctionDescriptor.ArrayElementType"/>). Every other array expression is left
+    /// null; the cells carry their element type, which is what a transport falls back to.
     /// </summary>
     private static ColumnType? InferArrayElementType(
         NodeAst expression,
@@ -513,6 +518,13 @@ internal static class DerivedTableSchemaBuilder
 
         if (target.nodeType == NodeType.ArrayLiteral)
             return InferArrayLiteralElementType(target, innerBound, innerResolver);
+
+        // A function that declares its element type (an extension function or aggregate returning
+        // IReadOnlyList<long>) types its column without a value.
+        if (target.nodeType == NodeType.ExprFuncCall && target.leftAst?.yytext is { } functionName)
+            return AggregateFunctionCatalog.IsExtensionAggregate(functionName)
+                ? AggregateFunctionCatalog.ResolveExtension(functionName).ReturnElementType
+                : ScalarFunctionEvaluator.InferArrayElementType(functionName);
 
         if (target.nodeType != NodeType.Identifier || target.yytext is null)
             return null;
@@ -812,6 +824,9 @@ internal static class DerivedTableSchemaBuilder
             return ColumnType.String;
         }
 
+        if (arrayOperand.nodeType == NodeType.ExprFuncCall && arrayOperand.leftAst?.yytext is { } functionName)
+            return ScalarFunctionEvaluator.InferArrayElementType(functionName) ?? ColumnType.String;
+
         if (arrayOperand.nodeType == NodeType.ArrayLiteral)
         {
             NodeAst? first = FirstNonNullArrayElement(arrayOperand.leftAst);
@@ -1015,6 +1030,8 @@ internal static class DerivedTableSchemaBuilder
                 ? ColumnType.Numeric
                 : ColumnType.Float64,
             "min" or "max" => InferAggregateArgumentType(funcCall, innerBound, innerResolver, fallback: ColumnType.String),
+            // An extension aggregate declares its result: the return type of its Finish method.
+            _ when AggregateFunctionCatalog.IsExtensionAggregate(funcName) => AggregateFunctionCatalog.ResolveExtension(funcName).ReturnType,
             _ => ColumnType.String,
         };
     }

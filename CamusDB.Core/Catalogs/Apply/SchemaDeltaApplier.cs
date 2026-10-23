@@ -170,6 +170,10 @@ internal static class SchemaDeltaApplier
 
     internal static void ValidateSchemaDelta(DatabaseDescriptor database, SchemaChangeLogEntry entry)
     {
+        // A column that a typed trigger maps cannot be dropped or renamed (checked on the live schema,
+        // before the delta), and a typed trigger cannot land after one of its columns went away.
+        CamusDB.Core.Extensions.TypedTriggerColumnGuard.Check(database.Schema, entry);
+
         // Dry-run: apply to a throwaway clone so validation has no side effects on the live schema.
         Schema clone = SchemaReplicator.CloneSchema(database.Schema);
         ApplySchemaDelta(clone, database, entry);

@@ -966,6 +966,15 @@ public static class CamusDBErrorCodes
     public const string ExtensionClusterMismatch = "CADB0835";
 
     /// <summary>
+    /// A typed trigger's row class (<c>ICamusTrigger&lt;TRow&gt;</c>) does not fit the table: a property
+    /// maps to a column the table lacks, a property's type cannot hold its column's values, or the
+    /// class itself cannot be a row class. <c>CREATE TRIGGER</c> refuses with it, and so does the first
+    /// DML on a node when the mapping no longer holds there (after an extension update, for example).
+    /// The message lists every problem. Maps to HTTP 400.
+    /// </summary>
+    public const string TriggerRowMappingInvalid = "CADB0836";
+
+    /// <summary>
     /// Returns the HTTP status code that should be used when surfacing <paramref name="code"/>
     /// to an API caller. Client errors (permanent, non-retryable caller mistakes) map to 400;
     /// all other codes map to 500.
@@ -1084,6 +1093,7 @@ public static class CamusDBErrorCodes
         ExtensionHasDependents => 409,
         ExtensionNotLoadedOnNode => 503,
         ExtensionClusterMismatch => 409,
+        TriggerRowMappingInvalid => 400,
         _ => 500
     };
 }

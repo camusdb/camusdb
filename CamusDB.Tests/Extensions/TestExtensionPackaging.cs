@@ -256,6 +256,40 @@ public sealed class TestExtensionPackaging : ExtensionTestBase
     }
 
     [Test]
+    public async Task IfExistsForms_ForgiveOnlyTheInstallState()
+    {
+        (string db, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase(WithExtensions("Fixture.Good", "Fixture.GoodV2"));
+
+        // Not installed: the drop is a no-op, for a loaded extension and for an unknown name.
+        await ExecDdl(executor, db, "DROP EXTENSION IF EXISTS good");
+        await ExecDdl(executor, db, "DROP EXTENSION IF EXISTS nope");
+
+        await ExecDdl(executor, db, "CREATE EXTENSION IF NOT EXISTS good VERSION '1.0.0'");
+        Assert.AreEqual("1.0.0", database.Schema.Extensions["good"].Version);
+
+        // Installed: the create is a no-op and does not move the version, whatever version it names.
+        await ExecDdl(executor, db, "CREATE EXTENSION IF NOT EXISTS good");
+        await ExecDdl(executor, db, "create extension if not exists GOOD version '2.0.0'");
+        Assert.AreEqual("1.0.0", database.Schema.Extensions["good"].Version);
+
+        // An extension that is not installed is still checked as by the plain form.
+        Assert.AreEqual(CamusDBErrorCodes.ExtensionNotAvailable, await Code(() => ExecDdl(executor, db, "CREATE EXTENSION IF NOT EXISTS nope")));
+
+        // IF EXISTS does not forgive dependents.
+        await ExecDdl(executor, db, "CREATE TABLE d (id INT64 PRIMARY KEY, n INT64 DEFAULT (fx_counter()))");
+        Assert.AreEqual(CamusDBErrorCodes.ExtensionHasDependents, await Code(() => ExecDdl(executor, db, "DROP EXTENSION IF EXISTS good")));
+
+        await ExecDdl(executor, db, "DROP TABLE d");
+        await ExecDdl(executor, db, "DROP EXTENSION IF EXISTS good");
+        Assert.IsFalse(database.Schema.Extensions.ContainsKey("good"));
+
+        // The plain forms keep their errors.
+        Assert.AreEqual(CamusDBErrorCodes.ExtensionNotInstalled, await Code(() => ExecDdl(executor, db, "DROP EXTENSION good")));
+        await ExecDdl(executor, db, "CREATE EXTENSION good");
+        Assert.AreEqual(CamusDBErrorCodes.ExtensionAlreadyInstalled, await Code(() => ExecDdl(executor, db, "CREATE EXTENSION good")));
+    }
+
+    [Test]
     public async Task Drop_RacingACreateThatUsesTheExtension_NeverLeavesADanglingDependent()
     {
         (string db, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabaseWithGoodFixture();

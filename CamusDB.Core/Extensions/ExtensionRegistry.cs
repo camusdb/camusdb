@@ -68,6 +68,15 @@ public sealed class LoadedExtension
     /// <summary>The SQL procedure names the assembly registered.</summary>
     public required IReadOnlyList<string> Procedures { get; init; }
 
+    /// <summary>The SQL aggregate names the assembly registered.</summary>
+    public IReadOnlyList<string> Aggregates { get; init; } = [];
+
+    /// <summary>The SQL names of the table functions the assembly registered.</summary>
+    public IReadOnlyList<string> TableFunctions { get; init; } = [];
+
+    /// <summary>The SQL signature of each function, aggregate and table function, for <c>SHOW EXTENSIONS</c>.</summary>
+    public IReadOnlyList<string> Signatures { get; init; } = [];
+
     /// <summary>The loaded assembly. Null only in registries built by tests without a load.</summary>
     internal Assembly? Assembly { get; init; }
 
@@ -80,13 +89,32 @@ public sealed class LoadedExtension
 
     internal Dictionary<string, ExtensionProcedure> ProcedureTable { get; } = new(StringComparer.OrdinalIgnoreCase);
 
+    internal Dictionary<string, ExtensionAggregate> AggregateTable { get; } = new(StringComparer.OrdinalIgnoreCase);
+
+    internal Dictionary<string, ExtensionTableFunction> TableFunctionTable { get; } = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// True when this extension defines <paramref name="name"/> as a scalar function, an aggregate or a
+    /// table function. The three share one name space: a call is resolved by name before its kind is
+    /// known (the aggregate classifier, the FROM binder and the scalar evaluator all ask by name), so
+    /// one name must not mean two kinds.
+    /// </summary>
+    internal bool DefinesCallable(string name) =>
+        FunctionTable.ContainsKey(name) || AggregateTable.ContainsKey(name) || TableFunctionTable.ContainsKey(name);
+
     /// <summary>The members, with their kinds, as an installed record lists them.</summary>
     internal List<Catalogs.Models.ExtensionMemberDefinition> BuildMembers()
     {
-        List<Catalogs.Models.ExtensionMemberDefinition> members = new(Functions.Count + Procedures.Count + Triggers.Count);
+        List<Catalogs.Models.ExtensionMemberDefinition> members = new(Functions.Count + Procedures.Count + Triggers.Count + Aggregates.Count + TableFunctions.Count);
 
         foreach (string name in Functions)
             members.Add(new() { Kind = Catalogs.Models.ExtensionMemberKind.Function, Name = name });
+
+        foreach (string name in Aggregates)
+            members.Add(new() { Kind = Catalogs.Models.ExtensionMemberKind.Aggregate, Name = name });
+
+        foreach (string name in TableFunctions)
+            members.Add(new() { Kind = Catalogs.Models.ExtensionMemberKind.TableFunction, Name = name });
 
         foreach (string name in Procedures)
             members.Add(new() { Kind = Catalogs.Models.ExtensionMemberKind.Procedure, Name = name });
@@ -128,16 +156,28 @@ public sealed class LoadedExtension
 /// A trigger type discovered in a loaded extension. The instance is created on first use, once per
 /// engine, and shared by every statement that fires the trigger, so trigger classes must be
 /// thread-safe (stated on <see cref="ICamusTrigger"/>).
+///
+/// <para><b>Two forms.</b> An untyped trigger implements <see cref="ICamusTrigger"/> and reads the row
+/// through <see cref="IRow"/>. A typed trigger implements <see cref="ICamusTrigger{TRow}"/>; its
+/// <see cref="Typed"/> adapter maps rows to and from the row class, and is compiled once per type, on
+/// first use, because its shape depends only on the row class (a property maps to a column by name).
+/// Whether the mapping fits a table is checked per table, by <see cref="TypedTriggerAdapter.Validate"/>.</para>
 /// </summary>
 internal sealed class ExtensionTriggerType
 {
-    private readonly Lazy<ICamusTrigger> instance;
+    private readonly Lazy<object> instance;
 
-    public ExtensionTriggerType(LoadedExtension source, Type type, Func<ICamusTrigger> factory)
+    private readonly Lazy<TypedTriggerAdapter>? typed;
+
+    public ExtensionTriggerType(LoadedExtension source, Type type, Func<object> factory, Type? rowType)
     {
         Source = source;
         Type = type;
-        instance = new Lazy<ICamusTrigger>(factory, LazyThreadSafetyMode.ExecutionAndPublication);
+        RowType = rowType;
+        instance = new Lazy<object>(factory, LazyThreadSafetyMode.ExecutionAndPublication);
+
+        if (rowType is not null)
+            typed = new Lazy<TypedTriggerAdapter>(() => TypedTriggerAdapter.Create(rowType), LazyThreadSafetyMode.ExecutionAndPublication);
     }
 
     public LoadedExtension Source { get; }
@@ -146,9 +186,16 @@ internal sealed class ExtensionTriggerType
 
     public string FullName => Type.FullName!;
 
-    /// <summary>The shared instance. The first access runs the type's constructor; an exception from
-    /// it surfaces on every access, because a failed <see cref="Lazy{T}"/> caches the exception.</summary>
-    public ICamusTrigger Instance => instance.Value;
+    /// <summary>The row class of a typed trigger, or null for an untyped one.</summary>
+    public Type? RowType { get; }
+
+    /// <summary>The row adapter of a typed trigger, or null for an untyped one.</summary>
+    public TypedTriggerAdapter? Typed => typed?.Value;
+
+    /// <summary>The shared instance: an <see cref="ICamusTrigger"/>, or an <see cref="ICamusTrigger{TRow}"/>
+    /// when <see cref="RowType"/> is set. The first access runs the type's constructor; an exception
+    /// from it surfaces on every access, because a failed <see cref="Lazy{T}"/> caches the exception.</summary>
+    public object Instance => instance.Value;
 }
 
 /// <summary>A procedure discovered in a loaded extension, with its argument-count bounds.</summary>
