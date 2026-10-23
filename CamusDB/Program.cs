@@ -52,6 +52,14 @@ if (optsResult is NotParsed<CamusCommandLineOptions> notParsed)
     bool textOnlyRequest = notParsed.Errors.All(
         error => error.Tag is ErrorType.HelpRequestedError or ErrorType.HelpVerbRequestedError or ErrorType.VersionRequestedError);
 
+    // `--version` prints only the name and version line. HelpText.AutoBuild with custom handlers
+    // always renders the whole option list, which buries the version a script wants to read.
+    if (textOnlyRequest && notParsed.Errors.All(error => error.Tag is ErrorType.VersionRequestedError))
+    {
+        Console.Out.WriteLine(HeadingInfo.Default);
+        return 0;
+    }
+
     HelpText helpText = HelpText.AutoBuild(
         optsResult,
         help =>
