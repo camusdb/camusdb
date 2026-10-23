@@ -75,6 +75,7 @@ All columns from plain `EXPLAIN`, plus:
 | `actual_time_ms`  | `FLOAT64`  | Total wall-clock milliseconds for the **entire plan** (root node only). `NULL` on all other nodes (per-node timing is planned for a future release). |
 | `kv_lookups`      | `INT64`    | KV point-lookups issued (unique-index lookups). |
 | `kv_scan_entries` | `INT64`    | KV scan entries visited (table or range-index scans). |
+| `estimate_trace`  | `STRING`   | How the node's row estimate was made, as one JSON object: the formula, the rule that dominates it, the input rows and one entry for each factor with the rule, the value and the statistics it read (`ndv`, `rows`, `alternative`, `textbook`, `keyed`). A join the join-order search estimated lists the leaves, the groups and the column classes of its table subset. `NULL` when the node has no estimate. The plan-quality harness records it for every node and reports the estimate errors by rule; see `docs/plan-quality-harness.md`. |
 
 `actual_rows` ≤ `rows_read` for scan nodes: `rows_read` counts rows decoded from storage
 before predicate evaluation; `actual_rows` counts rows that passed all filters and were

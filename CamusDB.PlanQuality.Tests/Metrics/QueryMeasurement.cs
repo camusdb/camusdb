@@ -13,6 +13,8 @@ namespace CamusDB.PlanQuality.Tests.Metrics;
 /// estimate (<c>join-order-est-rows=</c>) on a join it costed, and the plan annotation's
 /// <c>estimated_rows</c> elsewhere. The annotation estimates an index-nested-loop join as one row
 /// for each outer row, which is a different quantity from the rows the node produces.
+/// <see cref="Trace"/> is the <c>estimate_trace</c> JSON of the node, how its estimate was made,
+/// or null when the planner recorded none; the estimator experiment trains on it.
 /// </summary>
 internal sealed record PlanNodeMeasure(
     string Node,
@@ -21,7 +23,8 @@ internal sealed record PlanNodeMeasure(
     long? ActualRows,
     long RowsRead,
     long KvLookups,
-    long KvScanEntries);
+    long KvScanEntries,
+    string? Trace = null);
 
 /// <summary>
 /// Everything the harness measures for one query. The fields fall in three groups:

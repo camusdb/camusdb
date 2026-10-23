@@ -101,20 +101,26 @@ internal static class CostEstimator
     ///
     /// Safe to call with a null <paramref name="stats"/> manager — all estimates degrade to the
     /// fixed <c>DefaultTableRowCount</c> default.
+    ///
+    /// <para>With <paramref name="traceEstimates"/> every node that has no
+    /// <see cref="PhysicalPlanNode.EstimateTrace"/> yet gets one that records how its estimate was
+    /// made; a join the join-order search estimated keeps the search's trace. Only the
+    /// <c>EXPLAIN (ANALYZE)</c> path asks for traces.</para>
     /// </summary>
     public static void AnnotatePlan(
         PhysicalPlanNode root,
         DatabaseDescriptor database,
         TableDescriptor? table,
         StatisticsManager? stats,
-        CamusDBOptions options)
+        CamusDBOptions options,
+        bool traceEstimates = false)
     {
         // Pre-resolve the single-table row count; null for join plans (resolved per-node below).
         long? singleTableRowCount = table is not null
             ? stats?.GetRowCountEstimate(database, table)
             : null;
 
-        AnnotateNode(root, database, stats, singleTableRowCount, options, table);
+        AnnotateNode(root, database, stats, singleTableRowCount, options, table, traceEstimates);
     }
 
     /// <summary>
@@ -194,21 +200,27 @@ internal static class CostEstimator
         StatisticsManager? stats,
         long? rowCountHint,
         CamusDBOptions options,
-        TableDescriptor? primaryTable = null)
+        TableDescriptor? primaryTable = null,
+        bool traceEstimates = false)
     {
         // Resolve the effective table row count for this specific node.
         // In join plans (rowCountHint == null) each TableScanNode looks up its own table's stats.
         long? effectiveRowCount = ResolveNodeRowCount(node, database, stats, rowCountHint);
 
         long inputCardinality = node.Input is not null
-            ? AnnotateNode(node.Input, database, stats, rowCountHint, options, primaryTable)
+            ? AnnotateNode(node.Input, database, stats, rowCountHint, options, primaryTable, traceEstimates)
             : effectiveRowCount ?? DefaultTableRowCount;
 
         TableDescriptor? resolvedTable = ResolveNodeTable(node, primaryTable);
-        (long cardinality, PlanCost cost) = EstimateNodeCost(node, inputCardinality, effectiveRowCount, database, stats, options, primaryTable, resolvedTable);
+        // A join the join-order search estimated already carries the search's trace; the
+        // annotation's own estimate of it is a second model and is not recorded over it.
+        EstimateTrace? trace = traceEstimates && node.EstimateTrace is null ? new EstimateTrace() : null;
+        (long cardinality, PlanCost cost) = EstimateNodeCost(node, inputCardinality, effectiveRowCount, database, stats, options, primaryTable, resolvedTable, trace);
 
         node.EstimatedCardinality = cardinality;
         node.Cost = cost;
+        if (trace is not null)
+            node.EstimateTrace = trace;
         return cardinality;
     }
 
@@ -296,6 +308,11 @@ internal static class CostEstimator
         return rows * remoteFraction * rowWidth * options.NetWeight;
     }
 
+    /// <summary>
+    /// The single source of truth for one node's estimate and cost. <paramref name="trace"/>, when
+    /// given, is filled with the formula, the inputs and the factors of the row estimate; every arm
+    /// completes it, so a traced node always says which rule made its number.
+    /// </summary>
     private static (long Cardinality, PlanCost Cost) EstimateNodeCost(
         PhysicalPlanNode node,
         long inputCardinality,
@@ -304,7 +321,8 @@ internal static class CostEstimator
         StatisticsManager? stats,
         CamusDBOptions options,
         TableDescriptor? primaryTable = null,
-        TableDescriptor? resolvedTable = null)
+        TableDescriptor? resolvedTable = null,
+        EstimateTrace? trace = null)
     {
         long trc = tableRowCount ?? DefaultTableRowCount;
 
@@ -313,6 +331,7 @@ internal static class CostEstimator
             case IndexLookupNode:
             {
                 long rows = 1;
+                TraceFixed(trace, EstimateRule.IndexLookup, trc, rows);
                 return (rows, new PlanCost
                 {
                     EstimatedRows        = rows,
@@ -328,7 +347,7 @@ internal static class CostEstimator
                 // Use NDV/histogram to estimate fan-out for non-unique indexes; unique stays min(n, trc).
                 long rows = CardinalityEstimator.EstimateInListRows(
                     inListNode.ColumnName, inListNode.Values, isUnique,
-                    trc, database, resolvedTable ?? primaryTable, stats);
+                    trc, database, resolvedTable ?? primaryTable, stats, trace);
                 int n = inListNode.Values.Count;
                 return (rows, new PlanCost
                 {
@@ -346,7 +365,7 @@ internal static class CostEstimator
                 // (resolved from BoundSource by ResolveNodeTable). Pass the non-null one so
                 // EstimateRangeScanRows can use histogram/min-max/NDV stats rather than the
                 // fixed 10%/40% fallback.
-                long rows = EstimateRangeScanRows(rangeNode, trc, options, stats, database, resolvedTable ?? primaryTable);
+                long rows = EstimateRangeScanRows(rangeNode, trc, options, stats, database, resolvedTable ?? primaryTable, trace);
                 return (rows, new PlanCost
                 {
                     EstimatedRows        = rows,
@@ -367,8 +386,13 @@ internal static class CostEstimator
                 if (tsn.ExecutionFilter is not null && stats is not null && resolvedTable is not null)
                 {
                     double sel = CardinalityEstimator.EstimateFilterSelectivity(
-                        tsn.ExecutionFilter, database, resolvedTable, stats);
+                        tsn.ExecutionFilter, database, resolvedTable, stats, trace);
                     outputCard = Math.Max(1L, (long)(rows * sel));
+                    trace?.Complete(EstimateFormula.Product, rows, outputCard);
+                }
+                else
+                {
+                    TraceFixed(trace, EstimateRule.TableRows, rows, outputCard);
                 }
 
                 return (outputCard, new PlanCost
@@ -382,25 +406,44 @@ internal static class CostEstimator
             case FilterNode filterNode:
             {
                 // Use histogram-based selectivity when stats and primary table are available.
-                double filterSel = FilterSelectivity;
+                double filterSel;
                 if (stats is not null && primaryTable is not null)
-                    filterSel = CardinalityEstimator.EstimateFilterSelectivity(filterNode.Predicate, database, primaryTable, stats);
+                {
+                    filterSel = CardinalityEstimator.EstimateFilterSelectivity(filterNode.Predicate, database, primaryTable, stats, trace);
+                }
+                else
+                {
+                    filterSel = FilterSelectivity;
+                    trace?.Factors.Add(new EstimateFactor { Rule = EstimateRule.FilterFallback, Stage = EstimateStage.Comparison, Selectivity = filterSel, Raw = filterSel });
+                }
 
                 long rows = Math.Max(1, (long)(inputCardinality * filterSel));
+                trace?.Complete(EstimateFormula.Product, inputCardinality, rows);
                 return (rows, new PlanCost { EstimatedRows = rows });
             }
 
             case AggregateNode agg:
             {
-                long rows = agg.GroupByExpressions is { Count: > 0 }
-                    ? Math.Max(1, (long)(inputCardinality * AggregateSelectivity))
-                    : 1;
+                long rows;
+                if (agg.GroupByExpressions is { Count: > 0 })
+                {
+                    double sel = TracedConstant(trace, EstimateRule.Aggregate, AggregateSelectivity);
+                    rows = Math.Max(1, (long)(inputCardinality * sel));
+                    trace?.Complete(EstimateFormula.Product, inputCardinality, rows);
+                }
+                else
+                {
+                    rows = 1;
+                    TraceFixed(trace, EstimateRule.AggregateSingle, inputCardinality, rows);
+                }
                 return (rows, new PlanCost { EstimatedRows = rows, InMemoryRows = inputCardinality });
             }
 
             case HavingFilterNode:
             {
-                long rows = Math.Max(1, (long)(inputCardinality * FilterSelectivity));
+                double sel = TracedConstant(trace, EstimateRule.HavingFilter, FilterSelectivity);
+                long rows = Math.Max(1, (long)(inputCardinality * sel));
+                trace?.Complete(EstimateFormula.Product, inputCardinality, rows);
                 return (rows, new PlanCost { EstimatedRows = rows });
             }
 
@@ -413,6 +456,7 @@ internal static class CostEstimator
                 long retained = sort.BoundedLimit is { } bound
                     ? Math.Min(bound, inputCardinality)
                     : inputCardinality;
+                TraceFixed(trace, sort.BoundedLimit is not null ? EstimateRule.SortBounded : EstimateRule.PassThrough, inputCardinality, retained);
 
                 return (retained, new PlanCost
                 {
@@ -426,16 +470,20 @@ internal static class CostEstimator
                 long rows = limit.LimitValue.HasValue
                     ? Math.Min(limit.LimitValue.Value, inputCardinality)
                     : inputCardinality;
+                TraceFixed(trace, limit.LimitValue.HasValue ? EstimateRule.Limit : EstimateRule.PassThrough, inputCardinality, rows);
                 return (rows, new PlanCost { EstimatedRows = rows });
             }
 
             case DistinctNode:
             {
-                long rows = Math.Max(1, (long)(inputCardinality * DistinctSelectivity));
+                double sel = TracedConstant(trace, EstimateRule.Distinct, DistinctSelectivity);
+                long rows = Math.Max(1, (long)(inputCardinality * sel));
+                trace?.Complete(EstimateFormula.Product, inputCardinality, rows);
                 return (rows, new PlanCost { EstimatedRows = rows, InMemoryRows = inputCardinality });
             }
 
             case ProjectNode:
+                TraceFixed(trace, EstimateRule.PassThrough, inputCardinality, inputCardinality);
                 return (inputCardinality, new PlanCost { EstimatedRows = inputCardinality });
 
             case NestedLoopJoinNode nlj:
@@ -452,8 +500,8 @@ internal static class CostEstimator
                     inputCardinality, innerRows,
                     nljRightCols, nlj.RightSource.Table?.Table,
                     nljLeftCols, nljLeftTable,
-                    database, stats, nljLeftIsJoin);
-                rows = ApplyOuterJoinFloor(nlj.Kind, rows, inputCardinality);
+                    database, stats, nljLeftIsJoin, trace);
+                rows = ApplyOuterJoinFloor(nlj.Kind, rows, inputCardinality, trace);
 
                 return (rows, new PlanCost
                 {
@@ -472,6 +520,7 @@ internal static class CostEstimator
                 // Outer row drives one unique-index lookup on the inner side. A left outer join
                 // emits at least one row per outer row, which this estimate already does.
                 long rows = inputCardinality;
+                TraceFixed(trace, EstimateRule.IndexNestedLoop, inputCardinality, rows);
                 return (rows, new PlanCost
                 {
                     EstimatedRows        = rows,
@@ -517,8 +566,8 @@ internal static class CostEstimator
                     inputCardinality, rightRows,           // logical left × right
                     buildKeyCols, hj.BuildSource.Table?.Table,
                     probeKeyCols, hjLeftTable,
-                    database, stats, hjLeftIsJoin);
-                rows = ApplyOuterJoinFloor(hj.Kind, rows, inputCardinality);
+                    database, stats, hjLeftIsJoin, trace);
+                rows = ApplyOuterJoinFloor(hj.Kind, rows, inputCardinality, trace);
 
                 return (rows, new PlanCost
                 {
@@ -551,8 +600,8 @@ internal static class CostEstimator
                     inputCardinality, rightRows,
                     rightKeyCols, mj.RightSource.Table?.Table,
                     leftKeyCols, mjLeftTable,
-                    database, stats, mjLeftIsJoin);
-                rows = ApplyOuterJoinFloor(mj.Kind, rows, inputCardinality);
+                    database, stats, mjLeftIsJoin, trace);
+                rows = ApplyOuterJoinFloor(mj.Kind, rows, inputCardinality, trace);
 
                 return (rows, new PlanCost
                 {
@@ -563,29 +612,62 @@ internal static class CostEstimator
             }
 
             case DerivedTableScanNode:
+                // A function in FROM arrives with its exact count as the row-count hint.
+                TraceFixed(trace, tableRowCount is not null ? EstimateRule.FunctionRows : EstimateRule.PassThrough, inputCardinality, inputCardinality);
                 return (inputCardinality, new PlanCost { EstimatedRows = inputCardinality });
 
             case SemiJoinNode:
             {
                 // Semi-join passes at most inputCardinality rows (semi) or fewer (anti); with no
                 // membership statistics, price it like a generic filter (FilterSelectivity).
-                long rows = Math.Max(1, (long)(inputCardinality * FilterSelectivity));
+                double sel = TracedConstant(trace, EstimateRule.SemiJoin, FilterSelectivity);
+                long rows = Math.Max(1, (long)(inputCardinality * sel));
+                trace?.Complete(EstimateFormula.Product, inputCardinality, rows);
                 return (rows, new PlanCost { EstimatedRows = rows });
             }
 
             default:
+                TraceFixed(trace, EstimateRule.PassThrough, inputCardinality, inputCardinality);
                 return (inputCardinality, new PlanCost { EstimatedRows = inputCardinality });
         }
+    }
+
+    /// <summary>
+    /// A fixed per-node constant (the group-by, distinct or filter selectivity), recorded as the
+    /// one factor of the node when a trace is given.
+    /// </summary>
+    private static double TracedConstant(EstimateTrace? trace, EstimateRule rule, double constant)
+    {
+        trace?.Factors.Add(new EstimateFactor { Rule = rule, Stage = EstimateStage.Node, Selectivity = constant, Raw = constant });
+        return constant;
+    }
+
+    /// <summary>Records an estimate that no factor explains: a pass-through, a bound, a count the node knows.</summary>
+    private static void TraceFixed(EstimateTrace? trace, EstimateRule rule, double baseRows, long rows)
+    {
+        if (trace is null)
+            return;
+
+        trace.Rule = rule;
+        trace.Complete(EstimateFormula.Fixed, baseRows, rows);
     }
 
     // ─────────────────────────────────────────────────────────────────────────
     /// <summary>
     /// A left outer join emits every left row at least once, so its output can never be smaller
     /// than its left input: the inner estimate is raised to that floor. Nothing else in the cost
-    /// model changes for the kind.
+    /// model changes for the kind. The trace, when given, records the floor and the floored result.
     /// </summary>
-    private static long ApplyOuterJoinFloor(JoinKind kind, long innerEstimate, long leftRows) =>
-        kind == JoinKind.LeftOuter ? Math.Max(innerEstimate, leftRows) : innerEstimate;
+    private static long ApplyOuterJoinFloor(JoinKind kind, long innerEstimate, long leftRows, EstimateTrace? trace = null)
+    {
+        long rows = kind == JoinKind.LeftOuter ? Math.Max(innerEstimate, leftRows) : innerEstimate;
+        if (trace is not null && kind == JoinKind.LeftOuter)
+        {
+            trace.Floor = leftRows;
+            trace.Estimate = rows;
+        }
+        return rows;
+    }
 
     // ─────────────────────────────────────────────────────────────────────────
     // Join step cost
@@ -631,7 +713,14 @@ internal static class CostEstimator
     /// join solves to between 14 and 22: a probe into order_items (57,273 rows, 2.4 for each key)
     /// beat the hash join at 1,915 left rows (33 ms against 40 ms) and lost at 3,869 (55 ms against
     /// 46 ms); one into shipments (20,410 rows, 0.85 for each key) lost already at 1,915 (21 ms
-    /// against 16 ms).
+    /// against 16 ms). Each row the probe returns costs one more unit, as the fetch of a unique
+    /// probe's row does. The rows a bounded scan returns are not priced at the two reads the leaf
+    /// model charges a range scan for each row (the index entry and the row fetch): measured on the
+    /// Join Order Benchmark at scale 0.003, that price moved eight plans away from one probe of a
+    /// popular key toward many probes of small keys and small hash builds, cut their rows read by
+    /// up to a third, and made every one of them two to three times slower, because one bounded
+    /// scan that returns a thousand rows costs far less time than a thousand units of this model
+    /// say, while each extra probe pays its own round trip.
     /// </summary>
     internal const double RangeProbeWeight = 16.0;
 
@@ -656,16 +745,22 @@ internal static class CostEstimator
     /// of a hit in the join's memo, which pairs the row with rows already in memory as a hash probe
     /// does; plus, for each distinct key of the left input, one probe and the rows it returns. The
     /// probe is a point read (<see cref="UniqueProbeWeight"/>) or a bounded scan
-    /// (<see cref="RangeProbeWeight"/>), and each row it returns costs one row fetch. The memo
+    /// (<see cref="RangeProbeWeight"/>), and each row it returns costs one row fetch. The distinct
+    /// keys are <see cref="ExpectedDistinctKeys"/> of the left rows that hold a key: the rows of the
+    /// key's table in the left input (<see cref="IndexLookupProfile.LeftKeyRows"/>, which the
+    /// join-order search bounds so that rows a later join multiplied do not probe again), times the
+    /// column's non-NULL share (<see cref="IndexLookupProfile.LeftNonNullFraction"/>: a left row whose
+    /// key is NULL probes nothing). The memo
     /// (<see cref="IndexNestedLoopJoinOperator.ProbeMemoMaxRows"/>) holds the rows of the probed
     /// keys; when they would not fit, a repeated key probes again, so every left row is a probe.
-    /// A left row whose key is NULL probes nothing (<see cref="IndexLookupProfile.LeftNonNullFraction"/>).
     /// </summary>
     internal static double IndexLookupJoinStepCost(double leftRows, IndexLookupProfile probe)
     {
         double matches = Math.Max(1.0, probe.MatchesPerProbe);
-        double keyedRows = leftRows * Math.Clamp(probe.LeftNonNullFraction, 0.0, 1.0);
-        double probes = Math.Min(keyedRows, probe.LeftKeyDistinct);
+        double nonNull = Math.Clamp(probe.LeftNonNullFraction, 0.0, 1.0);
+        double keyedRows = leftRows * nonNull;
+        double keyRows = double.IsPositiveInfinity(probe.LeftKeyRows) ? keyedRows : Math.Min(keyedRows, probe.LeftKeyRows * nonNull);
+        double probes = ExpectedDistinctKeys(keyRows, probe.LeftKeyDistinct, probe.LeftTableRows);
 
         if (probes * matches > IndexNestedLoopJoinOperator.ProbeMemoMaxRows)
             probes = keyedRows;
@@ -675,16 +770,46 @@ internal static class CostEstimator
     }
 
     /// <summary>
+    /// The distinct keys expected among <paramref name="rows"/> rows of a table of
+    /// <paramref name="tableRows"/> rows whose key column has <paramref name="distinct"/> values:
+    /// <c>distinct · (1 − (1 − rows / tableRows)^(tableRows / distinct))</c>, the count of values
+    /// that a sample of the rows reaches when the rows of one value are spread over the table
+    /// (the same estimate PostgreSQL applies to a grouped column under a restriction). It is at
+    /// most <c>min(rows, distinct)</c>, the bound the step cost used before: that bound counts
+    /// every left row as a new key until the column runs out of them, so a cast table joined for
+    /// a few hundred movies probed one person for each of its thousands of rows, while its people
+    /// repeat and the memo answers the repeats. Without a table row count the bound stands, and
+    /// without a distinct count every row is a key. The estimate still assumes that the rows of
+    /// one key are spread evenly: a column whose popular keys concentrate in the rows a filter
+    /// keeps repeats more than it says.
+    /// </summary>
+    internal static double ExpectedDistinctKeys(double rows, double distinct, double tableRows)
+    {
+        if (rows <= 0 || double.IsPositiveInfinity(distinct))
+            return Math.Max(0.0, rows);
+
+        if (!(tableRows > distinct) || double.IsPositiveInfinity(tableRows))
+            return Math.Min(rows, distinct);
+
+        if (rows >= tableRows)
+            return distinct;
+
+        return distinct * (1.0 - Math.Pow(1.0 - rows / tableRows, tableRows / distinct));
+    }
+
+    /// <summary>
     /// The <see cref="IndexLookupProfile"/> of a lookup into <paramref name="rightTable"/> through
     /// <paramref name="index"/> on <paramref name="rightColumn"/>, driven by
     /// <paramref name="leftColumn"/> of <paramref name="leftTable"/>. A unique index returns one row
     /// for each probe; a non-unique one returns the table's rows over the column's distinct count,
-    /// or one row when that count is unknown. The distinct keys of the left input are the distinct
-    /// count of the left column in its table (the table's rows when the column is a unique key),
-    /// unbounded when the column's table or its count is unknown. The left table is the table of
-    /// the column, not of the whole left input: a join before this step can only reduce the
-    /// distinct values the column still has, and the join-order search applies that reduction when
-    /// it prices the step (<see cref="JoinEnumerator"/>). When the left column's values are known
+    /// or one row when that count is unknown. The keys of the left input are described by the
+    /// distinct count of the left column in its table (the table's rows when the column is a unique
+    /// key) and by the table's row count, from which the step cost estimates the distinct keys among
+    /// the rows a step has (<see cref="ExpectedDistinctKeys"/>); both are unbounded when the
+    /// column's table or its count is unknown. The left table is the table of the column, not of
+    /// the whole left input: a join before this step can only reduce the rows the column's table
+    /// still has, and the join-order search applies that reduction when it prices the step
+    /// (<see cref="JoinEnumerator"/>). When the left column's values are known
     /// (<paramref name="leftKeys"/>, read at plan time by <see cref="PlanTimeLeafLookup"/>), a
     /// non-unique probe returns the mean of those keys' shares of the right column, from its
     /// histogram, and the distinct keys are the known keys.
@@ -718,9 +843,11 @@ internal static class CostEstimator
         }
 
         double leftDistinct = double.PositiveInfinity;
+        double leftTableRows = double.PositiveInfinity;
         double leftNonNull = 1.0;
         if (leftKeys is { Count: > 0 })
         {
+            // The keys are known one by one, so the distinct count is exact and needs no sampling estimate.
             leftDistinct = leftKeys.Count;
         }
         else if (leftTable is not null)
@@ -728,12 +855,15 @@ internal static class CostEstimator
             long leftRows = stats?.GetRowCountEstimate(database, leftTable) ?? DefaultTableRowCount;
             long? distinct = CardinalityEstimator.EstimateKeyDistinctCount(leftTable, [leftColumn], leftRows, database, stats);
             if (distinct is > 0)
+            {
                 leftDistinct = distinct.Value;
+                leftTableRows = Math.Max(leftRows, distinct.Value);
+            }
 
             leftNonNull = CardinalityEstimator.NonNullFraction(leftTable, [leftColumn], database, stats);
         }
 
-        return new IndexLookupProfile(unique, matches, leftDistinct, leftNonNull);
+        return new IndexLookupProfile(unique, matches, leftDistinct, leftNonNull, leftTableRows);
     }
 
     /// <summary>
@@ -971,14 +1101,38 @@ internal static class CostEstimator
     // Helpers
     // ─────────────────────────────────────────────────────────────────────────
 
+    /// <summary>
+    /// The rows an index range scan returns: an equality prefix through the key or column
+    /// distinct counts, a range column through its histogram or its min/max, fixed constants
+    /// without statistics. <paramref name="trace"/>, when given, receives each of those factors
+    /// and the formula. The equality forms divide the table rows by the distinct count, and the
+    /// trace marks those factors as divided, because the product by the inverse differs in the
+    /// last bit and the truncation to whole rows can see it.
+    /// </summary>
     internal static long EstimateRangeScanRows(
         IndexRangeScanNode node,
         long tableRowCount,
         CamusDBOptions options,
         StatisticsManager? stats = null,
         DatabaseDescriptor? database = null,
-        TableDescriptor? table = null)
+        TableDescriptor? table = null,
+        EstimateTrace? trace = null)
     {
+        long rows = EstimateRangeScanRowsCore(node, tableRowCount, stats, database, table, trace, out EstimateFormula formula);
+        trace?.Complete(formula, tableRowCount, rows);
+        return rows;
+    }
+
+    private static long EstimateRangeScanRowsCore(
+        IndexRangeScanNode node,
+        long tableRowCount,
+        StatisticsManager? stats,
+        DatabaseDescriptor? database,
+        TableDescriptor? table,
+        EstimateTrace? trace,
+        out EstimateFormula formula)
+    {
+        formula = EstimateFormula.Product;
         bool hasFrom = node.FromBound is not null;
         bool hasTo   = node.ToBound   is not null;
 
@@ -1019,14 +1173,14 @@ internal static class CostEstimator
                 {
                     long? keyNdv = stats.GetKeyNdv(database, table, eqCols);
                     if (keyNdv is { } kn && kn > 0)
-                        return Math.Max(1, (long)(tableRowCount / (double)kn));
+                        return DividedRows(tableRowCount, kn, EstimateRule.IndexEqualityKeyNdv, string.Join(",", eqCols), eqCols.Length, trace);
                 }
 
                 if (eqCols.Length == 1)
                 {
                     long? colNdv = stats.GetColumnNdv(database, table, eqCols[0]);
                     if (colNdv is { } cn && cn > 0)
-                        return Math.Max(1, (long)(tableRowCount / (double)cn));
+                        return DividedRows(tableRowCount, cn, EstimateRule.IndexEqualityNdv, eqCols[0], 1, trace);
                 }
                 else
                 {
@@ -1039,7 +1193,18 @@ internal static class CostEstimator
                         if (colNdv is { } cn && cn > 0) { sel /= cn; hasSel = true; }
                     }
                     if (hasSel)
+                    {
+                        trace?.Factors.Add(new EstimateFactor
+                        {
+                            Rule = EstimateRule.IndexEqualityNdvProduct,
+                            Stage = EstimateStage.Index,
+                            Column = string.Join(",", eqCols),
+                            Selectivity = sel,
+                            Raw = sel,
+                            Values = eqCols.Length,
+                        });
                         return Math.Max(1, (long)(tableRowCount * sel));
+                    }
                 }
                 // Fall through to general path when no NDV stats are available.
             }
@@ -1057,17 +1222,24 @@ internal static class CostEstimator
             if (equalityPrefixLen > 0 && rangeColIdx < node.Index.Columns.Length)
             {
                 string[] prefixCols = node.Index.Columns[..equalityPrefixLen];
+                long? prefixNdv = null;
                 if (equalityPrefixLen == 1)
                 {
                     long? colNdv = stats.GetColumnNdv(database, table, prefixCols[0]);
                     if (colNdv is { } ndv && ndv > 0)
+                    {
                         prefixSel = 1.0 / ndv;
+                        prefixNdv = ndv;
+                    }
                 }
                 else
                 {
                     long? keyNdv = stats.GetKeyNdv(database, table, prefixCols);
                     if (keyNdv is { } ndv && ndv > 0)
+                    {
                         prefixSel = 1.0 / ndv;
+                        prefixNdv = ndv;
+                    }
                     else
                     {
                         // Independence fallback: multiply per-column NDV inverses.
@@ -1078,6 +1250,20 @@ internal static class CostEstimator
                                 prefixSel /= pn;
                         }
                     }
+                }
+
+                if (prefixSel < 1.0)
+                {
+                    trace?.Factors.Add(new EstimateFactor
+                    {
+                        Rule = EstimateRule.IndexPrefixNdv,
+                        Stage = EstimateStage.Index,
+                        Column = string.Join(",", prefixCols),
+                        Selectivity = prefixSel,
+                        Raw = prefixSel,
+                        Ndv = prefixNdv,
+                        Values = prefixCols.Length,
+                    });
                 }
             }
 
@@ -1099,7 +1285,7 @@ internal static class CostEstimator
                     // composite inclusivity flags apply to it directly; an inclusive lower
                     // bound keeps the equality mass at the bound value.
                     double histSel = CardinalityEstimator.EstimateRangeFraction(
-                        fb, node.FromInclusive, tb, node.ToInclusive, rangeCol, database, table, stats);
+                        fb, node.FromInclusive, tb, node.ToInclusive, rangeCol, database, table, stats, trace, EstimateStage.Index);
                     return Math.Max(1, (long)(tableRowCount * prefixSel * histSel));
                 }
 
@@ -1109,7 +1295,17 @@ internal static class CostEstimator
                 {
                     double? realSel = ComputeSelectivityFromMinMax(mm.Min, mm.Max, rangeFrom, rangeTo);
                     if (realSel.HasValue)
+                    {
+                        trace?.Factors.Add(new EstimateFactor
+                        {
+                            Rule = EstimateRule.IndexRangeMinMax,
+                            Stage = EstimateStage.Index,
+                            Column = rangeCol,
+                            Selectivity = realSel.Value,
+                            Raw = realSel.Value,
+                        });
                         return Math.Max(1, (long)(tableRowCount * prefixSel * realSel.Value));
+                    }
                 }
             }
 
@@ -1119,6 +1315,13 @@ internal static class CostEstimator
                 double fallbackRangeSel = (hasFrom && hasTo) ? BothBoundsSelectivity
                                         : (hasFrom || hasTo) ? OneBoundSelectivity
                                         : 1.0;
+                trace?.Factors.Add(new EstimateFactor
+                {
+                    Rule = EstimateRule.IndexRangeFixed,
+                    Stage = EstimateStage.Index,
+                    Selectivity = fallbackRangeSel,
+                    Raw = fallbackRangeSel,
+                });
                 return Math.Max(1, (long)(tableRowCount * prefixSel * fallbackRangeSel));
             }
         }
@@ -1131,7 +1334,38 @@ internal static class CostEstimator
                            : (hasFrom || hasTo) ? OneBoundSelectivity
                            : 1.0;
 
+        formula = EstimateFormula.CeilingProduct;
+        trace?.Factors.Add(new EstimateFactor
+        {
+            Rule = EstimateRule.IndexRangeFixed,
+            Stage = EstimateStage.Index,
+            Selectivity = selectivity,
+            Raw = selectivity,
+        });
         return Math.Max(1, (long)Math.Ceiling(tableRowCount * selectivity));
+    }
+
+    /// <summary>
+    /// <c>max(1, trunc(rows / ndv))</c>, the index equality estimate, which divides by the count
+    /// rather than multiplying by its inverse: the two differ in the last bit and the truncation
+    /// can see it. The trace marks the factor as divided for that reason.
+    /// </summary>
+    private static long DividedRows(long tableRowCount, long ndv, EstimateRule rule, string column, int columns, EstimateTrace? trace)
+    {
+        long rows = Math.Max(1, (long)(tableRowCount / (double)ndv));
+
+        trace?.Factors.Add(new EstimateFactor
+        {
+            Rule = rule,
+            Stage = EstimateStage.Index,
+            Column = column,
+            Selectivity = 1.0 / ndv,
+            Raw = 1.0 / ndv,
+            Divided = true,
+            Ndv = ndv,
+            Values = columns,
+        });
+        return rows;
     }
 
     // Multiplies two non-negative row counts, saturating at long.MaxValue instead of wrapping.

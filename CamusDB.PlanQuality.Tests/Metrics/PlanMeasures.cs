@@ -83,6 +83,8 @@ internal static partial class PlanMeasures
             if (row.Row.TryGetValue("actual_time_ms", out ColumnValue? time) && time.Type == ColumnType.Float64)
                 executionMs = Math.Max(executionMs, time.FloatValue);
 
+            string trace = Text(row, "estimate_trace");
+
             nodes.Add(new PlanNodeMeasure(
                 node,
                 detail,
@@ -90,7 +92,8 @@ internal static partial class PlanMeasures
                 NullableLong(row, "actual_rows"),
                 NullableLong(row, "rows_read") ?? 0,
                 NullableLong(row, "kv_lookups") ?? 0,
-                NullableLong(row, "kv_scan_entries") ?? 0));
+                NullableLong(row, "kv_scan_entries") ?? 0,
+                trace.Length == 0 ? null : trace));
         }
 
         long work = 0;

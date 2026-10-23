@@ -1,4 +1,3 @@
-
 /**
  * This file is part of CamusDB
  *
@@ -8,6 +7,7 @@
 
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
+using CamusDB.Core.CommandsExecutor.Models.Plans;
 using CamusDB.Core.CommandsExecutor.Models.Predicates;
 using CamusDB.Core.CommandsExecutor.Controllers.DML;
 using CamusDB.Core.SQLParser;
@@ -30,6 +30,12 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 ///
 /// NDV takes priority over histogram for equality predicates: NDV gives a tighter 1/NDV estimate
 /// without needing a histogram bucket lookup. For range predicates the histogram is always used.
+///
+/// <para><b>Tracing.</b> Every entry point takes an optional <see cref="EstimateTrace"/>. When it
+/// is given, each factor the estimate multiplied is recorded as an <see cref="EstimateFactor"/>
+/// with its rule (<see cref="EstimateRule"/>) and the inputs the rule read; when it is null, the
+/// shipped default, nothing is recorded or allocated. Only <c>EXPLAIN (ANALYZE)</c> passes a
+/// trace, and the plan-quality harness reads it to attribute each estimate error to its rule.</para>
 /// </summary>
 internal static class CardinalityEstimator
 {
@@ -46,7 +52,8 @@ internal static class CardinalityEstimator
         NodeAst predicate,
         DatabaseDescriptor database,
         TableDescriptor table,
-        StatisticsManager stats)
+        StatisticsManager stats,
+        EstimateTrace? trace = null)
     {
         // parameters: null — parameterized predicates (WHERE year > @p) leave the constant
         // unresolved; TryGetBound returns null and range operators fall back to FallbackSelectivity.
@@ -64,15 +71,25 @@ internal static class CardinalityEstimator
             sel = EstimatePredicateSelectivity(
                 analysis.IndexableComparisons,
                 analysis.InListComparisons,
-                database, table, stats);
+                database, table, stats, trace);
             priced = true;
         }
 
-        sel *= PatternConjunctsSelectivity(analysis.ResidualConjuncts, database, table, stats, out int unrecognized);
+        sel *= PatternConjunctsSelectivity(analysis.ResidualConjuncts, database, table, stats, out int unrecognized, trace);
         if (unrecognized < analysis.ResidualConjuncts.Count)
             priced = true;
 
-        return priced ? Clamp(sel) : FallbackSelectivity;
+        if (priced)
+            return Clamp(sel);
+
+        trace?.Factors.Add(new EstimateFactor
+        {
+            Rule = EstimateRule.FilterFallback,
+            Stage = EstimateStage.Comparison,
+            Selectivity = FallbackSelectivity,
+            Raw = FallbackSelectivity,
+        });
+        return FallbackSelectivity;
     }
 
     /// <summary>
@@ -91,7 +108,8 @@ internal static class CardinalityEstimator
         DatabaseDescriptor database,
         TableDescriptor table,
         StatisticsManager stats,
-        out int unrecognized)
+        out int unrecognized,
+        EstimateTrace? trace = null)
     {
         unrecognized = 0;
         Dictionary<string, List<AnalyzedPattern>>? byColumn = null;
@@ -120,7 +138,7 @@ internal static class CardinalityEstimator
         {
             if (group.Count == 1)
             {
-                sel *= PatternSelectivity(group[0], database, table, stats);
+                sel *= PatternSelectivity(group[0], database, table, stats, trace);
                 continue;
             }
 
@@ -128,11 +146,35 @@ internal static class CardinalityEstimator
             if (hist is null || hist.TotalRows <= 0 || hist.Buckets.Count == 0)
             {
                 foreach (AnalyzedPattern pattern in group)
-                    sel *= pattern.Negated ? 1.0 - FallbackSelectivity : FallbackSelectivity;
+                {
+                    double value = pattern.Negated ? 1.0 - FallbackSelectivity : FallbackSelectivity;
+                    sel *= value;
+                    trace?.Factors.Add(new EstimateFactor
+                    {
+                        Rule = EstimateRule.LikeFallback,
+                        Stage = EstimateStage.Pattern,
+                        Column = column,
+                        Selectivity = value,
+                        Raw = FallbackSelectivity,
+                        Negated = pattern.Negated,
+                    });
+                }
                 continue;
             }
 
-            sel *= JointPatternFraction(hist, group);
+            double joint = JointPatternFraction(hist, group);
+            sel *= joint;
+            trace?.Factors.Add(new EstimateFactor
+            {
+                Rule = EstimateRule.LikeJoint,
+                Stage = EstimateStage.Pattern,
+                Column = column,
+                Selectivity = joint,
+                Raw = joint,
+                Rows = hist.TotalRows,
+                Buckets = hist.Buckets.Count,
+                Values = group.Count,
+            });
         }
 
         return Clamp(sel);
@@ -203,36 +245,65 @@ internal static class CardinalityEstimator
         AnalyzedPattern pattern,
         DatabaseDescriptor database,
         TableDescriptor table,
-        StatisticsManager stats)
+        StatisticsManager stats,
+        EstimateTrace? trace = null)
     {
         string columnName = StripAliasPrefix(pattern.ColumnName);
         ColumnHistogram? hist = stats.GetColumnHistogram(database, table, columnName);
 
         double sel;
+        EstimateRule rule;
         if (hist is null || hist.TotalRows <= 0 || hist.Buckets.Count == 0)
+        {
             sel = FallbackSelectivity;
+            rule = EstimateRule.LikeFallback;
+        }
         else if (pattern.Patterns.Count == 1)
-            sel = SinglePatternFraction(hist, stats.GetColumnNdv(database, table, columnName), pattern.Patterns[0], pattern.IgnoreCase);
+        {
+            sel = SinglePatternFraction(hist, stats.GetColumnNdv(database, table, columnName), pattern.Patterns[0], pattern.IgnoreCase, out rule);
+        }
         else
+        {
             sel = MatchingBoundsFraction(hist, pattern.Patterns, pattern.IgnoreCase);
+            rule = EstimateRule.LikeBounds;
+        }
 
         sel = Clamp(sel);
-        return pattern.Negated ? 1.0 - sel : sel;
+        double result = pattern.Negated ? 1.0 - sel : sel;
+
+        trace?.Factors.Add(new EstimateFactor
+        {
+            Rule = rule,
+            Stage = EstimateStage.Pattern,
+            Column = columnName,
+            Selectivity = result,
+            Raw = sel,
+            Negated = pattern.Negated,
+            Rows = hist?.TotalRows,
+            Buckets = hist?.Buckets.Count,
+            Values = pattern.Patterns.Count,
+        });
+
+        return result;
     }
 
-    private static double SinglePatternFraction(ColumnHistogram hist, long? ndv, string pattern, bool ignoreCase)
+    private static double SinglePatternFraction(ColumnHistogram hist, long? ndv, string pattern, bool ignoreCase, out EstimateRule rule)
     {
         // Only '%' is a wildcard; '_' is literal (the matcher's semantics).
         int wildcard = pattern.IndexOf('%');
 
         if (wildcard < 0 && !ignoreCase)
         {
+            rule = EstimateRule.LikeEquality;
             ScalarBound value = new() { Type = ColumnType.String, StrValue = pattern };
             return EqualitySelectivity(value, hist, ndv, EqualityDistribution(hist, ndv));
         }
 
         if (wildcard <= 0 || ignoreCase)
+        {
+            rule = EstimateRule.LikeBounds;
             return MatchingBoundsFraction(hist, [pattern], ignoreCase);
+        }
 
         string prefix = pattern[..wildcard];
         ScalarBound lo = new() { Type = ColumnType.String, StrValue = prefix };
@@ -240,8 +311,12 @@ internal static class CardinalityEstimator
         double range = hist.RangeFraction(lo, loInclusive: true, hi, hiInclusive: false);
 
         if (wildcard == pattern.Length - 1)
+        {
+            rule = EstimateRule.LikePrefix;
             return range;
+        }
 
+        rule = EstimateRule.LikePrefixScaled;
         return range * MatchingBoundsShare(hist, pattern, lo, hi);
     }
 
@@ -335,13 +410,14 @@ internal static class CardinalityEstimator
         IReadOnlyList<AnalyzedInList> inLists,
         DatabaseDescriptor database,
         TableDescriptor table,
-        StatisticsManager stats)
+        StatisticsManager stats,
+        EstimateTrace? trace = null)
     {
         double sel = 1.0;
 
         // Try composite-key NDV for correlated equality columns before independence loop.
         HashSet<string>? compositeHandled = TryApplyCompositeKeyNdv(
-            comparisons, database, table, stats, ref sel);
+            comparisons, database, table, stats, ref sel, trace);
 
         // Group same-column range comparisons to avoid double-counting. A two-sided range
         // "x > lo AND x < hi" is two AnalyzedComparisons on the same column; multiplying
@@ -407,7 +483,7 @@ internal static class CardinalityEstimator
 
                 sel *= EstimateRangeFraction(
                     kv.Value.lo, kv.Value.loInc, kv.Value.hi, kv.Value.hiInc,
-                    kv.Key, database, table, stats);
+                    kv.Key, database, table, stats, trace);
                 rangePairHandled ??= new(StringComparer.OrdinalIgnoreCase);
                 rangePairHandled.Add(kv.Key);
             }
@@ -421,11 +497,11 @@ internal static class CardinalityEstimator
             // Skip range comparisons already merged into a two-sided range fraction above.
             if ((c.Operator is ">" or ">=" or "<" or "<=") && rangePairHandled?.Contains(c.ColumnName) == true)
                 continue;
-            sel *= SingleComparisonSelectivity(c.Operator, c.Constant, c.ColumnName, database, table, stats);
+            sel *= SingleComparisonSelectivity(c.Operator, c.Constant, c.ColumnName, database, table, stats, trace);
         }
 
         foreach (AnalyzedInList inList in inLists)
-            sel *= InListSelectivity(inList, database, table, stats);
+            sel *= InListSelectivity(inList, database, table, stats, trace);
 
         return Clamp(sel);
     }
@@ -446,7 +522,8 @@ internal static class CardinalityEstimator
         DatabaseDescriptor database,
         TableDescriptor table,
         StatisticsManager stats,
-        ref double sel)
+        ref double sel,
+        EstimateTrace? trace)
     {
         if (table.Indexes is null) return null;
 
@@ -487,7 +564,18 @@ internal static class CardinalityEstimator
         long? keyNdv = stats.GetKeyNdv(database, table, prefixCols);
         if (keyNdv is not > 0) return null;
 
-        sel *= Math.Min(1.0, 1.0 / keyNdv.Value);
+        double value = Math.Min(1.0, 1.0 / keyNdv.Value);
+        sel *= value;
+        trace?.Factors.Add(new EstimateFactor
+        {
+            Rule = EstimateRule.CompositeKeyNdv,
+            Stage = EstimateStage.Comparison,
+            Column = string.Join(",", prefixCols),
+            Selectivity = value,
+            Raw = value,
+            Ndv = keyNdv,
+            Values = prefixCols.Length,
+        });
         return new HashSet<string>(prefixCols, StringComparer.OrdinalIgnoreCase);
     }
 
@@ -510,6 +598,8 @@ internal static class CardinalityEstimator
     /// Inclusivity-aware variant: an inclusive lower bound keeps the equality mass at
     /// <paramref name="loBound"/> and an exclusive upper bound drops the mass at
     /// <paramref name="hiBound"/> (see <see cref="ColumnHistogram.RangeFraction(ScalarBound?, bool, ScalarBound?, bool)"/>).
+    /// <paramref name="stage"/> labels the recorded factor with where the range came from: a
+    /// filter comparison, or the bounds of an index scan.
     /// </summary>
     public static double EstimateRangeFraction(
         ScalarBound? loBound,
@@ -519,14 +609,37 @@ internal static class CardinalityEstimator
         string columnName,
         DatabaseDescriptor database,
         TableDescriptor table,
-        StatisticsManager stats)
+        StatisticsManager stats,
+        EstimateTrace? trace = null,
+        EstimateStage stage = EstimateStage.Comparison)
     {
         columnName = StripAliasPrefix(columnName);
         ColumnHistogram? hist = stats.GetColumnHistogram(database, table, columnName);
         if (hist is null || hist.TotalRows == 0)
+        {
+            trace?.Factors.Add(new EstimateFactor
+            {
+                Rule = EstimateRule.RangeFallback,
+                Stage = stage,
+                Column = columnName,
+                Selectivity = FallbackSelectivity,
+                Raw = FallbackSelectivity,
+            });
             return FallbackSelectivity;
+        }
 
-        return Clamp(hist.RangeFraction(loBound, loInclusive, hiBound, hiInclusive));
+        double value = Clamp(hist.RangeFraction(loBound, loInclusive, hiBound, hiInclusive));
+        trace?.Factors.Add(new EstimateFactor
+        {
+            Rule = EstimateRule.RangeHistogram,
+            Stage = stage,
+            Column = columnName,
+            Selectivity = value,
+            Raw = value,
+            Rows = hist.TotalRows,
+            Buckets = hist.Buckets.Count,
+        });
+        return value;
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -559,6 +672,7 @@ internal static class CardinalityEstimator
     /// earlier join can repeat each of its rows. The unique-left shortcut then does not apply, and
     /// the key's distinct count (the table row count, for a unique key) enters the NDV formula.
     /// </param>
+    /// <param name="trace">Receives the formula, the inputs and the factor of this estimate, or null.</param>
     public static long EstimateJoinCardinality(
         long leftRows,
         long rightRows,
@@ -568,21 +682,45 @@ internal static class CardinalityEstimator
         TableDescriptor? leftTable,
         DatabaseDescriptor database,
         StatisticsManager? stats,
-        bool leftIsJoinResult = false)
+        bool leftIsJoinResult = false,
+        EstimateTrace? trace = null)
     {
         // A NULL key matches nothing: each side keeps the share of its rows that hold a key.
         double leftKeyed = NonNullFraction(leftTable, leftKeyColumns, database, stats);
         double rightKeyed = NonNullFraction(rightTable, rightKeyColumns, database, stats);
 
+        if (trace is not null)
+        {
+            trace.RightRows = rightRows;
+            trace.LeftKeyed = leftKeyed;
+            trace.RightKeyed = rightKeyed;
+        }
+
         // FK-aware: unique key on the right → at most 1 right match per keyed left row.
         if (rightTable is not null && rightKeyColumns.Count > 0
             && IsJoinKeyUnique(rightTable, rightKeyColumns))
-            return Math.Max(1, (long)(leftRows * leftKeyed));
+        {
+            long rows = Math.Max(1, (long)(leftRows * leftKeyed));
+            if (trace is not null)
+            {
+                trace.Factors.Add(new EstimateFactor { Rule = EstimateRule.JoinUniqueRight, Stage = EstimateStage.Join, Selectivity = leftKeyed, Raw = 1.0, Keyed = leftKeyed });
+                trace.Complete(EstimateFormula.JoinUniqueRight, leftRows, rows);
+            }
+            return rows;
+        }
 
         // FK-aware: unique key on the left → at most 1 left match per keyed right row.
         if (!leftIsJoinResult && leftTable is not null && leftKeyColumns.Count > 0
             && IsJoinKeyUnique(leftTable, leftKeyColumns))
-            return Math.Max(1, (long)(rightRows * rightKeyed));
+        {
+            long rows = Math.Max(1, (long)(rightRows * rightKeyed));
+            if (trace is not null)
+            {
+                trace.Factors.Add(new EstimateFactor { Rule = EstimateRule.JoinUniqueLeft, Stage = EstimateStage.Join, Selectivity = rightKeyed, Raw = 1.0, Keyed = rightKeyed });
+                trace.Complete(EstimateFormula.JoinUniqueLeft, leftRows, rows);
+            }
+            return rows;
+        }
 
         // NDV-based: |A ⋈ B| ≈ |A| × |B| / max(NDV_A, NDV_B).
         if (stats is not null)
@@ -602,17 +740,71 @@ internal static class CardinalityEstimator
                 && SkewedDistribution(rightTable, rightKeyColumns[0], right, database, stats) is { } rightDistribution
                 && JoinKeyDistribution.JoinSelectivity(leftDistribution, rightDistribution) is { } selectivity)
             {
-                return Math.Max(1, (long)((double)leftRows * leftKeyed * rightRows * rightKeyed * selectivity));
+                long rows = Math.Max(1, (long)((double)leftRows * leftKeyed * rightRows * rightKeyed * selectivity));
+                if (trace is not null)
+                {
+                    long skewNdv = Math.Max(left, right);
+                    trace.Factors.Add(new EstimateFactor
+                    {
+                        Rule = EstimateRule.JoinSkewPair,
+                        Stage = EstimateStage.Join,
+                        Selectivity = selectivity,
+                        Raw = selectivity,
+                        Textbook = skewNdv > 0 ? 1.0 / skewNdv : 0.0,
+                        Keyed = leftKeyed * rightKeyed,
+                        Ndv = skewNdv,
+                    });
+                    trace.Complete(EstimateFormula.JoinProduct, leftRows, rows);
+                }
+                return rows;
             }
 
             long maxNdv = Math.Max(ndvLeft ?? 0L, ndvRight ?? 0L);
             if (maxNdv > 0)
-                return Math.Max(1, (long)((double)leftRows * leftKeyed * rightRows * rightKeyed / maxNdv));
+            {
+                long rows = Math.Max(1, (long)((double)leftRows * leftKeyed * rightRows * rightKeyed / maxNdv));
+                if (trace is not null)
+                {
+                    double raw = 1.0 / maxNdv;
+                    trace.Factors.Add(new EstimateFactor
+                    {
+                        Rule = JoinKeyRule(leftTable, leftKeyColumns, rightTable, rightKeyColumns),
+                        Stage = EstimateStage.Join,
+                        Selectivity = raw,
+                        Raw = raw,
+                        Divided = true,
+                        Keyed = leftKeyed * rightKeyed,
+                        Ndv = maxNdv,
+                    });
+                    trace.Complete(EstimateFormula.JoinProduct, leftRows, rows);
+                }
+                return rows;
+            }
         }
 
         // Fallback: fixed selectivity.
-        return Math.Max(1, (long)((double)leftRows * rightRows * FallbackSelectivity));
+        long fallbackRows = Math.Max(1, (long)((double)leftRows * rightRows * FallbackSelectivity));
+        if (trace is not null)
+        {
+            // The fallback formula multiplies no non-null share.
+            trace.LeftKeyed = 1.0;
+            trace.RightKeyed = 1.0;
+            trace.Factors.Add(new EstimateFactor { Rule = EstimateRule.JoinFallback, Stage = EstimateStage.Join, Selectivity = FallbackSelectivity, Raw = FallbackSelectivity });
+            trace.Complete(EstimateFormula.JoinProduct, leftRows, fallbackRows);
+        }
+        return fallbackRows;
     }
+
+    /// <summary>
+    /// The rule of a textbook join selectivity: <see cref="EstimateRule.JoinUniqueKey"/> when one
+    /// side's key covers a unique index (its distinct count is then its row count), else
+    /// <see cref="EstimateRule.JoinTextbook"/>. Called only when a trace needs the label.
+    /// </summary>
+    private static EstimateRule JoinKeyRule(TableDescriptor? leftTable, IReadOnlyList<string> leftKeyColumns, TableDescriptor? rightTable, IReadOnlyList<string> rightKeyColumns) =>
+        (leftTable is not null && IsJoinKeyUnique(leftTable, leftKeyColumns))
+        || (rightTable is not null && IsJoinKeyUnique(rightTable, rightKeyColumns))
+            ? EstimateRule.JoinUniqueKey
+            : EstimateRule.JoinTextbook;
 
     /// <summary>
     /// Selectivity of an equi-join between two tables on the key columns of each side:
@@ -642,6 +834,7 @@ internal static class CardinalityEstimator
     /// <param name="stats">Statistics manager; may be null when no stats are loaded.</param>
     /// <param name="leftKeys">The known values of the left key column, read at plan time (<see cref="PlanTimeLeafLookup"/>), or null.</param>
     /// <param name="rightKeys">The known values of the right key column, or null.</param>
+    /// <param name="trace">Receives the one factor of this selectivity, or null.</param>
     internal static double EstimateEquiJoinSelectivity(
         TableDescriptor? leftTable,
         IReadOnlyList<string> leftKeyColumns,
@@ -652,7 +845,8 @@ internal static class CardinalityEstimator
         DatabaseDescriptor database,
         StatisticsManager? stats,
         IReadOnlyList<ColumnValue>? leftKeys = null,
-        IReadOnlyList<ColumnValue>? rightKeys = null)
+        IReadOnlyList<ColumnValue>? rightKeys = null,
+        EstimateTrace? trace = null)
     {
         // A NULL key matches nothing: the selectivity carries the share of each side's rows that
         // hold a key, because the statistics below describe the rows that hold one.
@@ -667,12 +861,16 @@ internal static class CardinalityEstimator
             if (leftKeys is { Count: > 0 } && rightTable is not null
                 && stats.GetColumnHistogram(database, rightTable, rightKeyColumns[0]) is { } rightHistogram
                 && KeyShareSelectivity(rightHistogram, leftKeys) is { } leftShare)
-                return leftShare * keyed;
+            {
+                return KnownKeysSelectivity(leftShare, keyed, leftKeys.Count, rightKeyColumns[0], trace);
+            }
 
             if (rightKeys is { Count: > 0 } && leftTable is not null
                 && stats.GetColumnHistogram(database, leftTable, leftKeyColumns[0]) is { } leftHistogram
                 && KeyShareSelectivity(leftHistogram, rightKeys) is { } rightShare)
-                return rightShare * keyed;
+            {
+                return KnownKeysSelectivity(rightShare, keyed, rightKeys.Count, leftKeyColumns[0], trace);
+            }
         }
 
         long? ndvLeft = KeyDistinctCount(leftTable, leftKeyColumns, leftTableRows, database, stats);
@@ -686,12 +884,71 @@ internal static class CardinalityEstimator
             && SkewedDistribution(rightTable, rightKeyColumns[0], right, database, stats) is { } rightDistribution
             && JoinKeyDistribution.JoinSelectivity(leftDistribution, rightDistribution) is { } selectivity)
         {
-            return selectivity * keyed;
+            double value = selectivity * keyed;
+            if (trace is not null)
+            {
+                long skewNdv = Math.Max(left, right);
+                trace.Factors.Add(new EstimateFactor
+                {
+                    Rule = EstimateRule.JoinSkewPair,
+                    Stage = EstimateStage.Join,
+                    Column = leftKeyColumns[0],
+                    Selectivity = value,
+                    Raw = selectivity,
+                    Textbook = skewNdv > 0 ? 1.0 / skewNdv : 0.0,
+                    Keyed = keyed,
+                    Ndv = skewNdv,
+                });
+            }
+            return value;
         }
 
         long maxNdv = Math.Max(ndvLeft ?? 0L, ndvRight ?? 0L);
 
-        return (maxNdv > 0 ? 1.0 / maxNdv : FallbackSelectivity) * keyed;
+        if (maxNdv > 0)
+        {
+            double raw = 1.0 / maxNdv;
+            double value = raw * keyed;
+            trace?.Factors.Add(new EstimateFactor
+            {
+                Rule = JoinKeyRule(leftTable, leftKeyColumns, rightTable, rightKeyColumns),
+                Stage = EstimateStage.Join,
+                Column = leftKeyColumns.Count == 1 ? leftKeyColumns[0] : string.Join(",", leftKeyColumns),
+                Selectivity = value,
+                Raw = raw,
+                Keyed = keyed,
+                Ndv = maxNdv,
+            });
+            return value;
+        }
+
+        double fallbackValue = FallbackSelectivity * keyed;
+        trace?.Factors.Add(new EstimateFactor
+        {
+            Rule = EstimateRule.JoinFallback,
+            Stage = EstimateStage.Join,
+            Selectivity = fallbackValue,
+            Raw = FallbackSelectivity,
+            Keyed = keyed,
+        });
+        return fallbackValue;
+    }
+
+    /// <summary>The selectivity of a join through keys known at plan time, recorded as one factor.</summary>
+    private static double KnownKeysSelectivity(double share, double keyed, int keys, string column, EstimateTrace? trace)
+    {
+        double value = share * keyed;
+        trace?.Factors.Add(new EstimateFactor
+        {
+            Rule = EstimateRule.JoinKnownKeys,
+            Stage = EstimateStage.Join,
+            Column = column,
+            Selectivity = value,
+            Raw = share,
+            Keyed = keyed,
+            Values = keys,
+        });
+        return value;
     }
 
     /// <summary>
@@ -896,7 +1153,9 @@ internal static class CardinalityEstimator
     ///   <item>Non-unique without stats: conservative heuristic
     ///     (<see cref="FallbackSelectivity"/> per value × trc).</item>
     /// </list>
-    /// Always returns at least 1 for a non-empty list.
+    /// Always returns at least 1 for a non-empty list. When given, <paramref name="trace"/>
+    /// receives the whole estimate of the scan: its formula, the table rows and the one list factor
+    /// (the capped sum; the per-value equalities inside the list are not recorded one by one).
     /// </summary>
     internal static long EstimateInListRows(
         string columnName,
@@ -905,17 +1164,28 @@ internal static class CardinalityEstimator
         long trc,
         DatabaseDescriptor database,
         TableDescriptor? table,
-        StatisticsManager? stats)
+        StatisticsManager? stats,
+        EstimateTrace? trace = null)
     {
         int n = values.Count;
         if (n == 0) return 0L;
 
+        string colKey = StripAliasPrefix(columnName);
+
         if (isUnique)
-            return Math.Min(n, trc);
+        {
+            long uniqueRows = Math.Min(n, trc);
+            if (trace is not null)
+            {
+                double share = trc > 0 ? (double)uniqueRows / trc : 1.0;
+                trace.Factors.Add(new EstimateFactor { Rule = EstimateRule.InListUnique, Stage = EstimateStage.Index, Column = colKey, Selectivity = share, Raw = share, Values = n });
+                trace.Complete(EstimateFormula.Fixed, trc, uniqueRows);
+            }
+            return uniqueRows;
+        }
 
         if (stats is not null && table is not null)
         {
-            string colKey = StripAliasPrefix(columnName);
             ColumnHistogram? hist = stats.GetColumnHistogram(database, table, colKey);
             long? ndv = stats.GetColumnNdv(database, table, colKey);
             JoinKeyDistribution? distribution = EqualityDistribution(hist, ndv);
@@ -924,12 +1194,36 @@ internal static class CardinalityEstimator
             foreach (ColumnValue val in values)
                 total += EqualitySelectivity(TryGetBound(val), hist, ndv, distribution);
 
-            return Math.Max(1L, (long)(trc * Math.Min(1.0, total)));
+            double sel = Math.Min(1.0, total);
+            long rows = Math.Max(1L, (long)(trc * sel));
+            if (trace is not null)
+            {
+                trace.Factors.Add(new EstimateFactor
+                {
+                    Rule = EstimateRule.InList,
+                    Stage = EstimateStage.Index,
+                    Column = colKey,
+                    Selectivity = sel,
+                    Raw = sel,
+                    Ndv = ndv,
+                    Rows = hist?.TotalRows,
+                    Buckets = hist?.Buckets.Count,
+                    Values = n,
+                });
+                trace.Complete(EstimateFormula.Product, trc, rows);
+            }
+            return rows;
         }
 
         // Conservative no-stats heuristic: FallbackSelectivity per value.
         double heuristicSel = Math.Min(1.0, n * FallbackSelectivity);
-        return Math.Max(1L, (long)(trc * heuristicSel));
+        long heuristicRows = Math.Max(1L, (long)(trc * heuristicSel));
+        if (trace is not null)
+        {
+            trace.Factors.Add(new EstimateFactor { Rule = EstimateRule.InListFallback, Stage = EstimateStage.Index, Column = colKey, Selectivity = heuristicSel, Raw = heuristicSel, Values = n });
+            trace.Complete(EstimateFormula.Product, trc, heuristicRows);
+        }
+        return heuristicRows;
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -942,7 +1236,8 @@ internal static class CardinalityEstimator
         string columnName,
         DatabaseDescriptor database,
         TableDescriptor table,
-        StatisticsManager stats)
+        StatisticsManager stats,
+        EstimateTrace? trace)
     {
         columnName = StripAliasPrefix(columnName);
         ColumnHistogram? hist = stats.GetColumnHistogram(database, table, columnName);
@@ -952,29 +1247,75 @@ internal static class CardinalityEstimator
         switch (op)
         {
             case "=":
-                return EqualitySelectivity(bound, hist, ndv, EqualityDistribution(hist, ndv));
+                return EqualitySelectivity(bound, hist, ndv, EqualityDistribution(hist, ndv), trace, columnName);
 
             case "!=":
-                return Clamp(1.0 - EqualitySelectivity(bound, hist, ndv, EqualityDistribution(hist, ndv)));
+            {
+                double equality = EqualitySelectivity(bound, hist, ndv, EqualityDistribution(hist, ndv));
+                double value = Clamp(1.0 - equality);
+                trace?.Factors.Add(new EstimateFactor
+                {
+                    Rule = EstimateRule.NotEqual,
+                    Stage = EstimateStage.Comparison,
+                    Column = columnName,
+                    Selectivity = value,
+                    Raw = value,
+                    Alternative = equality,
+                    Ndv = ndv,
+                    Rows = hist?.TotalRows,
+                });
+                return value;
+            }
 
             case ">":
             case ">=":
                 // ">=" carries the equality mass at the bound; on a skewed low-NDV column
                 // that mass can be most of the table, so dropping it flips scan decisions.
                 if (bound is not null && hist is not null && hist.TotalRows > 0)
-                    return Clamp(hist.RangeFraction(bound, loInclusive: op == ">=", null, hiInclusive: true));
-                return FallbackSelectivity;
+                    return RangeSelectivity(hist, hist.RangeFraction(bound, loInclusive: op == ">=", null, hiInclusive: true), columnName, trace);
+                return RangeFallback(columnName, trace);
 
             case "<":
             case "<=":
                 // "<" must exclude the equality mass at the bound (cumulative is ≤-based).
                 if (bound is not null && hist is not null && hist.TotalRows > 0)
-                    return Clamp(hist.RangeFraction(null, loInclusive: false, bound, hiInclusive: op == "<="));
-                return FallbackSelectivity;
+                    return RangeSelectivity(hist, hist.RangeFraction(null, loInclusive: false, bound, hiInclusive: op == "<="), columnName, trace);
+                return RangeFallback(columnName, trace);
 
             default:
-                return FallbackSelectivity;
+                return RangeFallback(columnName, trace);
         }
+    }
+
+    /// <summary>A one-sided range read from the histogram, clamped and recorded.</summary>
+    private static double RangeSelectivity(ColumnHistogram hist, double fraction, string columnName, EstimateTrace? trace)
+    {
+        double value = Clamp(fraction);
+        trace?.Factors.Add(new EstimateFactor
+        {
+            Rule = EstimateRule.RangeHistogram,
+            Stage = EstimateStage.Comparison,
+            Column = columnName,
+            Selectivity = value,
+            Raw = value,
+            Rows = hist.TotalRows,
+            Buckets = hist.Buckets.Count,
+        });
+        return value;
+    }
+
+    /// <summary>The fallback selectivity of a comparison without a histogram or a constant, recorded.</summary>
+    private static double RangeFallback(string columnName, EstimateTrace? trace)
+    {
+        trace?.Factors.Add(new EstimateFactor
+        {
+            Rule = EstimateRule.RangeFallback,
+            Stage = EstimateStage.Comparison,
+            Column = columnName,
+            Selectivity = FallbackSelectivity,
+            Raw = FallbackSelectivity,
+        });
+        return FallbackSelectivity;
     }
 
     /// <summary>
@@ -985,6 +1326,10 @@ internal static class CardinalityEstimator
     /// </summary>
     private static JoinKeyDistribution? EqualityDistribution(ColumnHistogram? hist, long? ndv) =>
         hist is not null && ndv is > 0 ? JoinKeyDistribution.FromHistogram(hist, ndv.Value) : null;
+
+    /// <summary>The unrecorded equality selectivity; see the full overload.</summary>
+    private static double EqualitySelectivity(ScalarBound? bound, ColumnHistogram? hist, long? ndv, JoinKeyDistribution? distribution) =>
+        EqualitySelectivity(bound, hist, ndv, distribution, trace: null, column: null);
 
     /// <summary>
     /// Estimates selectivity for <c>col = constant</c>. A heavy value, one of the most common
@@ -999,51 +1344,110 @@ internal static class CardinalityEstimator
     /// arrived after the statistics; with no heavy value that is <c>1 / NDV</c>. Without a
     /// distinct count the containing bucket's density stands in; without a histogram or a count,
     /// <see cref="FallbackSelectivity"/>.
+    ///
+    /// <para>For a trace, the branch the estimator did not take is computed too and recorded as
+    /// the factor's alternative (the histogram share next to a distinct-count estimate, and the
+    /// reverse); without a trace the histogram is read no more than it was.</para>
     /// </summary>
-    private static double EqualitySelectivity(ScalarBound? bound, ColumnHistogram? hist, long? ndv, JoinKeyDistribution? distribution)
+    private static double EqualitySelectivity(
+        ScalarBound? bound,
+        ColumnHistogram? hist,
+        long? ndv,
+        JoinKeyDistribution? distribution,
+        EstimateTrace? trace,
+        string? column)
     {
+        EstimateRule rule;
+        double value;
+        double? alternative = null;
+
         // NULL bound means the constant is SQL NULL.  col = NULL is UNKNOWN in 3VL → 0 rows.
         // Guard this before the NDV branch so we don't return 1/NDV for a NULL constant.
         // (PredicateAnalyzer currently emits IS NULL rather than = NULL, so this is latent.)
         if (bound is null)
-            return 0.0;
-
+        {
+            rule = EstimateRule.EqualityNull;
+            value = 0.0;
+        }
         // 1. A heavy value: its own share of the rows, from the statistics that counted it.
-        if (hist is not null && hist.TotalRows > 0 && hist.IsHeavyValue(bound))
-            return Math.Min(1.0, hist.EqualityFraction(bound));
-
+        else if (hist is not null && hist.TotalRows > 0 && hist.IsHeavyValue(bound))
+        {
+            rule = EstimateRule.EqualityHeavy;
+            value = Math.Min(1.0, hist.EqualityFraction(bound));
+            if (trace is not null && ndv is > 0)
+            {
+                alternative = distribution is { HeavyValues.Count: > 0 }
+                    ? Math.Min(1.0, Math.Max(1.0 / hist.TotalRows, distribution.ResidualFraction / distribution.ResidualDistinct))
+                    : Math.Min(1.0, 1.0 / ndv.Value);
+            }
+        }
         // 2. NDV: the residual share over the residual distinct values when the column has heavy
         //    values (at least one row: the value may be newer than the statistics), else 1/NDV.
-        if (ndv is > 0)
+        else if (ndv is > 0)
         {
             if (distribution is { HeavyValues.Count: > 0 })
             {
                 double oneRow = hist is { TotalRows: > 0 } ? 1.0 / hist.TotalRows : 0.0;
-                return Math.Min(1.0, Math.Max(oneRow, distribution.ResidualFraction / distribution.ResidualDistinct));
+                rule = EstimateRule.EqualityResidual;
+                value = Math.Min(1.0, Math.Max(oneRow, distribution.ResidualFraction / distribution.ResidualDistinct));
+            }
+            else
+            {
+                rule = EstimateRule.EqualityNdv;
+                value = Math.Min(1.0, 1.0 / ndv.Value);
             }
 
-            return Math.Min(1.0, 1.0 / ndv.Value);
+            if (trace is not null && hist is not null && hist.TotalRows > 0)
+            {
+                alternative = IsOutsideHistogramDomain(hist, bound)
+                    ? Math.Min(1.0, 1.0 / hist.TotalRows)
+                    : Math.Min(1.0, Math.Max(hist.EqualityFraction(bound), 1.0 / hist.TotalRows));
+            }
         }
-
         // 3. Histogram bucket, no distinct count: rows-in-bucket / totalRows / distinct-in-bucket.
-        if (hist is not null && hist.TotalRows > 0)
+        else if (hist is not null && hist.TotalRows > 0)
         {
             // Out-of-domain: equality on a value above every bucket (or below the observed
             // minimum) matches ~nothing — estimate one row rather than last-bucket density.
             if (IsOutsideHistogramDomain(hist, bound))
-                return Math.Min(1.0, 1.0 / hist.TotalRows);
-
-            return Math.Min(1.0, Math.Max(hist.EqualityFraction(bound), 1.0 / hist.TotalRows));
+            {
+                rule = EstimateRule.EqualityOutOfDomain;
+                value = Math.Min(1.0, 1.0 / hist.TotalRows);
+            }
+            else
+            {
+                rule = EstimateRule.EqualityBucket;
+                value = Math.Min(1.0, Math.Max(hist.EqualityFraction(bound), 1.0 / hist.TotalRows));
+            }
+        }
+        else
+        {
+            rule = EstimateRule.EqualityFallback;
+            value = FallbackSelectivity;
         }
 
-        return FallbackSelectivity;
+        trace?.Factors.Add(new EstimateFactor
+        {
+            Rule = rule,
+            Stage = EstimateStage.Comparison,
+            Column = column,
+            Selectivity = value,
+            Raw = value,
+            Alternative = alternative,
+            Ndv = ndv,
+            Rows = hist?.TotalRows,
+            Buckets = hist?.Buckets.Count,
+        });
+
+        return value;
     }
 
     private static double InListSelectivity(
         AnalyzedInList inList,
         DatabaseDescriptor database,
         TableDescriptor table,
-        StatisticsManager stats)
+        StatisticsManager stats,
+        EstimateTrace? trace)
     {
         if (inList.Values.Count == 0)
             return 0.0;
@@ -1060,7 +1464,20 @@ internal static class CardinalityEstimator
         foreach (ColumnValue val in inList.Values)
             total += EqualitySelectivity(TryGetBound(val), hist, ndv, distribution);
 
-        return Math.Min(1.0, total);
+        double value = Math.Min(1.0, total);
+        trace?.Factors.Add(new EstimateFactor
+        {
+            Rule = EstimateRule.InList,
+            Stage = EstimateStage.Comparison,
+            Column = columnName,
+            Selectivity = value,
+            Raw = value,
+            Ndv = ndv,
+            Rows = hist?.TotalRows,
+            Buckets = hist?.Buckets.Count,
+            Values = inList.Values.Count,
+        });
+        return value;
     }
 
     // True when the value lies outside the histogram's observed [min, max] domain: above the

@@ -750,7 +750,8 @@ catch (OperationCanceledException) when (hostStopping.IsCancellationRequested)
 }
 catch (Exception ex)
 {
-    startupLogger.LogCritical(ex, "Startup failed: {Message}", ex.Message);
+    if (startupLogger.IsEnabled(LogLevel.Critical))
+        startupLogger.LogCritical(ex, "Startup failed: {Message}", ex.Message);
 
     SpillFileManager.ReleaseInstanceLock();
     await sharedNode.DisposeAsync();

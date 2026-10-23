@@ -9,6 +9,7 @@ using System.Globalization;
 using System.Text;
 
 using CamusDB.PlanQuality.Tests.Baselines;
+using CamusDB.PlanQuality.Tests.Estimates;
 using CamusDB.PlanQuality.Tests.Harness;
 using CamusDB.PlanQuality.Tests.Metrics;
 
@@ -21,12 +22,17 @@ namespace CamusDB.PlanQuality.Tests.Reports;
 /// </summary>
 internal static class PlanQualityReport
 {
+    /// <param name="estimates">
+    /// The estimate records of the run (one for each node with an estimate and an actual count),
+    /// for the estimate-rule section; null leaves the section out.
+    /// </param>
     public static string Render(
         string title,
         string baselinePath,
         IReadOnlyList<QueryMeasurement> run,
         ComparisonResult comparison,
-        HarnessSettings settings)
+        HarnessSettings settings,
+        IReadOnlyList<EstimateRecord>? estimates = null)
     {
         StringBuilder md = new();
         List<Finding> failures = comparison.Failures.ToList();
@@ -79,9 +85,28 @@ internal static class PlanQualityReport
         AppendWorkByTag(md, comparison);
         AppendPlanChanges(md, comparison, notes);
         AppendEstimates(md, run);
+        if (estimates is not null)
+            AppendEstimateRules(md, estimates);
         AppendTimings(md, run);
 
         return md.ToString();
+    }
+
+    /// <summary>
+    /// The estimate errors of the run by the rule that made each estimate (nodes over a q-error of
+    /// 100, the median and the 95th percentile), so a large error can be read back to the branch of
+    /// the estimator that produced it. A share of nodes with an unknown rule means the planner did
+    /// not trace them; the target is none.
+    /// </summary>
+    private static void AppendEstimateRules(StringBuilder md, IReadOnlyList<EstimateRecord> estimates)
+    {
+        if (estimates.Count == 0)
+            return;
+
+        md.Append("## Estimates by rule (not graded)\n\n");
+        md.Append(TrainingSet.Summary.Header).Append('\n');
+        md.Append(TrainingSet.Summarize(estimates).Row("all nodes")).Append("\n\n");
+        md.Append(TrainingSet.RulesTable(estimates)).Append('\n');
     }
 
     private static void AppendWorkByTag(StringBuilder md, ComparisonResult comparison)

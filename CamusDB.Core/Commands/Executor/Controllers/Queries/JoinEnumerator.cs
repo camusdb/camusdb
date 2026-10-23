@@ -148,6 +148,13 @@ internal static class JoinEnumerator
         public required List<StepEdge>[] StepEdges { get; init; }
 
         /// <summary>
+        /// How each leaf's rows were estimated, by leaf index, when the planner traces estimates;
+        /// null otherwise, and then no step records a trace either. An entry is null for a leaf whose
+        /// rows need no explanation beyond its count.
+        /// </summary>
+        public EstimateTrace?[]? LeafTraces { get; init; }
+
+        /// <summary>
         /// The row estimate of the subset <paramref name="mask"/>: from the dense array when there is
         /// one, otherwise computed alone. Both use <see cref="EstimateMaskRows"/>, so the value is the
         /// same bit for bit.
@@ -244,10 +251,12 @@ internal static class JoinEnumerator
     /// groups with their selectivities, and the column equivalence classes. Built once per plan by
     /// <see cref="BuildSelectivityGroups"/>.
     /// </summary>
+    /// <param name="GroupFactors">The recorded factor of each group, parallel to <paramref name="Groups"/>; null when the planner does not trace estimates.</param>
     private sealed record SelectivityModel(
         List<(ulong Mask, double Selectivity)> Groups,
         List<EquivalenceClass> Classes,
-        Dictionary<(int Leaf, string Column), ulong> ClassLeaves);
+        Dictionary<(int Leaf, string Column), ulong> ClassLeaves,
+        List<EstimateFactor>? GroupFactors = null);
 
     /// <summary>
     /// Returns the cheapest left-deep join tree for <paramref name="root"/>, the filter that stays
@@ -268,6 +277,10 @@ internal static class JoinEnumerator
     /// its kept rows, and a probe through one of its key columns at the keys' own shares of the
     /// probed column.
     /// </param>
+    /// <param name="traceEstimates">
+    /// True to record how each leaf and each join was estimated (<see cref="JoinStepEstimate.Trace"/>),
+    /// for <c>EXPLAIN (ANALYZE)</c>; the normal path passes false and allocates nothing for it.
+    /// </param>
     public static JoinOrderChoice Enumerate(
         QuerySource root,
         BoundSelectQuery bound,
@@ -276,7 +289,8 @@ internal static class JoinEnumerator
         StatisticsManager stats,
         CamusDBOptions options,
         Dictionary<string, ColumnValue>? clockValues = null,
-        IReadOnlyDictionary<string, PlanTimeLeafKeys>? leafKeys = null)
+        IReadOnlyDictionary<string, PlanTimeLeafKeys>? leafKeys = null,
+        bool traceEstimates = false)
     {
         JoinGraph? graph = JoinGraph.TryBuild(root, bound, pushdown.PostJoinConjuncts);
 
@@ -290,7 +304,7 @@ internal static class JoinEnumerator
             return JoinOrderOptimizer.ChooseWithGraph(root, bound, pushdown, graph);
 
         CostInputs inputs = ComputeCostInputs(graph, bound, pushdown, database, stats, options, clockValues,
-            denseSubsets: graph.LeafCount <= MaxTablesForDenseEstimates, leafKeys: leafKeys);
+            denseSubsets: graph.LeafCount <= MaxTablesForDenseEstimates, leafKeys: leafKeys, traceEstimates: traceEstimates);
         long budget = stats.JoinSearchStepBudgetForTesting ?? MaxCostedStepsForEnumeration;
         int[]? order = FindCheapestOrder(graph, inputs, budget, out long costedSteps, out bool overBudget);
         bool greedy = false;
@@ -337,9 +351,10 @@ internal static class JoinEnumerator
         CamusDBOptions options,
         Dictionary<string, ColumnValue>? clockValues = null,
         IReadOnlyDictionary<string, PlanTimeLeafKeys>? leafKeys = null,
-        IReadOnlyList<double>? keyRowsBounds = null) =>
+        IReadOnlyList<double>? keyRowsBounds = null,
+        bool traceEstimates = false) =>
         EstimateSteps(graph, order, tree,
-            ComputeCostInputs(graph, bound, pushdown, database, stats, options, clockValues, denseSubsets: false, leafKeys: leafKeys),
+            ComputeCostInputs(graph, bound, pushdown, database, stats, options, clockValues, denseSubsets: false, leafKeys: leafKeys, traceEstimates: traceEstimates),
             keyRowsBounds);
 
     /// <param name="keyRowsBounds">
@@ -388,12 +403,132 @@ internal static class JoinEnumerator
                 indexLookup,
                 CostEstimator.SelectJoinStepOperator(leftRows, rightRows, rightScanCost, equiKey, indexLookup),
                 inputs.RowsOf(prefix | (1 << leaf)),
-                keyRows);
+                keyRows,
+                inputs.LeafTraces is null ? null : DescribeSubset(graph, inputs, prefix | (1 << leaf), leaf, prefix));
 
             prefix |= 1 << leaf;
         }
 
         return steps;
+    }
+
+    /// <summary>
+    /// The trace of one subset estimate, for a join step that adds <paramref name="stepLeaf"/> to
+    /// the tables of <paramref name="prefix"/>: the leaves of the subset with their own traces, the
+    /// groups the subset covers with their factors, and the column classes over its members with
+    /// their pair selectivities, in the order <see cref="EstimateMaskRows"/> multiplies them. The
+    /// dominant rule is the smallest factor the step brought in (a group or a class pair that names
+    /// the new leaf); a step that brought none is a cross product.
+    /// </summary>
+    private static EstimateTrace DescribeSubset(JoinGraph graph, CostInputs inputs, int mask, int stepLeaf, int prefix)
+    {
+        SelectivityModel selectivity = inputs.Selectivity;
+        EstimateTrace trace = new()
+        {
+            Formula = EstimateFormula.JoinSearch,
+            Mask = (ulong)mask,
+            StepLeaf = stepLeaf,
+            BaseRows = inputs.RowsOf(prefix),
+            RightRows = inputs.LeafRows[stepLeaf],
+            Estimate = inputs.RowsOf(mask),
+            Leaves = [],
+            Groups = [],
+            Classes = [],
+        };
+
+        for (int leaf = 0; leaf < inputs.LeafRows.Length; leaf++)
+        {
+            if ((mask & (1 << leaf)) == 0)
+                continue;
+
+            trace.Leaves.Add(new EstimateLeafTrace
+            {
+                Leaf = leaf,
+                Alias = graph.Leaves[leaf].Alias,
+                Rows = inputs.LeafRows[leaf],
+                Trace = inputs.LeafTraces![leaf],
+            });
+        }
+
+        EstimateRule dominant = EstimateRule.JoinCross;
+        double smallest = double.PositiveInfinity;
+        ulong stepBit = 1UL << stepLeaf;
+
+        for (int g = 0; g < selectivity.Groups.Count; g++)
+        {
+            (ulong groupMask, _) = selectivity.Groups[g];
+            if ((groupMask & ~(ulong)mask) != 0)
+                continue;
+
+            EstimateFactor factor = selectivity.GroupFactors![g];
+            trace.Groups.Add(new EstimateGroupTrace { Mask = groupMask, Factor = factor });
+
+            if ((groupMask & stepBit) != 0 && factor.Selectivity < smallest)
+            {
+                smallest = factor.Selectivity;
+                dominant = factor.Rule;
+            }
+        }
+
+        foreach (EquivalenceClass equivalence in selectivity.Classes)
+        {
+            List<EstimateClassMember> members = [];
+            List<int> positions = [];
+            for (int member = 0; member < equivalence.Leaves.Count; member++)
+            {
+                (int leaf, long? distinct, bool skewed, double nonNull) = equivalence.Leaves[member];
+                if ((mask & (1 << leaf)) == 0)
+                    continue;
+
+                members.Add(new EstimateClassMember { Leaf = leaf, Distinct = distinct, Skewed = skewed, NonNull = nonNull });
+                positions.Add(member);
+            }
+
+            if (members.Count < 2)
+                continue;
+
+            List<EstimateClassPair>? pairs = null;
+            if (equivalence.PairSelectivity is { } matrix)
+            {
+                pairs = [];
+                for (int i = 0; i < positions.Count; i++)
+                {
+                    for (int j = i + 1; j < positions.Count; j++)
+                    {
+                        EstimateRule rule = equivalence.PairRules?[positions[i], positions[j]] ?? EstimateRule.ClassPairTextbook;
+                        double sel = matrix[positions[i], positions[j]];
+                        pairs.Add(new EstimateClassPair
+                        {
+                            I = i,
+                            J = j,
+                            Rule = rule,
+                            Selectivity = sel,
+                            Textbook = equivalence.PairTextbook?[positions[i], positions[j]] ?? sel,
+                        });
+
+                        bool namesStep = members[i].Leaf == stepLeaf || members[j].Leaf == stepLeaf;
+                        if (namesStep && sel < smallest)
+                        {
+                            smallest = sel;
+                            dominant = rule;
+                        }
+                    }
+                }
+            }
+            else if (dominant == EstimateRule.JoinCross)
+            {
+                // A class without a pair matrix prices the new member at 1 / d or the fallback.
+                bool anyCount = false;
+                foreach (EstimateClassMember m in members)
+                    anyCount |= m.Distinct is > 0;
+                dominant = anyCount ? EstimateRule.ClassTextbook : EstimateRule.ClassFallback;
+            }
+
+            trace.Classes.Add(new EstimateClassTrace { Members = members, Pairs = pairs });
+        }
+
+        trace.Rule = dominant;
+        return trace;
     }
 
     /// <param name="denseSubsets">
@@ -411,28 +546,40 @@ internal static class JoinEnumerator
         CamusDBOptions options,
         Dictionary<string, ColumnValue>? clockValues = null,
         bool denseSubsets = true,
-        IReadOnlyDictionary<string, PlanTimeLeafKeys>? leafKeys = null)
+        IReadOnlyDictionary<string, PlanTimeLeafKeys>? leafKeys = null,
+        bool traceEstimates = false)
     {
         int n = graph.LeafCount;
 
         double[] firstLeafCost = new double[n];
         double[] rightScanCost = new double[n];
         double[] leafRows = new double[n];
+        EstimateTrace?[]? leafTraces = traceEstimates ? new EstimateTrace?[n] : null;
 
         for (int i = 0; i < n; i++)
         {
             string alias = graph.Leaves[i].Alias;
-            EstimateLeaf(alias, pushdown, bound, database, stats, out firstLeafCost[i], out long rows, options, clockValues);
+            EstimateTrace? leafTrace = traceEstimates ? new EstimateTrace() : null;
+            EstimateLeaf(alias, pushdown, bound, database, stats, out firstLeafCost[i], out long rows, options, clockValues, leafTrace);
 
             // The rows a plan-time lookup counted are the rows; the scan still costs its read.
             if (leafKeys is not null && leafKeys.TryGetValue(alias, out PlanTimeLeafKeys? known))
+            {
                 rows = Math.Max(1L, known.RowCount);
+                if (leafTrace is not null)
+                {
+                    leafTrace = new EstimateTrace { Rule = EstimateRule.LeafLookup };
+                    leafTrace.Complete(EstimateFormula.Fixed, rows, rows);
+                }
+            }
 
             leafRows[i] = rows;
             rightScanCost[i] = firstLeafCost[i];
+            if (leafTraces is not null)
+                leafTraces[i] = leafTrace;
         }
 
-        SelectivityModel selectivity = BuildSelectivityGroups(graph, bound, database, stats, leafKeys);
+        SelectivityModel selectivity = BuildSelectivityGroups(graph, bound, database, stats, leafKeys, traceEstimates);
 
         return new CostInputs
         {
@@ -442,6 +589,7 @@ internal static class JoinEnumerator
             SubsetRows = denseSubsets ? EstimateAllSubsets(n, leafRows, selectivity) : null,
             Selectivity = selectivity,
             StepEdges = BuildStepEdges(graph, bound, database, stats, leafKeys, selectivity.ClassLeaves),
+            LeafTraces = leafTraces,
         };
     }
 
@@ -730,17 +878,17 @@ internal static class JoinEnumerator
     }
 
     /// <summary>
-    /// <paramref name="lookup"/> with its distinct keys lowered to the rows of
-    /// <see cref="KeyRowsBound"/> that hold a value (the column's non-NULL share), when that is
-    /// below the distinct count of the column in its table; the profile unchanged otherwise.
+    /// <paramref name="lookup"/> with the rows of its key's table in the left input bounded by
+    /// <see cref="KeyRowsBound"/> (<see cref="IndexLookupProfile.LeftKeyRows"/>), when that is below
+    /// the bound the profile carries; the profile unchanged otherwise. The step cost scales the bound
+    /// by the column's non-NULL share and estimates the distinct keys among those rows.
     /// </summary>
     private static IndexLookupProfile? ApplyKeyRowsBound(IndexLookupProfile? lookup, double keyRows)
     {
         if (lookup is not { } probe || double.IsPositiveInfinity(keyRows))
             return lookup;
 
-        double keyed = keyRows * Math.Clamp(probe.LeftNonNullFraction, 0.0, 1.0);
-        return keyed < probe.LeftKeyDistinct ? probe with { LeftKeyDistinct = keyed } : lookup;
+        return keyRows < probe.LeftKeyRows ? probe with { LeftKeyRows = keyRows } : lookup;
     }
 
     /// <param name="classLeaves">The leaves of each column's class, by (leaf, lower-case column).</param>
@@ -819,9 +967,13 @@ internal static class JoinEnumerator
     /// <see cref="Leaves"/>; null when some member has no distribution, in which case the class
     /// uses the distinct counts alone.
     /// </summary>
+    /// <param name="PairRules">The rule behind each pair selectivity, when the planner traces estimates; null otherwise.</param>
+    /// <param name="PairTextbook">The textbook <c>1 / max(d)</c> of each pair, when the planner traces estimates; null otherwise.</param>
     private sealed record EquivalenceClass(
         IReadOnlyList<(int Leaf, long? DistinctCount, bool Skewed, double NonNullFraction)> Leaves,
-        double[,]? PairSelectivity);
+        double[,]? PairSelectivity,
+        EstimateRule[,]? PairRules = null,
+        double[,]? PairTextbook = null);
 
     /// <summary>
     /// Returns one row estimate for each subset of the leaves, indexed by leaf mask. The estimate
@@ -875,7 +1027,7 @@ internal static class JoinEnumerator
         StatisticsManager? stats,
         IReadOnlyDictionary<string, PlanTimeLeafKeys>? leafKeys = null)
     {
-        return EstimateAllSubsets(graph.LeafCount, leafRows, BuildSelectivityGroups(graph, bound, database, stats, leafKeys));
+        return EstimateAllSubsets(graph.LeafCount, leafRows, BuildSelectivityGroups(graph, bound, database, stats, leafKeys, traceEstimates: false));
     }
 
     /// <summary>The estimate of every non-empty subset of <paramref name="n"/> leaves; index 0 is unused.</summary>
@@ -1017,14 +1169,17 @@ internal static class JoinEnumerator
         return factor;
     }
 
+    /// <param name="traceEstimates">True to keep, next to each group and pair selectivity, the rule and inputs that produced it.</param>
     private static SelectivityModel BuildSelectivityGroups(
         JoinGraph graph,
         BoundSelectQuery bound,
         DatabaseDescriptor database,
         StatisticsManager? stats,
-        IReadOnlyDictionary<string, PlanTimeLeafKeys>? leafKeys)
+        IReadOnlyDictionary<string, PlanTimeLeafKeys>? leafKeys,
+        bool traceEstimates)
     {
         List<(ulong Mask, double Selectivity)> groups = [];
+        List<EstimateFactor>? groupFactors = traceEstimates ? [] : null;
 
         // Union-find over the columns of the equi-conjuncts, keyed by (leaf, column).
         Dictionary<(int Leaf, string Column), int> nodeOf = [];
@@ -1064,6 +1219,7 @@ internal static class JoinEnumerator
             if (conjunct.Left is not { } a || conjunct.Right is not { } b)
             {
                 groups.Add((conjunct.Mask, CardinalityEstimator.FallbackSelectivity));
+                groupFactors?.Add(new EstimateFactor { Rule = EstimateRule.JoinNonEqui, Stage = EstimateStage.Join, Selectivity = CardinalityEstimator.FallbackSelectivity, Raw = CardinalityEstimator.FallbackSelectivity });
                 continue;
             }
 
@@ -1138,14 +1294,18 @@ internal static class JoinEnumerator
             TableDescriptor? lowTable = FindTableDescriptor(graph.Leaves[low].Alias, bound);
             TableDescriptor? highTable = FindTableDescriptor(graph.Leaves[high].Alias, bound);
 
+            EstimateTrace? pairTrace = traceEstimates ? new EstimateTrace() : null;
             double selectivity = CardinalityEstimator.EstimateEquiJoinSelectivity(
                 lowTable, lowColumns, TableRows(lowTable, database, stats),
                 highTable, highColumns, TableRows(highTable, database, stats),
                 database, stats,
                 lowColumns.Count == 1 ? KnownKeys(leafKeys, graph.Leaves[low].Alias, lowColumns[0]) : null,
-                highColumns.Count == 1 ? KnownKeys(leafKeys, graph.Leaves[high].Alias, highColumns[0]) : null);
+                highColumns.Count == 1 ? KnownKeys(leafKeys, graph.Leaves[high].Alias, highColumns[0]) : null,
+                pairTrace);
 
             groups.Add(((1UL << low) | (1UL << high), selectivity));
+            // The selectivity records exactly one factor; keep it next to the group.
+            groupFactors?.Add(pairTrace!.Factors[0]);
         }
 
         // Larger classes: one entry for each leaf with a column in the class (its first column in
@@ -1186,10 +1346,12 @@ internal static class JoinEnumerator
                 knownKeys.Add(keys);
             }
 
-            classes.Add(new EquivalenceClass(memberLeaves, PairSelectivities(distributions, memberLeaves, histograms, knownKeys)));
+            double[,]? pairMatrix = PairSelectivities(distributions, memberLeaves, histograms, knownKeys, traceEstimates,
+                out EstimateRule[,]? pairRules, out double[,]? pairTextbook);
+            classes.Add(new EquivalenceClass(memberLeaves, pairMatrix, pairRules, pairTextbook));
         }
 
-        return new SelectivityModel(groups, classes, classLeaves);
+        return new SelectivityModel(groups, classes, classLeaves, groupFactors);
     }
 
     /// <summary>
@@ -1199,12 +1361,19 @@ internal static class JoinEnumerator
     /// (<paramref name="knownKeys"/>) and a histogram on the other takes the mean share of those
     /// keys in the other column (<see cref="CardinalityEstimator.KeyShareSelectivity"/>).
     /// </summary>
+    /// <param name="traceEstimates">True to fill <paramref name="rules"/> and <paramref name="textbook"/>; they are null otherwise.</param>
     private static double[,]? PairSelectivities(
         IReadOnlyList<JoinKeyDistribution?> distributions,
         IReadOnlyList<(int Leaf, long? DistinctCount, bool Skewed, double NonNullFraction)> leaves,
         IReadOnlyList<ColumnHistogram?> histograms,
-        IReadOnlyList<IReadOnlyList<ColumnValue>?> knownKeys)
+        IReadOnlyList<IReadOnlyList<ColumnValue>?> knownKeys,
+        bool traceEstimates,
+        out EstimateRule[,]? rules,
+        out double[,]? textbook)
     {
+        rules = null;
+        textbook = null;
+
         int count = distributions.Count;
         double[,] pairs = new double[count, count];
 
@@ -1214,19 +1383,39 @@ internal static class JoinEnumerator
                 return null;
         }
 
+        if (traceEstimates)
+        {
+            rules = new EstimateRule[count, count];
+            textbook = new double[count, count];
+        }
+
         for (int i = 0; i < count; i++)
         {
             for (int j = i + 1; j < count; j++)
             {
-                double selectivity = JoinKeyDistribution.JoinSelectivity(distributions[i]!, distributions[j]!)
+                double? skew = JoinKeyDistribution.JoinSelectivity(distributions[i]!, distributions[j]!);
+                double selectivity = skew
                     ?? 1.0 / Math.Max(Math.Max(leaves[i].DistinctCount ?? 1L, leaves[j].DistinctCount ?? 1L), 1L);
+                EstimateRule rule = skew is not null ? EstimateRule.ClassSkewPair : EstimateRule.ClassPairTextbook;
 
                 if (knownKeys[i] is { Count: > 0 } keysOfI && histograms[j] is { } histogramJ
                     && CardinalityEstimator.KeyShareSelectivity(histogramJ, keysOfI) is { } shareInJ)
+                {
                     selectivity = shareInJ;
+                    rule = EstimateRule.ClassKnownKeys;
+                }
                 else if (knownKeys[j] is { Count: > 0 } keysOfJ && histograms[i] is { } histogramI
                     && CardinalityEstimator.KeyShareSelectivity(histogramI, keysOfJ) is { } shareInI)
+                {
                     selectivity = shareInI;
+                    rule = EstimateRule.ClassKnownKeys;
+                }
+
+                if (traceEstimates)
+                {
+                    rules![i, j] = rules[j, i] = rule;
+                    textbook![i, j] = textbook[j, i] = 1.0 / Math.Max(Math.Max(leaves[i].DistinctCount ?? 1L, leaves[j].DistinctCount ?? 1L), 1L);
+                }
 
                 pairs[i, j] = selectivity;
                 pairs[j, i] = selectivity;
@@ -1246,6 +1435,7 @@ internal static class JoinEnumerator
     /// pushed-down filter. <paramref name="cost"/> is what a step pays to read the input;
     /// <paramref name="card"/> is the number of rows the scan returns.
     /// </summary>
+    /// <param name="trace">Receives how the rows were estimated, or null.</param>
     private static void EstimateLeaf(
         string alias,
         JoinPredicatePushdown.Result pushdown,
@@ -1255,7 +1445,8 @@ internal static class JoinEnumerator
         out double cost,
         out long card,
         CamusDBOptions options,
-        Dictionary<string, ColumnValue>? clockValues)
+        Dictionary<string, ColumnValue>? clockValues,
+        EstimateTrace? trace = null)
     {
         TableDescriptor? table = FindTableDescriptor(alias, bound);
 
@@ -1270,6 +1461,11 @@ internal static class JoinEnumerator
         {
             cost = tableRows;
             card = tableRows;
+            if (trace is not null)
+            {
+                trace.Rule = table is null ? EstimateRule.FunctionRows : EstimateRule.TableRows;
+                trace.Complete(EstimateFormula.Fixed, tableRows, tableRows);
+            }
             return;
         }
 
@@ -1298,7 +1494,7 @@ internal static class JoinEnumerator
                     // a plan shape the builder then refuses to build.
                     if (!CostEstimator.ShouldPreferFullScan(candidate, tableRows, options, stats, database, table))
                     {
-                        long rangeRows = CostEstimator.EstimateRangeScanRows(candidate, tableRows, options, stats, database, table);
+                        long rangeRows = CostEstimator.EstimateRangeScanRows(candidate, tableRows, options, stats, database, table, trace);
                         cost = rangeRows * 2.0; // index entry + row fetch
                         card = rangeRows;
                         return;
@@ -1329,10 +1525,15 @@ internal static class JoinEnumerator
 
                     if (bestIndex is null) continue;
 
+                    // The breakeven test must not leave factors in the trace of a list the leaf
+                    // then rejects, so it runs untraced and the kept list is traced on its own.
                     long inListRows = CardinalityEstimator.EstimateInListRows(
                         inList.ColumnName, inList.Values, bestIsUnique, tableRows, database, table, stats);
                     long inListBreakeven = (long)Math.Ceiling(tableRows * CostEstimator.BreakevenFraction);
                     if (inListRows >= inListBreakeven) continue;
+
+                    if (trace is not null)
+                        CardinalityEstimator.EstimateInListRows(inList.ColumnName, inList.Values, bestIsUnique, tableRows, database, table, stats, trace);
 
                     cost = inListRows * 2.0;
                     card = inListRows;
@@ -1341,8 +1542,9 @@ internal static class JoinEnumerator
             }
         }
 
-        double selectivity = CardinalityEstimator.EstimateFilterSelectivity(filter, database, table, stats);
+        double selectivity = CardinalityEstimator.EstimateFilterSelectivity(filter, database, table, stats, trace);
         long estimatedRows = Math.Max(1L, (long)(tableRows * selectivity));
+        trace?.Complete(EstimateFormula.Product, tableRows, estimatedRows);
 
         // Full scan + residual ExecutionFilter (the physical plan BuildJoinTree produces when no
         // selective index scan is chosen).

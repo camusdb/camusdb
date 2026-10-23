@@ -39,15 +39,24 @@ public sealed class QueryPlanner
     /// next operation boundary.
     /// </summary>
     internal void ApplyOptions(CamusDBOptions next) => _options = next;
+
     private readonly PlanCache? _cache;
 
-    public QueryPlanner(CamusDBOptions options, StatisticsManager? stats = null) : this(stats, null, options) { }
+    /// <summary>
+    /// True for the planner of the <c>EXPLAIN (ANALYZE)</c> path: every estimate records how it was
+    /// made (<see cref="PhysicalPlanNode.EstimateTrace"/>). False for the planner a statement runs
+    /// through, which then allocates nothing for traces.
+    /// </summary>
+    private readonly bool _traceEstimates;
 
-    internal QueryPlanner(StatisticsManager? stats, PlanCache? cache, CamusDBOptions options)
+    public QueryPlanner(CamusDBOptions options, StatisticsManager? stats = null, bool traceEstimates = false) : this(stats, null, options, traceEstimates) { }
+
+    internal QueryPlanner(StatisticsManager? stats, PlanCache? cache, CamusDBOptions options, bool traceEstimates = false)
     {
         _stats = stats;
         _cache = cache;
         _options = options;
+        _traceEstimates = traceEstimates;
     }
 
     // Tag a scan leaf with its DataDistribution and return it (fluent helper).
@@ -746,7 +755,7 @@ public sealed class QueryPlanner
         TryMarkIndexOnly(plan, table);
 
         // Annotate every node with EstimatedCardinality and PlanCost.
-        CostEstimator.AnnotatePlan(plan.Root, database, table, _stats, _options);
+        CostEstimator.AnnotatePlan(plan.Root, database, table, _stats, _options, _traceEstimates);
 
         // On a cache miss, store the access-path decision so the next identical-shape query
         // can skip the expensive cost enumeration.  In-list scans are excluded: they have no

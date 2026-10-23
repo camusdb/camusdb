@@ -907,6 +907,17 @@ with two refinements:
   (a stale count) or keeps more than 64 rows yields nothing, and the statistics stand. EXPLAIN reads
   the same keys, so it shows the plan the statement runs.
 
+**Rules and traces.** Every factor of an estimate has a rule (`EstimateRule`: `equality-ndv`,
+`equality-heavy`, `range-histogram`, `like-prefix`, `in-list`, `join-skew-pair`, `class-textbook`,
+and so on), the branch of the estimator that produced it. Under `EXPLAIN (ANALYZE)` the planner
+records the rule, the value and the inputs of each factor on the node (`PhysicalPlanNode.EstimateTrace`,
+printed as the `estimate_trace` column); a statement and a plain `EXPLAIN` record nothing. The
+plan-quality harness reads the trace of every node and reports the estimate errors by rule
+(`docs/plan-quality-harness.md`). An experiment that fitted a multiplier and an exponent per rule
+to the rows plans produced was measured and not adopted: per-rule scaling explained little of the
+error, the fit did not transfer across query templates, and a lower estimate error still lost plans
+at a cost break-even, because an operator choice flips at the break-even and not at the estimate.
+
 ## Network & distribution cost
 
 **Files:** `Controllers/Queries/PlacementReader.cs`, `RowWidthEstimator.cs`, `Models/Plans/DataDistribution.cs`.
@@ -1099,24 +1110,41 @@ selects for the conjuncts that the step attaches. The checks are the builder's o
   A hit priced far below that (0.1) once made a large join followed by memoized lookups look almost
   free, and the search moved selective tables to the end; the constant carries its derivation in
   `CostEstimator`.
-- `probes` is the number of distinct keys of the left input, `min(leftRows × nonNull, distinct(leftColumn))`,
-  where `nonNull` is the share of the left column's rows that hold a value (a NULL key probes nothing; a
-  cast table whose character column is NULL in half the rows probes the characters for half of them) and
-  the distinct count is the left column's NDV in its own table (its row count for a unique key) and
-  unbounded when unknown, so every keyed left row then probes. The join-order search lowers the
-  distinct count further to the rows the key's table can still have in the left input: the smallest
-  estimate of any subset of the left tables that contains it (a join after that table multiplies its
-  rows but adds none of them, so the cast rows of a movie, repeated once for each of its companies,
-  probe the people once each). The bound needs the estimate of every subset, which the search keeps
-  for joins of up to 12 tables. When the probed rows would not fit the memo (65,536 rows), every
-  keyed left row is a probe too.
+- `probes` is the number of distinct keys of the left input: the distinct values expected among the
+  left rows that hold a key, `CostEstimator.ExpectedDistinctKeys`. The keyed rows are
+  `leftRows × nonNull`, where `nonNull` is the share of the left column's rows that hold a value (a
+  NULL key probes nothing; a cast table whose character column is NULL in half the rows probes the
+  characters for half of them). Among `r` keyed rows of a table of `N` rows whose column has `d`
+  distinct values, the expected keys are `d · (1 − (1 − r / N)^(N / d))`, the estimate PostgreSQL
+  applies to a grouped column under a restriction: the rows of one key are spread over the table,
+  so a part of the rows reaches a part of the keys, and keys grow slower than rows. The value is
+  at most `min(r, d)`, which was the count before and still is when the table's row count is not
+  known; without a distinct count every keyed row probes. On the Join Order Benchmark the cast rows
+  of the movies one keyword names (3,800 by estimate) were priced as 3,800 probes of `name`,
+  while 2,100 distinct people are among the 4,900 rows the chain produces; the estimate gives
+  3,300, and the probe then wins over a hash join that scans the whole `name` table. The formula
+  still assumes an even spread: popular keys that concentrate in the kept rows repeat more than it
+  says. The join-order search bounds `r` further by the rows the key's table can still have in the
+  left input: the smallest estimate of any subset of the left tables that contains it (a join after
+  that table multiplies its rows but adds none of them, so the cast rows of a movie, repeated once
+  for each of its companies, probe the people once each). The bound needs the estimate of every
+  subset, which the search keeps for joins of up to 12 tables. When the probed rows would not fit
+  the memo (65,536 rows), every keyed left row is a probe too.
 - `probeWeight` is the cost of one probe in rows read from storage: 3 for a unique index (one batched
   point read) and 16 for a non-unique index (one batched bounded scan), solved from the retail data set
   at scale 4 on memory storage, where a scanned row costs about 0.55 µs, a unique probe about 2.2 to 4.8 µs
   with its row fetch and a non-unique probe about 10 µs with its 2.4 row fetches. The constants carry
   their derivation in `CostEstimator`; a faster store means a smaller weight, not a different formula.
 - `matchesPerProbe` is the rows one probe returns: 1 for a unique index, else the right table's rows
-  over the NDV of the indexed column (1 when unknown). Each is one row fetch.
+  over the NDV of the indexed column (1 when unknown), or the named keys' share of the column when the
+  plan-time lookup knows the keys. Each is one row fetch. The leaf model charges a range scan two
+  reads for each row (the index entry and the row fetch), and `EXPLAIN (ANALYZE)` counts a probe's
+  rows the same way, but the step cost does not: priced at two, the rows of one bounded scan of a
+  popular key (3,208 `movie_info` rows for one info type on the Join Order Benchmark) made the
+  search prefer many probes of small keys and small hash builds in eight JOB plans, which read up
+  to a third fewer rows and ran two to three times slower. One bounded scan that returns a thousand
+  rows costs far less time than a thousand units of the model, and each extra probe pays its own
+  round trip; the rows-read count of the harness is not the time.
 
 A hash join therefore wins sooner than before: a unique probe is worth it while the right table has
 about four rows for each distinct left key, and a non-unique probe while it has about seventeen rows plus

@@ -43,6 +43,15 @@ public abstract class PhysicalPlanNode
     public double? JoinOrderEstimatedRows { get; internal set; }
 
     /// <summary>
+    /// How this node's row estimate was made (the rule, the inputs and the factors), for
+    /// <c>EXPLAIN (ANALYZE)</c> and the plan-quality harness. Null during normal query execution
+    /// and plain <c>EXPLAIN</c>: only a planner built to trace estimates fills it. On a join the
+    /// join-order search estimated it describes <see cref="JoinOrderEstimatedRows"/>; on every
+    /// other node, <see cref="EstimatedCardinality"/>.
+    /// </summary>
+    public EstimateTrace? EstimateTrace { get; internal set; }
+
+    /// <summary>
     /// Distribution of this node's output data across the cluster.
     /// Populated on scan leaves by <see cref="Controllers.Queries.QueryPlanner"/> /
     /// <see cref="Controllers.Queries.JoinQueryPlanner"/> from the table/index sharding scheme.

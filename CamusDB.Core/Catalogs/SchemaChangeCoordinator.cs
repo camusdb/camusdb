@@ -290,8 +290,11 @@ public sealed class SchemaChangeCoordinator
     /// </summary>
     private async Task AnswerFromHandedOverJobAsync(DatabaseDescriptor database, SchemaChangeJob job, long term, Exception failure, SchemaDdlGateHold gate)
     {
-        if (logger is not null)
-            Log.LogSchemaChangeHandedOver(logger, DescribeElement(job), job.TableName, database.Name, term, failure.Message);
+        if (logger?.IsEnabled(LogLevel.Information) == true)
+        {
+            string element = DescribeElement(job);
+            Log.LogSchemaChangeHandedOver(logger, element, job.TableName, database.Name, term, failure.Message);
+        }
 
         gate.Release();
 
@@ -330,8 +333,11 @@ public sealed class SchemaChangeCoordinator
 
             if (state == job.TargetState)
             {
-                if (logger is not null)
-                    Log.LogSchemaChangeCompletedBySuccessor(logger, DescribeElement(job), job.TableName, database.Name);
+                if (logger?.IsEnabled(LogLevel.Information) == true)
+                {
+                    string element = DescribeElement(job);
+                    Log.LogSchemaChangeCompletedBySuccessor(logger, element, job.TableName, database.Name);
+                }
                 return;
             }
 
@@ -449,8 +455,12 @@ public sealed class SchemaChangeCoordinator
                     // compensation inside the phase takes the gate again before it proposes.
                     gate.Release();
 
-                    if (logger is not null)
-                        Log.LogStagedChangeReleasesDdlGate(logger, DescribeElement(job), job.TableName, PhaseName(job.ElementKind), database.Name);
+                    if (logger?.IsEnabled(LogLevel.Debug) == true)
+                    {
+                        string element = DescribeElement(job);
+                        string phase = PhaseName(job.ElementKind);
+                        Log.LogStagedChangeReleasesDdlGate(logger, element, job.TableName, phase, database.Name);
+                    }
 
                     try
                     {
@@ -644,8 +654,11 @@ public sealed class SchemaChangeCoordinator
         {
             if (JobWasHandedOver(database, term, ex))
             {
-                if (logger is not null)
-                    Log.LogFillStoppedByLeadershipLoss(logger, DescribeElement(job), job.TableName, database.Name, term);
+                if (logger?.IsEnabled(LogLevel.Information) == true)
+                {
+                    string element = DescribeElement(job);
+                    Log.LogFillStoppedByLeadershipLoss(logger, element, job.TableName, database.Name, term);
+                }
                 throw;
             }
 
@@ -687,8 +700,9 @@ public sealed class SchemaChangeCoordinator
         }
         catch (CoordinatorJobTakenOverException ex)
         {
-            logger?.LogInformation(ex.Message + "; the unfilled column {ElementName} of {TableName} is that leader's to fill or to remove",
-                job.ElementName, job.TableName);
+            if (logger?.IsEnabled(LogLevel.Information) == true)
+                logger.LogInformation(ex.Message + "; the unfilled column {ElementName} of {TableName} is that leader's to fill or to remove",
+                    job.ElementName, job.TableName);
             throw;
         }
         catch (Exception ex)
@@ -873,8 +887,12 @@ public sealed class SchemaChangeCoordinator
                 // The read proposes nothing and visits every row; see RunJobAsync.
                 gate.Release();
 
-                if (logger is not null)
-                    Log.LogStagedChangeReleasesDdlGate(logger, DescribeElement(job), job.TableName, PhaseName(job.ElementKind), database.Name);
+                if (logger?.IsEnabled(LogLevel.Debug) == true)
+                {
+                    string element = DescribeElement(job);
+                    string phase = PhaseName(job.ElementKind);
+                    Log.LogStagedChangeReleasesDdlGate(logger, element, job.TableName, phase, database.Name);
+                }
 
                 await RequireEarlierWritersSettledAsync(database, job).ConfigureAwait(false);
 

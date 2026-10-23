@@ -45,6 +45,15 @@ internal sealed class ExplainExecutor
 
     private readonly JoinQueryPlanner joinQueryPlanner;
 
+    /// <summary>
+    /// The planners of the <c>ANALYZE</c> path. They are built to trace estimates
+    /// (<see cref="PhysicalPlanNode.EstimateTrace"/>), which plain <c>EXPLAIN</c> and a statement do
+    /// not do, so the trace costs nothing outside <c>EXPLAIN (ANALYZE)</c>.
+    /// </summary>
+    private readonly QueryPlanner tracingQueryPlanner;
+
+    private readonly JoinQueryPlanner tracingJoinQueryPlanner;
+
     private readonly QueryExecutor queryExecutor;
 
     /// <summary>Configuration of the engine this executor belongs to.</summary>
@@ -61,6 +70,8 @@ internal sealed class ExplainExecutor
         this.options = options;
         queryPlanner = new QueryPlanner(options, stats);
         joinQueryPlanner = new JoinQueryPlanner(options, stats);
+        tracingQueryPlanner = new QueryPlanner(options, stats, traceEstimates: true);
+        tracingJoinQueryPlanner = new JoinQueryPlanner(options, stats, traceEstimates: true);
     }
 
     /// <summary>
@@ -243,7 +254,7 @@ internal sealed class ExplainExecutor
 
         // Bind and plan, timed together: the planning time a client waits for before the first row.
         Stopwatch planning = Stopwatch.StartNew();
-        QueryPlan plan = await BuildPlanAsync(database, selectAst, ticket).ConfigureAwait(false);
+        QueryPlan plan = await BuildPlanAsync(database, selectAst, ticket, traceEstimates: true).ConfigureAwait(false);
         planning.Stop();
 
         return RunAnalyzedPlan(plan, planning.Elapsed.TotalMilliseconds);
@@ -325,6 +336,9 @@ internal sealed class ExplainExecutor
                 { "actual_time_ms",    stats?.ElapsedMs is { } ms ? new ColumnValue(ColumnType.Float64, ms) : ColumnValue.Null },
                 { "kv_lookups",        stats is not null ? new ColumnValue(ColumnType.Integer64, stats.KvPointLookups) : ColumnValue.Null },
                 { "kv_scan_entries",   stats is not null ? new ColumnValue(ColumnType.Integer64, stats.KvScanEntries) : ColumnValue.Null },
+                { "estimate_trace",    physNode?.EstimateTrace is { } estimateTrace
+                    ? new ColumnValue(ColumnType.String, EstimateTraceJson.Render(estimateTrace))
+                    : ColumnValue.Null },
             });
 
             // A gather that ran carries per-span actuals: one gather-span row per placement
@@ -546,10 +560,15 @@ internal sealed class ExplainExecutor
         return false;
     }
 
+    /// <param name="traceEstimates">
+    /// True to plan with the tracing planners, so every node records how its estimate was made.
+    /// Only the <c>ANALYZE</c> path asks for it: the trace is useful next to the actual rows.
+    /// </param>
     private async Task<QueryPlan> BuildPlanAsync(
         DatabaseDescriptor database,
         NodeAst selectAst,
-        ExecuteSQLTicket ticket)
+        ExecuteSQLTicket ticket,
+        bool traceEstimates = false)
     {
         SelectQuery selectQuery = selectQueryCreator.CreateSelectQuery(selectAst);
 
@@ -565,11 +584,11 @@ internal sealed class ExplainExecutor
         {
             IReadOnlyDictionary<string, PlanTimeLeafKeys>? leafKeys =
                 await queryExecutor.JoinExecutor.ResolvePlanTimeLeafKeysAsync(database, boundQuery, queryTicket).ConfigureAwait(false);
-            return joinQueryPlanner.GetPlan(database, boundQuery, queryTicket, leafKeys);
+            return (traceEstimates ? tracingJoinQueryPlanner : joinQueryPlanner).GetPlan(database, boundQuery, queryTicket, leafKeys);
         }
 
         TableDescriptor table = boundQuery.PrimaryTable;
-        return queryPlanner.GetPlan(database, table, queryTicket);
+        return (traceEstimates ? tracingQueryPlanner : queryPlanner).GetPlan(database, table, queryTicket);
     }
 
     /// <summary>

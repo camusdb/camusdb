@@ -58,13 +58,21 @@ internal sealed class JoinQueryPlanner
 
     private readonly PlanCache? _cache;
 
-    public JoinQueryPlanner(CamusDBOptions options, StatisticsManager? stats = null) : this(stats, null, options) { }
+    /// <summary>
+    /// True for the planner of the <c>EXPLAIN (ANALYZE)</c> path: every estimate records how it was
+    /// made (<see cref="PhysicalPlanNode.EstimateTrace"/>). False for the planner a statement runs
+    /// through, which then allocates nothing for traces.
+    /// </summary>
+    private readonly bool _traceEstimates;
 
-    internal JoinQueryPlanner(StatisticsManager? stats, PlanCache? cache, CamusDBOptions options)
+    public JoinQueryPlanner(CamusDBOptions options, StatisticsManager? stats = null, bool traceEstimates = false) : this(stats, null, options, traceEstimates) { }
+
+    internal JoinQueryPlanner(StatisticsManager? stats, PlanCache? cache, CamusDBOptions options, bool traceEstimates = false)
     {
         _stats = stats;
         _cache = cache;
         _options = options;
+        _traceEstimates = traceEstimates;
     }
 
     /// <param name="leafKeys">
@@ -133,7 +141,7 @@ internal sealed class JoinQueryPlanner
         // A miss, or a hit whose order cannot be rebuilt over the current query: plan from the start.
         choice ??= _options.CostBasedJoinOrderEnabled && _stats is not null
                 && AllBaseTableEstimatesLoaded(database, bound)
-            ? JoinEnumerator.Enumerate(bound.Query.Source, bound, pushdown, database, _stats, _options, clockValues, leafKeys)
+            ? JoinEnumerator.Enumerate(bound.Query.Source, bound, pushdown, database, _stats, _options, clockValues, leafKeys, _traceEstimates)
             : JoinOrderOptimizer.Choose(bound.Query.Source, bound, pushdown);
 
         QuerySource orderedSource = choice.Source;
@@ -161,7 +169,7 @@ internal sealed class JoinQueryPlanner
         ProjectionPushdownPlanner.Apply(plan);
 
         // Annotate the join plan tree with cardinality and cost estimates.
-        CostEstimator.AnnotatePlan(plan.Root, database, table: null, _stats, _options);
+        CostEstimator.AnnotatePlan(plan.Root, database, table: null, _stats, _options, _traceEstimates);
 
         // Record the plan's query-shape ID and schema-version dependencies.
         plan.QueryShapeId = shapeId;
@@ -226,7 +234,7 @@ internal sealed class JoinQueryPlanner
 
         // A replay runs no search, so it costs no step.
         return JoinOrderChoice.CostBased(tree, graph,
-            JoinEnumerator.EstimateSteps(graph, order, tree, bound, pushdown, database, _stats, _options, clockValues, leafKeys, keyRowsBounds),
+            JoinEnumerator.EstimateSteps(graph, order, tree, bound, pushdown, database, _stats, _options, clockValues, leafKeys, keyRowsBounds, _traceEstimates),
             costedJoinSteps: 0);
     }
 
@@ -373,7 +381,10 @@ internal sealed class JoinQueryPlanner
                 // Kept beside the annotated estimate, not in place of it: EXPLAIN (ANALYZE) prints both,
                 // so a reader can see which of the two models was closer to the rows the join produced.
                 if (step is { } estimate)
+                {
                     joinNode.JoinOrderEstimatedRows = estimate.OutputRows;
+                    joinNode.EstimateTrace = estimate.Trace;
+                }
 
                 return joinNode;
             }
@@ -956,9 +967,9 @@ internal sealed class JoinQueryPlanner
         if (rightScanFilter is not null)
         {
             double sel = CardinalityEstimator.EstimateFilterSelectivity(
-                rightScanFilter, 
-                database, 
-                rightSource.Table.Table, 
+                rightScanFilter,
+                database,
+                rightSource.Table.Table,
                 stats
             );
 
@@ -993,9 +1004,9 @@ internal sealed class JoinQueryPlanner
                 if (tsn.ExecutionFilter is not null && stats is not null)
                 {
                     double sel = CardinalityEstimator.EstimateFilterSelectivity(
-                        tsn.ExecutionFilter, 
-                        database, 
-                        boundSource.Table, 
+                        tsn.ExecutionFilter,
+                        database,
+                        boundSource.Table,
                         stats
                     );
 

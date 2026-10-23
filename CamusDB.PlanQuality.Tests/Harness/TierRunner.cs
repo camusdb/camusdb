@@ -16,6 +16,7 @@ using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.PlanQuality.Tests.Baselines;
 using CamusDB.PlanQuality.Tests.Corpus;
 using CamusDB.PlanQuality.Tests.Engine;
+using CamusDB.PlanQuality.Tests.Estimates;
 using CamusDB.PlanQuality.Tests.Metrics;
 using CamusDB.PlanQuality.Tests.Reports;
 
@@ -147,13 +148,22 @@ internal static class TierRunner
             findings.InsertRange(0, extraFailures);
         comparison = comparison with { Findings = findings };
 
-        string report = PlanQualityReport.Render(title, baselinePath, run, comparison, settings);
+        // The estimate records: one for each node with an estimate and an actual count, with the
+        // trace of the estimate. They go next to the run, never into the repository.
+        List<EstimateRecord> estimates = TrainingSet.FromRun(run, identity.Tier, identity.Scale);
+
+        string report = PlanQualityReport.Render(title, baselinePath, run, comparison, settings, estimates);
         Directory.CreateDirectory(settings.ReportDirectory);
         string stem = Path.GetFileNameWithoutExtension(baselinePath);
         string reportPath = Path.Combine(settings.ReportDirectory, stem + "-report.md");
         await File.WriteAllTextAsync(reportPath, report).ConfigureAwait(false);
         await File.WriteAllTextAsync(Path.Combine(settings.ReportDirectory, stem + "-run.json"),
             JsonSerializer.Serialize(run, new JsonSerializerOptions { WriteIndented = true })).ConfigureAwait(false);
+        TrainingSet.Save(estimates, Path.Combine(settings.ReportDirectory, stem + "-estimates.json"));
+
+        TrainingSet.Summary estimateSummary = TrainingSet.Summarize(estimates);
+        TestContext.Progress.WriteLine(FormattableString.Invariant(
+            $"estimates: {estimateSummary.Nodes} nodes, {estimateSummary.Over100} with q-error > 100, median {estimateSummary.Median:0.00}, p95 {estimateSummary.P95:0.0}, unknown rule {estimateSummary.UnknownShare:P1}"));
 
         TestContext.Progress.WriteLine($"plan-quality report: {reportPath}");
         TestContext.AddTestAttachment(reportPath);

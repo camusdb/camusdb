@@ -186,6 +186,35 @@ created and loaded in a fixed order, because table ids come from a sequence and 
 insertion order. The JOB generator uses Python's seeded `random` module, and the nightly workflow
 pins one Python version.
 
+## Estimate traces and the errors by rule
+
+Under `EXPLAIN (ANALYZE)` every plan node carries an `estimate_trace` column: the rule that made
+its estimate (`equality-ndv`, `equality-heavy`, `range-histogram`, `like-prefix`, `in-list`,
+`join-skew-pair`, `class-textbook`, …), the formula, and each factor with the value and the
+statistics it read. A join that the join-order search estimated lists the leaves, the groups and
+the column classes of its table subset, so the estimate can be rebuilt from the trace alone. A
+statement and a plain `EXPLAIN` record nothing; only the `ANALYZE` path plans with a tracing
+planner.
+
+The harness reads the trace of every node:
+
+- Each tier run writes `<tier>-sf<scale>-estimates.json` next to its report: one record for each
+  plan node with an estimate and an actual count, with the query, its template (`17f` belongs to
+  template `17`), the rule, the formula, both counts and the trace. The file is a measurement of
+  one tree on one data set, not a baseline, and it is never committed.
+- The report gets a section *Estimates by rule*: for the whole run and for each rule, the count of
+  nodes, the count over a q-error of 100, the median and the 95th percentile of the q-error, and
+  the share of nodes without a rule (the target is none). This is where to look first when the
+  *Worst estimates* table names a query: the rule tells which branch of the estimator produced the
+  number, and the trace of the node tells what the statistics said.
+
+An experiment that fitted a multiplier and an exponent per rule to these records (offline, with a
+replica of the estimator over the traces) was measured against the tiers and not adopted. Per-rule
+scaling explained little of the estimate error even on the training queries, what it learned on
+some Join Order Benchmark templates did not hold on the others or on the retail data, and the
+fitted estimates lost plans at the probe-to-hash break-even of the widest joins while they lowered
+the error. The trace and this report section are what remains of it.
+
 ## Known gaps
 
 - **Correlated `EXISTS` on an unindexed key.** The subquery scans the inner table for each outer

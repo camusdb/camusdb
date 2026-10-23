@@ -59,20 +59,31 @@ internal enum JoinStepOperator
 /// The shape of the index lookups one join step would make into its right table, the inputs of
 /// <see cref="CostEstimator.IndexLookupJoinStepCost"/> beyond the left rows: whether the index is
 /// unique (a point read for each key) or not (a bounded scan for each key), the right rows one
-/// probe returns on average, and the distinct keys of the left input. The join keeps the rows of
-/// each probed key in a memo, so a left input that repeats a key probes the store once for it;
-/// <see cref="LeftKeyDistinct"/> bounds the probes, and it is unbounded when the distinct count of
-/// the left column is unknown, so every left row then counts as a probe. The join-order search
-/// lowers that bound to the distinct rows the key's table can have in the step's left input, the
-/// smallest estimate of any subset of the left tables that contains it, so the rows a later join
-/// multiplied do not count as probes again. A left row whose key is
-/// NULL probes nothing, so <see cref="LeftNonNullFraction"/>, the share of the left column's rows
-/// that hold a value, scales the probes before the distinct bound: a cast table whose character
-/// column is NULL in half the rows probes the characters for half of them.
+/// probe returns on average, and the shape of the left column's keys. The join keeps the rows of
+/// each probed key in a memo, so a left input that repeats a key probes the store once for it: the
+/// probes of a step are the distinct keys of its left input, which
+/// <see cref="CostEstimator.ExpectedDistinctKeys"/> estimates from <see cref="LeftKeyDistinct"/>,
+/// the distinct count of the left column in its table, and <see cref="LeftTableRows"/>, the rows
+/// of that table: a left input that holds a part of the table holds a part of its keys, and rows
+/// of the same key fall into the part together, so the keys grow slower than the rows. Both are
+/// positive infinity when the column's table or its count is unknown, and every left row then
+/// counts as a probe. <see cref="LeftKeyRows"/> is the join-order search's bound on the rows of
+/// the key's table in the step's left input, the smallest estimate of any subset of the left
+/// tables that contains it, so the rows a later join multiplied do not count as probes again;
+/// positive infinity when there is none. A left row whose key is NULL probes nothing, so
+/// <see cref="LeftNonNullFraction"/>, the share of the left column's rows that hold a value,
+/// scales the rows before the distinct estimate: a cast table whose character column is NULL in
+/// half the rows probes the characters for half of them.
 /// <see cref="CostEstimator.EstimateIndexLookupProfile"/> builds it from the statistics, and the
 /// enumerator and the builder both price a step through the same instance.
 /// </summary>
-internal readonly record struct IndexLookupProfile(bool UniqueIndex, double MatchesPerProbe, double LeftKeyDistinct, double LeftNonNullFraction = 1.0);
+internal readonly record struct IndexLookupProfile(
+    bool UniqueIndex,
+    double MatchesPerProbe,
+    double LeftKeyDistinct,
+    double LeftNonNullFraction = 1.0,
+    double LeftTableRows = double.PositiveInfinity,
+    double LeftKeyRows = double.PositiveInfinity);
 
 /// <summary>
 /// The enumerator's estimates for one join of the tree it chose: the rows of the left input, the
@@ -96,7 +107,8 @@ internal readonly record struct JoinStepEstimate(
     IndexLookupProfile? IndexLookup,
     JoinStepOperator Operator,
     double OutputRows,
-    double KeyRowsBound = double.PositiveInfinity);
+    double KeyRowsBound = double.PositiveInfinity,
+    CamusDB.Core.CommandsExecutor.Models.Plans.EstimateTrace? Trace = null);
 
 /// <summary>
 /// The join tree that the planner builds, how it was built, the filter that runs after the
