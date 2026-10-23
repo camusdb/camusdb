@@ -80,8 +80,11 @@ Contract:
 ## 3. Eligibility — which statements get a "prefer"
 
 The server advertises a destination only when it can prove the statement's data footprint is **one
-ordinary hash-routed table**, in which case every row and index key space of that table shares one
-placement group and the destination is independent of parameter values.
+ordinary table whose every key space sits on one partition**, so the destination is independent of
+parameter values. Under hash routing that is always true: every row and index key space of a table
+shares one placement group. Under key-range routing it is true while the row space, every index space
+and the large-value space are each one range on the same partition, which is how Kahuna seeds a new
+table. The first split of any of them ends it.
 
 | Statement | Advice |
 | --- | --- |
@@ -90,7 +93,8 @@ placement group and the destination is independent of parameter values.
 | Join, subquery (anywhere in the statement), derived table, view | `clear` (`ineligible`) |
 | `AS OF SYSTEM TIME`, branch database, materialized view | `clear` (`ineligible`) |
 | `{cache=…}`-hinted query (hit, miss or bypass) | `clear` (`cacheAffinity`) — cache locality and data locality may prefer different nodes |
-| Key-range sharding enabled (deployment-wide gate) | `clear` (`ineligible`) — a ranged access path's destination depends on the parameter |
+| Key-range table whose spaces are each one range on one partition | `prefer` (`singleRangeTable`), reusable across parameter values until a split |
+| Key-range table with a divided space, or a space on another partition | `clear` (`ineligible`) — the destination depends on the parameter |
 | DDL, server-level statements, `SHOW`/information queries | No metadata at all |
 | Placement not yet initialized on this node, or leader unknown | `clear` (`placementUnknown`) |
 | Standalone node | No metadata at all — there is only one destination |

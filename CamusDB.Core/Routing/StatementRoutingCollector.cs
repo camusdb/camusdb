@@ -18,13 +18,21 @@ namespace CamusDB.Core.Routing;
 /// time so a later schema or storage change cannot alter what the statement actually touched.
 /// <see cref="RowKeySpace"/> is the exact bucket prefix the placement lookup uses; the identity
 /// fields feed the opaque dependency token (see <see cref="StatementRoutingResolver"/>).
+///
+/// <para><see cref="Store"/> and <see cref="Indexes"/> name the table's other key spaces — every
+/// index space and the large-value space. Under hash routing they share the row space's partition
+/// by construction and are never read. Under key-range routing each space has its own ranges, so the
+/// resolver checks all of them before it names one leader. <see cref="Indexes"/> is the descriptor's
+/// copy-on-write map as it stood at record time, so holding it costs no copy.</para>
 /// </summary>
 public sealed record StatementRoutingCandidate(
     string RowKeySpace,
     string TableId,
     string StorageId,
     long ContentsGeneration,
-    int SchemaVersion);
+    int SchemaVersion,
+    Storage.Kv.KvTableStore Store,
+    IReadOnlyDictionary<string, TableIndexSchema> Indexes);
 
 /// <summary>
 /// Per-statement accumulator for advisory routing metadata, modeled on
@@ -130,7 +138,9 @@ public sealed class StatementRoutingCollector
             TableId: table.Id,
             StorageId: table.Schema.EffectiveStorageId,
             ContentsGeneration: table.Schema.ContentsGeneration,
-            SchemaVersion: table.Schema.Version);
+            SchemaVersion: table.Schema.Version,
+            Store: table.Store,
+            Indexes: table.Indexes);
 
         Volatile.Write(ref state, new State(candidate, null));
     }

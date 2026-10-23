@@ -11,6 +11,7 @@ using System.Buffers.Binary;
 using System.Collections.Concurrent;
 using System.IO.Hashing;
 using System.Text;
+using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.Storage.Kv;
 
@@ -26,13 +27,16 @@ namespace CamusDB.Core.Routing;
 /// worse than stale advice. Callers must still guard the call: a failure here must never turn a
 /// committed success into an error.</para>
 ///
-/// <para><b>Hash-only, conservatively.</b> Advice is emitted only when the whole deployment runs
-/// hash placement (<c>KeyRangeShardingEnabled</c> off). Under hash routing every key space of a
-/// table shares one placement group — the grouped layout <see cref="KvKeyBuilder"/> documents — so
-/// one lookup of the row space covers the index spaces too, and the answer is independent of
-/// parameter values. Under key-range routing a statement's destination depends on the parameter,
-/// so parameter-independent advice would be wrong by construction; the deployment-wide gate keeps
-/// that entire regime out of the first version.</para>
+/// <para><b>One partition for every parameter value.</b> Advice names one leader that every
+/// parameter value of the statement reaches. Under hash routing every key space of a table shares
+/// one placement group — the grouped layout <see cref="KvKeyBuilder"/> documents — so one lookup of
+/// the row space covers the index spaces too. Under key-range routing each key space of the table has
+/// its own ranges, and a statement's destination depends on its parameter once any space is divided.
+/// So a key-range table gets advice only while its row space, every index space and its large-value
+/// space are each one range, all on the row range's partition. That holds from creation, because
+/// Kahuna seeds every space of one placement group on the same partition, until the first split.
+/// Stale advice after a split costs one forwarded request, never a wrong answer, and the placement
+/// cache below lets it expire within its TTL.</para>
 ///
 /// <para><b>The initialized flag is respected.</b> <see cref="EmbeddedKahuna.GetPlacement"/>
 /// discards the range-map initialized bit, so this resolver goes through
@@ -106,18 +110,20 @@ public sealed class StatementRoutingResolver
         if (candidate is null)
             return null;
 
-        // Deployment-wide gate: any key-range routing in the process makes parameter-independent
-        // reuse unsound for a ranged access path, so the whole regime is excluded.
-        if (database.Options.KeyRangeShardingEnabled)
-            return Clear(StatementRoutingAdvice.ReasonIneligible);
-
         (TablePlacement placement, bool initialized) = LookupPlacement(database.Kahuna, candidate.RowKeySpace);
 
         if (!initialized)
             return Clear(StatementRoutingAdvice.ReasonPlacementUnknown);
 
         if (placement.IsKeyRange)
-            return Clear(StatementRoutingAdvice.ReasonIneligible);
+        {
+            if (placement.Spans.Count != 1)
+                return Clear(StatementRoutingAdvice.ReasonIneligible);
+
+            string? companionVerdict = CheckCompanionSpaces(database.Kahuna, candidate, placement.Spans[0].PartitionId);
+            if (companionVerdict is not null)
+                return Clear(companionVerdict);
+        }
 
         if (placement.Spans.Count != 1 || placement.Spans[0].LeaderEndpoint is null)
             return Clear(StatementRoutingAdvice.ReasonPlacementUnknown);
@@ -127,7 +133,42 @@ public sealed class StatementRoutingResolver
             PreferredNodeId: placement.Spans[0].LeaderEndpoint,
             DependencyToken: BuildDependencyToken(database.Id, candidate),
             MaxAgeMs: maxAgeMs,
-            Reason: StatementRoutingAdvice.ReasonSingleTableHash);
+            Reason: placement.IsKeyRange ? StatementRoutingAdvice.ReasonSingleRangeTable : StatementRoutingAdvice.ReasonSingleTableHash);
+    }
+
+    /// <summary>
+    /// For a key-range table, checks that every index space and the large-value space is one span on
+    /// <paramref name="rowPartition"/>, and returns null when they all are. A space that is divided, or
+    /// that sits on another partition — a split moved it, or an index that is not range-routed stays on
+    /// the group's hash partition — makes the destination depend on the parameter, so the statement is
+    /// ineligible. A space this node cannot place yet is answered as unknown, like the row space.
+    /// </summary>
+    private string? CheckCompanionSpaces(EmbeddedKahuna kahuna, StatementRoutingCandidate candidate, int rowPartition)
+    {
+        string? verdict = CheckSpace(kahuna, candidate.Store.LargeValueKeySpace, rowPartition);
+        if (verdict is not null)
+            return verdict;
+
+        foreach (TableIndexSchema index in candidate.Indexes.Values)
+        {
+            verdict = CheckSpace(kahuna, candidate.Store.IndexKeySpace(index.KvId), rowPartition);
+            if (verdict is not null)
+                return verdict;
+        }
+
+        return null;
+    }
+
+    private string? CheckSpace(EmbeddedKahuna kahuna, string keySpace, int rowPartition)
+    {
+        (TablePlacement placement, bool initialized) = LookupPlacement(kahuna, keySpace);
+
+        if (!initialized)
+            return StatementRoutingAdvice.ReasonPlacementUnknown;
+
+        return placement.Spans.Count == 1 && placement.Spans[0].PartitionId == rowPartition
+            ? null
+            : StatementRoutingAdvice.ReasonIneligible;
     }
 
     private static StatementRoutingAdvice Clear(string reason) => new(

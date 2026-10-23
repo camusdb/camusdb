@@ -51,6 +51,13 @@ public sealed record StatementRoutingAdvice(
     /// <summary>Reason: a single ordinary hash-routed table backs the statement.</summary>
     public const string ReasonSingleTableHash = "singleTableHash";
 
+    /// <summary>
+    /// Reason: a single ordinary key-range routed table backs the statement, and every one of its
+    /// key spaces is one range on one partition, so every parameter value lands on the same leader
+    /// until a split divides a space.
+    /// </summary>
+    public const string ReasonSingleRangeTable = "singleRangeTable";
+
     /// <summary>Reason: the statement's shape or footprint is outside the supported set.</summary>
     public const string ReasonIneligible = "ineligible";
 
