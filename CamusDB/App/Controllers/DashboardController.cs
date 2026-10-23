@@ -597,14 +597,12 @@ public sealed class DashboardController : CommandsController
     /// here is a null reference rather than a shortcut. What it carries is the cheapest kind there
     /// is — a synthetic read-only transaction at timestamp zero, which reads the latest committed
     /// value per key. It makes no round trip to Kahuna to begin, takes no locks, and needs no
-    /// commit or rollback, so an unattended page polling it adds no coordinator traffic. It is
-    /// deliberately not promoted: promotion exists to hold a range lock for a phantom-free scan,
-    /// and this statement reads schema, not rows.</para>
+    /// commit or rollback, so an unattended page polling it adds no coordinator traffic.</para>
     /// </summary>
     private async IAsyncEnumerable<QueryResultRow> RunDatabaseStatementAsync(string database, string sql, Principal? principal)
     {
         KvTransaction readOnly = await transactions
-            .BeginReadOnlyAsync(database, promote: false, causalToken: null)
+            .BeginReadOnlyAsync(database)
             .ConfigureAwait(false);
 
         ExecuteSQLTicket ticket = new(

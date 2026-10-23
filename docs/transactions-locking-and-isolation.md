@@ -220,10 +220,12 @@ bounded index range scans, and `IN`-list scans). They fire in two situations:
 - **For a Serializable read-write transaction** (see §9), on *any* configuration including the default
   single-node hash setup — a serializable scan needs phantom protection to be correct, so the lock is
   taken regardless of routing.
-- **In key-range routing mode**, for ordinary scans, so a scan over `[A, B)` doesn't block a writer on
-  the disjoint `[B, C)`.
+- **In key-range routing mode**, for a scan in an explicit Read Committed transaction, so a scan over
+  `[A, B)` doesn't block a writer on the disjoint `[B, C)`.
 
-Otherwise — a plain Read Committed `SELECT` in the default hash setup — **no range lock is taken**.
+Otherwise **no range lock is taken**. That includes every autocommit `SELECT`, in every routing mode:
+it reads a pinned snapshot under the Serializable default, or the latest committed value per key under
+a Read Committed default, and it has no transaction identity that could own a lock.
 
 ### 6.3 Point read locks (Serializable read-write only)
 A Serializable read-write transaction also locks the *individual* keys it reads with `GetRow` or a
@@ -382,7 +384,7 @@ machinery across more nodes and partitions. Here's the mapping:
 | Routing | one place, so routing is trivial | keys routed to partitions by hash (or by range, if enabled) |
 | Where a write commits | local Raft (a one-node "quorum") | the partition **leader**, replicated to a node majority |
 | Multi-key write | 2PC, local | 2PC across the **leaders** of every partition the keys touch |
-| Range locks | active for Serializable transactions; otherwise dormant in the hash default | additionally active for ordinary scans when key-range routing is enabled (≥ 2 partitions) |
+| Range locks | active for Serializable transactions; otherwise dormant in the hash default | additionally active for scans in explicit Read Committed transactions when key-range routing is enabled; never for an autocommit `SELECT` |
 | Reads | MVCC, lock-free | MVCC, lock-free (served by the partition leader of each key) |
 | Isolation levels | Read Committed + Serializable, both work | identical — same levels, same guarantees |
 | Schema/DDL | a dedicated, totally-ordered key space | same key space, kept on a single partition so all nodes agree on schema order |
@@ -488,7 +490,8 @@ different strategies, picked automatically from whether the transaction is read-
   And it does this **without taking any locks**, so it never blocks writers and is never blocked. This
   holds under key-range sharding too (`key-range-sharding.md`): the engine takes no scan lock for a
   transaction that reads at a pinned timestamp, so a snapshot read is never refused by a writer's range
-  lock and never makes a writer wait. You can
+  lock and never makes a writer wait. An autocommit `SELECT` gets the same kind of snapshot, pinned when
+  the statement begins, with no round trip to Kahuna, in every routing mode. You can
   hold one open across **several reads** (in separate requests, resumed by transaction id) and they all
   observe the same instant — ideal for a consistent multi-query report.
 - **Serializable read-write → strict locking.** Reads take the shared point/range locks from §6.2–6.3
@@ -593,8 +596,8 @@ When reasoning about a concurrency question in CamusDB, ask in this order:
 2. **Is it a read or a write?** Read Committed reads and Serializable read-only reads are lock-free
    MVCC; Serializable read-write reads take locks; all writes take per-key locks + 2PC.
 3. **Is it a scan or a point lookup?** A point lookup reads one key; a scan over a range is what can
-   take a range (predicate) lock — for Serializable transactions, or for ordinary scans under key-range
-   routing.
+   take a range (predicate) lock — for Serializable read-write transactions, or for scans in explicit
+   Read Committed transactions under key-range routing. An autocommit `SELECT` never takes one.
 4. **Single partition or many?** Many partitions means writes/locks happen on partition leaders and a
    transaction may run a 2PC across them — but the isolation guarantees are the same either way.
 5. **What guarantee does the app actually need?** Need a consistent multi-statement read? Use a

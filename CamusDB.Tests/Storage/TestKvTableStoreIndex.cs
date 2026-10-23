@@ -707,14 +707,13 @@ public sealed class TestKvTableStoreIndex
         }
     }
 
-    // A promoted read-only scan (key-range mode) is a REAL transaction: it has a non-zero identity,
-    // takes an enforced shared range lock during its scan, and releases that lock when it commits —
-    // exactly like an implicit single-statement transaction. This proves the autocommit-SELECT
-    // promotion end-to-end: the lock is real (a foreign write into the range is blocked while held)
-    // and the commit path releases it (the same write succeeds afterwards).
+    // An explicit Read Committed read-only transaction (key-range mode) is a REAL transaction: it has
+    // a non-zero identity, takes an enforced shared range lock during its scan, and releases that lock
+    // when it commits. The lock is real (a foreign write into the range is blocked while held) and the
+    // commit path releases it although the transaction wrote nothing (the same write succeeds after).
     [Test]
     [NonParallelizable]
-    public async Task PromotedReadOnlyScan_HoldsEnforcedSharedRangeLock_ReleasedOnCommit()
+    public async Task ReadCommittedReadOnlyScan_HoldsEnforcedSharedRangeLock_ReleasedOnCommit()
     {
         // Key-range sharding on — the store and transactions take it as configuration. The engine's
         // lock-wait deadline is raised far above the test's 500 ms cancellation so the blocked write
@@ -731,10 +730,9 @@ public sealed class TestKvTableStoreIndex
             CompositeColumnValue cv25 = new(new ColumnValue(ColumnType.Integer64, 25L));
             CompositeColumnValue cv50 = new(new ColumnValue(ColumnType.Integer64, 50L));
 
-            // A scan SELECT promotes to a real read-only transaction.
-            KvTransaction roTx = await transactions.BeginReadOnlyAsync(promote: true);
-            Assert.AreNotEqual(HLCTimestamp.Zero, roTx.TransactionId, "a promoted read-only scan must have a real identity");
-            Assert.IsTrue(roTx.IsReadOnly, "the promoted scan transaction is still read-only");
+            KvTransaction roTx = await transactions.BeginAsync(CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadOnly);
+            Assert.AreNotEqual(HLCTimestamp.Zero, roTx.TransactionId, "an explicit read-only transaction has a real identity");
+            Assert.AreEqual(CamusTransactionMode.ReadOnly, roTx.TransactionMode, "the scan transaction is read-only");
 
             // The read-only scan takes a shared range lock over [1,50].
             await store.AcquireBoundedIndexRangeLockAsync(roTx, "idx_age", cv1, true, cv50, true, unique: false);
@@ -760,31 +758,49 @@ public sealed class TestKvTableStoreIndex
         }
     }
 
-    // The promotion is scoped: a read-only begin stays on the lightweight HLCTimestamp.Zero snapshot
-    // when promotion is not requested, or whenever key-range sharding is disabled (single-partition
-    // mode, where range locks are no-ops). A Zero transaction has no Kahuna identity and needs no
-    // commit/rollback round-trips.
+    // The autocommit SELECT transaction is the same in both routing modes: a zero-identity snapshot
+    // that cannot own a lock. Under key-range sharding its scan therefore takes no range lock, and a
+    // writer into the range it read is neither blocked nor refused. Two managers rather than one flag
+    // toggled between the assertions: a manager fixes its configuration when it is built.
     [Test]
     [NonParallelizable]
-    public async Task BeginReadOnly_StaysZeroSnapshot_WhenNotPromotedOrShardingDisabled()
+    public async Task BeginReadOnly_IsLockFreeZeroIdentitySnapshot_InEveryRoutingMode()
     {
-        // Two managers rather than one flag toggled between the assertions: a manager fixes its
-        // configuration when it is built, so the two cases below are two configurations.
-        CamusDBOptions sharded   = CamusDBOptions.Default with { KeyRangeShardingEnabled = true };
+        CamusDBOptions sharded   = CamusDBOptions.Default with { KeyRangeShardingEnabled = true, LockWaitDeadlineMs = 10_000 };
         CamusDBOptions unsharded = CamusDBOptions.Default with { KeyRangeShardingEnabled = false };
 
-        (EmbeddedKahuna node, _) = await CreateStoreAsync("irange-zero", sharded);
+        (EmbeddedKahuna node, KvTableStore store) = await CreateStoreAsync("irange-zero", sharded);
         await using EmbeddedKahuna __ = node;
 
-        // Sharding ON but promotion NOT requested (e.g. a point read) → Zero snapshot.
-        KvTransactionsManager shardedTransactions = new(node.Kahuna, sharded);
-        KvTransaction noPromote = await shardedTransactions.BeginReadOnlyAsync(promote: false);
-        Assert.AreEqual(HLCTimestamp.Zero, noPromote.TransactionId, "an un-promoted read-only begin must stay on the Zero snapshot");
+        store.MarkIndexAsRanged("idx_age");
 
-        // Promotion requested but sharding OFF → still Zero (range locks are no-ops in hash mode).
         KvTransactionsManager unshardedTransactions = new(node.Kahuna, unsharded);
-        KvTransaction shardingOff = await unshardedTransactions.BeginReadOnlyAsync(promote: true);
-        Assert.AreEqual(HLCTimestamp.Zero, shardingOff.TransactionId, "promotion must be a no-op when key-range sharding is disabled");
+        Assert.AreEqual(HLCTimestamp.Zero, unshardedTransactions.BeginReadOnly().TransactionId,
+            "under hash routing the autocommit read has no identity");
+
+        KvTransactionsManager transactions = new(node.Kahuna, sharded);
+        KvTransaction reader = transactions.BeginReadOnly();
+        Assert.AreEqual(HLCTimestamp.Zero, reader.TransactionId,
+            "under key-range sharding the autocommit read has no identity either");
+
+        CompositeColumnValue cv1  = new(new ColumnValue(ColumnType.Integer64, 1L));
+        CompositeColumnValue cv25 = new(new ColumnValue(ColumnType.Integer64, 25L));
+        CompositeColumnValue cv50 = new(new ColumnValue(ColumnType.Integer64, 50L));
+
+        await store.AcquireRowRangeLockAsync(reader);
+        await store.AcquireIndexRangeLockAsync(reader, "idx_age");
+        await store.AcquireBoundedIndexRangeLockAsync(reader, "idx_age", cv1, true, cv50, true, unique: false);
+        Assert.AreEqual(0, reader.GetAcquiredRangeLocks().Count,
+            "the autocommit read must take no row, index or bounded index range lock under key-range sharding");
+
+        // A writer into the range the read just covered commits without waiting. The lock-wait
+        // deadline is far above this bound, so a lock held by the reader would surface as a cancel.
+        KvTransaction writer = await transactions.BeginAsync();
+        using CancellationTokenSource cts = new(TimeSpan.FromSeconds(5));
+        await store.PutIndexEntry(writer, "idx_age", cv25, new ObjectIdValue(25, 0, 0), unique: false, cancellationToken: cts.Token);
+        await transactions.CommitAsync(writer);
+
+        await transactions.CommitAsync(reader);
     }
 
     // Bounded scan range locks are SHARED. Two transactions scanning DISJOINT index ranges

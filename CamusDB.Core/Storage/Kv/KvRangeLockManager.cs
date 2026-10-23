@@ -118,7 +118,7 @@ internal sealed class KvRangeLockManager
     ///   <item>A Serializable read-write transaction, in every routing mode
     ///   (<see cref="IsSerializableReadWrite"/>).</item>
     ///   <item>Under key-range sharding, a transaction that reads the latest state with a real
-    ///   identity: the promoted autocommit scan and a Read Committed read-write transaction. Their
+    ///   identity: an explicit Read Committed transaction, read-write or read-only. Its
     ///   pages can be answered by several ranges on several partitions, and the shared lock is what
     ///   keeps those pages one consistent read. For an index this arm applies only once the index
     ///   space is range-routed (<see cref="MarkIndexAsRanged"/>); a hash-routed index needs no lock.</item>
@@ -367,8 +367,8 @@ internal sealed class KvRangeLockManager
 
         // A range lock needs a real transaction identity to own and later release it. The
         // Zero-snapshot read-only fast path (point reads, and all reads in single-partition mode)
-        // has no such identity, so it cannot take a range lock — skip. A promoted read-only scan
-        // (real id, key-range mode) falls through and takes a shared lock like any transaction.
+        // has no such identity, so it cannot take a range lock — skip. The autocommit SELECT is
+        // always this shape, in every routing mode.
         if (tx.TransactionId == HLCTimestamp.Zero)
             return;
 

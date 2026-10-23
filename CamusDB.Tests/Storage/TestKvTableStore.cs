@@ -485,10 +485,11 @@ public sealed class TestKvTableStore
             "a pinned snapshot must take no row, index or bounded index range lock under key-range sharding");
 
         // The latest-state shape still locks in this mode, so the exemption belongs to the snapshot alone.
-        KvTransaction latest = await transactions.BeginReadOnlyAsync(promote: true);
+        KvTransaction latest = await transactions.BeginAsync(
+            CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadOnly);
         await store.AcquireBoundedIndexRangeLockAsync(latest, "idx_slot", cv7, true, cv7, true, unique: false);
         Assert.AreEqual(1, latest.GetAcquiredRangeLocks().Count,
-            "a promoted latest-state scan keeps its shared range lock under key-range sharding");
+            "an explicit Read Committed read-only scan keeps its shared range lock under key-range sharding");
 
         await transactions.CommitAsync(latest);
         await transactions.RollbackAsync(snapshot);

@@ -135,23 +135,18 @@ internal sealed class QueryExecutor
     {
         QueryPlan plan = queryPlanner.GetPlan(database, table, ticket);
 
-        // Only autocommit reads are cache-eligible (IsReadOnly ensures no writes). Two
-        // kinds are admitted:
+        // Only reads of the current committed state are cache-eligible (IsReadOnly ensures no
+        // writes). Two kinds are admitted:
         //
         // 1. Synthetic zero-snapshot reads (TransactionId == Zero): CreateReadOnly() and
-        //    CreateSnapshotReadOnly(T). These have no Kahuna identity and read at the latest
-        //    committed value per key — the standard single-node / hash-mode fast path.
+        //    CreateSnapshotReadOnly(T), the autocommit SELECT in every routing mode. These have
+        //    no Kahuna identity; T is minted from the local clock at begin, so the read sees the
+        //    current committed state.
         //
-        // 2. Promoted single-statement autocommit reads (TransactionId != Zero, but
-        //    ReadTimestamp == Zero): BeginReadOnlyAsync(promote: true) under key-range
-        //    sharding. These mint a real Kahuna transaction identity so a shared range lock
-        //    can be held for phantom-free reads, but they do not pin a read snapshot
-        //    (ReadTimestamp stays Zero). Semantically they are equivalent to a zero-snapshot
-        //    autocommit read for caching: both read at the current latest committed state,
-        //    and both are single-statement (no cross-statement snapshot to protect).
-        //    Admitting them keeps the result cache effective in key-range sharding mode;
-        //    excluding them would silently disable caching for every HTTP autocommit SELECT
-        //    in that mode.
+        // 2. Read-only transactions with a live Kahuna identity but no pinned read snapshot
+        //    (TransactionId != Zero, ReadTimestamp == Zero): an explicit Read Committed
+        //    read-only transaction. Each of its statements reads the latest committed state,
+        //    which is what a fenced cache entry holds, so it is equivalent to case 1.
         //
         // Excluded: explicit Serializable RO transactions (TransactionId != Zero AND
         //    ReadTimestamp != Zero), opened via BeginAsync(Serializable, ReadOnly). These
@@ -204,9 +199,10 @@ internal sealed class QueryExecutor
     /// <summary>
     /// Executes a cached-read path for autocommit SELECTs with a <c>{cache=name}</c> hint.
     /// Admitted are synthetic zero-snapshot reads (<see cref="KvTransaction.TransactionId"/> ==
-    /// <see cref="HLCTimestamp.Zero"/>) and promoted single-statement autocommit reads
+    /// <see cref="HLCTimestamp.Zero"/>), the shape of every autocommit SELECT, and read-only
+    /// transactions with a live identity but no pinned snapshot
     /// (<see cref="KvTransaction.TransactionId"/> != Zero but <see cref="KvTransaction.ReadTimestamp"/>
-    /// == Zero). Excluded are explicit Serializable RO transactions, which have a pinned read
+    /// == Zero), which read the latest committed state per statement. Excluded are explicit Serializable RO transactions, which have a pinned read
     /// snapshot (<see cref="KvTransaction.ReadTimestamp"/> != Zero); serving them a cached result
     /// from a different snapshot would violate their isolation guarantee.
     ///

@@ -106,7 +106,7 @@ public sealed class KvTransactionsManager : IDisposable
 
     /// <summary>
     /// Mints a local HLC timestamp without opening a Kahuna transaction. Used by the cheap
-    /// serializable read-only snapshot path (<see cref="BeginReadOnlyAsync"/> with Serializable
+    /// serializable read-only snapshot path (<see cref="BeginReadOnly"/> with Serializable
     /// default) — a purely in-memory clock bump, no Raft or network round-trip.
     /// <c>null</c> when not wired (legacy test paths); falls back to the zero-snapshot fast path.
     /// </summary>
@@ -479,8 +479,7 @@ public sealed class KvTransactionsManager : IDisposable
     /// <para>Lock-free holds in every routing mode. The scan-lock helpers skip a transaction with a
     /// pinned <see cref="KvTransaction.ReadTimestamp"/> (see <c>KvRangeLockManager.ScanTakesPredicateLock</c>),
     /// so under key-range sharding the snapshot is neither refused by a writer's range lock nor a holder
-    /// that a writer waits for. The key-range promoted scan is a different shape: it reads the latest
-    /// state and keeps its shared lock (<see cref="BeginReadOnlyAsync"/>).</para>
+    /// that a writer waits for.</para>
     /// </summary>
     private async Task<KvTransaction> BeginSerializableReadOnlyAsync(
         TransactionPriority priority, 
@@ -630,71 +629,27 @@ public sealed class KvTransactionsManager : IDisposable
     public KvTransaction CreateReadOnlyTransaction() => KvTransaction.CreateReadOnly();
 
     /// <summary>
-    /// Begins a read-only transaction for a SELECT, choosing between two strategies:
+    /// Begins the read-only transaction of an autocommit SELECT. It never contacts Kahuna, has no
+    /// identity (<see cref="HLCTimestamp.Zero"/>), and its commit and rollback are no-ops, so the
+    /// caller needs no cleanup on any path.
     ///
-    /// <para><b>Zero-snapshot fast path</b> (default, and always in single-partition / hash mode):
-    /// returns a synthetic transaction at <see cref="HLCTimestamp.Zero"/> — no Kahuna round-trips,
-    /// read-committed per key, commit/rollback are no-ops. Used for point reads and whenever
-    /// key-range sharding is disabled (range locks are no-ops there, so a snapshot lock would buy
-    /// nothing).</para>
+    /// <para>Under the Serializable default the read is pinned at a local HLC timestamp
+    /// <c>T ≥ causalToken</c>, so every key, page and range the statement reads is served as of one
+    /// point. Under the Read Committed default it reads the latest committed value of each key.</para>
     ///
-    /// <para><b>Promoted real transaction</b> (when <paramref name="promote"/> is set <i>and</i>
-    /// key-range sharding is enabled): mints a real server-assigned transaction identity via
-    /// <c>LocateAndStartTransaction</c>. A scan can then hold a <em>shared</em> range lock for a
-    /// serializable, phantom-free read — which is impossible under <see cref="HLCTimestamp.Zero"/>
-    /// because that sentinel has no identity to own or release a lock. The caller <b>must</b>
-    /// finalize a promoted transaction (commit or rollback) so its shared range locks are released
-    /// and its MVCC snapshot is cleaned; this matches an implicit single-statement transaction.</para>
+    /// <para>The routing mode does not change the shape. Under key-range sharding a pinned snapshot
+    /// stays consistent across a split, because Kahuna re-resolves the range map per page and reads a
+    /// moved range at the fixed timestamp, and it takes no range lock (see
+    /// <c>KvRangeLockManager.ScanTakesPredicateLock</c>). So a writer can neither refuse the read nor
+    /// be made to wait for it. A transaction that needs to hold a range lock is an explicit one,
+    /// begun with <see cref="BeginAsync"/>.</para>
     /// </summary>
-    public async Task<KvTransaction> BeginReadOnlyAsync(
-        bool promote,
-        Kommander.Time.HLCTimestamp? causalToken = null,
-        TransactionPriority? priority = null,
-        CancellationToken cancellationToken = default)
+    public KvTransaction BeginReadOnly(Kommander.Time.HLCTimestamp? causalToken = null)
     {
-        if (!promote || !options.KeyRangeShardingEnabled)
-        {
-            // Serializable default: mint a local HLC timestamp T ≥ causalToken (when provided)
-            // and return a zero-identity snapshot transaction at T — no Kahuna round-trip.
-            // RC default: keep the HLCTimestamp.Zero fast path (latest-committed per key).
-            if (options.DefaultIsolationLevel == CamusIsolationLevel.Serializable &&
-                mintLocalT is not null)
-                return KvTransaction.CreateSnapshotReadOnly(mintLocalT(causalToken));
+        if (options.DefaultIsolationLevel == CamusIsolationLevel.Serializable && mintLocalT is not null)
+            return KvTransaction.CreateSnapshotReadOnly(mintLocalT(causalToken));
 
-            return KvTransaction.CreateReadOnly();
-        }
-
-        string uniqueId = Guid.NewGuid().ToString("N");
-
-        // Route through the shared start helper so a promoted read-only scan gets the same session
-        // timeout (MaxSerializableTransactionLifetimeMs, not Kahuna's 5 s default) and the same
-        // MustRetry/WaitingForReplication warmup retry as a read-write Begin. A bare start here would
-        // give the scan's shared range locks a 5 s session lease and no retry against a still-electing
-        // partition, so a slow serializable scan could have its snapshot reaped mid-read.
-        TransactionPriority priorityMode = priority ?? options.DefaultTransactionPriority;
-
-        TransactionHandle handle = await StartKahunaTransactionAsync(
-            uniqueId, 
-            "start read-only transaction",
-            KeyValueTransactionLocking.Pessimistic, 
-            ReadValidation.None, 
-            DecisionDurability.BestEffort,
-            priorityMode, 
-            cancellationToken
-        ).ConfigureAwait(false);
-
-        KvTransaction tx = new(
-            handle.TransactionId,
-            uniqueId,
-            isReadOnly: true,
-            transactionMode: CamusTransactionMode.ReadOnly,
-            clientId: MintTrackingId(handle.TransactionId),
-            priority: priorityMode
-        );
-
-        Track(tx);
-        
-        return tx;
+        return KvTransaction.CreateReadOnly();
     }
 
     /// <summary>
@@ -751,9 +706,9 @@ public sealed class KvTransactionsManager : IDisposable
 
         // Serializable+ReadOnly transactions hold no write intents and no range locks — a lightweight
         // rollback of the empty Kahuna transaction is equivalent to commit and avoids the full 2PC
-        // roundtrip. Promoted ReadCommitted+ReadOnly scan transactions are excluded: they may hold
-        // shared range locks that the coordinator's finalize must release, so they go through the
-        // normal commit path below.
+        // roundtrip. An explicit ReadCommitted+ReadOnly transaction is excluded: under key-range
+        // sharding its scans hold shared range locks that the coordinator's finalize must release,
+        // so it goes through the normal commit path below.
         if (tx is { IsReadOnly: true, TransactionMode: CamusTransactionMode.ReadOnly, IsolationLevel: CamusIsolationLevel.Serializable })
         {
             tx.Status = KvTransactionStatus.Committed;

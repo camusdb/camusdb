@@ -28,7 +28,7 @@ public enum QueryStage
     Request,
     /// <summary>Resolving the SQL text and parameters (prepared-statement lookup).</summary>
     Resolve,
-    /// <summary>The autocommit read's <c>BeginReadOnlyAsync</c>.</summary>
+    /// <summary>The autocommit read's <c>BeginReadOnlyAsync</c> (opens the database and mints the snapshot).</summary>
     Begin,
     /// <summary>Everything the executor does before it hands back a cursor.</summary>
     Prepare,

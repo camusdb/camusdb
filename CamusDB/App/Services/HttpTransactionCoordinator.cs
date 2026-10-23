@@ -135,36 +135,19 @@ public sealed class HttpTransactionCoordinator
     }
 
     /// <summary>
-    /// Begins a read-only transaction for a standalone SELECT. By default (and always in
-    /// single-partition / hash mode) this is a <c>HLCTimestamp.Zero</c> snapshot: Kahuna reads the
-    /// latest committed value per key with no <c>StartTransaction</c> / <c>CommitTransaction</c>
-    /// round-trips, so commit and rollback are no-ops and the transaction needs no tracking.
-    ///
-    /// When <paramref name="promote"/> is set and key-range sharding is enabled, the transaction is
-    /// promoted to a real server-minted transaction so a scan can hold a shared range lock for a
-    /// serializable, phantom-free read. A promoted transaction has a real identity, so it is
-    /// registered here for cleanup and <b>must</b> be committed or rolled back by the caller.
+    /// Begins the read-only transaction of an autocommit SELECT in <paramref name="databaseName"/>.
+    /// It is a zero-identity snapshot in every routing mode (see
+    /// <see cref="KvTransactionsManager.BeginReadOnly"/>): no <c>StartTransaction</c> /
+    /// <c>CommitTransaction</c> round trips and no range locks, so commit and rollback are no-ops and
+    /// the transaction is not registered here.
     /// </summary>
-    public async Task<KvTransaction> BeginReadOnlyAsync(
-        string databaseName,
-        bool promote,
-        HLCTimestamp? causalToken = null,
-        TransactionPriority? priority = null,
-        CancellationToken cancellationToken = default)
+    public async Task<KvTransaction> BeginReadOnlyAsync(string databaseName, HLCTimestamp? causalToken = null)
     {
         if (string.IsNullOrEmpty(databaseName))
             throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "DatabaseName is required");
 
         DatabaseDescriptor database = await executor.OpenDatabase(databaseName).ConfigureAwait(false);
-        KvTransaction tx = await database.Transactions.BeginReadOnlyAsync(
-            promote, causalToken, priority, cancellationToken).ConfigureAwait(false);
-
-        // Zero-snapshot fast-path transactions carry no identity and need no tracking or cleanup;
-        // a promoted (real-id) transaction is registered so commit/rollback can find and release it.
-        if (tx.TransactionId != Kommander.Time.HLCTimestamp.Zero)
-            await RegisterAsync(database.Transactions, tx).ConfigureAwait(false);
-
-        return tx;
+        return database.Transactions.BeginReadOnly(causalToken);
     }
 
     public KvTransaction GetState(long txnIdPT, uint txnIdCounter)
@@ -314,7 +297,7 @@ public sealed class HttpTransactionCoordinator
     /// wrote nothing through this transaction. A server-level query is read-only, and a
     /// database-scoped mutation writes the shared registry or auth keyspace through its own
     /// machinery. So the work is already done and correct by the time this runs, and rolling the
-    /// unused transaction back merely drops any promoted identity and its shared range locks.</para>
+    /// unused transaction back merely releases its session and any shared range locks.</para>
     /// </summary>
     public async Task<HLCTimestamp> CommitOrReleaseAsync(
         DatabaseDescriptor? database, KvTransaction tx, CancellationToken cancellationToken = default)

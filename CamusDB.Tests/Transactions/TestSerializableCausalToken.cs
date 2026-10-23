@@ -86,7 +86,7 @@ public sealed class TestSerializableCausalToken : SharedNodeBaseTest
     private static async Task<(long balance, HLCTimestamp token)> ReadBalance(
         string dbname, DatabaseDescriptor db, CommandExecutor executor, string id, HLCTimestamp? causalToken = null)
     {
-        KvTransaction tx = await db.Transactions.BeginReadOnlyAsync(promote: false, causalToken);
+        KvTransaction tx = db.Transactions.BeginReadOnly(causalToken);
         QueryTicket ticket = new(
             txnState: tx,
             databaseName: dbname,
@@ -165,14 +165,14 @@ public sealed class TestSerializableCausalToken : SharedNodeBaseTest
             "second commit token must be >= first commit token (HLC monotonicity)");
     }
 
-    /// BeginReadOnlyAsync with a causal token mints a snapshot T >= that token (Serializable mode).
+    /// BeginReadOnly with a causal token mints a snapshot T >= that token (Serializable mode).
     [Test]
     public async Task ReadSnapshot_IsAtLeastCausalToken()
     {
         (string dbname, DatabaseDescriptor db, CommandExecutor executor) = await SetupDbAsync(SerializableByDefault);
         (_, HLCTimestamp writeToken) = await InsertAccount(dbname, db, executor, 600);
 
-        KvTransaction tx = await db.Transactions.BeginReadOnlyAsync(promote: false, writeToken);
+        KvTransaction tx = db.Transactions.BeginReadOnly(writeToken);
         Assert.That(tx.ReadTimestamp.CompareTo(writeToken), Is.GreaterThanOrEqualTo(0),
             "snapshot ReadTimestamp must be >= the supplied causal token");
         await db.Transactions.CommitAsync(tx);

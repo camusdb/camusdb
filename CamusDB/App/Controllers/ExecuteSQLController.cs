@@ -307,9 +307,7 @@ public sealed class ExecuteSQLController : CommandsController
                     ? await transactions.StartAsync(
                         resolved.Database, reqLevel, reqMode, reqLocking, priority: reqPriority,
                         cancellationToken: ct).ConfigureAwait(false)
-                    : await transactions.BeginReadOnlyAsync(
-                        resolved.Database, promote: true, request.CausalToken, priority: reqPriority,
-                        cancellationToken: ct).ConfigureAwait(false);
+                    : await transactions.BeginReadOnlyAsync(resolved.Database, request.CausalToken).ConfigureAwait(false);
                 try
                 {
                     QuerySchemaHolder schemaHolder = new();
@@ -518,13 +516,9 @@ public sealed class ExecuteSQLController : CommandsController
             // serializable retry, because rows may already be on the wire before commit.
             else
             {
-                // Begin, commit and rollback deliberately ignore the client's disconnect. A
-                // promoted read-only transaction mints a Kahuna identity and can hold a shared
-                // range lock; a begin cancelled after that identity exists leaks a transaction no
-                // rollback ever reaches, and a cancelled commit or rollback abandons the locks
-                // until their lease expires. Only the read below is worth stopping early.
-                KvTransaction tx = await transactions.BeginReadOnlyAsync(
-                    resolved.Database, promote: true, request.CausalToken, cancellationToken: CancellationToken.None).ConfigureAwait(false);
+                // The read-only snapshot holds no Kahuna session and no lock, so only the read
+                // below observes the client's disconnect.
+                KvTransaction tx = await transactions.BeginReadOnlyAsync(resolved.Database, request.CausalToken).ConfigureAwait(false);
                 try
                 {
                     ExecuteSQLTicket ticket = new(

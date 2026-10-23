@@ -178,7 +178,7 @@ internal sealed class TestSequences : SharedNodeBaseTest
 
         for (int i = 0; i < 3; i++)
         {
-            KvTransaction tx = await database.Transactions.BeginReadOnlyAsync(promote: false);
+            KvTransaction tx = database.Transactions.BeginReadOnly();
             Assert.That(tx.UniqueId, Is.Empty);
 
             (DatabaseDescriptor _, IAsyncEnumerable<QueryResultRow> cursor) =

@@ -126,7 +126,7 @@ public sealed class TestSerializableLockRenewal : SharedNodeBaseTest
         await db.Transactions.CommitAsync(alice);
 
         // After commit a fresh snapshot should see the updated value.
-        KvTransaction snap = await db.Transactions.BeginReadOnlyAsync(promote: false);
+        KvTransaction snap = db.Transactions.BeginReadOnly();
         long committed = await ReadBalanceAsync(dbname, executor, snap, id);
         Assert.AreEqual(777L, committed, "Committed write must be visible after commit");
     }

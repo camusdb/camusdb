@@ -255,63 +255,49 @@ public sealed class TestQueryResultCacheSchemaFence : CommandsExecutor.BaseTest
             "non-strict hit must succeed when schema has not changed");
     }
 
-    // ── 5. Promoted autocommit read (key-range sharding) is cache-eligible ──────
+    // ── 5. Autocommit read under key-range sharding is cache-eligible ─────────
     //
-    // When KeyRangeShardingEnabled is true, BeginReadOnlyAsync(promote: true) mints a
-    // real Kahuna transaction identity so a shared range lock can be held, but
-    // ReadTimestamp stays Zero (no pinned snapshot). The cache gate must admit this
-    // transaction because it is semantically equivalent to a zero-snapshot autocommit
-    // read for caching purposes. Without the fix, the gate's TransactionId == Zero check
-    // rejects the promoted read and every HTTP autocommit SELECT under key-range sharding
-    // silently bypasses the cache.
+    // Under key-range sharding the autocommit SELECT gets the same zero-identity snapshot as under
+    // hash routing (KvTransactionsManager.BeginReadOnly). The cache gate admits that shape, so the
+    // result cache stays effective for every HTTP and gRPC autocommit SELECT in that mode.
     [Test]
-    public async Task PromotedAutocommitRead_KeyRangeSharding_HitMissCycle()
+    public async Task AutocommitRead_KeyRangeSharding_HitMissCycle()
     {
-        const string cacheName = "promoted_cache";
+        const string cacheName = "keyrange_cache";
 
-        // Promotion only happens under key-range sharding, so this engine is built with it enabled.
         (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase(
             Options with { KeyRangeShardingEnabled = true });
 
         await CreateItems(dbname, database, executor);
         await InsertItem(dbname, database, executor, "p1", 100);
 
-        CacheMetadataHolder miss = await SelectItemsPromoted(dbname, database, executor, cacheName);
+        CacheMetadataHolder miss = await SelectItemsAutocommit(dbname, database, executor, cacheName);
         Assert.That(miss.Status, Is.EqualTo(QueryCacheStatus.Miss),
-            "first promoted-read query must execute live and populate the cache");
+            "first autocommit query must execute live and populate the cache");
 
-        CacheMetadataHolder hit = await SelectItemsPromoted(dbname, database, executor, cacheName);
+        CacheMetadataHolder hit = await SelectItemsAutocommit(dbname, database, executor, cacheName);
         Assert.That(hit.Status, Is.EqualTo(QueryCacheStatus.Hit),
-            "second promoted-read query must be served from cache: " +
-            "the promoted read has ReadTimestamp == Zero so the gate admits it");
+            "second autocommit query must be served from cache under key-range sharding");
     }
 
     /// <summary>
-    /// Runs <c>SELECT * FROM items{cache=<paramref name="cacheName"/>}</c> under a
-    /// promoted autocommit read transaction and returns cache metadata.
-    /// The promoted transaction is committed after the cursor is fully drained so its
-    /// shared range locks are released (matching the HTTP-path single-statement lifecycle).
+    /// Runs <c>SELECT * FROM items{cache=<paramref name="cacheName"/>}</c> under the autocommit read
+    /// transaction the HTTP path begins, drains the cursor, commits, and returns cache metadata.
     /// </summary>
-    private static async Task<CacheMetadataHolder> SelectItemsPromoted(
+    private static async Task<CacheMetadataHolder> SelectItemsAutocommit(
         string dbname,
         DatabaseDescriptor database,
         CommandExecutor executor,
         string cacheName)
     {
         var meta = new CacheMetadataHolder();
-        KvTransaction tx = await database.Transactions.BeginReadOnlyAsync(promote: true);
-        try
-        {
-            (_, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(
-                new ExecuteSQLTicket(tx, dbname, $"SELECT * FROM items{{cache={cacheName}}}", null), meta);
-            await foreach (QueryResultRow _ in cursor) { }
-            await database.Transactions.CommitAsync(tx);
-        }
-        catch
-        {
-            await database.Transactions.RollbackAsync(tx);
-            throw;
-        }
+        KvTransaction tx = database.Transactions.BeginReadOnly();
+        Assert.That(tx.TransactionId, Is.EqualTo(HLCTimestamp.Zero), "the autocommit read has no identity");
+
+        (_, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(
+            new ExecuteSQLTicket(tx, dbname, $"SELECT * FROM items{{cache={cacheName}}}", null), meta);
+        await foreach (QueryResultRow _ in cursor) { }
+        await database.Transactions.CommitAsync(tx);
         return meta;
     }
 

@@ -112,7 +112,7 @@ internal sealed class TestQueryFragmentControllerWire : BaseTest
     private static async Task<QueryFragmentRequest> BuildRequest(Fixture fx, bool wantStats = false, int? schemaVersion = null)
     {
         TableDescriptor table = await fx.Database.TableDescriptors["robots"];
-        KvTransaction snapshot = await fx.Database.Transactions.BeginReadOnlyAsync(promote: false);
+        KvTransaction snapshot = fx.Database.Transactions.BeginReadOnly();
         NodeAst where = SQLParserProcessor.Parse("SELECT * FROM robots WHERE year > 2002").extendedOne!;
 
         return new QueryFragmentRequest

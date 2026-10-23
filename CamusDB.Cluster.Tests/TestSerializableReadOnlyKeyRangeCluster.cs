@@ -142,7 +142,18 @@ public sealed class TestSerializableReadOnlyKeyRangeCluster
     /// the snapshot looks slot 7 up again under the writer's locks and intents, the writer commits,
     /// and the snapshot still reads its pinned instant.
     /// </summary>
+    private static Task RunScenario(
+        CamusIsolationLevel writerIsolation, KeyValueTransactionLocking writerLocking, params string[] writerSql)
+        => RunScenario(
+            transactions => transactions.BeginAsync(CamusIsolationLevel.Serializable, CamusTransactionMode.ReadOnly),
+            writerIsolation, writerLocking, writerSql);
+
+    /// <summary>
+    /// The scenario with the reader begun by <paramref name="beginReader"/>: an explicit serializable
+    /// read-only transaction, or the snapshot every autocommit SELECT begins.
+    /// </summary>
     private static async Task RunScenario(
+        Func<KvTransactionsManager, Task<KvTransaction>> beginReader,
         CamusIsolationLevel writerIsolation, KeyValueTransactionLocking writerLocking, params string[] writerSql)
     {
         (InProcessSchemaCluster cluster, string db) = await SetupAsync();
@@ -152,8 +163,7 @@ public sealed class TestSerializableReadOnlyKeyRangeCluster
             InProcessSchemaCluster.Node readerNode = cluster.Nodes[1];
             InProcessSchemaCluster.Node writerNode = cluster.Nodes[2];
 
-            KvTransaction snapshot = await readerNode.Database!.Transactions.BeginAsync(
-                CamusIsolationLevel.Serializable, CamusTransactionMode.ReadOnly);
+            KvTransaction snapshot = await beginReader(readerNode.Database!.Transactions);
             CollectionAssert.AreEqual(new[] { "token-7" }, await LookupSlotPromptly(readerNode, db, snapshot, 7));
 
             // Two nodes order their HLCs by physical millisecond first. The lookup above already took
@@ -220,4 +230,16 @@ public sealed class TestSerializableReadOnlyKeyRangeCluster
         => RunScenario(CamusIsolationLevel.ReadCommitted, KeyValueTransactionLocking.Optimistic,
             "DELETE FROM tokens WHERE slot = 7",
             "INSERT INTO tokens (id, slot, token) VALUES (107, 7, 'moved')");
+
+    /// <summary>
+    /// The autocommit SELECT under key-range sharding, across nodes: the reader is the zero-identity
+    /// snapshot <see cref="KvTransactionsManager.BeginReadOnly"/> returns, the begin of every HTTP and
+    /// gRPC autocommit read. A younger pessimistic writer on another node updates the slot it looked up.
+    /// The read is not refused, takes no range lock, and does not fence the writer's commit.
+    /// </summary>
+    [Test]
+    public Task Cluster_AutocommitRead_UpdateOfTheLookedUpSlot_NeitherRefusesNorIsRefused()
+        => RunScenario(transactions => Task.FromResult(transactions.BeginReadOnly()),
+            CamusIsolationLevel.Serializable, KeyValueTransactionLocking.Pessimistic,
+            "UPDATE tokens SET token = 'moved' WHERE slot = 7");
 }

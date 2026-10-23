@@ -140,7 +140,7 @@ internal sealed class TableAnalyzer
         // transaction would fold that transaction's uncommitted writes into globally published
         // stats — and the snapshot must be pinned AFTER the baseline capture above. The reads
         // are never folded into any validation set, so ANALYZE cannot abort foreground work.
-        KvTransaction tx = await database.Transactions.BeginReadOnlyAsync(promote: false).ConfigureAwait(false);
+        KvTransaction tx = database.Transactions.BeginReadOnly();
         Kommander.Time.HLCTimestamp analyzedAt = tx.ReadTimestamp;
 
         try
@@ -345,7 +345,7 @@ internal sealed class TableAnalyzer
         // Open our own lock-free read-only snapshot. Under the serializable default this pins a
         // single HLC across every scan page (consistent), takes no range locks, and does not fold
         // reads into any transaction's validation set — so it cannot interfere with foreground work.
-        KvTransaction tx = await database.Transactions.BeginReadOnlyAsync(promote: false, cancellationToken: cancellationToken).ConfigureAwait(false);
+        KvTransaction tx = database.Transactions.BeginReadOnly();
         
         try
         {

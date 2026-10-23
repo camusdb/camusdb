@@ -31,7 +31,10 @@ read. Once a space has been divided, that becomes one clipped sub-lock per range
 transactions scanning disjoint parts of the same table or index no longer block each other. Under
 hash routing the equivalent lock covers the single partition that owns the whole space. A serializable
 read-only transaction takes no range lock in this mode either: it reads every range at its pinned
-timestamp, so it is never refused by a writer's lock and never makes a writer wait.
+timestamp, so it is never refused by a writer's lock and never makes a writer wait. An autocommit
+`SELECT` is the same: it gets the snapshot it gets under hash routing, with no round trip to Kahuna to
+begin or end it and no range lock. Only an explicit Read Committed transaction locks its scans in this
+mode.
 
 **Scans stay ordered and complete.** A scan resolves every range descriptor its bounds intersect and
 merges the results in key order, so a `SELECT` returns the same rows in the same order whether the

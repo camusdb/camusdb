@@ -78,25 +78,6 @@ public sealed class TestTransactionTrackingIdentity
     }
 
     [Test]
-    public async Task PromotedReadOnly_TrackingIdentityIsLocallyMinted()
-    {
-        CamusDBOptions options = CamusDBOptions.Default with { KeyRangeShardingEnabled = true };
-        (EmbeddedKahuna node, KvTransactionsManager mgr) = await CreateAsync("trackid-promoted", options);
-        await using EmbeddedKahuna _ = node;
-
-        KvTransaction tx = await mgr.BeginReadOnlyAsync(promote: true);
-
-        Assert.Multiple(() =>
-        {
-            Assert.That(tx.TransactionId.IsNull(), Is.False, "a promoted read has a real session");
-            Assert.That(tx.ClientId.IsNull(), Is.False);
-            Assert.That(tx.ClientId, Is.Not.EqualTo(tx.TransactionId));
-        });
-
-        await mgr.RollbackAsync(tx);
-    }
-
-    [Test]
     public async Task SerializableReadOnly_TrackingIdentityIsLocallyMinted()
     {
         (EmbeddedKahuna node, KvTransactionsManager mgr) = await CreateAsync("trackid-serro");

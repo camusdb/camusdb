@@ -151,7 +151,7 @@ public sealed class CamusRowsService : CamusRows.CamusRowsBase
     /// <summary>
     /// Queries a table using filter and ordering parameters, streaming results schema-first.
     /// Mirrors <c>QueryController.Query</c> but emits <c>QueryStreamMessage</c> rather than a JSON
-    /// array, using a read-only autocommit transaction promoted from the global snapshot.
+    /// array, using a read-only autocommit snapshot.
     ///
     /// The output-column schema is derived from the first row in the result: column names and types
     /// are read from the <c>ColumnValue</c> entries. When the result is empty, an empty schema is
@@ -191,13 +191,10 @@ public sealed class CamusRowsService : CamusRows.CamusRowsBase
                 }
             }
 
-            // Autocommit: promoted read-only transaction.
+            // Autocommit: a read-only snapshot. It holds no Kahuna session and no lock, so only
+            // the read observes the call's token.
             HLCTimestamp? causalToken = ToCausalToken(request.CausalTokenN, request.CausalTokenL, request.CausalTokenC);
-            // Begin, commit and rollback deliberately ignore the call's token: a cancelled
-            // lifecycle call abandons the transaction's locks until their lease expires. The read
-            // between them is the only part worth stopping when the caller disconnects.
-            KvTransaction tx = await transactions.BeginReadOnlyAsync(
-                request.Database, promote: true, causalToken, priority: ToPriority(request.Priority), cancellationToken: CancellationToken.None).ConfigureAwait(false);
+            KvTransaction tx = await transactions.BeginReadOnlyAsync(request.Database, causalToken).ConfigureAwait(false);
             try
             {
                 QueryTicket ticket = BuildQueryTicket(tx, request, filters, orderBy, ct);
@@ -266,15 +263,12 @@ public sealed class CamusRowsService : CamusRows.CamusRowsBase
                 }
             }
 
-            // Autocommit: promoted read-only transaction. The database descriptor from OpenAsync lets
-            // CommitAsync handle both zero-snapshot and promoted txns, avoiding the tracked-only
-            // restriction of CommitTrackedAsync.
+            // Autocommit: a read-only snapshot. The database descriptor from OpenAsync lets
+            // CommitAsync finalize the untracked snapshot, avoiding the tracked-only restriction of
+            // CommitTrackedAsync. The snapshot holds no Kahuna session and no lock, so only the read
+            // observes the caller's token.
             HLCTimestamp? causalToken = ToCausalToken(request.CausalTokenN, request.CausalTokenL, request.CausalTokenC);
-            // The read observes the caller's token through the stream write; begin, commit and
-            // rollback do not, because a cancelled lifecycle call abandons this transaction's
-            // locks until their lease expires.
-            KvTransaction tx = await transactions.BeginReadOnlyAsync(
-                request.Database, promote: true, causalToken, priority: ToPriority(request.Priority), cancellationToken: CancellationToken.None).ConfigureAwait(false);
+            KvTransaction tx = await transactions.BeginReadOnlyAsync(request.Database, causalToken).ConfigureAwait(false);
             try
             {
                 await RunQueryById(tx).ConfigureAwait(false);

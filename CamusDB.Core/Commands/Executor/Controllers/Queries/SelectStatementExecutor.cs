@@ -996,8 +996,8 @@ internal sealed class SelectStatementExecutor
     /// Time-travel is only supported for an autocommit read-only SELECT: the incoming transaction must
     /// be the lock-free zero-identity snapshot the autocommit read path creates
     /// (<see cref="KvTransaction.CreateReadOnly"/> / <see cref="KvTransaction.CreateSnapshotReadOnly"/>).
-    /// A transaction that already holds a live Kahuna session — an explicit multi-statement transaction
-    /// or a promoted key-range-sharded read — is pinned to its own read snapshot and cannot be
+    /// A transaction that already holds a live Kahuna session — an explicit multi-statement
+    /// transaction — is pinned to its own read snapshot and cannot be
     /// retroactively moved to an arbitrary past point, so the clause is rejected there rather than
     /// silently ignored.
     /// </para>
@@ -1013,7 +1013,7 @@ internal sealed class SelectStatementExecutor
             throw new CamusDBException(
                 CamusDBErrorCodes.InvalidAsOfSystemTime,
                 "AS OF SYSTEM TIME is only supported for an autocommit read-only SELECT, not inside an " +
-                "explicit or promoted transaction.");
+                "explicit transaction.");
 
         if (context.SharedNode is null)
             throw new CamusDBException(

@@ -382,7 +382,7 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
     }
 
     /// <summary>
-    /// Runs an autocommit query: begin a promoted read-only transaction, stream schema + rows, and
+    /// Runs an autocommit query: begin a read-only snapshot, stream schema + rows, and
     /// commit after the last row. When <paramref name="retry"/> is set, a transient serialization
     /// failure replays from a fresh BEGIN — but <b>only while nothing has been streamed yet</b>
     /// (<c>!sink.HasWritten</c>); once output is on the wire the conflict is reported as the terminal
@@ -401,17 +401,11 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
         HLCTimestamp? causalToken = ToCausalToken(request.CausalTokenN, request.CausalTokenL, request.CausalTokenC);
         HLCTimestamp commitToken = default;
         DatabaseDescriptor? committedDb = null;
-        EnginePriority? reqPriority = ToPriority(request.Priority);
-
         async Task<HLCTimestamp> Attempt(CancellationToken innerCt)
         {
-            // Begin, commit and rollback deliberately ignore the caller's token. A promoted
-            // read-only transaction mints a Kahuna identity and can hold a shared range lock; a
-            // begin cancelled after that identity exists leaks a transaction no rollback ever
-            // reaches, and a cancelled commit or rollback abandons the locks until their lease
-            // expires. Only the read is worth stopping early.
-            KvTransaction tx = await transactions.BeginReadOnlyAsync(
-                request.Database, promote: true, causalToken, priority: reqPriority, cancellationToken: CancellationToken.None).ConfigureAwait(false);
+            // The read-only snapshot holds no Kahuna session and no lock, so only the read
+            // observes the caller's token.
+            KvTransaction tx = await transactions.BeginReadOnlyAsync(request.Database, causalToken).ConfigureAwait(false);
             try
             {
                 ExecuteSQLTicket ticket = new(
@@ -1661,18 +1655,16 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
         }
         else
         {
-            // Autocommit: begin a promoted read-only txn, stream, commit. Not server-retried — a
+            // Autocommit: begin a read-only snapshot, stream, commit. Not server-retried — a
             // retryable conflict propagates and is reported as BatchError for the client to replay.
             HLCTimestamp? causalToken = ToCausalToken(request.CausalTokenN, request.CausalTokenL, request.CausalTokenC);
             if (stageClock is not null)
                 stageClock.Path = QueryStageProfile.Paths.Autocommit;
-            // Begin, commit and rollback deliberately ignore the stream's token, for the reason
-            // given on the unary autocommit path: a cancelled lifecycle call abandons locks that
-            // only a lease expiry reclaims. The read alone observes a cancel.
+            // The read-only snapshot holds no Kahuna session and no lock, so only the read
+            // observes the stream's token.
             KvTransaction tx;
             using (QueryStageProfile.Measure(QueryStage.Begin))
-                tx = await transactions.BeginReadOnlyAsync(
-                    resolved.Database, promote: true, causalToken, priority: ToPriority(request.Priority), cancellationToken: CancellationToken.None).ConfigureAwait(false);
+                tx = await transactions.BeginReadOnlyAsync(resolved.Database, causalToken).ConfigureAwait(false);
             try
             {
                 routingCollector = BeginRoutingCollection(request);

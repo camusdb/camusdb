@@ -63,8 +63,8 @@ an earlier point.
 ## Restrictions
 
 - **Autocommit read-only only.** `AS OF SYSTEM TIME` is rejected inside an explicit multi-statement
-  transaction or a promoted (key-range-sharded) read, which are already pinned to their own read
-  snapshot and cannot be moved to an arbitrary past point. It is also read-only — there is no
+  transaction, which is already pinned to its own read snapshot and cannot be moved to an arbitrary
+  past point. It is also read-only — there is no
   historical `UPDATE`/`DELETE`.
 - **Only past instants.** A value resolving to a future time, or to a time at or before the Unix
   epoch, is rejected.

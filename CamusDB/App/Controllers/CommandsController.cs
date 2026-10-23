@@ -136,7 +136,6 @@ public abstract class CommandsController : ControllerBase
         long txnIdPT,
         uint txnIdCounter,
         bool readOnly = false,
-        bool promoteReadOnly = false,
         CamusIsolationLevel? isolationLevel = null,
         CamusTransactionMode? transactionMode = null,
         KeyValueTransactionLocking? locking = null,
@@ -149,22 +148,11 @@ public abstract class CommandsController : ControllerBase
         if (string.IsNullOrEmpty(databaseName))
             throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "DatabaseName is required to start a transaction");
 
-        // Read-only queries default to a zero-timestamp synthetic transaction: no
-        // LocateAndStartTransaction / LocateAndCommitTransaction round-trips to Kahuna. Kahuna treats
-        // HLCTimestamp.Zero as "read latest committed value" per key (read-committed per key).
-        //
-        // Scan SELECTs pass promoteReadOnly: in key-range sharding mode the read-only transaction is
-        // then promoted to a real transaction so the scan can hold a shared range lock (serializable,
-        // phantom-free read). A promoted transaction has a real identity and must be finalized, so we
-        // report NewTransaction = true to make the caller commit it on success / roll back on error.
+        // A read-only query gets the zero-identity snapshot: no LocateAndStartTransaction /
+        // LocateAndCommitTransaction round trips to Kahuna, and nothing to finalize, so it is not
+        // reported as a new transaction.
         if (readOnly)
-        {
-            KvTransaction roTx = await transactions.BeginReadOnlyAsync(
-                databaseName, promoteReadOnly, causalToken: null, priority: priority,
-                cancellationToken: cancellationToken).ConfigureAwait(false);
-            bool promoted = roTx.TransactionId != Kommander.Time.HLCTimestamp.Zero;
-            return (promoted, roTx);
-        }
+            return (false, await transactions.BeginReadOnlyAsync(databaseName).ConfigureAwait(false));
 
         KvTransaction tx = await transactions.StartAsync(
             databaseName, isolationLevel, transactionMode, locking, priority: priority,

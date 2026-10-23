@@ -77,10 +77,10 @@ public sealed class ExecuteSQLRequest
     /// <c>"Critical"</c>. Ignored when <c>TxnIdPT</c> resumes an existing transaction — priority is
     /// consumed when the coordinator session opens, so a resumed transaction has already spent it.
     ///
-    /// <para>Unlike <see cref="Locking"/> this <i>does</i> apply on the read-only
-    /// <c>/execute-sql-query</c> path, but only when that path promotes to a real transaction (a
-    /// serializable read-only snapshot or a key-range-sharded scan). A zero-timestamp read-committed
-    /// snapshot opens no session and so is never admission-gated.</para>
+    /// <para>It does not apply to an autocommit read on the <c>/execute-sql-query</c> path. That read
+    /// is a zero-identity snapshot in every routing mode: it opens no session, so it is never
+    /// admission-gated. It does apply when that path runs a write with <c>RETURNING</c>, which begins
+    /// a read-write transaction.</para>
     /// </summary>
     public string? Priority { get; set; }
 

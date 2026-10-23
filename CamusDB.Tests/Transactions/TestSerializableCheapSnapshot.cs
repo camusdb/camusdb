@@ -30,7 +30,7 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// <summary>
 /// Verifies the Task 2 cheap serializable snapshot for autocommit SELECT.
 ///
-/// Under Serializable default, <see cref="KvTransactionsManager.BeginReadOnlyAsync"/> (non-key-range
+/// Under Serializable default, <see cref="KvTransactionsManager.BeginReadOnly"/> (non-key-range
 /// mode) mints a local HLC timestamp <c>T</c> and returns a zero-identity
 /// <see cref="KvTransaction"/> carrying <c>ReadTimestamp = T</c> — no Kahuna
 /// StartTransaction/CommitTransaction round-trip, no session, no cleanup.
@@ -90,7 +90,7 @@ public sealed class TestSerializableCheapSnapshot : SharedNodeBaseTest
     }
 
     // -----------------------------------------------------------------------
-    // 1. Structural: Serializable default → BeginReadOnlyAsync returns a zero-identity
+    // 1. Structural: Serializable default → BeginReadOnly returns a zero-identity
     //    transaction carrying a non-Zero ReadTimestamp (cheap local HLC snapshot).
     // -----------------------------------------------------------------------
 
@@ -99,7 +99,7 @@ public sealed class TestSerializableCheapSnapshot : SharedNodeBaseTest
     {
         (string _, DatabaseDescriptor db, CommandExecutor __) = await SetupTableAsync();
 
-        KvTransaction tx = await db.Transactions.BeginReadOnlyAsync(promote: false);
+        KvTransaction tx = db.Transactions.BeginReadOnly();
 
         Assert.AreEqual(HLCTimestamp.Zero, tx.TransactionId,
             "Cheap snapshot must be zero-identity — no Kahuna tx object");
@@ -111,7 +111,7 @@ public sealed class TestSerializableCheapSnapshot : SharedNodeBaseTest
     }
 
     // -----------------------------------------------------------------------
-    // 2. RC default: BeginReadOnlyAsync still returns Zero ReadTimestamp (unchanged).
+    // 2. RC default: BeginReadOnly still returns Zero ReadTimestamp (unchanged).
     // -----------------------------------------------------------------------
 
     [Test]
@@ -120,7 +120,7 @@ public sealed class TestSerializableCheapSnapshot : SharedNodeBaseTest
         (string _, DatabaseDescriptor db, CommandExecutor __) = await SetupTableAsync(
             Options with { DefaultIsolationLevel = CamusIsolationLevel.ReadCommitted });
 
-        KvTransaction tx = await db.Transactions.BeginReadOnlyAsync(promote: false);
+        KvTransaction tx = db.Transactions.BeginReadOnly();
 
         Assert.AreEqual(HLCTimestamp.Zero, tx.TransactionId,
             "RC fast-path must be zero-identity");
@@ -138,8 +138,8 @@ public sealed class TestSerializableCheapSnapshot : SharedNodeBaseTest
     {
         (string _, DatabaseDescriptor db, CommandExecutor __) = await SetupTableAsync();
 
-        KvTransaction t1 = await db.Transactions.BeginReadOnlyAsync(promote: false);
-        KvTransaction t2 = await db.Transactions.BeginReadOnlyAsync(promote: false);
+        KvTransaction t1 = db.Transactions.BeginReadOnly();
+        KvTransaction t2 = db.Transactions.BeginReadOnly();
 
         // The local HLC SendOrLocalEvent guarantees strictly increasing timestamps for events
         // on the same node. So T2 must be strictly greater than T1.
@@ -163,7 +163,7 @@ public sealed class TestSerializableCheapSnapshot : SharedNodeBaseTest
         await InsertRowAsync(dbname, db, executor, id, 100L);
 
         // Mint a cheap snapshot T1 (before the update below).
-        KvTransaction snapshot = await db.Transactions.BeginReadOnlyAsync(promote: false);
+        KvTransaction snapshot = db.Transactions.BeginReadOnly();
         Assert.AreNotEqual(HLCTimestamp.Zero, snapshot.ReadTimestamp);
 
         // Commit an update at T2 > T1.
@@ -205,7 +205,7 @@ public sealed class TestSerializableCheapSnapshot : SharedNodeBaseTest
         await InsertRowAsync(dbname, db, executor, id, 100L);
 
         // Mint snapshot AFTER the seed insert.
-        KvTransaction snapshot = await db.Transactions.BeginReadOnlyAsync(promote: false);
+        KvTransaction snapshot = db.Transactions.BeginReadOnly();
 
         QueryTicket q = new(
             txnState: snapshot, databaseName: dbname, tableName: "accounts",
@@ -230,7 +230,7 @@ public sealed class TestSerializableCheapSnapshot : SharedNodeBaseTest
     {
         (string _, DatabaseDescriptor db, CommandExecutor __) = await SetupTableAsync();
 
-        KvTransaction snapshot = await db.Transactions.BeginReadOnlyAsync(promote: false);
+        KvTransaction snapshot = db.Transactions.BeginReadOnly();
 
         Assert.DoesNotThrowAsync(async () =>
             await db.Transactions.CommitAsync(snapshot),
