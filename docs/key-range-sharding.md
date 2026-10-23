@@ -55,7 +55,39 @@ initial_partitions: 4
 `CAMUS_KEY_RANGE_SHARDING` overrides the YAML value when set.
 
 The setting is **restart-scoped and cluster-wide**: a node fixes it when it starts, and nodes that
-disagree will route the same key to different partitions. Change it everywhere, then restart.
+disagree will route the same key to different partitions.
+
+### The mode is fixed when the cluster is created
+
+A cluster records its routing mode once, the first time a node of the new cluster starts, in the
+system key `_system/routing/mode`. Every later start reads that record:
+
+- **`key_range_sharding` unset** (not in `config.yml` and no `CAMUS_KEY_RANGE_SHARDING`): the node
+  follows the record. A change of the built-in default therefore applies only to clusters created
+  after it. `SHOW VARIABLES` reports the value with the source `cluster`.
+- **`key_range_sharding` set to the recorded mode:** the node starts.
+- **`key_range_sharding` set to the other mode:** the node refuses to start and exits with code 1. The
+  message names both modes.
+
+A cluster created before the record existed has its mode inferred once, on the first start of the new
+version, and then recorded: a table key space that has a range descriptor means key-range, a
+registered database without one means hash, and a cluster with no database takes the configured value.
+
+**Why the mode cannot change on existing data.** The two modes place a table's keys on different
+partitions, so turning key-range sharding on moves most existing tables. Their rows stay reachable
+today only because Kahuna's storage is node-global and, at full replication, every node holds every
+partition; under replica placement or a partition-scoped store they would not. Turning it off does
+not undo it either: Kahuna rebuilds its routing registry from the replicated range map, so a table
+that has a range descriptor stays key-range routed whatever the flag says. To move data to the other
+mode, dump it and reimport it into a new cluster (see
+[logical-dump-and-reimport.md](logical-dump-and-reimport.md)).
+
+**Start an existing node first after the upgrade.** The inference for a cluster without a record reads
+the node's own copy of the range map, which a node restores from its WAL when it starts. A node that
+joins such a cluster with an empty data directory, before any existing node has started the new
+version, has no copy yet and would record hash. If that ever happens, a node with the flag off refuses
+to open a table that is stored under key-range routing, so the mismatch shows at the first statement
+and no wrong answer is served.
 
 ### Partition count
 

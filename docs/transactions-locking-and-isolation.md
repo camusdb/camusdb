@@ -91,8 +91,9 @@ table's rows and all of its indexes share one partition.
   indivisible: one partition holds all of them, and a hot table cannot be spread.
 - **Key-range routing (opt-in, off by default).** Contiguous keys are kept together in one range, so a
   scan over `[A, B)` touches one place and can be locked as a range. Enabled per key space, and only
-  has an effect when the cluster has at least two partitions. Toggled with the
-  `CAMUS_KEY_RANGE_SHARDING` environment variable.
+  has an effect when the cluster has at least two partitions. Set with `key_range_sharding` (or the
+  `CAMUS_KEY_RANGE_SHARDING` environment variable) when the cluster is created; the mode is fixed
+  from then on (see `key-range-sharding.md`).
 
 For most of this document, assume **hash routing** (the default). §8 covers what changes with
 key-range routing.

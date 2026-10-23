@@ -16,6 +16,7 @@ using CamusDB.Core.CommandsExecutor.Models.Queries;
 using Microsoft.Extensions.Logging;
 using System.Linq;
 using Kommander.Time;
+using Kahuna.Shared.Communication.Rest;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
 
@@ -277,7 +278,9 @@ internal sealed class TableOpener
         // seed to the meta-partition leader, the very first writer on each node pays at most one
         // extra round-trip to establish the range descriptor. Registering at CREATE TABLE time
         // would buy nothing.
-        if (database.Options.KeyRangeShardingEnabled)
+        if (!database.Options.KeyRangeShardingEnabled)
+            RefuseKeyRangeSpaceUnderHashRouting(database, store.RowKeySpace, tableSchema.Name);
+        else
         {
             await database.Kahuna.Kahuna.RegisterKeyRangeAsync(store.RowKeySpace);
 
@@ -368,6 +371,31 @@ internal sealed class TableOpener
         Log.LogTableOpened(logger, tableSchema.Name!);
 
         return tableDescriptor;
+    }
+
+    /// <summary>
+    /// Refuses to open a table under hash routing when Kahuna holds a range descriptor for its row
+    /// space. Kahuna rebuilds its key-space registry from the replicated range map, so such a space
+    /// stays key-range routed whatever this node's flag says, while the scan lock policy, the session
+    /// anchor and the routing advice here would assume hash routing for it. That split state comes
+    /// from turning <c>key_range_sharding</c> off on a cluster that used it; the startup check
+    /// (<see cref="CamusDB.Core.Config.RoutingModeStartupCheck"/>) refuses that on the server host, and
+    /// this is the last line for hosts and joins it cannot see. The range map is node-local and only
+    /// ever lags, so it can hide a descriptor but never invent one: there are no false refusals.
+    /// </summary>
+    private static void RefuseKeyRangeSpaceUnderHashRouting(DatabaseDescriptor database, string rowKeySpace, string? tableName)
+    {
+        foreach (KahunaKeySpaceRangesResponse space in database.Kahuna.Kahuna.GetRangeMap(rowKeySpace).KeySpaces)
+        {
+            if (space.Descriptors.Count == 0 || !string.Equals(space.KeySpace, rowKeySpace, StringComparison.Ordinal))
+                continue;
+
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidConfig,
+                $"Table '{tableName}' is stored under key-range routing, but key_range_sharding is off on this node. " +
+                "A cluster's routing mode is fixed when it is created: set key_range_sharding to true on every node, " +
+                "or remove it so the node follows the cluster's recorded mode.");
+        }
     }
 
     /// <summary>

@@ -457,6 +457,31 @@ builder.Services.AddSingleton<CamusDB.Core.Routing.StatementRoutingResolver>(ser
     new CamusDB.Core.Routing.StatementRoutingResolver(
         services.GetRequiredService<CamusDB.Core.Config.CamusDBOptionsHolder>().Current));
 
+// The cluster's routing mode, set once at boot by RoutingModeStartupCheck before the settings service
+// publishes. Every resolve after that carries it, because the local layers alone cannot know it: an
+// unset key_range_sharding follows the mode the cluster recorded when it was created.
+bool? clusterKeyRangeSharding = null;
+
+bool keyRangeShardingSetLocally =
+    config.KeySources.TryGetValue("key_range_sharding", out CamusDB.Core.Config.ConfigValueSource keyRangeSource) &&
+    keyRangeSource != CamusDB.Core.Config.ConfigValueSource.Default;
+
+CamusDBOptions ApplyClusterRoutingMode(CamusDBOptions resolved)
+{
+    if (clusterKeyRangeSharding is not bool keyRange || keyRange == resolved.KeyRangeShardingEnabled)
+        return resolved;
+
+    // Only an unset key reaches here (a set one that disagrees refused the boot), so the value
+    // comes from the cluster's record and is reported as a cluster value.
+    Dictionary<string, CamusDB.Core.Config.ConfigValueSource> valueSources =
+        new(resolved.ValueSources, StringComparer.OrdinalIgnoreCase)
+        {
+            ["key_range_sharding"] = CamusDB.Core.Config.ConfigValueSource.Cluster
+        };
+
+    return resolved with { KeyRangeShardingEnabled = keyRange, ValueSources = valueSources };
+}
+
 // Owns the replicated runtime-settings overlay: validates and proposes changes, applies committed
 // changes from the settings log, persists the load-time checkpoint, and publishes merged snapshots
 // through the holder. In standalone mode the same pipeline runs with no replication.
@@ -465,7 +490,7 @@ builder.Services.AddSingleton<CamusDB.Core.Config.ClusterSettingsService>(servic
         services.GetRequiredService<EmbeddedKahuna>(),
         services.GetRequiredService<CamusDB.Core.Config.CamusDBOptionsHolder>(),
         baseDefinitionFactory,
-        postResolve: resolved => applyEnvironmentSecrets(resolved) with { BootstrapSuperuserPassword = "" },
+        postResolve: resolved => ApplyClusterRoutingMode(applyEnvironmentSecrets(resolved)) with { BootstrapSuperuserPassword = "" },
         isClusterMode: config.IsClusterMode,
         forwarder: services.GetService<CamusDB.Core.Config.IClusterSettingsForwarder>(),
         logger: services.GetRequiredService<ILogger<ICamusDB>>()));
@@ -719,6 +744,13 @@ CancellationToken hostStopping = app.Lifetime.ApplicationStopping;
 try
 {
     await sharedNode.StartAsync(hostStopping);
+
+    // Fix the routing mode before anything is built from the boot configuration: an explicit
+    // key_range_sharding that disagrees with the cluster's record refuses the boot here, and an unset
+    // one follows the record. See RoutingModeStartupCheck.
+    clusterKeyRangeSharding = await CamusDB.Core.Config.RoutingModeStartupCheck.ResolveAsync(
+        sharedNode, camusOptions.KeyRangeShardingEnabled, keyRangeShardingSetLocally, startupLogger, hostStopping);
+    camusOptions = ApplyClusterRoutingMode(camusOptions);
 
     // Load the persisted cluster-settings overlay and publish the merged configuration NOW — after the
     // store is readable, before the executor below is resolved — so everything the executor constructs

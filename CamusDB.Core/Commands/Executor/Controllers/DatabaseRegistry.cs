@@ -169,12 +169,25 @@ public sealed class DatabaseRegistry : IAsyncDisposable
     // database (keyspaces use the immutable id), so normalization only governs the registry keyspace.
     private static string Normalize(string name) => name.ToLowerInvariant();
 
+    /// <summary>The key prefix the server's registry lives under, shared with the other system catalogs.</summary>
+    internal const string SystemKeyPrefix = "_system/";
+
     /// <summary>
     /// KV bucket that holds every registry key. Exposed so the snapshot-hold renewer can elect a
     /// single sweeping node via leadership of this bucket's Raft partition.
     /// </summary>
-    public string RegistryBucket => $"{keyPrefix}dbregistry";
-    private string NameKeyPrefix => $"{keyPrefix}dbregistry/db:";
+    public string RegistryBucket => RegistryBucketOf(keyPrefix);
+    private string NameKeyPrefix => NameKeyPrefixOf(keyPrefix);
+
+    /// <summary>
+    /// The registry bucket under <paramref name="keyPrefix"/>, for a reader that has no registry
+    /// instance: the routing-mode startup check asks whether any database exists before the
+    /// executor is built.
+    /// </summary>
+    internal static string RegistryBucketOf(string keyPrefix) => $"{keyPrefix}dbregistry";
+
+    /// <summary>The prefix of every database-name key under <paramref name="keyPrefix"/>. See <see cref="RegistryBucketOf"/>.</summary>
+    internal static string NameKeyPrefixOf(string keyPrefix) => $"{keyPrefix}dbregistry/db:";
     private string NameKey(string name) => $"{keyPrefix}dbregistry/db:{name}";
     private string SequenceKey => $"{keyPrefix}dbregistry/seq";
 
@@ -816,7 +829,7 @@ public sealed class DatabaseRegistry : IAsyncDisposable
         };
 
         KvTransactionsManager txManager = new(sharedNode.Kahuna, options, mintLocalT);
-        DatabaseRegistry registry = new(sharedNode.Kahuna, options, txManager, "_system/", sharedNode.Raft.GetLocalNodeId(), isClusterMode);
+        DatabaseRegistry registry = new(sharedNode.Kahuna, options, txManager, SystemKeyPrefix, sharedNode.Raft.GetLocalNodeId(), isClusterMode);
 
         // OpenAsync is kicked off eagerly during CommandExecutor construction, which a hosted service
         // can trigger before Program.cs calls StartAsync. Wait until the shared node has elected
@@ -849,7 +862,7 @@ public sealed class DatabaseRegistry : IAsyncDisposable
         };
 
         KvTransactionsManager txManager = new(kvOverride, options, mintLocalT);
-        DatabaseRegistry registry = new(kvOverride, options, txManager, "_system/", node.Raft.GetLocalNodeId(), isClusterMode);
+        DatabaseRegistry registry = new(kvOverride, options, txManager, SystemKeyPrefix, node.Raft.GetLocalNodeId(), isClusterMode);
 
         await node.WaitUntilStartedAsync().ConfigureAwait(false);
         await registry.LoadAsync().ConfigureAwait(false);

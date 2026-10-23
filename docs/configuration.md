@@ -75,7 +75,7 @@ Example: YAML `mode: cluster` with `--mode standalone` starts in standalone mode
 | `lock_escalation_threshold` | — | `50` |
 | `lock_wait_deadline_ms` | — | `500` |
 | `replication_wait_deadline_ms` | — | `5000`; cap on a lock or write that waits on a value still replicating or a committed predecessor still settling (Kahuna's `WaitingForReplication`), kept apart from the lock-conflict cap so settlement lag on a loaded node does not fail a statement that conflicts with nothing |
-| `key_range_sharding` | — (`CAMUS_KEY_RANGE_SHARDING` env) | `false` |
+| `key_range_sharding` | — (`CAMUS_KEY_RANGE_SHARDING` env) | `false`; fixed per cluster when the cluster is created. Unset, a node follows the cluster's recorded mode; set to the other mode, the node refuses to start (see [key-range sharding](key-range-sharding.md#the-mode-is-fixed-when-the-cluster-is-created)) |
 | `distributed_query_execution` | — | `false`; fragments eligible key-range scans across cluster nodes (see [query planning](query-planner.md#part-iv--distributed-ready-plan-properties)) |
 | `broadcast_join_max_build_rows` | — | `10000`; maximum build-side rows for a remote inner-join probe; `0` disables broadcast probes |
 | `stats_flush_interval_ms` | — | `5000` |
