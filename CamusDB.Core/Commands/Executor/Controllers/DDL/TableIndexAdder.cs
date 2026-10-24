@@ -220,21 +220,35 @@ internal sealed class TableIndexAdder
             ? GetColumnIdsByName(table, ticket.IncludeColumns)
             : null;
 
+        TableIndexSchema schemaEntry = new(
+            indexId,
+            ticket.IndexName,
+            columnIds,
+            indexType,
+            SchemaElementState.WriteOnly,
+            startOffset: null,
+            columnDirections: columnDirections,
+            includeColumnIds: includeColumnIds
+        );
+
+        // Kahuna must see a key space registered before the first write to it. Once the WriteOnly index
+        // is published below, every statement writes entries into its key space, so the space is
+        // registered here, while it is still empty. Left to the next table open, the registration would
+        // change the routing of a space whose entries and write intents were placed by hash routing,
+        // under writers that still hold those intents. The rule is the one TableOpener applies.
+        if (database.Options.KeyRangeShardingEnabled && table.Schema.Columns is { Count: > 0 } columns)
+        {
+            Dictionary<string, ColumnType> columnTypeById = columns.ToDictionary(c => c.Id, c => c.Type);
+            if (TableOpener.IsIndexRangeable(schemaEntry, columnTypeById))
+                await database.Kahuna.Kahuna.RegisterKeyRangeAsync(table.Store.IndexKeySpace(indexId)).ConfigureAwait(false);
+        }
+
         try
         {
             await database.SystemSchemaSemaphore.WaitAsync().ConfigureAwait(false);
 
             table.Schema.Indexes ??= [];
-            table.Schema.Indexes.Add(new TableIndexSchema(
-                indexId,
-                ticket.IndexName,
-                columnIds,
-                indexType,
-                SchemaElementState.WriteOnly,
-                startOffset: null,
-                columnDirections: columnDirections,
-                includeColumnIds: includeColumnIds
-            ));
+            table.Schema.Indexes.Add(schemaEntry);
         }
         finally
         {
