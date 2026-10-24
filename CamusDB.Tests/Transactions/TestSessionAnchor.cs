@@ -13,6 +13,7 @@ using NUnit.Framework;
 
 using Kahuna.Shared.Routing;
 
+using CamusDB.Core;
 using CamusDB.Core.CommandsExecutor;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Results;
@@ -35,6 +36,11 @@ namespace CamusDB.Tests.Transactions;
 [TestFixture]
 public sealed class TestSessionAnchor : SharedNodeBaseTest
 {
+    // The hash-routed anchor. The routing mode is explicit so that the cases do not depend on which
+    // mode is the default; the key-range anchor is covered by TestSessionAnchorKeyRange.
+    protected override CamusDBOptions ConfigureOptions(CamusDBOptions defaults) =>
+        defaults with { KeyRangeShardingEnabled = false };
+
     private async Task<(string dbname, DatabaseDescriptor database, CommandExecutor executor)> SetupAsync()
     {
         (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();

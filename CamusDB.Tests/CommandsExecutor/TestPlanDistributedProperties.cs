@@ -66,9 +66,12 @@ public class TestPlanDistributedProperties
     /// A planner fixes its configuration when constructed, so a fixture-level instance would plan every
     /// case under whatever settings happened to hold when the fixture was created.
     /// </summary>
-    /// <summary>Plans <paramref name="sql"/> under the engine defaults.</summary>
+    /// <summary>
+    /// Plans <paramref name="sql"/> under the engine defaults with hash routing. The routing mode is
+    /// explicit so that the sharding-off cases do not depend on which mode is the default.
+    /// </summary>
     private QueryPlan Plan(string sql, Dictionary<string, ColumnValue>? parameters = null) =>
-        Plan(CamusDBOptions.Default, sql, parameters);
+        Plan(CamusDBOptions.Default with { KeyRangeShardingEnabled = false }, sql, parameters);
 
     /// <summary>
     /// Plans <paramref name="sql"/> with a planner configured by <paramref name="options"/>. A planner
@@ -395,7 +398,7 @@ public class TestPlanDistributedProperties
     [Test]
     public void Distribution_ScanLeaf_IsGatheredWhenShardingOff()
     {
-        // KeyRangeShardingEnabled is false in the test environment.
+        // Plan(sql) plans with KeyRangeShardingEnabled false.
         QueryPlan plan = Plan("SELECT * FROM robots");
         var scanLeaves = AllNodes(plan).OfType<TableScanNode>().ToList();
         Assert.IsTrue(scanLeaves.Count > 0, "Expected at least one TableScanNode in plan");
@@ -553,13 +556,13 @@ public class TestPlanDistributedProperties
     // ── NetworkFactor ─────────────────────────────────────────────────────────
 
     /// <summary>
-    /// With sharding OFF (the default), NetworkFactor is 0 on all nodes.
+    /// With sharding OFF, NetworkFactor is 0 on all nodes.
     /// Single-node cost is unchanged — no existing cost comparisons are disrupted.
     /// </summary>
     [Test]
     public void NetworkFactor_IsZeroWhenShardingOff()
     {
-        // KeyRangeShardingEnabled=false and ClusterPartitionCount=1 in test defaults.
+        // Plan(sql) plans with KeyRangeShardingEnabled false and ClusterPartitionCount 1.
         QueryPlan plan = Plan("SELECT * FROM robots");
         foreach (PhysicalPlanNode node in AllNodes(plan))
             Assert.AreEqual(0.0, node.Cost?.NetworkFactor ?? 0.0,

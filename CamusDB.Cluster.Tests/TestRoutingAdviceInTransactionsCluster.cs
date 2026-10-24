@@ -50,6 +50,10 @@ public sealed class TestRoutingAdviceInTransactionsCluster
 
     private static readonly ILogger<ICamusDB> logger = sharedLoggerFactory.CreateLogger<ICamusDB>();
 
+    // The cases describe hash routing. The mode is explicit so that they do not depend on which mode
+    // is the default.
+    private static readonly CamusDBOptions HashRouted = CamusDBOptions.Default with { KeyRangeShardingEnabled = false };
+
     private sealed class Host
     {
         public InProcessSchemaCluster Cluster = null!;
@@ -67,7 +71,7 @@ public sealed class TestRoutingAdviceInTransactionsCluster
     private static async Task<Host> SetupAsync()
     {
         InProcessSchemaCluster cluster = await InProcessSchemaCluster.StartAsync(
-            nodeCount: 3, partitions: 3, loggerFactory: sharedLoggerFactory, logger: logger);
+            nodeCount: 3, partitions: 3, loggerFactory: sharedLoggerFactory, logger: logger, options: HashRouted);
 
         string db = cluster.NextSchemaLogDatabaseName();
         await cluster.OpenDatabaseOnAllNodesAsync(db);
@@ -99,7 +103,7 @@ public sealed class TestRoutingAdviceInTransactionsCluster
         });
 
         InProcessSchemaCluster.Node node = cluster.Nodes[0];
-        CamusDBOptions options = CamusDBOptions.Default;
+        CamusDBOptions options = HashRouted;
         Host h = new()
         {
             Cluster = cluster,
@@ -246,7 +250,7 @@ public sealed class TestRoutingAdviceInTransactionsCluster
         http.Request.ContentLength = bytes.Length;
         http.Request.IsHttps = true;
         http.Response.Body = new MemoryStream();
-        return new ExecuteSQLController(h.Node.Executor, h.Coordinator, h.Registry, logger, CamusDBOptions.Default, routing: h.Resolver)
+        return new ExecuteSQLController(h.Node.Executor, h.Coordinator, h.Registry, logger, HashRouted, routing: h.Resolver)
         {
             ControllerContext = new ControllerContext { HttpContext = http },
         };

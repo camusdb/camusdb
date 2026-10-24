@@ -44,6 +44,10 @@ public sealed class TestSessionAnchorCluster
 
     private static readonly ILogger<ICamusDB> logger = sharedLoggerFactory.CreateLogger<ICamusDB>();
 
+    // The cases describe hash routing. The mode is explicit so that they do not depend on which mode
+    // is the default.
+    private static readonly CamusDBOptions HashRouted = CamusDBOptions.Default with { KeyRangeShardingEnabled = false };
+
     /// <summary>Sums the registration counter by <c>route</c> while it is alive.</summary>
     private sealed class RegistrationProbe : IDisposable
     {
@@ -85,7 +89,7 @@ public sealed class TestSessionAnchorCluster
     private static async Task<(InProcessSchemaCluster cluster, string db, string rowId)> SetupAsync()
     {
         InProcessSchemaCluster cluster = await InProcessSchemaCluster.StartAsync(
-            nodeCount: 3, partitions: 3, loggerFactory: sharedLoggerFactory, logger: logger);
+            nodeCount: 3, partitions: 3, loggerFactory: sharedLoggerFactory, logger: logger, options: HashRouted);
 
         string db = cluster.NextSchemaLogDatabaseName();
         await cluster.OpenDatabaseOnAllNodesAsync(db);

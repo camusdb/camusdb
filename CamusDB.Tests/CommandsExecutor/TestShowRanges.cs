@@ -40,6 +40,11 @@ namespace CamusDB.Tests.CommandsExecutor;
 [NonParallelizable]
 internal sealed class TestShowRanges : BaseTest
 {
+    // The cases describe a hash-routed standalone node. The routing mode is explicit so that they do
+    // not depend on which mode is the default.
+    protected override CamusDBOptions ConfigureOptions(CamusDBOptions defaults) =>
+        defaults with { KeyRangeShardingEnabled = false };
+
     // ─────────────────────────────────────────────────────────────────────────
     // Helpers
     // ─────────────────────────────────────────────────────────────────────────

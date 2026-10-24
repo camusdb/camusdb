@@ -24,6 +24,9 @@ public sealed class TestKeyRangeSplitStartupChecks
 {
     private static readonly CamusDBOptions Sharded = CamusDBOptions.Default with { KeyRangeShardingEnabled = true };
 
+    // Explicit, so the hash-routing cases do not depend on which routing mode is the default.
+    private static readonly CamusDBOptions HashRouted = CamusDBOptions.Default with { KeyRangeShardingEnabled = false };
+
     /// <summary>A cluster configuration that satisfies every precondition, for a test to break one field of.</summary>
     private static ConfigDefinition HealthyCluster() => new()
     {
@@ -49,7 +52,7 @@ public sealed class TestKeyRangeSplitStartupChecks
         // threshold at its default must stay quiet, whatever the rest of the configuration says.
         ConfigDefinition config = new() { Mode = "standalone", InitialPartitions = 1 };
 
-        Assert.That(KeyRangeSplitStartupChecks.Inspect(config, CamusDBOptions.Default), Is.Empty);
+        Assert.That(KeyRangeSplitStartupChecks.Inspect(config, HashRouted), Is.Empty);
     }
 
     [Test]
@@ -57,7 +60,7 @@ public sealed class TestKeyRangeSplitStartupChecks
     {
         ConfigDefinition config = HealthyCluster();
 
-        string[] warnings = [.. KeyRangeSplitStartupChecks.Inspect(config, CamusDBOptions.Default)];
+        string[] warnings = [.. KeyRangeSplitStartupChecks.Inspect(config, HashRouted)];
 
         Assert.That(warnings.Any(w => w.Contains("key_range_sharding is off")), Is.True, string.Join("\n", warnings));
     }
