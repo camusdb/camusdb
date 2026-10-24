@@ -263,7 +263,7 @@ internal sealed class TableOpener
         // DROP TABLE safety: dropping a table evicts its AsyncLazy<TableDescriptor> entry from
         // database.TableDescriptors by name — locally via TableDropper, and on the replicated apply
         // path via SchemaReplicator.InvalidateAppliedTableDescriptor (which also evicts on
-        // AddIndex/DropIndex/SetElementState(Index), so index DDL rebuilds rangedIndexIds too). A
+        // AddIndex/DropIndex/SetElementState(Index), so index DDL registers a new index space too). A
         // recreated table with the same name gets a NEW ObjectId, so RegisterKeyRangeAsync is called with a
         // brand-new key space ({dbId}:{newId}|r) — completely disjoint from the old one ({dbId}:{oldId}|r). The old
         // space's descriptors are left in the replicated range map; they are never written to and pose
@@ -359,7 +359,6 @@ internal sealed class TableOpener
                     if (columnTypeById is not null && IsIndexRangeable(entry, columnTypeById))
                     {
                         await database.Kahuna.Kahuna.RegisterKeyRangeAsync(store.IndexKeySpace(entry.KvId));
-                        store.MarkIndexAsRanged(entry.KvId);
                     }
                     break;
 

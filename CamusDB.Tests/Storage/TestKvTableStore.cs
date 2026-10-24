@@ -466,7 +466,6 @@ public sealed class TestKvTableStore
         (EmbeddedKahuna node, KvTableStore store) = await CreateStoreAsync("rosnaplock", ShardedOptions);
         await using EmbeddedKahuna __ = node;
 
-        store.MarkIndexAsRanged("idx_slot");
         KvTransactionsManager transactions = new(node.Kahuna, ShardedOptions);
 
         KvTransaction snapshot = await transactions.BeginAsync(
@@ -484,14 +483,14 @@ public sealed class TestKvTableStore
         Assert.AreEqual(0, snapshot.GetAcquiredRangeLocks().Count,
             "a pinned snapshot must take no row, index or bounded index range lock under key-range sharding");
 
-        // The latest-state shape still locks in this mode, so the exemption belongs to the snapshot alone.
-        KvTransaction latest = await transactions.BeginAsync(
-            CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadOnly);
-        await store.AcquireBoundedIndexRangeLockAsync(latest, "idx_slot", cv7, true, cv7, true, unique: false);
-        Assert.AreEqual(1, latest.GetAcquiredRangeLocks().Count,
-            "an explicit Read Committed read-only scan keeps its shared range lock under key-range sharding");
+        // A Serializable read-write scan still locks in this mode, so the exemption is not the routing mode's.
+        KvTransaction locking = await transactions.BeginAsync(
+            CamusIsolationLevel.Serializable, CamusTransactionMode.ReadWrite);
+        await store.AcquireBoundedIndexRangeLockAsync(locking, "idx_slot", cv7, true, cv7, true, unique: false);
+        Assert.AreEqual(1, locking.GetAcquiredRangeLocks().Count,
+            "a Serializable read-write scan keeps its shared range lock under key-range sharding");
 
-        await transactions.CommitAsync(latest);
+        await transactions.CommitAsync(locking);
         await transactions.RollbackAsync(snapshot);
     }
 
@@ -512,7 +511,6 @@ public sealed class TestKvTableStore
         (EmbeddedKahuna node, KvTableStore store) = await CreateStoreAsync("rosnapwriter", ShardedOptions);
         await using EmbeddedKahuna __ = node;
 
-        store.MarkIndexAsRanged("idx_slot");
         KvTransactionsManager transactions = new(node.Kahuna, ShardedOptions);
 
         CompositeColumnValue cv7 = new(new ColumnValue(ColumnType.Integer64, 7L));

@@ -474,10 +474,10 @@ public sealed class KvTransactionsManager : IDisposable
     /// any data — it is finalized via rollback on commit or rollback (see
     /// <see cref="CommitAsync"/>).</para>
     ///
-    /// <para>Lock-free holds in every routing mode. The scan-lock helpers skip a transaction with a
-    /// pinned <see cref="KvTransaction.ReadTimestamp"/> (see <c>KvRangeLockManager.ScanTakesPredicateLock</c>),
-    /// so under key-range sharding the snapshot is neither refused by a writer's range lock nor a holder
-    /// that a writer waits for.</para>
+    /// <para>Lock-free holds in every routing mode. The scan-lock helpers lock only for a Serializable
+    /// read-write transaction (see <c>KvRangeLockManager.ScanTakesPredicateLock</c>), so under key-range
+    /// sharding the snapshot is neither refused by a writer's range lock nor a holder that a writer
+    /// waits for.</para>
     /// </summary>
     private async Task<KvTransaction> BeginSerializableReadOnlyAsync(
         TransactionPriority priority, 
@@ -783,9 +783,9 @@ public sealed class KvTransactionsManager : IDisposable
 
         // Serializable+ReadOnly transactions hold no write intents and no range locks — a lightweight
         // rollback of the empty Kahuna transaction is equivalent to commit and avoids the full 2PC
-        // roundtrip. An explicit ReadCommitted+ReadOnly transaction is excluded: under key-range
-        // sharding its scans hold shared range locks that the coordinator's finalize must release,
-        // so it goes through the normal commit path below.
+        // roundtrip. An explicit ReadCommitted+ReadOnly transaction is excluded: it takes no scan lock,
+        // but an optimistic one folds its reads into the coordinator's working set for commit-time
+        // validation, so it goes through the normal commit path below.
         if (tx is { IsReadOnly: true, TransactionMode: CamusTransactionMode.ReadOnly, IsolationLevel: CamusIsolationLevel.Serializable })
         {
             tx.Status = KvTransactionStatus.Committed;

@@ -34,8 +34,8 @@ hash routing the equivalent lock covers the single partition that owns the whole
 read-only transaction takes no range lock in this mode either: it reads every range at its pinned
 timestamp, so it is never refused by a writer's lock and never makes a writer wait. An autocommit
 `SELECT` is the same: it gets the snapshot it gets under hash routing, with no round trip to Kahuna to
-begin or end it and no range lock. Only an explicit Read Committed transaction locks its scans in this
-mode.
+begin or end it and no range lock. A scan in an explicit Read Committed transaction takes no range lock
+either, as under hash routing. Only a Serializable read-write transaction locks its scans.
 
 **Scans stay ordered and complete.** A scan resolves every range descriptor its bounds intersect and
 merges the results in key order, so a `SELECT` returns the same rows in the same order whether the

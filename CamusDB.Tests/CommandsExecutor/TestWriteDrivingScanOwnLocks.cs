@@ -185,8 +185,8 @@ internal sealed class TestWriteDrivingScanOwnLocks : SharedNodeBaseTest
     [Test]
     public async Task InsertSelect_UnderKeyRangeSharding_ReadCommitted_CopiesEveryRow()
     {
-        // With key-range sharding a write-driving scan takes its exclusive range lock at every isolation
-        // level, not only under Serializable.
+        // Under key-range sharding a Read Committed write-driving scan takes no range lock, as under hash
+        // routing; the copy is fenced only by the per-key locks of its own writes.
         (string dbname, DatabaseDescriptor database, CommandExecutor executor) =
             await SetupAsync(Options with { KeyRangeShardingEnabled = true });
 

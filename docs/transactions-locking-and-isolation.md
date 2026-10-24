@@ -220,11 +220,12 @@ bounded index range scans, and `IN`-list scans). They fire in two situations:
 
 - **For a Serializable read-write transaction** (see §9), on *any* configuration including the default
   single-node hash setup — a serializable scan needs phantom protection to be correct, so the lock is
-  taken regardless of routing.
-- **In key-range routing mode**, for a scan in an explicit Read Committed transaction, so a scan over
-  `[A, B)` doesn't block a writer on the disjoint `[B, C)`.
+  taken regardless of routing. In key-range routing mode the lock is clipped to each range the scan
+  touches, so a scan over `[A, B)` doesn't block a writer on the disjoint `[B, C)`.
 
-Otherwise **no range lock is taken**. That includes every autocommit `SELECT`, in every routing mode:
+Otherwise **no range lock is taken**. That includes every scan in an explicit Read Committed
+transaction, in every routing mode: Read Committed promises no phantom protection, so its scans never
+block or abort a writer. That includes every autocommit `SELECT`, in every routing mode:
 it reads a pinned snapshot under the Serializable default, or the latest committed value per key under
 a Read Committed default, and it has no transaction identity that could own a lock.
 
@@ -385,7 +386,7 @@ machinery across more nodes and partitions. Here's the mapping:
 | Routing | one place, so routing is trivial | keys routed to partitions by hash (or by range, if enabled) |
 | Where a write commits | local Raft (a one-node "quorum") | the partition **leader**, replicated to a node majority |
 | Multi-key write | 2PC, local | 2PC across the **leaders** of every partition the keys touch |
-| Range locks | active for Serializable transactions; otherwise dormant in the hash default | additionally active for scans in explicit Read Committed transactions when key-range routing is enabled; never for an autocommit `SELECT` |
+| Range locks | active for Serializable read-write transactions; otherwise dormant | identical: Serializable read-write only (clipped per range under key-range routing); never for Read Committed or an autocommit `SELECT` |
 | Reads | MVCC, lock-free | MVCC, lock-free (served by the partition leader of each key) |
 | Isolation levels | Read Committed + Serializable, both work | identical — same levels, same guarantees |
 | Schema/DDL | a dedicated, totally-ordered key space | same key space, kept on a single partition so all nodes agree on schema order |
@@ -597,8 +598,8 @@ When reasoning about a concurrency question in CamusDB, ask in this order:
 2. **Is it a read or a write?** Read Committed reads and Serializable read-only reads are lock-free
    MVCC; Serializable read-write reads take locks; all writes take per-key locks + 2PC.
 3. **Is it a scan or a point lookup?** A point lookup reads one key; a scan over a range is what can
-   take a range (predicate) lock — for Serializable read-write transactions, or for scans in explicit
-   Read Committed transactions under key-range routing. An autocommit `SELECT` never takes one.
+   take a range (predicate) lock — for Serializable read-write transactions only, in every routing
+   mode. A Read Committed scan and an autocommit `SELECT` never take one.
 4. **Single partition or many?** Many partitions means writes/locks happen on partition leaders and a
    transaction may run a 2PC across them — but the isolation guarantees are the same either way.
 5. **What guarantee does the app actually need?** Need a consistent multi-statement read? Use a

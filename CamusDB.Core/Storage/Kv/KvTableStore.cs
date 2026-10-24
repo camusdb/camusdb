@@ -263,13 +263,6 @@ public sealed partial class KvTableStore
     // -----------------------------------------------------------------------
 
     /// <summary>
-    /// Marks <paramref name="indexId"/> as key-range routed on this node. Called by
-    /// <c>TableOpener</c> after successfully registering the index space. Once marked,
-    /// <see cref="AcquireIndexRangeLockAsync"/> uses a Kahuna range lock instead of a prefix lock.
-    /// </summary>
-    public void MarkIndexAsRanged(string indexId) => locks.MarkIndexAsRanged(indexId);
-
-    /// <summary>
     /// Registers the human-readable display name for an index KvId so that duplicate-key
     /// errors show the mutable index name (e.g., <c>robots.name_idx</c>) rather than the
     /// immutable KvId stored in KV keys. Called by <c>TableOpener</c> for every index entry

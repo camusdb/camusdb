@@ -519,9 +519,6 @@ public sealed class TestKvTableStoreIndex
             (EmbeddedKahuna node, KvTableStore store) = await CreateStoreAsync("irange1", sharded);
             await using EmbeddedKahuna __ = node;
 
-            // Mark the index as ranged (simulates what TableOpener does after RegisterKeyRangeAsync).
-            store.MarkIndexAsRanged("idx_age");
-
             KvTransactionsManager transactions = new(node.Kahuna, sharded);
 
             KvTransaction tx1 = await transactions.BeginAsync();
@@ -626,21 +623,19 @@ public sealed class TestKvTableStoreIndex
         Assert.IsFalse(TableOpener.IsIndexRangeable(entry, types));
     }
 
-    // An index NOT marked as ranged (or when key-range sharding is off) acquires NO lock.
-    // In single-partition mode MVCC provides snapshot isolation; phantom protection via
-    // range locks only activates with KeyRangeShardingEnabled + a registered ranged index.
+    // A Read Committed scan of an index acquires NO lock: phantom protection via range locks is taken
+    // only by a Serializable read-write transaction.
     [Test]
-    public async Task AcquireIndexRangeLock_UnmarkedIndex_AcquiresNoLock()
+    public async Task AcquireIndexRangeLock_ReadCommitted_AcquiresNoLock()
     {
         (EmbeddedKahuna node, KvTableStore store) = await CreateStoreAsync("irange2");
         await using EmbeddedKahuna __ = node;
 
-        // idx_name is NOT marked as ranged — no lock should be acquired.
         KvTransactionsManager transactions = new(node.Kahuna, CamusDBOptions.Default);
 
         KvTransaction tx1 = await transactions.BeginAsync(CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite);
         await store.AcquireIndexRangeLockAsync(tx1, "idx_name");
-        Assert.AreEqual(0, tx1.GetAcquiredRangeLocks().Count, "unmarked index must not acquire a range lock");
+        Assert.AreEqual(0, tx1.GetAcquiredRangeLocks().Count, "a Read Committed index scan must not acquire a range lock");
 
         await transactions.CommitAsync(tx1);
     }
@@ -663,7 +658,6 @@ public sealed class TestKvTableStoreIndex
             (EmbeddedKahuna node, KvTableStore store) = await CreateStoreAsync("irange-f1", sharded);
             await using EmbeddedKahuna __ = node;
 
-            store.MarkIndexAsRanged("idx_age");
             KvTransactionsManager transactions = new(node.Kahuna, sharded);
 
             CompositeColumnValue cv1  = new(new ColumnValue(ColumnType.Integer64, 1L));
@@ -707,54 +701,42 @@ public sealed class TestKvTableStoreIndex
         }
     }
 
-    // An explicit Read Committed read-only transaction (key-range mode) is a REAL transaction: it has
-    // a non-zero identity, takes an enforced shared range lock during its scan, and releases that lock
-    // when it commits. The lock is real (a foreign write into the range is blocked while held) and the
-    // commit path releases it although the transaction wrote nothing (the same write succeeds after).
+    // An explicit Read Committed transaction has a real identity, but under key-range sharding its scan
+    // takes no range lock, read-only or read-write, as under hash routing. Read Committed promises no
+    // phantom protection, and a lock held to commit made every writer into the scanned range wait or
+    // abort. A foreign write into the scanned range therefore commits while the scan is still open.
     [Test]
     [NonParallelizable]
-    public async Task ReadCommittedReadOnlyScan_HoldsEnforcedSharedRangeLock_ReleasedOnCommit()
+    public async Task ReadCommittedScan_TakesNoRangeLock_AndDoesNotBlockAWriter_UnderKeyRangeSharding()
     {
-        // Key-range sharding on — the store and transactions take it as configuration. The engine's
-        // lock-wait deadline is raised far above the test's 500 ms cancellation so the blocked write
-        // deterministically surfaces as OperationCanceledException (see BlocksWriteInsideRange test).
-        CamusDBOptions sharded = CamusDBOptions.Default with { KeyRangeShardingEnabled = true, LockWaitDeadlineMs = 10_000 };
+        CamusDBOptions sharded = CamusDBOptions.Default with { KeyRangeShardingEnabled = true };
+        (EmbeddedKahuna node, KvTableStore store) = await CreateStoreAsync("irange-rop", sharded);
+        await using EmbeddedKahuna __ = node;
+
+        KvTransactionsManager transactions = new(node.Kahuna, sharded);
+
+        CompositeColumnValue cv1  = new(new ColumnValue(ColumnType.Integer64, 1L));
+        CompositeColumnValue cv50 = new(new ColumnValue(ColumnType.Integer64, 50L));
+        CompositeColumnValue cv25 = new(new ColumnValue(ColumnType.Integer64, 25L));
+
+        foreach (CamusTransactionMode mode in new[] { CamusTransactionMode.ReadOnly, CamusTransactionMode.ReadWrite })
         {
-            (EmbeddedKahuna node, KvTableStore store) = await CreateStoreAsync("irange-rop", sharded);
-            await using EmbeddedKahuna __ = node;
+            KvTransaction scan = await transactions.BeginAsync(CamusIsolationLevel.ReadCommitted, mode);
+            Assert.AreNotEqual(HLCTimestamp.Zero, scan.TransactionId, "an explicit transaction has a real identity");
 
-            store.MarkIndexAsRanged("idx_age");
-            KvTransactionsManager transactions = new(node.Kahuna, sharded);
+            await store.AcquireRowRangeLockAsync(scan);
+            await store.AcquireIndexRangeLockAsync(scan, "idx_age");
+            await store.AcquireBoundedIndexRangeLockAsync(scan, "idx_age", cv1, true, cv50, true, unique: false);
+            Assert.AreEqual(0, scan.GetAcquiredRangeLocks().Count, $"a Read Committed {mode} scan takes no range lock");
 
-            CompositeColumnValue cv1  = new(new ColumnValue(ColumnType.Integer64, 1L));
-            CompositeColumnValue cv25 = new(new ColumnValue(ColumnType.Integer64, 25L));
-            CompositeColumnValue cv50 = new(new ColumnValue(ColumnType.Integer64, 50L));
-
-            KvTransaction roTx = await transactions.BeginAsync(CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadOnly);
-            Assert.AreNotEqual(HLCTimestamp.Zero, roTx.TransactionId, "an explicit read-only transaction has a real identity");
-            Assert.AreEqual(CamusTransactionMode.ReadOnly, roTx.TransactionMode, "the scan transaction is read-only");
-
-            // The read-only scan takes a shared range lock over [1,50].
-            await store.AcquireBoundedIndexRangeLockAsync(roTx, "idx_age", cv1, true, cv50, true, unique: false);
-            Assert.AreEqual(1, roTx.GetAcquiredRangeLocks().Count, "the read-only scan must hold its shared range lock");
-
-            // While held, a foreign write into the range is blocked (the lock is genuinely enforced).
             KvTransaction writer = await transactions.BeginAsync();
-            ObjectIdValue rowId25 = new(25, 0, 0);
-            using CancellationTokenSource cts = new(TimeSpan.FromMilliseconds(500));
-            Assert.CatchAsync<OperationCanceledException>(
-                async () => await store.PutIndexEntry(writer, "idx_age", cv25, rowId25, unique: false, cancellationToken: cts.Token),
-                "a write inside the range must be blocked while the read-only scan holds the shared lock");
-
-            // Committing the read-only scan releases the lock (no leak, despite no writes).
-            await transactions.CommitAsync(roTx);
-
-            KvTransaction writer2 = await transactions.BeginAsync();
-            ObjectIdValue rowId25b = new(25, 0, 1);
+            ObjectIdValue rowId = new(25, 0, (int)mode);
             Assert.DoesNotThrowAsync(
-                async () => await store.PutIndexEntry(writer2, "idx_age", cv25, rowId25b, unique: false),
-                "the write must succeed once the read-only scan commits and releases its shared lock");
-            await transactions.CommitAsync(writer2);
+                async () => await store.PutIndexEntry(writer, "idx_age", cv25, rowId, unique: false),
+                "a write inside the scanned range is not blocked while the Read Committed scan is open");
+            await transactions.CommitAsync(writer);
+
+            await transactions.CommitAsync(scan);
         }
     }
 
@@ -771,8 +753,6 @@ public sealed class TestKvTableStoreIndex
 
         (EmbeddedKahuna node, KvTableStore store) = await CreateStoreAsync("irange-zero", sharded);
         await using EmbeddedKahuna __ = node;
-
-        store.MarkIndexAsRanged("idx_age");
 
         KvTransactionsManager unshardedTransactions = new(node.Kahuna, unsharded);
         Assert.AreEqual(HLCTimestamp.Zero, unshardedTransactions.BeginReadOnly().TransactionId,
@@ -818,7 +798,6 @@ public sealed class TestKvTableStoreIndex
             (EmbeddedKahuna node, KvTableStore store) = await CreateStoreAsync("irange3", sharded);
             await using EmbeddedKahuna __ = node;
 
-            store.MarkIndexAsRanged("idx_age");
             KvTransactionsManager transactions = new(node.Kahuna, sharded);
 
             CompositeColumnValue low  = new(new ColumnValue(ColumnType.Integer64, 1L));
@@ -875,7 +854,6 @@ public sealed class TestKvTableStoreIndex
             (EmbeddedKahuna node, KvTableStore store) = await CreateStoreAsync("irange-f2a", sharded);
             await using EmbeddedKahuna __ = node;
 
-            store.MarkIndexAsRanged("idx_age");
             KvTransactionsManager transactions = new(node.Kahuna, sharded);
 
             CompositeColumnValue cv1  = new(new ColumnValue(ColumnType.Integer64, 1L));
@@ -930,7 +908,6 @@ public sealed class TestKvTableStoreIndex
             (EmbeddedKahuna node, KvTableStore store) = await CreateStoreAsync("irange-f2b", sharded);
             await using EmbeddedKahuna __ = node;
 
-            store.MarkIndexAsRanged("idx_name");
             KvTransactionsManager transactions = new(node.Kahuna, sharded);
 
             CompositeColumnValue cvApple  = new(new ColumnValue(ColumnType.String, "apple"));
@@ -986,7 +963,6 @@ public sealed class TestKvTableStoreIndex
             (EmbeddedKahuna node, KvTableStore store) = await CreateStoreAsync("irange-f2c", sharded);
             await using EmbeddedKahuna __ = node;
 
-            store.MarkIndexAsRanged("idx_age");
             KvTransactionsManager transactions = new(node.Kahuna, sharded);
 
             CompositeColumnValue cv1  = new(new ColumnValue(ColumnType.Integer64, 1L));
@@ -1041,7 +1017,6 @@ public sealed class TestKvTableStoreIndex
             (EmbeddedKahuna node, KvTableStore store) = await CreateStoreAsync("irange-f2d", sharded);
             await using EmbeddedKahuna __ = node;
 
-            store.MarkIndexAsRanged("idx_cat_age");
             KvTransactionsManager transactions = new(node.Kahuna, sharded);
 
             static CompositeColumnValue CV2(string cat, long age) => new(new ColumnValue[]
