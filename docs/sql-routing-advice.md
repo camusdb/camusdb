@@ -181,8 +181,12 @@ await using CamusConnection connection = CamusConnection.Connect(
   same placement rule as data keys. A client-owned transaction (deferred session start) anchors
   that key inside the placement group of the first table it touches, so the session lives on that
   table's data leader; with the client starting the transaction there too, registrations and the
-  commit are local. Under key-range sharding the anchor is not applied. An autocommit statement
-  opens its session eagerly and is not anchored.
+  commit are local. Under key-range sharding no key string names a table's partition, so the
+  session is instead pinned to the partition of the table's one row range (Kahuna's
+  `CoordinatorPartitionId`, Kahuna 1.13.4 or later on every node). The pin is fixed for the life
+  of the session; a split during the transaction costs forwarded calls, never a wrong answer. A
+  table whose row space is already divided gets an unpinned session, because the right partition
+  depends on the row key. An autocommit statement opens its session eagerly and is not anchored.
 - Performance claims should come from the qualification benchmark (routing off vs learned vs a
   manually selected leader on identical concurrency and pool budgets), not from intuition. The
   win is bounded by the eligible fraction of the workload and by how often statements repeat.

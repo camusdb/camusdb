@@ -116,9 +116,12 @@ public sealed class KvTransaction
     /// replaces it at session open with the anchored form
     /// <c>{placementGroup}|tx/{UniqueId}</c> (see <c>KvKeyBuilder.SessionAnchorKeyOf</c>) when the
     /// first data operation names the table it touches, so the session lands on that table's
-    /// partition and the leader of the data also owns the registrations and the commit. Read it only
-    /// after <see cref="EnsureSessionStartedAsync"/> completed; before that it still equals
-    /// <see cref="UniqueId"/>.</para>
+    /// partition and the leader of the data also owns the registrations and the commit. For a
+    /// key-range routed table the anchored key is pinned to the partition of the table's one row
+    /// range, and the key then has Kahuna's pinned form <c>"\u0001p/{partition}/{key}"</c>
+    /// (<c>CoordinatorKeys</c>), which routes every later call to that partition without hashing.
+    /// Treat the key as opaque. Read it only after <see cref="EnsureSessionStartedAsync"/> completed;
+    /// before that it still equals <see cref="UniqueId"/>.</para>
     /// </summary>
     public string CoordinatorKey { get; private set; }
 

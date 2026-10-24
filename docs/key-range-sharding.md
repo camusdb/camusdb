@@ -23,6 +23,7 @@ Hash routing remains the default. Key-range routing is enabled per deployment wi
 | Range locks | Cover the whole space | Clipped per range — disjoint scans do not conflict |
 | Scans | One partition answers | Every intersecting range answers; results merged in key order |
 | Splitting | Not applicable | A range can be divided, on demand or on a size threshold |
+| A client transaction's session | On the leader of the first touched table's partition (hashed anchor key) | Pinned to the partition of the first touched table's one row range; unpinned when the row space is already divided |
 
 Two consequences are worth stating plainly:
 
@@ -317,5 +318,9 @@ nodes is a reasonable way to spot one that is behind.
   and transactional commits are fenced against the split's range lock wherever they were issued — so
   this does not reach SQL traffic. It matters only if something else writes into CamusDB's key spaces
   through Kahuna directly.
+- **A session is pinned only while the first table's row space is one range.** The pin needs Kahuna
+  1.13.4 or later on every node, because an older node refuses operation registrations for a pinned
+  session. After the row space is divided, a new client transaction gets an unpinned session on an
+  arbitrary partition, so its registrations and commit are usually forwarded.
 - **Orphaned data after a split is reclaimed by compaction**, not immediately, so disk usage does not
   drop the moment a range moves.

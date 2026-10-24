@@ -9,6 +9,7 @@ using System.Collections.Concurrent;
 using System.Diagnostics;
 using Kahuna;
 using Kahuna.Server.KeyValues.Transactions.Data;
+using Kahuna.Shared.Communication.Rest;
 using Kahuna.Shared.KeyValue;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -400,16 +401,10 @@ public sealed class KvTransactionsManager : IDisposable
             DecisionDurability capturedDecision = decisionDurabilityMode;
             txDeferred.SessionStarter = async (placementGroup, ct) =>
             {
-                // Anchor the session to the partition of the first table this transaction touches.
-                // Kahuna hashes the coordinator key with the data placement rule, so a key inside the
-                // table's placement group puts the session on the table's data leader: registrations
-                // and the commit are then local when the transaction executes there, instead of
-                // forwarded to whichever partition a bare GUID happens to hash to. Under key-range
-                // sharding the data leader is not a function of the hash group, so the anchor would
-                // name an unrelated partition; the bare GUID is kept there.
-                string coordinatorKey = placementGroup is not null && !options.KeyRangeShardingEnabled
-                    ? KvKeyBuilder.SessionAnchorKeyOf(placementGroup, uniqueId)
-                    : uniqueId;
+                // Anchor the session to the partition of the first table this transaction touches,
+                // so the table's data leader owns the registrations and the commit, and they stay
+                // local when the transaction executes there (see SessionAnchorOf).
+                (string coordinatorKey, int? coordinatorPartition) = SessionAnchorOf(placementGroup, uniqueId);
 
                 // Priority is read from the transaction (not captured above) for the same reason
                 // Locking is: a SET TRANSACTION PRIORITY between BeginAsync and the first operation
@@ -417,9 +412,12 @@ public sealed class KvTransactionsManager : IDisposable
                 TransactionHandle h = await StartKahunaTransactionAsync(
                     coordinatorKey, "start Kahuna transaction",
                     txDeferred.Locking, txDeferred.ReadValidation, capturedDecision,
-                    txDeferred.Priority, ct
+                    txDeferred.Priority, ct, coordinatorPartition
                 ).ConfigureAwait(false);
-                txDeferred.SetSession(h.TransactionId, coordinatorKey);
+
+                // A pinned start returns the key in its pinned form, and every later operation,
+                // commit and rollback must send that form to reach the session's partition.
+                txDeferred.SetSession(h.TransactionId, string.IsNullOrEmpty(h.CoordinatorKey) ? coordinatorKey : h.CoordinatorKey);
             };
 
             Track(txDeferred);
@@ -522,6 +520,66 @@ public sealed class KvTransactionsManager : IDisposable
     }
 
     /// <summary>
+    /// The coordinator key, and the partition to pin it to when there is one, for a deferred session
+    /// whose first operation touches the table of <paramref name="placementGroup"/>.
+    ///
+    /// <para><b>Hash-routed table.</b> Kahuna hashes an unpinned coordinator key with the data placement
+    /// rule, so the anchored key <c>{placementGroup}|tx/{sessionId}</c> lands on the partition of the
+    /// table's rows and indexes. No pin is needed.</para>
+    ///
+    /// <para><b>Key-range routed table.</b> The table's partition comes from its range descriptor, which
+    /// no key string names, so the session is pinned (<c>KeyValueTransactionOptions.CoordinatorPartitionId</c>)
+    /// to the partition of the row space's one range. Kahuna seeds every key space of one placement
+    /// group on that partition, so until the first split it holds the rows and every index. The pin is
+    /// fixed for the life of the session: a later split or move costs forwarded calls, never a wrong
+    /// answer.</para>
+    ///
+    /// <para><b>Divided row space.</b> The partition then depends on the row key, which this call does
+    /// not see. The session keeps the bare id and its hash spread, because the hashed anchored key would
+    /// put every session of the table on one unrelated leader. A key space that this node routes by
+    /// hash (not registered as key-range here, or not seeded yet) follows the hash rule, as Kahuna's
+    /// router does.</para>
+    ///
+    /// <para>The range map is this node's applied view and can lag. A stale partition costs forwarded
+    /// calls; a partition that no longer exists is refused by the start, and
+    /// <see cref="StartKahunaTransactionAsync"/> then starts unpinned. Every node of the cluster must
+    /// read pinned keys (Kahuna 1.13.4 or later): an older node refuses operation registrations for a
+    /// pinned session.</para>
+    /// </summary>
+    private (string CoordinatorKey, int? PartitionId) SessionAnchorOf(string? placementGroup, string sessionId)
+    {
+        if (placementGroup is null)
+            return (sessionId, null);
+
+        string anchored = KvKeyBuilder.SessionAnchorKeyOf(placementGroup, sessionId);
+
+        if (!options.KeyRangeShardingEnabled)
+            return (anchored, null);
+
+        string rowSpace = string.Concat(placementGroup, KvKeyBuilder.RowSpaceSuffix);
+
+        KahunaKeySpaceRangesResponse? space = null;
+        foreach (KahunaKeySpaceRangesResponse candidate in kahuna.GetRangeMap(rowSpace).KeySpaces)
+        {
+            if (string.Equals(candidate.KeySpace, rowSpace, StringComparison.Ordinal))
+            {
+                space = candidate;
+                break;
+            }
+        }
+
+        if (space is null
+            || !string.Equals(space.RoutingMode, "KeyRange", StringComparison.Ordinal)
+            || space.Descriptors.Count == 0)
+            return (anchored, null);
+
+        if (space.Descriptors.Count == 1)
+            return (anchored, space.Descriptors[0].PartitionId);
+
+        return (sessionId, null);
+    }
+
+    /// <summary>
     /// Opens a Kahuna transaction, tolerating the transient startup/leadership signals
     /// <see cref="KeyValueResponseType.MustRetry"/> and <see cref="KeyValueResponseType.WaitingForReplication"/>
     /// with a bounded back-off before giving up.
@@ -546,7 +604,8 @@ public sealed class KvTransactionsManager : IDisposable
         ReadValidation readValidation, 
         DecisionDurability decisionDurability,
         TransactionPriority priority, 
-        CancellationToken cancellationToken
+        CancellationToken cancellationToken,
+        int? coordinatorPartition = null
     )
     {
         KeyValueResponseType type = KeyValueResponseType.MustRetry;
@@ -564,6 +623,9 @@ public sealed class KvTransactionsManager : IDisposable
                     // A deferred-start transaction passes an anchored key inside the first touched
                     // table's placement group; eager starts pass the bare GUID.
                     CoordinatorKey    = coordinatorKey,
+                    // When set, the session is placed on this partition instead of by the hash of the
+                    // key, and the handle carries the key in its pinned form (see SessionAnchorOf).
+                    CoordinatorPartitionId = coordinatorPartition,
                     Locking           = locking,
                     ReadValidation    = readValidation,
                     DecisionDurability = decisionDurability,
@@ -585,6 +647,21 @@ public sealed class KvTransactionsManager : IDisposable
                 cancellationToken
             ).ConfigureAwait(false);
             startCall.Dispose();
+
+            // A pin read from a lagging range map can name a partition that no longer exists. The
+            // start refuses it with nothing started, and the session is opened unpinned instead:
+            // the pin only saves forwarded calls, so losing it is never a correctness issue.
+            if (type == KeyValueResponseType.InvalidInput && coordinatorPartition is not null)
+            {
+                if (logger.IsEnabled(LogLevel.Debug))
+                    logger.LogDebug(
+                        "Kahuna refused to pin the session of {CoordinatorKey} to partition {PartitionId}; starting it unpinned",
+                        coordinatorKey, coordinatorPartition);
+
+                coordinatorPartition = null;
+                attempt--;
+                continue;
+            }
 
             if (type is not (KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication))
                 break;
