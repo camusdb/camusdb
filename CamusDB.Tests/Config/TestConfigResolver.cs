@@ -11,6 +11,7 @@ using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
 using NUnit.Framework;
+using CommandLine;
 
 using CamusDB.Core;
 using CamusDB.Core.Config;
@@ -71,6 +72,48 @@ public sealed class TestConfigResolver
 
         Assert.That(config.RaftHost, Is.EqualTo("db-host"));
         Assert.That(config.RaftPort, Is.EqualTo(8080));
+    }
+
+    [Test]
+    public void GrpcPortFlagOverridesYaml()
+    {
+        ConfigDefinition config = new ConfigReader().Read("grpc_port: 6001");
+
+        ConfigResolver.ApplyCliOverrides(config, ParseCli("--grpc-port", "7096"));
+
+        Assert.That(config.GrpcPort, Is.EqualTo(7096));
+        Assert.That(config.KeySources["grpc_port"], Is.EqualTo(ConfigValueSource.CommandLine));
+    }
+
+    [Test]
+    public void OmittedGrpcPortFlagLeavesYamlValueIntact()
+    {
+        ConfigDefinition config = new ConfigReader().Read("grpc_port: 6001");
+
+        ConfigResolver.ApplyCliOverrides(config, ParseCli("--http-port", "5095"));
+
+        Assert.That(config.GrpcPort, Is.EqualTo(6001));
+    }
+
+    [Test]
+    public void OutOfRangeGrpcPortFlagIsRejected()
+    {
+        // The file is validated before the flags apply; the host validates again afterwards, and that
+        // second pass is what catches a bad port that arrived on the command line.
+        ConfigDefinition config = new ConfigReader().Read("");
+
+        ConfigResolver.ApplyCliOverrides(config, ParseCli("--grpc-port", "70000"));
+
+        Assert.That(() => config.Validate(), Throws.Exception.With.Message.Contains("grpc_port"));
+    }
+
+    private static ConfigCliOverrides ParseCli(params string[] args)
+    {
+        CamusCommandLineOptions? opts = null;
+        Parser.Default.ParseArguments<CamusCommandLineOptions>(args).WithParsed(o => opts = o);
+
+        Assert.That(opts, Is.Not.Null, $"CLI failed to parse: {string.Join(' ', args)}");
+        return opts!.ToOverrides();
     }
 
     [Test]

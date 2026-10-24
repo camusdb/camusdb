@@ -62,7 +62,7 @@ Example: YAML `mode: cluster` with `--mode standalone` starts in standalone mode
 | `raft_mutual_tls_enabled` | — | `false` (authenticates peers by client certificate on the Raft port; see [Node-to-node authentication](#node-to-node-authentication)) |
 | `raft_peer_ca` | — | `""` (PEM CA file that peer certificates must chain to) |
 | `grpc_enabled` | — | `true` |
-| `grpc_port` | — | `5096` |
+| `grpc_port` | `--grpc-port` | `5096` |
 | `grpc_certificate` | — | `""` (falls back to `raft_certificate`) |
 | `grpc_tls_enabled` | — | `true` (`false` serves the client gRPC port as plaintext h2c even when a certificate is configured; the Raft port is unaffected) |
 | `require_tls_when_auth_enabled` | `--require-tls-when-auth-enabled` | `true` |

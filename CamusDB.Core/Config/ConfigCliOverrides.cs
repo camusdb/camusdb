@@ -62,6 +62,8 @@ public sealed class ConfigCliOverrides
 
     public int? HttpsPort { get; init; }
 
+    public int? GrpcPort { get; init; }
+
     public string? HttpsCertificate { get; init; }
 
     public string? RaftCertificate { get; init; }

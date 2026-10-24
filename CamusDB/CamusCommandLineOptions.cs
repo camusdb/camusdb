@@ -93,6 +93,9 @@ public class CamusCommandLineOptions
     [Option("https-port", Required = false, HelpText = "Port for the HTTPS API")]
     public int? HttpsPort { get; set; }
 
+    [Option("grpc-port", Required = false, HelpText = "Port for the client-facing gRPC API (HTTP/2 only)")]
+    public int? GrpcPort { get; set; }
+
     [Option("https-certificate", Required = false, HelpText = "Path to PFX certificate for the HTTPS API port; omit to disable HTTPS")]
     public string? HttpsCertificate { get; set; }
 
@@ -143,6 +146,7 @@ public class CamusCommandLineOptions
             SchemaAckLiveNodeLeaseMs = SchemaAckLiveNodeLeaseMs,
             HttpPort = HttpPort,
             HttpsPort = HttpsPort,
+            GrpcPort = GrpcPort,
             HttpsCertificate = HttpsCertificate,
             RaftCertificate = RaftCertificate,
             RequireTlsWhenAuthEnabled = RequireTlsWhenAuthEnabled,

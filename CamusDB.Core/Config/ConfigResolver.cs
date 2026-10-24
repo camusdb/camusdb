@@ -147,6 +147,12 @@ public static class ConfigResolver
             config.RecordSource("https_port", ConfigValueSource.CommandLine);
         }
 
+        if (cli.GrpcPort is int grpcPort)
+        {
+            config.GrpcPort = grpcPort;
+            config.RecordSource("grpc_port", ConfigValueSource.CommandLine);
+        }
+
         if (cli.HttpsCertificate is not null)
         {
             config.HttpsCertificate = cli.HttpsCertificate;
