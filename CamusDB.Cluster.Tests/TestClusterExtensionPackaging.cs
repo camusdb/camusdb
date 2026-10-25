@@ -151,6 +151,12 @@ public sealed class TestClusterExtensionPackaging
             InProcessSchemaCluster.Node lacking = cluster.Nodes[2];
             string lackingEndpoint = lacking.Kahuna.Raft.GetLocalEndpoint();
 
+            // The proposer checks its own build before the cluster's, so a lacking schema leader refuses
+            // with ExtensionNotAvailable and never reaches the cluster check this test covers. Move the
+            // leadership to a node that loads both versions.
+            if ((await cluster.WaitForSchemaLeaderNodeAsync(db)).Index == lacking.Index)
+                await cluster.TransferSchemaLeadershipAsync(db, cluster.Nodes[0], timeout: TimeSpan.FromSeconds(30));
+
             // Installing the version node 2 does not load is refused, and names node 2.
             CamusDBException install = await RefusedOnLeaderAsync(cluster, db, "CREATE EXTENSION good VERSION '2.0.0'");
             Assert.AreEqual(CamusDBErrorCodes.ExtensionClusterMismatch, install.Code);
