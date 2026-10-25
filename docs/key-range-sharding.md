@@ -104,13 +104,16 @@ scans and per-range locking — but it is not distribution.
 
 ### Which indexes are eligible
 
-A secondary index is registered for key-range routing only when **every** one of its key columns uses
-the non-`String` ordered encoding — `Integer64`, `Float64`, `Bool`, `Id`, `Null`. An index with any
-`String` key column stays hash-routed until the persistence comparator is aligned with the encoding;
-the table's rows are unaffected either way.
+Every secondary index is registered for key-range routing, whatever the types of its key columns,
+`String` included. Each type has an order-preserving ASCII key encoding: `KeyEncoder` writes a
+`String` value with an ordered ASCII alphabet, so the byte order of the stored keys matches the
+ordinal (UTF-16) order that the in-memory index path uses. A composite index that mixes `String`
+and numeric columns is eligible too.
 
-This is silent by design: a mixed table works, with some spaces ranged and some hashed. If you expect
-an index to be splittable and it never divides, check its key column types first.
+The only index that stays hash-routed is one whose key columns cannot be resolved: an entry with no
+column ids, or with an id that the table's columns do not hold. That is a damaged or legacy schema
+entry, not a choice of type, and the table's rows are unaffected either way. This is silent: a table
+with such an entry works, with that one index space hashed.
 
 ---
 
@@ -216,8 +219,9 @@ the key space rather than the splitter's decisions.
 
 ### Limits of an automatic split
 
-- **A `String`-keyed secondary index never splits.** It stays hash-routed, so a hot index of that
-  shape looks inert for a reason unrelated to these settings.
+- **An index whose key columns cannot be resolved never splits.** It stays hash-routed (see "Which
+  indexes are eligible"), so a hot index of that kind looks inert for a reason unrelated to these
+  settings. Indexes of every column type, `String` included, split like any other key space.
 - **Heat is measured per Raft partition, not per range.** One partition can host several ranges and
   also carry hash-routed traffic, so a cold range on a hot partition is a split candidate too.
 - **These settings are read once, at startup.** `SET CLUSTER SETTING` cannot change them.
@@ -308,7 +312,8 @@ nodes is a reasonable way to spot one that is behind.
 ## Limits to know about
 
 - **The setting is not runtime-changeable.** Components capture it when they are built.
-- **A `String`-keyed index stays hash-routed** (above).
+- **An index whose key columns cannot be resolved stays hash-routed** (see "Which indexes are
+  eligible"). The column type does not matter.
 - **Range locks are held in memory by the range's current leader.** A leadership change immediately
   after a lock is confirmed can strand one; this is a Kahuna-level property, not specific to
   CamusDB.
