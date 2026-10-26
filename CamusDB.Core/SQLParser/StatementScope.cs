@@ -131,6 +131,9 @@ public static class StatementScope
         NodeType.ShowExtensions or
         // This process's own slow query log; not read from any database either.
         NodeType.ShowSlowQueries or
+        // This process's own per-shape statement totals; rows carry their database, but nothing is
+        // read from one.
+        NodeType.ShowStatementStats or
         // The cluster-wide settings overlay; not read from any database either.
         NodeType.ShowClusterSettings or
         // The statements and connections this process, or the cluster, serves now.
@@ -157,7 +160,7 @@ public static class StatementScope
         NodeType.ShowViews or NodeType.ShowMaterializedViews or
         NodeType.ShowCreateView or NodeType.ShowCreateMaterializedView or
         NodeType.ShowSequences or NodeType.ShowCreateSequence or
-        NodeType.ShowOrphanTables ||
+        NodeType.ShowOrphanTables or NodeType.ShowIndexUsage ||
         IsServerLevelQuery(nodeType);
 
     /// <summary>

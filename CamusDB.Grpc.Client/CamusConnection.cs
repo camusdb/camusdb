@@ -449,6 +449,11 @@ public sealed class CamusConnection : IAsyncDisposable
     /// routing off, START goes to rotation here, exactly as before routing existed. In every case the
     /// endpoint is immutable once START was sent: advice can inform the next transaction, never
     /// relocate this one.</para>
+    ///
+    /// <para><b>Causal token.</b> Pass the token of the caller's last commit as
+    /// <paramref name="causalToken"/>. Every Read Committed SELECT of the transaction then reads at a
+    /// statement timestamp at least that token, so it sees the commit even when the transaction runs on
+    /// a node whose clock is behind the node that committed.</para>
     /// </summary>
     public async Task<CamusTransactionSession> BeginTransactionAsync(
         string database,
@@ -456,7 +461,8 @@ public sealed class CamusConnection : IAsyncDisposable
         TransactionMode mode = TransactionMode.Unspecified,
         LockingMode locking = LockingMode.Unspecified,
         CancellationToken cancellationToken = default,
-        CamusPreparedStatement? affinity = null)
+        CamusPreparedStatement? affinity = null,
+        CausalToken causalToken = default)
     {
         SqlRequest request = new()
         {
@@ -464,6 +470,9 @@ public sealed class CamusConnection : IAsyncDisposable
             IsolationLevel   = isolation,
             TransactionMode  = mode,
             Locking          = locking,
+            CausalTokenN     = causalToken.N,
+            CausalTokenL     = causalToken.L,
+            CausalTokenC     = causalToken.C,
         };
 
         if (affinity is not null && ReferenceEquals(affinity.Owner, this))

@@ -118,3 +118,4 @@ fallback used when a transaction does not state its own.
   `SET CLUSTER SETTING`, and what `mutability` and `scope` mean for whether it takes hold.
 - [Engine statistics](engine-stats.md) — `SHOW ENGINE STATS`, the runtime-metrics counterpart.
 - [Slow query log](slow-query-log.md) — `SHOW SLOW QUERIES`, the per-statement counterpart.
+- [Statement statistics](statement-stats.md) and [index usage](index-usage.md) — `statement_stats_enabled`, `statement_stats_max_shapes` and `index_usage_enabled`.

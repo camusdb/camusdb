@@ -125,9 +125,13 @@ internal sealed class SemiJoinExecutor
 
         if (index.Type == IndexType.Unique)
         {
+            Diagnostics.IndexUsageCounters? usage = inner.Store.IndexUsage?.BeginRead(index.KvId);
+
             ObjectIdValue? rowId = await inner.Store.LookupUnique(outerTicket.TxnState, index.KvId, key, outerTicket.CancellationToken).ConfigureAwait(false);
             if (rowId is null)
                 return false;
+
+            usage?.AddEntriesRead(1);
 
             if (node.InnerFilter is null)
                 return true;
@@ -147,11 +151,11 @@ internal sealed class SemiJoinExecutor
         ColumnType keyType = GetColumnType(inner, index.Columns[0]);
         (CompositeColumnValue upperBound, bool toInclusive) = IndexScanSelector.EqualitySeekUpperBound(inner, index, key);
 
-        await foreach ((CompositeColumnValue _, ObjectIdValue rowId, ReadOnlyMemory<byte> _) in inner.Store.ScanIndex(
+        await foreach ((CompositeColumnValue _, ObjectIdValue rowId, ReadOnlyMemory<byte> _) in Diagnostics.TableIndexUsage.Count(inner.Store.IndexUsage, index.KvId, inner.Store.ScanIndex(
             outerTicket.TxnState, index.KvId, new[] { keyType },
             key, upperBound,
             unique: false, fromInclusive: true, toInclusive: toInclusive,
-            maxRows: null, cancellationToken: outerTicket.CancellationToken))
+            maxRows: null, cancellationToken: outerTicket.CancellationToken)))
         {
             ReadOnlyMemory<byte>? data = await inner.Store.GetRow(outerTicket.TxnState, rowId, outerTicket.CancellationToken).ConfigureAwait(false);
             if (data is null || data.Value.Length == 0)

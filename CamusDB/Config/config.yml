@@ -27,7 +27,9 @@
 # with SET CLUSTER SETTING (see docs/runtime-cluster-settings.md). A commented-out value is the
 # built-in default, except for paths, hosts and names, which are examples.
 
-data_dir: /tmp/camusdb/    # unset = ~/.camusdb/data ($CAMUS_HOME/data when CAMUS_HOME is set)
+data_dir: /tmp/camusdb/    # unset = $CAMUS_HOME/data when CAMUS_HOME is set, else $XDG_DATA_HOME/camusdb
+                           # when XDG_DATA_HOME is set, else ~/.local/share/camusdb
+                           # (%LOCALAPPDATA%\camusdb on Windows)
 
 # ── Node identity ─────────────────────────────────────────────────────────────
 # mode: standalone         # standalone | cluster
@@ -501,6 +503,13 @@ initial_partitions: 1      # Raft partition count (>= 1). Unset, it is 1 in stan
 # slow_query_log_threshold_ms: 1000       # 0 = record every statement
 # slow_query_log_max_entries: 200         # ring size; the oldest entry is overwritten (>= 1)
 # slow_query_log_max_sql_length: 4096     # SQL characters kept per entry (>= 1)
+#
+# Per-shape statement totals: SHOW STATEMENT STATS. See docs/statement-stats.md.
+# statement_stats_enabled: false          # record SELECT/INSERT/UPDATE/DELETE totals per literal-free shape
+# statement_stats_max_shapes: 2000        # shapes held (>= 1); restart to change
+#
+# Per-index read and write counts: SHOW INDEX USAGE. See docs/index-usage.md.
+# index_usage_enabled: true               # count index reads, constraint reads and index writes
 #
 # Running statements and client connections: SHOW [CLUSTER] QUERIES, SHOW [CLUSTER] CONNECTIONS and
 # CANCEL QUERY. See docs/query-activity.md.

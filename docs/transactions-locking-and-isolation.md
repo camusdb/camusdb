@@ -449,23 +449,38 @@ globally, if you need to roll back an environment to the old behaviour.
 
 This is the lock-free behavior described in §4/§5. What it does **not** promise (design around these):
 
-- ⚠️ **No single global snapshot per query.** A statement reads the *latest committed* version of each
-  key. One scan is internally consistent, but a query that does several sub-reads (an index lookup,
-  then fetching the rows) can observe values committed at slightly different instants.
+- ✅ **One snapshot per `SELECT` in a transaction.** In a pessimistic transaction that you begin
+  explicitly, each `SELECT` reads at one statement timestamp. The node takes this timestamp from its hybrid logical clock
+  when the statement starts. Every scan page, partition, index lookup, row fetch and large value of the
+  statement is read at that timestamp, so one statement never sees half of another transaction's
+  commit, also when its pages come from several partitions. The statement also sees the uncommitted
+  writes of its own transaction. The next statement gets a new timestamp and sees the commits that came
+  between the two statements. An optimistic transaction, or one with read validation, keeps reading the
+  latest committed value of each key: it validates every read at commit, so it never commits on a torn
+  read, and a lost update fails early, at the statement that writes the changed row.
+- ⚠️ **Pass the causal token at `BEGIN` when you read after a commit on another node.** A read at a
+  timestamp does not show a value that another node committed at a later clock time, even when that
+  commit finished first. If the clock of the node that runs your transaction is behind, a `SELECT` can
+  miss your own last commit. Pass the causal token of that commit when you begin the transaction
+  (`causal_token_*` on gRPC `StartTxnRequest` or on the batch `START`, `causalToken` on HTTP
+  `/start-transaction`). Every statement timestamp of the transaction is then at least that token.
+- ⚠️ **An autocommit `SELECT` under a Read Committed default has no single snapshot.** It reads the
+  *latest committed* version of each key. One partition serves the later pages of a scan at the
+  snapshot of its first page, but a scan over several partitions, or a query that does several
+  sub-reads, can observe values committed at slightly different instants. (Under the Serializable
+  default, an autocommit `SELECT` reads at one pinned snapshot.)
 - ⚠️ **No repeatable reads / phantom protection across statements.** Read a set of rows, read again,
   and a concurrent transaction may have changed or inserted rows in between.
 - ⚠️ **Write skew is possible.** Two transactions can each read a set, then write disjoint keys based on
   what they read, in a way no serial order would allow.
-- ⚠️ **A scanned row is not pinned.** A point read under a pessimistic Read Committed transaction records
-  the revision it saw, and Kahuna usually refuses a later write to that same key in the same
-  transaction if another transaction committed in between. Do not rely on that guard: whether it fires
-  depends on the order in which the other commit's messages reach the partition leader, and it can miss
-  a commit that came through another node. A *range scan* records nothing: while
-  the transaction folds no reads (pessimistic locking, no `TrackAndValidate`) and has written nothing
-  yet, its scans carry no transaction identity at all and simply return each row's latest committed
-  version. That is what keeps a read-only aggregate on a hot table from being answered with a
-  write-conflict error when a scan page has to be retried under replication lag, and it is the
-  non-repeatable read this level already permits.
+- ⚠️ **A `SELECT` does not pin what it read.** A statement-timestamp read leaves no read pin in Kahuna,
+  so a later statement is never refused because a key it read earlier changed. It also means that
+  nothing guards a value you read in one statement and write in a later one: that read-then-write
+  pattern needs Serializable, or a single `UPDATE … SET v = f(v)`.
+- ✅ **Writes and their checks read the latest committed value.** A uniqueness check, a foreign-key
+  check, and the rows an `UPDATE` or `DELETE` locks and reads are never read at a statement
+  timestamp. They see every commit that came before them, including commits after the transaction's
+  last `SELECT`.
 - ✅ **One `UPDATE` or `DELETE` statement never loses a concurrent commit.** The statement finds its rows
   with an unlocked scan, then, for each batch of rows: it takes the exclusive row locks, reads the rows
   again, evaluates the `WHERE` clause again on that read, and computes every `SET` expression from that
@@ -574,6 +589,10 @@ A map for when you want to read the real thing:
   and coordinator key — plus the concurrency policy it was begun with) and `KvTransactionsManager`
   (begin / commit / rollback, including the retry on transient commit conflicts). The authoritative set
   of modified keys and held locks lives in the Kahuna coordinator, not on `KvTransaction`.
+  `KvTransaction.QueryReadView` decides the timestamp and Kahuna read mode of a query read (the
+  statement timestamp of a Read Committed `SELECT`, §9.2), and `LatestReadView` is the read of a
+  write path. `SelectStatementExecutor` opens the statement snapshot and closes it when the cursor
+  ends.
 - **`CamusDB.Core/Storage/Kv/KvTableStore.cs`** — the per-table data layer: how rows and index entries
   are written/read as keys, the batched write path, and the range-lock methods
   (`AcquireRowRangeLockAsync`, `AcquireIndexRangeLockAsync`, `AcquireBoundedIndexRangeLockAsync`).

@@ -216,6 +216,46 @@ internal sealed class TestSqlAuthEnforcement : BaseTest
     }
 
     /// <summary>
+    /// Statement statistics keep a sample of each shape's SQL text, literals included, so they take
+    /// the slow query log's bar.
+    /// </summary>
+    [Test]
+    public async Task ShowStatementStats_RequiresSuperuser()
+    {
+        (string dbname, CommandExecutor executor, Principal root) = await SetupWithSuperuser();
+
+        await RunDdl(executor, "", "CREATE USER stats_reader IDENTIFIED BY 'stats-pw'", root);
+        await RunDdl(executor, "", $"GRANT SELECT ON {dbname}.* TO stats_reader", root);
+        Principal granted = await LoginAsync(executor, "stats_reader", "stats-pw");
+
+        CamusDBException ex = Assert.ThrowsAsync<CamusDBException>(async () =>
+            await RunServerQuery(executor, "SHOW STATEMENT STATS", granted))!;
+        Assert.AreEqual(CamusDBErrorCodes.InsufficientPrivilege, ex.Code);
+
+        await RunServerQuery(executor, "SHOW STATEMENT STATS", root);
+    }
+
+    /// <summary>
+    /// Index usage counts the whole node's workload against the database's indexes, so a SELECT grant
+    /// on the database is not enough.
+    /// </summary>
+    [Test]
+    public async Task ShowIndexUsage_RequiresSuperuser()
+    {
+        (string dbname, CommandExecutor executor, Principal root) = await SetupWithSuperuser();
+
+        await RunDdl(executor, "", "CREATE USER usage_reader IDENTIFIED BY 'usage-pw'", root);
+        await RunDdl(executor, "", $"GRANT SELECT ON {dbname}.* TO usage_reader", root);
+        Principal granted = await LoginAsync(executor, "usage_reader", "usage-pw");
+
+        CamusDBException ex = Assert.ThrowsAsync<CamusDBException>(async () =>
+            await RunQuery(executor, dbname, "SHOW INDEX USAGE", granted))!;
+        Assert.AreEqual(CamusDBErrorCodes.InsufficientPrivilege, ex.Code);
+
+        await RunQuery(executor, dbname, "SHOW INDEX USAGE", root);
+    }
+
+    /// <summary>
     /// SHOW VARIABLES is held to the same bar as engine metrics and for the same reason: even with the
     /// secret settings masked, the output describes the node's whole security posture and limits, which
     /// no per-database grant scopes down.

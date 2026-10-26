@@ -369,7 +369,8 @@ public sealed partial class KvTableStore
         if (aborts is { HasAbort: true })
             return result;
 
-        await this.largeValues.ResolveAsync(tx, rowIds, result, largeValues, cancellationToken).ConfigureAwait(false);
+        // The rows were read at the latest committed state, so their values are too.
+        await this.largeValues.ResolveAsync(tx, rowIds, result, largeValues, cancellationToken, latest: true).ConfigureAwait(false);
         return result;
     }
 
@@ -418,9 +419,13 @@ public sealed partial class KvTableStore
     /// Resolves, in place, the cells <paramref name="largeValues"/> requires in rows that were read
     /// with <see cref="LargeValueFetch.Raw"/>. Lets a mutation read which keys a row points at first
     /// and then resolve only the values it must compare.
+    ///
+    /// <para>Pass <paramref name="latest"/> for rows read by <see cref="LockAndReadRowsForMutationAsync"/>:
+    /// they hold the latest committed state, and their values must be read at it too, not at a
+    /// statement timestamp.</para>
     /// </summary>
-    internal Task ResolveLargeValuesAsync(KvTransaction tx, IReadOnlyList<ObjectIdValue> rowIds, ReadOnlyMemory<byte>?[] rowData, LargeValueFetch? largeValues, CancellationToken cancellationToken = default)
-        => this.largeValues.ResolveAsync(tx, rowIds, rowData, largeValues, cancellationToken);
+    internal Task ResolveLargeValuesAsync(KvTransaction tx, IReadOnlyList<ObjectIdValue> rowIds, ReadOnlyMemory<byte>?[] rowData, LargeValueFetch? largeValues, CancellationToken cancellationToken = default, bool latest = false)
+        => this.largeValues.ResolveAsync(tx, rowIds, rowData, largeValues, cancellationToken, latest);
 
     /// <summary>
     /// First scan window: once a marked row is seen, up to this many rows are held so their out-of-line
@@ -681,17 +686,38 @@ public sealed partial class KvTableStore
     // Batched write paths
     // -----------------------------------------------------------------------
 
+    /// <summary>
+    /// This table's index counters, read by <c>SHOW INDEX USAGE</c>; null for a store built outside a
+    /// table open (an ancestor store of a branch, a test). Set by <c>TableOpener</c> once the
+    /// descriptor's indexes are known, before the store is published, so every statement that reaches
+    /// the store sees it. Read sites call <see cref="Diagnostics.TableIndexUsage.BeginRead"/> once per
+    /// index access path; the batch writes below count their index entries once per batch.
+    /// </summary>
+    public Diagnostics.TableIndexUsage? IndexUsage { get; internal set; }
+
     /// <inheritdoc cref="KvBatchWriter.WriteRowsBatch"/>
-    public Task WriteRowsBatch(KvTransaction tx, IReadOnlyList<RowWrite> rows, CancellationToken cancellationToken = default)
-        => batch.WriteRowsBatch(tx, rows, cancellationToken);
+    public async Task WriteRowsBatch(KvTransaction tx, IReadOnlyList<RowWrite> rows, CancellationToken cancellationToken = default)
+    {
+        await batch.WriteRowsBatch(tx, rows, cancellationToken).ConfigureAwait(false);
+        IndexUsage?.CountInserts(rows);
+    }
 
     /// <inheritdoc cref="KvBatchWriter.UpdateRowsBatch"/>
-    public Task UpdateRowsBatch(KvTransaction tx, IReadOnlyList<RowUpdate> rows, CancellationToken cancellationToken = default, RetryableAbortSink? aborts = null)
-        => batch.UpdateRowsBatch(tx, rows, cancellationToken, aborts);
+    public async Task UpdateRowsBatch(KvTransaction tx, IReadOnlyList<RowUpdate> rows, CancellationToken cancellationToken = default, RetryableAbortSink? aborts = null)
+    {
+        await batch.UpdateRowsBatch(tx, rows, cancellationToken, aborts).ConfigureAwait(false);
+
+        // An abort recorded on the sink instead of thrown means the batch wrote nothing that will stay.
+        if (aborts is not { HasAbort: true })
+            IndexUsage?.CountUpdates(rows);
+    }
 
     /// <inheritdoc cref="KvBatchWriter.DeleteRowsBatch"/>
-    public Task DeleteRowsBatch(KvTransaction tx, IReadOnlyList<RowDelete> rows, CancellationToken cancellationToken = default)
-        => batch.DeleteRowsBatch(tx, rows, cancellationToken);
+    public async Task DeleteRowsBatch(KvTransaction tx, IReadOnlyList<RowDelete> rows, CancellationToken cancellationToken = default)
+    {
+        await batch.DeleteRowsBatch(tx, rows, cancellationToken).ConfigureAwait(false);
+        IndexUsage?.CountDeletes(rows);
+    }
 
     /// <inheritdoc cref="KvBatchWriter.DropIndexEntries"/>
     public Task<int> DropIndexEntries(KvTransaction tx, string indexName, CancellationToken cancellationToken = default)

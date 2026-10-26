@@ -436,14 +436,14 @@ public sealed class KahunaOptionsConfig
     /// Total shared block-cache budget in MiB when <see cref="RocksdbSharedMemory"/> is enabled.
     /// The memtable sub-budget (<see cref="RocksdbSharedMemtableBudgetMb"/>) lives inside this budget
     /// and must be &lt;= this value. Must be &gt; 0 when set.
-    /// Maps to <see cref="Kahuna.EmbeddedKahunaOptions.RocksDbSharedMemoryBudgetMb"/>.
+    /// Maps to <see cref="Kahuna.EmbeddedKahunaOptions.StorageSharedCacheMb"/>.
     /// </summary>
     public int? RocksdbSharedMemoryBudgetMb { get; set; }
 
     /// <summary>
     /// Memtable sub-budget in MiB, cost-charged into the shared block-cache budget. Must be &gt; 0
     /// when set, and must be &lt;= <see cref="RocksdbSharedMemoryBudgetMb"/> when both are provided.
-    /// Maps to <see cref="Kahuna.EmbeddedKahunaOptions.RocksDbSharedMemtableBudgetMb"/>.
+    /// Maps to <see cref="Kahuna.EmbeddedKahunaOptions.StorageSharedMemtableBudgetMb"/>.
     /// </summary>
     public int? RocksdbSharedMemtableBudgetMb { get; set; }
 

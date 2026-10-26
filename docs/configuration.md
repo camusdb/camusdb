@@ -106,6 +106,9 @@ Example: YAML `mode: cluster` with `--mode standalone` starts in standalone mode
 | `slow_query_log_threshold_ms` | — | `1000` |
 | `slow_query_log_max_entries` | — | `200` |
 | `slow_query_log_max_sql_length` | — | `4096` |
+| `statement_stats_enabled` | — | `false` (per-shape statement totals for `SHOW STATEMENT STATS`; see [statement-stats.md](statement-stats.md)) |
+| `statement_stats_max_shapes` | — | `2000` (restart to change) |
+| `index_usage_enabled` | — | `true` (per-index read and write counts for `SHOW INDEX USAGE`; see [index-usage.md](index-usage.md)) |
 | `query_activity_enabled` | — | `true` |
 | `query_activity_max_sql_length` | — | `1024` |
 | `cluster_activity_peer_timeout_ms` | — | `2000` |

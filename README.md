@@ -103,7 +103,7 @@ Features
 - **Distributed queries** — with key-range sharding and `distributed_query_execution` enabled, eligible scans run as fragments on span leaders. Peers can filter rows, compute partial aggregates, and probe eligible inner hash joins before the coordinator gathers results. See [query planning](docs/query-planner.md#part-iv--distributed-ready-plan-properties) for the supported shapes.
 - **Standalone mode** — runs as a single embedded process with no cluster configuration required.
 - **APIs** — all database operations are accessible over a JSON/HTTP endpoint and over a gRPC endpoint (streaming query results and a duplex batch-execute channel with per-transaction chains).
-- **Observability** — `SHOW ENGINE STATS`, `SHOW SLOW QUERIES`, `SHOW STATISTICS FOR`, `SHOW RANGES`, `SHOW VARIABLES`, and `SHOW EXTENSIONS` from a SQL prompt; a read-only operator dashboard on each node's HTTP port; and opt-in OpenTelemetry metrics and traces.
+- **Observability** — `SHOW ENGINE STATS`, `SHOW SLOW QUERIES`, `SHOW STATEMENT STATS`, `SHOW INDEX USAGE`, `SHOW STATISTICS FOR`, `SHOW RANGES`, `SHOW VARIABLES`, and `SHOW EXTENSIONS` from a SQL prompt; a read-only operator dashboard on each node's HTTP port; and opt-in OpenTelemetry metrics and traces.
 - **Runtime cluster settings** — `SET CLUSTER SETTING` / `RESET CLUSTER SETTING` change a defined subset of the configuration on every node without a restart.
 - **Learned client routing** — servers attach advisory routing metadata to SQL responses, so a multi-endpoint client sends repeated statements straight to the node that leads their data.
 - **Logical dump and reimport** — move data across storage revisions or machines with `camus-dump` and `camus-cli`.

@@ -547,6 +547,9 @@ internal sealed class ForeignKeyStatementChecker
             bool[] found = await parent.Store.LockAndLookupUniqueManyAsync(
                 tx, plan.Constraint.ReferencedIndexId, parentKeys, cancellationToken).ConfigureAwait(false);
 
+            // Each key checked keeps the parent's referenced index in use, though no query reads it.
+            parent.Store.IndexUsage?.NoteConstraintReads(plan.Constraint.ReferencedIndexId, parentKeys.Count, CountTrue(found));
+
             for (int i = 0; i < found.Length; i++)
             {
                 if (found[i])
@@ -710,6 +713,9 @@ internal sealed class ForeignKeyStatementChecker
                     }).ConfigureAwait(false);
             }
 
+            // Each probe keeps the child's backing index in use, though no query reads it.
+            child.Store.IndexUsage?.NoteConstraintReads(backingIndexId, childPrefixes.Count, CountTrue(referenced));
+
             for (int i = 0; i < referenced.Length; i++)
             {
                 if (!referenced[i])
@@ -723,5 +729,18 @@ internal sealed class ForeignKeyStatementChecker
                     $"key {ForeignKeyKeyText.Format(columnNames, parentValues[i])} is still referenced from table '{child.Name}'");
             }
         }
+    }
+
+    /// <summary>The number of probes that found a key, counted as the entries a constraint read returned.</summary>
+    private static long CountTrue(bool[] values)
+    {
+        long count = 0;
+        foreach (bool value in values)
+        {
+            if (value)
+                count++;
+        }
+
+        return count;
     }
 }

@@ -391,6 +391,48 @@ public sealed record CamusDBOptions
     public int SlowQueryLogMaxSqlLength { get; init; } = 4096;
 
     /// <summary>
+    /// Accumulates per-shape totals for every <c>SELECT</c>, <c>INSERT</c>, <c>UPDATE</c> and
+    /// <c>DELETE</c>, readable with <c>SHOW STATEMENT STATS</c>. Off by default: each shape keeps a
+    /// sample of its SQL text, literals included, so an operator turns it on deliberately.
+    ///
+    /// <para>Runtime-mutable, and honestly so: the recorder asks the current options snapshot once per
+    /// statement whether to record it, so turning the feature on affects the next statement and turning
+    /// it off stops recording without discarding the totals. The sample text is cut to
+    /// <see cref="SlowQueryLogMaxSqlLength"/>.</para>
+    ///
+    /// <para>Node-scoped: each node counts the statements it served.</para>
+    /// </summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Node)]
+    public bool StatementStatsEnabled { get; init; } = false;
+
+    /// <summary>
+    /// Statement shapes statement statistics hold at most. A shape that arrives when the table is
+    /// full is not admitted and is counted in <c>statement_stats.dropped</c>; the shapes already held
+    /// keep counting.
+    ///
+    /// <para>Restart-class: the recorder latches the capacity when it is constructed, and a table
+    /// created later by a live enable still uses the boot value.</para>
+    /// </summary>
+    [ConfigSetting(ConfigMutability.Restart, ConfigScope.Node)]
+    public int StatementStatsMaxShapes { get; init; } = 2000;
+
+    /// <summary>
+    /// Counts, per index, the statement reads through it, the reads that enforce a unique key or a
+    /// foreign key, the entries read and the entries written, readable with <c>SHOW INDEX USAGE</c>.
+    /// On by default: the counts are a few interlocked adds per index access, never per row, and the
+    /// question they answer — is this index ever read? — needs a long window that must already be
+    /// running when an operator asks it.
+    ///
+    /// <para>Runtime-mutable, and honestly so: every counting site reads the flag the registry adopts
+    /// from each published snapshot, so turning it off stops the counts on the next statement and
+    /// keeps what was counted.</para>
+    ///
+    /// <para>Node-scoped: each node counts the statements it served.</para>
+    /// </summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Node)]
+    public bool IndexUsageEnabled { get; init; } = true;
+
+    /// <summary>
     /// Registers every running statement in the per-node list that <c>SHOW QUERIES</c> reads and
     /// <c>CANCEL QUERY</c> acts on. On by default, because an operator needs the list most during an
     /// incident, when it is too late to turn it on.

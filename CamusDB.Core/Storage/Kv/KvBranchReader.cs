@@ -121,6 +121,11 @@ internal sealed class KvBranchReader
     /// <para>With <paramref name="aborts"/>, a read Kahuna aborted or never confirmed is recorded there
     /// and answered as <see cref="BranchKvValue.Miss"/>, which the caller must not use: it tests
     /// <see cref="RetryableAbortSink.HasAbort"/> first. See <see cref="RetryableAbortSink"/>.</para>
+    ///
+    /// <para><paramref name="readMode"/> is the Kahuna read mode that goes with
+    /// <paramref name="readTimestamp"/>; a caller takes both from one <see cref="KvReadView"/>. The
+    /// same parameter on the batch and scan methods of this class has the same meaning. An ancestor
+    /// snapshot read keeps the default mode.</para>
     /// </summary>
     internal async ValueTask<BranchKvValue> ProbeRaw(
         HLCTimestamp txId,
@@ -128,7 +133,8 @@ internal sealed class KvBranchReader
         string key,
         CancellationToken cancellationToken,
         string coordinatorKey = "",
-        RetryableAbortSink? aborts = null)
+        RetryableAbortSink? aborts = null,
+        KeyValueReadMode readMode = KeyValueReadMode.Default)
     {
         TransactionOperationId operationId = coordinatorKey.Length == 0 ? default : TransactionOperationId.NewRandom();
 
@@ -138,8 +144,8 @@ internal sealed class KvBranchReader
         (KeyValueResponseType type, ReadOnlyKeyValueEntry? entry) = await KahunaRetryPolicy.RetryOnMustRetry(
             static state => state.kahuna.LocateAndTryGetValue(
                 state.txId, state.key, -1, state.readTimestamp, KeyValueDurability.Persistent, state.cancellationToken,
-                coordinatorKey: state.coordinatorKey, operationId: state.operationId),
-            (kahuna, txId, key, readTimestamp, cancellationToken, coordinatorKey, operationId),
+                coordinatorKey: state.coordinatorKey, operationId: state.operationId, readMode: state.readMode),
+            (kahuna, txId, key, readTimestamp, cancellationToken, coordinatorKey, operationId, readMode),
             cancellationToken
         ).ConfigureAwait(false);
 
@@ -223,7 +229,8 @@ internal sealed class KvBranchReader
         string coordinatorKey,
         string retryDiagnosticLabel,
         CancellationToken cancellationToken,
-        RetryableAbortSink? aborts = null)
+        RetryableAbortSink? aborts = null,
+        KeyValueReadMode readMode = KeyValueReadMode.Default)
     {
         if (probeKeys.Count == 0)
             return [];
@@ -253,7 +260,7 @@ internal sealed class KvBranchReader
         {
             bool confirmed = await ProbeBatchAsync(
                 txId, readTimestamp, distinct, members, offset, count, answers,
-                coordinatorKey, retryDiagnosticLabel, cancellationToken, aborts).ConfigureAwait(false);
+                coordinatorKey, retryDiagnosticLabel, cancellationToken, aborts, readMode).ConfigureAwait(false);
 
             if (!confirmed)
                 return AllMisses(probeKeys.Count);
@@ -352,7 +359,8 @@ internal sealed class KvBranchReader
         string coordinatorKey,
         string retryDiagnosticLabel,
         CancellationToken cancellationToken,
-        RetryableAbortSink? aborts)
+        RetryableAbortSink? aborts,
+        KeyValueReadMode readMode)
     {
         // The slots still to ask. Null on the first attempt: the whole batch.
         List<int>? pending = null;
@@ -379,7 +387,8 @@ internal sealed class KvBranchReader
                     KeyValueDurability.Persistent,
                     cancellationToken,
                     coordinatorKey,
-                    operationId),
+                    operationId,
+                    readMode),
                 cancellationToken).ConfigureAwait(false);
 
             List<int>? next = null;
@@ -572,7 +581,8 @@ internal sealed class KvBranchReader
         bool startInclusive,
         string? endHex,
         [EnumeratorCancellation] CancellationToken cancellationToken = default,
-        string coordinatorKey = "")
+        string coordinatorKey = "",
+        KeyValueReadMode readMode = KeyValueReadMode.Default)
     {
         string rowKeyPrefix = keys.RowKeyPrefix;
         int prefixLen = rowKeyPrefix.Length;
@@ -593,7 +603,7 @@ internal sealed class KvBranchReader
         {
             await foreach ((string key, ReadOnlyKeyValueEntry entry) in KvScanFailure.Translate(kahuna.LocateAndScanRange(
                 txId, keys.RowBucketPrefix, startKey, startInclusive, endKey, endKey is null, KvStoreConstants.DefaultPageSize,
-                readTimestamp, KeyValueDurability.Persistent, cancellationToken, coordinatorKey, operationId),
+                readTimestamp, KeyValueDurability.Persistent, cancellationToken, coordinatorKey, operationId, readMode: readMode),
                 $"row scan of table {keys.DisplayTableName}", cancellationToken).ConfigureAwait(false))
             {
                 entriesRead++;
@@ -634,7 +644,8 @@ internal sealed class KvBranchReader
         string coordinatorKey = "",
         bool toIsPrefixBound = false,
         bool fromIsPrefixBound = false,
-        int pageSize = KvStoreConstants.DefaultPageSize)
+        int pageSize = KvStoreConstants.DefaultPageSize,
+        KeyValueReadMode readMode = KeyValueReadMode.Default)
     {
         string bucketPrefix = keys.BuildIndexBucketPrefix(indexId);
         string keyPrefix = bucketPrefix + "/";
@@ -664,7 +675,8 @@ internal sealed class KvBranchReader
             KeyValueDurability.Persistent, 
             cancellationToken, 
             coordinatorKey, 
-            operationId
+            operationId,
+            readMode: readMode
         ),
         $"index scan of {keys.DisplayTableName}.{indexId}", cancellationToken).ConfigureAwait(false);
 

@@ -280,18 +280,27 @@ public sealed class CommandExecutor : IAsyncDisposable
     private readonly Diagnostics.EngineMetricsCollector? engineMetrics;
 
     /// <summary>
-    /// Times statements into the bounded slow query log. Always present, so a live
-    /// <c>SET CLUSTER SETTING slow_query_log_enabled = true</c> reaches it through
-    /// <see cref="ApplyOptions"/> even when the engine started with the log off. The recorder builds
-    /// its ring only when the log is first enabled, so an engine that never enables the log holds no
-    /// ring array; while the log is off, a statement pays one options read here.
+    /// Times statements into the bounded slow query log and into statement statistics. Always present,
+    /// so a live <c>SET CLUSTER SETTING slow_query_log_enabled = true</c> or
+    /// <c>statement_stats_enabled = true</c> reaches it through <see cref="ApplyOptions"/> even when the
+    /// engine started with both off. The recorder builds each store only when its feature is first
+    /// enabled, so an engine that never enables them holds neither; while both are off, a statement
+    /// pays one options read here.
     ///
-    /// <para>Turning the log off at runtime stops recording without discarding what was already
-    /// recorded. The ring's capacity is the boot value of
-    /// <see cref="CamusDBOptions.SlowQueryLogMaxEntries"/> whenever the ring is created, which is what
-    /// that setting being restart-class means in practice.</para>
+    /// <para>Turning either off at runtime stops recording without discarding what was already
+    /// recorded. The capacities are the boot values of
+    /// <see cref="CamusDBOptions.SlowQueryLogMaxEntries"/> and
+    /// <see cref="CamusDBOptions.StatementStatsMaxShapes"/> whenever a store is created, which is what
+    /// those settings being restart-class means in practice.</para>
     /// </summary>
-    private readonly Diagnostics.SlowQueryRecorder slowQueries;
+    private readonly Diagnostics.StatementRecorder statementRecorder;
+
+    /// <summary>
+    /// The node's per-index read and write counters, read by <c>SHOW INDEX USAGE</c>. Always built;
+    /// <see cref="CamusDBOptions.IndexUsageEnabled"/> only decides whether statements count. Handed to
+    /// the table opener, which gives each table's store its counters.
+    /// </summary>
+    private readonly Diagnostics.IndexUsageRegistry indexUsage;
 
     /// <summary>
     /// The statements that run on this node now, and the client connections the host reports. Always
@@ -559,7 +568,8 @@ public sealed class CommandExecutor : IAsyncDisposable
         coordinatorJobSweeper.Start();
         databaseDroper = new(databaseDescriptors, logger, options);
         databaseCreator = new(logger);
-        tableOpener = new(catalogs, logger);
+        indexUsage = new Diagnostics.IndexUsageRegistry(options);
+        tableOpener = new(catalogs, logger, indexUsage);
         tableCreator = new(catalogs, logger, options);
         tableIndexAlterer = new(catalogs, logger);
         tableConstraintAlterer = new(logger);
@@ -610,7 +620,7 @@ public sealed class CommandExecutor : IAsyncDisposable
         if (options.EngineMetricsEnabled)
             engineMetrics = new Diagnostics.EngineMetricsCollector();
 
-        slowQueries = new Diagnostics.SlowQueryRecorder(options);
+        statementRecorder = new Diagnostics.StatementRecorder(options);
 
         sqlParserCache = new SQLParser.SqlParserCache(
             logger,
@@ -727,7 +737,8 @@ public sealed class CommandExecutor : IAsyncDisposable
             clusterSettings,
             engineMetrics,
             sequenceBinder,
-            slowQueries,
+            statementRecorder,
+            indexUsage,
             queryActivityService
         );
         ctasExecutor = new Controllers.DDL.CreateTableAsSelectExecutor(
@@ -855,7 +866,8 @@ public sealed class CommandExecutor : IAsyncDisposable
         statementAuthorizer.ApplyOptions(next);
         userAdmin.ApplyOptions(next);
         selectExecutor.ApplyOptions(next);
-        slowQueries.ApplyOptions(next);
+        statementRecorder.ApplyOptions(next);
+        indexUsage.ApplyOptions(next);
         queryActivity.ApplyOptions(next);
         queryActivityService.ApplyOptions(next);
         sequenceAllocator.ApplyOptions(next);
@@ -1124,12 +1136,12 @@ public sealed class CommandExecutor : IAsyncDisposable
 
     private async Task<ExecuteDDLSQLResult> ExecuteDDLSQLTimed(ExecuteSQLTicket ticket, Diagnostics.QueryActivityEntry? activity)
     {
-        Diagnostics.SlowQueryRecording? recording = slowQueries.Begin(ticket.Sql, ticket.DatabaseName, ticket.Principal?.UserName);
+        Diagnostics.StatementRecording? recording = statementRecorder.Begin(ticket.Sql, ticket.DatabaseName, ticket.Principal?.UserName);
 
         if (recording is null)
             return await ddlDispatcher.ExecuteDDLSQL(this, ticket, activity).ConfigureAwait(false);
 
-        recording.Describe(SafeParseKind(ticket.Sql));
+        recording.Describe(SafeParse(ticket.Sql));
 
         try
         {
@@ -1147,20 +1159,21 @@ public sealed class CommandExecutor : IAsyncDisposable
     }
 
     /// <summary>
-    /// The statement's root node type for the slow query log, or <see cref="NodeType.Select"/>'s
-    /// stand-in when it cannot be parsed.
+    /// The statement's parsed root for the slow query log and statement statistics, or null when it
+    /// cannot be parsed.
     ///
     /// <para>It re-parses through the same cache the dispatcher below will use, so the cost is a
-    /// dictionary lookup rather than a second parse. A parse failure here is swallowed: the
-    /// dispatcher is about to raise the real error with the real message, and a diagnostic that
-    /// changed which exception a caller sees would be worse than an entry labelled
-    /// <c>unknown</c>.</para>
+    /// dictionary lookup rather than a second parse, and it returns the very tree the dispatcher will
+    /// run — which is what lets statement statistics cache the statement's shape on that tree. A parse
+    /// failure here is swallowed: the dispatcher is about to raise the real error with the real
+    /// message, and a diagnostic that changed which exception a caller sees would be worse than an
+    /// entry labelled <c>unknown</c>.</para>
     /// </summary>
-    private NodeType? SafeParseKind(string sql)
+    private NodeAst? SafeParse(string sql)
     {
         try
         {
-            return ParseSql(sql).nodeType;
+            return ParseSql(sql);
         }
         catch (Exception)
         {
@@ -1200,7 +1213,7 @@ public sealed class CommandExecutor : IAsyncDisposable
 
     private async Task<ExecuteNonSQLResult> ExecuteNonSQLQueryTimed(ExecuteSQLTicket ticket, Diagnostics.QueryActivityEntry? activity)
     {
-        Diagnostics.SlowQueryRecording? recording = slowQueries.Begin(ticket.Sql, ticket.DatabaseName, ticket.Principal?.UserName);
+        Diagnostics.StatementRecording? recording = statementRecorder.Begin(ticket.Sql, ticket.DatabaseName, ticket.Principal?.UserName);
 
         if (recording is null)
         {
@@ -1210,7 +1223,7 @@ public sealed class CommandExecutor : IAsyncDisposable
             return plain;
         }
 
-        recording.Describe(SafeParseKind(ticket.Sql));
+        recording.Describe(SafeParse(ticket.Sql));
 
         try
         {

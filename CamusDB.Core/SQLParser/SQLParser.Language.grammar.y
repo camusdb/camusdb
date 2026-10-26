@@ -942,6 +942,19 @@ show_stmt : TSHOW TCOLUMNS TFROM any_identifier { $$.n = new(NodeType.ShowColumn
           | TSHOW TDATABASES TLIKE string { $$.n = new(NodeType.ShowDatabases, $4.n, null, null, null, null, null, null, null); }
           | TSHOW TINDEXES TFROM any_identifier { $$.n = new(NodeType.ShowIndexes, $4.n, null, null, null, null, null, null, null); }
           | TSHOW TINDEX TFROM any_identifier { $$.n = new(NodeType.ShowIndexes, $4.n, null, null, null, null, null, null, null); }
+          /* USAGE is a plain identifier validated in the action, so the word stays usable as a table
+             and column name. The identifier after TINDEX keeps these distinct from SHOW INDEX FROM on
+             one token of lookahead. */
+          | TSHOW TINDEX TIDENTIFIER
+          {
+            RequireIndexUsageWord($3.s);
+            $$.n = new(NodeType.ShowIndexUsage, null, null, null, null, null, null, null, null);
+          }
+          | TSHOW TINDEX TIDENTIFIER TFROM any_identifier
+          {
+            RequireIndexUsageWord($3.s);
+            $$.n = new(NodeType.ShowIndexUsage, $5.n, null, null, null, null, null, null, null);
+          }
           | TSHOW TBRANCHES TFROM any_identifier { $$.n = new(NodeType.ShowBranches, $4.n, null, null, null, null, null, null, null); }
           | TSHOW TANCESTORS TFROM any_identifier { $$.n = new(NodeType.ShowAncestors, $4.n, null, null, null, null, null, null, null); }
           | TSHOW TORPHAN TTABLES { $$.n = new(NodeType.ShowOrphanTables, null, null, null, null, null, null, null, null); }
@@ -973,7 +986,7 @@ show_stmt : TSHOW TCOLUMNS TFROM any_identifier { $$.n = new(NodeType.ShowColumn
                     "Expected: SHOW STATISTICS FOR [TABLE] <table>");
             $$.n = new(NodeType.ShowStatistics, $5.n, null, null, null, null, null, null, null);
           }
-          /* ENGINE STATS, CLUSTER SETTINGS, SLOW QUERIES, CLUSTER QUERIES and CLUSTER CONNECTIONS are
+          /* ENGINE STATS, CLUSTER SETTINGS, SLOW QUERIES, STATEMENT STATS, CLUSTER QUERIES and CLUSTER CONNECTIONS are
              matched as plain identifiers, not keywords, so every one of those words remains usable as a
              column and table name. The statements share ONE two-identifier production dispatched on
              the words — a second production with
@@ -990,6 +1003,9 @@ show_stmt : TSHOW TCOLUMNS TFROM any_identifier { $$.n = new(NodeType.ShowColumn
             else if (string.Equals($2.s, "slow", System.StringComparison.OrdinalIgnoreCase) &&
                 string.Equals($3.s, "queries", System.StringComparison.OrdinalIgnoreCase))
                 $$.n = new(NodeType.ShowSlowQueries, null, null, null, null, null, null, null, null);
+            else if (string.Equals($2.s, "statement", System.StringComparison.OrdinalIgnoreCase) &&
+                string.Equals($3.s, "stats", System.StringComparison.OrdinalIgnoreCase))
+                $$.n = new(NodeType.ShowStatementStats, null, null, null, null, null, null, null, null);
             else if (string.Equals($2.s, "cluster", System.StringComparison.OrdinalIgnoreCase) &&
                 string.Equals($3.s, "queries", System.StringComparison.OrdinalIgnoreCase))
                 $$.n = new(NodeType.ShowClusterQueries, null, null, null, null, null, null, null, null);
@@ -999,7 +1015,7 @@ show_stmt : TSHOW TCOLUMNS TFROM any_identifier { $$.n = new(NodeType.ShowColumn
             else
                 throw new CamusDB.Core.CamusDBException(
                     CamusDB.Core.CamusDBErrorCodes.InvalidInput,
-                    "Expected: SHOW ENGINE STATS [LIKE '<pattern>'], SHOW CLUSTER SETTINGS [LIKE '<pattern>'], SHOW SLOW QUERIES [LIKE '<pattern>'], SHOW CLUSTER QUERIES [LIKE '<pattern>'] or SHOW CLUSTER CONNECTIONS");
+                    "Expected: SHOW ENGINE STATS [LIKE '<pattern>'], SHOW CLUSTER SETTINGS [LIKE '<pattern>'], SHOW SLOW QUERIES [LIKE '<pattern>'], SHOW STATEMENT STATS [LIKE '<pattern>'], SHOW CLUSTER QUERIES [LIKE '<pattern>'] or SHOW CLUSTER CONNECTIONS");
           }
           | TSHOW TIDENTIFIER TIDENTIFIER TLIKE string
           {
@@ -1012,13 +1028,16 @@ show_stmt : TSHOW TCOLUMNS TFROM any_identifier { $$.n = new(NodeType.ShowColumn
             else if (string.Equals($2.s, "slow", System.StringComparison.OrdinalIgnoreCase) &&
                 string.Equals($3.s, "queries", System.StringComparison.OrdinalIgnoreCase))
                 $$.n = new(NodeType.ShowSlowQueries, $5.n, null, null, null, null, null, null, null);
+            else if (string.Equals($2.s, "statement", System.StringComparison.OrdinalIgnoreCase) &&
+                string.Equals($3.s, "stats", System.StringComparison.OrdinalIgnoreCase))
+                $$.n = new(NodeType.ShowStatementStats, $5.n, null, null, null, null, null, null, null);
             else if (string.Equals($2.s, "cluster", System.StringComparison.OrdinalIgnoreCase) &&
                 string.Equals($3.s, "queries", System.StringComparison.OrdinalIgnoreCase))
                 $$.n = new(NodeType.ShowClusterQueries, $5.n, null, null, null, null, null, null, null);
             else
                 throw new CamusDB.Core.CamusDBException(
                     CamusDB.Core.CamusDBErrorCodes.InvalidInput,
-                    "Expected: SHOW ENGINE STATS [LIKE '<pattern>'], SHOW CLUSTER SETTINGS [LIKE '<pattern>'], SHOW SLOW QUERIES [LIKE '<pattern>'], SHOW CLUSTER QUERIES [LIKE '<pattern>'] or SHOW CLUSTER CONNECTIONS");
+                    "Expected: SHOW ENGINE STATS [LIKE '<pattern>'], SHOW CLUSTER SETTINGS [LIKE '<pattern>'], SHOW SLOW QUERIES [LIKE '<pattern>'], SHOW STATEMENT STATS [LIKE '<pattern>'], SHOW CLUSTER QUERIES [LIKE '<pattern>'] or SHOW CLUSTER CONNECTIONS");
           }
           /* VARIABLES, USERS, QUERIES and CONNECTIONS are likewise plain identifiers rather than
              keywords, so all four words stay usable as column and table names. "users" in particular is a table name in most

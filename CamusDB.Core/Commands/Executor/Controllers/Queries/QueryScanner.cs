@@ -1118,7 +1118,7 @@ internal sealed class QueryScanner
             // above and the schema dep cover snapshot correctness for the index scan.
             IndexOnlyLayout covered = BuildIndexOnlyLayout(table, plan.ScanRequiredColumns, index);
 
-            await foreach ((CompositeColumnValue decodedKey, ObjectIdValue rowId, ReadOnlyMemory<byte> includeTuple) in table.Store.ScanIndex(
+            await foreach ((CompositeColumnValue decodedKey, ObjectIdValue rowId, ReadOnlyMemory<byte> includeTuple) in Diagnostics.TableIndexUsage.Count(table.Store.IndexUsage, index.KvId, table.Store.ScanIndex(
                 ticket.TxnState,
                 index.KvId,
                 keyTypes,
@@ -1128,7 +1128,7 @@ internal sealed class QueryScanner
                 fromInclusive: true,
                 toInclusive: true,
                 maxRows: plan.ScanRowLimit,
-                cancellationToken: cancellationToken))
+                cancellationToken: cancellationToken)))
             {
                 cancellationToken.ThrowIfCancellationRequested();
 
@@ -1196,7 +1196,7 @@ internal sealed class QueryScanner
             }
         }
 
-        await foreach ((CompositeColumnValue entryKey, ObjectIdValue rowId, ReadOnlyMemory<byte> _) in table.Store.ScanIndex(
+        await foreach ((CompositeColumnValue entryKey, ObjectIdValue rowId, ReadOnlyMemory<byte> _) in Diagnostics.TableIndexUsage.Count(table.Store.IndexUsage, index.KvId, table.Store.ScanIndex(
             ticket.TxnState,
             index.KvId,
             keyTypes,
@@ -1206,7 +1206,7 @@ internal sealed class QueryScanner
             fromInclusive: true,
             toInclusive: true,
             maxRows: plan.ScanRowLimit,
-            cancellationToken: cancellationToken))
+            cancellationToken: cancellationToken)))
         {
             cancellationToken.ThrowIfCancellationRequested();
 

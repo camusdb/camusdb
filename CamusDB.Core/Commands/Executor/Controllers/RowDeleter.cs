@@ -546,7 +546,7 @@ internal sealed class RowDeleter
         }
 
         if (anyMarked)
-            await table.Store.ResolveLargeValuesAsync(tx, rowIds, rows, LargeValueFetch.Columns(table.Schema, requiredColumns), cancellationToken).ConfigureAwait(false);
+            await table.Store.ResolveLargeValuesAsync(tx, rowIds, rows, LargeValueFetch.Columns(table.Schema, requiredColumns), cancellationToken, latest: true).ConfigureAwait(false);
 
         return (rows, outOfLine);
     }

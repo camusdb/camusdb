@@ -99,10 +99,14 @@ internal sealed class SelectStatementExecutor
     internal readonly EngineMetricsCollector? engineMetrics;
 
     /// <summary>
-    /// Times statements into the slow query log. Never null, because the engine always builds it;
-    /// its <see cref="SlowQueryRecorder.Log"/> is null until the log is first enabled.
+    /// Times statements into the slow query log and statement statistics. Never null, because the
+    /// engine always builds it; its <see cref="StatementRecorder.Log"/> and
+    /// <see cref="StatementRecorder.Stats"/> are null until each feature is first enabled.
     /// </summary>
-    internal readonly SlowQueryRecorder slowQueries;
+    internal readonly StatementRecorder statementRecorder;
+
+    /// <summary>The node's per-index counters, read by <c>SHOW INDEX USAGE</c>; never null.</summary>
+    internal readonly IndexUsageRegistry indexUsage;
 
     /// <summary>The running-statement list; never null, because the engine always builds it.</summary>
     internal readonly QueryActivityRegistry queryActivity;
@@ -145,7 +149,8 @@ internal sealed class SelectStatementExecutor
         ClusterSettingsService? clusterSettings,
         EngineMetricsCollector? engineMetrics,
         Functions.SequenceStatementBinder sequenceBinder,
-        SlowQueryRecorder slowQueries,
+        StatementRecorder statementRecorder,
+        IndexUsageRegistry indexUsage,
         QueryActivityService queryActivityService
     )
     {
@@ -170,7 +175,8 @@ internal sealed class SelectStatementExecutor
         this.clusterSettings = clusterSettings;
         this.engineMetrics = engineMetrics;
         this.sequenceBinder = sequenceBinder;
-        this.slowQueries = slowQueries;
+        this.statementRecorder = statementRecorder;
+        this.indexUsage = indexUsage;
         this.queryActivityService = queryActivityService;
         queryActivity = queryActivityService.Registry;
     }
@@ -230,13 +236,21 @@ internal sealed class SelectStatementExecutor
             ? DistributedQueryMetricsReporter.Build(queryExecutor.DistributedMetrics)
             : null;
 
-        if (ttlRows is null)
-            return distributedRows;
+        // Statement statistics publish how full their table is, and how many shapes it refused, so a
+        // reader of SHOW STATEMENT STATS can tell a complete view from a truncated one. Absent while
+        // the feature has never been enabled, by the statement's all-or-nothing rule.
+        IReadOnlyList<EngineMetricRow>? statsRows = statementRecorder.Stats is { } stats
+            ?
+            [
+                new EngineMetricRow("camusdb", "statement_stats.dropped", "", EngineMetricKind.Counter, stats.Dropped, stats.Dropped, null, null, null),
+                new EngineMetricRow("camusdb", "statement_stats.shapes", "", EngineMetricKind.Gauge, 1, null, null, null, stats.Count),
+            ]
+            : null;
 
-        if (distributedRows is null)
-            return ttlRows;
+        if (ttlRows is null && distributedRows is null && statsRows is null)
+            return null;
 
-        return [.. ttlRows, .. distributedRows];
+        return [.. ttlRows ?? [], .. distributedRows ?? [], .. statsRows ?? []];
     }
 
     /// <summary>
@@ -245,7 +259,7 @@ internal sealed class SelectStatementExecutor
     /// <para><b>The returned cursor is lazy, and that is why the timing is where it is.</b> When
     /// this method returns, the statement has been parsed, authorized and planned, and no row has
     /// been read. The clock therefore stops inside the wrapped cursor, when the caller stops reading
-    /// it — see <see cref="SlowQueryRecording.Wrap"/>. A duration measured at return would report
+    /// it — see <see cref="StatementRecording.Wrap"/>. A duration measured at return would report
     /// every query in the engine as fast.</para>
     ///
     /// <para>With the log off, <paramref name="ticket"/> is passed through untouched and nothing is
@@ -291,7 +305,7 @@ internal sealed class SelectStatementExecutor
     private async Task<(DatabaseDescriptor database, IAsyncEnumerable<QueryResultRow> cursor)> ExecuteSQLQueryTimed(
         ExecuteSQLTicket ticket, CacheMetadataHolder? metaOut, QuerySchemaHolder? schemaOut, QueryActivityEntry? activity)
     {
-        SlowQueryRecording? recording = slowQueries.Begin(ticket.Sql, ticket.DatabaseName, ticket.Principal?.UserName);
+        StatementRecording? recording = statementRecorder.Begin(ticket.Sql, ticket.DatabaseName, ticket.Principal?.UserName);
 
         if (recording is null)
             return await ExecuteSQLQueryInternal(ticket, metaOut, schemaOut, recording: null, activity).ConfigureAwait(false);
@@ -320,7 +334,7 @@ internal sealed class SelectStatementExecutor
     /// recording and on the probe already attached to <paramref name="ticket"/>.
     /// </param>
     private async Task<(DatabaseDescriptor database, IAsyncEnumerable<QueryResultRow> cursor)> ExecuteSQLQueryInternal(
-        ExecuteSQLTicket ticket, CacheMetadataHolder? metaOut, QuerySchemaHolder? schemaOut, SlowQueryRecording? recording,
+        ExecuteSQLTicket ticket, CacheMetadataHolder? metaOut, QuerySchemaHolder? schemaOut, StatementRecording? recording,
         QueryActivityEntry? activity)
     {
         context.Validator.Validate(ticket);
@@ -336,7 +350,7 @@ internal sealed class SelectStatementExecutor
         using (Diagnostics.QueryStageProfile.Measure(Diagnostics.QueryStage.Parse))
             ast = SQLParserProcessor.Parse(ticket.Sql, sqlParserCache);
 
-        recording?.Describe(ast.nodeType);
+        recording?.Describe(ast);
         activity?.Describe(ast.nodeType);
 
         // An INSERT, UPDATE or DELETE with a RETURNING list is a write that returns rows. The no-rows
@@ -400,7 +414,19 @@ internal sealed class SelectStatementExecutor
             if (schemaOut is not null)
                 schemaOut.Schema = DerivedTableSchemaBuilder.ShowSlowQueriesSchema;
 
-            return (null!, schemaQuerier.ShowSlowQueries(slowQueries.Log, UnquoteLikePattern(ast.leftAst?.yytext)));
+            return (null!, schemaQuerier.ShowSlowQueries(statementRecorder.Log, UnquoteLikePattern(ast.leftAst?.yytext)));
+        }
+
+        // SHOW STATEMENT STATS reports this process's per-shape statement totals. Node-local for the
+        // same reason as the slow query log. It never records itself: statement statistics record
+        // only SELECT, INSERT, UPDATE and DELETE.
+        if (ast.nodeType == NodeType.ShowStatementStats)
+        {
+            if (schemaOut is not null)
+                schemaOut.Schema = DerivedTableSchemaBuilder.ShowStatementStatsSchema;
+
+            return (null!, schemaQuerier.ShowStatementStats(
+                statementRecorder.Stats, LocalNodeLabel(), UnquoteLikePattern(ast.leftAst?.yytext)));
         }
 
         // SHOW [CLUSTER] QUERIES and SHOW [CLUSTER] CONNECTIONS report what this node, or every member,
@@ -607,63 +633,26 @@ internal sealed class SelectStatementExecutor
         {
             case NodeType.Select:
                 {
-                    // FROM-less SELECT (no table node): project scalar expressions against a single
-                    // synthetic row. The grammar only admits a projection list plus optional
-                    // LIMIT/OFFSET here, so there is no scan, join, filter, or grouping to plan.
-                    if (ast.rightAst is null)
-                        return (database, await ExecuteFromlessSelectAsync(database, ast, ticket, schemaOut).ConfigureAwait(false));
+                    // A Read Committed SELECT of a transaction reads at one statement timestamp; see
+                    // KvTransaction.QueryReadView. Taken from the statement's own transaction, before an
+                    // AS OF SYSTEM TIME clause rebinds the ticket to a snapshot.
+                    KvTransaction statementTx = ticket.TxnState;
+                    if (!database.Transactions.TryMintStatementTimestamp(statementTx, out HLCTimestamp statementTimestamp))
+                        return await ExecuteSelectAsync(database, ast, ticket, metaOut, schemaOut).ConfigureAwait(false);
 
-                    // AS OF SYSTEM TIME: rebind the whole statement onto a read-only snapshot pinned
-                    // to the requested past timestamp, so every scan/join/subquery below reads that
-                    // one historical point. No-op when the SELECT carries no time-travel clause.
-                    ticket = ApplyAsOfSystemTime(ast, ticket);
-
-                    (BoundSelectQuery boundQuery, QueryTicket queryTicket) =
-                        await BuildBoundQueryAsync(database, ast, ticket, metaOut: metaOut).ConfigureAwait(false);
-
-                    SelectQuery selectQuery = boundQuery.Query;
-
-                    // Classify the statement for advisory routing metadata before the cursor runs:
-                    // the decision is a pure shape question, and a retried attempt simply
-                    // re-classifies (last write wins on the collector).
-                    ticket.Routing?.RecordSelect(
-                        boundQuery,
-                        hasTimeTravel: ast.extendedSeven is not null,
-                        hasSubquery: Routing.StatementRoutingCollector.ContainsSubqueryNodes(ast),
-                        hasCacheHint: selectQuery.CacheHint is not null);
-
-                    // Join queries bypass the result cache: caching a multi-table result
-                    // requires fencing ALL involved tables' row keyspaces, not just one.
-                    // Until the multi-keyspace fence is implemented, any {cache=name} hint
-                    // on a join executes live every time. Surface the bypass so the response
-                    // is not silently identical to an unhinted query.
-                    if (boundQuery.IsMultiSource)
+                    object statementSnapshot = statementTx.BeginStatementSnapshot(statementTimestamp);
+                    try
                     {
-                        if (queryTicket.CacheHint is { } joinHint && metaOut is not null)
-                        {
-                            metaOut.CacheName = joinHint.CacheName;
-                            metaOut.Status = QueryCacheStatus.Bypass;
-                            // A query that reads through a view is multi-source only because expansion
-                            // produced a derived table; reporting "Join" would send its author looking
-                            // for a join they did not write.
-                            metaOut.BypassReason =
-                                selectQuery.Source is JoinSource || boundQuery.Sources.Count > 1
-                                    ? QueryCacheBypassReason.Join
-                                    : QueryCacheBypassReason.DerivedSource;
-                        }
-                        if (schemaOut is not null)
-                            schemaOut.Schema = DerivedTableSchemaBuilder.Build(selectQuery, boundQuery);
+                        (DatabaseDescriptor selectDatabase, IAsyncEnumerable<QueryResultRow> cursor) =
+                            await ExecuteSelectAsync(database, ast, ticket, metaOut, schemaOut).ConfigureAwait(false);
 
-                        // Planned before the cursor is handed out, as a single-table query is: the
-                        // plan-time lookup of the dimension leaves is the one awaited step.
-                        QueryPlan joinPlan = await queryExecutor.PlanJoinQueryAsync(database, boundQuery, queryTicket).ConfigureAwait(false);
-                        return (database, queryExecutor.ExecuteJoinPlan(joinPlan));
+                        return (selectDatabase, CloseStatementSnapshotAtEnd(cursor, statementTx, statementSnapshot));
                     }
-
-                    if (schemaOut is not null)
-                        schemaOut.Schema = DerivedTableSchemaBuilder.Build(selectQuery, boundQuery);
-
-                    return (database, ExecuteBoundQuery(database, boundQuery, queryTicket, metaOut));
+                    catch
+                    {
+                        statementTx.EndStatementSnapshot(statementSnapshot);
+                        throw;
+                    }
                 }
 
             case NodeType.ShowTables:
@@ -791,6 +780,20 @@ internal sealed class SelectStatementExecutor
                     PinSchemaVersion(database, table, ticket.TxnState);
 
                     return (database, schemaQuerier.ShowIndexes(table));
+                }
+
+            case NodeType.ShowIndexUsage:
+                {
+                    if (schemaOut is not null)
+                        schemaOut.Schema = DerivedTableSchemaBuilder.ShowIndexUsageSchema;
+
+                    // Read from the catalog, never by opening the tables: inspecting index use must
+                    // not make every table of the database resident on this node.
+                    string? usageTable = ast.leftAst?.yytext;
+                    if (usageTable is not null && !database.Schema.Tables.ContainsKey(usageTable))
+                        throw new CamusDBException(CamusDBErrorCodes.TableDoesntExist, $"Table '{usageTable}' does not exist");
+
+                    return (database, schemaQuerier.ShowIndexUsage(database, indexUsage, LocalNodeLabel(), usageTable));
                 }
 
             case NodeType.ShowStatistics:
@@ -986,6 +989,95 @@ internal sealed class SelectStatementExecutor
             // goes on to do with the rows.
             (viewName, view) => ViewAuthorization.Require(
                 database, viewName, view, Privilege.Select));
+
+    /// <summary>
+    /// Plans and starts one SELECT statement whose AST has been expanded: a FROM-less projection, a join
+    /// plan, or a single-source query. The caller owns the statement snapshot around it.
+    /// </summary>
+    private async Task<(DatabaseDescriptor database, IAsyncEnumerable<QueryResultRow> cursor)> ExecuteSelectAsync(
+        DatabaseDescriptor database, NodeAst ast, ExecuteSQLTicket ticket, CacheMetadataHolder? metaOut, QuerySchemaHolder? schemaOut)
+    {
+        // FROM-less SELECT (no table node): project scalar expressions against a single
+        // synthetic row. The grammar only admits a projection list plus optional
+        // LIMIT/OFFSET here, so there is no scan, join, filter, or grouping to plan.
+        if (ast.rightAst is null)
+            return (database, await ExecuteFromlessSelectAsync(database, ast, ticket, schemaOut).ConfigureAwait(false));
+
+        // AS OF SYSTEM TIME: rebind the whole statement onto a read-only snapshot pinned
+        // to the requested past timestamp, so every scan/join/subquery below reads that
+        // one historical point. No-op when the SELECT carries no time-travel clause.
+        ticket = ApplyAsOfSystemTime(ast, ticket);
+
+        (BoundSelectQuery boundQuery, QueryTicket queryTicket) =
+            await BuildBoundQueryAsync(database, ast, ticket, metaOut: metaOut).ConfigureAwait(false);
+
+        SelectQuery selectQuery = boundQuery.Query;
+
+        // Classify the statement for advisory routing metadata before the cursor runs:
+        // the decision is a pure shape question, and a retried attempt simply
+        // re-classifies (last write wins on the collector).
+        ticket.Routing?.RecordSelect(
+            boundQuery,
+            hasTimeTravel: ast.extendedSeven is not null,
+            hasSubquery: Routing.StatementRoutingCollector.ContainsSubqueryNodes(ast),
+            hasCacheHint: selectQuery.CacheHint is not null);
+
+        // Join queries bypass the result cache: caching a multi-table result
+        // requires fencing ALL involved tables' row keyspaces, not just one.
+        // Until the multi-keyspace fence is implemented, any {cache=name} hint
+        // on a join executes live every time. Surface the bypass so the response
+        // is not silently identical to an unhinted query.
+        if (boundQuery.IsMultiSource)
+        {
+            if (queryTicket.CacheHint is { } joinHint && metaOut is not null)
+            {
+                metaOut.CacheName = joinHint.CacheName;
+                metaOut.Status = QueryCacheStatus.Bypass;
+                // A query that reads through a view is multi-source only because expansion
+                // produced a derived table; reporting "Join" would send its author looking
+                // for a join they did not write.
+                metaOut.BypassReason =
+                    selectQuery.Source is JoinSource || boundQuery.Sources.Count > 1
+                        ? QueryCacheBypassReason.Join
+                        : QueryCacheBypassReason.DerivedSource;
+            }
+            if (schemaOut is not null)
+                schemaOut.Schema = DerivedTableSchemaBuilder.Build(selectQuery, boundQuery);
+
+            // Planned before the cursor is handed out, as a single-table query is: the
+            // plan-time lookup of the dimension leaves is the one awaited step.
+            QueryPlan joinPlan = await queryExecutor.PlanJoinQueryAsync(database, boundQuery, queryTicket).ConfigureAwait(false);
+            return (database, queryExecutor.ExecuteJoinPlan(joinPlan));
+        }
+
+        if (schemaOut is not null)
+            schemaOut.Schema = DerivedTableSchemaBuilder.Build(selectQuery, boundQuery);
+
+        return (database, ExecuteBoundQuery(database, boundQuery, queryTicket, metaOut));
+    }
+
+    /// <summary>
+    /// Yields the rows of <paramref name="cursor"/> and closes the statement snapshot
+    /// <paramref name="token"/> opened when the cursor ends: after the last row, on a failure, or when
+    /// the consumer stops early and disposes it. The statement's reads run while the cursor runs, so the
+    /// snapshot must outlive the call that returned the cursor. A cursor that is never enumerated or
+    /// disposed leaves the snapshot open until the transaction's next statement starts
+    /// (<see cref="KvTransaction.MarkStatementExecuted"/>).
+    /// </summary>
+    private static async IAsyncEnumerable<QueryResultRow> CloseStatementSnapshotAtEnd(
+        IAsyncEnumerable<QueryResultRow> cursor, KvTransaction tx, object token,
+        [EnumeratorCancellation] CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            await foreach (QueryResultRow row in cursor.WithCancellation(cancellationToken).ConfigureAwait(false))
+                yield return row;
+        }
+        finally
+        {
+            tx.EndStatementSnapshot(token);
+        }
+    }
 
     /// <summary>
     /// Applies an <c>AS OF SYSTEM TIME</c> clause (carried on the SELECT node's

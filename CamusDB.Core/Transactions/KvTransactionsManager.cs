@@ -339,6 +339,11 @@ public sealed class KvTransactionsManager : IDisposable
     /// <paramref name="transactionMode"/> are carried as metadata only, with no change to the
     /// underlying Kahuna transaction. Selection precedence: explicit argument →
     /// <see cref="CamusDBOptions.DefaultIsolationLevel"/> → <see cref="CamusIsolationLevel.ReadCommitted"/>.</para>
+    ///
+    /// <para>Every transaction begun here, except the Serializable read-only snapshot, reads each Read
+    /// Committed SELECT at one statement timestamp (<see cref="TryMintStatementTimestamp"/>).
+    /// <paramref name="causalToken"/> is the lowest such timestamp: a client passes the causal token of
+    /// its last commit so that a statement on a node whose clock is behind still sees that commit.</para>
     /// </summary>
     public async Task<KvTransaction> BeginAsync(
         CamusIsolationLevel? isolationLevel = null,
@@ -349,7 +354,8 @@ public sealed class KvTransactionsManager : IDisposable
         DecisionDurability? decisionDurability = null,
         bool deferStart = false,
         TransactionPriority? priority = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        Kommander.Time.HLCTimestamp? causalToken = null)
     {
         CamusIsolationLevel level = isolationLevel ?? options.DefaultIsolationLevel;
         CamusTransactionMode mode = transactionMode ?? CamusTransactionMode.ReadWrite;
@@ -397,6 +403,7 @@ public sealed class KvTransactionsManager : IDisposable
             {
                 WriteAdmissionGate = EnsureDiskSpaceForWrites
             };
+            txDeferred.EnableStatementSnapshots(causalToken ?? Kommander.Time.HLCTimestamp.Zero);
 
             DecisionDurability capturedDecision = decisionDurabilityMode;
             txDeferred.SessionStarter = async (placementGroup, ct) =>
@@ -453,6 +460,7 @@ public sealed class KvTransactionsManager : IDisposable
         {
             WriteAdmissionGate = EnsureDiskSpaceForWrites
         };
+        tx.EnableStatementSnapshots(causalToken ?? Kommander.Time.HLCTimestamp.Zero);
         Track(tx);
 
         // No client-side range-lock heartbeat: range-lock acquisitions are registered with the
@@ -727,6 +735,26 @@ public sealed class KvTransactionsManager : IDisposable
             return KvTransaction.CreateSnapshotReadOnly(mintLocalT(causalToken));
 
         return KvTransaction.CreateReadOnly();
+    }
+
+    /// <summary>
+    /// Mints the read timestamp of one SELECT statement of <paramref name="tx"/>, from the local HLC and
+    /// at least the transaction's <see cref="KvTransaction.CausalFloor"/>. Returns false when the
+    /// statement reads the latest committed value instead: the transaction does not take statement
+    /// snapshots (<see cref="KvTransaction.TakesStatementSnapshot"/>), or no local clock is attached.
+    ///
+    /// <para>The mint is a local clock event, with no Kahuna round trip.</para>
+    /// </summary>
+    public bool TryMintStatementTimestamp(KvTransaction tx, out Kommander.Time.HLCTimestamp timestamp)
+    {
+        if (mintLocalT is null || !tx.TakesStatementSnapshot)
+        {
+            timestamp = Kommander.Time.HLCTimestamp.Zero;
+            return false;
+        }
+
+        timestamp = mintLocalT(tx.CausalFloor.IsNull() ? null : tx.CausalFloor);
+        return true;
     }
 
     /// <summary>

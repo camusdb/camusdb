@@ -296,6 +296,54 @@ internal static class DerivedTableSchemaBuilder
         new("sql",           ColumnType.String),
     ];
 
+    // SHOW STATEMENT STATS: one row per statement shape, highest coefficient of variation first. The
+    // additive columns are running totals since the shape was first seen, so a reader subtracts two
+    // readings for a window; `sum_sq_ms` lets the variance of that window be derived as well.
+    // `last_plan` is NULL for a shape that never built a plan (an INSERT … VALUES).
+    internal static readonly IReadOnlyList<DerivedColumnSchema> ShowStatementStatsSchema =
+    [
+        new("node",          ColumnType.String),
+        new("database",      ColumnType.String),
+        new("shape_id",      ColumnType.String),
+        new("kind",          ColumnType.String),
+        new("sample_sql",    ColumnType.String),
+        new("calls",         ColumnType.Integer64),
+        new("errors",        ColumnType.Integer64),
+        new("total_ms",      ColumnType.Float64),
+        new("sum_sq_ms",     ColumnType.Float64),
+        new("min_ms",        ColumnType.Float64),
+        new("max_ms",        ColumnType.Float64),
+        new("mean_ms",       ColumnType.Float64),
+        new("stddev_ms",     ColumnType.Float64),
+        new("cv",            ColumnType.Float64),
+        new("rows_read",     ColumnType.Integer64),
+        new("rows_returned", ColumnType.Integer64),
+        new("full_scans",    ColumnType.Integer64),
+        new("spills",        ColumnType.Integer64),
+        new("retries",       ColumnType.Integer64),
+        new("plan_changes",  ColumnType.Integer64),
+        new("last_plan",     ColumnType.String),
+        new("first_seen_at", ColumnType.String),
+        new("last_seen_at",  ColumnType.String),
+    ];
+
+    // SHOW INDEX USAGE: one row per readable index, zero rows included. `last_read_at` is NULL when
+    // the index has not been read on this node since `tracked_since`.
+    internal static readonly IReadOnlyList<DerivedColumnSchema> ShowIndexUsageSchema =
+    [
+        new("node",             ColumnType.String),
+        new("database",         ColumnType.String),
+        new("table",            ColumnType.String),
+        new("index",            ColumnType.String),
+        new("unique",           ColumnType.Bool),
+        new("reads",            ColumnType.Integer64),
+        new("constraint_reads", ColumnType.Integer64),
+        new("entries_read",     ColumnType.Integer64),
+        new("last_read_at",     ColumnType.String),
+        new("writes",           ColumnType.Integer64),
+        new("tracked_since",    ColumnType.String),
+    ];
+
     // SHOW [CLUSTER] QUERIES: one row per running statement, oldest first. `transaction_id` and
     // `isolation` are NULL for a statement that runs with no transaction (a server-level statement).
     // `rows_returned` counts the rows the client has read so far. `error` is NULL on every statement

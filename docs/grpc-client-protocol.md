@@ -168,7 +168,8 @@ CamusDB supports two execution modes on every SQL/row call:
 ### 4.1 Explicit transaction lifecycle (`CamusSql`)
 
 ```
-TxnHandle h = StartTransaction(StartTxnRequest{database, isolation_level, transaction_mode, locking})
+TxnHandle h = StartTransaction(StartTxnRequest{database, isolation_level, transaction_mode, locking,
+                                               causal_token_n/_l/_c})
    ... ExecuteQuery/ExecuteNonQuery/ExecuteDdl with sql_request.txn_handle = h ...
 CommitTransaction(h)      -> CommitReply
    // or
@@ -213,6 +214,11 @@ Where the token lives per message:
 - `TxnHandle`: `causal_token_n/_l/_c` — set them when you resume/commit/rollback a transaction so the
   server sees the session's latest observed time.
 - All `CamusRows` requests: top-level `causal_token_n/_l/_c`.
+- `StartTxnRequest`: top-level `causal_token_n/_l/_c`, and the `SqlRequest` of a batch `START`. Send
+  the token of your last commit here. Each `SELECT` of a Read Committed transaction reads at one
+  statement timestamp from the clock of the node that runs it, and that timestamp is at least this
+  token. Without it, a transaction on a node whose clock is behind can miss your last commit (see
+  `transactions-locking-and-isolation.md` §9.2).
 
 ### 4.3 Isolation, mode, and locking
 
@@ -351,7 +357,8 @@ BatchExecuteResponse { int32 request_id,
   - `QUERY` → `ExecuteQuery`, streams schema + rows.
   - `NON_QUERY` → `ExecuteNonQuery`, single reply.
   - `START` → begin a transaction; the reply is a `TxnHandle` (`start_reply`). Reuses
-    `request.database` + `isolation_level` / `transaction_mode` / `locking`; `sql` is ignored.
+    `request.database` + `isolation_level` / `transaction_mode` / `locking` + the causal token (the
+    floor of the transaction's statement timestamps); `sql` is ignored.
   - `COMMIT` / `ROLLBACK` → finalize `request.txn_handle`; the reply is `commit_reply` (causal token)
     or `rollback_reply`.
 - `request` is the same `SqlRequest` used on the unary path (so it carries `txn_handle`, parameters,

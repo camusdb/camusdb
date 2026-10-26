@@ -660,8 +660,10 @@ public sealed class InProcessSchemaCluster : IAsyncDisposable
 
     /// <summary>
     /// Kills the node at <paramref name="nodeIndex"/>: blocks all inbound AND outbound
-    /// messages for it at the transport layer, then disposes its Kahuna instance.
-    /// The remaining nodes retain quorum for a 3-node cluster.
+    /// messages for it at the Raft transport layer, removes it from the in-process node registry
+    /// (so schema probes, schema acks and query fragments addressed to it fail as unreachable),
+    /// then disposes its Kahuna instance. The Kahuna inter-node channel is not blocked, so a request
+    /// can still reach the node while it stops. The remaining nodes retain quorum for a 3-node cluster.
     /// </summary>
     public async Task KillNodeAsync(int nodeIndex)
     {
@@ -671,6 +673,11 @@ public sealed class InProcessSchemaCluster : IAsyncDisposable
         // Block transport before disposal so in-flight messages are not forwarded.
         faultComm.BlockSender(endpoint);
         faultComm.BlockRecipient(endpoint);
+
+        // A crashed host answers no schema probe, schema ack or query fragment either. Left
+        // registered, the dead node still answers the schema pull probe, so the ack gate counts it
+        // as live and waits on it instead of dropping it from the live set.
+        buildContext.Registry.Unregister(endpoint);
 
         try
         {

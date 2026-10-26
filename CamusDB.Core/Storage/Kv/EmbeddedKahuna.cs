@@ -569,13 +569,13 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
         const long OneMb = 1024L * 1024;
         (long machineBytes, string machineSource) = MachineMemory.ReadTotal();
         long flushUnitHeadroomBytes = EmbeddedKahunaOptionsBuilder.RaftLogFlushUnitHeadroomBytes(Options);
-        bool coversFlushUnit = (long)Options.RocksDbSharedMemtableBudgetMb * OneMb >= flushUnitHeadroomBytes;
+        bool coversFlushUnit = (long)Options.StorageSharedMemtableBudgetMb * OneMb >= flushUnitHeadroomBytes;
 
         logger.LogInformation(
             "RocksDB shared memory: block cache {BlockCacheMb} MiB, memtable budget {MemtableMb} MiB; Raft-log flush unit plus headroom {FlushUnitMb} MiB ({Fit}). " +
             "Native budgets sit outside the managed heap: machine memory {MachineMb} MiB ({MachineSource}), managed heap budget {HeapMb} MiB.",
-            Options.RocksDbSharedMemoryBudgetMb,
-            Options.RocksDbSharedMemtableBudgetMb,
+            Options.StorageSharedCacheMb,
+            Options.StorageSharedMemtableBudgetMb,
             flushUnitHeadroomBytes / OneMb,
             coversFlushUnit ? "covered" : "NOT covered: Raft-log flushes will be budget-forced",
             machineBytes / OneMb,

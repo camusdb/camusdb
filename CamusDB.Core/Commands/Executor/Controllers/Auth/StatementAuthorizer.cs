@@ -190,6 +190,24 @@ internal sealed class StatementAuthorizer
             return;
         }
 
+        // Statement statistics carry a sample of each shape's SQL text, with the literals of whoever
+        // ran it first — the slow query log's reason, and the slow query log's bar.
+        if (ast.nodeType is NodeType.ShowStatementStats)
+        {
+            if (!principal.IsSuperuser)
+                throw new CamusDBException(CamusDBErrorCodes.InsufficientPrivilege, "Statement statistics require a superuser");
+            return;
+        }
+
+        // Index usage counts the node's whole workload against every index of the database, which no
+        // per-table grant scopes down: the engine statistics' reason, and their bar.
+        if (ast.nodeType is NodeType.ShowIndexUsage)
+        {
+            if (!principal.IsSuperuser)
+                throw new CamusDBException(CamusDBErrorCodes.InsufficientPrivilege, "Index usage requires a superuser");
+            return;
+        }
+
         // Configuration is held to the same bar, and for the same reason. Even with the three secret
         // settings masked, the output describes the node's entire security posture and limits — whether
         // authentication and TLS are on, the password hashing cost, the data directory, every rate-limit

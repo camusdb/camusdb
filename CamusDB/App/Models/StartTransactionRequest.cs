@@ -6,6 +6,8 @@
  * file that was distributed with this source code.
  */
 
+using Kommander.Time;
+
 namespace CamusDB.App.Models;
 
 public sealed class StartTransactionRequest
@@ -42,4 +44,11 @@ public sealed class StartTransactionRequest
     /// lock conflicts or isolation.</para>
     /// </summary>
     public string? Priority { get; set; }
+
+    /// <summary>
+    /// Optional causal token of the client's last commit, as returned by a commit response. Every Read
+    /// Committed SELECT of the transaction reads at a statement timestamp at least this value, so it
+    /// sees that commit even on a node whose clock is behind.
+    /// </summary>
+    public HLCTimestamp? CausalToken { get; set; }
 }

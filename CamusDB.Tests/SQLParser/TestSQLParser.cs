@@ -1633,6 +1633,64 @@ public class TestSQLParser
         Assert.Throws<CamusDBException>(() => SQLParserProcessor.Parse("SHOW SLOW QUERIES LIKE 'x' EXTRA"));
     }
 
+    [Test]
+    public void TestParseShowStatementStats()
+    {
+        NodeAst ast = SQLParserProcessor.Parse("SHOW STATEMENT STATS");
+
+        Assert.AreEqual(NodeType.ShowStatementStats, ast.nodeType);
+        Assert.IsNull(ast.leftAst);
+        Assert.AreEqual(NodeType.ShowStatementStats, SQLParserProcessor.Parse("show statement stats").nodeType);
+    }
+
+    [Test]
+    public void TestParseShowStatementStatsLike()
+    {
+        NodeAst ast = SQLParserProcessor.Parse("SHOW STATEMENT STATS LIKE '%orders%'");
+
+        Assert.AreEqual(NodeType.ShowStatementStats, ast.nodeType);
+        Assert.AreEqual("'%orders%'", ast.leftAst!.yytext);
+    }
+
+    [Test]
+    public void TestParseShowStatementStatsRejectsOtherWords()
+    {
+        Assert.Throws<CamusDBException>(() => SQLParserProcessor.Parse("SHOW STATEMENT FOO"));
+        Assert.Throws<CamusDBException>(() => SQLParserProcessor.Parse("SHOW STATEMENT STATS LIKE 'x' EXTRA"));
+    }
+
+    [Test]
+    public void TestParseShowIndexUsage()
+    {
+        NodeAst all = SQLParserProcessor.Parse("SHOW INDEX USAGE");
+        Assert.AreEqual(NodeType.ShowIndexUsage, all.nodeType);
+        Assert.IsNull(all.leftAst);
+
+        NodeAst one = SQLParserProcessor.Parse("show index usage from orders");
+        Assert.AreEqual(NodeType.ShowIndexUsage, one.nodeType);
+        Assert.AreEqual("orders", one.leftAst!.yytext);
+    }
+
+    /// <summary>
+    /// SHOW INDEX FROM keeps its meaning next to SHOW INDEX USAGE, and USAGE is validated in the
+    /// parse action, so another word after SHOW INDEX is refused rather than accepted as USAGE.
+    /// </summary>
+    [Test]
+    public void TestShowIndexFromStillParsesAndOtherWordsAreRefused()
+    {
+        Assert.AreEqual(NodeType.ShowIndexes, SQLParserProcessor.Parse("SHOW INDEX FROM orders").nodeType);
+        Assert.Throws<CamusDBException>(() => SQLParserProcessor.Parse("SHOW INDEX STATS"));
+        Assert.Throws<CamusDBException>(() => SQLParserProcessor.Parse("SHOW INDEX USAGE FROM"));
+    }
+
+    [Test]
+    public void TestStatementStatsAndUsageWordsRemainUsableAsIdentifiers()
+    {
+        Assert.AreEqual(NodeType.Select, SQLParserProcessor.Parse("SELECT statement, usage, stats FROM audit").nodeType);
+        Assert.AreEqual(NodeType.CreateTable, SQLParserProcessor.Parse(
+            "CREATE TABLE usage (id OID PRIMARY KEY, statement STRING NOT NULL)").nodeType);
+    }
+
     /// <summary>
     /// ENGINE and STATS are matched as identifiers rather than reserved as keywords, precisely so DDL
     /// that already uses those words keeps parsing. Reserving them would have been a silent breaking

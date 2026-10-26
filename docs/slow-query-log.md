@@ -182,6 +182,8 @@ Know these before you build anything on the log.
 - [`SHOW ENGINE STATS`](engine-stats.md) — node-level Raft and storage metrics.
 - [`SHOW VARIABLES`](show-variables.md) — what this node's configuration actually resolved to.
 - [`EXPLAIN` and `EXPLAIN ANALYZE`](explain.md) — per-operator detail for one statement.
+- [Statement statistics](statement-stats.md) — `SHOW STATEMENT STATS`, running totals per statement shape, including the fast statements this log never sees.
+- [Index usage](index-usage.md) — `SHOW INDEX USAGE`, which indexes statements read and which they do not.
 - [Spill to disk](spill-to-disk.md) — what `spilled` means and how to tune it.
 - [Operator dashboard](operator-dashboard.md) — the browser panel over the same log.
 - [Configuration](configuration.md) — the full settings reference.

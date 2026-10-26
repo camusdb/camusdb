@@ -144,8 +144,20 @@ script polling a fleet does not have to special-case which nodes have it enabled
 This setting is independent of the `diagnostics:` section, which configures OpenTelemetry/Prometheus
 export. Either can be on without the other, and both can read the same meters.
 
+### Statement statistics
+
+When [statement statistics](statement-stats.md) have been enabled on the node, two `camusdb` rows
+report the state of their table:
+
+| metric | tells you |
+|---|---|
+| `statement_stats.shapes` | shapes held now (gauge) |
+| `statement_stats.dropped` | new shapes refused because the table was full (counter); a value that moves means `SHOW STATEMENT STATS` is incomplete |
+
 ## Related
 
 `SHOW ENGINE STATS` describes the node. For the individual statements that were slow on it, with the
 full-scan and spill facts that explain each duration, see the
-[slow query log](slow-query-log.md).
+[slow query log](slow-query-log.md). For running totals per statement shape see
+[`SHOW STATEMENT STATS`](statement-stats.md), and for which indexes statements read see
+[`SHOW INDEX USAGE`](index-usage.md).

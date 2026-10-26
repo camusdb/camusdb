@@ -109,6 +109,11 @@ public sealed class HttpTransactionCoordinator
     /// statement that cannot honour a later <c>ROLLBACK</c> — <c>TRUNCATE</c>, or
     /// <c>ALTER TABLE ... REWRITE STORAGE</c> — can refuse to run inside it. Leave false for the server-side transaction wrapped around one autocommit statement.
     /// </param>
+    /// <param name="causalToken">
+    /// The causal token of the client's last commit, or null. Every Read Committed SELECT of the
+    /// transaction reads at a statement timestamp at least this value; see
+    /// <see cref="KvTransaction.CausalFloor"/>.
+    /// </param>
     public async Task<KvTransaction> StartAsync(
         string databaseName,
         CamusIsolationLevel? isolationLevel,
@@ -117,7 +122,8 @@ public sealed class HttpTransactionCoordinator
         bool deferStart = false,
         TransactionPriority? priority = null,
         bool sessionOwned = false,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        HLCTimestamp? causalToken = null)
     {
         if (string.IsNullOrEmpty(databaseName))
             throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "DatabaseName is required to start a transaction");
@@ -126,7 +132,7 @@ public sealed class HttpTransactionCoordinator
 
         KvTransaction tx = await database.Transactions.BeginAsync(
             isolationLevel, transactionMode, locking: locking, deferStart: deferStart,
-            priority: priority, cancellationToken: cancellationToken).ConfigureAwait(false);
+            priority: priority, cancellationToken: cancellationToken, causalToken: causalToken).ConfigureAwait(false);
         if (sessionOwned)
             tx.MarkSessionOwned();
 

@@ -574,8 +574,8 @@ public sealed class TestEmbeddedKahunaOptionsBuilder
         foreach (EmbeddedKahunaOptions opts in new[] { standalone, standaloneRocksDb, cluster })
         {
             Assert.That(opts.RocksDbSharedMemoryEnabled, Is.True);
-            Assert.That(opts.RocksDbSharedMemoryBudgetMb, Is.EqualTo(320));
-            Assert.That(opts.RocksDbSharedMemtableBudgetMb, Is.EqualTo(128));
+            Assert.That(opts.StorageSharedCacheMb, Is.EqualTo(320));
+            Assert.That(opts.StorageSharedMemtableBudgetMb, Is.EqualTo(128));
         }
     }
 
@@ -700,8 +700,8 @@ public sealed class TestEmbeddedKahunaOptionsBuilder
         EmbeddedKahunaOptions built = EmbeddedKahunaOptionsBuilder.BuildStandaloneRocksDb("/tmp/sm-budget", kahuna, CamusDBOptions.Default);
 
         Assert.That(built.RocksDbSharedMemoryEnabled, Is.True);
-        Assert.That(built.RocksDbSharedMemoryBudgetMb, Is.EqualTo(512));
-        Assert.That(built.RocksDbSharedMemtableBudgetMb, Is.EqualTo(200));
+        Assert.That(built.StorageSharedCacheMb, Is.EqualTo(512));
+        Assert.That(built.StorageSharedMemtableBudgetMb, Is.EqualTo(200));
     }
 
     [Test]
@@ -731,12 +731,12 @@ public sealed class TestEmbeddedKahunaOptionsBuilder
         EmbeddedKahunaOptions built = EmbeddedKahunaOptionsBuilder.BuildStandaloneRocksDb("/tmp/sm-defaults", kahuna, CamusDBOptions.Default);
 
         Assert.That(built.RocksDbSharedMemoryEnabled, Is.True);
-        Assert.That(built.RocksDbSharedMemoryBudgetMb, Is.EqualTo(expectedBlockCacheMb));
-        Assert.That(built.RocksDbSharedMemtableBudgetMb, Is.EqualTo(expectedMemtableMb));
+        Assert.That(built.StorageSharedCacheMb, Is.EqualTo(expectedBlockCacheMb));
+        Assert.That(built.StorageSharedMemtableBudgetMb, Is.EqualTo(expectedMemtableMb));
 
         // The derived pair must never invert, or the build-time cross-field check would reject its
         // own defaults on a machine whose RAM lands near a clamp boundary.
-        Assert.That(built.RocksDbSharedMemtableBudgetMb, Is.LessThanOrEqualTo(built.RocksDbSharedMemoryBudgetMb));
+        Assert.That(built.StorageSharedMemtableBudgetMb, Is.LessThanOrEqualTo(built.StorageSharedCacheMb));
     }
 
     [Test]
@@ -751,8 +751,8 @@ public sealed class TestEmbeddedKahunaOptionsBuilder
         KahunaOptionsConfig kahuna = new();
         EmbeddedKahunaOptions built = EmbeddedKahunaOptionsBuilder.BuildStandaloneRocksDb("/tmp/sm-clamps", kahuna, CamusDBOptions.Default);
 
-        Assert.That(built.RocksDbSharedMemoryBudgetMb, Is.InRange(64, 2048));
-        Assert.That(built.RocksDbSharedMemtableBudgetMb, Is.InRange(16, 1024));
+        Assert.That(built.StorageSharedCacheMb, Is.InRange(64, 2048));
+        Assert.That(built.StorageSharedMemtableBudgetMb, Is.InRange(16, 1024));
 
         // The KV actor caches are the other half of the default footprint; their bounds are the
         // 1 MiB degenerate per-actor floor and the 2 GiB per-actor ceiling.
@@ -842,17 +842,17 @@ public sealed class TestEmbeddedKahunaOptionsBuilder
         EmbeddedKahunaOptions built = EmbeddedKahunaOptionsBuilder.BuildStandaloneRocksDb(
             "/tmp/sm-merge-total", kahuna, CamusDBOptions.Default);
 
-        Assert.That(built.RocksDbSharedMemoryBudgetMb, Is.EqualTo(100));
-        Assert.That(built.RocksDbSharedMemtableBudgetMb, Is.EqualTo(50));
+        Assert.That(built.StorageSharedCacheMb, Is.EqualTo(100));
+        Assert.That(built.StorageSharedMemtableBudgetMb, Is.EqualTo(50));
 
         // With the floor on, the Raft log's 192 MiB flush unit lifts it from a quarter of the total
         // (25) to the half the floor may take (50), never past it — still never inverting the pair.
         EmbeddedKahunaOptions floored = EmbeddedKahunaOptionsBuilder.StandaloneRocksDbBaseline("/tmp/sm-merge-total-floor");
-        floored.RocksDbSharedMemoryBudgetMb = 100;
+        floored.StorageSharedCacheMb = 100;
         EmbeddedKahunaOptionsBuilder.ApplyMemoryProportionalDefaults(floored, kahuna, 4096L * 1024 * 1024, raftLogFlushUnitFloor: true);
 
-        Assert.That(floored.RocksDbSharedMemoryBudgetMb, Is.EqualTo(100));
-        Assert.That(floored.RocksDbSharedMemtableBudgetMb, Is.EqualTo(50));
+        Assert.That(floored.StorageSharedCacheMb, Is.EqualTo(100));
+        Assert.That(floored.StorageSharedMemtableBudgetMb, Is.EqualTo(50));
     }
 
     [Test]
@@ -870,25 +870,32 @@ public sealed class TestEmbeddedKahunaOptionsBuilder
     }
 
     [Test]
-    public void EffectiveBudgetInversion_OnNonRocksDbBaseline_IsNotRejected()
+    public void EffectiveBudgetInversion_OnNonRocksDbBaseline_IsRejectedAtBuild()
     {
-        // The merge-time guard is scoped to the case where Kahuna actually builds the shared bundle
-        // (sharing enabled AND both storages rocksdb). On the SQLite standalone baseline the budgets are
-        // ignored, so an inverted effective pair (total=100 / memtable=128) must NOT be rejected —
-        // rejecting it would be over-strict for a config Kahuna never acts on.
-        KahunaOptionsConfig kahuna = new() { RocksdbSharedMemoryBudgetMb = 100 };
+        // The SQLite standalone baseline never builds the shared RocksDB bundle, but Kahuna validates the
+        // cache and memtable pair on every engine and stops the node at boot when the memtable budget is
+        // larger than a cache above 0. Only the memtable budget is overridden, and the sized total is at
+        // most 2 GB on any machine, so 4 GB of memtable is inverted and the merge-time check must refuse
+        // it with a config error first.
+        KahunaOptionsConfig kahuna = new() { RocksdbSharedMemtableBudgetMb = 4096 };
 
-        Assert.DoesNotThrow(() => EmbeddedKahunaOptionsBuilder.BuildStandalone("/tmp/sm-merge-sqlite", kahuna, CamusDBOptions.Default));
+        CamusDBException ex = Assert.Throws<CamusDBException>(
+            () => EmbeddedKahunaOptionsBuilder.BuildStandalone("/tmp/sm-merge-sqlite", kahuna, CamusDBOptions.Default))!;
+        Assert.That(ex.Code, Is.EqualTo(CamusDBErrorCodes.InvalidConfig));
+        Assert.That(ex.Message, Does.Contain("rocksdb_shared_memtable_budget_mb"));
     }
 
     [Test]
-    public void SharingDisabled_WithInvertedEffectiveBudgets_IsNotRejected()
+    public void SharingDisabled_WithInvertedEffectiveBudgets_IsRejectedAtBuild()
     {
-        // Sharing explicitly off: the bundle is never built, so an inverted effective pair is harmless
-        // and must not be rejected even on the RocksDB baseline.
-        KahunaOptionsConfig kahuna = new() { RocksdbSharedMemory = false, RocksdbSharedMemoryBudgetMb = 100 };
+        // Sharing explicitly off: the bundle is never built, but Kahuna still validates the pair, so an
+        // inverted effective pair would stop the node at boot. It is refused on the RocksDB baseline too.
+        KahunaOptionsConfig kahuna = new() { RocksdbSharedMemory = false, RocksdbSharedMemtableBudgetMb = 4096 };
 
-        Assert.DoesNotThrow(() => EmbeddedKahunaOptionsBuilder.BuildStandaloneRocksDb("/tmp/sm-merge-off", kahuna, CamusDBOptions.Default));
+        CamusDBException ex = Assert.Throws<CamusDBException>(
+            () => EmbeddedKahunaOptionsBuilder.BuildStandaloneRocksDb("/tmp/sm-merge-off", kahuna, CamusDBOptions.Default))!;
+        Assert.That(ex.Code, Is.EqualTo(CamusDBErrorCodes.InvalidConfig));
+        Assert.That(ex.Message, Does.Contain("rocksdb_shared_memtable_budget_mb"));
     }
 
     // ── Priority admission gate ──────────────────────────────────────────────────────────────────

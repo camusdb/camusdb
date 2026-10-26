@@ -1439,6 +1439,126 @@ internal sealed class SchemaQuerier
     }
 
     /// <summary>
+    /// Renders <c>SHOW STATEMENT STATS</c>: one row per statement shape this node has recorded, sorted
+    /// by the coefficient of variation, highest first, so a statement whose duration has two regimes
+    /// — a plan that flips, a cache that is sometimes cold — is at the top.
+    ///
+    /// <para>The additive columns are running totals since the shape was first seen. A reader takes two
+    /// readings and subtracts them; <c>sum_sq_ms</c> is there so the variance of that window can be
+    /// derived too. The mean, the standard deviation and <c>cv</c> are derived from the totals at read
+    /// time and describe the whole life of the shape.</para>
+    ///
+    /// <para>A null <paramref name="stats"/> — the feature never enabled on this engine — contributes no
+    /// rows, matching <see cref="ShowSlowQueries"/>, so a script polling a fleet gets one shape from
+    /// every node.</para>
+    /// </summary>
+    internal async IAsyncEnumerable<QueryResultRow> ShowStatementStats(StatementStatsTable? stats, string node, string? pattern)
+    {
+        await Task.CompletedTask;
+
+        if (stats is null)
+            yield break;
+
+        List<StatementStatsSnapshot> rows = stats.Snapshot();
+        rows.Sort(static (a, b) =>
+        {
+            int byCv = b.Cv.CompareTo(a.Cv);
+            return byCv != 0 ? byCv : b.TotalMs.CompareTo(a.TotalMs);
+        });
+
+        foreach (StatementStatsSnapshot row in rows)
+        {
+            if (pattern is not null && !LikeMatch(row.SampleSql, pattern))
+                continue;
+
+            yield return new QueryResultRow(default, new Dictionary<string, ColumnValue>(StringComparer.OrdinalIgnoreCase)
+            {
+                { "node",          new ColumnValue(ColumnType.String, node) },
+                { "database",      new ColumnValue(ColumnType.String, row.Database) },
+                { "shape_id",      new ColumnValue(ColumnType.String, row.ShapeId) },
+                { "kind",          new ColumnValue(ColumnType.String, row.Kind) },
+                { "sample_sql",    new ColumnValue(ColumnType.String, row.SampleSql) },
+                { "calls",         new ColumnValue(ColumnType.Integer64, row.Calls) },
+                { "errors",        new ColumnValue(ColumnType.Integer64, row.Errors) },
+                { "total_ms",      new ColumnValue(ColumnType.Float64, row.TotalMs) },
+                { "sum_sq_ms",     new ColumnValue(ColumnType.Float64, row.SumSqMs) },
+                { "min_ms",        new ColumnValue(ColumnType.Float64, row.MinMs) },
+                { "max_ms",        new ColumnValue(ColumnType.Float64, row.MaxMs) },
+                { "mean_ms",       new ColumnValue(ColumnType.Float64, row.MeanMs) },
+                { "stddev_ms",     new ColumnValue(ColumnType.Float64, row.StddevMs) },
+                { "cv",            new ColumnValue(ColumnType.Float64, row.Cv) },
+                { "rows_read",     new ColumnValue(ColumnType.Integer64, row.RowsRead) },
+                { "rows_returned", new ColumnValue(ColumnType.Integer64, row.RowsReturned) },
+                { "full_scans",    new ColumnValue(ColumnType.Integer64, row.FullScans) },
+                { "spills",        new ColumnValue(ColumnType.Integer64, row.Spills) },
+                { "retries",       new ColumnValue(ColumnType.Integer64, row.Retries) },
+                { "plan_changes",  new ColumnValue(ColumnType.Integer64, row.PlanChanges) },
+                { "last_plan",     row.LastPlan == 0 ? ColumnValue.Null : new ColumnValue(ColumnType.String, row.LastPlan.ToString("x16", CultureInfo.InvariantCulture)) },
+                { "first_seen_at", new ColumnValue(ColumnType.String, FormatUtc(row.FirstSeenAt)) },
+                { "last_seen_at",  new ColumnValue(ColumnType.String, FormatUtc(row.LastSeenAt)) },
+            });
+        }
+    }
+
+    /// <summary>
+    /// Renders <c>SHOW INDEX USAGE</c>: one row per readable index of every table of
+    /// <paramref name="database"/>, or of <paramref name="onlyTable"/>, with this node's counts.
+    ///
+    /// <para><b>Every index has a row, including one with nothing counted.</b> A zero row is the answer
+    /// the statement exists to give. The list comes from the catalog, not from the open tables, so a
+    /// table this node never opened still lists its indexes — with zero reads, which is true: a read
+    /// opens the table — and inspecting the database makes no table resident.</para>
+    ///
+    /// <para>An index in the middle of a backfill is left out, as <c>SHOW INDEXES</c> leaves it out:
+    /// it takes writes and cannot be read yet, and listing it would make every new index look like an
+    /// unused one.</para>
+    /// </summary>
+    internal async IAsyncEnumerable<QueryResultRow> ShowIndexUsage(
+        DatabaseDescriptor database, IndexUsageRegistry registry, string node, string? onlyTable)
+    {
+        await Task.CompletedTask;
+
+        foreach (KeyValuePair<string, TableSchema> table in database.Schema.Tables)
+        {
+            if (onlyTable is not null && !string.Equals(table.Key, onlyTable, StringComparison.OrdinalIgnoreCase))
+                continue;
+
+            if (MaterializedViewNaming.IsStagingRelation(table.Key) || table.Value.Indexes is not { Count: > 0 } live)
+                continue;
+
+            TableIndexUsage? usage = registry.Find(database.Id, table.Value.Id ?? "");
+
+            foreach (TableIndexSchema index in TableOpener.SnapshotIndexes(live, table.Key))
+            {
+                if (!SchemaElementStateRules.IsReadable(index))
+                    continue;
+
+                IndexUsageCounters? counters = usage?.Find(index.KvId);
+                DateTime? lastRead = counters?.LastReadAt;
+
+                yield return new QueryResultRow(default, new Dictionary<string, ColumnValue>(StringComparer.OrdinalIgnoreCase)
+                {
+                    { "node",             new ColumnValue(ColumnType.String, node) },
+                    { "database",         new ColumnValue(ColumnType.String, database.Name) },
+                    { "table",            new ColumnValue(ColumnType.String, table.Key) },
+                    { "index",            new ColumnValue(ColumnType.String, index.Name) },
+                    { "unique",           ColumnValue.FromBool(index.Type == IndexType.Unique || index.Name == CamusDBConstants.PrimaryKeyInternalName) },
+                    { "reads",            new ColumnValue(ColumnType.Integer64, counters?.Reads ?? 0) },
+                    { "constraint_reads", new ColumnValue(ColumnType.Integer64, counters?.ConstraintReads ?? 0) },
+                    { "entries_read",     new ColumnValue(ColumnType.Integer64, counters?.EntriesRead ?? 0) },
+                    { "last_read_at",     lastRead is null ? ColumnValue.Null : new ColumnValue(ColumnType.String, FormatUtc(lastRead.Value)) },
+                    { "writes",           new ColumnValue(ColumnType.Integer64, counters?.Writes ?? 0) },
+                    { "tracked_since",    new ColumnValue(ColumnType.String, FormatUtc(counters?.TrackedSince ?? registry.StartedAtUtc)) },
+                });
+            }
+        }
+    }
+
+    /// <summary>ISO-8601 UTC with milliseconds, the format every diagnostic statement uses.</summary>
+    private static string FormatUtc(DateTime value)
+        => value.ToString("yyyy-MM-ddTHH:mm:ss.fffZ", CultureInfo.InvariantCulture);
+
+    /// <summary>
     /// Renders the rows of <c>SHOW [CLUSTER] QUERIES</c>, optionally narrowed by a LIKE
     /// <paramref name="pattern"/> on the statement text. The rows arrive already filtered to what the
     /// caller may see and already redacted; see <see cref="QueryActivityService"/>.

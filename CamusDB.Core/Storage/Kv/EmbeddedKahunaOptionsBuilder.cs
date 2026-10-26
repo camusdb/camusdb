@@ -133,8 +133,8 @@ public static class EmbeddedKahunaOptionsBuilder
             // kahuna.range_split_load_threshold.
             RangeSplitLoadThreshold = 0,
             RocksDbSharedMemoryEnabled = true,
-            RocksDbSharedMemoryBudgetMb = 320,
-            RocksDbSharedMemtableBudgetMb = 128,
+            StorageSharedCacheMb = 320,
+            StorageSharedMemtableBudgetMb = 128,
             // Buffered SST reads (Kahuna's default is direct I/O). A block-cache miss then comes from
             // the page cache instead of the device, where it would queue behind the Raft WAL's fsyncs;
             // the as-of history read runs on the key/value actor thread, so a device-bound miss stalls
@@ -200,8 +200,8 @@ public static class EmbeddedKahunaOptionsBuilder
             // kahuna.range_split_load_threshold.
             RangeSplitLoadThreshold = 0,
             RocksDbSharedMemoryEnabled = true,
-            RocksDbSharedMemoryBudgetMb = 320,
-            RocksDbSharedMemtableBudgetMb = 128,
+            StorageSharedCacheMb = 320,
+            StorageSharedMemtableBudgetMb = 128,
             // Buffered SST reads (Kahuna's default is direct I/O). A block-cache miss then comes from
             // the page cache instead of the device, where it would queue behind the Raft WAL's fsyncs;
             // the as-of history read runs on the key/value actor thread, so a device-bound miss stalls
@@ -268,8 +268,8 @@ public static class EmbeddedKahunaOptionsBuilder
             // kahuna.range_split_load_threshold.
             RangeSplitLoadThreshold = 0,
             RocksDbSharedMemoryEnabled = true,
-            RocksDbSharedMemoryBudgetMb = 320,
-            RocksDbSharedMemtableBudgetMb = 128,
+            StorageSharedCacheMb = 320,
+            StorageSharedMemtableBudgetMb = 128,
             // Buffered SST reads (Kahuna's default is direct I/O). A block-cache miss then comes from
             // the page cache instead of the device, where it would queue behind the Raft WAL's fsyncs;
             // the as-of history read runs on the key/value actor thread, so a device-bound miss stalls
@@ -455,10 +455,10 @@ public static class EmbeddedKahunaOptionsBuilder
             baseline.RocksDbSharedMemoryEnabled = sharedMem;
 
         if (kahuna.RocksdbSharedMemoryBudgetMb is int sharedBudget)
-            baseline.RocksDbSharedMemoryBudgetMb = sharedBudget;
+            baseline.StorageSharedCacheMb = sharedBudget;
 
         if (kahuna.RocksdbSharedMemtableBudgetMb is int memtableBudget)
-            baseline.RocksDbSharedMemtableBudgetMb = memtableBudget;
+            baseline.StorageSharedMemtableBudgetMb = memtableBudget;
 
         if (kahuna.RocksdbDirectReads is bool directReads)
             baseline.RocksDbDirectReads = directReads;
@@ -659,22 +659,22 @@ public static class EmbeddedKahunaOptionsBuilder
         else
             ApplyMemoryProportionalDefaults(baseline, kahuna);
 
-        // Kahuna only builds the shared bundle when sharing is enabled and both databases are RocksDB;
-        // otherwise the budgets are ignored. In that build case the memtable sub-budget must fit inside
-        // the total cache budget, or Kahuna's RocksDbSharedResources.CreateWithUnifiedBudget throws an
-        // ArgumentOutOfRangeException while the node is starting. KahunaOptionsConfig.Validate only sees
-        // the raw config, so a single-knob override (e.g. setting only the memtable budget above the
-        // total the sizing step chose) slips past it and would surface as a raw crash at boot. Checking
-        // the fully-merged pair — after the sizing defaults, not before them — is what makes the check
-        // see the values the node will actually be built with, and it fails fast with a clear config
-        // error instead.
-        if (SharesRocksDbMemory(baseline)
-            && baseline.RocksDbSharedMemtableBudgetMb > baseline.RocksDbSharedMemoryBudgetMb)
+        // Kahuna validates the shared cache and memtable budget on every engine, not only when it builds
+        // the shared RocksDB bundle: whenever the cache is above 0, a memtable budget larger than it
+        // stops the node at boot, because the memtables are charged into the cache. The sizing defaults
+        // always give a cache above 0, so the rule applies to every node CamusDB builds, sharing on or
+        // off. KahunaOptionsConfig.Validate only sees the raw config, so a single-knob override (e.g.
+        // setting only the memtable budget above the total the sizing step chose) slips past it and
+        // would surface as a raw Kahuna error at boot. Checking the fully-merged pair — after the sizing
+        // defaults, not before them — is what makes the check see the values the node will actually be
+        // built with, and it fails fast with a clear config error instead.
+        if (baseline.StorageSharedCacheMb > 0
+            && baseline.StorageSharedMemtableBudgetMb > baseline.StorageSharedCacheMb)
         {
             throw new CamusDBException(
                 CamusDBErrorCodes.InvalidConfig,
-                $"'kahuna.rocksdb_shared_memtable_budget_mb' ({baseline.RocksDbSharedMemtableBudgetMb}) must be <= " +
-                $"'kahuna.rocksdb_shared_memory_budget_mb' ({baseline.RocksDbSharedMemoryBudgetMb})");
+                $"'kahuna.rocksdb_shared_memtable_budget_mb' ({baseline.StorageSharedMemtableBudgetMb}) must be <= " +
+                $"'kahuna.rocksdb_shared_memory_budget_mb' ({baseline.StorageSharedCacheMb})");
         }
 
         // Persistent MVCC revision retention. Every version of every row is a physical row in the
@@ -723,13 +723,13 @@ public static class EmbeddedKahunaOptionsBuilder
         const long ActorLayerBytes = 32 * OneMb;
 
         if (kahuna.RocksdbSharedMemoryBudgetMb is null)
-            baseline.RocksDbSharedMemoryBudgetMb = BlockCacheMb;
+            baseline.StorageSharedCacheMb = BlockCacheMb;
 
         // Derived from whatever the total ended up being, not pinned: an operator who set only the total
         // to something below 16 MiB would otherwise get a memtable sub-budget larger than the cache it
         // is charged against, which the cross-field check above rejects at boot.
         if (kahuna.RocksdbSharedMemtableBudgetMb is null)
-            baseline.RocksDbSharedMemtableBudgetMb = Math.Min(MemtableMb, baseline.RocksDbSharedMemoryBudgetMb);
+            baseline.StorageSharedMemtableBudgetMb = Math.Min(MemtableMb, baseline.StorageSharedCacheMb);
 
         // Divide by the actor count the node will actually run, not the possibly-unset config value:
         // Kahuna fills the worker default (32 or more) only after these options reach it, so dividing
@@ -893,16 +893,16 @@ public static class EmbeddedKahunaOptionsBuilder
         const long OneMb = 1024L * 1024;
 
         if (kahuna.RocksdbSharedMemoryBudgetMb is null)
-            baseline.RocksDbSharedMemoryBudgetMb = (int)(ClampWithYieldingFloor(
+            baseline.StorageSharedCacheMb = (int)(ClampWithYieldingFloor(
                 machineMemoryBytes / 10, historicFloor: 320 * OneMb, degenerateFloor: 64 * OneMb, ceiling: 2048 * OneMb) / OneMb);
 
         if (kahuna.RocksdbSharedMemtableBudgetMb is null)
         {
             int proportionalMb = (int)ClampWithYieldingFloor(
-                baseline.RocksDbSharedMemoryBudgetMb / 4, historicFloor: 128, degenerateFloor: 16, ceiling: 1024);
+                baseline.StorageSharedCacheMb / 4, historicFloor: 128, degenerateFloor: 16, ceiling: 1024);
 
             int floorMb = (raftLogFlushUnitFloor ?? RaftWalFlushUnitFloorEnabled) ? RaftLogFlushUnitFloorMb(baseline) : 0;
-            baseline.RocksDbSharedMemtableBudgetMb = Math.Max(proportionalMb, floorMb);
+            baseline.StorageSharedMemtableBudgetMb = Math.Max(proportionalMb, floorMb);
         }
 
         int actorCount = EffectiveActorCount(baseline);
@@ -945,8 +945,10 @@ public static class EmbeddedKahunaOptionsBuilder
 
     /// <summary>
     /// True when Kahuna will build one shared block cache and WriteBufferManager for the key/value
-    /// store and the Raft WAL. That happens only with sharing on and both databases on RocksDB;
-    /// otherwise the two budget knobs are ignored (see <c>EmbeddedKahunaNode.CreateSharedResources</c>).
+    /// store and the Raft WAL. That happens only with sharing on and both databases on RocksDB
+    /// (see <c>EmbeddedKahunaNode.CreateSharedResources</c>); otherwise no engine uses the two budget
+    /// knobs. Kahuna still validates the pair on every engine, so the memtable budget must stay at or
+    /// below the cache even when this is false.
     /// </summary>
     internal static bool SharesRocksDbMemory(EmbeddedKahunaOptions options) =>
         options is { RocksDbSharedMemoryEnabled: true, Storage: "rocksdb", WalStorage: "rocksdb" };
@@ -1018,7 +1020,7 @@ public static class EmbeddedKahunaOptionsBuilder
         const long OneMb = 1024L * 1024;
         long neededMb = (RaftLogFlushUnitHeadroomBytes(options) + OneMb - 1) / OneMb;
 
-        return (int)Math.Min(neededMb, options.RocksDbSharedMemoryBudgetMb / 2);
+        return (int)Math.Min(neededMb, options.StorageSharedCacheMb / 2);
     }
 
     /// <summary>

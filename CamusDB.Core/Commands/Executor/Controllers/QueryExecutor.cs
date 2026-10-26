@@ -1158,6 +1158,10 @@ internal sealed class QueryExecutor
         deps?.RecordRange(table.Store.IndexKeySpace(index.KvId));
         deps?.RecordSchema(table.Id, table.Schema.Version, table.Schema.ContentsGeneration);
 
+        // One index read per lookup, whether the row id then comes from the index or from the
+        // remembered-row-id cache: the plan chose this index either way.
+        CamusDB.Core.Diagnostics.IndexUsageCounters? usage = table.Store.IndexUsage?.BeginRead(index.KvId);
+
         if (plan.IndexOnly)
         {
             // Covering path: fetch the rowId together with the entry's stored/payload (INCLUDE) tuple
@@ -1170,6 +1174,8 @@ internal sealed class QueryExecutor
 
             if (covering is null)
                 yield break;
+
+            usage?.AddEntriesRead(1);
 
             QueryScanner.IndexOnlyLayout coveredLayout = QueryScanner.BuildIndexOnlyLayout(table, plan.ScanRequiredColumns, index);
             ColumnValue[] values = QueryScanner.SynthesizeCoveredValues(coveredLayout, lookupKey, covering.Value.includeTuple.Span);
@@ -1253,6 +1259,8 @@ internal sealed class QueryExecutor
                 CamusDB.Core.Diagnostics.ServerDiagnostics.RecordRowIdCache("hit");
             }
         }
+
+        usage?.AddEntriesRead(1);
 
         if (data is null || data.Value.Length == 0)
             yield break;
@@ -1347,7 +1355,7 @@ internal sealed class QueryExecutor
             // primary-key column. Synthesize rows directly from the scan entry; no GetRow call.
             QueryScanner.IndexOnlyLayout covered = QueryScanner.BuildIndexOnlyLayout(table, plan.ScanRequiredColumns, index);
 
-            await foreach ((CompositeColumnValue decodedKey, ObjectIdValue rowId, ReadOnlyMemory<byte> includeTuple) in table.Store.ScanIndex(
+            await foreach ((CompositeColumnValue decodedKey, ObjectIdValue rowId, ReadOnlyMemory<byte> includeTuple) in CamusDB.Core.Diagnostics.TableIndexUsage.Count(table.Store.IndexUsage, index.KvId, table.Store.ScanIndex(
                 ticket.TxnState,
                 index.KvId,
                 keyTypes,
@@ -1357,7 +1365,7 @@ internal sealed class QueryExecutor
                 fromInclusive,
                 toInclusive,
                 maxRows: plan.ScanRowLimit,
-                cancellationToken: cancellationToken))
+                cancellationToken: cancellationToken)))
             {
                 cancellationToken.ThrowIfCancellationRequested();
 
@@ -1418,7 +1426,7 @@ internal sealed class QueryExecutor
             }
         }
 
-        await foreach ((CompositeColumnValue entryKey, ObjectIdValue rowId, ReadOnlyMemory<byte> _) in table.Store.ScanIndex(
+        await foreach ((CompositeColumnValue entryKey, ObjectIdValue rowId, ReadOnlyMemory<byte> _) in CamusDB.Core.Diagnostics.TableIndexUsage.Count(table.Store.IndexUsage, index.KvId, table.Store.ScanIndex(
             ticket.TxnState,
             index.KvId,
             keyTypes,
@@ -1428,7 +1436,7 @@ internal sealed class QueryExecutor
             fromInclusive,
             toInclusive,
             maxRows: plan.ScanRowLimit,
-            cancellationToken: cancellationToken))
+            cancellationToken: cancellationToken)))
         {
             cancellationToken.ThrowIfCancellationRequested();
 
@@ -1478,6 +1486,9 @@ internal sealed class QueryExecutor
 
         HashSet<ObjectIdValue> seen = new();
         PlanNodeStats? scanStats = plan.CollectRuntimeStats && plan.StepNodes.Count > 0 ? plan.StepNodes[0].Stats : null;
+
+        // One index read for the whole IN list; each seek adds the entries it returns.
+        CamusDB.Core.Diagnostics.IndexUsageCounters? usage = table.Store.IndexUsage?.BeginRead(index.KvId);
         CamusDB.Core.Diagnostics.StatementProbe? probe = plan.Ticket.Probe;
 
         // Layout-backed decode with a per-scan plan cache shared by every seek in the IN list
@@ -1530,6 +1541,9 @@ internal sealed class QueryExecutor
                 if (scanStats is not null)
                     scanStats.KvPointLookups++;
 
+                if (rowId is not null)
+                    usage?.AddEntriesRead(1);
+
                 if (rowId is null || !seen.Add(rowId.Value))
                     continue;
 
@@ -1558,11 +1572,11 @@ internal sealed class QueryExecutor
                 // non-empty in the index's own key order, which a descending column reverses.
                 (CompositeColumnValue toBound, bool toInclusive) = IndexScanSelector.EqualitySeekUpperBound(table, index, lookupKey);
 
-                await foreach ((CompositeColumnValue entryKey, ObjectIdValue rowId, ReadOnlyMemory<byte> _) in table.Store.ScanIndex(
+                await foreach ((CompositeColumnValue entryKey, ObjectIdValue rowId, ReadOnlyMemory<byte> _) in CamusDB.Core.Diagnostics.TableIndexUsage.CountInto(usage, table.Store.ScanIndex(
                     ticket.TxnState, index.KvId, keyTypes,
                     lookupKey, toBound, unique: false,
                     fromInclusive: true, toInclusive: toInclusive,
-                    maxRows: null, cancellationToken: cancellationToken).ConfigureAwait(false))
+                    maxRows: null, cancellationToken: cancellationToken)).ConfigureAwait(false))
                 {
                     cancellationToken.ThrowIfCancellationRequested();
 
@@ -1612,9 +1626,13 @@ internal sealed class QueryExecutor
         HLCTimestamp txId = ticket.TxnState.TransactionId;
         ColumnValue columnId = new(ColumnType.Id, ticket.Id);
 
+        CamusDB.Core.Diagnostics.IndexUsageCounters? usage = table.Store.IndexUsage?.BeginRead(index.KvId);
+
         ObjectIdValue? rowId = await table.Store.LookupUnique(ticket.TxnState, index.KvId, new CompositeColumnValue(new[] { columnId })).ConfigureAwait(false);
         if (rowId is null)
             yield break;
+
+        usage?.AddEntriesRead(1);
 
         ReadOnlyMemory<byte>? data = await table.Store.GetRow(ticket.TxnState, rowId.Value).ConfigureAwait(false);
         if (data is null || data.Value.Length == 0)

@@ -1894,9 +1894,11 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
         (CamusIsolationLevel? level, CamusTransactionMode? mode, KeyValueTransactionLocking? locking, Kahuna.Shared.KeyValue.TransactionPriority? priority) =
             ParseLevelMode(request);
 
+        // A START reuses SqlRequest, whose causal token is the client's last commit.
         KvTransaction tx = await transactions.StartAsync(
             request.Database, level, mode, locking, deferStart: true, priority: priority,
-            sessionOwned: true, cancellationToken: ct).ConfigureAwait(false);
+            sessionOwned: true, cancellationToken: ct,
+            causalToken: ToCausalToken(request.CausalTokenN, request.CausalTokenL, request.CausalTokenC)).ConfigureAwait(false);
 
         TxnHandle handle = new()
         {
@@ -2046,7 +2048,8 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
 
             KvTransaction tx = await transactions.StartAsync(
                 request.Database, level, mode, locking, deferStart: true, priority: priority,
-                sessionOwned: true).ConfigureAwait(false);
+                sessionOwned: true,
+                causalToken: ToCausalToken(request.CausalTokenN, request.CausalTokenL, request.CausalTokenC)).ConfigureAwait(false);
 
             return new TxnHandle
             {

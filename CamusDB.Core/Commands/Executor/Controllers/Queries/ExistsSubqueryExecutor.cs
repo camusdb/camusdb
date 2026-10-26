@@ -217,14 +217,14 @@ internal sealed class ExistsSubqueryExecutor(SubqueryQueryExecutor? queryExecuto
             cancellationToken: cancellationToken,
             keyColumnCount: seekPlan.Index.Columns.Length).ConfigureAwait(false);
 
-        await foreach ((CompositeColumnValue _, ObjectIdValue rowId, ReadOnlyMemory<byte> _) in innerTable.Store.ScanIndex(
+        await foreach ((CompositeColumnValue _, ObjectIdValue rowId, ReadOnlyMemory<byte> _) in Diagnostics.TableIndexUsage.Count(innerTable.Store.IndexUsage, seekPlan.Index.KvId, innerTable.Store.ScanIndex(
             txnState,
             seekPlan.Index.KvId,
             seekPlan.KeyTypes,
             seekKey,
             seekKey,
             seekPlan.Unique,
-            cancellationToken: cancellationToken).ConfigureAwait(false))
+            cancellationToken: cancellationToken)).ConfigureAwait(false))
         {
             cancellationToken.ThrowIfCancellationRequested();
 

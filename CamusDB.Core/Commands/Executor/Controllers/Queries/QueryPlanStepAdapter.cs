@@ -6,6 +6,8 @@
  * file that was distributed with this source code.
  */
 
+using System.IO.Hashing;
+using System.Text;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Plans;
 using CamusDB.Core.Catalogs.Models;
@@ -28,6 +30,83 @@ internal static class QueryPlanStepAdapter
 
         Flatten(plan.Root, plan.Steps, plan.StepNodes);
         NoteScanStrategy(plan);
+        NotePlanShape(plan);
+    }
+
+    /// <summary>
+    /// Gives the statement's probe a hash of this plan's access paths, so statement statistics can
+    /// count the executions whose plan differed from the one before.
+    ///
+    /// <para>The hash covers what decides how the data is read: the node kinds, the table each scan
+    /// reads, whether a scan reads the rows or an index, and which index. It leaves out every bound,
+    /// literal and estimate. Two executions that differ only in their literals therefore hash the
+    /// same, and a new index or a fresh <c>ANALYZE</c> that flips an access path hashes differently.
+    /// It is computed here, at plan time, rather than from what the execution touched: an execution
+    /// whose outer side happened to be empty never probes its inner index, and counting that as a
+    /// plan change would report the data, not the plan.</para>
+    /// </summary>
+    private static void NotePlanShape(QueryPlan plan)
+    {
+        if (plan.Ticket.Probe is not { } probe)
+            return;
+
+        StringBuilder shape = new(128);
+        shape.Append(plan.Table.Id).Append('|');
+        AppendShape(plan.Root, shape);
+
+        probe.NotePlan(XxHash64.HashToUInt64(Encoding.UTF8.GetBytes(shape.ToString())));
+    }
+
+    private static void AppendShape(PhysicalPlanNode? node, StringBuilder shape)
+    {
+        for (; node is not null; node = node.Input)
+        {
+            shape.Append(node.GetType().Name).Append('(');
+
+            switch (node)
+            {
+                case TableScanNode scan:
+                    shape.Append(scan.Source).Append(',').Append(scan.Index?.KvId);
+                    break;
+
+                case IndexLookupNode lookup:
+                    shape.Append(lookup.Index.KvId);
+                    break;
+
+                case IndexRangeScanNode range:
+                    shape.Append(range.Index.KvId);
+                    break;
+
+                case IndexInListScanNode inList:
+                    shape.Append(inList.Index.KvId);
+                    break;
+
+                case SemiJoinNode semi:
+                    shape.Append(semi.InnerIndex?.KvId);
+                    break;
+
+                case IndexNestedLoopJoinNode indexJoin:
+                    shape.Append(indexJoin.RightSource.Table.Id).Append(',').Append(indexJoin.Index.KvId);
+                    break;
+
+                case NestedLoopJoinNode nestedLoop:
+                    shape.Append(nestedLoop.RightSource.Table?.Table.Id).Append(',');
+                    AppendShape(nestedLoop.RightPhysicalNode, shape);
+                    break;
+
+                case HashJoinNode hash:
+                    shape.Append(hash.BuildSource.Table?.Table.Id).Append(',');
+                    AppendShape(hash.RightPhysicalNode, shape);
+                    break;
+
+                case MergeJoinNode merge:
+                    shape.Append(merge.RightSource.Table?.Table.Id).Append(',');
+                    AppendShape(merge.RightPhysicalNode, shape);
+                    break;
+            }
+
+            shape.Append(')');
+        }
     }
 
     /// <summary>

@@ -445,6 +445,28 @@ public enum NodeType
     ShowSlowQueries,
 
     /// <summary>
+    /// <c>SHOW STATEMENT STATS [LIKE 'pattern']</c>. <c>leftAst</c> = the LIKE pattern node, matched
+    /// against each shape's sample SQL text, or null for no filter.
+    ///
+    /// <para>Reports this node's running totals per statement shape — the literal-free fingerprint of
+    /// a <c>SELECT</c>, <c>INSERT</c>, <c>UPDATE</c> or <c>DELETE</c>. Node-local and dispatched before
+    /// any database is opened, for the same reason as <see cref="ShowSlowQueries"/>, and
+    /// superuser-gated for the same reason: the sample text carries other users' literals.</para>
+    /// </summary>
+    ShowStatementStats,
+
+    /// <summary>
+    /// <c>SHOW INDEX USAGE [FROM table]</c>. <c>leftAst</c> = the table name, or null for every table
+    /// of the context database.
+    ///
+    /// <para>Reports this node's read and write counts for each index, including the indexes nothing
+    /// has read, so an unused index is visible. Database-scoped (it lists the context database's
+    /// indexes from its catalog) but node-local in its counts, and superuser-gated like
+    /// <see cref="ShowEngineStats"/>: the counts describe the whole node's workload.</para>
+    /// </summary>
+    ShowIndexUsage,
+
+    /// <summary>
     /// <c>SHOW VARIABLES [LIKE 'pattern']</c>. <c>leftAst</c> = the LIKE pattern node, matched against
     /// the variable name, or null for no filter.
     ///

@@ -102,8 +102,9 @@ internal sealed class KvIndexAccessor
     /// Point-read a unique index entry. Returns the rowId the encoded key maps to, or
     /// <c>null</c> if no entry exists (the key is absent).
     ///
-    /// Passes <see cref="KvTransaction.ReadTimestamp"/> to Kahuna so that a Serializable
-    /// read-only transaction observes the same snapshot here as a row read does.
+    /// Reads at <see cref="KvTransaction.QueryReadView"/> so that a Serializable read-only transaction,
+    /// or a Read Committed SELECT at its statement timestamp, observes the same snapshot here as a row
+    /// read does.
     ///
     /// In a Serializable read-write transaction a shared point lock is acquired on the index
     /// entry before the read and held until commit, preventing a concurrent writer from
@@ -126,7 +127,8 @@ internal sealed class KvIndexAccessor
         if (tx.IsolationLevel == CamusIsolationLevel.Serializable && tx.TransactionMode == CamusTransactionMode.ReadWrite)
             await locks.AcquireSharedPointLockAsync(tx, keys.BuildIndexBucketPrefix(indexId), kvKey, cancellationToken).ConfigureAwait(false);
 
-        BranchKvValue idx = await branch.ProbeRaw(tx.TransactionId, tx.ReadTimestamp, kvKey, cancellationToken, tx.ReadRegistrationKey(kvKey)).ConfigureAwait(false);
+        KvReadView view = tx.QueryReadView;
+        BranchKvValue idx = await branch.ProbeRaw(tx.TransactionId, view.Timestamp, kvKey, cancellationToken, tx.ReadRegistrationKey(kvKey), readMode: view.Mode).ConfigureAwait(false);
         if (idx.Kind == BranchKvKind.Tombstone)
             return null;   // tombstone at this level
 
@@ -219,7 +221,7 @@ internal sealed class KvIndexAccessor
             }
         }
 
-        return await ProbeUniqueRowIdsAsync(tx, indexId, lookupKeys, kvKeys, rememberRowIds: true, cancellationToken).ConfigureAwait(false);
+        return await ProbeUniqueRowIdsAsync(tx, indexId, lookupKeys, kvKeys, rememberRowIds: true, latest: false, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -293,7 +295,8 @@ internal sealed class KvIndexAccessor
     /// a deadlock edge, and protect nothing.</para>
     ///
     /// <para><b>What the read sees.</b> The transaction's own writes, so a child that the same statement
-    /// deleted does not count; and each entry's newest committed state. On a branch the ancestry is
+    /// deleted does not count; and each entry's newest committed state, never a statement timestamp
+    /// (<see cref="KvTransaction.LatestReadView"/>). On a branch the ancestry is
     /// merged, and a tombstone hides an inherited entry. It reads a small page
     /// (<see cref="KvStoreConstants.ForeignKeyProbePageSize"/>) and stops at the first live entry.</para>
     /// </summary>
@@ -309,7 +312,7 @@ internal sealed class KvIndexAccessor
 
         await foreach ((CompositeColumnValue _, ObjectIdValue _, ReadOnlyMemory<byte> _) in ScanIndex(
             tx, indexId, keyTypes, prefix, prefix, unique, fromInclusive: true, toInclusive: true, maxRows: 1,
-            cancellationToken, KvStoreConstants.ForeignKeyProbePageSize).ConfigureAwait(false))
+            cancellationToken, KvStoreConstants.ForeignKeyProbePageSize, latest: true).ConfigureAwait(false))
         {
             return true;
         }
@@ -353,7 +356,9 @@ internal sealed class KvIndexAccessor
         ServerDiagnostics.AddForeignKeyOperation(ServerDiagnostics.ForeignKeyOperation.ChildProbeBatch);
         ServerDiagnostics.AddForeignKeyOperation(ServerDiagnostics.ForeignKeyOperation.ChildProbeKey, probed);
 
-        ObjectIdValue?[] rowIds = await ProbeUniqueRowIdsAsync(tx, indexId, lookupKeys, kvKeys, rememberRowIds: false, cancellationToken).ConfigureAwait(false);
+        // A foreign-key check reads the latest committed entries: a parent key read at an older statement
+        // timestamp can be one a commit after it deleted.
+        ObjectIdValue?[] rowIds = await ProbeUniqueRowIdsAsync(tx, indexId, lookupKeys, kvKeys, rememberRowIds: false, latest: true, cancellationToken).ConfigureAwait(false);
 
         for (int i = 0; i < rowIds.Length; i++)
             found[i] = rowIds[i] is not null;
@@ -366,6 +371,8 @@ internal sealed class KvIndexAccessor
     /// Answers one row id per key, in input order; null for a key with no entry at any level, a tombstone
     /// at the nearest level that holds one, or no encoding. With <paramref name="rememberRowIds"/> a
     /// level-0 hit is remembered in the row-id cache, as <see cref="LookupUnique"/> remembers its hit.
+    /// <paramref name="latest"/> reads at <see cref="KvTransaction.LatestReadView"/> instead of
+    /// <see cref="KvTransaction.QueryReadView"/>.
     /// </summary>
     private async Task<ObjectIdValue?[]> ProbeUniqueRowIdsAsync(
         KvTransaction tx,
@@ -373,6 +380,7 @@ internal sealed class KvIndexAccessor
         IReadOnlyList<CompositeColumnValue> lookupKeys,
         string?[] kvKeys,
         bool rememberRowIds,
+        bool latest,
         CancellationToken cancellationToken)
     {
         ObjectIdValue?[] rowIds = new ObjectIdValue?[kvKeys.Length];
@@ -391,13 +399,15 @@ internal sealed class KvIndexAccessor
         if (probeKeys.Count == 0)
             return rowIds;
 
+        KvReadView view = latest ? tx.LatestReadView : tx.QueryReadView;
         BranchKvValue[] level0 = await branch.ProbeManyRaw(
             tx.TransactionId,
-            tx.ReadTimestamp,
+            view.Timestamp,
             probeKeys,
             tx.ReadRegistrationKey(probeKeys),
             "unique_lookup_batch",
-            cancellationToken).ConfigureAwait(false);
+            cancellationToken,
+            readMode: view.Mode).ConfigureAwait(false);
 
         List<int>? pending = null;
 
@@ -545,7 +555,8 @@ internal sealed class KvIndexAccessor
         if (tx.IsolationLevel == CamusIsolationLevel.Serializable && tx.TransactionMode == CamusTransactionMode.ReadWrite)
             await locks.AcquireSharedPointLockAsync(tx, keys.BuildIndexBucketPrefix(indexId), kvKey, cancellationToken).ConfigureAwait(false);
 
-        BranchKvValue idx = await branch.ProbeRaw(tx.TransactionId, tx.ReadTimestamp, kvKey, cancellationToken, tx.ReadRegistrationKey(kvKey)).ConfigureAwait(false);
+        KvReadView view = tx.QueryReadView;
+        BranchKvValue idx = await branch.ProbeRaw(tx.TransactionId, view.Timestamp, kvKey, cancellationToken, tx.ReadRegistrationKey(kvKey), readMode: view.Mode).ConfigureAwait(false);
         if (idx.Kind == BranchKvKind.Tombstone) return null;
         if (idx.HasPayload) return (RowIdFromPayload(idx.Payload.Span), IncludeTupleFromPayload(idx.Payload));
 
@@ -606,6 +617,7 @@ internal sealed class KvIndexAccessor
         string startKey = keys.BuildIndexScanBound(indexId, key, withSentinel: false);
         string endKey = keys.BuildIndexScanBound(indexId, key, withSentinel: true);
         int matchLength = startKey.Length + KvStoreConstants.RowIdHexLength;
+        KvReadView view = tx.QueryReadView;
 
         string scanCoordinatorKey = tx.FoldReads ? tx.CoordinatorKey : "";
         TransactionOperationId scanOperationId = scanCoordinatorKey.Length == 0 ? default : TransactionOperationId.NewRandom();
@@ -619,11 +631,12 @@ internal sealed class KvIndexAccessor
                 startKey, true,
                 endKey, true,
                 pageSize,
-                tx.ReadTimestamp,
+                view.Timestamp,
                 KeyValueDurability.Persistent,
                 cancellationToken,
                 scanCoordinatorKey,
-                scanOperationId).GetAsyncEnumerator(cancellationToken);
+                scanOperationId,
+                readMode: view.Mode).GetAsyncEnumerator(cancellationToken);
             string scanDescription = ScanDescription(indexId);
 
             while (await KvScanFailure.MoveNextAsync(entries, scanDescription, cancellationToken).ConfigureAwait(false))
@@ -723,6 +736,7 @@ internal sealed class KvIndexAccessor
 
         string scanCoordinatorKey = tx.FoldReads ? tx.CoordinatorKey : "";
         HLCTimestamp identity = tx.RangeScanIdentityFor(bucketPrefix);
+        KvReadView view = tx.QueryReadView;
 
         // One call holds at most ProbeBatchMaxKeys seeks and ProbeRangeMaxEntries entries in all.
         int seeksPerCall = Math.Max(1, Math.Min(KvStoreConstants.ProbeBatchMaxKeys, KvStoreConstants.ProbeRangeMaxEntries / Math.Max(1, pageSize)));
@@ -733,7 +747,7 @@ internal sealed class KvIndexAccessor
             for (int offset = 0; offset < seeks.Length; offset += seeksPerCall)
             {
                 int count = Math.Min(seeksPerCall, seeks.Length - offset);
-                await ProbeRangesAsync(identity, tx.ReadTimestamp, bucketPrefix, seeks, startKeys, offset, count, answers, scanCoordinatorKey, cancellationToken).ConfigureAwait(false);
+                await ProbeRangesAsync(identity, view, bucketPrefix, seeks, startKeys, offset, count, answers, scanCoordinatorKey, cancellationToken).ConfigureAwait(false);
 
                 // A wide key's first page is read again by the caller's single scan, which counts it; so
                 // the meter takes only the keys this call answered whole.
@@ -762,7 +776,7 @@ internal sealed class KvIndexAccessor
     /// </summary>
     private async Task ProbeRangesAsync(
         HLCTimestamp identity,
-        HLCTimestamp readTimestamp,
+        KvReadView view,
         string bucketPrefix,
         KeyValueProbeRange[] seeks,
         string[] startKeys,
@@ -785,8 +799,8 @@ internal sealed class KvIndexAccessor
 
             KeyValueProbeRangeResult[]? results = await KahunaRetryPolicy.InvokeOrUnanswered(
                 () => kahuna.LocateAndTryProbeManyRanges(
-                    identity, readTimestamp, bucketPrefix, request, KeyValueProbeLock.None, 0,
-                    KeyValueDurability.Persistent, cancellationToken, coordinatorKey, operationId),
+                    identity, view.Timestamp, bucketPrefix, request, KeyValueProbeLock.None, 0,
+                    KeyValueDurability.Persistent, cancellationToken, coordinatorKey, operationId, view.Mode),
                 cancellationToken).ConfigureAwait(false);
 
             List<int>? next = null;
@@ -879,10 +893,12 @@ internal sealed class KvIndexAccessor
     /// When <paramref name="unique"/> is false the stored key has the rowId hex (24 chars)
     /// appended directly to the encoded key (no separator); the rowId is stripped before decoding.
     ///
-    /// Passes <see cref="KvTransaction.ReadTimestamp"/> to Kahuna so the scan is pinned to the same
+    /// Reads at <see cref="KvTransaction.QueryReadView"/> so the scan is pinned to the same
     /// consistent snapshot as the point reads across all pages, and folds reads according to
     /// <see cref="KvTransaction.FoldReads"/> — see <see cref="KvRowAccessor.ScanRows"/> for why
-    /// folding is a transaction property rather than a call-site choice.
+    /// folding is a transaction property rather than a call-site choice. <paramref name="latest"/>
+    /// reads at <see cref="KvTransaction.LatestReadView"/> instead, for a check that must see the
+    /// newest committed entries whatever statement runs.
     ///
     /// <para><b>Two meanings of the bounds.</b> The raw range always uses the encoded key order, in
     /// which a descending column runs from its largest value to its smallest. By default the decoded
@@ -906,7 +922,8 @@ internal sealed class KvIndexAccessor
         long? maxRows = null,
         [EnumeratorCancellation] CancellationToken cancellationToken = default,
         int pageSize = KvStoreConstants.DefaultPageSize,
-        bool boundsInIndexOrder = false)
+        bool boundsInIndexOrder = false,
+        bool latest = false)
     {
         if (maxRows is <= 0)
             yield break;
@@ -915,6 +932,9 @@ internal sealed class KvIndexAccessor
         // under the transaction's own identity, and a tracked scan can only fold reads once the
         // session exists. No-op for eager, read-only, and already-started transactions.
         await tx.EnsureSessionStartedAsync(cancellationToken, keys.TableKeyPrefix).ConfigureAwait(false);
+
+        // Read once: every page reads at the timestamp the scan started with.
+        KvReadView view = latest ? tx.LatestReadView : tx.QueryReadView;
 
         long emitted = 0;
         string bucketPrefix = keys.BuildIndexBucketPrefix(indexId);
@@ -982,11 +1002,12 @@ internal sealed class KvIndexAccessor
                     startKey, fromInclusive,
                     endKey, toInclusive,
                     pageSize,
-                    tx.ReadTimestamp,
+                    view.Timestamp,
                     KeyValueDurability.Persistent,
                     cancellationToken,
                     scanCoordinatorKey,
-                    scanOperationId).GetAsyncEnumerator(cancellationToken);
+                    scanOperationId,
+                    readMode: view.Mode).GetAsyncEnumerator(cancellationToken);
                 string scanDescription = ScanDescription(indexId);
 
                 while (await KvScanFailure.MoveNextAsync(entries, scanDescription, cancellationToken).ConfigureAwait(false))
@@ -1085,7 +1106,7 @@ internal sealed class KvIndexAccessor
             int levelCount = 1 + levels.Length;
             var iters = new IAsyncEnumerator<(string suffix, BranchKvKind kind, ReadOnlyMemory<byte>? payload)>[levelCount];
 
-            iters[0] = branch.ScanIndexRawAsync(tx.RangeScanIdentityFor(bucketPrefix), tx.ReadTimestamp, indexId, fromEncoded, fromInclusive, toEncoded, toInclusive, unique, cancellationToken, tx.FoldReads ? tx.CoordinatorKey : "", toIsPrefixBound, fromIsPrefixBound, pageSize).GetAsyncEnumerator(cancellationToken);
+            iters[0] = branch.ScanIndexRawAsync(tx.RangeScanIdentityFor(bucketPrefix), view.Timestamp, indexId, fromEncoded, fromInclusive, toEncoded, toInclusive, unique, cancellationToken, tx.FoldReads ? tx.CoordinatorKey : "", toIsPrefixBound, fromIsPrefixBound, pageSize, view.Mode).GetAsyncEnumerator(cancellationToken);
             for (int ai = 0; ai < levels.Length; ai++)
             {
                 (KvKeyBuilder _, KvBranchReader ancestorReader, HLCTimestamp forkTimestamp) = levels[ai];

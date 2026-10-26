@@ -412,6 +412,25 @@ public class ConfigDefinition
     public int SlowQueryLogMaxSqlLength { get; set; } = 4096;
 
     /// <summary>
+    /// Accumulates per-shape statement totals readable with <c>SHOW STATEMENT STATS</c>. Maps to
+    /// <c>CamusDBOptions.StatementStatsEnabled</c> (yml <c>statement_stats_enabled</c>). Default off.
+    /// </summary>
+    public bool StatementStatsEnabled { get; set; } = false;
+
+    /// <summary>
+    /// Statement shapes held at most. Must be &gt; 0. Maps to
+    /// <c>CamusDBOptions.StatementStatsMaxShapes</c> (yml <c>statement_stats_max_shapes</c>).
+    /// Default 2000.
+    /// </summary>
+    public int StatementStatsMaxShapes { get; set; } = 2000;
+
+    /// <summary>
+    /// Counts per-index reads and writes readable with <c>SHOW INDEX USAGE</c>. Maps to
+    /// <c>CamusDBOptions.IndexUsageEnabled</c> (yml <c>index_usage_enabled</c>). Default on.
+    /// </summary>
+    public bool IndexUsageEnabled { get; set; } = true;
+
+    /// <summary>
     /// Lists running statements for <c>SHOW QUERIES</c> and <c>CANCEL QUERY</c>.
     /// Maps to <c>CamusDBOptions.QueryActivityEnabled</c> (yml <c>query_activity_enabled</c>). Default true.
     /// </summary>
@@ -1622,6 +1641,9 @@ public class ConfigDefinition
 
         if (SlowQueryLogMaxSqlLength < 1)
             throw Invalid($"'slow_query_log_max_sql_length' must be >= 1, got {SlowQueryLogMaxSqlLength}");
+
+        if (StatementStatsMaxShapes < 1)
+            throw Invalid($"'statement_stats_max_shapes' must be >= 1, got {StatementStatsMaxShapes}");
 
         if (QueryActivityMaxSqlLength < 1)
             throw Invalid($"'query_activity_max_sql_length' must be >= 1, got {QueryActivityMaxSqlLength}");

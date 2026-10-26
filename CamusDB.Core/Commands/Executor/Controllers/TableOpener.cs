@@ -33,10 +33,18 @@ internal sealed class TableOpener
 
     private readonly ILogger<ICamusDB> logger;
 
-    public TableOpener(CatalogsManager catalogs, ILogger<ICamusDB> logger)
+    /// <summary>
+    /// The node's index counters, or null for an opener built without them (unit tests that bind a
+    /// query by hand). Every store this opener builds is handed its table's counters, so the counts
+    /// survive the descriptor rebuild that follows each schema change.
+    /// </summary>
+    private readonly Diagnostics.IndexUsageRegistry? indexUsage;
+
+    public TableOpener(CatalogsManager catalogs, ILogger<ICamusDB> logger, Diagnostics.IndexUsageRegistry? indexUsage = null)
     {
         this.catalogs = catalogs;
         this.logger = logger;
+        this.indexUsage = indexUsage;
     }
 
     public async ValueTask<TableDescriptor> Open(DatabaseDescriptor database, string tableName)
@@ -185,7 +193,7 @@ internal sealed class TableOpener
     /// <see cref="CamusDBErrorCodes.SchemaCatchingUp"/>, as it does when the node is behind on schema
     /// changes; nothing was written at this point.</para>
     /// </summary>
-    private static TableIndexSchema[] SnapshotIndexes(List<TableIndexSchema> live, string? tableName)
+    internal static TableIndexSchema[] SnapshotIndexes(List<TableIndexSchema> live, string? tableName)
     {
         List<TableIndexSchema> copy = new(live.Count);
 
@@ -366,6 +374,11 @@ internal sealed class TableOpener
                     throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Cannot load invalid type of index");
             }
         }
+
+        // Keyed by the relation id rather than the storage id, so the counts of a materialized view
+        // follow the view across a refresh that swaps its storage.
+        if (indexUsage is not null)
+            store.IndexUsage = indexUsage.Track(database.Id, tableSchema.Id ?? "", indexSource.Select(static ix => ix.KvId));
 
         Log.LogTableOpened(logger, tableSchema.Name!);
 

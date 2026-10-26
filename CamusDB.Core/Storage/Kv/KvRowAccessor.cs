@@ -22,8 +22,10 @@ namespace CamusDB.Core.Storage.Kv;
 ///
 /// <para><b>Snapshot and lock behaviour is decided by the transaction, never by the call site.</b>
 /// A non-Zero <see cref="KvTransaction.ReadTimestamp"/> pins every read here to one consistent cut
-/// through the version history, including across scan page boundaries; every other transaction type
-/// passes Zero and stays on Kahuna's read-committed fast path. A Serializable read-write transaction
+/// through the version history, including across scan page boundaries. A Read Committed SELECT reads
+/// at its statement timestamp in Kahuna's statement mode, which also shows the transaction's own writes
+/// (<see cref="KvTransaction.QueryReadView"/>); the read of rows a mutation locked always reads the
+/// latest value. Every other read passes Zero and stays on Kahuna's read-committed fast path. A Serializable read-write transaction
 /// additionally takes a shared point lock before a read and holds it to commit, which is what stops a
 /// concurrent writer from committing a modification to the same key while this transaction is live.</para>
 ///
@@ -108,7 +110,8 @@ internal sealed class KvRowAccessor
         if (tx.IsolationLevel == CamusIsolationLevel.Serializable && tx.TransactionMode == CamusTransactionMode.ReadWrite)
             await locks.AcquireSharedPointLockAsync(tx, keys.RowBucketPrefix, key, cancellationToken).ConfigureAwait(false);
 
-        BranchKvValue probe = await branch.ProbeRaw(tx.TransactionId, tx.ReadTimestamp, key, cancellationToken, tx.ReadRegistrationKey(key), aborts).ConfigureAwait(false);
+        KvReadView view = tx.QueryReadView;
+        BranchKvValue probe = await branch.ProbeRaw(tx.TransactionId, view.Timestamp, key, cancellationToken, tx.ReadRegistrationKey(key), aborts, view.Mode).ConfigureAwait(false);
         if (aborts is { HasAbort: true })
             return null;
 
@@ -142,8 +145,13 @@ internal sealed class KvRowAccessor
     ///
     /// The batch is issued as a single <c>LocateAndTryGetManyValues</c> call so all N ids are
     /// resolved in one Kahuna round-trip instead of N sequential <see cref="GetRow"/> calls, and the
-    /// transaction's <see cref="KvTransaction.ReadTimestamp"/> is forwarded so every fetch reads at
+    /// transaction's <see cref="KvTransaction.QueryReadView"/> is forwarded so every fetch reads at
     /// the same snapshot as the index scan that produced the ids.
+    ///
+    /// <para><paramref name="latest"/> reads the latest committed rows instead
+    /// (<see cref="KvTransaction.LatestReadView"/>), whatever statement snapshot is open. A mutation's
+    /// read of the rows it locked passes it: a row read at an older statement timestamp can miss the
+    /// commit that came before the lock.</para>
     ///
     /// <para>Branch ancestry: ids that miss at level-0 are carried forward as input positions and
     /// resolved one bounded batch per ancestry level (see
@@ -159,7 +167,8 @@ internal sealed class KvRowAccessor
         KvTransaction tx,
         IReadOnlyList<ObjectIdValue> rowIds,
         CancellationToken cancellationToken = default,
-        RetryableAbortSink? aborts = null)
+        RetryableAbortSink? aborts = null,
+        bool latest = false)
     {
         if (rowIds.Count == 0)
             return [];
@@ -174,14 +183,16 @@ internal sealed class KvRowAccessor
         // Register the batch read for read-set folding on the optimistic / TrackAndValidate path, and
         // when the batch holds a row this transaction wrote (see KvTransaction.ReadRegistrationKey); an
         // empty coordinatorKey leaves it unregistered (pessimistic / snapshot).
+        KvReadView view = latest ? tx.LatestReadView : tx.QueryReadView;
         BranchKvValue[] level0 = await branch.ProbeManyRaw(
             tx.TransactionId,
-            tx.ReadTimestamp,
+            view.Timestamp,
             rowKeys,
             tx.ReadRegistrationKey(rowKeys),
             "get_rows_batch",
             cancellationToken,
-            aborts
+            aborts,
+            view.Mode
         ).ConfigureAwait(false);
 
         ReadOnlyMemory<byte>?[] output = new ReadOnlyMemory<byte>?[rowIds.Count];
@@ -282,7 +293,7 @@ internal sealed class KvRowAccessor
                 await locks.AcquireSharedPointLockAsync(tx, keys.RowBucketPrefix, keys.BuildRowKey(rowId), cancellationToken).ConfigureAwait(false);
         }
 
-        return await GetRowsBatch(tx, rowIds, cancellationToken, aborts).ConfigureAwait(false);
+        return await GetRowsBatch(tx, rowIds, cancellationToken, aborts, latest: true).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -364,6 +375,9 @@ internal sealed class KvRowAccessor
         // read-only, and already-started transactions.
         await tx.EnsureSessionStartedAsync(cancellationToken, keys.TableKeyPrefix).ConfigureAwait(false);
 
+        // Read once: every page of the scan reads at the timestamp the scan started with.
+        KvReadView view = tx.QueryReadView;
+
         if (!branch.IsBranch)
         {
             // Root database (no ancestry): stream directly without materialization.
@@ -396,11 +410,12 @@ internal sealed class KvRowAccessor
                         // meaning, and true is what every other unbounded scan in the engine passes.
                         scanEndKey, scanEndKey is null,
                         KvStoreConstants.DefaultPageSize,
-                        tx.ReadTimestamp,
+                        view.Timestamp,
                         KeyValueDurability.Persistent,
                         cancellationToken,
                         scanCoordinatorKey,
-                        scanOperationId), 
+                        scanOperationId,
+                        readMode: view.Mode), 
                     rowScanDescription ??= $"row scan of table {keys.DisplayTableName}", 
                     cancellationToken
                 ).ConfigureAwait(false);
@@ -453,12 +468,13 @@ internal sealed class KvRowAccessor
             // the bounds or both outside — a bound can never admit one and drop the other.
             iters[0] = branch.ScanRowsRawAsync(
                 tx.RangeScanIdentityFor(keys.RowBucketPrefix),
-                tx.ReadTimestamp,
+                view.Timestamp,
                 startHex,
                 startInclusive,
                 untilHex,
                 cancellationToken,
-                tx.FoldReads ? tx.CoordinatorKey : ""
+                tx.FoldReads ? tx.CoordinatorKey : "",
+                view.Mode
             ).GetAsyncEnumerator(cancellationToken);
 
             for (int ai = 0; ai < levels.Length; ai++)

@@ -91,16 +91,24 @@ internal sealed class KvLargeValueReader
     /// the cells <paramref name="fetch"/> requires are resolved. An entry may become null when a
     /// read-committed re-read finds the row deleted. <paramref name="rowIds"/> is aligned with
     /// <paramref name="rows"/>.
+    ///
+    /// <para>The values are read at the view the rows were read at: <see cref="KvTransaction.QueryReadView"/>,
+    /// or <see cref="KvTransaction.LatestReadView"/> with <paramref name="latest"/>, which the read of
+    /// rows a mutation locked passes. A value read at another timestamp than its row can be one the row
+    /// no longer points at.</para>
     /// </summary>
     internal async Task ResolveAsync(
         KvTransaction tx,
         IReadOnlyList<ObjectIdValue> rowIds,
         ReadOnlyMemory<byte>?[] rows,
         LargeValueFetch? fetch,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool latest = false)
     {
         if (fetch is { IsRaw: true })
             return;
+
+        KvReadView view = latest ? tx.LatestReadView : tx.QueryReadView;
 
         List<int>? pending = null;
         for (int i = 0; i < rows.Length; i++)
@@ -115,7 +123,7 @@ internal sealed class KvLargeValueReader
         long budget = ResolveBatchBytes;
         if (budget <= 0 || pending.Count == 1)
         {
-            await ResolveChunkAsync(tx, rowIds, rows, pending, fetch, cancellationToken).ConfigureAwait(false);
+            await ResolveChunkAsync(tx, view, rowIds, rows, pending, fetch, cancellationToken).ConfigureAwait(false);
             return;
         }
 
@@ -126,7 +134,7 @@ internal sealed class KvLargeValueReader
             long rowBytes = RowStorageForms.MarkedRawBytes(rows[i]!.Value.Span);
             if (chunk.Count > 0 && chunkBytes + rowBytes > budget)
             {
-                await ResolveChunkAsync(tx, rowIds, rows, chunk, fetch, cancellationToken).ConfigureAwait(false);
+                await ResolveChunkAsync(tx, view, rowIds, rows, chunk, fetch, cancellationToken).ConfigureAwait(false);
                 chunk = [];
                 chunkBytes = 0;
             }
@@ -135,7 +143,7 @@ internal sealed class KvLargeValueReader
             chunkBytes += rowBytes;
         }
 
-        await ResolveChunkAsync(tx, rowIds, rows, chunk, fetch, cancellationToken).ConfigureAwait(false);
+        await ResolveChunkAsync(tx, view, rowIds, rows, chunk, fetch, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -144,6 +152,7 @@ internal sealed class KvLargeValueReader
     /// </summary>
     private async Task ResolveChunkAsync(
         KvTransaction tx,
+        KvReadView view,
         IReadOnlyList<ObjectIdValue> rowIds,
         ReadOnlyMemory<byte>?[] rows,
         List<int> pending,
@@ -152,11 +161,11 @@ internal sealed class KvLargeValueReader
     {
         for (int attempt = 0; ; attempt++)
         {
-            List<int>? torn = await ResolvePassAsync(tx, rowIds, rows, pending, fetch, cancellationToken).ConfigureAwait(false);
+            List<int>? torn = await ResolvePassAsync(tx, view, rowIds, rows, pending, fetch, cancellationToken).ConfigureAwait(false);
             if (torn is null)
                 return;
 
-            if (!tx.ReadTimestamp.IsNull())
+            if (!view.Timestamp.IsNull())
                 throw new CamusDBException(
                     CamusDBErrorCodes.LargeValueCorrupt,
                     $"An out-of-line value of table {keys.DisplayTableName} does not match its row at a fixed snapshot");
@@ -166,7 +175,7 @@ internal sealed class KvLargeValueReader
                     CamusDBErrorCodes.TransactionMustRetry,
                     $"Rows of table {keys.DisplayTableName} kept changing while their large values were read — retry the operation");
 
-            await RereadRowsAsync(tx, rowIds, rows, torn, cancellationToken).ConfigureAwait(false);
+            await RereadRowsAsync(tx, view, rowIds, rows, torn, cancellationToken).ConfigureAwait(false);
 
             List<int>? next = null;
             foreach (int i in torn)
@@ -188,6 +197,7 @@ internal sealed class KvLargeValueReader
     /// </summary>
     private async Task<List<int>?> ResolvePassAsync(
         KvTransaction tx,
+        KvReadView view,
         IReadOnlyList<ObjectIdValue> rowIds,
         ReadOnlyMemory<byte>?[] rows,
         List<int> positions,
@@ -245,7 +255,7 @@ internal sealed class KvLargeValueReader
         if (fetchKeys.Count > 0)
         {
             Interlocked.Increment(ref fetchCalls);
-            ReadOnlyMemory<byte>?[] fetched = await FetchAsync(tx, fetchKeys, fetchRowIds, outOfLine, cancellationToken).ConfigureAwait(false);
+            ReadOnlyMemory<byte>?[] fetched = await FetchAsync(tx, view, fetchKeys, fetchRowIds, outOfLine, cancellationToken).ConfigureAwait(false);
 
             HashSet<int>? tornSlots = null;
             for (int k = 0; k < outOfLine.Count; k++)
@@ -301,6 +311,7 @@ internal sealed class KvLargeValueReader
     /// </summary>
     private async Task<ReadOnlyMemory<byte>?[]> FetchAsync(
         KvTransaction tx,
+        KvReadView view,
         List<string> fetchKeys,
         List<ObjectIdValue> fetchRowIds,
         List<(int slot, int ordinal)> cells,
@@ -308,11 +319,12 @@ internal sealed class KvLargeValueReader
     {
         BranchKvValue[] level0 = await branch.ProbeManyRaw(
             tx.TransactionId,
-            tx.ReadTimestamp,
+            view.Timestamp,
             fetchKeys,
             tx.ReadRegistrationKey(fetchKeys),
             "large_values_batch",
-            cancellationToken).ConfigureAwait(false);
+            cancellationToken,
+            readMode: view.Mode).ConfigureAwait(false);
 
         ReadOnlyMemory<byte>?[] output = new ReadOnlyMemory<byte>?[fetchKeys.Count];
         List<int>? unresolved = null;
@@ -384,6 +396,7 @@ internal sealed class KvLargeValueReader
     /// </summary>
     private async Task RereadRowsAsync(
         KvTransaction tx,
+        KvReadView view,
         IReadOnlyList<ObjectIdValue> rowIds,
         ReadOnlyMemory<byte>?[] rows,
         List<int> positions,
@@ -395,11 +408,12 @@ internal sealed class KvLargeValueReader
 
         BranchKvValue[] level0 = await branch.ProbeManyRaw(
             tx.TransactionId,
-            tx.ReadTimestamp,
+            view.Timestamp,
             rowKeys,
             tx.ReadRegistrationKey(rowKeys),
             "large_values_reread",
-            cancellationToken).ConfigureAwait(false);
+            cancellationToken,
+            readMode: view.Mode).ConfigureAwait(false);
 
         List<ObjectIdValue>? ancestorIds = null;
         List<int>? ancestorPositions = null;

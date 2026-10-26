@@ -369,6 +369,16 @@ internal sealed class IndexNestedLoopJoinOperator
         KvIndexAccessor.IndexEqualityProbe[] probes = await table.Store.ScanIndexEqualityManyAsync(
             plan.Ticket.TxnState, joinNode.Index.KvId, keyTypes, batch.Keys, probePageSize, plan.Ticket.CancellationToken).ConfigureAwait(false);
 
+        // One index read per probe batch, with every entry the batch returned.
+        if (table.Store.IndexUsage?.BeginRead(joinNode.Index.KvId) is { } usage)
+        {
+            long entries = 0;
+            for (int i = 0; i < probes.Length; i++)
+                entries += probes[i].RowIds.Count;
+
+            usage.AddEntriesRead(entries);
+        }
+
         PlanNodeStats? stats = joinNode.Stats;
         if (stats is not null)
             stats.ProbeBatches++;
@@ -452,6 +462,19 @@ internal sealed class IndexNestedLoopJoinOperator
 
         ObjectIdValue?[] rowIds = await table.Store.LookupUniqueRowIdsAsync(
             plan.Ticket.TxnState, joinNode.Index.KvId, batch.Keys, plan.Ticket.CancellationToken).ConfigureAwait(false);
+
+        // One index read per probe batch, with every key the batch resolved.
+        if (table.Store.IndexUsage?.BeginRead(joinNode.Index.KvId) is { } usage)
+        {
+            long entries = 0;
+            for (int i = 0; i < rowIds.Length; i++)
+            {
+                if (rowIds[i] is not null)
+                    entries++;
+            }
+
+            usage.AddEntriesRead(entries);
+        }
 
         List<ObjectIdValue> found = new(count);
         List<int> foundSlot = new(count);
@@ -555,13 +578,13 @@ internal sealed class IndexNestedLoopJoinOperator
         deps?.RecordRange(table.Store.IndexKeySpace(joinNode.Index.KvId));
         deps?.RecordSchema(table.Id, JoinAliasMetadata.GetTableSchemaVersionForAlias(plan, source.Alias), table.Schema.ContentsGeneration);
 
-        await foreach ((ObjectIdValue rowId, ReadOnlyMemory<byte> _) in table.Store.ScanIndexEquality(
+        await foreach ((ObjectIdValue rowId, ReadOnlyMemory<byte> _) in Diagnostics.TableIndexUsage.Count(table.Store.IndexUsage, joinNode.Index.KvId, table.Store.ScanIndexEquality(
             plan.Ticket.TxnState,
             joinNode.Index.KvId,
             keyTypes,
             lookupKey,
             pageSize,
-            cancellationToken).ConfigureAwait(false))
+            cancellationToken)).ConfigureAwait(false))
         {
             cancellationToken.ThrowIfCancellationRequested();
 

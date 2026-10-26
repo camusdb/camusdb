@@ -1051,7 +1051,7 @@ public sealed class RowUpdater
         for (int i = 0; i < positions.Count; i++)
             subset[i] = rows[positions[i]];
 
-        await table.Store.ResolveLargeValuesAsync(tx, ids, subset, fetch).ConfigureAwait(false);
+        await table.Store.ResolveLargeValuesAsync(tx, ids, subset, fetch, latest: true).ConfigureAwait(false);
 
         for (int i = 0; i < positions.Count; i++)
             rows[positions[i]] = subset[i];

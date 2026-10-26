@@ -432,6 +432,7 @@ internal sealed class TestShowGrantsTransports : BaseTest
             (NodeType.ShowVariables,       "SHOW VARIABLES"),
             (NodeType.ShowExtensions,      "SHOW EXTENSIONS"),
             (NodeType.ShowSlowQueries,     "SHOW SLOW QUERIES"),
+            (NodeType.ShowStatementStats,  "SHOW STATEMENT STATS"),
         ];
 
         foreach ((NodeType type, string sql) in statements)

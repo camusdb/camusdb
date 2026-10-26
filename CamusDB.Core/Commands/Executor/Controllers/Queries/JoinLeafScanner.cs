@@ -175,11 +175,11 @@ internal sealed class JoinLeafScanner
 
         JoinLeafRowPage page = new(services, plan, source, executionFilter, stats: stats, index: index);
 
-        await foreach ((CompositeColumnValue entryKey, ObjectIdValue rowId, ReadOnlyMemory<byte> _) in table.Store.ScanIndex(
+        await foreach ((CompositeColumnValue entryKey, ObjectIdValue rowId, ReadOnlyMemory<byte> _) in Diagnostics.TableIndexUsage.Count(table.Store.IndexUsage, index.KvId, table.Store.ScanIndex(
             plan.Ticket.TxnState,
             index.KvId,
             keyTypes,
-            from: null, to: null, unique: unique, cancellationToken: scanToken).ConfigureAwait(false))
+            from: null, to: null, unique: unique, cancellationToken: scanToken)).ConfigureAwait(false))
         {
             scanToken.ThrowIfCancellationRequested();
 
@@ -234,7 +234,7 @@ internal sealed class JoinLeafScanner
 
         JoinLeafRowPage page = new(services, plan, source, rangeNode.ExecutionFilter, stats: stats, index: rangeNode.Index);
 
-        await foreach ((CompositeColumnValue entryKey, ObjectIdValue rowId, ReadOnlyMemory<byte> _) in table.Store.ScanIndex(
+        await foreach ((CompositeColumnValue entryKey, ObjectIdValue rowId, ReadOnlyMemory<byte> _) in Diagnostics.TableIndexUsage.Count(table.Store.IndexUsage, rangeNode.Index.KvId, table.Store.ScanIndex(
             plan.Ticket.TxnState,
             rangeNode.Index.KvId,
             keyTypes,
@@ -242,7 +242,7 @@ internal sealed class JoinLeafScanner
             to: rangeNode.ToBound,
             fromInclusive: rangeNode.FromInclusive,
             toInclusive: rangeNode.ToInclusive,
-            unique: unique, cancellationToken: scanToken).ConfigureAwait(false))
+            unique: unique, cancellationToken: scanToken)).ConfigureAwait(false))
         {
             scanToken.ThrowIfCancellationRequested();
 
@@ -301,6 +301,9 @@ internal sealed class JoinLeafScanner
         // and the index-side `seen` dedup are unaffected — both happen before an id is buffered.
         JoinLeafRowPage page = new(services, plan, source, inListNode.ExecutionFilter, stats: stats, index: inListNode.Index);
 
+        // One index read for the whole IN list; each seek adds the entries it returns.
+        Diagnostics.IndexUsageCounters? usage = table.Store.IndexUsage?.BeginRead(inListNode.Index.KvId);
+
         foreach (ColumnValue value in inListNode.Values)
         {
             scanToken.ThrowIfCancellationRequested();
@@ -314,6 +317,9 @@ internal sealed class JoinLeafScanner
 
                 if (stats is not null)
                     stats.KvPointLookups++;
+
+                if (rowId is not null)
+                    usage?.AddEntriesRead(1);
 
                 if (rowId is null || !seen.Add(rowId.Value))
                     continue;
@@ -334,11 +340,11 @@ internal sealed class JoinLeafScanner
                 // non-empty in the index's own key order, which a descending column reverses.
                 (CompositeColumnValue toBound, bool toInclusive) = IndexScanSelector.EqualitySeekUpperBound(table, inListNode.Index, lookupKey);
 
-                await foreach ((CompositeColumnValue entryKey, ObjectIdValue rowId, ReadOnlyMemory<byte> _) in table.Store.ScanIndex(
+                await foreach ((CompositeColumnValue entryKey, ObjectIdValue rowId, ReadOnlyMemory<byte> _) in Diagnostics.TableIndexUsage.CountInto(usage, table.Store.ScanIndex(
                     plan.Ticket.TxnState, inListNode.Index.KvId, keyTypes,
                     lookupKey, toBound, unique: false,
                     fromInclusive: true, toInclusive: toInclusive,
-                    maxRows: null, cancellationToken: scanToken).ConfigureAwait(false))
+                    maxRows: null, cancellationToken: scanToken)).ConfigureAwait(false))
                 {
                     scanToken.ThrowIfCancellationRequested();
 

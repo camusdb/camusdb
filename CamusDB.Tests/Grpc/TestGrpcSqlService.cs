@@ -787,6 +787,38 @@ public class TestGrpcSqlService : BaseTest
     }
 
     [Test]
+    public async Task StartTransaction_CausalToken_BecomesTheStatementTimestampFloor()
+    {
+        string dbName = await CreateTestDatabaseAsync();
+
+        TxnHandle withToken = await service.StartTransaction(
+            new StartTxnRequest
+            {
+                Database = dbName,
+                IsolationLevel = IsolationLevel.ReadCommitted,
+                CausalTokenN = 1,
+                CausalTokenL = 12345,
+                CausalTokenC = 7,
+            }, Ctx());
+        TxnHandle withoutToken = await service.StartTransaction(
+            new StartTxnRequest { Database = dbName, IsolationLevel = IsolationLevel.ReadCommitted }, Ctx());
+        try
+        {
+            KvTransaction tx = coordinator.GetState(withToken.TxnIdPt, (uint)withToken.TxnIdCounter);
+            Assert.That(tx.CausalFloor, Is.EqualTo(new Kommander.Time.HLCTimestamp(1, 12345, 7)));
+            Assert.That(tx.TakesStatementSnapshot, Is.True);
+
+            KvTransaction plain = coordinator.GetState(withoutToken.TxnIdPt, (uint)withoutToken.TxnIdCounter);
+            Assert.That(plain.CausalFloor.IsNull(), Is.True, "no token means no floor");
+        }
+        finally
+        {
+            await service.RollbackTransaction(withToken, Ctx());
+            await service.RollbackTransaction(withoutToken, Ctx());
+        }
+    }
+
+    [Test]
     public async Task ExecuteQuery_ReadCommittedAutocommit_StreamsWithoutRetryWrapper()
     {
         // A non-Serializable autocommit query takes the no-retry branch of RunAutocommitQuery

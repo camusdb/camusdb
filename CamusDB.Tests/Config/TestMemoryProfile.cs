@@ -84,8 +84,8 @@ public sealed class TestMemoryProfile
         EmbeddedKahunaOptions dev = EmbeddedKahunaOptionsBuilder.BuildStandaloneRocksDb(
             "/tmp/mem-profile-dev", new KahunaOptionsConfig(), CamusDBOptions.Default with { MemoryProfile = MemoryProfile.Dev });
 
-        Assert.That(dev.RocksDbSharedMemoryBudgetMb, Is.EqualTo(64));
-        Assert.That(dev.RocksDbSharedMemtableBudgetMb, Is.EqualTo(16));
+        Assert.That(dev.StorageSharedCacheMb, Is.EqualTo(64));
+        Assert.That(dev.StorageSharedMemtableBudgetMb, Is.EqualTo(16));
 
         // The actor caches are budgeted as a layer and split across the actor count Kahuna will
         // actually run (the config leaves key_value_workers unset here, so the count is Kahuna's own
@@ -104,8 +104,8 @@ public sealed class TestMemoryProfile
         EmbeddedKahunaOptions options = new() { KeyValueWorkers = 32 };
         EmbeddedKahunaOptionsBuilder.ApplyMemoryProportionalDefaults(options, new KahunaOptionsConfig(), 8L * 1024 * OneMb);
 
-        Assert.That(options.RocksDbSharedMemoryBudgetMb, Is.EqualTo(819));   // 10% of RAM
-        Assert.That(options.RocksDbSharedMemtableBudgetMb, Is.EqualTo(204)); // a quarter of the cache
+        Assert.That(options.StorageSharedCacheMb, Is.EqualTo(819));   // 10% of RAM
+        Assert.That(options.StorageSharedMemtableBudgetMb, Is.EqualTo(204)); // a quarter of the cache
         Assert.That(options.MaxBytesPerActor, Is.EqualTo(16 * OneMb));       // 512 MiB layer / 32 actors
         Assert.That(options.MaxEntriesPerActor, Is.EqualTo(32_768));         // bytes / 512
     }
@@ -119,13 +119,13 @@ public sealed class TestMemoryProfile
         EmbeddedKahunaOptions options = new() { KeyValueWorkers = 32 };
         EmbeddedKahunaOptionsBuilder.ApplyMemoryProportionalDefaults(options, new KahunaOptionsConfig(), 1536 * OneMb);
 
-        Assert.That(options.RocksDbSharedMemoryBudgetMb, Is.EqualTo(153));  // 10%, not the 320 floor
-        Assert.That(options.RocksDbSharedMemtableBudgetMb, Is.EqualTo(38)); // a quarter, not the 128 floor
+        Assert.That(options.StorageSharedCacheMb, Is.EqualTo(153));  // 10%, not the 320 floor
+        Assert.That(options.StorageSharedMemtableBudgetMb, Is.EqualTo(38)); // a quarter, not the 128 floor
         Assert.That(options.MaxBytesPerActor, Is.EqualTo(3 * OneMb));       // 96 MiB layer / 32, not 8 MiB
         Assert.That(options.MaxEntriesPerActor, Is.EqualTo(6_144));         // derived, not the 10k floor
 
         // The invariant the shared-bundle builder enforces at boot must hold at every size.
-        Assert.That(options.RocksDbSharedMemtableBudgetMb, Is.LessThanOrEqualTo(options.RocksDbSharedMemoryBudgetMb));
+        Assert.That(options.StorageSharedMemtableBudgetMb, Is.LessThanOrEqualTo(options.StorageSharedCacheMb));
     }
 
     [Test]
@@ -136,8 +136,8 @@ public sealed class TestMemoryProfile
         EmbeddedKahunaOptions options = new() { KeyValueWorkers = 128 };
         EmbeddedKahunaOptionsBuilder.ApplyMemoryProportionalDefaults(options, new KahunaOptionsConfig(), 256 * OneMb);
 
-        Assert.That(options.RocksDbSharedMemoryBudgetMb, Is.EqualTo(64));
-        Assert.That(options.RocksDbSharedMemtableBudgetMb, Is.EqualTo(16));
+        Assert.That(options.StorageSharedCacheMb, Is.EqualTo(64));
+        Assert.That(options.StorageSharedMemtableBudgetMb, Is.EqualTo(16));
         Assert.That(options.MaxBytesPerActor, Is.EqualTo(OneMb));           // 64 MiB layer / 128 actors, floored
         Assert.That(options.MaxEntriesPerActor, Is.EqualTo(2_048));
     }
@@ -156,12 +156,12 @@ public sealed class TestMemoryProfile
         EmbeddedKahunaOptionsBuilder.ApplyMemoryProportionalDefaults(
             options, new KahunaOptionsConfig(), machineMemoryBytes: 4096 * OneMb, managedHeapBytes: 2458 * OneMb, raftLogFlushUnitFloor: true);
 
-        Assert.That(options.RocksDbSharedMemoryBudgetMb, Is.EqualTo(409));   // 10% of the container
-        Assert.That(options.RocksDbSharedMemtableBudgetMb, Is.EqualTo(192)); // the flush unit, not 102 or 61
+        Assert.That(options.StorageSharedCacheMb, Is.EqualTo(409));   // 10% of the container
+        Assert.That(options.StorageSharedMemtableBudgetMb, Is.EqualTo(192)); // the flush unit, not 102 or 61
         Assert.That(options.MaxBytesPerActor, Is.EqualTo(2458 * OneMb / 16 / 32)); // 6.25% of the HEAP, split
 
         // The exact comparison Kommander's RocksDbWAL makes at open; below it, it logs the warning.
-        Assert.That((long)options.RocksDbSharedMemtableBudgetMb * OneMb,
+        Assert.That((long)options.StorageSharedMemtableBudgetMb * OneMb,
             Is.GreaterThanOrEqualTo(EmbeddedKahunaOptionsBuilder.RaftLogFlushUnitHeadroomBytes(options)));
     }
 
@@ -180,20 +180,20 @@ public sealed class TestMemoryProfile
         reference.KeyValueWorkers = 32;
         EmbeddedKahunaOptionsBuilder.ApplyMemoryProportionalDefaults(
             reference, new KahunaOptionsConfig(), machineMemoryBytes: 4096 * OneMb, managedHeapBytes: 2458 * OneMb);
-        Assert.That(reference.RocksDbSharedMemoryBudgetMb, Is.EqualTo(409));
-        Assert.That(reference.RocksDbSharedMemtableBudgetMb, Is.EqualTo(192));
+        Assert.That(reference.StorageSharedCacheMb, Is.EqualTo(409));
+        Assert.That(reference.StorageSharedMemtableBudgetMb, Is.EqualTo(192));
 
         // The gate can still be turned off per call (the test seam), which restores the quarter.
         EmbeddedKahunaOptions gatedOff = EmbeddedKahunaOptionsBuilder.StandaloneRocksDbBaseline("/tmp/mem-shipped-off");
         gatedOff.KeyValueWorkers = 32;
         EmbeddedKahunaOptionsBuilder.ApplyMemoryProportionalDefaults(
             gatedOff, new KahunaOptionsConfig(), machineMemoryBytes: 4096 * OneMb, managedHeapBytes: 2458 * OneMb, raftLogFlushUnitFloor: false);
-        Assert.That(gatedOff.RocksDbSharedMemtableBudgetMb, Is.EqualTo(102));
+        Assert.That(gatedOff.StorageSharedMemtableBudgetMb, Is.EqualTo(102));
 
         EmbeddedKahunaOptions heapOnly = EmbeddedKahunaOptionsBuilder.StandaloneRocksDbBaseline("/tmp/mem-shipped-heap");
         heapOnly.KeyValueWorkers = 32;
         EmbeddedKahunaOptionsBuilder.ApplyMemoryProportionalDefaults(heapOnly, new KahunaOptionsConfig(), 2458 * OneMb);
-        Assert.That(heapOnly.RocksDbSharedMemtableBudgetMb, Is.EqualTo(122));
+        Assert.That(heapOnly.StorageSharedMemtableBudgetMb, Is.EqualTo(122));
 
         Assert.That(EmbeddedKahunaOptionsBuilder.RaftLogFlushUnitFloorMb(reference), Is.EqualTo(192));
     }
@@ -209,9 +209,9 @@ public sealed class TestMemoryProfile
 
         EmbeddedKahunaOptionsBuilder.ApplyMemoryProportionalDefaults(options, new KahunaOptionsConfig(), 2458 * OneMb, raftLogFlushUnitFloor: true);
 
-        Assert.That(options.RocksDbSharedMemoryBudgetMb, Is.EqualTo(245));
-        Assert.That(options.RocksDbSharedMemtableBudgetMb, Is.EqualTo(122));
-        Assert.That(options.RocksDbSharedMemtableBudgetMb, Is.Not.EqualTo(61));
+        Assert.That(options.StorageSharedCacheMb, Is.EqualTo(245));
+        Assert.That(options.StorageSharedMemtableBudgetMb, Is.EqualTo(122));
+        Assert.That(options.StorageSharedMemtableBudgetMb, Is.Not.EqualTo(61));
     }
 
     [Test]
@@ -225,9 +225,9 @@ public sealed class TestMemoryProfile
 
         EmbeddedKahunaOptionsBuilder.ApplyMemoryProportionalDefaults(options, new KahunaOptionsConfig(), 1536 * OneMb, raftLogFlushUnitFloor: true);
 
-        Assert.That(options.RocksDbSharedMemoryBudgetMb, Is.EqualTo(153));
-        Assert.That(options.RocksDbSharedMemtableBudgetMb, Is.EqualTo(76));
-        Assert.That(options.RocksDbSharedMemtableBudgetMb, Is.LessThanOrEqualTo(options.RocksDbSharedMemoryBudgetMb));
+        Assert.That(options.StorageSharedCacheMb, Is.EqualTo(153));
+        Assert.That(options.StorageSharedMemtableBudgetMb, Is.EqualTo(76));
+        Assert.That(options.StorageSharedMemtableBudgetMb, Is.LessThanOrEqualTo(options.StorageSharedCacheMb));
     }
 
     [Test]
@@ -239,17 +239,17 @@ public sealed class TestMemoryProfile
         narrow.RaftWalShardWriteBufferSizeMb = 32;
         narrow.RaftWalShardMinWriteBufferNumberToMerge = 3;
         EmbeddedKahunaOptionsBuilder.ApplyMemoryProportionalDefaults(narrow, new KahunaOptionsConfig(), 4096 * OneMb, raftLogFlushUnitFloor: true);
-        Assert.That(narrow.RocksDbSharedMemtableBudgetMb, Is.EqualTo(128)); // 32 x 4
+        Assert.That(narrow.StorageSharedMemtableBudgetMb, Is.EqualTo(128)); // 32 x 4
 
         EmbeddedKahunaOptions wide = EmbeddedKahunaOptionsBuilder.StandaloneRocksDbBaseline("/tmp/mem-floor-wide");
         wide.RaftWalShardWriteBufferSizeMb = 128;
         EmbeddedKahunaOptionsBuilder.ApplyMemoryProportionalDefaults(wide, new KahunaOptionsConfig(), 4096 * OneMb, raftLogFlushUnitFloor: true);
-        Assert.That(wide.RocksDbSharedMemtableBudgetMb, Is.EqualTo(204));   // 384 wanted, half of 409 allowed
+        Assert.That(wide.StorageSharedMemtableBudgetMb, Is.EqualTo(204));   // 384 wanted, half of 409 allowed
 
         // Where the proportional share already covers the unit, the floor is inert.
         EmbeddedKahunaOptions large = EmbeddedKahunaOptionsBuilder.StandaloneRocksDbBaseline("/tmp/mem-floor-large");
         EmbeddedKahunaOptionsBuilder.ApplyMemoryProportionalDefaults(large, new KahunaOptionsConfig(), 16L * 1024 * OneMb, raftLogFlushUnitFloor: true);
-        Assert.That(large.RocksDbSharedMemtableBudgetMb, Is.EqualTo(409));  // a quarter of 1638
+        Assert.That(large.StorageSharedMemtableBudgetMb, Is.EqualTo(409));  // a quarter of 1638
     }
 
     [Test]
@@ -259,24 +259,24 @@ public sealed class TestMemoryProfile
         // budget is ignored, so there is nothing to floor: the quarter-of-the-cache default stands.
         EmbeddedKahunaOptions sqlite = EmbeddedKahunaOptionsBuilder.StandaloneBaseline("/tmp/mem-floor-sqlite");
         EmbeddedKahunaOptionsBuilder.ApplyMemoryProportionalDefaults(sqlite, new KahunaOptionsConfig(), 4096 * OneMb, raftLogFlushUnitFloor: true);
-        Assert.That(sqlite.RocksDbSharedMemtableBudgetMb, Is.EqualTo(102));
+        Assert.That(sqlite.StorageSharedMemtableBudgetMb, Is.EqualTo(102));
 
         EmbeddedKahunaOptions unshared = EmbeddedKahunaOptionsBuilder.StandaloneRocksDbBaseline("/tmp/mem-floor-unshared");
         unshared.RocksDbSharedMemoryEnabled = false;
         EmbeddedKahunaOptionsBuilder.ApplyMemoryProportionalDefaults(unshared, new KahunaOptionsConfig(), 4096 * OneMb, raftLogFlushUnitFloor: true);
-        Assert.That(unshared.RocksDbSharedMemtableBudgetMb, Is.EqualTo(102));
+        Assert.That(unshared.StorageSharedMemtableBudgetMb, Is.EqualTo(102));
     }
 
     [Test]
     public void ExplicitMemtableBudgetBeatsTheFlushUnitFloor()
     {
         EmbeddedKahunaOptions options = EmbeddedKahunaOptionsBuilder.StandaloneRocksDbBaseline("/tmp/mem-floor-explicit");
-        options.RocksDbSharedMemtableBudgetMb = 64;
+        options.StorageSharedMemtableBudgetMb = 64;
 
         EmbeddedKahunaOptionsBuilder.ApplyMemoryProportionalDefaults(
             options, new KahunaOptionsConfig { RocksdbSharedMemtableBudgetMb = 64 }, 4096 * OneMb, raftLogFlushUnitFloor: true);
 
-        Assert.That(options.RocksDbSharedMemtableBudgetMb, Is.EqualTo(64));
+        Assert.That(options.StorageSharedMemtableBudgetMb, Is.EqualTo(64));
     }
 
     [Test]
@@ -293,10 +293,10 @@ public sealed class TestMemoryProfile
                 new ConfigDefinition { DataDir = "/tmp/mem-floor-cluster" }, CamusDBOptions.Default);
 
             long unit = EmbeddedKahunaOptionsBuilder.RaftLogFlushUnitHeadroomBytes(built);
-            Assert.That(built.RocksDbSharedMemtableBudgetMb, Is.LessThanOrEqualTo(built.RocksDbSharedMemoryBudgetMb));
+            Assert.That(built.StorageSharedMemtableBudgetMb, Is.LessThanOrEqualTo(built.StorageSharedCacheMb));
 
-            if (built.RocksDbSharedMemoryBudgetMb / 2 * OneMb >= unit)
-                Assert.That((long)built.RocksDbSharedMemtableBudgetMb * OneMb, Is.GreaterThanOrEqualTo(unit));
+            if (built.StorageSharedCacheMb / 2 * OneMb >= unit)
+                Assert.That((long)built.StorageSharedMemtableBudgetMb * OneMb, Is.GreaterThanOrEqualTo(unit));
         }
         finally
         {
@@ -312,7 +312,7 @@ public sealed class TestMemoryProfile
         EmbeddedKahunaOptions dev = EmbeddedKahunaOptionsBuilder.BuildCluster(
             new ConfigDefinition { DataDir = "/tmp/mem-floor-dev" }, CamusDBOptions.Default with { MemoryProfile = MemoryProfile.Dev });
 
-        Assert.That(dev.RocksDbSharedMemtableBudgetMb, Is.EqualTo(16));
+        Assert.That(dev.StorageSharedMemtableBudgetMb, Is.EqualTo(16));
     }
 
     [Test]
@@ -342,14 +342,14 @@ public sealed class TestMemoryProfile
         EmbeddedKahunaOptions dev = EmbeddedKahunaOptionsBuilder.BuildStandaloneRocksDb(
             "/tmp/mem-profile-dev-cmp", new KahunaOptionsConfig(), CamusDBOptions.Default with { MemoryProfile = MemoryProfile.Dev });
 
-        Assert.That(dev.RocksDbSharedMemoryBudgetMb, Is.LessThan(prod.RocksDbSharedMemoryBudgetMb));
-        Assert.That(dev.RocksDbSharedMemtableBudgetMb, Is.LessThan(prod.RocksDbSharedMemtableBudgetMb));
+        Assert.That(dev.StorageSharedCacheMb, Is.LessThan(prod.StorageSharedCacheMb));
+        Assert.That(dev.StorageSharedMemtableBudgetMb, Is.LessThan(prod.StorageSharedMemtableBudgetMb));
         Assert.That(dev.MaxBytesPerActor, Is.LessThan(prod.MaxBytesPerActor));
         Assert.That(dev.MaxEntriesPerActor, Is.LessThan(prod.MaxEntriesPerActor));
 
         // The pair the shared-bundle builder validates must stay consistent, or the node fails to boot
         // on the profile that is meant to be the easy one to run.
-        Assert.That(dev.RocksDbSharedMemtableBudgetMb, Is.LessThanOrEqualTo(dev.RocksDbSharedMemoryBudgetMb));
+        Assert.That(dev.StorageSharedMemtableBudgetMb, Is.LessThanOrEqualTo(dev.StorageSharedCacheMb));
     }
 
     [Test]
@@ -366,8 +366,8 @@ public sealed class TestMemoryProfile
         EmbeddedKahunaOptions built = EmbeddedKahunaOptionsBuilder.BuildStandaloneRocksDb(
             "/tmp/mem-profile-explicit", kahuna, CamusDBOptions.Default with { MemoryProfile = MemoryProfile.Dev });
 
-        Assert.That(built.RocksDbSharedMemoryBudgetMb, Is.EqualTo(512));
-        Assert.That(built.RocksDbSharedMemtableBudgetMb, Is.EqualTo(200));
+        Assert.That(built.StorageSharedCacheMb, Is.EqualTo(512));
+        Assert.That(built.StorageSharedMemtableBudgetMb, Is.EqualTo(200));
         Assert.That(built.MaxBytesPerActor, Is.EqualTo(256 * OneMb));
         Assert.That(built.MaxEntriesPerActor, Is.EqualTo(50_000));
     }

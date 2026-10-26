@@ -76,6 +76,17 @@ internal partial class sqlParser
     }
 
     /// <summary>
+    /// USAGE in <c>SHOW INDEX USAGE</c> is a plain identifier, so the parse action is what pins the
+    /// word; anything else after <c>SHOW INDEX</c> is told the two accepted forms.
+    /// </summary>
+    private static void RequireIndexUsageWord(string? word)
+    {
+        if (!string.Equals(word, "usage", StringComparison.OrdinalIgnoreCase))
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInput, "Expected: SHOW INDEX USAGE [FROM <table>] or SHOW INDEX FROM <table>");
+    }
+
+    /// <summary>
     /// Validates the word that opens a <c>FLUSH</c> statement. FLUSH is matched as a plain identifier
     /// so the word stays usable as a table and column name, which means a typo reaches this action
     /// rather than the tokenizer and carries no positional hint of its own — hence the message names

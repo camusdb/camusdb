@@ -456,6 +456,131 @@ public sealed class KvTransaction
     }
 
     /// <summary>
+    /// The read timestamp of the SELECT statement this transaction runs now, held in one object so a
+    /// reader gets the timestamp and the decision to use it in one read. Null when no statement
+    /// snapshot is open.
+    /// </summary>
+    private sealed class StatementSnapshot(HLCTimestamp timestamp)
+    {
+        public HLCTimestamp Timestamp { get; } = timestamp;
+    }
+
+    private StatementSnapshot? statementSnapshot;
+
+    /// <summary>
+    /// True for a transaction begun with <see cref="KvTransactionsManager.BeginAsync"/>. Only such a
+    /// transaction reads each Read Committed SELECT at one statement timestamp. The zero-identity
+    /// transaction of an autocommit SELECT (<see cref="CreateReadOnly"/>) keeps reading the latest
+    /// committed value of each key.
+    /// </summary>
+    public bool UsesStatementSnapshots { get; private set; }
+
+    /// <summary>
+    /// The causal token the client passed when it began the transaction, or Zero. Every statement
+    /// timestamp of the transaction is at least this value.
+    ///
+    /// <para>A statement timestamp comes from the local HLC, and Kahuna does not show a value committed
+    /// at a later HLC time to a read at an earlier one. A client that commits through one node and then
+    /// begins a transaction on a node whose clock is behind would therefore not see its own commit. The
+    /// commit's causal token, passed at begin, closes that gap.</para>
+    /// </summary>
+    public HLCTimestamp CausalFloor { get; private set; }
+
+    /// <summary>
+    /// Marks the transaction as one whose Read Committed SELECT statements read at a statement
+    /// timestamp, with <paramref name="causalFloor"/> as the lowest timestamp. Called once, by
+    /// <see cref="KvTransactionsManager.BeginAsync"/>, before the transaction is returned.
+    /// </summary>
+    internal void EnableStatementSnapshots(HLCTimestamp causalFloor)
+    {
+        UsesStatementSnapshots = true;
+        CausalFloor = causalFloor;
+    }
+
+    /// <summary>
+    /// True when the next SELECT statement of this transaction must read at a statement timestamp: a
+    /// transaction begun with <see cref="KvTransactionsManager.BeginAsync"/>, at Read Committed, with no
+    /// fixed <see cref="ReadTimestamp"/>, that does not validate its reads at commit. Read at the start
+    /// of each statement, because <c>SET TRANSACTION</c> can change the level or the locking before the
+    /// first one.
+    ///
+    /// <para><b>Why a validating transaction is left out.</b> An optimistic or
+    /// <see cref="ReadValidation.TrackAndValidate"/> transaction folds every read into its read set, so
+    /// its commit is refused when a value it read changed; it cannot commit on a torn read. Its reads keep
+    /// the transaction's read pins, and the pin is what lets Kahuna abort a lost update at the statement
+    /// that writes the changed row, early, instead of at commit.</para>
+    /// </summary>
+    public bool TakesStatementSnapshot =>
+        UsesStatementSnapshots &&
+        IsolationLevel == CamusIsolationLevel.ReadCommitted &&
+        ReadTimestamp.IsNull() &&
+        Locking != KeyValueTransactionLocking.Optimistic &&
+        ReadValidation != ReadValidation.TrackAndValidate;
+
+    /// <summary>
+    /// Opens the statement snapshot of one SELECT statement at <paramref name="timestamp"/>, and returns
+    /// the token that <see cref="EndStatementSnapshot"/> takes to close it. Replaces a snapshot an earlier
+    /// statement left open.
+    /// </summary>
+    internal object BeginStatementSnapshot(HLCTimestamp timestamp)
+    {
+        StatementSnapshot snapshot = new(timestamp);
+        Volatile.Write(ref statementSnapshot, snapshot);
+        return snapshot;
+    }
+
+    /// <summary>
+    /// Closes the statement snapshot that <paramref name="token"/> opened. A no-op when a later statement
+    /// already replaced or cleared it, so the end of one cursor never closes the snapshot of the
+    /// statement after it.
+    /// </summary>
+    internal void EndStatementSnapshot(object token) =>
+        Interlocked.CompareExchange(ref statementSnapshot, null, token as StatementSnapshot);
+
+    /// <summary>
+    /// The timestamp and read mode a <b>query</b> read of this transaction uses: a point read, a batched
+    /// probe, a scan or a large-value fetch issued by a SELECT.
+    ///
+    /// <list type="bullet">
+    ///   <item>A fixed <see cref="ReadTimestamp"/> (a Serializable read-only snapshot, AS OF SYSTEM TIME)
+    ///   wins, in the default mode.</item>
+    ///   <item>Otherwise, while a statement snapshot is open, the statement timestamp in
+    ///   <see cref="KeyValueReadMode.StatementSnapshot"/>: Kahuna shows the transaction's own staged writes,
+    ///   serves every other key as committed at the timestamp, and neither serves nor leaves a read pin.
+    ///   Each statement then reads one consistent view, and a later statement sees later commits.</item>
+    ///   <item>Otherwise Zero in the default mode: the latest committed value.</item>
+    /// </list>
+    ///
+    /// <para>The pair comes from one read of the snapshot, so a concurrent close cannot pair a statement
+    /// timestamp with the default mode, which would hide the transaction's own writes.</para>
+    ///
+    /// <para><b>Not for a write path.</b> A lock-then-read, a uniqueness check or a foreign-key check must
+    /// read the latest value, or it can miss a commit that landed after the statement timestamp. Such a
+    /// path uses <see cref="LatestReadView"/>. The statement snapshot is open only while a SELECT runs:
+    /// <see cref="MarkStatementExecuted"/> closes it when any other statement starts.</para>
+    /// </summary>
+    public KvReadView QueryReadView
+    {
+        get
+        {
+            if (!ReadTimestamp.IsNull())
+                return new KvReadView(ReadTimestamp, KeyValueReadMode.Default);
+
+            StatementSnapshot? snapshot = Volatile.Read(ref statementSnapshot);
+            return snapshot is null
+                ? new KvReadView(HLCTimestamp.Zero, KeyValueReadMode.Default)
+                : new KvReadView(snapshot.Timestamp, KeyValueReadMode.StatementSnapshot);
+        }
+    }
+
+    /// <summary>
+    /// The timestamp and read mode of a read that must see the latest committed value whatever statement
+    /// runs: <see cref="ReadTimestamp"/> (Zero for every transaction that can write) in the default mode.
+    /// See <see cref="QueryReadView"/>.
+    /// </summary>
+    public KvReadView LatestReadView => new(ReadTimestamp, KeyValueReadMode.Default);
+
+    /// <summary>
     /// Monotonic elapsed-time counter started when the Kahuna coordinator session begins. Used to
     /// enforce <see cref="CamusDBOptions.MaxSerializableTransactionLifetimeMs"/> — immune to NTP
     /// wall-clock jumps, consistent with the monotonic lock-wait deadline used elsewhere in the
@@ -695,6 +820,10 @@ public sealed class KvTransaction
         // No lock needed: a bool write is atomic on all .NET-supported architectures, and the
         // flag only transitions false→true (never back), so a torn read is harmless.
         statementExecuted = true;
+
+        // A new statement starts: the statement snapshot of an earlier SELECT no longer applies. A
+        // SELECT opens its own after this call.
+        Volatile.Write(ref statementSnapshot, null);
     }
 
     /// <summary>
