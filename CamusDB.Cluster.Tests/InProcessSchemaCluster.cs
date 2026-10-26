@@ -43,13 +43,129 @@ public sealed class InProcessSchemaCluster : IAsyncDisposable
 
     private readonly FaultInjectingCommunication faultComm;
 
-    private InProcessSchemaCluster(Node[] nodes, FaultInjectingCommunication faultComm)
+    private readonly BuildContext buildContext;
+
+    // Replaced, never mutated, when a node joins: a caller that holds the array keeps a consistent view.
+    private Node[] nodes;
+
+    private InProcessSchemaCluster(Node[] nodes, FaultInjectingCommunication faultComm, BuildContext buildContext)
     {
-        Nodes = nodes;
+        this.nodes = nodes;
         this.faultComm = faultComm;
+        this.buildContext = buildContext;
     }
 
-    public Node[] Nodes { get; }
+    /// <summary>The cluster's nodes in the order they started or joined. A node's index is its position here.</summary>
+    public Node[] Nodes => Volatile.Read(ref nodes);
+
+    /// <summary>
+    /// What <see cref="StartAsync"/> built the cluster with, kept so that <see cref="JoinNodeAsync"/> builds a
+    /// joining node the same way: the same transports, configuration and per-node hooks.
+    /// </summary>
+    private sealed record BuildContext(
+        MemoryInterNodeCommmunication InterNode,
+        InProcessClusterNodes Registry,
+        InProcessSchemaDdlForwarder SchemaTransport,
+        InProcessSchemaDdlForwarder? Forwarder,
+        RecordingFragmentTransport FragmentTransport,
+        int PortBase,
+        string ClusterId,
+        int Partitions,
+        ILoggerFactory LoggerFactory,
+        ILogger<ICamusDB> Logger,
+        CamusDBOptions Options,
+        Action<EmbeddedKahunaOptions>? ConfigureNode,
+        Func<int, CamusDBOptions, CamusDBOptions>? ConfigureNodeOptions);
+
+    /// <summary>Wraps a started embedded node in an executor and registers it with the shared in-process transports.</summary>
+    private static Node BuildNode(int index, EmbeddedKahuna kahuna, BuildContext context)
+    {
+        // A test that needs nodes to differ (one node without an extension, say) states it here; the
+        // default is the same configuration everywhere.
+        CamusDBOptions nodeOptions = context.ConfigureNodeOptions?.Invoke(index, context.Options) ?? context.Options;
+        CommandValidator validator = new(nodeOptions);
+        CatalogsManager catalogs = new(context.Logger);
+        CommandExecutor executor = new(
+            validator,
+            catalogs,
+            context.Logger, nodeOptions,
+            sharedNode: kahuna,
+            schemaDdlForwarder: context.Forwarder,
+            isClusterMode: true,
+            fragmentTransport: context.FragmentTransport
+        );
+
+        context.Registry.Register(kahuna, executor);
+
+        return new Node(index, kahuna, executor);
+    }
+
+    /// <summary>
+    /// Starts one more node and joins it to the running cluster through Kommander's membership protocol:
+    /// the node is built with <c>JoinExistingSeeds</c> naming the first node, enters the roster as a
+    /// learner, and <c>StartAsync</c> returns once it is promoted to voter and its partitions have
+    /// leaders. It gets the data the cluster already holds by log replay or snapshot, as a server that
+    /// starts with <c>join_existing: true</c> does. The caller opens a database on it with
+    /// <see cref="OpenDatabaseOnNodeAsync"/>.
+    ///
+    /// <para>Up to nine nodes can join one cluster: <see cref="StartAsync"/> reserves that many ports
+    /// past the starting nodes.</para>
+    /// </summary>
+    public async Task<Node> JoinNodeAsync(TimeSpan? timeout = null)
+    {
+        Node[] current = Nodes;
+        int index = current.Length;
+        BuildContext context = buildContext;
+
+        List<RaftNode> peers = [.. current.Select(n => new RaftNode(n.Kahuna.Raft.GetLocalEndpoint()))];
+        string seed = current[0].Kahuna.Raft.GetLocalEndpoint();
+
+        EmbeddedKahuna kahuna = CreateClusterNode(
+            nodeName: $"schema-{context.ClusterId}-{index + 1}",
+            nodeId: index + 1,
+            port: context.PortBase + index + 1,
+            peers: peers,
+            partitions: context.Partitions,
+            raftCommunication: faultComm,
+            interNode: context.InterNode,
+            loggerFactory: context.LoggerFactory,
+            configureNode: options =>
+            {
+                context.ConfigureNode?.Invoke(options);
+                options.JoinExistingSeeds = [seed];
+            }
+        );
+
+        EmbeddedKahuna[] all = [.. current.Select(n => n.Kahuna), kahuna];
+        faultComm.SetNodes(all.ToDictionary(node => node.Raft.GetLocalEndpoint(), node => node.Raft));
+        context.InterNode.SetNodes(all.ToDictionary(node => node.Raft.GetLocalEndpoint(), node => node.Kahuna));
+
+        try
+        {
+            await kahuna.StartAsync(CancellationToken.None)
+                .WaitAsync(timeout ?? TimeSpan.FromSeconds(90))
+                .ConfigureAwait(false);
+        }
+        catch
+        {
+            await kahuna.DisposeAsync().ConfigureAwait(false);
+            throw;
+        }
+
+        kahuna.SetSchemaAckForwarder(context.SchemaTransport);
+
+        Node node = BuildNode(index, kahuna, context);
+        Volatile.Write(ref nodes, [.. current, node]);
+        return node;
+    }
+
+    /// <summary>Opens an existing database on one node, as <see cref="OpenDatabaseOnAllNodesAsync"/> does on each.</summary>
+    public async Task OpenDatabaseOnNodeAsync(int nodeIndex, string databaseName)
+    {
+        ValidateNodeIndex(nodeIndex);
+        Node node = Nodes[nodeIndex];
+        node.Database = await node.Executor.OpenDatabase(databaseName).ConfigureAwait(false);
+    }
 
     /// <summary>The in-process fragment channel shared by every node; set by StartAsync.</summary>
     internal RecordingFragmentTransport? FragmentTransport { get; set; }
@@ -177,31 +293,16 @@ public sealed class InProcessSchemaCluster : IAsyncDisposable
             // distribution flag is off in most fixtures, so this is inert for them).
             RecordingFragmentTransport fragmentTransport = new(new InProcessQueryFragmentTransport(registry));
 
+            BuildContext context = new(
+                interNode, registry, schemaTransport, forwarder, fragmentTransport,
+                portBase, clusterId, partitions, loggerFactory, logger, effective,
+                configureNode, configureNodeOptions);
+
             Node[] nodes = kahunaNodes
-                .Select((kahuna, index) =>
-                {
-                    // A test that needs nodes to differ (one node without an extension, say) states
-                    // it here; the default is the same configuration everywhere.
-                    CamusDBOptions nodeOptions = configureNodeOptions?.Invoke(index, effective) ?? effective;
-                    CommandValidator validator = new(nodeOptions);
-                    CatalogsManager catalogs = new(logger);
-                    CommandExecutor executor = new(
-                        validator,
-                        catalogs,
-                        logger, nodeOptions,
-                        sharedNode: kahuna,
-                        schemaDdlForwarder: forwarder,
-                        isClusterMode: true,
-                        fragmentTransport: fragmentTransport
-                    );
-
-                    registry.Register(kahuna, executor);
-
-                    return new Node(index, kahuna, executor);
-                })
+                .Select((kahuna, index) => BuildNode(index, kahuna, context))
                 .ToArray();
 
-            InProcessSchemaCluster cluster = new(nodes, faultComm);
+            InProcessSchemaCluster cluster = new(nodes, faultComm, context);
             cluster.FragmentTransport = fragmentTransport;
             created = cluster;
             return cluster;

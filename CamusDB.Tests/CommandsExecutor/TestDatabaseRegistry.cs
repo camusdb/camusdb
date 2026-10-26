@@ -96,14 +96,14 @@ internal sealed class TestDatabaseRegistry
 
         public override Task<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> LocateAndTryGetValue(
             HLCTimestamp transactionId, string key, long revision, HLCTimestamp readTimestamp, KeyValueDurability durability,
-            CancellationToken cancellationToken, string coordinatorKey = "", TransactionOperationId operationId = default)
+            CancellationToken cancellationToken, string coordinatorKey = "", TransactionOperationId operationId = default, KeyValueReadMode readMode = KeyValueReadMode.Default)
         {
             bool generation = key.EndsWith("dbregistry/generation", StringComparison.Ordinal);
             if (Refuse && (RefuseGenerationReads || !generation))
                 throw new RpcException(new Status(StatusCode.Unavailable, "Error connecting to subchannel.",
                     new SocketException((int)SocketError.ConnectionRefused)));
 
-            return base.LocateAndTryGetValue(transactionId, key, revision, readTimestamp, durability, cancellationToken, coordinatorKey, operationId);
+            return base.LocateAndTryGetValue(transactionId, key, revision, readTimestamp, durability, cancellationToken, coordinatorKey, operationId, readMode);
         }
     }
 
@@ -886,11 +886,11 @@ internal sealed class TestDatabaseRegistry
             HLCTimestamp txId, string prefix, string? startKey, bool startInclusive, string? endKey, bool endInclusive,
             int pageSize, HLCTimestamp readTimestamp, KeyValueDurability durability,
             [EnumeratorCancellation] CancellationToken ct,
-            string coordinatorKey = "", TransactionOperationId operationId = default, KeyValueScanObservationSink? observations = null)
+            string coordinatorKey = "", TransactionOperationId operationId = default, KeyValueScanObservationSink? observations = null, KeyValueReadMode readMode = KeyValueReadMode.Default)
         {
             await foreach ((string key, ReadOnlyKeyValueEntry entry) in base.LocateAndScanRange(
                 txId, prefix, startKey, startInclusive, endKey, endInclusive, pageSize, readTimestamp,
-                durability, ct, coordinatorKey, operationId, observations))
+                durability, ct, coordinatorKey, operationId, observations, readMode))
             {
                 // The inner scan already read this entry; the pause sits between that read and the
                 // registry consuming it.
@@ -904,10 +904,10 @@ internal sealed class TestDatabaseRegistry
         public override async Task<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> LocateAndTryGetValue(
             HLCTimestamp transactionId, string key, long revision, HLCTimestamp readTimestamp,
             KeyValueDurability durability, CancellationToken cancellationToken,
-            string coordinatorKey = "", TransactionOperationId operationId = default)
+            string coordinatorKey = "", TransactionOperationId operationId = default, KeyValueReadMode readMode = KeyValueReadMode.Default)
         {
             (KeyValueResponseType, ReadOnlyKeyValueEntry?) result = await base.LocateAndTryGetValue(
-                transactionId, key, revision, readTimestamp, durability, cancellationToken, coordinatorKey, operationId);
+                transactionId, key, revision, readTimestamp, durability, cancellationToken, coordinatorKey, operationId, readMode);
 
             // Pause AFTER the read so the caller holds a copy that a concurrent delete then outdates.
             if (!gateScan)

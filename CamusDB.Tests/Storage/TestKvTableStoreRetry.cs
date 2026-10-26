@@ -111,13 +111,13 @@ public sealed class TestKvTableStoreRetry
         // ---- intercepted: single-key get ----
         public override Task<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> LocateAndTryGetValue(
             HLCTimestamp txId, string key, long revision, HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken ct,
-            string coordinatorKey = "", TransactionOperationId operationId = default)
+            string coordinatorKey = "", TransactionOperationId operationId = default, KeyValueReadMode readMode = KeyValueReadMode.Default)
         {
             if (InjectGetValueFaults-- > 0)
                 return Task.FromResult<(KeyValueResponseType, ReadOnlyKeyValueEntry?)>((KeyValueResponseType.MustRetry, null));
             if (InjectGetValueTerminalFaults-- > 0)
                 return Task.FromResult<(KeyValueResponseType, ReadOnlyKeyValueEntry?)>((GetValueTerminalType, null));
-            return inner.LocateAndTryGetValue(txId, key, revision, readTimestamp, durability, ct, coordinatorKey, operationId);
+            return inner.LocateAndTryGetValue(txId, key, revision, readTimestamp, durability, ct, coordinatorKey, operationId, readMode);
         }
 
         // ---- intercepted: single-key get, non-confirmed terminal answer ----
@@ -142,7 +142,7 @@ public sealed class TestKvTableStoreRetry
         // whichever Kahuna call the path issues.
         public override Task<KeyValueProbeResult[]> LocateAndTryProbeMany(
             HLCTimestamp txId, HLCTimestamp readTimestamp, IReadOnlyList<string> keys, KeyValueProbeLock lockMode, int expiresMs,
-            KeyValueDurability durability, CancellationToken ct, string coordinatorKey = "", TransactionOperationId operationId = default)
+            KeyValueDurability durability, CancellationToken ct, string coordinatorKey = "", TransactionOperationId operationId = default, KeyValueReadMode readMode = KeyValueReadMode.Default)
         {
             GetManyCalls++;
 
@@ -155,7 +155,7 @@ public sealed class TestKvTableStoreRetry
             if (InjectGetManyAbortedFaults-- > 0)
                 return Task.FromResult(keys.Select(_ => new KeyValueProbeResult(KeyValueResponseType.Aborted, null, HLCTimestamp.Zero, false)).ToArray());
 
-            return inner.LocateAndTryProbeMany(txId, readTimestamp, keys, lockMode, expiresMs, durability, ct, coordinatorKey, operationId);
+            return inner.LocateAndTryProbeMany(txId, readTimestamp, keys, lockMode, expiresMs, durability, ct, coordinatorKey, operationId, readMode);
         }
 
         public override Task<List<(KeyValueResponseType, string, KeyValueDurability, ReadOnlyKeyValueEntry?)>> LocateAndTryGetManyValues(

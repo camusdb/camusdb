@@ -69,20 +69,20 @@ internal sealed class TestRegistryRevalidationCost : BaseTest
         public override IAsyncEnumerable<(string Key, ReadOnlyKeyValueEntry Entry)> LocateAndScanRange(
             HLCTimestamp txId, string prefix, string? startKey, bool startInclusive, string? endKey,
             bool endInclusive, int pageSize, HLCTimestamp readTimestamp, KeyValueDurability durability,
-            CancellationToken ct, string coordinatorKey = "", TransactionOperationId operationId = default, KeyValueScanObservationSink? observations = null)
+            CancellationToken ct, string coordinatorKey = "", TransactionOperationId operationId = default, KeyValueScanObservationSink? observations = null, KeyValueReadMode readMode = KeyValueReadMode.Default)
         {
             if (string.Equals(prefix, registryBucket, StringComparison.Ordinal))
                 Interlocked.Increment(ref RegistryScans);
 
             return base.LocateAndScanRange(
                 txId, prefix, startKey, startInclusive, endKey, endInclusive, pageSize,
-                readTimestamp, durability, ct, coordinatorKey, operationId, observations);
+                readTimestamp, durability, ct, coordinatorKey, operationId, observations, readMode);
         }
 
         public override Task<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> LocateAndTryGetValue(
             HLCTimestamp transactionId, string key, long revision, HLCTimestamp readTimestamp,
             KeyValueDurability durability, CancellationToken cancellationToken,
-            string coordinatorKey = "", TransactionOperationId operationId = default)
+            string coordinatorKey = "", TransactionOperationId operationId = default, KeyValueReadMode readMode = KeyValueReadMode.Default)
         {
             if (key.StartsWith(registryBucket + "/db:", StringComparison.Ordinal))
                 Interlocked.Increment(ref RegistryPointReads);
@@ -91,7 +91,7 @@ internal sealed class TestRegistryRevalidationCost : BaseTest
 
             return base.LocateAndTryGetValue(
                 transactionId, key, revision, readTimestamp, durability, cancellationToken,
-                coordinatorKey, operationId);
+                coordinatorKey, operationId, readMode);
         }
     }
 

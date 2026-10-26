@@ -48,7 +48,7 @@ Example: YAML `mode: cluster` with `--mode standalone` starts in standalone mode
 | `http_peers` | `--http-peers` | `[]` |
 | `extension_assemblies` | `--extension-assemblies` | `[]` (absolute paths of SAFE C# extensions; see [csharp-extensions.md](csharp-extensions.md)) |
 | `unsafe_extension_assemblies` | `--unsafe-extension-assemblies` | `[]` (absolute paths of extensions loaded without the SAFE check) |
-| `join_existing` | `--join-existing` | `false` |
+| `join_existing` | `--join-existing` | `false` (`true` joins a running cluster, with `peers` as the seed list; see [growing-a-one-node-cluster.md](growing-a-one-node-cluster.md)) |
 | `pitr_bootstrap_from` | `--pitr-bootstrap-from` | unset (see [backups-and-point-in-time-recovery.md](backups-and-point-in-time-recovery.md)) |
 | `pitr_bootstrap_target_time_ms` | `--pitr-bootstrap-target-time-ms` | `0` (the latest point the chain covers) |
 | `schema_ack_wait_timeout_ms` | `--schema-ack-wait-timeout-ms` | `30000` |
