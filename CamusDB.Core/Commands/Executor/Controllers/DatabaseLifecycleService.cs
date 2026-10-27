@@ -697,7 +697,7 @@ internal sealed class DatabaseLifecycleService
                 else
                 {
                     // Mark the drop in progress before unregistering so a crash during the (non-atomic,
-                    // per-key) keyspace purge below can be resumed at startup. The marker is owner-scoped
+                    // batched) keyspace purge below can be resumed at startup. The marker is owner-scoped
                     // and cleared only after the purge fully completes.
                     await registry.DropMarkers.MarkDroppingAsync(entry.Id).ConfigureAwait(false);
                 }

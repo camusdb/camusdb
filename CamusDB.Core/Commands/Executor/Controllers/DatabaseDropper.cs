@@ -29,7 +29,8 @@ internal sealed class DatabaseDropper
     // scan miss of a just-committed entry (delete is idempotent, so re-scanning is safe).
     private const int MaxPurgeScanRounds = 3;
 
-    // Bounded retries for a single key delete that returns a retryable (non-terminal) status.
+    // Bounded retries for a key delete, alone or inside a batch, that returns a retryable
+    // (non-terminal) status.
     private const int MaxDeleteRetries = 10;
 
     private readonly DatabaseDescriptors databaseDescriptors;
@@ -96,6 +97,96 @@ internal sealed class DatabaseDropper
 
             logger.LogWarning("Delete of key '{Key}' returned {Type}; purge treated as incomplete", key, type);
             return false;
+        }
+    }
+
+    /// <summary>
+    /// Deletes one scanned batch with a single delete-many call and returns how many of its keys reached
+    /// a terminal outcome (<see cref="KeyValueResponseType.Deleted"/> or
+    /// <see cref="KeyValueResponseType.DoesNotExist"/>). Keys answered with a retryable status
+    /// (<c>MustRetry</c> / <c>WaitingForReplication</c>), or not answered at all, are resent on their own
+    /// with bounded backoff. Any other status, an exhausted retry, or an exception leaves the key
+    /// unconfirmed, so the caller sees a short count, treats the batch as incomplete and keeps the
+    /// recovery markers — the same contract as <see cref="DeleteExactVerifiedAsync"/>.
+    ///
+    /// <para><b>One Raft round per batch, not per key.</b> A non-transactional persistent delete is its
+    /// own proposal: one partition write batch, one Raft round, one WAL fsync. Awaiting such deletes one
+    /// at a time never let the partition write aggregator coalesce them, so a purge paid that full round
+    /// for every key — about 5 ms each on a RocksDB node, or 100 s for a branch-built index over 20,000
+    /// rows. A delete-many call fans the whole batch out together, so the batch rides one round.</para>
+    /// </summary>
+    private async Task<int> DeleteBatchVerifiedAsync(IKahuna kahuna, List<string> keys, CancellationToken ct)
+    {
+        List<KahunaDeleteKeyValueRequestItem> pending = new(keys.Count);
+        foreach (string key in keys)
+            pending.Add(new KahunaDeleteKeyValueRequestItem { TransactionId = HLCTimestamp.Zero, Key = key, Durability = KeyValueDurability.Persistent });
+
+        int confirmed = 0;
+        int retries = 0;
+
+        while (true)
+        {
+            ct.ThrowIfCancellationRequested();
+
+            PurgeDeleteRoundTripsForTesting++;
+
+            List<KahunaDeleteKeyValueResponseItem> responses;
+            try
+            {
+                responses = await kahuna.LocateAndTryDeleteManyKeyValue(pending, ct).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                logger.LogWarning(ex, "Failed to delete a batch of {Count} key(s) during purge", pending.Count);
+                return confirmed;
+            }
+
+            // Answers are matched by key, not by position: the node merges the replies of every
+            // partition leader it fanned out to, so their order is not the request order. A key the
+            // reply does not name at all is resent like a retryable answer.
+            Dictionary<string, KahunaDeleteKeyValueRequestItem> unanswered = new(pending.Count, StringComparer.Ordinal);
+            foreach (KahunaDeleteKeyValueRequestItem item in pending)
+                unanswered[item.Key!] = item;
+
+            List<KahunaDeleteKeyValueRequestItem> retry = [];
+
+            foreach (KahunaDeleteKeyValueResponseItem response in responses)
+            {
+                if (response.Key is null || !unanswered.Remove(response.Key, out KahunaDeleteKeyValueRequestItem? item))
+                    continue;
+
+                if (response.Type is KeyValueResponseType.Deleted or KeyValueResponseType.DoesNotExist)
+                {
+                    confirmed++;
+                    continue;
+                }
+
+                if (response.Type is KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication)
+                {
+                    retry.Add(item);
+                    continue;
+                }
+
+                logger.LogWarning("Delete of key '{Key}' returned {Type}; purge treated as incomplete", response.Key, response.Type);
+            }
+
+            retry.AddRange(unanswered.Values);
+
+            if (retry.Count == 0)
+                return confirmed;
+
+            if (++retries >= MaxDeleteRetries)
+            {
+                logger.LogWarning("{Count} key(s) still unconfirmed after {Retries} delete retries; purge treated as incomplete", retry.Count, retries);
+                return confirmed;
+            }
+
+            await Task.Delay(retries * 10, ct).ConfigureAwait(false);
+            pending = retry;
         }
     }
 
@@ -268,9 +359,9 @@ internal sealed class DatabaseDropper
     /// resume can re-run this method from the id alone (no live descriptor, <c>safetyNetTables = null</c>)
     /// and is fully idempotent — already-deleted keys are harmless no-op deletes.</para>
     ///
-    /// Scan bucket = the string before the last '/' of the stored keys. Each key is deleted as a
-    /// standalone autocommit operation (HLCTimestamp.Zero). Errors are logged and skipped so a partial
-    /// failure never wedges the drop.
+    /// Scan bucket = the string before the last '/' of the stored keys. Each scanned batch is deleted
+    /// with one non-transactional delete-many call (HLCTimestamp.Zero), so a batch costs one Raft round
+    /// rather than one per key. Errors are logged and skipped so a partial failure never wedges the drop.
     /// </summary>
     internal async Task<bool> PurgeKeyspaceByIdAsync(IKahuna kahuna, string id, IReadOnlyList<TableSchema>? safetyNetTables, CancellationToken ct = default)
     {
@@ -731,6 +822,13 @@ internal sealed class DatabaseDropper
     internal static long EmptyPurgeScansForTesting;
 
     /// <summary>
+    /// Test-only: counts the delete-many round trips a purge issues. A test reads it next to
+    /// <see cref="PurgeBatchesForTesting"/> to prove a batch is deleted in one round trip, not in one
+    /// autocommit delete per key.
+    /// </summary>
+    internal static long PurgeDeleteRoundTripsForTesting;
+
+    /// <summary>
     /// Pairs a row or index key space with the stored-key prefix its members carry: the key space
     /// is what a scan addresses, and the prefix (the key space plus the <c>'/'</c> key-space
     /// separator) is what every stored key of that space starts with. Composed here, next to the
@@ -752,7 +850,9 @@ internal sealed class DatabaseDropper
     /// can span an entire database. The loop ends after <see cref="MaxPurgeScanRounds"/> consecutive
     /// scans make no progress (all-empty or all-failed), which also absorbs a transient scan miss; a
     /// batch that deletes nothing (persistent delete errors) counts as no-progress so the loop can't
-    /// spin. Each delete is an idempotent autocommit operation.
+    /// spin. Each batch is deleted with one delete-many call (<see cref="DeleteBatchVerifiedAsync"/>),
+    /// so the batch size also sets how many keys share one Raft round; every delete is an idempotent
+    /// autocommit operation, so a re-scan after a partial batch is safe.
     ///
     /// <para>The all-empty streak is the one that matters for correctness. Reporting a bucket drained
     /// is what lets the caller clear the recovery markers, and once they are gone nothing revisits the
@@ -822,10 +922,8 @@ internal sealed class DatabaseDropper
 
             PurgeBatchesForTesting++;
 
-            int deleted = 0;
-            foreach (string key in batch)
-                if (await DeleteExactVerifiedAsync(kahuna, key, ct).ConfigureAwait(false))
-                    deleted++;
+            // One delete-many call for the whole batch: one Raft round per batch, not one per key.
+            int deleted = await DeleteBatchVerifiedAsync(kahuna, batch, ct).ConfigureAwait(false);
 
             if (deleted == batch.Count)
             {

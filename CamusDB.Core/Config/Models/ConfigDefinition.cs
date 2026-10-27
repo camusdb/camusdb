@@ -1014,8 +1014,9 @@ public class ConfigDefinition
     public int RegistryGenerationLeaseMs { get; set; } = 250;
 
     /// <summary>
-    /// Max keys the non-transactional DROP DATABASE keyspace purge scans/deletes per batch. Must be
-    /// &gt;= 1. Default 512. Maps to <c>CamusDBOptions.KeyspacePurgeBatchSize</c>.
+    /// Max keys the non-transactional DROP DATABASE keyspace purge scans and deletes per batch, one
+    /// delete round trip per batch. Must be &gt;= 1. Default 512. Maps to
+    /// <c>CamusDBOptions.KeyspacePurgeBatchSize</c>.
     /// </summary>
     public int KeyspacePurgeBatchSize { get; set; } = 512;
 

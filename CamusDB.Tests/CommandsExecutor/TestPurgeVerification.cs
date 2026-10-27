@@ -9,6 +9,7 @@
 using NUnit.Framework;
 
 using System;
+using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -36,7 +37,11 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// </summary>
 internal sealed class TestPurgeVerification : SharedNodeBaseTest
 {
-    /// <summary>Wraps a real node but fails every delete of a key under a given prefix, to simulate a partial purge.</summary>
+    /// <summary>
+    /// Wraps a real node but fails every delete of a key under a given prefix, sent alone or inside a
+    /// delete-many batch, to simulate a partial purge. The purge deletes a scanned batch with one
+    /// delete-many call, so a fake that failed only the single-key delete would let the batch through.
+    /// </summary>
     private sealed class FailDeleteKahuna : DelegatingKahuna
     {
         private readonly string failPrefix;
@@ -49,6 +54,16 @@ internal sealed class TestPurgeVerification : SharedNodeBaseTest
             if (key.StartsWith(failPrefix, StringComparison.Ordinal))
                 throw new InvalidOperationException("injected delete failure");
             return base.LocateAndTryDeleteKeyValue(transactionId, key, durability, cancellationToken, coordinatorKey, operationId);
+        }
+
+        public override Task<List<KahunaDeleteKeyValueResponseItem>> LocateAndTryDeleteManyKeyValue(
+            List<KahunaDeleteKeyValueRequestItem> items, CancellationToken cancellationToken,
+            string coordinatorKey = "", TransactionOperationId operationId = default)
+        {
+            foreach (KahunaDeleteKeyValueRequestItem item in items)
+                if (item.Key is not null && item.Key.StartsWith(failPrefix, StringComparison.Ordinal))
+                    throw new InvalidOperationException("injected delete failure");
+            return base.LocateAndTryDeleteManyKeyValue(items, cancellationToken, coordinatorKey, operationId);
         }
     }
 

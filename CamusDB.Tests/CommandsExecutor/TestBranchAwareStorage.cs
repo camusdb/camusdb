@@ -9,7 +9,9 @@
 using NUnit.Framework;
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Linq;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -1926,6 +1928,85 @@ internal sealed class TestBranchAwareStorage : BaseTest
         finally
         {
             DatabaseDropper.PurgeBatchesForTesting = 0;
+        }
+    }
+
+    /// <summary>
+    /// A branch has no private rows, so a branch-built index is the whole overlay: one key per row
+    /// under the branch's index key space. The purge must delete each scanned batch with one
+    /// delete-many call. Before it did, it awaited one autocommit delete per key — one Raft round and
+    /// one WAL fsync each — and dropping a branch with an index over 20,000 rows took about 100 s on a
+    /// RocksDB node. The round-trip counter is the deterministic signal; the time bound is the
+    /// user-facing one, with a wide margin over the sub-second batched drop.
+    /// </summary>
+    [Test]
+    [NonParallelizable]
+    public async Task DropDatabase_BranchWithBranchBuiltIndex_DeletesOneRoundTripPerBatch()
+    {
+        DatabaseDropper.PurgeBatchesForTesting = 0;
+        DatabaseDropper.PurgeDeleteRoundTripsForTesting = 0;
+        try
+        {
+            (string rootName, DatabaseDescriptor rootDb, CommandExecutor executor) =
+                await CreateRootWithTable("CREATE TABLE orders (id INT64 PRIMARY KEY, region STRING NOT NULL)");
+
+            const int rows = 20_000;
+            const int rowsPerInsert = 500;
+            for (int b = 0; b < rows / rowsPerInsert; b++)
+            {
+                StringBuilder sql = new("INSERT INTO orders (id, region) VALUES ");
+                for (int i = 0; i < rowsPerInsert; i++)
+                {
+                    int id = b * rowsPerInsert + i;
+                    if (i > 0)
+                        sql.Append(", ");
+                    sql.Append('(').Append(id).Append(", \"r").Append(id % 7).Append("\")");
+                }
+
+                await InsertRow(rootName, rootDb, executor, sql.ToString());
+            }
+
+            string branchName = NewName();
+            DatabaseDescriptor branch = await executor.CreateDatabase(
+                new CreateDatabaseTicket(branchName, ifNotExists: false, branchFrom: rootName));
+            TrackDatabase(branchName, executor);
+
+            await executor.ExecuteDDLSQL(new ExecuteSQLTicket(
+                txnState: null!, database: branchName,
+                sql: "CREATE INDEX region_idx ON orders (region)", parameters: null));
+
+            string branchId = sharedRegistry!.Get(branchName)!.Id;
+            TableSchema table = branch.Schema.Tables["orders"];
+            string indexId = table.Indexes!.First(ix => ix.Name == "region_idx").KvId;
+            IKahuna kahuna = TestNode!.Kahuna;
+            string indexBucket = $"{branchId}:{table.Id}|i:{indexId}";
+
+            Assert.AreEqual(rows, await CountKeysUnder(kahuna, indexBucket, indexBucket + "/"),
+                "sanity: the branch-built index holds one entry per inherited row");
+
+            Stopwatch drop = Stopwatch.StartNew();
+            await executor.DropDatabase(new DropDatabaseTicket(branchName));
+            drop.Stop();
+
+            Assert.AreEqual(0, await CountKeysUnder(kahuna, indexBucket, indexBucket + "/"),
+                "the branch index key space must be empty after the drop");
+            Assert.AreEqual(0, await CountKeysUnder(kahuna, $"{branchId}/meta", $"{branchId}/"),
+                "the branch meta namespace must be empty after the drop");
+
+            long batches = DatabaseDropper.PurgeBatchesForTesting;
+            long roundTrips = DatabaseDropper.PurgeDeleteRoundTripsForTesting;
+
+            Assert.That(batches, Is.GreaterThanOrEqualTo(rows / Options.KeyspacePurgeBatchSize),
+                "20,000 index keys must page through at least 39 batches at the default batch size");
+            Assert.That(roundTrips, Is.LessThanOrEqualTo(batches + 20),
+                $"each batch must be deleted in one round trip (a per-key purge would need more than {rows}); batches={batches}");
+            Assert.That(drop.Elapsed, Is.LessThan(TimeSpan.FromSeconds(15)),
+                $"the drop took {drop.Elapsed.TotalSeconds:F1} s; one Raft round per key would take over a minute");
+        }
+        finally
+        {
+            DatabaseDropper.PurgeBatchesForTesting = 0;
+            DatabaseDropper.PurgeDeleteRoundTripsForTesting = 0;
         }
     }
 

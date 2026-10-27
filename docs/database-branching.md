@@ -416,7 +416,13 @@ several layered fences:
   included) last** — so a crashed purge can be resumed from the still-present catalog. A `dropping:{dbId}` marker is written before
   `UnregisterAsync` and cleared only after the purge completes; startup resumes any interrupted
   purge. Deletes are **paged** in bounded batches (`CamusDBOptions.KeyspacePurgeBatchSize`) so a
-  large database drops in bounded memory.
+  large database drops in bounded memory, and each batch is deleted with **one delete-many call**,
+  so a batch costs one scan plus one Raft round rather than one round per key.
+- **Drop cost.** A branch with no private rows and one branch-built index over 20,000 rows holds
+  20,000 overlay keys and drops in well under a second on a standalone node (40 batches at the
+  default batch size). Before the batched delete, the purge awaited one autocommit delete per key —
+  one Raft round and one WAL fsync each, about 5 ms on a RocksDB node — and the same drop took
+  about 100 s. The drop is still inline: `DROP DATABASE` returns only after the purge completes.
 
 ---
 
@@ -511,7 +517,7 @@ Roots (no ancestry) never touch these paths, so root databases add no counter ov
 | Knob | Default | Effect |
 |------|---------|--------|
 | `BranchSnapshotHoldLeaseMs` | `300_000` | Snapshot-hold lease; renewer runs at `lease/3`. |
-| `KeyspacePurgeBatchSize` | `512` | Max keys per batch in the `DROP DATABASE` purge (memory bound). |
+| `KeyspacePurgeBatchSize` | `512` | Max keys per scan batch in the `DROP DATABASE` purge. Each batch is one delete-many round trip, so this bounds memory and sets how many keys share one Raft round. |
 | `BranchMetrics.LineageWarningThreshold` | `10` | Lineage depth at/above which opening a table store logs a warning and increments `DeepLineageWarnings`. Advisory, not a hard cap. |
 
 ---
@@ -525,7 +531,8 @@ Roots (no ancestry) never touch these paths, so root databases add no counter ov
   the remedy is still manual (recreate the branch as a root).
 - **Large branch `DROP TABLE`/`DROP INDEX`.** These delete inside one DDL transaction and are
   therefore capped by the per-transaction mutation limit; arbitrarily large single-object drops
-  on a branch would need decoupling from the DDL transaction. (`DROP DATABASE` is already paged.)
+  on a branch would need decoupling from the DDL transaction. (`DROP DATABASE` is paged and deletes
+  each batch in one round trip, so it has no such cap.)
 - **Cross-node cluster tests.** Several fences are covered by single-node simulations of the
   cross-node scenario (two registry instances, injected markers) rather than true multi-node
   tests; the mechanisms are topology-independent, but network/replication fidelity is not

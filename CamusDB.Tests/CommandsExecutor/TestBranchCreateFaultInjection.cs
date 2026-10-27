@@ -911,6 +911,41 @@ public sealed class TestBranchCreateFaultInjection : BaseTest
 
             return base.LocateAndTryDeleteKeyValue(transactionId, key, durability, cancellationToken, coordinatorKey, operationId);
         }
+
+        // The namespace purge deletes each scanned batch with one delete-many call, so the fault must
+        // cover that path too: the branch's meta keys in a batch fail the same way as a single delete,
+        // and the other keys of the batch pass through to the real node.
+        public override async Task<List<KahunaDeleteKeyValueResponseItem>> LocateAndTryDeleteManyKeyValue(
+            List<KahunaDeleteKeyValueRequestItem> items, CancellationToken cancellationToken,
+            string coordinatorKey = "", TransactionOperationId operationId = default)
+        {
+            if (!FailMetaDeletes || ObservedBranchId is null)
+                return await base.LocateAndTryDeleteManyKeyValue(items, cancellationToken, coordinatorKey, operationId);
+
+            string metaPrefix = $"{ObservedBranchId}/meta/";
+            List<KahunaDeleteKeyValueRequestItem> passThrough = [];
+            List<KahunaDeleteKeyValueResponseItem> responses = new(items.Count);
+
+            foreach (KahunaDeleteKeyValueRequestItem item in items)
+            {
+                if (item.Key is not null && item.Key.StartsWith(metaPrefix, StringComparison.Ordinal))
+                {
+                    Interlocked.Increment(ref metaDeleteAttempts);
+                    if (throwOnDelete)
+                        throw new InvalidOperationException("injected branch meta delete failure");
+                    responses.Add(new KahunaDeleteKeyValueResponseItem { Key = item.Key, Type = KeyValueResponseType.Errored, Durability = item.Durability });
+                }
+                else
+                {
+                    passThrough.Add(item);
+                }
+            }
+
+            if (passThrough.Count > 0)
+                responses.AddRange(await base.LocateAndTryDeleteManyKeyValue(passThrough, cancellationToken, coordinatorKey, operationId));
+
+            return responses;
+        }
     }
 
     /// <summary>

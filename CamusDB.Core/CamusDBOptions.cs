@@ -307,6 +307,8 @@ public sealed record CamusDBOptions
     /// The purge pages through each bucket one batch at a time so peak memory is bounded to this many
     /// keys regardless of how large a database (or branch overlay) is — a full database drop can span
     /// every table and row. Kept modest so the purge never materialises an entire keyspace at once.
+    /// Each batch is deleted in one delete-many round trip, so the value also sets how many keys share
+    /// one Raft round.
     /// </summary>
     [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Node)]
     public int KeyspacePurgeBatchSize { get; init; } = 512;
