@@ -719,9 +719,19 @@ public sealed class KvTransactionsManager : IDisposable
     /// identity (<see cref="HLCTimestamp.Zero"/>), and its commit and rollback are no-ops, so the
     /// caller needs no cleanup on any path.
     ///
-    /// <para>Under the Serializable default the read is pinned at a local HLC timestamp
-    /// <c>T ≥ causalToken</c>, so every key, page and range the statement reads is served as of one
-    /// point. Under the Read Committed default it reads the latest committed value of each key.</para>
+    /// <para>The read is pinned at a local HLC timestamp <c>T ≥ causalToken</c>, so every key, page and
+    /// range the statement reads is served as of one point. This holds under both defaults: under the
+    /// Read Committed default the autocommit SELECT reads one consistent view, as each SELECT of an
+    /// explicit Read Committed transaction does (<see cref="TryMintStatementTimestamp"/>). The
+    /// transaction carries the default level as its label (<see cref="KvTransaction.CreateSnapshotReadOnly"/>).</para>
+    ///
+    /// <para><b>Costs of the pin.</b> A read at <c>T</c> waits for a write that another transaction
+    /// staged before <c>T</c> and has not yet committed, where a latest read would not wait. And a node
+    /// whose clock is behind does not show a commit that another node made at a later clock time, so a
+    /// client that reads its own commit through another node passes that commit's causal token.</para>
+    ///
+    /// <para>A manager built without a local clock returns the latest-value transaction
+    /// (<see cref="KvTransaction.CreateReadOnly"/>). Every manager the engine builds has one.</para>
     ///
     /// <para>The routing mode does not change the shape. Under key-range sharding a pinned snapshot
     /// stays consistent across a split, because Kahuna re-resolves the range map per page and reads a
@@ -732,8 +742,8 @@ public sealed class KvTransactionsManager : IDisposable
     /// </summary>
     public KvTransaction BeginReadOnly(Kommander.Time.HLCTimestamp? causalToken = null)
     {
-        if (options.DefaultIsolationLevel == CamusIsolationLevel.Serializable && mintLocalT is not null)
-            return KvTransaction.CreateSnapshotReadOnly(mintLocalT(causalToken));
+        if (mintLocalT is not null)
+            return KvTransaction.CreateSnapshotReadOnly(mintLocalT(causalToken), options.DefaultIsolationLevel);
 
         return KvTransaction.CreateReadOnly();
     }

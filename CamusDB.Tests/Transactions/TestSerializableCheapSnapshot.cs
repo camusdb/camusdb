@@ -28,10 +28,10 @@ using Kommander.Time;
 namespace CamusDB.Tests.CommandsExecutor;
 
 /// <summary>
-/// Verifies the Task 2 cheap serializable snapshot for autocommit SELECT.
+/// Verifies the cheap snapshot that an autocommit SELECT reads at.
 ///
-/// Under Serializable default, <see cref="KvTransactionsManager.BeginReadOnly"/> (non-key-range
-/// mode) mints a local HLC timestamp <c>T</c> and returns a zero-identity
+/// Under either default isolation level, <see cref="KvTransactionsManager.BeginReadOnly"/> mints a
+/// local HLC timestamp <c>T</c> and returns a zero-identity
 /// <see cref="KvTransaction"/> carrying <c>ReadTimestamp = T</c> — no Kahuna
 /// StartTransaction/CommitTransaction round-trip, no session, no cleanup.
 ///
@@ -111,11 +111,11 @@ public sealed class TestSerializableCheapSnapshot : SharedNodeBaseTest
     }
 
     // -----------------------------------------------------------------------
-    // 2. RC default: BeginReadOnly still returns Zero ReadTimestamp (unchanged).
+    // 2. RC default: BeginReadOnly pins a snapshot too, labeled Read Committed.
     // -----------------------------------------------------------------------
 
     [Test]
-    public async Task BeginReadOnly_ReadCommittedDefault_HasZeroReadTimestamp()
+    public async Task BeginReadOnly_ReadCommittedDefault_PinsASnapshotLabeledReadCommitted()
     {
         (string _, DatabaseDescriptor db, CommandExecutor __) = await SetupTableAsync(
             Options with { DefaultIsolationLevel = CamusIsolationLevel.ReadCommitted });
@@ -123,9 +123,11 @@ public sealed class TestSerializableCheapSnapshot : SharedNodeBaseTest
         KvTransaction tx = db.Transactions.BeginReadOnly();
 
         Assert.AreEqual(HLCTimestamp.Zero, tx.TransactionId,
-            "RC fast-path must be zero-identity");
-        Assert.AreEqual(HLCTimestamp.Zero, tx.ReadTimestamp,
-            "RC path must keep Zero ReadTimestamp — latest-committed-per-key semantics");
+            "the autocommit read stays zero-identity");
+        Assert.AreNotEqual(HLCTimestamp.Zero, tx.ReadTimestamp,
+            "the autocommit read is pinned at one timestamp under the Read Committed default too");
+        Assert.AreEqual(CamusIsolationLevel.ReadCommitted, tx.IsolationLevel,
+            "the transaction carries the default level as its label");
         Assert.IsTrue(tx.IsReadOnly);
     }
 

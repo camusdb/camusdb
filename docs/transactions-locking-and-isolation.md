@@ -226,8 +226,8 @@ bounded index range scans, and `IN`-list scans). They fire in two situations:
 Otherwise **no range lock is taken**. That includes every scan in an explicit Read Committed
 transaction, in every routing mode: Read Committed promises no phantom protection, so its scans never
 block or abort a writer. That includes every autocommit `SELECT`, in every routing mode:
-it reads a pinned snapshot under the Serializable default, or the latest committed value per key under
-a Read Committed default, and it has no transaction identity that could own a lock.
+it reads a pinned snapshot under either default, and it has no transaction identity that could own a
+lock.
 
 ### 6.3 Point read locks (Serializable read-write only)
 A Serializable read-write transaction also locks the *individual* keys it reads with `GetRow` or a
@@ -480,11 +480,14 @@ This is the lock-free behavior described in §4/§5. What it does **not** promis
   `/start-transaction`). Every statement timestamp of the transaction is then at least that token.
   A commit returns its token: gRPC `CommitReply`, and `causalToken` in the HTTP `/commit-transaction`
   response and in the HTTP autocommit query and write responses (not in the DDL response).
-- ⚠️ **An autocommit `SELECT` under a Read Committed default has no single snapshot.** It reads the
-  *latest committed* version of each key. One partition serves the later pages of a scan at the
-  snapshot of its first page, but a scan over several partitions, or a query that does several
-  sub-reads, can observe values committed at slightly different instants. (Under the Serializable
-  default, an autocommit `SELECT` reads at one pinned snapshot.)
+- ✅ **An autocommit `SELECT` reads one snapshot under a Read Committed default too.** It reads at
+  one timestamp, which the node takes from its clock when the statement starts, as under the
+  Serializable default. Every page, partition and sub-read (a join, a subquery, an index lookup) of
+  the statement is read at that timestamp. The read takes no lock and has no Kahuna round trip. It
+  has the two costs of every read at a timestamp, above: it can wait for a write that another
+  transaction staged before the timestamp, and it needs the causal token to see a commit that another
+  node made at a later clock time. Pass the token as `causal_token_*` on the gRPC `SqlRequest`, or as
+  `causalToken` on HTTP `/execute-sql-query`.
 - ⚠️ **No repeatable reads / phantom protection across statements.** Read a set of rows, read again,
   and a concurrent transaction may have changed or inserted rows in between.
 - ⚠️ **Write skew is possible.** Two transactions can each read a set, then write disjoint keys based on

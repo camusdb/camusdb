@@ -799,10 +799,17 @@ public sealed class KvTransaction
     /// but every read is issued with <c>readTimestamp = snapshotT</c> so all reads in the query
     /// see one consistent point in the version history — exactly as a full Serializable+ReadOnly
     /// transaction would, but without the session-open cost.
+    ///
+    /// <para><paramref name="isolationLevel"/> is a label only: it is what diagnostics report for the
+    /// transaction (<c>SHOW QUERIES</c>). The reads are the same at every level, because a read-only
+    /// transaction with a fixed <see cref="ReadTimestamp"/> takes no lock, folds no read and takes no
+    /// statement snapshot. The autocommit SELECT passes the server's default level, so a Read Committed
+    /// deployment does not see its reads reported as Serializable.</para>
     /// </summary>
-    public static KvTransaction CreateSnapshotReadOnly(HLCTimestamp snapshotT) =>
+    public static KvTransaction CreateSnapshotReadOnly(
+        HLCTimestamp snapshotT, CamusIsolationLevel isolationLevel = CamusIsolationLevel.Serializable) =>
         new(HLCTimestamp.Zero, string.Empty, isReadOnly: true,
-            CamusIsolationLevel.Serializable, CamusTransactionMode.ReadOnly,
+            isolationLevel, CamusTransactionMode.ReadOnly,
             readTimestamp: snapshotT);
 
     /// <summary>
