@@ -184,7 +184,10 @@ internal static class QueryPlanStepAdapter
                     rangeScan.FromBound,
                     rangeScan.FromInclusive,
                     rangeScan.ToBound,
-                    rangeScan.ToInclusive));
+                    rangeScan.ToInclusive)
+                {
+                    EqualityPrefixLength = rangeScan.EqualityPrefixLength,
+                });
                 stepNodes.Add(node);
                 return;
 

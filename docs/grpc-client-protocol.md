@@ -176,8 +176,8 @@ CommitTransaction(h)      -> CommitReply
 RollbackTransaction(h)    -> RollbackReply
 ```
 
-- `TxnHandle` is the pair `(txn_id_pt, txn_id_counter)` plus a causal token (below). It mirrors the
-  HTTP session model's transaction identity.
+- `TxnHandle` is the pair `(txn_id_pt, txn_id_counter)`. It mirrors the HTTP session model's
+  transaction identity. It also has `causal_token_*` fields, which the server does not read (§4.2).
 - All statements in one logical transaction must carry the **same** handle.
 - Commit and rollback are addressed by handle.
 
@@ -200,19 +200,23 @@ read-your-writes / causal consistency can silently break. Whenever you carry a t
 **Threading rule (mandatory for read-your-writes across a session):**
 
 1. Start with no token (all zero) on the first operation of a session.
-2. Every reply (`NonQueryReply`, `DdlReply`, `CommitReply`, `QueryComplete`, and the `TxnHandle`
-   returned by `StartTransaction`) carries a token in its `causal_token_n/_l/_c`.
-3. **Feed the most recent token back** into the next request's `causal_token_n/_l/_c` (and into the
-   `TxnHandle.causal_token_*` when resuming an explicit transaction).
+2. Every reply that ends a write or a read (`NonQueryReply`, `DdlReply`, `CommitReply`,
+   `QueryComplete`) carries a token in its `causal_token_n/_l/_c`. The `TxnHandle` that
+   `StartTransaction` returns carries none.
+3. **Feed the most recent token back** into the next request that takes one: an autocommit query,
+   a `CamusRows` request, or the start of a transaction (see the list below).
 
 This is how a client that talks to a multi-node cluster guarantees it observes its own prior writes.
 Even in single-node use, threading the token is correct and cheap; do it unconditionally.
 
 Where the token lives per message:
-- `SqlRequest`: top-level `causal_token_n/_l/_c` (autocommit path) **and** inside `txn_handle` when
-  resuming a transaction.
-- `TxnHandle`: `causal_token_n/_l/_c` — set them when you resume/commit/rollback a transaction so the
-  server sees the session's latest observed time.
+- `SqlRequest`: top-level `causal_token_n/_l/_c`. An autocommit query reads its snapshot at a
+  timestamp that is at least this token. An autocommit write, a DDL statement and every statement
+  of an explicit transaction ignore it: a write locks each row and reads its latest value, and a
+  transaction takes its floor once, when it starts.
+- `TxnHandle`: `causal_token_n/_l/_c` exist on the message, but the server does not read them and
+  `StartTransaction` does not set them. To give a transaction a floor, send the token when you
+  start it.
 - All `CamusRows` requests: top-level `causal_token_n/_l/_c`.
 - `StartTxnRequest`: top-level `causal_token_n/_l/_c`, and the `SqlRequest` of a batch `START`. Send
   the token of your last commit here. Each `SELECT` of a Read Committed transaction reads at one
@@ -721,7 +725,8 @@ Use this as an acceptance list when building a client:
 - [ ] Handle empty results as "schema, zero rows" — never as an empty stream.
 
 **Transactions & causal token**
-- [ ] Thread `(N, L, C)` from every reply into the next request — all three components, always.
+- [ ] Thread `(N, L, C)` from every reply into the next request that takes one (autocommit query,
+      `CamusRows`, transaction start) — all three components, always.
 - [ ] Use the same `TxnHandle` for every statement in one transaction.
 - [ ] Send isolation/mode/locking only where they take effect (start / autocommit); know they're
       ignored when resuming an existing handle.

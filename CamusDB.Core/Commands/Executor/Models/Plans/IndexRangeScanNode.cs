@@ -25,6 +25,14 @@ public sealed class IndexRangeScanNode : PhysicalPlanNode
 
     public bool ToInclusive { get; }
 
+    /// <summary>
+    /// How many leading key columns the bounds fix by equality, carried from
+    /// <see cref="QueryPlanStep.EqualityPrefixLength"/>. The cost model prices those columns by
+    /// distinct count instead of reading an equality's half-open <c>[v, next(v))</c> as a range on the
+    /// column. Zero when unknown; the estimate then infers the prefix from the bound shape.
+    /// </summary>
+    public int EqualityPrefixLength { get; init; }
+
     /// <summary>Bound table source when used as a join leaf; null for single-table plans.</summary>
     public BoundTableSource? BoundSource { get; init; }
 

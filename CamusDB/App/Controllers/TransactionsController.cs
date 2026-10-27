@@ -16,6 +16,7 @@ using System.Text.Json;
 using CamusDB.App.Services;
 using System;
 using Kahuna.Shared.KeyValue;
+using Kommander.Time;
 
 namespace CamusDB.App.Controllers;
 
@@ -107,9 +108,9 @@ public sealed class TransactionsController : CommandsController
 
             DatabaseDescriptor database = await executor.OpenDatabase(request.DatabaseName).ConfigureAwait(false);
 
-            await transactions.CommitAsync(database, txnState).ConfigureAwait(false);
-            
-            return new JsonResult(new CommitTransactionResponse("ok"));
+            HLCTimestamp causalToken = await transactions.CommitAsync(database, txnState).ConfigureAwait(false);
+
+            return new JsonResult(new CommitTransactionResponse("ok") { CausalToken = causalToken.IsNull() ? null : causalToken });
         }
         catch (CamusDBException e)
         {

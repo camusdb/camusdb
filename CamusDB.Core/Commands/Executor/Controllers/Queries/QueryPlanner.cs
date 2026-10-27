@@ -880,6 +880,7 @@ public sealed class QueryPlanner
         PhysicalPlanNode bestNode = fullScanNode;
         QueryPlanStep? bestStep = null;
         bool bestCovers = false;
+        int bestBoundColumns = 0;
 
         foreach (QueryPlanStep step in IndexScanSelector.EnumerateViableSteps(table, analysis))
         {
@@ -894,21 +895,29 @@ public sealed class QueryPlanner
             if (hasOrderBy && !IndexScanSelector.ScanSatisfiesOrderBy(table, step, ticket.OrderBy, constantColumns))
                 cost += sortCost;
 
-            // Ties resolve in two layers, both required for determinism and plan quality:
+            // Ties resolve in three layers, all required for determinism and plan quality:
             //   1. A covering candidate beats a non-covering equal-cost best (including the
             //      full-scan baseline: an unbounded covered scan costs exactly the table row
             //      count, tying the full scan it must not lose to).
-            //   2. Among candidates alike in coverage, break by ordinal index name: candidates
-            //      arrive in Dictionary iteration order, which can differ across descriptor
-            //      rebuilds (and therefore across nodes) — a strict `<` would then pick
-            //      different equal-cost plans on different nodes.
+            //   2. Among candidates alike in coverage, the step that binds more key columns wins:
+            //      it reads a subset of what the shorter step reads. Two steps tie in cost when
+            //      the statistics cannot tell them apart (no distinct count for the prefix column,
+            //      no histogram for the range column); an equality prefix plus a range must then
+            //      beat the same prefix alone on another index.
+            //   3. Among those, break by ordinal index name: candidates arrive in Dictionary
+            //      iteration order, which can differ across descriptor rebuilds (and therefore
+            //      across nodes) — a strict `<` would then pick different equal-cost plans on
+            //      different nodes.
+            int boundColumns = IndexScanSelector.BoundColumnCount(step);
             bool wins = cost < bestCost
                 || (cost == bestCost
                     && (covers && !bestCovers
                         || covers == bestCovers
                             && bestStep is { Index: { } bestIdx }
                             && step.Index is { } candIdx
-                            && string.CompareOrdinal(candIdx.Name, bestIdx.Name) < 0));
+                            && (boundColumns > bestBoundColumns
+                                || boundColumns == bestBoundColumns
+                                    && string.CompareOrdinal(candIdx.Name, bestIdx.Name) < 0)));
 
             if (wins)
             {
@@ -916,6 +925,7 @@ public sealed class QueryPlanner
                 bestNode = candidateNode;
                 bestStep = step;
                 bestCovers = covers;
+                bestBoundColumns = boundColumns;
             }
         }
 
@@ -1176,6 +1186,19 @@ public sealed class QueryPlanner
         QueryTicket ticket,
         PredicateAnalysis analysis)
     {
+        // A FORCE_INDEX hint names the index the scan must use. When the predicate can bound that
+        // index, the bounded scan is the plan: it does not compete with the other indexes on cost
+        // or score, and the range-vs-full-scan veto does not apply, because the user asked for the
+        // index. A hint whose index the predicate cannot bound goes through the automatic choice
+        // below, and becomes an end-to-end scan of that index only when no automatic scan is chosen.
+        if (!string.IsNullOrEmpty(ticket.IndexName))
+        {
+            TableIndexSchema forcedIndex = ResolveForcedIndex(table, ticket.IndexName);
+            QueryPlanStep? forcedStep = IndexScanSelector.TrySelectScanForForcedIndex(table, analysis, forcedIndex.Name);
+            if (forcedStep is not null)
+                return (WithDistribution(ToScanNode(forcedStep.Value), table), forcedStep, null);
+        }
+
         // Cost-based access-path selection: when the feature flag is on AND the table has been
         // ANALYZEd and the predicate drives an index, enumerate all viable steps, cost each
         // against the full-scan baseline, and pick the cheapest rather than the heuristic-best.
@@ -1317,19 +1340,7 @@ public sealed class QueryPlanner
 
         if (!string.IsNullOrEmpty(ticket.IndexName))
         {
-            if (!table.Indexes.TryGetValue(ticket.IndexName, out TableIndexSchema? index))
-            {
-                throw new CamusDBException(
-                    CamusDBErrorCodes.UnknownKey,
-                    $"Key '{ticket.IndexName}' doesn't exist in table '{table.Name}'");
-            }
-
-            if (!SchemaElementStateRules.IsReadableIndex(table.Schema, index))
-            {
-                throw new CamusDBException(
-                    CamusDBErrorCodes.UnknownKey,
-                    $"Key '{ticket.IndexName}' doesn't exist in table '{table.Name}'");
-            }
+            TableIndexSchema index = ResolveForcedIndex(table, ticket.IndexName);
 
             // A unique index omits entries for rows with a NULL in any indexed column, so an
             // unbounded full scan over it would silently drop those rows from the result. The
@@ -1347,6 +1358,24 @@ public sealed class QueryPlanner
 
         QueryPlanStep tableScanStep = new(QueryPlanStepType.FullScanFromTableIndex);
         return (WithDistribution(new TableScanNode(TableScanSource.PrimaryRows), table), tableScanStep, null);
+    }
+
+    /// <summary>
+    /// The index a <c>FORCE_INDEX</c> hint names. A name that is not an index of the table, or an
+    /// index that is not readable yet (a backfill in progress), is an unknown key to the user, as
+    /// it was before the hint could bound a scan.
+    /// </summary>
+    private static TableIndexSchema ResolveForcedIndex(TableDescriptor table, string indexName)
+    {
+        if (!table.Indexes.TryGetValue(indexName, out TableIndexSchema? index)
+            || !SchemaElementStateRules.IsReadableIndex(table.Schema, index))
+        {
+            throw new CamusDBException(
+                CamusDBErrorCodes.UnknownKey,
+                $"Key '{indexName}' doesn't exist in table '{table.Name}'");
+        }
+
+        return index;
     }
 
     /// <summary>
@@ -1544,7 +1573,10 @@ public sealed class QueryPlanner
                     step.FromBound,
                     step.FromInclusive,
                     step.ToBound,
-                    step.ToInclusive);
+                    step.ToInclusive)
+                {
+                    EqualityPrefixLength = step.EqualityPrefixLength,
+                };
 
             case QueryPlanStepType.FullScanFromIndex:
                 return new TableScanNode(TableScanSource.ForcedIndex, step.Index);

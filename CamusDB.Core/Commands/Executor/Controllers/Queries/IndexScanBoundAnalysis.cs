@@ -36,11 +36,45 @@ internal static class IndexScanBoundAnalysis
         if (scanStep is null || scanStep.Value.Index is null)
             return false;
 
+        if (IsEqualityOnEqualityPrefix(comparison, scanStep.Value))
+            return true;
+
         ColumnScanBounds? bounds = GetColumnScanBounds(scanStep.Value, table, comparison.ColumnName);
         if (bounds is null)
             return false;
 
         return IsComparisonAbsorbed(comparison, bounds.Value);
+    }
+
+    /// <summary>
+    /// An equality on a key column the step fixes by equality
+    /// (<see cref="QueryPlanStep.EqualityPrefixLength"/>) is absorbed for every column type, with no
+    /// arithmetic on the bounds: the seek returns only rows whose column holds the bound value. The
+    /// half-open <c>[v, next(v))</c> form has no value between its ends, and the inclusive
+    /// <c>[v, v]</c> form is trimmed to <c>key == v</c> by the scan's decoded-key filter (see
+    /// <see cref="IndexScanSelector.EqualitySeekUpperBound"/>). The per-type bound analysis below
+    /// has no arm for uuid, date, datetime, bytes or NUMERIC, so without this rule an equality on
+    /// such a column stays in the residual filter and is evaluated again on every row.
+    /// A second equality on the same column with another constant is not absorbed: the seek used
+    /// the other value, and the residual filter must keep this one so the conjunction returns no rows.
+    /// </summary>
+    private static bool IsEqualityOnEqualityPrefix(AnalyzedComparison comparison, in QueryPlanStep step)
+    {
+        if (step.Type != QueryPlanStepType.RangeScanFromIndex
+            || step.EqualityPrefixLength == 0
+            || comparison.Operator != "="
+            || step.FromBound is null)
+        {
+            return false;
+        }
+
+        int columnIndex = Array.FindIndex(step.Index!.Columns,
+            c => string.Equals(c, comparison.ColumnName, StringComparison.OrdinalIgnoreCase));
+        if (columnIndex < 0 || columnIndex >= step.EqualityPrefixLength || columnIndex >= step.FromBound.Values.Length)
+            return false;
+
+        ColumnValue bound = step.FromBound.Values[columnIndex];
+        return bound.Type == comparison.Constant.Type && bound.CompareTo(comparison.Constant) == 0;
     }
 
     private static ColumnScanBounds? GetColumnScanBounds(

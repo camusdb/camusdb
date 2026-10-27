@@ -1154,6 +1154,7 @@ internal sealed class JoinQueryPlanner
                         indexNode = new IndexRangeScanNode(
                             rsn.Index, rsn.FromBound, rsn.FromInclusive, rsn.ToBound, rsn.ToInclusive)
                         {
+                            EqualityPrefixLength = rsn.EqualityPrefixLength,
                             BoundSource = boundSource,
                             ExecutionFilter = residual,
                             Distribution = PlacementReader.Instance.GetIndexScanDistribution(rsn.Index, _options)

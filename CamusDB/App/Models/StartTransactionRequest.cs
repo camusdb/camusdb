@@ -46,9 +46,11 @@ public sealed class StartTransactionRequest
     public string? Priority { get; set; }
 
     /// <summary>
-    /// Optional causal token of the client's last commit, as returned by a commit response. Every Read
-    /// Committed SELECT of the transaction reads at a statement timestamp at least this value, so it
-    /// sees that commit even on a node whose clock is behind.
+    /// Optional causal token of the client's last commit, as <c>/commit-transaction</c> or an autocommit
+    /// response returns it in its <c>causalToken</c> field (a JSON object with <c>n</c>, <c>l</c> and
+    /// <c>c</c>; all three are needed). Every Read Committed SELECT of the transaction reads at a
+    /// statement timestamp at least this value, so it sees that commit even on a node whose clock is
+    /// behind.
     /// </summary>
     public HLCTimestamp? CausalToken { get; set; }
 }

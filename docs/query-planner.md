@@ -408,6 +408,16 @@ the inclusive prefix so the scan stays within the prefix rather than running to 
 The index is never refused because a value has no successor; one helper,
 `IndexScanSelector.EqualitySeekUpperBound`, picks the bound for the planner and for every executor seek.
 
+**The step records its equality prefix.** The bounds alone do not say how many leading columns the
+predicate fixed: the half-open `[v, next(v))` of an equality looks like a range on that column, and a
+prefix plus a range carries the range value in only one of the two bounds. Each step from the matcher
+therefore carries `EqualityPrefixLength`, copied onto the `IndexRangeScanNode`. Two readers depend on it.
+The cost model prices the first `n` columns by distinct count and the column after them, when a bound
+reaches it, by its histogram (below). The residual filter drops an equality on one of these columns for
+every column type, because the seek returns only rows that hold the bound value; without the count, an
+equality on a `uuid`, `date`, `datetime`, `bytes` or `NUMERIC` column stayed in the filter and ran again on
+every row.
+
 **ORDER BY scan elision:** if no predicate matches, `TrySelectOrderByScan` looks for an index whose
 leading columns equal the ORDER BY columns (ascending only) and returns an unbounded range scan;
 `ScanSatisfiesOrderBy` confirms so the planner omits `SortNode`. Descending order is not satisfiable by
@@ -956,6 +966,35 @@ range-vs-full-scan veto becomes a true cost comparison rather than a fixed-thres
 It engages only when the flag is on, stats and a row count exist, and the query is not an `UPDATE`/`DELETE`
 (those keep the heuristic to avoid widening exclusive row-range locks). IN-list competition runs after the
 cost pick, exactly as in the heuristic path.
+
+**How an index range scan is priced** (`CostEstimator.EstimateRangeScanRows`). The equality prefix of the
+step (`EqualityPrefixLength`) is priced by distinct count: `KeyNdv` of the prefix tuple, else the column's
+NDV, else the product of the column NDVs. A prefix with no distinct count at all (a `bool` column, a
+column `ANALYZE` did not reach) is priced at the equality fallback 0.10, the same constant the filter
+estimate uses, so the prefix weighs the same in every step that binds it. The column after the prefix is
+priced by its histogram over the bounds the step puts on it, else by linear interpolation between its
+min and max, else, when the step pins one value of it (the last column of a prefix-only step), by its
+distinct count, else by the fixed range constants for the bounds that column itself has (one side 0.50,
+two sides 0.10). The last rule is what keeps `studio_id = ? AND created_at >= ?` on the index
+`(studio_id, created_at)` when four indexes start with `studio_id`: a `uuid` column has no histogram, so
+without it the prefix-only steps on the other three indexes were priced at the fixed 10 % while the step
+that also bound `created_at` was priced by the histogram at its true third of the table, and lost.
+
+**Ties.** Two candidates with the same cost are separated in this order: a covering candidate first; then
+the candidate whose bounds address more key columns (`IndexScanSelector.BoundColumnCount`), because it reads
+a subset of what the shorter step reads; then the ordinal index name, so every node of a cluster picks the
+same plan from a Dictionary whose iteration order differs across descriptor rebuilds. Two steps tie in cost
+when the statistics cannot tell them apart, for example a range column with no histogram; the tie must not
+go to the index whose name sorts first.
+
+**`FORCE_INDEX` names the index the scan must use.** `FROM t@{FORCE_INDEX=idx} WHERE …` first asks the
+matcher for the step `idx` can serve for the predicate. When there is one, that bounded scan is the plan:
+it does not compete with the other indexes on cost or score, and the range-vs-full-scan veto does not
+apply. When the predicate cannot bound `idx` (no comparison on its leading column, or a unique index that
+would omit rows with a NULL key), the automatic choice runs as if there were no hint, and the hint becomes
+an end-to-end scan of `idx` only when no automatic scan is chosen. A name that is not a readable index of
+the table is an error. The hint is part of the plan-cache shape, so the hinted and the unhinted statement
+never share a cached decision.
 
 **ORDER BY and LIMIT are part of the comparison.** The cheapest scan alone is not always the cheapest
 result:

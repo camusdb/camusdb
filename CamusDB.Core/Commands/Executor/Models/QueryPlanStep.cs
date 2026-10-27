@@ -34,6 +34,18 @@ public record struct QueryPlanStep
     /// <summary>Whether the upper bound is inclusive (≤) or exclusive (&lt;).</summary>
     public bool ToInclusive { get; } = true;
 
+    /// <summary>
+    /// How many leading key columns of a <see cref="QueryPlanStepType.RangeScanFromIndex"/> step the
+    /// predicate fixes by equality. The bounds alone do not say: an equality on an ascending column
+    /// with a successor becomes the half-open <c>[v, next(v))</c>, which has the shape of a range on
+    /// that column, and a prefix plus a range puts the range value only in one bound. The cost model
+    /// prices the first <c>n</c> columns by distinct count and the column after them, when a bound
+    /// reaches it, by its histogram; the residual filter drops an equality on one of these columns.
+    /// Zero on a step that did not come from the predicate matcher (an ORDER BY scan, a step rebuilt
+    /// from a plan node), and the readers then infer the prefix from the bound shape.
+    /// </summary>
+    public int EqualityPrefixLength { get; init; }
+
     public QueryPlanStep(QueryPlanStepType type, TableIndexSchema? index = null, ColumnValue? columnValue = null)
     {
         Type = type;

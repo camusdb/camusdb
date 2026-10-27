@@ -464,6 +464,8 @@ This is the lock-free behavior described in §4/§5. What it does **not** promis
   miss your own last commit. Pass the causal token of that commit when you begin the transaction
   (`causal_token_*` on gRPC `StartTxnRequest` or on the batch `START`, `causalToken` on HTTP
   `/start-transaction`). Every statement timestamp of the transaction is then at least that token.
+  A commit returns its token: gRPC `CommitReply`, and `causalToken` in the HTTP `/commit-transaction`
+  response and in the HTTP autocommit query and write responses (not in the DDL response).
 - ⚠️ **An autocommit `SELECT` under a Read Committed default has no single snapshot.** It reads the
   *latest committed* version of each key. One partition serves the later pages of a scan at the
   snapshot of its first page, but a scan over several partitions, or a query that does several

@@ -375,6 +375,12 @@ several layered fences:
 - **Descendant block (`CADB0508`).** A database with any registered descendant cannot be
   dropped. `HasLiveDescendantsAsync` checks the in-memory cache *then* does a persistent registry
   scan (to see branches registered on other nodes). Drop leaf-first: leaf → parent → root.
+  The scan reads with the read-only identity (transaction id zero), never inside a read-write
+  transaction. A read-write scan pins an OCC snapshot on every registry key it reads, and a
+  concurrent `CREATE` or `DROP DATABASE` then aborts it. The latest committed state is enough for
+  the fence, because Kahuna adds committed but unsettled writes to every latest scan page. A
+  transient scan failure restarts the scan up to three times, and then fails the drop with the
+  retryable `CADB0504`.
 - **Same-node fence (semaphore).** `DropDatabase` opens the target and holds its
   `SchemaDdlSemaphore` across the descendant re-check and `UnregisterAsync`, entering it
   exclusively so a staged schema change in progress on any table of the database (an index build,

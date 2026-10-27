@@ -1148,41 +1148,52 @@ public sealed class DatabaseRegistry : IAsyncDisposable
         }
 
         // Persistent scan: catch branches registered on other nodes that this node's cache missed.
-        // High for the same reason as the point-read above — it sits underneath an in-flight user
-        // request, so queueing it stalls work the gate has already admitted.
+        return await RegistryKeyspace.RetryTransientScanAsync(() => ScanForDescendantAsync(targetId)).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// The persistent half of <see cref="HasLiveDescendantsAsync"/>: one scan of the registry bucket
+    /// for an entry that names <paramref name="targetId"/> as an ancestor.
+    ///
+    /// <para><b>Read-only identity, never a read-write transaction.</b> A scan that carries a
+    /// transaction id pins an OCC snapshot on every registry key it reads, and a page Kahuna re-reads
+    /// (a key in it still settling) aborts the whole scan when a concurrent writer committed a newer
+    /// revision of a pinned key in between. DROP DATABASE runs this scan while other sessions create
+    /// and drop databases, and every one of those writes a registry key, so the abort reached the
+    /// client as a failed drop. Nothing here writes, so there is nothing for OCC to protect.</para>
+    ///
+    /// <para>The drop fence needs only the latest committed state: the drop-intent marker is committed
+    /// before this scan, so a branch registration either committed before the marker (this scan sees
+    /// it, including a committed registration whose key has not settled yet — Kahuna overlays committed
+    /// prepared intents on every latest scan page) or commits after it (branch-create then sees the
+    /// marker and backs out). The identity has no START or ROLLBACK, so it needs no cleanup.</para>
+    /// </summary>
+    private async Task<bool> ScanForDescendantAsync(string targetId)
+    {
         string namePrefix = NameKeyPrefix;
-        KvTransaction tx = await transactions.BeginAsync(
-            CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite,
-            priority: TransactionPriority.High
-        ).ConfigureAwait(false);
-        try
+        KvTransaction tx = transactions.CreateReadOnlyTransaction();
+
+        await foreach ((string key, ReadOnlyKeyValueEntry kve) in kahuna.LocateAndScanRange(
+            tx.TransactionId,
+            RegistryBucket,
+            null, true,
+            null, true,
+            1000,
+            HLCTimestamp.Zero,
+            KeyValueDurability.Persistent,
+            CancellationToken.None).ConfigureAwait(false))
         {
-            await foreach ((string key, ReadOnlyKeyValueEntry kve) in kahuna.LocateAndScanRange(
-                tx.TransactionId,
-                RegistryBucket,
-                null, true,
-                null, true,
-                1000,
-                HLCTimestamp.Zero,
-                KeyValueDurability.Persistent,
-                CancellationToken.None).ConfigureAwait(false))
+            if (!key.StartsWith(namePrefix, StringComparison.Ordinal) || kve.Value is null)
+                continue;
+
+            DatabaseRegistryEntry loaded = MetaJsonSerializer.Deserialize(
+                kve.Value, MetaJsonContext.Default.DatabaseRegistryEntry);
+
+            foreach (DatabaseBranchAncestor ancestor in loaded.Ancestors)
             {
-                if (!key.StartsWith(namePrefix, StringComparison.Ordinal) || kve.Value is null)
-                    continue;
-
-                DatabaseRegistryEntry loaded = MetaJsonSerializer.Deserialize(
-                    kve.Value, MetaJsonContext.Default.DatabaseRegistryEntry);
-
-                foreach (DatabaseBranchAncestor ancestor in loaded.Ancestors)
-                {
-                    if (ancestor.DatabaseId == targetId)
-                        return true;
-                }
+                if (ancestor.DatabaseId == targetId)
+                    return true;
             }
-        }
-        finally
-        {
-            await transactions.RollbackIfNotCompletedAsync(tx).ConfigureAwait(false);
         }
 
         return false;

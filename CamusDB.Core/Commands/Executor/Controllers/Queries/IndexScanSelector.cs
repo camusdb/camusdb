@@ -206,7 +206,10 @@ internal static class IndexScanSelector
                 lookupKey,
                 fromInclusive: true,
                 upperBound,
-                equalityToInclusive);
+                equalityToInclusive)
+            {
+                EqualityPrefixLength = columns.Length,
+            };
             score = RangeScanScore + columns.Length * 10;
             return true;
         }
@@ -267,7 +270,10 @@ internal static class IndexScanSelector
                 fromBound,
                 fromInclusive,
                 toBound,
-                toInclusive);
+                toInclusive)
+            {
+                EqualityPrefixLength = equalityPrefixLength,
+            };
             score = RangeScanScore + equalityPrefixLength * 10 + 1;
             return true;
         }
@@ -289,12 +295,32 @@ internal static class IndexScanSelector
                 prefixBound,
                 fromInclusive: true,
                 upperBound,
-                prefixToInclusive);
+                prefixToInclusive)
+            {
+                EqualityPrefixLength = equalityPrefixLength,
+            };
             score = RangeScanScore + equalityPrefixLength;
             return true;
         }
 
         return false;
+    }
+
+    /// <summary>
+    /// How many leading key columns the step's bounds address: the lookup key of a unique lookup,
+    /// the longer bound of a range scan. The cost-based choice breaks a cost tie with it, because a
+    /// step that binds one more key column reads a subset of what the shorter step reads. Two steps
+    /// tie in cost when the statistics cannot tell them apart (a prefix column with no distinct count,
+    /// a range column with no histogram), and the tie must not go to the index whose name sorts first.
+    /// </summary>
+    internal static int BoundColumnCount(in QueryPlanStep step)
+    {
+        return step.Type switch
+        {
+            QueryPlanStepType.QueryFromIndex => step.LookupKey?.Values.Length ?? (step.ColumnValue is null ? 0 : 1),
+            QueryPlanStepType.RangeScanFromIndex => Math.Max(step.FromBound?.Values.Length ?? 0, step.ToBound?.Values.Length ?? 0),
+            _ => 0,
+        };
     }
 
     internal static QueryPlanStep? TrySelectOrderByScan(

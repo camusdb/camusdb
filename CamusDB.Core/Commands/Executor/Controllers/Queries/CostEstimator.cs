@@ -1209,20 +1209,35 @@ internal static class CostEstimator
                 // Fall through to general path when no NDV stats are available.
             }
 
-            // For composite-index steps (equality prefix + trailing range), price the equality
-            // prefix via key NDV and the range column via its histogram / min-max. The range column
-            // sits at the last position of whichever bound carries it — max(fromLen, toLen) − 1 — so
-            // an upper-open range (range value only in ToBound, FromBound null/short prefix) still
-            // finds the range column. The columns before it are the equality prefix. When both
-            // bounds have length 1 this reduces to the single-column case.
-            int rangeColIdx      = Math.Max(0, Math.Max(fromLen, toLen) - 1);
+            // The range column is the first key column after the equality prefix. The planner's
+            // count locates it exactly: the prefix-only step [v, next(v)) has the shape of a range on
+            // its last prefix column, and a prefix plus a range carries the range value in only one
+            // of the two bounds. A node built without the matcher (no count) infers the prefix from
+            // the bound shape: every bound column but the last.
+            int boundLen = Math.Max(fromLen, toLen);
+            int keyColumnCount = node.Index.Columns.Length;
+            int plannerPrefix = node.EqualityPrefixLength > 0 && node.EqualityPrefixLength <= boundLen && node.EqualityPrefixLength <= keyColumnCount
+                ? node.EqualityPrefixLength
+                : 0;
+
+            int rangeColIdx = plannerPrefix > 0
+                ? (plannerPrefix == boundLen ? plannerPrefix - 1 : plannerPrefix)
+                : Math.Max(0, boundLen - 1);
             int equalityPrefixLen = rangeColIdx; // number of columns BEFORE the range column
 
+            // True when the bounds on the range column pin one value: the last column of a
+            // prefix-only step, or an inclusive [v, v] on an inferred node. Without a histogram or
+            // min/max for that column, its distinct count prices it, as an equality in the filter
+            // is priced; the fixed range constant would price every such seek alike, and a step
+            // that binds one more column, priced by its histogram, would then lose to it.
+            bool rangeColumnIsEquality = plannerPrefix > 0 ? rangeColIdx < plannerPrefix : isFullEquality;
+
             double prefixSel = 1.0;
-            if (equalityPrefixLen > 0 && rangeColIdx < node.Index.Columns.Length)
+            if (equalityPrefixLen > 0 && rangeColIdx < keyColumnCount)
             {
                 string[] prefixCols = node.Index.Columns[..equalityPrefixLen];
                 long? prefixNdv = null;
+                bool prefixPriced = false;
                 if (equalityPrefixLen == 1)
                 {
                     long? colNdv = stats.GetColumnNdv(database, table, prefixCols[0]);
@@ -1230,6 +1245,7 @@ internal static class CostEstimator
                     {
                         prefixSel = 1.0 / ndv;
                         prefixNdv = ndv;
+                        prefixPriced = true;
                     }
                 }
                 else
@@ -1239,6 +1255,7 @@ internal static class CostEstimator
                     {
                         prefixSel = 1.0 / ndv;
                         prefixNdv = ndv;
+                        prefixPriced = true;
                     }
                     else
                     {
@@ -1247,12 +1264,15 @@ internal static class CostEstimator
                         {
                             long? pNdv = stats.GetColumnNdv(database, table, pc);
                             if (pNdv is { } pn && pn > 0)
+                            {
                                 prefixSel /= pn;
+                                prefixPriced = true;
+                            }
                         }
                     }
                 }
 
-                if (prefixSel < 1.0)
+                if (prefixPriced)
                 {
                     trace?.Factors.Add(new EstimateFactor
                     {
@@ -1265,13 +1285,31 @@ internal static class CostEstimator
                         Values = prefixCols.Length,
                     });
                 }
+                else
+                {
+                    // No distinct count for the prefix (a bool column, a column ANALYZE did not
+                    // reach): the equality fallback the filter estimate uses. The prefix must weigh
+                    // the same in every step that binds it, or the step that binds the prefix alone,
+                    // priced by this constant, beats the step that also binds the range column, priced
+                    // by the histogram of that column.
+                    prefixSel = CardinalityEstimator.FallbackSelectivity;
+                    trace?.Factors.Add(new EstimateFactor
+                    {
+                        Rule = EstimateRule.EqualityFallback,
+                        Stage = EstimateStage.Index,
+                        Column = string.Join(",", prefixCols),
+                        Selectivity = prefixSel,
+                        Raw = prefixSel,
+                        Values = prefixCols.Length,
+                    });
+                }
             }
 
             // Range column bounds (null = open on that side).
             ColumnValue? rangeFrom = (hasFrom && rangeColIdx < fromLen) ? node.FromBound!.Values[rangeColIdx] : null;
             ColumnValue? rangeTo   = (hasTo   && rangeColIdx < toLen)   ? node.ToBound!.Values[rangeColIdx]   : null;
 
-            if (rangeColIdx < node.Index.Columns.Length)
+            if (rangeColIdx < keyColumnCount)
             {
                 string rangeCol = node.Index.Columns[rangeColIdx];
 
@@ -1307,13 +1345,36 @@ internal static class CostEstimator
                         return Math.Max(1, (long)(tableRowCount * prefixSel * realSel.Value));
                     }
                 }
+
+                // One value of a column with no histogram and no usable min/max (a uuid column has
+                // neither): its distinct count.
+                if (rangeColumnIsEquality)
+                {
+                    long? rangeNdv = stats.GetColumnNdv(database, table, rangeCol);
+                    if (rangeNdv is { } rn && rn > 0)
+                    {
+                        trace?.Factors.Add(new EstimateFactor
+                        {
+                            Rule = EstimateRule.IndexEqualityNdv,
+                            Stage = EstimateStage.Index,
+                            Column = rangeCol,
+                            Selectivity = 1.0 / rn,
+                            Raw = 1.0 / rn,
+                            Ndv = rn,
+                            Values = 1,
+                        });
+                        return Math.Max(1, (long)(tableRowCount * prefixSel / rn));
+                    }
+                }
             }
 
-            // If a prefix selectivity was derived but no range-column stats exist, apply prefix alone.
-            if (equalityPrefixLen > 0 && prefixSel < 1.0)
+            // A priced prefix and no statistics for the range column: the fixed constant for the
+            // bounds the range column itself has. The composite bounds do not say: a = 1 AND b >= 5
+            // has two composite bounds, the upper one being the end of the prefix, and one bound on b.
+            if (equalityPrefixLen > 0)
             {
-                double fallbackRangeSel = (hasFrom && hasTo) ? BothBoundsSelectivity
-                                        : (hasFrom || hasTo) ? OneBoundSelectivity
+                double fallbackRangeSel = (rangeFrom is not null && rangeTo is not null) ? BothBoundsSelectivity
+                                        : (rangeFrom is not null || rangeTo is not null) ? OneBoundSelectivity
                                         : 1.0;
                 trace?.Factors.Add(new EstimateFactor
                 {

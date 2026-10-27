@@ -256,10 +256,10 @@ public sealed class CamusTransactionSession
     }
 
     /// <summary>
-    /// The handle to resume this transaction with, carrying the session's latest causal token (all
-    /// three of N/L/C, per the protocol) so the server continues from what the session has already
-    /// observed. A prepared execution needs the same handle without the inline database and SQL,
-    /// which the statement id already stands for.
+    /// The handle to resume this transaction with. It also carries the session's latest causal token
+    /// (all three of N/L/C), but the server does not read a handle's token: a transaction takes its
+    /// causal floor once, from the START request. A prepared execution needs the same handle without
+    /// the inline database and SQL, which the statement id already stands for.
     /// </summary>
     private TxnHandle ResumeHandle() => new()
     {
