@@ -350,10 +350,11 @@ message BatchExecuteResponse {
 message TxnHandle {
   int64  txn_id_pt      = 1;
   uint32 txn_id_counter = 2;
-  // Optional causal token from the previous operation in this session. The three
-  // components mirror HLCTimestamp (N, L, C) exactly — N is the node-id dimension and
-  // is load-bearing (it participates in HLCTimestamp equality and is the CompareTo
-  // tie-breaker), so it must travel with L/C or the token is a lossy copy.
+  // Reserved: the server does not read these fields, and StartTransaction does not set
+  // them. A transaction takes its causal floor once, from StartTxnRequest (or the batch
+  // START), so send the token there. The three components mirror HLCTimestamp (N, L, C)
+  // exactly — N is the node-id dimension and is load-bearing (it participates in
+  // HLCTimestamp equality and is the CompareTo tie-breaker), so it must travel with L/C.
   int32  causal_token_n = 5;
   int64  causal_token_l = 3;
   int64  causal_token_c = 4;
