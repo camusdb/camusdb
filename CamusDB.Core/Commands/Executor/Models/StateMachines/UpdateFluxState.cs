@@ -59,6 +59,15 @@ internal sealed class UpdateFluxState
     internal Extensions.StatementTriggers? Triggers { get; init; }
 
     /// <summary>
+    /// The timestamp the locate scan reads at, minted when the statement started, or null to read the
+    /// latest committed value. A Read Committed transaction that takes statement snapshots
+    /// (<see cref="Transactions.KvTransaction.TakesStatementSnapshot"/>) passes one, so the locate scan
+    /// and the statement's subqueries read one view. The write phase never uses it: it locks each
+    /// located row and reads it again at the latest value.
+    /// </summary>
+    internal Kommander.Time.HLCTimestamp? StatementTimestamp { get; init; }
+
+    /// <summary>
     /// Where the statement's retryable Kahuna abort is recorded instead of thrown, or null to throw.
     /// Each step tests it after every call it passes it to and aborts the machine when it is set.
     /// See <see cref="Transactions.RetryableAbortSink"/>.

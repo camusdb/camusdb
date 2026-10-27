@@ -14,7 +14,7 @@
          build when they differ). The assembly version derived from it is the contract version, and
          the loader refuses an extension compiled against a newer one: a newer major from 1.0 on, and
          a newer major.minor while the major is 0, because a 0.x minor release may break the contract. -->
-    <Version>0.16.2</Version>
+    <Version>0.16.3</Version>
     <RootNamespace>CamusDB.Extensions</RootNamespace>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
     <!-- CS1587: the repository's license header opens with "/**", which the documentation

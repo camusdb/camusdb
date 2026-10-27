@@ -226,7 +226,11 @@ internal sealed class RowCommandService
         TableDescriptor table = await context.TableOpener.Open(database, ticket.TableName).ConfigureAwait(false);
         SelectStatementExecutor.PinForWrite(database, table, ticket.TxnState, writeShapeEpoch);
 
-        int updated = await rowUpdater.Update(queryExecutor, database, table, ticket).ConfigureAwait(false);
+        // The locate scan reads at one statement timestamp, as on the SQL path.
+        Kommander.Time.HLCTimestamp? statementTimestamp = database.Transactions.TryMintStatementTimestamp(
+            ticket.TxnState, out Kommander.Time.HLCTimestamp timestamp) ? timestamp : null;
+
+        int updated = await rowUpdater.Update(queryExecutor, database, table, ticket, statementTimestamp: statementTimestamp).ConfigureAwait(false);
         context.Statistics.TrackUpdate(database, table, updated, ticket.PlainValues);
         return new(database, table, updated);
     }
@@ -250,7 +254,11 @@ internal sealed class RowCommandService
         TableDescriptor table = await context.TableOpener.Open(database, ticket.TableName).ConfigureAwait(false);
         SelectStatementExecutor.PinForWrite(database, table, ticket.TxnState, writeShapeEpoch);
 
-        int deleted = await rowDeleter.Delete(queryExecutor, database, table, ticket).ConfigureAwait(false);
+        // The locate scan reads at one statement timestamp, as on the SQL path.
+        Kommander.Time.HLCTimestamp? statementTimestamp = database.Transactions.TryMintStatementTimestamp(
+            ticket.TxnState, out Kommander.Time.HLCTimestamp timestamp) ? timestamp : null;
+
+        int deleted = await rowDeleter.Delete(queryExecutor, database, table, ticket, statementTimestamp: statementTimestamp).ConfigureAwait(false);
         context.Statistics.TrackDelete(database, table, deleted);
         return new(database, table, deleted);
     }

@@ -915,6 +915,9 @@ public sealed class CommandExecutor : IAsyncDisposable
     /// <summary>The DELETE controller, so a test can install its interleaving hook.</summary>
     internal RowDeleter RowDeleterForTests => rowDeleter;
 
+    /// <summary>The INSERT … SELECT controller, so a test can install its interleaving hook.</summary>
+    internal RowInsertSelector RowInsertSelectorForTests => rowInsertSelector;
+
     /// <summary>
     /// Test-only seam: runs one schema freshness sweep over every open database and returns how
     /// many stale schemas were repaired. Drives the sweep deterministically instead of waiting out

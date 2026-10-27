@@ -176,6 +176,10 @@ public sealed class RowUpdater
     /// <para>With <paramref name="returning"/>, each written chunk hands the new image of its rows to
     /// the collector after the chunk's batch write succeeded. The write phase then also decodes the
     /// columns the RETURNING list reads; see <see cref="FlushUpdateChunk"/>.</para>
+    ///
+    /// <para>With <paramref name="statementTimestamp"/>, the locate scan reads at that timestamp in the
+    /// statement read mode (<see cref="UpdateFluxState.StatementTimestamp"/>). Null reads the latest
+    /// committed value.</para>
     /// </summary>
     internal async Task<int> Update(
         QueryExecutor queryExecutor,
@@ -183,7 +187,8 @@ public sealed class RowUpdater
         TableDescriptor table,
         UpdateTicket ticket,
         RetryableAbortSink? aborts = null,
-        DML.WriteReturningPlan.ReturningRowCollector? returning = null)
+        DML.WriteReturningPlan.ReturningRowCollector? returning = null,
+        Kommander.Time.HLCTimestamp? statementTimestamp = null)
     {
         MaterializedViewAccessGuard.RequireWritable(table);
 
@@ -211,7 +216,8 @@ public sealed class RowUpdater
         {
             ForeignKeys = foreignKeys,
             Returning = returning,
-            Triggers = rowTriggers
+            Triggers = rowTriggers,
+            StatementTimestamp = statementTimestamp
         };
 
         FluxMachine<UpdateFluxSteps, UpdateFluxState> machine = new(state);
@@ -394,6 +400,14 @@ public sealed class RowUpdater
             retryableAborts: state.RetryableAborts
         );
 
+        // The locate scan reads at the statement timestamp, and the snapshot closes before the write
+        // phase: the lock-then-read there must see the latest value. See UpdateFluxState.StatementTimestamp.
+        using StatementSnapshotScope locateSnapshot = StatementSnapshotScope.Open(ticket.TxnState, state.StatementTimestamp);
+
+        // Test-only interleaving point; see TestBeforeLocateHook. Read once so a concurrent clear cannot fault it.
+        if (TestBeforeLocateHook is { } beforeLocateHook)
+            await beforeLocateHook().ConfigureAwait(false);
+
         IAsyncEnumerable<QueryResultRow> cursor = state.QueryExecutor.Query(state.Database, state.Table, queryTicket);
 
         // The buffer keeps row-id-only records. The write phase never reads the located row's values:
@@ -566,6 +580,13 @@ public sealed class RowUpdater
     /// time deterministically. Null (zero-cost) in production.
     /// </summary>
     internal Func<Task>? TestBeforeWriteHook;
+
+    /// <summary>
+    /// Test-only interleaving hook, awaited after the statement started (and minted its timestamp) and before the locate
+    /// scan reads its first row. Lets a test commit a change that the locate scan must not see when it reads at the
+    /// statement timestamp. Null (zero-cost) in production.
+    /// </summary>
+    internal Func<Task>? TestBeforeLocateHook;
 
     private async Task<FluxAction> UpdateRowsAndIndexes(UpdateFluxState state)
     {

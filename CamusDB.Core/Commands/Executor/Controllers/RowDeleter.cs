@@ -70,6 +70,10 @@ internal sealed class RowDeleter
     /// to it after the chunk's batch delete succeeded, and the write phase also decodes the columns the
     /// list reads; see <see cref="FlushDeleteChunk"/>.
     /// </param>
+    /// <param name="statementTimestamp">
+    /// The timestamp the locate scan reads at, in the statement read mode, or null to read the latest
+    /// committed value; see <see cref="DeleteFluxState.StatementTimestamp"/>.
+    /// </param>
     public async Task<int> Delete(
         QueryExecutor queryExecutor,
         DatabaseDescriptor database,
@@ -79,7 +83,8 @@ internal sealed class RowDeleter
         bool checkForeignKeys = true,
         bool maintainIndexes = true,
         DML.WriteReturningPlan.ReturningRowCollector? returning = null,
-        bool fireTriggers = true)
+        bool fireTriggers = true,
+        Kommander.Time.HLCTimestamp? statementTimestamp = null)
     {
         if (!allowMaterializedView)
             MaterializedViewAccessGuard.RequireWritable(table);
@@ -106,7 +111,8 @@ internal sealed class RowDeleter
             ForeignKeys = foreignKeys,
             MaintainIndexes = maintainIndexes,
             Returning = returning,
-            Triggers = rowTriggers
+            Triggers = rowTriggers,
+            StatementTimestamp = statementTimestamp
         };
 
         FluxMachine<DeleteFluxSteps, DeleteFluxState> machine = new(state);
@@ -306,6 +312,14 @@ internal sealed class RowDeleter
             probe: ticket.Probe
         );
 
+        // The locate scan reads at the statement timestamp, and the snapshot closes before the write
+        // phase: the lock-then-read there must see the latest value. See DeleteFluxState.StatementTimestamp.
+        using StatementSnapshotScope locateSnapshot = StatementSnapshotScope.Open(ticket.TxnState, state.StatementTimestamp);
+
+        // Test-only interleaving point; see TestBeforeLocateHook. Read once so a concurrent clear cannot fault it.
+        if (TestBeforeLocateHook is { } beforeLocateHook)
+            await beforeLocateHook().ConfigureAwait(false);
+
         IAsyncEnumerable<QueryResultRow> cursor = state.QueryExecutor.Query(state.Database, state.Table, queryTicket);
 
         // Buffer row-id-only records: the mutation phase reads RowId alone and re-reads every row
@@ -385,6 +399,13 @@ internal sealed class RowDeleter
     /// can time deterministically. Null (zero-cost) in production.
     /// </summary>
     internal Func<Task>? TestBeforeWriteHook;
+
+    /// <summary>
+    /// Test-only interleaving hook, awaited after the statement started (and minted its timestamp) and before the locate
+    /// scan reads its first row. Lets a test commit a change that the locate scan must not see when it reads at the
+    /// statement timestamp. Null (zero-cost) in production.
+    /// </summary>
+    internal Func<Task>? TestBeforeLocateHook;
 
     /// <summary>
     /// Deletes one chunk of located rows: <b>lock, then read, then re-check, then delete</b>.

@@ -19,6 +19,7 @@ using CamusDB.Core.Diagnostics;
 using CamusDB.Core.SQLParser;
 using CamusDB.Core.Statistics;
 using CamusDB.Core.Transactions;
+using Kommander.Time;
 using Microsoft.Extensions.Logging;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers.DML;
@@ -341,6 +342,10 @@ internal sealed class NonQueryStatementDispatcher
                     InsertSelectTicket insertSelectTicket = sqlExecutor.CreateInsertSelectTicket(ticket, ast);
                     context.Validator.Validate(insertSelectTicket);
 
+                    // One timestamp for the whole source query, kept across fence retries; see
+                    // MintStatementTimestamp.
+                    HLCTimestamp? statementTimestamp = MintStatementTimestamp(database, ticket.TxnState);
+
                     for (int fenceAttempt = 0; ; fenceAttempt++)
                     {
                         // Read before the attempt: a fence error is retried in this transaction only
@@ -365,13 +370,14 @@ internal sealed class NonQueryStatementDispatcher
                                 ? new()
                                 : null;
 
-                            await using SelectRowSource source = await selectExecutor.BuildSelectSourceAsync(
-                                database, insertSelectTicket.SourceSelect, ticket, "INSERT ... SELECT").ConfigureAwait(false);
+                            await using SelectRowSource source = await BuildInsertSelectSourceAsync(
+                                database, insertSelectTicket.SourceSelect, ticket, statementTimestamp).ConfigureAwait(false);
 
                             int insertedFromSelect = await rowInsertSelector
                                 .InsertSelect(
                                     rowInserter, context.Statistics, sequenceBinder, database, table,
-                                    insertSelectTicket, ticket, source.Columns, source.Cursor, insertedRows)
+                                    insertSelectTicket, ticket, source.Columns, source.Cursor, insertedRows,
+                                    sourceTimestamp: statementTimestamp)
                                 .ConfigureAwait(false);
 
                             string? insertWarning = ctasExecutor.WarnIfTimeTravelCopyReadNothing(
@@ -398,7 +404,11 @@ internal sealed class NonQueryStatementDispatcher
                         WriteReturningPlan.Validate(returningList);
 
                     UpdateTicket updateTicket = sqlExecutor.CreateUpdateTicket(ticket, ast);
-                    updateTicket = await RewriteUpdateSubqueriesAsync(database, updateTicket, ticket).ConfigureAwait(false);
+
+                    // The subqueries and the locate scan read at one timestamp; see MintStatementTimestamp.
+                    HLCTimestamp? statementTimestamp = MintStatementTimestamp(database, ticket.TxnState);
+                    using (StatementSnapshotScope.Open(ticket.TxnState, statementTimestamp))
+                        updateTicket = await RewriteUpdateSubqueriesAsync(database, updateTicket, ticket).ConfigureAwait(false);
 
                     for (int fenceAttempt = 0; ; fenceAttempt++)
                     {
@@ -425,7 +435,9 @@ internal sealed class NonQueryStatementDispatcher
                                 ? returning.CreateCollector()
                                 : null;
 
-                            int updated = await rowUpdater.Update(queryExecutor, database, table, updateTicket, ticket.RetryableAborts, collector).ConfigureAwait(false);
+                            int updated = await rowUpdater.Update(
+                                queryExecutor, database, table, updateTicket, ticket.RetryableAborts, collector,
+                                statementTimestamp).ConfigureAwait(false);
 
                             // A retryable abort recorded instead of thrown: the statement did not
                             // complete, and the transport that owns the sink reports it.
@@ -455,15 +467,20 @@ internal sealed class NonQueryStatementDispatcher
 
                     DeleteTicket deleteTicket = sqlExecutor.CreateDeleteTicket(ticket, ast);
 
+                    // The subqueries and the locate scan read at one timestamp; see MintStatementTimestamp.
+                    HLCTimestamp? statementTimestamp = MintStatementTimestamp(database, ticket.TxnState);
+
                     // Resolve any scalar / IN / NOT IN subquery in the WHERE clause to a literal
                     // before evaluation (DELETE has no subquery rewrite of its own, unlike SELECT).
                     // Done once here, outside the fence-retry loop, so the inner query is not
                     // re-executed on each SchemaCatchingUp retry.
                     if (deleteTicket.Where is not null)
                     {
-                        NodeAst rewrittenWhere = await subqueryRewriter
-                            .RewriteWhereExpressionAsync(database, deleteTicket.Where, ticket)
-                            .ConfigureAwait(false);
+                        NodeAst rewrittenWhere;
+                        using (StatementSnapshotScope.Open(ticket.TxnState, statementTimestamp))
+                            rewrittenWhere = await subqueryRewriter
+                                .RewriteWhereExpressionAsync(database, deleteTicket.Where, ticket)
+                                .ConfigureAwait(false);
 
                         if (!ReferenceEquals(rewrittenWhere, deleteTicket.Where))
                             deleteTicket = new DeleteTicket(
@@ -501,7 +518,9 @@ internal sealed class NonQueryStatementDispatcher
                                 ? returning.CreateCollector()
                                 : null;
 
-                            int deleted = await rowDeleter.Delete(queryExecutor, database, table, deleteTicket, returning: collector).ConfigureAwait(false);
+                            int deleted = await rowDeleter.Delete(
+                                queryExecutor, database, table, deleteTicket, returning: collector,
+                                statementTimestamp: statementTimestamp).ConfigureAwait(false);
                             context.Statistics.TrackDelete(database, table, deleted);
                             return CompleteChangeResult(database, table, deleted, returning, collector);
                         }
@@ -605,6 +624,39 @@ internal sealed class NonQueryStatementDispatcher
 
                 throw new CamusDBException(CamusDBErrorCodes.InvalidAstStmt, "Unknown non-query AST stmt: " + ast.nodeType);
         }
+    }
+
+    /// <summary>
+    /// Mints the read timestamp of a write statement (<c>UPDATE</c>, <c>DELETE</c>,
+    /// <c>INSERT … SELECT</c>), or returns null when the transaction does not take statement snapshots
+    /// (<see cref="KvTransaction.TakesStatementSnapshot"/>), in which case the statement reads the latest
+    /// committed value as before.
+    ///
+    /// <para>The statement's read phase reads at this timestamp: the subquery rewrite, then the locate
+    /// scan of an <c>UPDATE</c> or <c>DELETE</c>, or the source query of an <c>INSERT … SELECT</c>. So
+    /// the statement sees one consistent view, as a SELECT does, and a row that a concurrent transfer
+    /// changes is located from one state, never from half of it. Minted once, before the fence-retry
+    /// loop, so a retried attempt reads the same view as the subqueries did.</para>
+    ///
+    /// <para>The write phase keeps the latest read: the lock-then-read and the re-check of each located
+    /// row, the uniqueness and the foreign-key checks. Each snapshot scope closes before that phase
+    /// begins (<see cref="StatementSnapshotScope"/>). A row that a later commit moved out of the WHERE is
+    /// skipped by the re-check; a row that a commit after the timestamp moved into the WHERE is not
+    /// located, as if the statement had run at its timestamp.</para>
+    /// </summary>
+    private static HLCTimestamp? MintStatementTimestamp(DatabaseDescriptor database, KvTransaction tx) =>
+        database.Transactions.TryMintStatementTimestamp(tx, out HLCTimestamp timestamp) ? timestamp : null;
+
+    /// <summary>
+    /// Binds the source query of an <c>INSERT … SELECT</c> with the statement snapshot open, so a
+    /// subquery that the bind runs reads at the same timestamp as the drain
+    /// (<see cref="RowInsertSelector.InsertSelect"/>). The snapshot closes when the bind returns.
+    /// </summary>
+    private async Task<SelectRowSource> BuildInsertSelectSourceAsync(
+        DatabaseDescriptor database, NodeAst sourceSelect, ExecuteSQLTicket ticket, HLCTimestamp? statementTimestamp)
+    {
+        using StatementSnapshotScope _ = StatementSnapshotScope.Open(ticket.TxnState, statementTimestamp);
+        return await selectExecutor.BuildSelectSourceAsync(database, sourceSelect, ticket, "INSERT ... SELECT").ConfigureAwait(false);
     }
 
     /// <summary>

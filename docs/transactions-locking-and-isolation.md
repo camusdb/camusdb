@@ -458,6 +458,20 @@ This is the lock-free behavior described in §4/§5. What it does **not** promis
   between the two statements. An optimistic transaction, or one with read validation, keeps reading the
   latest committed value of each key: it validates every read at commit, so it never commits on a torn
   read, and a lost update fails early, at the statement that writes the changed row.
+- ✅ **One snapshot for the read phase of a write statement.** In the same transactions, the locate
+  scan of an `UPDATE` or a `DELETE` reads at one statement timestamp, and so do the subqueries in its
+  `WHERE` and `SET`. The source query of an `INSERT … SELECT` also reads at one statement timestamp.
+  The write phase then reads the latest value: it locks each located row, reads it again and checks
+  the `WHERE` again. A row that a later commit deleted or moved out of the `WHERE` is skipped. A row
+  that a commit after the timestamp inserted or moved into the `WHERE` is not changed by the
+  statement, as if the statement ran at its timestamp. Uniqueness and foreign-key checks read the
+  latest value.
+- ⚠️ **A read at a statement timestamp can wait for another transaction's write.** Kahuna can meet a
+  write that another transaction staged and that can still commit at or before the timestamp. Then the
+  read waits until that transaction commits or rolls back. The wait has a limit: about 5 s for a scan
+  page and about 16 s for a point read, by default. After the limit, the statement fails with a
+  retryable error. A read of the latest value does not wait. This applies to a `SELECT` and to the
+  read phase of a write statement.
 - ⚠️ **Pass the causal token at `BEGIN` when you read after a commit on another node.** A read at a
   timestamp does not show a value that another node committed at a later clock time, even when that
   commit finished first. If the clock of the node that runs your transaction is behind, a `SELECT` can
@@ -594,7 +608,8 @@ A map for when you want to read the real thing:
   `KvTransaction.QueryReadView` decides the timestamp and Kahuna read mode of a query read (the
   statement timestamp of a Read Committed `SELECT`, §9.2), and `LatestReadView` is the read of a
   write path. `SelectStatementExecutor` opens the statement snapshot and closes it when the cursor
-  ends.
+  ends. A write statement opens it only for its read phase (`StatementSnapshotScope`, minted in
+  `NonQueryStatementDispatcher.MintStatementTimestamp`) and closes it before the write phase.
 - **`CamusDB.Core/Storage/Kv/KvTableStore.cs`** — the per-table data layer: how rows and index entries
   are written/read as keys, the batched write path, and the range-lock methods
   (`AcquireRowRangeLockAsync`, `AcquireIndexRangeLockAsync`, `AcquireBoundedIndexRangeLockAsync`).

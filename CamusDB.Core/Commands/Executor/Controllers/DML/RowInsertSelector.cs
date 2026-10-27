@@ -31,6 +31,13 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.DML;
 internal sealed class RowInsertSelector
 {
     /// <summary>
+    /// Test-only interleaving hook, awaited after the statement started (and minted its timestamp) and before the drain
+    /// reads the first source row. Lets a test commit a change that the source query must not see when it reads at the
+    /// statement timestamp. Null (zero-cost) in production.
+    /// </summary>
+    internal Func<Task>? TestBeforeSourceReadHook;
+
+    /// <summary>
     /// Maps the source's output columns onto the target columns <b>positionally</b> and inserts them.
     /// </summary>
     /// <param name="sourceColumns">
@@ -55,6 +62,13 @@ internal sealed class RowInsertSelector
     /// Receives one (row id, stored values) pair for each written row, in source order, for an
     /// <c>INSERT … SELECT … RETURNING</c>. Null when the statement returns no rows.
     /// </param>
+    /// <param name="sourceTimestamp">
+    /// The timestamp the drain of <paramref name="cursor"/> reads at, in the statement read mode, or null
+    /// to read the latest committed value. A Read Committed transaction that takes statement snapshots
+    /// passes the timestamp its statement minted, so the whole source query reads one view. The
+    /// snapshot closes when the drain ends, before the first row is written: the uniqueness and
+    /// foreign-key checks of the writes read the latest value.
+    /// </param>
     public async Task<int> InsertSelect(
         RowInserter rowInserter,
         StatisticsManager statisticsManager,
@@ -65,7 +79,8 @@ internal sealed class RowInsertSelector
         ExecuteSQLTicket statementTicket,
         IReadOnlyList<DerivedColumnSchema> sourceColumns,
         IAsyncEnumerable<QueryResultRow> cursor,
-        List<QueryResultRow>? insertedRows = null)
+        List<QueryResultRow>? insertedRows = null,
+        Kommander.Time.HLCTimestamp? sourceTimestamp = null)
     {
         // Target columns: the explicit list, or every column in schema order. The implicit list
         // deliberately mirrors INSERT … VALUES (which also takes every column) so the two forms
@@ -106,30 +121,38 @@ internal sealed class RowInsertSelector
         // reserved once the row count is known — which is after this drain.
         List<ColumnValue?[]> sourceRows = new();
 
-        await foreach (QueryResultRow sourceRow in cursor.ConfigureAwait(false))
+        // The drain reads at the statement timestamp, and the snapshot closes before the first write.
+        using (Transactions.StatementSnapshotScope.Open(ticket.TxnState, sourceTimestamp))
         {
-            if (sourceRows.Count >= mutationLimit)
-                throw new CamusDBException(
-                    CamusDBErrorCodes.TransactionMutationLimitExceeded,
-                    $"INSERT ... SELECT would insert more than {mutationLimit} rows, which exceeds the " +
-                    $"per-transaction mutation limit. Narrow the source query (for example with WHERE or " +
-                    $"LIMIT) and run it in several transactions."
-                );
+            // Test-only interleaving point; see TestBeforeSourceReadHook. Read once so a concurrent clear cannot fault it.
+            if (TestBeforeSourceReadHook is { } beforeSourceReadHook)
+                await beforeSourceReadHook().ConfigureAwait(false);
 
-            ColumnValue?[] slots = new ColumnValue?[targetColumns.Count];
-
-            for (int i = 0; i < sourceColumns.Count; i++)
+            await foreach (QueryResultRow sourceRow in cursor.ConfigureAwait(false))
             {
-                // Resolved by the source column's row key — the key the projection stores the cell
-                // under and, for a join, the {alias}.{column} form the join executor keys its rows by.
-                // The display name is not used: two source columns may share it. A key the cursor did
-                // not produce contributes no value, so the target column takes its default.
-                slots[i] = sourceRow.Row.TryGetValue(sourceColumns[i].RowKey, out ColumnValue? value)
-                    ? value
-                    : null;
-            }
+                if (sourceRows.Count >= mutationLimit)
+                    throw new CamusDBException(
+                        CamusDBErrorCodes.TransactionMutationLimitExceeded,
+                        $"INSERT ... SELECT would insert more than {mutationLimit} rows, which exceeds the " +
+                        $"per-transaction mutation limit. Narrow the source query (for example with WHERE or " +
+                        $"LIMIT) and run it in several transactions."
+                    );
 
-            sourceRows.Add(slots);
+                ColumnValue?[] slots = new ColumnValue?[targetColumns.Count];
+
+                for (int i = 0; i < sourceColumns.Count; i++)
+                {
+                    // Resolved by the source column's row key — the key the projection stores the cell
+                    // under and, for a join, the {alias}.{column} form the join executor keys its rows by.
+                    // The display name is not used: two source columns may share it. A key the cursor did
+                    // not produce contributes no value, so the target column takes its default.
+                    slots[i] = sourceRow.Row.TryGetValue(sourceColumns[i].RowKey, out ColumnValue? value)
+                        ? value
+                        : null;
+                }
+
+                sourceRows.Add(slots);
+            }
         }
 
         if (sourceRows.Count == 0)

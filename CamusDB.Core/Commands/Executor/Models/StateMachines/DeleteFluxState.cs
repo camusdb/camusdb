@@ -64,6 +64,15 @@ internal sealed class DeleteFluxState
     /// </summary>
     internal Extensions.StatementTriggers? Triggers { get; init; }
 
+    /// <summary>
+    /// The timestamp the locate scan reads at, minted when the statement started, or null to read the
+    /// latest committed value. A Read Committed transaction that takes statement snapshots
+    /// (<see cref="Transactions.KvTransaction.TakesStatementSnapshot"/>) passes one, so the locate scan
+    /// and the statement's subqueries read one view. The write phase never uses it: it locks each
+    /// located row and reads it again at the latest value.
+    /// </summary>
+    internal Kommander.Time.HLCTimestamp? StatementTimestamp { get; init; }
+
     public DeleteFluxState(DatabaseDescriptor database, TableDescriptor table, DeleteTicket ticket, QueryExecutor queryExecutor)
     {
         Database = database;

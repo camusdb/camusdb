@@ -456,9 +456,9 @@ public sealed class KvTransaction
     }
 
     /// <summary>
-    /// The read timestamp of the SELECT statement this transaction runs now, held in one object so a
-    /// reader gets the timestamp and the decision to use it in one read. Null when no statement
-    /// snapshot is open.
+    /// The read timestamp of the statement this transaction runs now (a SELECT, or the read phase of a
+    /// write statement), held in one object so a reader gets the timestamp and the decision to use it
+    /// in one read. Null when no statement snapshot is open.
     /// </summary>
     private sealed class StatementSnapshot(HLCTimestamp timestamp)
     {
@@ -487,7 +487,7 @@ public sealed class KvTransaction
     public HLCTimestamp CausalFloor { get; private set; }
 
     /// <summary>
-    /// Marks the transaction as one whose Read Committed SELECT statements read at a statement
+    /// Marks the transaction as one whose Read Committed statements read at a statement
     /// timestamp, with <paramref name="causalFloor"/> as the lowest timestamp. Called once, by
     /// <see cref="KvTransactionsManager.BeginAsync"/>, before the transaction is returned.
     /// </summary>
@@ -498,7 +498,7 @@ public sealed class KvTransaction
     }
 
     /// <summary>
-    /// True when the next SELECT statement of this transaction must read at a statement timestamp: a
+    /// True when the next statement of this transaction must read at a statement timestamp: a
     /// transaction begun with <see cref="KvTransactionsManager.BeginAsync"/>, at Read Committed, with no
     /// fixed <see cref="ReadTimestamp"/>, that does not validate its reads at commit. Read at the start
     /// of each statement, because <c>SET TRANSACTION</c> can change the level or the locking before the
@@ -556,7 +556,10 @@ public sealed class KvTransaction
     ///
     /// <para><b>Not for a write path.</b> A lock-then-read, a uniqueness check or a foreign-key check must
     /// read the latest value, or it can miss a commit that landed after the statement timestamp. Such a
-    /// path uses <see cref="LatestReadView"/>. The statement snapshot is open only while a SELECT runs:
+    /// path uses <see cref="LatestReadView"/>. The statement snapshot is open only while a SELECT runs,
+    /// and while a write statement runs a read phase: the subquery rewrite and the locate scan of an
+    /// <c>UPDATE</c> or <c>DELETE</c>, and the source query of an <c>INSERT … SELECT</c>
+    /// (<see cref="StatementSnapshotScope"/>). It is closed before the write phase begins, and
     /// <see cref="MarkStatementExecuted"/> closes it when any other statement starts.</para>
     /// </summary>
     public KvReadView QueryReadView
