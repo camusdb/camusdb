@@ -35,7 +35,10 @@ internal sealed class QueryBinder
     }
 
     /// <summary>
-    /// Binds the query's sources to catalog objects and validates every column reference.
+    /// Binds the query's sources to catalog objects and validates every column reference, for the
+    /// schema of the query only: a SELECT nested in the source tree binds through this binder alone,
+    /// with its subquery nodes left in place, so the result must not run. Every executed statement
+    /// binds through <see cref="BindAsync(DatabaseDescriptor, SelectQuery, NestedSelectBinder?)"/>.
     /// <para><b>Parameter independence (audited):</b> the result is a function of the query and the
     /// catalog only. Nothing here reads a parameter value or transaction state, so a binding is
     /// reusable across executions with different parameters — which the bound-query cache does for
@@ -46,7 +49,18 @@ internal sealed class QueryBinder
     /// the table through the same chokepoint. A change that makes the single-table path read
     /// per-execution state must also make that shape ineligible for the cache.</para>
     /// </summary>
-    public async Task<BoundSelectQuery> BindAsync(DatabaseDescriptor database, SelectQuery query)
+    public Task<BoundSelectQuery> BindAsync(DatabaseDescriptor database, SelectQuery query) =>
+        BindAsync(database, query, nested: null);
+
+    /// <summary>
+    /// Binds the query as the overload above does, and binds every SELECT nested in its source tree
+    /// — the inner query of a derived table, each operand of a set operation — through
+    /// <paramref name="nested"/> when one is given, so those SELECTs resolve their own subqueries and
+    /// can run. With a nested binder the result is no longer parameter independent: the nested
+    /// subquery stages read storage and parameter values. The bound-query cache is unaffected, since
+    /// it already excludes every shape that has a derived source.
+    /// </summary>
+    public async Task<BoundSelectQuery> BindAsync(DatabaseDescriptor database, SelectQuery query, NestedSelectBinder? nested)
     {
         List<BoundTableSource> sources = [];
         List<BoundDerivedTableSource> derivedSources = [];
@@ -55,7 +69,7 @@ internal sealed class QueryBinder
         // is a genuine duplicate and must be rejected here with a clear error.
         HashSet<string> aliases = new(StringComparer.OrdinalIgnoreCase);
 
-        await CollectBoundSourcesAsync(database, query.Source, sources, derivedSources, aliases).ConfigureAwait(false);
+        await CollectBoundSourcesAsync(database, query.Source, sources, derivedSources, aliases, nested).ConfigureAwait(false);
         ValidateJoinPredicates(query.Source, sources, derivedSources);
 
         QueryRowNameResolver rowNames = new(sources, derivedSources);
@@ -66,15 +80,19 @@ internal sealed class QueryBinder
 
     /// <summary>
     /// Binds a subquery shell for correlated EXISTS execution. Inner WHERE may reference outer
-    /// columns and is validated separately by the caller.
+    /// columns and is validated separately by the caller. A SELECT nested in the shell's source tree
+    /// binds through <paramref name="nested"/>, as in the main overload.
     /// </summary>
-    internal async Task<BoundSelectQuery> BindSubqueryAsync(DatabaseDescriptor database, SelectQuery query)
+    internal async Task<BoundSelectQuery> BindSubqueryAsync(
+        DatabaseDescriptor database,
+        SelectQuery query,
+        NestedSelectBinder? nested)
     {
         List<BoundTableSource> sources = [];
         List<BoundDerivedTableSource> derivedSources = [];
         HashSet<string> aliases = new(StringComparer.OrdinalIgnoreCase);
 
-        await CollectBoundSourcesAsync(database, query.Source, sources, derivedSources, aliases).ConfigureAwait(false);
+        await CollectBoundSourcesAsync(database, query.Source, sources, derivedSources, aliases, nested).ConfigureAwait(false);
         ValidateJoinPredicates(query.Source, sources, derivedSources);
 
         QueryRowNameResolver rowNames = new(sources, derivedSources);
@@ -102,7 +120,8 @@ internal sealed class QueryBinder
         QuerySource source,
         List<BoundTableSource> sources,
         List<BoundDerivedTableSource> derivedSources,
-        HashSet<string> aliases)
+        HashSet<string> aliases,
+        NestedSelectBinder? nested)
     {
         switch (source)
         {
@@ -157,7 +176,7 @@ internal sealed class QueryBinder
                 // and so needs SELECT on them. The shell around them has no sources.
                 if (derivedSource.SetOperation is { } setOperation)
                 {
-                    BoundSetOperation bound = await BindSetOperationAsync(database, setOperation).ConfigureAwait(false);
+                    BoundSetOperation bound = await BindSetOperationAsync(database, setOperation, nested).ConfigureAwait(false);
 
                     derivedSources.Add(new BoundDerivedTableSource(
                         derivedSource,
@@ -188,7 +207,11 @@ internal sealed class QueryBinder
 
                 using OwnerScope _ = new(owner);
 
-                BoundSelectQuery innerBound = await BindAsync(database, derivedSource.Query).ConfigureAwait(false);
+                // The whole inner bind runs inside the scope, the subquery stages included: an IN or
+                // EXISTS in a view body reads its table as the view's owner, like the body's FROM.
+                (BoundSelectQuery innerBound, SubqueryBindProducts innerSubqueries) =
+                    await BindNestedAsync(database, derivedSource.Query, nested).ConfigureAwait(false);
+
                 IReadOnlyList<DerivedColumnSchema> columns =
                     DerivedTableSchemaBuilder.Build(derivedSource.Query, innerBound);
 
@@ -196,14 +219,17 @@ internal sealed class QueryBinder
                     derivedSource,
                     derivedSource.Alias,
                     columns,
-                    innerBound));
+                    innerBound)
+                {
+                    InnerSubqueries = innerSubqueries,
+                });
                 return;
             }
 
             case JoinSource joinSource:
-                await CollectBoundSourcesAsync(database, joinSource.Left, sources, derivedSources, aliases)
+                await CollectBoundSourcesAsync(database, joinSource.Left, sources, derivedSources, aliases, nested)
                     .ConfigureAwait(false);
-                await CollectBoundSourcesAsync(database, joinSource.Right, sources, derivedSources, aliases)
+                await CollectBoundSourcesAsync(database, joinSource.Right, sources, derivedSources, aliases, nested)
                     .ConfigureAwait(false);
                 return;
 
@@ -215,15 +241,41 @@ internal sealed class QueryBinder
     }
 
     /// <summary>
-    /// Binds both operands of a set operation and resolves its output columns
-    /// (<see cref="SetOperationSchema"/>). The operands bind in the caller's authorization scope:
-    /// an operand that is an expanded view swaps to the view's owner for its own subtree only, in
-    /// the derived-table case above, exactly as it would in a plain FROM.
+    /// Binds a SELECT met inside a source tree. Through <paramref name="nested"/> it runs the whole
+    /// bind pipeline, so its subqueries are resolved and the products its ticket needs come back with
+    /// it. Without one it binds for its schema only, and the products are default.
     /// </summary>
-    private async Task<BoundSetOperation> BindSetOperationAsync(DatabaseDescriptor database, SetOperationSource setOperation)
+    private async Task<(BoundSelectQuery Bound, SubqueryBindProducts Subqueries)> BindNestedAsync(
+        DatabaseDescriptor database,
+        SelectQuery query,
+        NestedSelectBinder? nested)
     {
-        BoundSelectQuery left = await BindAsync(database, setOperation.Left).ConfigureAwait(false);
-        BoundSelectQuery right = await BindAsync(database, setOperation.Right).ConfigureAwait(false);
+        if (nested is { } binder)
+        {
+            SelectBindResult result = await binder.BindAsync(database, query).ConfigureAwait(false);
+            return (result.Bound, result.Subqueries);
+        }
+
+        return (await BindAsync(database, query, nested: null).ConfigureAwait(false), default);
+    }
+
+    /// <summary>
+    /// Binds both operands of a set operation and resolves its output columns
+    /// (<see cref="SetOperationSchema"/>). The operands bind in the authorization scope that is
+    /// current here: the caller's for a set operation the statement writes, the view owner's for
+    /// one that is a view's body, because the derived-table case above enters that scope before it
+    /// binds the body. An operand that is itself an expanded view swaps to that view's owner for its
+    /// own subtree only, exactly as it would in a plain FROM.
+    /// </summary>
+    private async Task<BoundSetOperation> BindSetOperationAsync(
+        DatabaseDescriptor database,
+        SetOperationSource setOperation,
+        NestedSelectBinder? nested)
+    {
+        (BoundSelectQuery left, SubqueryBindProducts leftSubqueries) =
+            await BindNestedAsync(database, setOperation.Left, nested).ConfigureAwait(false);
+        (BoundSelectQuery right, SubqueryBindProducts rightSubqueries) =
+            await BindNestedAsync(database, setOperation.Right, nested).ConfigureAwait(false);
 
         IReadOnlyList<DerivedColumnSchema> leftColumns = DerivedTableSchemaBuilder.Build(setOperation.Left, left);
         IReadOnlyList<DerivedColumnSchema> rightColumns = DerivedTableSchemaBuilder.Build(setOperation.Right, right);
@@ -231,7 +283,11 @@ internal sealed class QueryBinder
         (IReadOnlyList<DerivedColumnSchema> columns, IReadOnlyList<bool> untyped) =
             SetOperationSchema.Resolve(setOperation, left, leftColumns, right, rightColumns);
 
-        return new BoundSetOperation(setOperation, left, right, leftColumns, rightColumns, columns, untyped);
+        return new BoundSetOperation(setOperation, left, right, leftColumns, rightColumns, columns, untyped)
+        {
+            LeftSubqueries = leftSubqueries,
+            RightSubqueries = rightSubqueries,
+        };
     }
 
     /// <summary>

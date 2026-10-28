@@ -75,10 +75,12 @@ internal sealed class SetOperationExecutor
         QueryExecutionContext context = QueryExecutionContext.For(database, outerTicket);
 
         IAsyncEnumerable<QueryResultRow> left = RunOperand(
-            database, setOperation.Left, setOperation.LeftColumns, setOperation.Columns, layout, outerTicket, stats, isLeft: true);
+            database, setOperation.Left, setOperation.LeftSubqueries, setOperation.LeftColumns, setOperation.Columns,
+            layout, outerTicket, stats, isLeft: true);
 
         IAsyncEnumerable<QueryResultRow> right = RunOperand(
-            database, setOperation.Right, setOperation.RightColumns, setOperation.Columns, layout, outerTicket, stats, isLeft: false);
+            database, setOperation.Right, setOperation.RightSubqueries, setOperation.RightColumns, setOperation.Columns,
+            layout, outerTicket, stats, isLeft: false);
 
         SetOperationSource source = setOperation.Source;
 
@@ -93,11 +95,14 @@ internal sealed class SetOperationExecutor
     /// <summary>
     /// Runs one operand and re-keys its rows to the output layout. The operand ticket carries the
     /// caller's transaction, parameters, probe and cancellation token, as a derived table's inner
-    /// ticket does, so a cancel stops the operand scan itself and not only this loop.
+    /// ticket does, so a cancel stops the operand scan itself and not only this loop. It also
+    /// carries the operand's own <paramref name="subqueries"/>, so an EXISTS in an operand's WHERE
+    /// finds its prepared subquery and an IN lifted into a semi-join finds its spec.
     /// </summary>
     private async IAsyncEnumerable<QueryResultRow> RunOperand(
         DatabaseDescriptor database,
         BoundSelectQuery operand,
+        SubqueryBindProducts subqueries,
         IReadOnlyList<DerivedColumnSchema> operandColumns,
         IReadOnlyList<DerivedColumnSchema> outputColumns,
         RowLayout layout,
@@ -116,7 +121,7 @@ internal sealed class SetOperationExecutor
             probe: outerTicket.Probe);
 
         QueryTicket operandTicket = QueryTicketAdapter.ToQueryTicket(
-            operand, executeTicket, existsSubqueries: null,
+            operand, executeTicket, subqueries.ExistsRegistry, subqueries.SemiJoinSpecs,
             exclusivePredicateLocks: outerTicket.ExclusivePredicateLocks);
 
         // EXPLAIN (ANALYZE) built this operand's plan in advance, to show and count it; that plan runs.

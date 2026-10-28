@@ -240,6 +240,13 @@ FROM open_orders v INNER JOIN customers c ON v.customer = c.name;
 There is no "view scan" node in `EXPLAIN` — the plan shows what actually runs, which is the expanded
 query.
 
+A subquery in the body's `WHERE` — `IN (SELECT …)`, `NOT IN`, a scalar subquery, `EXISTS` and
+`NOT EXISTS`, correlated or not — runs as it would in a top-level statement, and so does one in a
+derived table the statement writes itself: `SELECT COUNT(*) FROM (SELECT … WHERE EXISTS (…)) AS sub`.
+In a view body the subquery reads its tables with the privileges of the view's owner, like the rest
+of the body (see [Ownership and security](#ownership-and-security)); in a hand-written derived table it reads them as the
+caller.
+
 A view may be referenced by its own name or given an alias:
 
 ```sql

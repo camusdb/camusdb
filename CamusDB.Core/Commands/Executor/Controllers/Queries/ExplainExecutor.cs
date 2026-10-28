@@ -615,8 +615,8 @@ internal sealed class ExplainExecutor
             if (node is not DerivedTableScanNode { BoundSource.SetOperation: { } setOperation } scan)
                 continue;
 
-            QueryPlan left = PlanOperand(plan, setOperation.Left, ticket, traceEstimates, analyze);
-            QueryPlan right = PlanOperand(plan, setOperation.Right, ticket, traceEstimates, analyze);
+            QueryPlan left = PlanOperand(plan, setOperation.Left, setOperation.LeftSubqueries, ticket, traceEstimates, analyze);
+            QueryPlan right = PlanOperand(plan, setOperation.Right, setOperation.RightSubqueries, ticket, traceEstimates, analyze);
 
             SetOperationOperandNode leftNode = new() { Side = "left", Plan = left, Input = left.Root };
             SetOperationOperandNode rightNode = new() { Side = "right", Plan = right, Input = right.Root };
@@ -638,7 +638,13 @@ internal sealed class ExplainExecutor
     /// (<see cref="SetOperationExecutor"/>). The plan-time leaf lookup is skipped: it reads rows, and
     /// a plan built without it is still the plan of a valid execution.
     /// </summary>
-    private QueryPlan PlanOperand(QueryPlan parent, BoundSelectQuery operand, ExecuteSQLTicket ticket, bool traceEstimates, bool analyze)
+    private QueryPlan PlanOperand(
+        QueryPlan parent,
+        BoundSelectQuery operand,
+        SubqueryBindProducts subqueries,
+        ExecuteSQLTicket ticket,
+        bool traceEstimates,
+        bool analyze)
     {
         QueryTicket outer = parent.Ticket;
 
@@ -651,7 +657,8 @@ internal sealed class ExplainExecutor
             probe: outer.Probe);
 
         QueryTicket operandTicket = QueryTicketAdapter.ToQueryTicket(
-            operand, executeTicket, existsSubqueries: null, exclusivePredicateLocks: outer.ExclusivePredicateLocks);
+            operand, executeTicket, subqueries.ExistsRegistry, subqueries.SemiJoinSpecs,
+            exclusivePredicateLocks: outer.ExclusivePredicateLocks);
 
         QueryPlan plan = operand.IsMultiSource
             ? (traceEstimates ? tracingJoinQueryPlanner : joinQueryPlanner).GetPlan(parent.Database, operand, operandTicket, null)

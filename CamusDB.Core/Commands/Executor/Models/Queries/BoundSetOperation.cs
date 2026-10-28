@@ -5,6 +5,8 @@
  * file that was distributed with this source code.
  */
 
+using CamusDB.Core.CommandsExecutor.Controllers.Queries;
+
 namespace CamusDB.Core.CommandsExecutor.Models.Queries;
 
 /// <summary>
@@ -43,6 +45,17 @@ public sealed record BoundSetOperation(
     IReadOnlyList<DerivedColumnSchema> Columns,
     IReadOnlyList<bool> Untyped)
 {
+    /// <summary>
+    /// The side products of the subquery stages that ran over <see cref="Left"/>, for the ticket
+    /// that operand runs with. Set when the operands were bound through the bind pipeline, which is
+    /// every bind of an executed statement; default when they were bound for their schema only, in
+    /// which case the operands must not run. See <see cref="SubqueryBindProducts"/>.
+    /// </summary>
+    internal SubqueryBindProducts LeftSubqueries { get; init; }
+
+    /// <summary>The same for <see cref="Right"/>.</summary>
+    internal SubqueryBindProducts RightSubqueries { get; init; }
+
     /// <summary>
     /// The set operation that <paramref name="operand"/> passes through unchanged, or null. An
     /// operand passes one through when it is the Select wrapper of a nested set operation: <c>*</c>

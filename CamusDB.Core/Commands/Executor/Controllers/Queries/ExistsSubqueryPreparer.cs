@@ -16,7 +16,11 @@ using CamusDB.Core.SQLParser;
 namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 
 /// <summary>
-/// Rewrites EXISTS subqueries before ticket creation.
+/// Rewrites EXISTS subqueries before ticket creation: an uncorrelated EXISTS runs once and folds to
+/// a literal, a correlated one is bound against the outer sources and registered in an
+/// <see cref="ExistsSubqueryRegistry"/> for the per-row evaluator. A correlated EXISTS's inner query
+/// binds with the <see cref="NestedSelectBinder"/> the pipeline passes in, so a derived table in its
+/// FROM resolves its own subqueries like one anywhere else.
 /// </summary>
 internal sealed class ExistsSubqueryPreparer
 {
@@ -35,7 +39,8 @@ internal sealed class ExistsSubqueryPreparer
         SelectQuery query,
         IReadOnlyList<BoundTableSource> outerTableSources,
         IReadOnlyList<BoundDerivedTableSource> outerDerivedSources,
-        ExecuteSQLTicket ticket)
+        ExecuteSQLTicket ticket,
+        NestedSelectBinder nested)
     {
         // No EXISTS anywhere in the WHERE (or no WHERE): the rewrite walk would traverse every node
         // — allocating a Task and a state-machine box per node per statement execution — only to
@@ -44,7 +49,7 @@ internal sealed class ExistsSubqueryPreparer
         if (query.Where is null || !ContainsExistsSubquery(query.Where.Expression))
             return new ValueTask<(SelectQuery, ExistsSubqueryRegistry?)>((query, null));
 
-        return PrepareCoreAsync(database, query, outerTableSources, outerDerivedSources, ticket);
+        return PrepareCoreAsync(database, query, outerTableSources, outerDerivedSources, ticket, nested);
     }
 
     /// <summary>Returns true when <paramref name="expr"/> or a left/right descendant is an EXISTS subquery.</summary>
@@ -64,9 +69,10 @@ internal sealed class ExistsSubqueryPreparer
         SelectQuery query,
         IReadOnlyList<BoundTableSource> outerTableSources,
         IReadOnlyList<BoundDerivedTableSource> outerDerivedSources,
-        ExecuteSQLTicket ticket)
+        ExecuteSQLTicket ticket,
+        NestedSelectBinder nested)
     {
-        ExistsRewriteContext context = new();
+        ExistsRewriteContext context = new(nested);
         NodeAst rewritten = await RewriteExpressionAsync(
             database,
             query.Where!.Expression,
@@ -83,7 +89,15 @@ internal sealed class ExistsSubqueryPreparer
 
     private sealed class ExistsRewriteContext
     {
+        public ExistsRewriteContext(NestedSelectBinder nested)
+        {
+            Nested = nested;
+        }
+
         public ExistsSubqueryRegistry? Registry { get; set; }
+
+        /// <summary>Binds the derived tables of a correlated EXISTS's inner FROM through the pipeline.</summary>
+        public NestedSelectBinder Nested { get; }
     }
 
     private async Task<NodeAst> RewriteExpressionAsync(
@@ -126,7 +140,8 @@ internal sealed class ExistsSubqueryPreparer
                 database,
                 innerQuery,
                 outerTableSources,
-                outerDerivedSources).ConfigureAwait(false);
+                outerDerivedSources,
+                context.Nested).ConfigureAwait(false);
 
             NodeAst correlatedNode = new(
                 NodeType.ExprExistsCorrelated,
@@ -173,9 +188,10 @@ internal sealed class ExistsSubqueryPreparer
         DatabaseDescriptor database,
         SelectQuery innerQuery,
         IReadOnlyList<BoundTableSource> outerTableSources,
-        IReadOnlyList<BoundDerivedTableSource> outerDerivedSources)
+        IReadOnlyList<BoundDerivedTableSource> outerDerivedSources,
+        NestedSelectBinder nested)
     {
-        BoundSelectQuery innerBound = await queryBinder.BindSubqueryAsync(database, innerQuery).ConfigureAwait(false);
+        BoundSelectQuery innerBound = await queryBinder.BindSubqueryAsync(database, innerQuery, nested).ConfigureAwait(false);
 
         List<BoundTableSource> combinedTableSources = new(innerBound.Sources.Count + outerTableSources.Count);
         combinedTableSources.AddRange(innerBound.Sources);

@@ -133,7 +133,8 @@ All operands read in the same snapshot of the statement. An operand with its own
 ## Privileges
 
 Each operand needs `SELECT` on the tables that it reads. A grant on the tables of one operand gives
-nothing on the tables of the other.
+nothing on the tables of the other. A subquery in an operand's `WHERE` reads its table with the same
+privileges as the operand: the caller's in a statement, the view owner's in a view body.
 
 ## Execution
 

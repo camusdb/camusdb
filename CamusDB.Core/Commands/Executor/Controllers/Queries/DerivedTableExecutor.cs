@@ -114,7 +114,11 @@ internal sealed class DerivedTableExecutor
                 cancellationToken: outerTicket.CancellationToken,
                 probe: outerTicket.Probe);
 
-            QueryTicket innerTicket = QueryTicketAdapter.ToQueryTicket(innerBound, executeTicket);
+            // The inner query bound through the whole pipeline, so its ticket carries what the
+            // pipeline's stages left for it: the prepared EXISTS subqueries the per-row evaluator looks
+            // up, and the semi-join specs the planner turns into index probes.
+            QueryTicket innerTicket = QueryTicketAdapter.ToQueryTicket(
+                innerBound, executeTicket, source.InnerSubqueries.ExistsRegistry, source.InnerSubqueries.SemiJoinSpecs);
 
             cursor = innerBound.IsMultiSource
                 ? queryJoinExecutor.ExecuteJoinQuery(database, innerBound, innerTicket)
