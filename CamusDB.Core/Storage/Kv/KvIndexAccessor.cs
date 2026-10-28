@@ -285,6 +285,49 @@ internal sealed class KvIndexAccessor
     }
 
     /// <summary>
+    /// The arbiter probe of <c>INSERT … ON CONFLICT</c>: takes an exclusive lock on the unique-index
+    /// entry of each of <paramref name="lookupKeys"/>, then reads each entry, and answers the row id it
+    /// maps to (null for none) together with the encoded key (null for a key that cannot be encoded,
+    /// which has no entry and is neither locked nor read).
+    ///
+    /// <para><b>Lock first, then read.</b> No lookup can be followed by a write of the same key without
+    /// a fence: a concurrent writer could insert the key between the two, and the statement's own insert
+    /// would then fail with <see cref="CamusDBErrorCodes.DuplicateUniqueKeyValue"/>, which ends the
+    /// transaction (there are no savepoints). The exclusive range lock is checked by Kahuna's write path
+    /// in both locking modes, so while it is held a plain INSERT of the key waits and then fails at the
+    /// lock-wait deadline, and a second upsert of the key meets the lock itself under wait-die. The read
+    /// that follows therefore answers for the life of the transaction.</para>
+    ///
+    /// <para><b>What the read sees.</b> The latest committed entry, never a statement timestamp
+    /// (<see cref="KvTransaction.LatestReadView"/>), plus the transaction's own writes, so a row that an
+    /// earlier chunk of the same statement inserted is found. On a branch the ancestry is walked as
+    /// <see cref="LookupUnique"/> walks it. A hit is not remembered in the row-id cache: the entry may be
+    /// this transaction's own uncommitted write.</para>
+    /// </summary>
+    internal async Task<(ObjectIdValue?[] RowIds, string?[] KvKeys)> LockAndLookupUniqueRowIdsForWriteAsync(
+        KvTransaction tx,
+        string indexId,
+        IReadOnlyList<CompositeColumnValue> lookupKeys,
+        CancellationToken cancellationToken = default)
+    {
+        await tx.EnsureSessionStartedAsync(cancellationToken, keys.TableKeyPrefix).ConfigureAwait(false);
+
+        string?[] kvKeys = EncodeUniqueKeys(indexId, lookupKeys);
+
+        List<string> lockKeys = new(kvKeys.Length);
+        foreach (string? kvKey in kvKeys)
+        {
+            if (kvKey is not null)
+                lockKeys.Add(kvKey);
+        }
+
+        await locks.AcquireUniqueKeyExclusiveLocksAsync(tx, keys.BuildIndexBucketPrefix(indexId), lockKeys, cancellationToken).ConfigureAwait(false);
+
+        ObjectIdValue?[] rowIds = await ProbeUniqueRowIdsAsync(tx, indexId, lookupKeys, kvKeys, rememberRowIds: false, latest: true, cancellationToken).ConfigureAwait(false);
+        return (rowIds, kvKeys);
+    }
+
+    /// <summary>
     /// The parent side of a foreign key: answers whether the index holds any live entry whose leading
     /// key columns equal <paramref name="prefix"/> — whether a child row still references a parent key.
     ///

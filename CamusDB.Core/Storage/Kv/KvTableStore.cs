@@ -609,6 +609,10 @@ public sealed partial class KvTableStore
     internal Task LockUniqueKeysExclusiveAsync(KvTransaction tx, string indexId, IReadOnlyList<CompositeColumnValue> keys, CancellationToken cancellationToken = default)
         => indexes.LockUniqueKeysExclusiveAsync(tx, indexId, keys, cancellationToken);
 
+    /// <inheritdoc cref="KvIndexAccessor.LockAndLookupUniqueRowIdsForWriteAsync"/>
+    internal Task<(ObjectIdValue?[] RowIds, string?[] KvKeys)> LockAndLookupUniqueRowIdsForWriteAsync(KvTransaction tx, string indexId, IReadOnlyList<CompositeColumnValue> keys, CancellationToken cancellationToken = default)
+        => indexes.LockAndLookupUniqueRowIdsForWriteAsync(tx, indexId, keys, cancellationToken);
+
     /// <inheritdoc cref="KvIndexAccessor.IndexPrefixExistsAsync"/>
     internal Task<bool> IndexPrefixExistsAsync(KvTransaction tx, string indexId, ColumnType[] keyTypes, CompositeColumnValue prefix, bool unique, CancellationToken cancellationToken = default)
         => indexes.IndexPrefixExistsAsync(tx, indexId, keyTypes, prefix, unique, cancellationToken);

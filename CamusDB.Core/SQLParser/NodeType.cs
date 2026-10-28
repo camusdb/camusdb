@@ -134,9 +134,10 @@ public enum NodeType
     /// <summary>
     /// <c>INSERT INTO t [(c1, …)] [OVERRIDING { SYSTEM | USER } VALUE] VALUES …</c>. <c>leftAst</c> is
     /// the target table, <c>rightAst</c> the optional target column list, <c>extendedOne</c> the
-    /// <see cref="InsertBatchList"/> and <c>extendedTwo</c> the optional RETURNING list.
-    /// <c>yytext</c> is <c>"system"</c> or <c>"user"</c> for an OVERRIDING clause and null without
-    /// one; read it through <c>InsertOverridingClause.Of</c>.
+    /// <see cref="InsertBatchList"/>, <c>extendedTwo</c> the optional RETURNING list and
+    /// <c>extendedThree</c> the optional <see cref="OnConflict"/> clause, which an <c>UPSERT INTO</c>
+    /// statement always carries. <c>yytext</c> is <c>"system"</c> or <c>"user"</c> for an OVERRIDING
+    /// clause and null without one; read it through <c>InsertOverridingClause.Of</c>.
     /// </summary>
     Insert,
     InsertBatchList,
@@ -146,7 +147,8 @@ public enum NodeType
     /// <c>extendedOne</c> holds the source <see cref="Select"/> statement instead of an
     /// <see cref="InsertBatchList"/>. The source's output columns are mapped onto the target
     /// columns <b>positionally</b>, so the two lists must have the same arity. An OVERRIDING clause is
-    /// carried in <c>yytext</c>, as for <see cref="Insert"/>.
+    /// carried in <c>yytext</c>, and an ON CONFLICT clause in <c>extendedThree</c>, as for
+    /// <see cref="Insert"/>.
     /// </summary>
     InsertSelect,
     Begin,
@@ -1074,4 +1076,25 @@ public enum NodeType
     /// ordinal, so a member inserted earlier would renumber every member after it.</para>
     /// </summary>
     SetOperationReference,
+
+    /// <summary>
+    /// The <c>ON CONFLICT</c> clause of an <see cref="Insert"/> or <see cref="InsertSelect"/>, in its
+    /// <c>extendedThree</c> slot. <c>yytext</c> is the action: <c>"nothing"</c> (DO NOTHING),
+    /// <c>"update"</c> (DO UPDATE) or <c>"upsert"</c> (an <c>UPSERT INTO</c> statement, which has no
+    /// written clause). <c>leftAst</c> is the conflict target: the column list (an
+    /// <see cref="IdentifierList"/> or one <see cref="Identifier"/>), an
+    /// <see cref="OnConflictConstraint"/> node, or null for none. <c>rightAst</c> is the DO UPDATE SET
+    /// list (<see cref="UpdateList"/> or one <see cref="UpdateItem"/>) and <c>extendedOne</c> its WHERE
+    /// condition; both are null for the other actions.
+    ///
+    /// <para>Appended at the end of the enum, because the AST wire codec sends a node type by its
+    /// ordinal.</para>
+    /// </summary>
+    OnConflict,
+
+    /// <summary>
+    /// The <c>ON CONSTRAINT name</c> target of an <see cref="OnConflict"/> clause. <c>yytext</c> is the
+    /// constraint name; <c>leftAst</c> is its identifier node.
+    /// </summary>
+    OnConflictConstraint,
 }

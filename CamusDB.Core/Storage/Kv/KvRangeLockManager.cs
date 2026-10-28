@@ -654,10 +654,32 @@ internal sealed class KvRangeLockManager
     /// <para>A key this transaction already holds exclusively is skipped. The acquires run with at most
     /// <see cref="KvStoreConstants.ForeignKeyLockConcurrency"/> in flight, as for the shared lock.</para>
     /// </summary>
-    internal async Task AcquireForeignKeyExclusiveLocksAsync(
+    internal Task AcquireForeignKeyExclusiveLocksAsync(
         KvTransaction tx,
         string bucketPrefix,
         IReadOnlyList<string> lockKeys,
+        CancellationToken cancellationToken) =>
+        AcquireExclusivePointLocksAsync(tx, bucketPrefix, lockKeys, foreignKeyCheck: true, cancellationToken);
+
+    /// <summary>
+    /// The arbiter fence of <c>INSERT … ON CONFLICT</c>: an exclusive point lock on each unique-index
+    /// entry the statement is about to probe and then may write. The same lock as
+    /// <see cref="AcquireForeignKeyExclusiveLocksAsync"/>, for the same reason — in optimistic mode the
+    /// write path takes no lock of its own, and a range lock is what Kahuna's write path checks — but
+    /// it is not counted as a foreign-key operation.
+    /// </summary>
+    internal Task AcquireUniqueKeyExclusiveLocksAsync(
+        KvTransaction tx,
+        string bucketPrefix,
+        IReadOnlyList<string> lockKeys,
+        CancellationToken cancellationToken) =>
+        AcquireExclusivePointLocksAsync(tx, bucketPrefix, lockKeys, foreignKeyCheck: false, cancellationToken);
+
+    private async Task AcquireExclusivePointLocksAsync(
+        KvTransaction tx,
+        string bucketPrefix,
+        IReadOnlyList<string> lockKeys,
+        bool foreignKeyCheck,
         CancellationToken cancellationToken)
     {
         if (lockKeys.Count == 0)
@@ -668,7 +690,9 @@ internal sealed class KvRangeLockManager
         if (tx.TransactionId == HLCTimestamp.Zero)
             throw new CamusDBException(
                 CamusDBErrorCodes.InvalidInternalOperation,
-                "A foreign-key check needs a read-write transaction with an identity to hold its locks");
+                foreignKeyCheck
+                    ? "A foreign-key check needs a read-write transaction with an identity to hold its locks"
+                    : "An exclusive unique-key lock needs a read-write transaction with an identity to hold it");
 
         List<string>? pending = null;
         HashSet<string> seen = new(lockKeys.Count, StringComparer.Ordinal);
@@ -684,7 +708,8 @@ internal sealed class KvRangeLockManager
         if (pending is null)
             return;
 
-        ServerDiagnostics.AddForeignKeyOperation(ServerDiagnostics.ForeignKeyOperation.ParentLock, pending.Count);
+        if (foreignKeyCheck)
+            ServerDiagnostics.AddForeignKeyOperation(ServerDiagnostics.ForeignKeyOperation.ParentLock, pending.Count);
 
         if (pending.Count == 1)
         {

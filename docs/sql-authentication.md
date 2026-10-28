@@ -280,6 +280,9 @@ With auth enabled, every statement is checked before it runs:
 - **`INSERT … RETURNING`** needs `SELECT` on the target table in addition to `INSERT`, as in
   PostgreSQL: the RETURNING list reads stored values, defaults and sequence draws. A user with
   `INSERT` only can run a plain `INSERT`. The count-only request flag does not lift the requirement.
+- **`INSERT … ON CONFLICT DO UPDATE`** and **`UPSERT`** need `UPDATE` on the target table in addition
+  to `INSERT`, because they can change a stored row. `ON CONFLICT DO NOTHING` needs `INSERT` only. See
+  [insert-on-conflict.md](insert-on-conflict.md).
 - **The typed gRPC rows API** (`CamusRows`) is checked the same way, on the table the request names:
   `InsertRow` needs `INSERT`, `Query` and `QueryById` need `SELECT`, `UpdateRows` and `UpdateById`
   need `UPDATE`, and `DeleteRows` and `DeleteById` need `DELETE`. A filtered update or delete needs

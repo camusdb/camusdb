@@ -283,23 +283,51 @@ group_list : group_list TCOMMA expr { $$.n = new(NodeType.ExprList, $1.n, $3.n, 
            ;
 
 /* The optional RETURNING list hangs off extendedTwo in all four forms, so the executor finds it in
-   one place whatever the row source is. */
-insert_stmt : TINSERT TINTO any_identifier LPAREN insert_field_list RPAREN TVALUES insert_batch_list opt_returning { $$.n = new(NodeType.Insert, $3.n, $5.n, $8.n, $9.n, null, null, null, null); }
-            | TINSERT TINTO any_identifier TVALUES insert_batch_list opt_returning { $$.n = new(NodeType.Insert, $3.n, null, $5.n, $6.n, null, null, null, null); }
+   one place whatever the row source is. The optional ON CONFLICT clause hangs off extendedThree as an
+   OnConflict node. */
+insert_stmt : TINSERT TINTO any_identifier LPAREN insert_field_list RPAREN TVALUES insert_batch_list opt_on_conflict opt_returning { $$.n = new(NodeType.Insert, $3.n, $5.n, $8.n, $10.n, $9.n, null, null, null); }
+            | TINSERT TINTO any_identifier TVALUES insert_batch_list opt_on_conflict opt_returning { $$.n = new(NodeType.Insert, $3.n, null, $5.n, $7.n, $6.n, null, null, null); }
             /* INSERT ... SELECT: the source query hangs off extendedOne, the same slot the VALUES
                batch list uses, so both INSERT forms stay structurally parallel. */
-            | TINSERT TINTO any_identifier LPAREN insert_field_list RPAREN select_stmt opt_returning { $$.n = new(NodeType.InsertSelect, $3.n, $5.n, $7.n, $8.n, null, null, null, null); }
-            | TINSERT TINTO any_identifier select_stmt opt_returning { $$.n = new(NodeType.InsertSelect, $3.n, null, $4.n, $5.n, null, null, null, null); }
+            | TINSERT TINTO any_identifier LPAREN insert_field_list RPAREN select_stmt opt_on_conflict opt_returning { $$.n = new(NodeType.InsertSelect, $3.n, $5.n, $7.n, $9.n, $8.n, null, null, null); }
+            | TINSERT TINTO any_identifier select_stmt opt_on_conflict opt_returning { $$.n = new(NodeType.InsertSelect, $3.n, null, $4.n, $6.n, $5.n, null, null, null); }
             /* The same four forms with PostgreSQL's OVERRIDING { SYSTEM | USER } VALUE between the
                column list and the row source. The clause is spelled out in separate productions
                rather than as an optional nonterminal: an empty alternative before the row source would
                have to be reduced on the "(" that may open either a column list or a parenthesized
                SELECT, which LALR(1) cannot decide. The kind travels in yytext ("system" or "user"). */
-            | TINSERT TINTO any_identifier LPAREN insert_field_list RPAREN overriding_clause TVALUES insert_batch_list opt_returning { $$.n = new(NodeType.Insert, $3.n, $5.n, $9.n, $10.n, null, null, null, $7.s); }
-            | TINSERT TINTO any_identifier overriding_clause TVALUES insert_batch_list opt_returning { $$.n = new(NodeType.Insert, $3.n, null, $6.n, $7.n, null, null, null, $4.s); }
-            | TINSERT TINTO any_identifier LPAREN insert_field_list RPAREN overriding_clause select_stmt opt_returning { $$.n = new(NodeType.InsertSelect, $3.n, $5.n, $8.n, $9.n, null, null, null, $7.s); }
-            | TINSERT TINTO any_identifier overriding_clause select_stmt opt_returning { $$.n = new(NodeType.InsertSelect, $3.n, null, $5.n, $6.n, null, null, null, $4.s); }
+            | TINSERT TINTO any_identifier LPAREN insert_field_list RPAREN overriding_clause TVALUES insert_batch_list opt_on_conflict opt_returning { $$.n = new(NodeType.Insert, $3.n, $5.n, $9.n, $11.n, $10.n, null, null, $7.s); }
+            | TINSERT TINTO any_identifier overriding_clause TVALUES insert_batch_list opt_on_conflict opt_returning { $$.n = new(NodeType.Insert, $3.n, null, $6.n, $8.n, $7.n, null, null, $4.s); }
+            | TINSERT TINTO any_identifier LPAREN insert_field_list RPAREN overriding_clause select_stmt opt_on_conflict opt_returning { $$.n = new(NodeType.InsertSelect, $3.n, $5.n, $8.n, $10.n, $9.n, null, null, $7.s); }
+            | TINSERT TINTO any_identifier overriding_clause select_stmt opt_on_conflict opt_returning { $$.n = new(NodeType.InsertSelect, $3.n, null, $5.n, $7.n, $6.n, null, null, $4.s); }
+            /* UPSERT INTO t ..., the CockroachDB form. It is an INSERT whose OnConflict node says
+               "upsert": the executor resolves the primary key as the arbiter and assigns every listed
+               column that is not part of it. UPSERT is a plain identifier, checked here, so it stays
+               usable as a table or column name. */
+            | TIDENTIFIER TINTO any_identifier LPAREN insert_field_list RPAREN TVALUES insert_batch_list opt_returning { $$.n = new(NodeType.Insert, $3.n, $5.n, $8.n, $9.n, UpsertClause($1.s), null, null, null); }
+            | TIDENTIFIER TINTO any_identifier TVALUES insert_batch_list opt_returning { $$.n = new(NodeType.Insert, $3.n, null, $5.n, $6.n, UpsertClause($1.s), null, null, null); }
+            | TIDENTIFIER TINTO any_identifier LPAREN insert_field_list RPAREN select_stmt opt_returning { $$.n = new(NodeType.InsertSelect, $3.n, $5.n, $7.n, $8.n, UpsertClause($1.s), null, null, null); }
+            | TIDENTIFIER TINTO any_identifier select_stmt opt_returning { $$.n = new(NodeType.InsertSelect, $3.n, null, $4.n, $5.n, UpsertClause($1.s), null, null, null); }
 			;
+
+/* ON CONFLICT [ (cols) | ON CONSTRAINT name ] DO NOTHING
+   ON CONFLICT ( (cols) | ON CONSTRAINT name ) DO UPDATE SET c = expr [, ...] [WHERE cond]
+   CONFLICT, DO and NOTHING are plain identifiers, checked in the actions, so none of them becomes a
+   reserved word. ON and CONSTRAINT are already keywords. See NodeType.OnConflict for the node shape. */
+opt_on_conflict : TON TIDENTIFIER opt_conflict_target conflict_action { $$.n = OnConflictClause($2.s, $3.n, $4.n); }
+                | /* empty */ { $$.n = null; }
+                ;
+
+/* The target node is an IdentifierList (or one Identifier) for the column form, and an
+   OnConflictConstraint node holding the name for the ON CONSTRAINT form. */
+opt_conflict_target : LPAREN insert_field_list RPAREN { $$.n = $2.n; }
+                    | TON TCONSTRAINT any_identifier { $$.n = new(NodeType.OnConflictConstraint, $3.n, null, null, null, null, null, null, $3.n.yytext); }
+                    | /* empty */ { $$.n = null; }
+                    ;
+
+conflict_action : TIDENTIFIER TIDENTIFIER { $$.n = ConflictDoNothing($1.s, $2.s); }
+                | TIDENTIFIER TUPDATE TSET update_list opt_where { $$.n = ConflictDoUpdate($1.s, $4.n, $5.n); }
+                ;
 
 /* OVERRIDING SYSTEM VALUE / OVERRIDING USER VALUE. OVERRIDING, SYSTEM and VALUE are plain
    identifiers, not keywords, so no table or column name is reserved by the clause; USER is already a
