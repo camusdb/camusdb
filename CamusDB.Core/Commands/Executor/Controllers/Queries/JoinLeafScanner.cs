@@ -374,12 +374,31 @@ internal sealed class JoinLeafScanner
         }
     }
 
+    /// <param name="readOnce">
+    /// True when the caller reads this derived table exactly once, which is the case when its scan is
+    /// the root of the plan. A set operation then streams instead of being materialized; any other
+    /// caller, such as the inner side of a nested-loop join, may read it again and gets the kept rows.
+    /// </param>
+    /// <param name="setOperationStats">The per-operand row counts of a set operation, for EXPLAIN (ANALYZE).</param>
     internal async IAsyncEnumerable<QueryResultRow> ScanDerivedTable(
         BoundDerivedTableSource source,
         NodeAst? executionFilter,
         QueryPlan plan,
-        [EnumeratorCancellation] CancellationToken ct = default)
+        [EnumeratorCancellation] CancellationToken ct = default,
+        bool readOnce = false,
+        SetOperationStats? setOperationStats = null)
     {
+        if (readOnce && source.SetOperation is not null)
+        {
+            await foreach (QueryResultRow row in derivedTableExecutor
+                .Stream(plan.Database, source, plan.Ticket, executionFilter, setOperationStats)
+                .WithCancellation(ct)
+                .ConfigureAwait(false))
+                yield return row;
+
+            yield break;
+        }
+
         // A function in FROM is streamed, never materialized: its rows cost no I/O to make again,
         // and a series can be far larger than memory (LIMIT 10 over a billion-row series must return
         // at once). A join that re-reads it simply generates it again.

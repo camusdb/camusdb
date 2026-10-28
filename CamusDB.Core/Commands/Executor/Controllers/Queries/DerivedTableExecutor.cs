@@ -35,10 +35,13 @@ internal sealed class DerivedTableExecutor
     private readonly QueryJoinExecutor queryJoinExecutor;
     private readonly QueryFilterer queryFilterer = new(new ExistsSubqueryExecutor());
 
+    private readonly SetOperationExecutor setOperationExecutor;
+
     public DerivedTableExecutor(QueryExecutor queryExecutor, QueryJoinExecutor queryJoinExecutor)
     {
         this.queryExecutor = queryExecutor;
         this.queryJoinExecutor = queryJoinExecutor;
+        setOperationExecutor = new SetOperationExecutor(queryExecutor, queryJoinExecutor);
     }
 
     /// <summary>
@@ -53,57 +56,12 @@ internal sealed class DerivedTableExecutor
         QueryTicket outerTicket,
         NodeAst? executionFilter)
     {
-        BoundSelectQuery innerBound = source.InnerBound;
-
-        // The request-scoped name, not the descriptor's display name: the inner ticket can be
-        // re-resolved by name downstream, and the descriptor's name is a cached value that a rename
-        // refreshes rather than a value this request asked for.
-        ExecuteSQLTicket executeTicket = new(
-            txnState: outerTicket.TxnState,
-            database: outerTicket.DatabaseName,
-            sql: "",
-            parameters: outerTicket.Parameters,
-            cancellationToken: outerTicket.CancellationToken,
-            probe: outerTicket.Probe);
-
-        QueryTicket innerTicket = QueryTicketAdapter.ToQueryTicket(innerBound, executeTicket);
-
-        IAsyncEnumerable<QueryResultRow> cursor = innerBound.IsMultiSource
-            ? queryJoinExecutor.ExecuteJoinQuery(database, innerBound, innerTicket)
-            : queryExecutor.Query(database, innerBound.PrimaryTable, innerTicket);
-
         SpillableRowList rows = new(QueryExecutionContext.For(database, outerTicket));
-
-        // A cell can carry a narrower numeric type than its column declares (COALESCE(p, 0) gives an
-        // INT64 zero for a NULL NUMERIC p). The outer join plans its key strategy from the declared
-        // types, so every cell is widened to that type here, before any consumer reads it.
-        (string RowKey, ColumnType Type)[] numericColumns = NumericWidening.NumericColumns(source.Columns);
 
         try
         {
-            await foreach (QueryResultRow scanned in cursor.ConfigureAwait(false))
-            {
-                QueryResultRow row = numericColumns.Length == 0
-                    ? scanned
-                    : NumericWidening.WidenToDeclaredTypes(scanned, numericColumns);
-
-                if (executionFilter is not null)
-                {
-                    IReadOnlyDictionary<string, ColumnValue> evalRow = outerTicket.RowNameResolver is { } resolver
-                                                             && resolver.UsesQualifiedRowKeys()
-                        ? QueryRowMerger.QualifyRow(row.Row, source.Alias)
-                        : row.Row;
-
-                    if (!await queryFilterer
-                            .MeetWhereAsync(executionFilter, evalRow, outerTicket, database)
-                            .ConfigureAwait(false))
-                    {
-                        continue;
-                    }
-                }
-
+            await foreach (QueryResultRow row in Stream(database, source, outerTicket, executionFilter).ConfigureAwait(false))
                 await rows.AddAsync(row).ConfigureAwait(false);
-            }
 
             await rows.SealAsync().ConfigureAwait(false);
         }
@@ -115,5 +73,82 @@ internal sealed class DerivedTableExecutor
         }
 
         return rows;
+    }
+
+    /// <summary>
+    /// Runs the derived table and streams the rows that pass <paramref name="executionFilter"/>,
+    /// without keeping them. <see cref="MaterializeAsync"/> fills its list from here. A caller that
+    /// reads the derived table exactly once, such as a set operation that is the whole query, reads
+    /// this directly, so a <c>LIMIT</c> over <c>UNION ALL</c> stops the operands early and nothing is
+    /// held in memory.
+    /// </summary>
+    /// <param name="stats">
+    /// The per-operand row counts of a set operation, for EXPLAIN (ANALYZE); null otherwise and for
+    /// any other derived table.
+    /// </param>
+    public async IAsyncEnumerable<QueryResultRow> Stream(
+        DatabaseDescriptor database,
+        BoundDerivedTableSource source,
+        QueryTicket outerTicket,
+        NodeAst? executionFilter,
+        SetOperationStats? stats = null)
+    {
+        IAsyncEnumerable<QueryResultRow> cursor;
+
+        if (source.SetOperation is { } setOperation)
+        {
+            cursor = setOperationExecutor.Execute(database, setOperation, outerTicket, stats);
+        }
+        else
+        {
+            BoundSelectQuery innerBound = source.InnerBound;
+
+            // The request-scoped name, not the descriptor's display name: the inner ticket can be
+            // re-resolved by name downstream, and the descriptor's name is a cached value that a rename
+            // refreshes rather than a value this request asked for.
+            ExecuteSQLTicket executeTicket = new(
+                txnState: outerTicket.TxnState,
+                database: outerTicket.DatabaseName,
+                sql: "",
+                parameters: outerTicket.Parameters,
+                cancellationToken: outerTicket.CancellationToken,
+                probe: outerTicket.Probe);
+
+            QueryTicket innerTicket = QueryTicketAdapter.ToQueryTicket(innerBound, executeTicket);
+
+            cursor = innerBound.IsMultiSource
+                ? queryJoinExecutor.ExecuteJoinQuery(database, innerBound, innerTicket)
+                : queryExecutor.Query(database, innerBound.PrimaryTable, innerTicket);
+        }
+
+        // A cell can carry a narrower numeric type than its column declares (COALESCE(p, 0) gives an
+        // INT64 zero for a NULL NUMERIC p). The outer join plans its key strategy from the declared
+        // types, so every cell is widened to that type here, before any consumer reads it. A set
+        // operation has already widened its cells, so for it this check finds nothing to change.
+        (string RowKey, ColumnType Type)[] numericColumns = NumericWidening.NumericColumns(source.Columns);
+
+        await foreach (QueryResultRow scanned in cursor.ConfigureAwait(false))
+        {
+            QueryResultRow row = numericColumns.Length == 0
+                ? scanned
+                : NumericWidening.WidenToDeclaredTypes(scanned, numericColumns);
+
+            if (executionFilter is not null)
+            {
+                IReadOnlyDictionary<string, ColumnValue> evalRow = outerTicket.RowNameResolver is { } resolver
+                                                         && resolver.UsesQualifiedRowKeys()
+                    ? QueryRowMerger.QualifyRow(row.Row, source.Alias)
+                    : row.Row;
+
+                if (!await queryFilterer
+                        .MeetWhereAsync(executionFilter, evalRow, outerTicket, database)
+                        .ConfigureAwait(false))
+                {
+                    continue;
+                }
+            }
+
+            yield return row;
+        }
     }
 }

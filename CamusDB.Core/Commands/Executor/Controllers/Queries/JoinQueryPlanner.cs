@@ -284,7 +284,17 @@ internal sealed class JoinQueryPlanner
             deps.Add((s.Table.Id, s.Table.Schema.Version));
 
         foreach (BoundDerivedTableSource d in bound.DerivedSources)
+        {
+            // A set operation's tables are in its operands; its shell has none.
+            if (d.SetOperation is { } setOperation)
+            {
+                CollectSchemaDepsInto(setOperation.Left, deps);
+                CollectSchemaDepsInto(setOperation.Right, deps);
+                continue;
+            }
+
             CollectSchemaDepsInto(d.InnerBound, deps);
+        }
     }
 
     /// <summary>
@@ -309,7 +319,16 @@ internal sealed class JoinQueryPlanner
                 _stats?.GetAnalyzeGeneration(database, s.Table) ?? 0));
 
         foreach (BoundDerivedTableSource d in bound.DerivedSources)
+        {
+            if (d.SetOperation is { } setOperation)
+            {
+                CollectCacheDepsInto(database, setOperation.Left, deps);
+                CollectCacheDepsInto(database, setOperation.Right, deps);
+                continue;
+            }
+
             CollectCacheDepsInto(database, d.InnerBound, deps);
+        }
     }
 
     /// <summary>
@@ -1245,7 +1264,10 @@ internal sealed class JoinQueryPlanner
 
         foreach (BoundDerivedTableSource derived in bound.DerivedSources)
         {
-            TableDescriptor? nested = TryResolvePlanTable(derived.InnerBound);
+            TableDescriptor? nested = derived.SetOperation is { } setOperation
+                ? TryResolvePlanTable(setOperation.Left) ?? TryResolvePlanTable(setOperation.Right)
+                : TryResolvePlanTable(derived.InnerBound);
+
             if (nested is not null)
                 return nested;
         }

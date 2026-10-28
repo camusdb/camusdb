@@ -103,6 +103,7 @@ internal sealed class ExplainExecutor
             return RenderFromlessPlan(selectAst, stage).ToAsyncEnumerable();
 
         QueryPlan plan = await BuildPlanAsync(database, selectAst, ticket).ConfigureAwait(false);
+        AttachSetOperationOperands(plan, ticket, traceEstimates: false, analyze: false);
 
         return RenderPlan(plan, stage).ToAsyncEnumerable();
     }
@@ -255,6 +256,7 @@ internal sealed class ExplainExecutor
         // Bind and plan, timed together: the planning time a client waits for before the first row.
         Stopwatch planning = Stopwatch.StartNew();
         QueryPlan plan = await BuildPlanAsync(database, selectAst, ticket, traceEstimates: true).ConfigureAwait(false);
+        AttachSetOperationOperands(plan, ticket, traceEstimates: true, analyze: true);
         planning.Stop();
 
         return RunAnalyzedPlan(plan, planning.Elapsed.TotalMilliseconds);
@@ -592,6 +594,83 @@ internal sealed class ExplainExecutor
     }
 
     /// <summary>
+    /// Plans the operands of every set operation on the main path of <paramref name="plan"/> and hangs
+    /// them under its scan node, so EXPLAIN shows what each operand reads
+    /// (<see cref="SetOperationOperandNode"/>). Nested set operations get theirs too, because an
+    /// operand plan goes through this step as well.
+    ///
+    /// <para>With <paramref name="analyze"/>, the operand plans also get counters and are handed to the
+    /// set operation (<see cref="SetOperationStats"/>), which then runs them instead of planning its
+    /// operands again. The counters under each operand are therefore the counters of the rows that
+    /// really ran, and the operand row reports how many rows that operand produced.</para>
+    ///
+    /// <para>Only the chain of <see cref="PhysicalPlanNode.Input"/> is walked, because only that
+    /// chain renders one row per node. A set operation on the inner side of a join still runs, but
+    /// EXPLAIN shows it as its scan line only.</para>
+    /// </summary>
+    private void AttachSetOperationOperands(QueryPlan plan, ExecuteSQLTicket ticket, bool traceEstimates, bool analyze)
+    {
+        for (PhysicalPlanNode? node = plan.Root; node is not null; node = node.Input)
+        {
+            if (node is not DerivedTableScanNode { BoundSource.SetOperation: { } setOperation } scan)
+                continue;
+
+            QueryPlan left = PlanOperand(plan, setOperation.Left, ticket, traceEstimates, analyze);
+            QueryPlan right = PlanOperand(plan, setOperation.Right, ticket, traceEstimates, analyze);
+
+            SetOperationOperandNode leftNode = new() { Side = "left", Plan = left, Input = left.Root };
+            SetOperationOperandNode rightNode = new() { Side = "right", Plan = right, Input = right.Root };
+
+            scan.SetOperationOperands = [leftNode, rightNode];
+
+            if (!analyze)
+                continue;
+
+            SetOperationStats stats = new() { LeftPlan = left, RightPlan = right };
+            scan.SetOperationStats = stats;
+            leftNode.Stats = stats.Left;
+            rightNode.Stats = stats.Right;
+        }
+    }
+
+    /// <summary>
+    /// Plans one operand with the ticket the set operation would give it when it runs
+    /// (<see cref="SetOperationExecutor"/>). The plan-time leaf lookup is skipped: it reads rows, and
+    /// a plan built without it is still the plan of a valid execution.
+    /// </summary>
+    private QueryPlan PlanOperand(QueryPlan parent, BoundSelectQuery operand, ExecuteSQLTicket ticket, bool traceEstimates, bool analyze)
+    {
+        QueryTicket outer = parent.Ticket;
+
+        ExecuteSQLTicket executeTicket = new(
+            txnState: ticket.TxnState,
+            database: outer.DatabaseName,
+            sql: "",
+            parameters: outer.Parameters,
+            cancellationToken: outer.CancellationToken,
+            probe: outer.Probe);
+
+        QueryTicket operandTicket = QueryTicketAdapter.ToQueryTicket(
+            operand, executeTicket, existsSubqueries: null, exclusivePredicateLocks: outer.ExclusivePredicateLocks);
+
+        QueryPlan plan = operand.IsMultiSource
+            ? (traceEstimates ? tracingJoinQueryPlanner : joinQueryPlanner).GetPlan(parent.Database, operand, operandTicket, null)
+            : (traceEstimates ? tracingQueryPlanner : queryPlanner).GetPlan(parent.Database, operand.PrimaryTable, operandTicket);
+
+        AttachSetOperationOperands(plan, ticket, traceEstimates, analyze);
+
+        if (analyze)
+        {
+            plan.CollectRuntimeStats = true;
+
+            if (plan.BoundQuery is not null)
+                AttachJoinStats(plan.Root);
+        }
+
+        return plan;
+    }
+
+    /// <summary>
     /// Returns the plan nodes in the same depth-first order that <see cref="PlanRenderer.WalkNodes"/>
     /// visits them (parent before children), so they can be zipped with the rendered output.
     /// </summary>
@@ -605,6 +684,11 @@ internal sealed class ExplainExecutor
     private static void WalkNodesOrderedInner(PhysicalPlanNode node, List<PhysicalPlanNode> result)
     {
         result.Add(node);
+
+        if (node is DerivedTableScanNode { SetOperationOperands: { } operands })
+            foreach (SetOperationOperandNode operand in operands)
+                WalkNodesOrderedInner(operand, result);
+
         if (node.Input is not null)
             WalkNodesOrderedInner(node.Input, result);
     }

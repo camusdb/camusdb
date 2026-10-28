@@ -115,7 +115,10 @@ internal sealed class SubqueryQueryExecutor
 
         SelectQuery subquery = selectQueryCreator.CreateSelectQuery(selectAst);
 
-        if (requireSingleColumn)
+        // A set operation projects *, and its column count is known only once its operands are bound.
+        bool isSetOperation = subquery.Source is DerivedTableSource { SetOperation: not null };
+
+        if (requireSingleColumn && !isSetOperation)
             ValidateSingleColumnProjection(subquery);
 
         // No request-scoped ticket reaches this helper, so the descriptor's display name is the only
@@ -129,6 +132,11 @@ internal sealed class SubqueryQueryExecutor
             cancellationToken: ct);
 
         SelectBindResult bound = await bindPipeline.BindAsync(database, subquery, executeTicket).ConfigureAwait(false);
+
+        if (requireSingleColumn && isSetOperation && bound.Bound.DerivedSources[0].Columns.Count != 1)
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInput,
+                "Subquery must return exactly one column");
 
         QueryTicket queryTicket = QueryTicketAdapter.ToQueryTicket(
             bound.Bound, executeTicket, bound.ExistsRegistry, bound.SemiJoinSpecsOrNull);

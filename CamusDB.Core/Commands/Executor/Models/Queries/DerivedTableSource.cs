@@ -43,4 +43,12 @@ public sealed record DerivedTableSource(
     /// leaf scanner streams the function's rows directly (see <see cref="TableFunctionSource"/>).
     /// </summary>
     public TableFunctionSource? Function => Query.Source as TableFunctionSource;
+
+    /// <summary>
+    /// The set operation this derived table stands for, or null for any other derived table. When it
+    /// is set, <see cref="Query"/> is the inner shell <c>SELECT * FROM (q1 UNION q2)</c>: the binder
+    /// binds the two operands instead of the shell, and the leaf scanner runs them (see
+    /// <see cref="SetOperationSource"/>).
+    /// </summary>
+    public SetOperationSource? SetOperation => Query.Source as SetOperationSource;
 }

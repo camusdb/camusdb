@@ -76,7 +76,8 @@ public sealed class QueryPlan
     /// <summary>
     /// The base table of a single-table plan, or the first base table found in a join plan. Null only
     /// on a plan built by <see cref="WithoutTable"/>, whose leaves read no table; such a plan is only
-    /// ever a join plan, and nothing on the join path reads this property.
+    /// ever a join plan. On the join path only the plan-shape hash reads this property, and it checks
+    /// for null.
     /// </summary>
 	public TableDescriptor Table { get; }
 

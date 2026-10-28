@@ -79,7 +79,13 @@ internal static class StoredBodyColumns
         NodeAst? left = Rewrite(schema, node.leftAst, scope, viewName, aliasSlot: false);
         NodeAst? from = node.rightAst is null ? null : RewriteFrom(schema, node.rightAst, scope, viewName);
         NodeAst? where = Rewrite(schema, node.extendedOne, scope, viewName, aliasSlot: false);
-        NodeAst? orderBy = Rewrite(schema, node.extendedTwo, scope, viewName, aliasSlot: true);
+
+        // The ORDER BY of a set operation names only its output columns or their positions, never a
+        // relation's column, so it is left as it is: binding a name there to an outer column that
+        // happens to share it would change what the body means.
+        NodeAst? orderBy = SetOperationAst.IsSetOperationSelect(node)
+            ? node.extendedTwo
+            : Rewrite(schema, node.extendedTwo, scope, viewName, aliasSlot: true);
         NodeAst? limit = Rewrite(schema, node.extendedThree, scope, viewName, aliasSlot: false);
         NodeAst? offset = Rewrite(schema, node.extendedFour, scope, viewName, aliasSlot: false);
         NodeAst? groupBy = Rewrite(schema, node.extendedFive, scope, viewName, aliasSlot: true);
@@ -172,6 +178,18 @@ internal static class StoredBodyColumns
     {
         switch (from.nodeType)
         {
+            case NodeType.SetOperationReference:
+                {
+                    // Each operand is a scope of its own, with this one (which holds no relations) as
+                    // its outer, so a correlated reference in an operand still resolves outward.
+                    NodeAst l = Walk(schema, from.leftAst!, scope, viewName);
+                    NodeAst r = Walk(schema, from.rightAst!, scope, viewName);
+
+                    return ReferenceEquals(l, from.leftAst) && ReferenceEquals(r, from.rightAst)
+                        ? from
+                        : new NodeAst(NodeType.SetOperationReference, l, r, null, null, null, null, null, from.yytext);
+                }
+
             case NodeType.DerivedTableReference:
                 {
                     NodeAst inner = Walk(schema, from.leftAst!, scope, viewName);

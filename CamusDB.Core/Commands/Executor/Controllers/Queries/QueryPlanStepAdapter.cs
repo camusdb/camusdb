@@ -51,7 +51,14 @@ internal static class QueryPlanStepAdapter
             return;
 
         StringBuilder shape = new(128);
-        shape.Append(plan.Table.Id).Append('|');
+
+        // A plan whose leaves are all functions in FROM has no base table (QueryPlan.WithoutTable):
+        // INSERT ... SELECT FROM generate_series(...), or a set operation whose operands are all
+        // FROM-less. Its node kinds still make a shape.
+        if (plan.Table is not null)
+            shape.Append(plan.Table.Id);
+
+        shape.Append('|');
         AppendShape(plan.Root, shape);
 
         probe.NotePlan(XxHash64.HashToUInt64(Encoding.UTF8.GetBytes(shape.ToString())));

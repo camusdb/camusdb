@@ -167,6 +167,18 @@ internal static class ViewExpander
                         : new NodeAst(NodeType.DerivedTableReference, inner, from.rightAst, null, null, null, null, null, null);
                 }
 
+            case NodeType.SetOperationReference:
+                {
+                    // Each operand is a complete SELECT with a FROM of its own, so a view named in
+                    // either one is expanded, and checked against the caller, like a view in any FROM.
+                    NodeAst l = Rewrite(schema, from.leftAst!, expansionStack, maxDepth, parseBody, authorize);
+                    NodeAst r = Rewrite(schema, from.rightAst!, expansionStack, maxDepth, parseBody, authorize);
+
+                    return ReferenceEquals(l, from.leftAst) && ReferenceEquals(r, from.rightAst)
+                        ? from
+                        : new NodeAst(NodeType.SetOperationReference, l, r, null, null, null, null, null, from.yytext);
+                }
+
             case NodeType.Join:
                 {
                     NodeAst l = RewriteFrom(schema, from.leftAst!, expansionStack, maxDepth, parseBody, authorize);

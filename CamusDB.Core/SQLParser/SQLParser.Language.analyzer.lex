@@ -63,6 +63,9 @@ TAsOfSystemTime (A|a)(S|s)[ \t\r\n]+(O|o)(F|f)[ \t\r\n]+(S|s)(Y|y)(S|s)(T|t)(E|e
 TGroup 		    (G|g)(R|r)(O|o)(U|u)(P|p)
 THaving         (H|h)(A|a)(V|v)(I|i)(N|n)(G|g)
 TDistinct       (D|d)(I|i)(S|s)(T|t)(I|i)(N|n)(C|c)(T|t)
+TUnion          (U|u)(N|n)(I|i)(O|o)(N|n)
+TIntersect      (I|i)(N|n)(T|t)(E|e)(R|r)(S|s)(E|e)(C|c)(T|t)
+TExcept         (E|e)(X|x)(C|c)(E|e)(P|p)(T|t)
 TJoin           (J|j)(O|o)(I|i)(N|n)
 TInner          (I|i)(N|n)(N|n)(E|e)(R|r)
 TLeft           (L|l)(E|e)(F|f)(T|t)
@@ -366,6 +369,10 @@ TSequence       (S|s)(E|e)(Q|q)(U|u)(E|e)(N|n)(C|c)(E|e)
 {THaving} { return (int)Token.THAVING; }
 
 {TDistinct} { return (int)Token.TDISTINCT; }
+
+{TUnion} { return (int)Token.TUNION; }
+{TIntersect} { return (int)Token.TINTERSECT; }
+{TExcept} { return (int)Token.TEXCEPT; }
 
 {TExplain} { return (int)Token.TEXPLAIN; }
 

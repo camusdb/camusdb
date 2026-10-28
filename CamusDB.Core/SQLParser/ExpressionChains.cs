@@ -135,7 +135,8 @@ internal static class ExpressionChains
 
     /// <summary>
     /// Rebalances, in place, every OR chain, AND chain, IN value list and ARRAY element list longer
-    /// than <see cref="BalanceThreshold"/> in a freshly parsed tree. The walk is iterative.
+    /// than <see cref="BalanceThreshold"/> in a freshly parsed tree, and every long chain of one
+    /// associative set operation (<see cref="SetOperationAst.Normalize"/>). The walk is iterative.
     ///
     /// <para>Must run inside the parser, before the tree is returned: it assigns child slots of nodes
     /// the parser has just created, which the <see cref="NodeAst"/> immutability invariant forbids once
@@ -180,6 +181,13 @@ internal static class ExpressionChains
                 case NodeType.ArrayLiteral:
                     node.leftAst = NormalizeList(node.leftAst, pending, operands);
                     PushChildren(pending, node, skipLeft: true);
+                    continue;
+
+                case NodeType.SetOperationReference:
+                    // The walk reaches the top of a chain first, so one call sees the whole chain.
+                    operands.Clear();
+                    SetOperationAst.Normalize(node, operands);
+                    PushAll(pending, operands);
                     continue;
 
                 default:

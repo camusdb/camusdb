@@ -30,6 +30,7 @@ Some shapes are cheap on purpose:
 | `x IN (v1, v2, …)`, `x NOT IN (…)` | about log₂ of the number of values |
 | `ARRAY[e1, e2, …]` | about log₂ of the number of elements |
 | Rows of a multi-row `INSERT … VALUES (…), (…)` | nothing — a 10,000-row statement is accepted |
+| `q1 UNION ALL q2 UNION ALL …` (also `UNION`, `INTERSECT`, `INTERSECT ALL`) | about 2 × log₂ of the number of operands |
 
 The parser rebuilds long OR/AND chains and long value lists as balanced trees. The terms stay in
 the order you wrote them, so results, short-circuit behavior and placeholder order do not change.
@@ -46,6 +47,13 @@ Shapes that still cost one level per step:
 
 A statement that names every column of a table at the default column limit (512) is about half the
 limit deep.
+
+## A separate limit for set operations
+
+`UNION`, `INTERSECT` and `EXCEPT` use much more stack per level than an expression does, so a
+statement may nest at most **64** of them on one path, with the same error code. A long chain of
+one associative operator is rebalanced and does not come near this limit. A chain of `EXCEPT`, or
+of mixed operators, adds one level per operator. See [set-operations.md](./set-operations.md).
 
 ## The error
 

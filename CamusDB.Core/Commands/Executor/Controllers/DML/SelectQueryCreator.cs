@@ -41,7 +41,12 @@ internal sealed class SelectQueryCreator
         (QuerySource source, BoundPredicate? where) = CreateFromClause(ast.rightAst, ast.extendedOne);
         IReadOnlyList<ProjectionItem> projections = CreateProjections(ast.leftAst);
 
-        IReadOnlyList<OrderByItem>? orderBy = CreateOrderBy(ast.extendedTwo, projections);
+        // The ORDER BY of a set operation names output columns, which are only known once the
+        // operands are bound, so its positions stay positions here and resolve against the bound
+        // output columns (QueryTicketAdapter).
+        IReadOnlyList<OrderByItem>? orderBy = source is DerivedTableSource { SetOperation: not null }
+            ? CreateSetOperationOrderBy(ast.extendedTwo)
+            : CreateOrderBy(ast.extendedTwo, projections);
         IReadOnlyList<NodeAst>? groupBy = CreateGroupBy(ast.extendedFive, projections);
         BoundPredicate? having = CreateHaving(ast.extendedSix);
         CacheHintOptions? cacheHint = ExtractQueryCacheHint(source);
@@ -116,6 +121,7 @@ internal sealed class SelectQueryCreator
             NodeType.TableReference => CreateTableSource(fromAst),
             NodeType.DerivedTableReference => CreateDerivedTableSource(fromAst),
             NodeType.TableFunctionReference => CreateTableFunctionSource(fromAst),
+            NodeType.SetOperationReference => CreateSetOperationSource(fromAst),
             NodeType.Join => CreateJoinSource(fromAst),
             NodeType.Identifier => new TableSource(fromAst.yytext!),
             NodeType.IdentifierWithOpts => new TableSource(
@@ -225,6 +231,141 @@ internal sealed class SelectQueryCreator
         string? ownerName = derivedAst.extendedTwo?.leftAst?.yytext;
 
         return new DerivedTableSource(innerQuery, derivedAst.rightAst.yytext, cacheHint, ownerName, ownerId);
+    }
+
+    /// <summary>
+    /// Turns the FROM slot of a set operation's Select wrapper into a derived table over a
+    /// <see cref="SetOperationSource"/> (see that type for why it is not a relation kind of its own).
+    /// Each operand becomes a complete <see cref="SelectQuery"/> of its own.
+    /// </summary>
+    private static DerivedTableSource CreateSetOperationSource(NodeAst setOperationAst)
+    {
+        SetOperationKind kind = SetOperationAst.KindOf(setOperationAst) switch
+        {
+            SetOperationAst.Union => SetOperationKind.Union,
+            SetOperationAst.Intersect => SetOperationKind.Intersect,
+            SetOperationAst.Except => SetOperationKind.Except,
+            _ => throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInput,
+                $"Unknown set operation '{setOperationAst.yytext}'"),
+        };
+
+        SetOperationSource setOperation = new(
+            kind,
+            SetOperationAst.IsAll(setOperationAst),
+            CreateSetOperationOperand(setOperationAst.leftAst, setOperationAst.yytext),
+            CreateSetOperationOperand(setOperationAst.rightAst, setOperationAst.yytext));
+
+        SelectQuery shell = new(setOperation, [new ProjectionItem(NodeAst.ExprAllFields, null)]);
+        return new DerivedTableSource(shell, SetOperationSource.DerivedAlias);
+    }
+
+    /// <summary>
+    /// Builds one operand of a set operation.
+    ///
+    /// <para><b>No AS OF SYSTEM TIME.</b> Every operand reads in the one snapshot of the statement, so
+    /// an operand with its own snapshot is refused rather than read at a second point in time.</para>
+    ///
+    /// <para><b>A FROM-less operand gets a one-row source.</b> <c>SELECT 1</c> as a statement runs on
+    /// its own path, but an operand must run through the bound-query path like every other one, so it
+    /// becomes <c>SELECT 1 FROM *single_row*()</c> (see <see cref="SingleRowTableFunction"/>). A
+    /// <c>*</c> there has nothing to expand and is refused, as it is for the statement form.</para>
+    /// </summary>
+    private static SelectQuery CreateSetOperationOperand(NodeAst? operandAst, string? operatorText)
+    {
+        if (operandAst is null || operandAst.nodeType != NodeType.Select || operandAst.leftAst is null)
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInput,
+                $"Each operand of {operatorText} must be a SELECT");
+
+        if (operandAst.extendedSeven is not null)
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidAsOfSystemTime,
+                $"AS OF SYSTEM TIME is not supported on an operand of {operatorText}; " +
+                "every operand reads in the snapshot of the statement");
+
+        if (operandAst.rightAst is not null)
+            return new SelectQueryCreator().CreateSelectQuery(operandAst);
+
+        List<ProjectionItem> projections = [];
+        CollectProjectionItems(operandAst.leftAst, projections);
+
+        foreach (ProjectionItem projection in projections)
+        {
+            if (QueryExpressionClassifier.UnwrapAlias(projection.Expression).nodeType == NodeType.ExprAllFields)
+                throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "SELECT * requires a FROM clause");
+        }
+
+        NodeAst singleRow = new(
+            NodeType.TableFunctionReference,
+            new NodeAst(NodeType.Identifier, null, null, null, null, null, null, null, SingleRowTableFunction.InternalName),
+            null, null, null, null, null, null, null);
+
+        NodeAst withSource = new(
+            NodeType.Select,
+            operandAst.leftAst,
+            singleRow,
+            operandAst.extendedOne,
+            operandAst.extendedTwo,
+            operandAst.extendedThree,
+            operandAst.extendedFour,
+            operandAst.extendedFive,
+            operandAst.yytext,
+            operandAst.extendedSix,
+            null);
+
+        return new SelectQueryCreator().CreateSelectQuery(withSource);
+    }
+
+    /// <summary>
+    /// The ORDER BY of a set operation. Each item must be an output column name or an output
+    /// position, as in PostgreSQL: the input columns of the operands are gone by the time the
+    /// combined rows are sorted, and an expression over the output columns is refused too, so the
+    /// rule stays the one a reader of the standard expects. A position stays an
+    /// <see cref="NodeType.Integer"/> node until the output columns are bound.
+    /// </summary>
+    private static IReadOnlyList<OrderByItem>? CreateSetOperationOrderBy(NodeAst? orderByAst)
+    {
+        if (orderByAst is null)
+            return null;
+
+        List<OrderByItem> items = [];
+        Stack<NodeAst> pending = new();
+        pending.Push(orderByAst);
+
+        // Left before right, so the items keep the order they were written in.
+        while (pending.Count > 0)
+        {
+            NodeAst node = pending.Pop();
+
+            if (node.nodeType == NodeType.IdentifierList)
+            {
+                if (node.rightAst is not null)
+                    pending.Push(node.rightAst);
+
+                if (node.leftAst is not null)
+                    pending.Push(node.leftAst);
+
+                continue;
+            }
+
+            OrderType direction = node.nodeType == NodeType.SortDesc ? OrderType.Descending : OrderType.Ascending;
+            NodeAst expression = node.nodeType is NodeType.SortAsc or NodeType.SortDesc ? node.leftAst! : node;
+
+            bool isOutputName = expression.nodeType == NodeType.Identifier
+                                && expression.yytext is { Length: > 0 } name
+                                && !name.Contains('.');
+
+            if (!isOutputName && expression.nodeType != NodeType.Integer)
+                throw new CamusDBException(
+                    CamusDBErrorCodes.InvalidInput,
+                    "ORDER BY on the result of UNION, INTERSECT or EXCEPT must name an output column or its " +
+                    "position; to sort by an expression, wrap the set operation in a derived table");
+
+            items.Add(new OrderByItem(expression, direction));
+        }
+
+        return items;
     }
 
     /// <summary>

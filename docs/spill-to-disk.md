@@ -25,10 +25,12 @@ it can produce its first output row. Those are the spill targets:
 | Hash join | builds a hash table from one side | Grace / hybrid hash join (partition both sides) |
 | `GROUP BY` | one accumulator per group | partition rows by group key, aggregate per partition |
 | `DISTINCT` | one row per distinct tuple | partition rows by tuple hash, dedup per partition |
+| `UNION` | one row per distinct tuple | the `DISTINCT` path |
+| `INTERSECT [ALL]`, `EXCEPT [ALL]` | one count per distinct row of the right operand | partition both operands by row hash, combine each pair of partitions in memory ([set-operations.md](./set-operations.md#spill-to-disk)) |
 | Derived tables / subqueries (`FROM (SELECT …)`) | materialized so they can be re-scanned | re-enumerable spill buffer |
 | `DELETE` / `UPDATE` match set | all matching rows are collected before any mutation (see below) | re-enumerable spill buffer |
 
-Operators that are already streaming or already bounded do **not** spill: global aggregates
+Operators that are already streaming or already bounded do **not** spill: `UNION ALL`, global aggregates
 (`COUNT(*)` with no `GROUP BY`), the streaming `DISTINCT` fast path over an ordered index, and the
 streaming merge join, which only ever buffers a single equal-key run.
 

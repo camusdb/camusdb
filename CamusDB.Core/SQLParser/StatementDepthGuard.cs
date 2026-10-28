@@ -53,34 +53,54 @@ internal static class StatementDepthGuard
     internal const int MaxDepth = 1_000;
 
     /// <summary>
+    /// The most <see cref="NodeType.SetOperationReference"/> nodes on one root-to-leaf path.
+    ///
+    /// <para>A set operation costs far more stack per level than an expression: each level keeps the
+    /// cursors of its operand open while it reads the first row, and a cursor is a stack of async
+    /// iterator frames. A chain of non-associative operators (<c>EXCEPT</c>, or alternating ones)
+    /// survived 300 levels and overflowed at 450 in a test probe, so the limit keeps a five-fold
+    /// margin, as <see cref="MaxDepth"/> does. A long chain of one associative operator, the shape of
+    /// generated SQL, never comes near it: the parser rebalances it (see
+    /// <see cref="SetOperationAst.Normalize"/>).</para>
+    /// </summary>
+    internal const int MaxSetOperationNesting = 64;
+
+    /// <summary>
     /// Throws <see cref="CamusDBErrorCodes.StatementTooDeeplyNested"/> when the tree under
     /// <paramref name="root"/> is deeper than <see cref="MaxDepth"/>. Stops at the first node past
     /// the limit.
     /// </summary>
     public static void Enforce(NodeAst root)
     {
-        Stack<(NodeAst Node, int Depth)> pending = new();
-        pending.Push((root, 1));
+        Stack<(NodeAst Node, int Depth, int SetOperations)> pending = new();
+        pending.Push((root, 1, 0));
 
         while (pending.Count > 0)
         {
-            (NodeAst node, int depth) = pending.Pop();
+            (NodeAst node, int depth, int setOperations) = pending.Pop();
 
             if (depth > MaxDepth)
                 throw TooDeep();
 
+            if (node.nodeType == NodeType.SetOperationReference && ++setOperations > MaxSetOperationNesting)
+                throw new CamusDBException(
+                    CamusDBErrorCodes.StatementTooDeeplyNested,
+                    $"Statement nests more than {MaxSetOperationNesting} UNION, INTERSECT or EXCEPT operations. " +
+                    "A long chain of one operator is accepted; reduce the nesting of mixed or EXCEPT chains, " +
+                    "or split the statement.");
+
             int childDepth = depth + 1;
 
             // The next row of a multi-row INSERT is a sibling of this one, not a level below it.
-            Push(pending, node.leftAst, node.nodeType == NodeType.InsertBatchList ? depth : childDepth);
-            Push(pending, node.rightAst, childDepth);
-            Push(pending, node.extendedOne, childDepth);
-            Push(pending, node.extendedTwo, childDepth);
-            Push(pending, node.extendedThree, childDepth);
-            Push(pending, node.extendedFour, childDepth);
-            Push(pending, node.extendedFive, childDepth);
-            Push(pending, node.extendedSix, childDepth);
-            Push(pending, node.extendedSeven, childDepth);
+            Push(pending, node.leftAst, node.nodeType == NodeType.InsertBatchList ? depth : childDepth, setOperations);
+            Push(pending, node.rightAst, childDepth, setOperations);
+            Push(pending, node.extendedOne, childDepth, setOperations);
+            Push(pending, node.extendedTwo, childDepth, setOperations);
+            Push(pending, node.extendedThree, childDepth, setOperations);
+            Push(pending, node.extendedFour, childDepth, setOperations);
+            Push(pending, node.extendedFive, childDepth, setOperations);
+            Push(pending, node.extendedSix, childDepth, setOperations);
+            Push(pending, node.extendedSeven, childDepth, setOperations);
         }
     }
 
@@ -118,9 +138,9 @@ internal static class StatementDepthGuard
         "Reduce the nesting of expressions, function calls, CASE branches or subqueries, " +
         "or split the statement.");
 
-    private static void Push(Stack<(NodeAst Node, int Depth)> pending, NodeAst? child, int depth)
+    private static void Push(Stack<(NodeAst Node, int Depth, int SetOperations)> pending, NodeAst? child, int depth, int setOperations)
     {
         if (child is not null)
-            pending.Push((child, depth));
+            pending.Push((child, depth, setOperations));
     }
 }

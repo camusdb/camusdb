@@ -20,4 +20,16 @@ public sealed class DerivedTableScanNode : PhysicalPlanNode
 
     /// <summary>Single-source predicate pushed into derived materialization.</summary>
     public NodeAst? ExecutionFilter { get; init; }
+
+    /// <summary>
+    /// The row count of each operand when the derived table is a set operation and EXPLAIN (ANALYZE)
+    /// collects runtime statistics; null otherwise. The explain path sets it before the plan runs.
+    /// </summary>
+    internal Controllers.Queries.SetOperationStats? SetOperationStats { get; set; }
+
+    /// <summary>
+    /// The operand plans of a set operation, left then right, when EXPLAIN built them; null otherwise.
+    /// See <see cref="SetOperationOperandNode"/>.
+    /// </summary>
+    public IReadOnlyList<SetOperationOperandNode>? SetOperationOperands { get; internal set; }
 }

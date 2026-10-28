@@ -88,7 +88,11 @@ internal static class ViewColumnDependencyAnalyzer
         // reference. FROM was consumed above; walking it again would read relation names as columns.
         CollectColumns(schema, node.leftAst, scope, columnIds);
         CollectColumns(schema, node.extendedOne, scope, columnIds);
-        CollectColumns(schema, node.extendedTwo, scope, columnIds);
+
+        // A set operation's ORDER BY names its own output columns, which are no table's columns.
+        if (!SetOperationAst.IsSetOperationSelect(node))
+            CollectColumns(schema, node.extendedTwo, scope, columnIds);
+
         CollectColumns(schema, node.extendedThree, scope, columnIds);
         CollectColumns(schema, node.extendedFour, scope, columnIds);
         CollectColumns(schema, node.extendedFive, scope, columnIds);
@@ -120,6 +124,14 @@ internal static class ViewColumnDependencyAnalyzer
                 // known here, or a qualified reference to it (s.n) would fall through to an outer
                 // relation that happens to share the alias.
                 scope.NonTables.Add(from.extendedOne?.yytext ?? from.leftAst?.yytext ?? "");
+                return;
+
+            case NodeType.SetOperationReference:
+                // Each operand is a query of its own; the columns it reads are the view's too.
+                if (from.leftAst is not null)
+                    Walk(schema, from.leftAst, scope, columnIds);
+                if (from.rightAst is not null)
+                    Walk(schema, from.rightAst, scope, columnIds);
                 return;
 
             case NodeType.DerivedTableReference:

@@ -1056,4 +1056,22 @@ public enum NodeType
     /// <c>yytext</c> = "if exists" for that form.
     /// </summary>
     DropExtension,
+
+    /// <summary>
+    /// <c>q1 UNION [ALL] q2</c>, <c>q1 INTERSECT [ALL] q2</c> or <c>q1 EXCEPT [ALL] q2</c>.
+    /// <c>leftAst</c> and <c>rightAst</c> are the two operands, and each one is always a
+    /// <see cref="Select"/>: an operand that is itself a set operation is wrapped as below.
+    /// <c>yytext</c> is the operator, upper case, with <c>" ALL"</c> appended for the ALL form (see
+    /// <c>SetOperationAst</c>).
+    ///
+    /// <para><b>Never a statement root.</b> The parser always puts this node in the FROM slot of a
+    /// plain <see cref="Select"/> of <c>*</c>, and that Select carries the ORDER BY, LIMIT and OFFSET
+    /// of the combined result. Every consumer that checks for a Select, reads the Select slots, or
+    /// walks a FROM clause therefore keeps working: to it, a set operation is one more relation in
+    /// FROM, the same way a derived table is.</para>
+    ///
+    /// <para>Appended at the end of the enum on purpose: the AST wire codec sends a node type by its
+    /// ordinal, so a member inserted earlier would renumber every member after it.</para>
+    /// </summary>
+    SetOperationReference,
 }

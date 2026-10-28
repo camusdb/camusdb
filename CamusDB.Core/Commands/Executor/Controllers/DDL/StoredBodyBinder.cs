@@ -166,6 +166,17 @@ internal static class StoredBodyBinder
                         from.extendedOne, null, null, null, null, null);
                 }
 
+            case NodeType.SetOperationReference:
+                {
+                    // Each operand is a complete SELECT with its own FROM.
+                    NodeAst l = Bind(schema, from.leftAst!);
+                    NodeAst r = Bind(schema, from.rightAst!);
+
+                    return ReferenceEquals(l, from.leftAst) && ReferenceEquals(r, from.rightAst)
+                        ? from
+                        : new NodeAst(NodeType.SetOperationReference, l, r, null, null, null, null, null, from.yytext);
+                }
+
             case NodeType.DerivedTableReference:
                 {
                     NodeAst inner = Bind(schema, from.leftAst!);
@@ -296,6 +307,16 @@ internal static class StoredBodyBinder
                         Identifier(current),
                         from.rightAst,
                         from.extendedOne, null, null, null, null, null);
+                }
+
+            case NodeType.SetOperationReference:
+                {
+                    NodeAst l = Resolve(schema, from.leftAst!, viewName);
+                    NodeAst r = Resolve(schema, from.rightAst!, viewName);
+
+                    return ReferenceEquals(l, from.leftAst) && ReferenceEquals(r, from.rightAst)
+                        ? from
+                        : new NodeAst(NodeType.SetOperationReference, l, r, null, null, null, null, null, from.yytext);
                 }
 
             case NodeType.DerivedTableReference:

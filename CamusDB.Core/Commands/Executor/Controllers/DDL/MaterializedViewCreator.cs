@@ -205,7 +205,8 @@ internal sealed class MaterializedViewCreator
             columnAliasList,
             CheckOptionKind.None,
             // Null when authentication is off, in which case no base-relation check applies anyway.
-            owner: ticket.Principal?.UserName);
+            owner: ticket.Principal?.UserName,
+            setOperation: source.SetOperation);
 
         // The definition's columns are positionally aligned with the source's: they carry the view's
         // final names, and the source carries what the planner knows about each column, including an

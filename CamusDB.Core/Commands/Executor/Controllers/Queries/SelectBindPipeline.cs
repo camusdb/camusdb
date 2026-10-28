@@ -71,6 +71,8 @@ internal sealed class SelectBindPipeline
         SelectQuery selectQuery,
         ExecuteSQLTicket ticket)
     {
+        selectQuery = await PrepareSetOperationOperandsAsync(database, selectQuery, ticket).ConfigureAwait(false);
+
         (selectQuery, List<SemiJoinSpec> semiJoinSpecs) = await semiJoinAnalyzer
             .AnalyzeAsync(database, selectQuery, ticket)
             .ConfigureAwait(false);
@@ -100,6 +102,74 @@ internal sealed class SelectBindPipeline
         }
 
         return new SelectBindResult(boundQuery, existsRegistry, semiJoinSpecs);
+    }
+
+    /// <summary>
+    /// Resolves the uncorrelated scalar, <c>IN</c> and <c>NOT IN</c> subqueries in the WHERE of every
+    /// set-operation operand under <paramref name="query"/>, as stage 2 does for the query itself.
+    ///
+    /// <para>An operand is bound by <see cref="QueryBinder"/> as part of its parent's source, not
+    /// through this pipeline, and runs with a ticket of its own. Without this step
+    /// <c>SELECT a FROM t WHERE a IN (SELECT …) UNION …</c> would reach the per-row evaluator with
+    /// the subquery unresolved. The walk goes through joins and derived tables to find the set
+    /// operations, and rewrites only their operands. An operand's EXISTS stays as it is: it has no
+    /// EXISTS-preparer stage, the same as the inner query of any derived table.</para>
+    /// </summary>
+    private async ValueTask<SelectQuery> PrepareSetOperationOperandsAsync(
+        DatabaseDescriptor database,
+        SelectQuery query,
+        ExecuteSQLTicket ticket)
+    {
+        QuerySource source = await PrepareSourceAsync(database, query.Source, ticket).ConfigureAwait(false);
+        return ReferenceEquals(source, query.Source) ? query : query with { Source = source };
+    }
+
+    private async ValueTask<QuerySource> PrepareSourceAsync(
+        DatabaseDescriptor database,
+        QuerySource source,
+        ExecuteSQLTicket ticket)
+    {
+        switch (source)
+        {
+            case DerivedTableSource { SetOperation: { } setOperation } derived:
+            {
+                SelectQuery left = await PrepareOperandAsync(database, setOperation.Left, ticket).ConfigureAwait(false);
+                SelectQuery right = await PrepareOperandAsync(database, setOperation.Right, ticket).ConfigureAwait(false);
+
+                if (ReferenceEquals(left, setOperation.Left) && ReferenceEquals(right, setOperation.Right))
+                    return derived;
+
+                return derived with { Query = derived.Query with { Source = setOperation with { Left = left, Right = right } } };
+            }
+
+            case DerivedTableSource derived:
+            {
+                SelectQuery inner = await PrepareSetOperationOperandsAsync(database, derived.Query, ticket).ConfigureAwait(false);
+                return ReferenceEquals(inner, derived.Query) ? derived : derived with { Query = inner };
+            }
+
+            case JoinSource join:
+            {
+                QuerySource left = await PrepareSourceAsync(database, join.Left, ticket).ConfigureAwait(false);
+                QuerySource right = await PrepareSourceAsync(database, join.Right, ticket).ConfigureAwait(false);
+
+                return ReferenceEquals(left, join.Left) && ReferenceEquals(right, join.Right)
+                    ? join
+                    : join with { Left = left, Right = right };
+            }
+
+            default:
+                return source;
+        }
+    }
+
+    private async ValueTask<SelectQuery> PrepareOperandAsync(
+        DatabaseDescriptor database,
+        SelectQuery operand,
+        ExecuteSQLTicket ticket)
+    {
+        operand = await PrepareSetOperationOperandsAsync(database, operand, ticket).ConfigureAwait(false);
+        return await subqueryRewriter.RewriteSelectQueryAsync(database, operand, ticket).ConfigureAwait(false);
     }
 }
 

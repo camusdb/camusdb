@@ -356,10 +356,13 @@ internal sealed class QueryJoinExecutor : IJoinNodeExecutor
 
             case DerivedTableScanNode { BoundSource: not null } derivedScanNode:
             {
+                // The root of the plan runs once, so a set operation there streams.
                 await foreach (QueryResultRow row in leafScanner.ScanDerivedTable(
                     derivedScanNode.BoundSource,
                     derivedScanNode.ExecutionFilter,
-                    plan).ConfigureAwait(false))
+                    plan,
+                    readOnce: ReferenceEquals(derivedScanNode, plan.Root),
+                    setOperationStats: derivedScanNode.SetOperationStats).ConfigureAwait(false))
                     yield return row;
 
                 yield break;

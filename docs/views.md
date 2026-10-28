@@ -255,6 +255,10 @@ SELECT o.customer FROM open_orders o;           -- an explicit alias wins
   `CREATE TABLE … AS SELECT … AS OF SYSTEM TIME` for a point-in-time copy.
 - **No index or cache hints.** A hint pins a plan choice into the stored definition, where it would
   outlive the statistics it was made against.
+- **No `*` in a set operation inside a derived table or a subquery.** A body that is
+  `UNION`, `INTERSECT` or `EXCEPT` has the `*` of each operand expanded at creation, but one nested
+  deeper cannot be, and a column added to one of its tables would give its operands different column
+  counts. See [set-operations.md](./set-operations.md#views).
 
 Applying a hint *to* a view is likewise refused: a view has no indexes of its own, and the hint would
 silently target a relation the statement does not name.

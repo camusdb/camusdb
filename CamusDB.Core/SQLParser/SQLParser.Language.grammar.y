@@ -12,6 +12,12 @@
 %start list
 %visibility internal
 
+/* Set operations bind looser than every expression operator, which never meets them anyway. INTERSECT
+   binds tighter than UNION and EXCEPT, and UNION and EXCEPT share one level and group left to right,
+   as in PostgreSQL: `a UNION b INTERSECT c` is `a UNION (b INTERSECT c)`, and `a EXCEPT b EXCEPT c` is
+   `(a EXCEPT b) EXCEPT c`. */
+%left TUNION TEXCEPT
+%left TINTERSECT
 %left TOR
 %left TAND
 %right TNOT
@@ -58,6 +64,10 @@
 %token TTRUNCATE TWITHOUT
 %token TCASE TWHEN TTHEN TELSE TEND
 %token TINCLUDE
+/* UNION, INTERSECT and EXCEPT are reserved, as they are in PostgreSQL. ALL is not: it stays a plain
+   identifier, validated in set_quantifier, so the quantifier `x = ALL (...)`, GRANT ALL, EVICT CACHE ALL
+   and a column named all keep working. */
+%token TUNION TINTERSECT TEXCEPT
 %token TASOFSYSTEMTIME
 %token TCOMMENT
 %token TUSER TIDENTIFIED TWITH TGRANT TGRANTS TREVOKE TPRIVILEGES TFOR
@@ -144,11 +154,69 @@ opt_distinct : TDISTINCT { $$.s = "1"; }
              | { $$.s = null; }
              ;
 
-select_stmt : TSELECT opt_distinct select_field_list TFROM select_table opt_as_of opt_where opt_group opt_having opt_order opt_limit opt_offset
-            { $$.n = new(NodeType.Select, $3.n, $5.n, $7.n, $10.n, $11.n, $12.n, $8.n, $2.s, $9.n, $6.n); }
-            | TSELECT opt_distinct select_field_list opt_limit opt_offset
-            { $$.n = new(NodeType.Select, $3.n, null, null, null, $4.n, $5.n, null, $2.s, null); }
+/* A query is a select core, a parenthesized query, or a set operation over two of them, followed by an
+   optional ORDER BY / LIMIT / OFFSET. The layering is PostgreSQL's (select_no_parens, select_with_parens,
+   select_clause, simple_select), and it is what keeps the grammar free of conflicts:
+   - A select core holds no ORDER BY / LIMIT / OFFSET, so in `a UNION b ORDER BY 1` the ORDER BY can only
+     belong to the whole set operation. An operand that needs its own must be in parentheses.
+   - select_with_parens holds exactly one level of parentheses. A second level, `((SELECT 1))`, would be
+     both a parenthesized query and a parenthesized scalar subquery in an expression, which LALR(1)
+     cannot tell apart. In an expression it still parses, as the scalar subquery; as a statement or a
+     derived table it does not.
+   SetOperationAst builds the nodes: a set operation always ends up in the FROM slot of a Select of *,
+   so every consumer of a Select keeps working (see NodeType.SetOperationReference). */
+select_stmt : select_no_parens { $$.n = $1.n; }
+            | select_with_parens { $$.n = $1.n; }
             ;
+
+select_with_parens : LPAREN select_no_parens RPAREN { $$.n = $2.n; }
+                   ;
+
+select_no_parens : simple_select { $$.n = SetOperationAst.Finish($1.n, null, null, null); }
+                 | select_clause order_clause opt_limit opt_offset { $$.n = SetOperationAst.Finish($1.n, $2.n, $3.n, $4.n); }
+                 | select_clause limit_clause opt_offset { $$.n = SetOperationAst.Finish($1.n, null, $2.n, $3.n); }
+                 | select_clause offset_clause { $$.n = SetOperationAst.Finish($1.n, null, null, $2.n); }
+                 ;
+
+select_clause : simple_select { $$.n = $1.n; }
+              | select_with_parens { $$.n = $1.n; }
+              ;
+
+simple_select : select_core { $$.n = $1.n; }
+              | select_clause TUNION set_quantifier select_clause { $$.n = SetOperationAst.Combine(SetOperationAst.Union, $3.s, $1.n, $4.n); }
+              | select_clause TEXCEPT set_quantifier select_clause { $$.n = SetOperationAst.Combine(SetOperationAst.Except, $3.s, $1.n, $4.n); }
+              | select_clause TINTERSECT set_quantifier select_clause { $$.n = SetOperationAst.Combine(SetOperationAst.Intersect, $3.s, $1.n, $4.n); }
+              ;
+
+/* ALL keeps duplicate rows. DISTINCT, the default, is accepted for symmetry with PostgreSQL. ALL is a
+   plain identifier: after the operator an operand can only start with SELECT or a parenthesis, so an
+   identifier here can only be the quantifier, and the action checks the word. */
+set_quantifier : TIDENTIFIER
+                 {
+                   if (!string.Equals($1.s, "all", System.StringComparison.OrdinalIgnoreCase))
+                       throw new CamusDB.Core.CamusDBException(
+                           CamusDB.Core.CamusDBErrorCodes.InvalidInput,
+                           "Expected ALL or DISTINCT after UNION, INTERSECT or EXCEPT, got '" + $1.s + "'");
+                   $$.s = "ALL";
+                 }
+               | TDISTINCT { $$.s = null; }
+               | { $$.s = null; }
+               ;
+
+select_core : TSELECT opt_distinct select_field_list TFROM select_table opt_as_of opt_where opt_group opt_having
+            { $$.n = new(NodeType.Select, $3.n, $5.n, $7.n, null, null, null, $8.n, $2.s, $9.n, $6.n); }
+            | TSELECT opt_distinct select_field_list
+            { $$.n = new(NodeType.Select, $3.n, null, null, null, null, null, null, $2.s, null); }
+            ;
+
+order_clause : TORDER TBY order_list { $$.n = $3.n; }
+             ;
+
+limit_clause : TLIMIT select_limit_offset { $$.n = $2.n; }
+             ;
+
+offset_clause : TOFFSET select_limit_offset { $$.n = $2.n; }
+              ;
 
 /* AS OF SYSTEM TIME '<expr>' — time-travel read. Placed immediately after the FROM clause and before
    WHERE, matching the standard SQL time-travel placement. The scanner recognises the whole
@@ -191,7 +259,7 @@ opt_having : THAVING condition { $$.n = new(NodeType.Having, $2.n, null, null, n
            | { $$.n = null; }
            ;
 
-query_expr : LPAREN select_stmt RPAREN { $$.n = $2.n; $$.s = $2.s; }
+query_expr : select_with_parens { $$.n = $1.n; }
            ;
 
 opt_where : TWHERE condition { $$.n = $2.n; }
@@ -199,10 +267,6 @@ opt_where : TWHERE condition { $$.n = $2.n; }
           ;
 
 opt_group : TGROUP TBY group_list { $$.n = new(NodeType.GroupBy, $3.n, null, null, null, null, null, null, null); }
-          | { $$.n = null; }
-          ;
-
-opt_order : TORDER TBY order_list { $$.n = $3.n; }
           | { $$.n = null; }
           ;
 

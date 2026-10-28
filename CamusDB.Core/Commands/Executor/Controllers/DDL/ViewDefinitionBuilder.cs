@@ -28,6 +28,11 @@ internal static class ViewDefinitionBuilder
     /// column list; <paramref name="projections"/> is the expression list that produced it, and the
     /// two must come from the same bound query or they can disagree about arity.
     /// </summary>
+    /// <param name="setOperation">
+    /// The bound set operation when the body is <c>q1 UNION q2</c> (or INTERSECT, EXCEPT), which
+    /// <see cref="SelectRowSource.SetOperation"/> carries; null for any other body. A set-operation
+    /// body is normalized operand by operand (see <see cref="NormalizeSetOperationBody"/>).
+    /// </param>
     public static ViewDefinition Build(
         Schema schema,
         NodeAst bodyAst,
@@ -36,7 +41,8 @@ internal static class ViewDefinitionBuilder
         NodeAst? columnAliasList,
         CheckOptionKind checkOption,
         string? owner,
-        string? ownerId = null)
+        string? ownerId = null,
+        BoundSetOperation? setOperation = null)
     {
         RejectTimeTravelBody(bodyAst);
 
@@ -52,13 +58,26 @@ internal static class ViewDefinitionBuilder
                 CamusDBErrorCodes.InvalidInput,
                 $"CREATE VIEW specifies {aliases.Count} column name(s) but the body query returns {derived.Count}");
 
+        bool isSetOperation = SetOperationAst.IsSetOperationSelect(bodyAst);
+
+        if (isSetOperation && setOperation is null)
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInternalOperation,
+                "A set-operation view body reached the definition builder without its bound operands");
+
         // Expanding '*' into the body's actual output columns is what freezes the view's shape:
         // without it, adding a column to a base table would silently widen every SELECT * view over
         // it, changing what dependent views and clients see with no statement having been issued.
-        NodeAst normalizedBody = ExpandStarProjections(bodyAst, derived);
+        // A set operation projects '*' over its operands, so it is the operands' '*' that is expanded,
+        // and its output names are the projections of its leftmost operand.
+        NodeAst normalizedBody = isSetOperation
+            ? NormalizeSetOperationBody(bodyAst, setOperation!, derived)
+            : ExpandStarProjections(bodyAst, derived);
+
+        RejectUnfrozenSetOperationStars(normalizedBody);
 
         List<NodeAst> effectiveProjections = [];
-        FlattenProjections(normalizedBody.leftAst!, effectiveProjections);
+        FlattenProjections(isSetOperation ? LeftmostOperand(normalizedBody).leftAst! : normalizedBody.leftAst!, effectiveProjections);
 
         if (effectiveProjections.Count != derived.Count)
             throw new CamusDBException(
@@ -79,8 +98,9 @@ internal static class ViewDefinitionBuilder
                 Name = name,
                 Type = derived[i].Type,
                 // Only a bare column reference is writable through an auto-updatable view; anything
-                // computed has no base column to write back to.
-                SourceColumnName = TryGetSourceColumn(effectiveProjections[i]),
+                // computed has no base column to write back to, and a set operation has no single
+                // base row a write could reach.
+                SourceColumnName = isSetOperation ? null : TryGetSourceColumn(effectiveProjections[i]),
             });
         }
 
@@ -91,7 +111,9 @@ internal static class ViewDefinitionBuilder
         // qualified reference like o.id) would be recorded in Columns but absent from the SQL, so the
         // derived table the view expands to would expose the body's names and every reference to the
         // view's own column names would fail to resolve.
-        NodeAst aliasedBody = ApplyOutputNames(normalizedBody, effectiveProjections, columns);
+        NodeAst aliasedBody = isSetOperation
+            ? ApplyLeftmostOutputNames(normalizedBody, effectiveProjections, columns)
+            : ApplyOutputNames(normalizedBody, effectiveProjections, columns);
 
         // Computed from the body while it still names its relations, because that is what the
         // lookup below matches on. Binding first would leave nothing for it to resolve.
@@ -236,6 +258,213 @@ internal static class ViewDefinitionBuilder
         {
             if (child is not null)
                 RejectTimeTravelBody(child);
+        }
+    }
+
+    /// <summary>
+    /// Normalizes a set-operation body before it is stored: every operand's <c>*</c> is expanded
+    /// from that operand's bound columns, and every ORDER BY name on the leftmost path becomes a
+    /// position.
+    ///
+    /// <para><b>Why positions.</b> The output names of a set operation are the names of its leftmost
+    /// operand, and the stored body pins the view's names as aliases on that operand
+    /// (<see cref="ApplyLeftmostOutputNames"/>). A column-alias list renames them, so
+    /// <c>CREATE VIEW v (a) AS SELECT x FROM t UNION … ORDER BY x</c> would no longer find <c>x</c>.
+    /// Each wrapper on the leftmost path has the same output names, so one name list serves all of
+    /// them. A position means the same column under any name.</para>
+    /// </summary>
+    private static NodeAst NormalizeSetOperationBody(
+        NodeAst wrapper,
+        BoundSetOperation bound,
+        IReadOnlyList<DerivedColumnSchema> outputColumns)
+    {
+        NodeAst setOperationAst = wrapper.rightAst!;
+
+        NodeAst left = NormalizeOperand(setOperationAst.leftAst!, bound.Left, bound.LeftColumns, outputColumns);
+        NodeAst right = NormalizeOperand(setOperationAst.rightAst!, bound.Right, bound.RightColumns, null);
+
+        NodeAst? orderBy = wrapper.extendedTwo is null ? null : OrderByNamesToPositions(wrapper.extendedTwo, outputColumns);
+
+        return new NodeAst(
+            NodeType.Select,
+            wrapper.leftAst,
+            new NodeAst(NodeType.SetOperationReference, left, right, null, null, null, null, null, setOperationAst.yytext),
+            wrapper.extendedOne, orderBy, wrapper.extendedThree, wrapper.extendedFour, wrapper.extendedFive,
+            wrapper.yytext, wrapper.extendedSix, wrapper.extendedSeven);
+    }
+
+    /// <summary>
+    /// One operand of <see cref="NormalizeSetOperationBody"/>. <paramref name="leftmostOutput"/> is the
+    /// output schema when the operand is on the leftmost path, and null otherwise.
+    /// </summary>
+    private static NodeAst NormalizeOperand(
+        NodeAst operand,
+        BoundSelectQuery operandBound,
+        IReadOnlyList<DerivedColumnSchema> operandColumns,
+        IReadOnlyList<DerivedColumnSchema>? leftmostOutput)
+    {
+        if (SetOperationAst.IsSetOperationSelect(operand))
+        {
+            BoundSetOperation nested = operandBound.DerivedSources.Count == 1 && operandBound.DerivedSources[0].SetOperation is { } found
+                ? found
+                : throw new CamusDBException(
+                    CamusDBErrorCodes.InvalidInternalOperation,
+                    "A nested set operation in a view body has no bound operands");
+
+            return NormalizeSetOperationBody(operand, nested, leftmostOutput ?? operandColumns);
+        }
+
+        NodeAst expanded = ExpandStarProjections(operand, operandColumns);
+
+        // A parenthesized leftmost operand's own ORDER BY may name an output column by the name the
+        // alias list replaces, so it moves to positions too.
+        if (leftmostOutput is not null && expanded.extendedTwo is not null)
+            return WithOrderBy(expanded, OrderByNamesToPositions(expanded.extendedTwo, leftmostOutput, projectionsOf: expanded));
+
+        return expanded;
+    }
+
+    /// <summary>
+    /// Returns <paramref name="orderBy"/> with each bare name that is an output column replaced by that
+    /// column's position. For a leaf operand (<paramref name="projectionsOf"/> set), only a name that
+    /// is an explicit alias of the operand moves: a bare column name there may be a base column that
+    /// the operand does not project, and it sorts before projection, so it is left as it is.
+    /// </summary>
+    private static NodeAst OrderByNamesToPositions(
+        NodeAst orderBy,
+        IReadOnlyList<DerivedColumnSchema> outputColumns,
+        NodeAst? projectionsOf = null)
+    {
+        HashSet<string>? aliases = null;
+
+        if (projectionsOf is not null)
+        {
+            aliases = new(StringComparer.OrdinalIgnoreCase);
+            List<NodeAst> projections = [];
+            FlattenProjections(projectionsOf.leftAst!, projections);
+
+            foreach (NodeAst projection in projections)
+            {
+                if (projection.nodeType == NodeType.ExprAlias && projection.rightAst?.yytext is { } alias)
+                    aliases.Add(alias);
+            }
+        }
+
+        switch (orderBy.nodeType)
+        {
+            case NodeType.IdentifierList:
+                {
+                    NodeAst l = OrderByNamesToPositions(orderBy.leftAst!, outputColumns, projectionsOf);
+                    NodeAst r = OrderByNamesToPositions(orderBy.rightAst!, outputColumns, projectionsOf);
+                    return ReferenceEquals(l, orderBy.leftAst) && ReferenceEquals(r, orderBy.rightAst)
+                        ? orderBy
+                        : new NodeAst(NodeType.IdentifierList, l, r, null, null, null, null, null, null);
+                }
+
+            case NodeType.SortAsc:
+            case NodeType.SortDesc:
+                {
+                    NodeAst inner = OrderByNamesToPositions(orderBy.leftAst!, outputColumns, projectionsOf);
+                    return ReferenceEquals(inner, orderBy.leftAst)
+                        ? orderBy
+                        : new NodeAst(orderBy.nodeType, inner, null, null, null, null, null, null, null);
+                }
+
+            case NodeType.Identifier when orderBy.yytext is { } name && (aliases is null || aliases.Contains(name)):
+                for (int i = 0; i < outputColumns.Count; i++)
+                {
+                    if (string.Equals(outputColumns[i].Name, name, StringComparison.OrdinalIgnoreCase))
+                        return NodeAst.FromLong(i + 1);
+                }
+
+                return orderBy;
+
+            default:
+                return orderBy;
+        }
+    }
+
+    private static NodeAst WithOrderBy(NodeAst select, NodeAst orderBy) =>
+        new(NodeType.Select, select.leftAst, select.rightAst, select.extendedOne, orderBy, select.extendedThree,
+            select.extendedFour, select.extendedFive, select.yytext, select.extendedSix, select.extendedSeven);
+
+    /// <summary>The leftmost leaf operand of a set-operation body: the one that names its columns.</summary>
+    private static NodeAst LeftmostOperand(NodeAst wrapper)
+    {
+        NodeAst node = wrapper;
+
+        while (SetOperationAst.IsSetOperationSelect(node))
+            node = node.rightAst!.leftAst!;
+
+        return node;
+    }
+
+    /// <summary>
+    /// <see cref="ApplyOutputNames"/> for a set operation: the aliases go on the leftmost leaf
+    /// operand, whose names are the output names, and every wrapper on the way is rebuilt.
+    /// </summary>
+    private static NodeAst ApplyLeftmostOutputNames(NodeAst node, List<NodeAst> projections, List<ViewColumnSchema> columns)
+    {
+        if (!SetOperationAst.IsSetOperationSelect(node))
+            return ApplyOutputNames(node, projections, columns);
+
+        NodeAst setOperationAst = node.rightAst!;
+        NodeAst left = ApplyLeftmostOutputNames(setOperationAst.leftAst!, projections, columns);
+
+        if (ReferenceEquals(left, setOperationAst.leftAst))
+            return node;
+
+        return new NodeAst(
+            NodeType.Select,
+            node.leftAst,
+            new NodeAst(NodeType.SetOperationReference, left, setOperationAst.rightAst, null, null, null, null, null, setOperationAst.yytext),
+            node.extendedOne, node.extendedTwo, node.extendedThree, node.extendedFour, node.extendedFive,
+            node.yytext, node.extendedSix, node.extendedSeven);
+    }
+
+    /// <summary>
+    /// Refuses a <c>*</c> in an operand of a set operation that the normalization above could not
+    /// expand: one inside a derived table or a subquery of the body. The view would store the
+    /// <c>*</c> as it is, and a column added to that operand's table would then give the two
+    /// operands different column counts, so every read of the view would fail.
+    /// </summary>
+    private static void RejectUnfrozenSetOperationStars(NodeAst root)
+    {
+        Stack<NodeAst> pending = new();
+        pending.Push(root);
+
+        while (pending.Count > 0)
+        {
+            NodeAst node = pending.Pop();
+
+            if (node.nodeType == NodeType.SetOperationReference)
+            {
+                foreach (NodeAst operand in new[] { node.leftAst!, node.rightAst! })
+                {
+                    if (SetOperationAst.IsSetOperationSelect(operand))
+                        continue;
+
+                    List<NodeAst> projections = [];
+                    FlattenProjections(operand.leftAst!, projections);
+
+                    if (projections.Any(p => p.nodeType == NodeType.ExprAllFields))
+                        throw new CamusDBException(
+                            CamusDBErrorCodes.InvalidInput,
+                            "A view body may not use '*' in an operand of a UNION, INTERSECT or EXCEPT inside a " +
+                            "derived table or a subquery; list the columns, so a column added to a table " +
+                            "cannot give the operands different column counts");
+                }
+            }
+
+            foreach (NodeAst? child in new[]
+                     {
+                         node.leftAst, node.rightAst, node.extendedOne, node.extendedTwo, node.extendedThree,
+                         node.extendedFour, node.extendedFive, node.extendedSix, node.extendedSeven
+                     })
+            {
+                if (child is not null)
+                    pending.Push(child);
+            }
         }
     }
 

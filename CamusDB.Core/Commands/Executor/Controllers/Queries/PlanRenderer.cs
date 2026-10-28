@@ -71,6 +71,14 @@ public static class PlanRenderer
     private static IEnumerable<(string Name, string Detail)> WalkNodesInner(PhysicalPlanNode node, QueryPlan plan)
     {
         yield return SplitNodeLine(GetRenderLine(node, plan));
+
+        // The operands of a set operation, when EXPLAIN planned them, come right after it, each one
+        // with the plan its nodes belong to. ExplainExecutor.WalkNodesOrdered visits the same order.
+        if (node is DerivedTableScanNode { SetOperationOperands: { } operands })
+            foreach (SetOperationOperandNode operand in operands)
+                foreach (var item in WalkNodesInner(operand, operand.Plan))
+                    yield return item;
+
         if (node.Input is not null)
             foreach (var item in WalkNodesInner(node.Input, plan))
                 yield return item;
@@ -101,7 +109,8 @@ public static class PlanRenderer
             IndexNestedLoopJoinNode n => RenderIndexNestedLoopJoin(n),
             HashJoinNode n => RenderHashJoin(n),
             MergeJoinNode n => RenderMergeJoin(n),
-            DerivedTableScanNode n => RenderDerivedTableScan(n),
+            DerivedTableScanNode n => RenderDerivedTableScan(n, plan),
+            SetOperationOperandNode n => $"operand({n.Side})",
             SemiJoinNode n => RenderSemiJoin(n),
             GatherNode n => $"gather(spans: {n.Placement.Spans.Count}, remote_leader_fraction: {n.Placement.RemoteLeaderFraction.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture)})",
             _ => node.GetType().Name,
@@ -138,6 +147,10 @@ public static class PlanRenderer
         }
 
         sb.Append(prefix + line).Append('\n');
+
+        if (node is DerivedTableScanNode { SetOperationOperands: { } operands })
+            foreach (SetOperationOperandNode operand in operands)
+                RenderNode(operand, operand.Plan, sb, depth + 1, includeRequiredColumns, includeDistributedProperties);
 
         if (node.Input is not null)
             RenderNode(node.Input, plan, sb, depth + 1, includeRequiredColumns, includeDistributedProperties);
@@ -349,14 +362,44 @@ public static class PlanRenderer
         _ => "",
     };
 
-    private static string RenderDerivedTableScan(DerivedTableScanNode node)
+    private static string RenderDerivedTableScan(DerivedTableScanNode node, QueryPlan plan)
     {
+        if (node.BoundSource.SetOperation is { } setOperation)
+            return RenderSetOperation(setOperation.Source, plan.Database.Options.SpillEnabled);
+
         if (node.BoundSource.Source.Function is not { } call)
             return $"derived-table-scan(alias={node.BoundSource.Alias})";
 
         // A function in FROM streams computed rows, so it is named for what it is, with its arguments.
         string arguments = string.Join(", ", call.Arguments.Select(RenderExpr));
         return $"function-scan({call.FunctionName}({arguments}), alias={node.BoundSource.Alias}, column={call.ColumnName})";
+    }
+
+    /// <summary>
+    /// A set operation is named for its operator, with how it combines the rows: <c>union(all)</c>
+    /// streams both operands, and every other form hashes, <c>union(distinct: hash)</c>,
+    /// <c>intersect(all, hash)</c>, <c>except(hash, spill)</c>. <c>spill</c> means the hash table
+    /// may move to disk, which <see cref="CamusDBOptions.SpillEnabled"/> decides; whether it did is a
+    /// run-time fact.
+    /// </summary>
+    private static string RenderSetOperation(SetOperationSource setOperation, bool spillEnabled)
+    {
+        string name = setOperation.Kind switch
+        {
+            SetOperationKind.Union => "union",
+            SetOperationKind.Intersect => "intersect",
+            _ => "except",
+        };
+
+        if (setOperation.Kind == SetOperationKind.Union && setOperation.All)
+            return "union(all)";
+
+        string spill = spillEnabled ? ", spill" : "";
+
+        if (setOperation.Kind == SetOperationKind.Union)
+            return $"union(distinct: hash{spill})";
+
+        return setOperation.All ? $"{name}(all, hash{spill})" : $"{name}(hash{spill})";
     }
 
     private static string RenderSemiJoin(SemiJoinNode node)

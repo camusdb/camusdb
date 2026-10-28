@@ -1414,7 +1414,12 @@ internal sealed class SelectStatementExecutor
                 columns,
                 ExecuteBoundQuery(database, bound, queryTicket),
                 bound.Query.Projections.Select(projection => projection.Expression).ToList(),
-                lease);
+                lease)
+            {
+                SetOperation = bound.Query.Source is DerivedTableSource { SetOperation: not null } && bound.DerivedSources.Count == 1
+                    ? bound.DerivedSources[0].SetOperation
+                    : null,
+            };
         }
         catch
         {

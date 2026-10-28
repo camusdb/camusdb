@@ -39,6 +39,13 @@ internal sealed class SelectRowSource : IAsyncDisposable
     public IReadOnlyList<NodeAst> Projections { get; }
 
     /// <summary>
+    /// The bound set operation when the source query is <c>q1 UNION q2</c> (or INTERSECT, EXCEPT);
+    /// null otherwise. Its <see cref="Projections"/> are then only <c>*</c>, and <c>CREATE VIEW</c>
+    /// reads the output columns of each operand from here to freeze every operand's <c>*</c>.
+    /// </summary>
+    public BoundSetOperation? SetOperation { get; init; }
+
+    /// <summary>
     /// True when the source reads at a historical snapshot (<c>AS OF SYSTEM TIME</c>) rather than at
     /// the statement's own transaction. Callers use it to report a copy that read nothing, which for
     /// a time-travel source may mean the requested history has already been reclaimed.

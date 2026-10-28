@@ -48,7 +48,18 @@ internal static class QueryTicketAdapter
         SingleTableRequiredColumnsMemo? requiredColumnsMemo = null) =>
         ToQueryTicketInternal(
             bound.Query, ticket, bound.RowNames, existsSubqueries, semiJoinSpecs,
-            exclusivePredicateLocks, suppressCacheHint, requiredColumnsMemo);
+            exclusivePredicateLocks, suppressCacheHint, requiredColumnsMemo,
+            SetOperationColumns(bound));
+
+    /// <summary>
+    /// The output columns of the set operation that is the whole FROM of <paramref name="bound"/>, or
+    /// null for any other query. Its ORDER BY resolves against these (see
+    /// <see cref="ResolveSetOperationOrderClause"/>).
+    /// </summary>
+    private static IReadOnlyList<DerivedColumnSchema>? SetOperationColumns(BoundSelectQuery bound) =>
+        bound.Query.Source is DerivedTableSource { SetOperation: not null } && bound.DerivedSources.Count == 1
+            ? bound.DerivedSources[0].Columns
+            : null;
 
     private static QueryTicket ToQueryTicketInternal(
         SelectQuery query,
@@ -58,7 +69,8 @@ internal static class QueryTicketAdapter
         IReadOnlyList<SemiJoinSpec>? semiJoinSpecs = null,
         bool exclusivePredicateLocks = false,
         bool suppressCacheHint = false,
-        SingleTableRequiredColumnsMemo? requiredColumnsMemo = null)
+        SingleTableRequiredColumnsMemo? requiredColumnsMemo = null,
+        IReadOnlyList<DerivedColumnSchema>? setOperationColumns = null)
     {
         TableSource tableSource = GetPrimaryTableSource(query.Source);
         NodeAst? where = query.Where?.Expression;
@@ -74,11 +86,13 @@ internal static class QueryTicketAdapter
             projection: query.Projections.Select(item => item.Expression).ToList(),
             filters: null,
             where: where,
-            orderBy: ToQueryOrderBy(
-                query.OrderBy,
-                query.Projections,
-                query.GroupBy,
-                SortAfterProjection(query)),
+            orderBy: setOperationColumns is not null
+                ? ToSetOperationOrderBy(query.OrderBy, setOperationColumns)
+                : ToQueryOrderBy(
+                    query.OrderBy,
+                    query.Projections,
+                    query.GroupBy,
+                    SortAfterProjection(query)),
             limit: query.Limit,
             offset: query.Offset,
             parameters: ticket.Parameters,
@@ -176,6 +190,52 @@ internal static class QueryTicketAdapter
             clauses.Add(ResolveOrderClause(item, projections, groupBy, sortAfterProjection));
 
         return clauses;
+    }
+
+    private static List<QueryOrderBy>? ToSetOperationOrderBy(
+        IReadOnlyList<OrderByItem>? orderBy,
+        IReadOnlyList<DerivedColumnSchema> columns)
+    {
+        if (orderBy is null || orderBy.Count == 0)
+            return null;
+
+        List<QueryOrderBy> clauses = new(orderBy.Count);
+
+        foreach (OrderByItem item in orderBy)
+            clauses.Add(ResolveSetOperationOrderClause(item, columns));
+
+        return clauses;
+    }
+
+    /// <summary>
+    /// Binds one ORDER BY item of a set operation to the row key of an output column. The query
+    /// creator admits only an output name or a position here, because a position names a column
+    /// that is only known once the operands are bound. A name resolves case-insensitively, to the
+    /// first output column with that name.
+    /// </summary>
+    private static QueryOrderBy ResolveSetOperationOrderClause(OrderByItem item, IReadOnlyList<DerivedColumnSchema> columns)
+    {
+        NodeAst expression = item.Expression;
+
+        if (expression.nodeType == NodeType.Integer)
+        {
+            if (!int.TryParse(expression.yytext, out int position) || position < 1 || position > columns.Count)
+                throw new CamusDBException(
+                    CamusDBErrorCodes.InvalidInput,
+                    $"ORDER BY position {expression.yytext} is out of range");
+
+            return new QueryOrderBy(columns[position - 1].RowKey, item.Direction);
+        }
+
+        foreach (DerivedColumnSchema column in columns)
+        {
+            if (string.Equals(column.Name, expression.yytext, StringComparison.OrdinalIgnoreCase))
+                return new QueryOrderBy(column.RowKey, item.Direction);
+        }
+
+        throw new CamusDBException(
+            CamusDBErrorCodes.UnknownColumn,
+            $"ORDER BY names '{expression.yytext}', which is not an output column of the set operation");
     }
 
     /// <summary>

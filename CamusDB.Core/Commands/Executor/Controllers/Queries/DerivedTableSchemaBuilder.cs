@@ -716,6 +716,23 @@ internal static class DerivedTableSchemaBuilder
         if (target.nodeType == NodeType.BytesLiteral)
             return ColumnType.Bytes;
 
+        // A literal has the type its value evaluates to. `SELECT 1 FROM t` used to declare a String
+        // column that carried Int64 cells; a set operation compares the declared types of its
+        // operands, so `SELECT 1 FROM t UNION SELECT id FROM u` failed as String against Int64. A
+        // NULL literal has no type of its own and keeps the String fallback, as PostgreSQL types an
+        // unknown as text; a set operation reads a NULL literal as untyped before it gets here.
+        switch (target.nodeType)
+        {
+            case NodeType.Integer:
+                return ColumnType.Integer64;
+
+            case NodeType.Float:
+                return ColumnType.Float64;
+
+            case NodeType.String:
+                return ColumnType.String;
+        }
+
         if (target.nodeType == NodeType.Identifier && target.yytext is not null)
         {
             string lookupKey = innerResolver.ResolveRowLookupKey(target.yytext);

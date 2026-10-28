@@ -206,7 +206,8 @@ internal sealed class ViewCreator
             checkOption,
             // Null when authentication is off, in which case no base-relation check applies anyway.
             owner: ticket.Principal?.UserName,
-            ownerId: ticket.Principal?.UserId);
+            ownerId: ticket.Principal?.UserId,
+            setOperation: source.SetOperation);
     }
 
     /// <summary>

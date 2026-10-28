@@ -143,6 +143,12 @@ internal sealed class ViewBodyRenderer : SqlAstRenderer
         if (select.nodeType != NodeType.Select)
             throw Unsupported(select);
 
+        if (SetOperationAst.IsSetOperationSelect(select))
+        {
+            RenderSetOperationInto(sb, select);
+            return;
+        }
+
         sb.Append("SELECT ");
 
         if (select.yytext is not null)
@@ -202,6 +208,60 @@ internal sealed class ViewBodyRenderer : SqlAstRenderer
             sb.Append(" OFFSET ");
             RenderNode(sb, select.extendedFour);
         }
+    }
+
+    /// <summary>
+    /// Renders the Select wrapper of a set operation as <c>q1 OP q2</c> followed by the wrapper's own
+    /// ORDER BY, LIMIT and OFFSET.
+    ///
+    /// <para><b>Parentheses decide the grouping, not precedence.</b> An operand that is itself a set
+    /// operation is always parenthesized, so the stored text groups exactly as the tree does, even
+    /// where the operators' precedence would group it the same way without them. A plain operand is
+    /// parenthesized only when it has its own ORDER BY, LIMIT or OFFSET, which the grammar admits only
+    /// in parentheses. Every form here re-parses: an operand in parentheses is one level deep, never
+    /// <c>((SELECT …))</c>.</para>
+    /// </summary>
+    private void RenderSetOperationInto(StringBuilder sb, NodeAst wrapper)
+    {
+        NodeAst setOperation = wrapper.rightAst!;
+
+        RenderSetOperationOperand(sb, setOperation.leftAst!);
+        sb.Append(' ').Append(setOperation.yytext).Append(' ');
+        RenderSetOperationOperand(sb, setOperation.rightAst!);
+
+        if (wrapper.extendedTwo is not null)
+        {
+            sb.Append(" ORDER BY ");
+            RenderOrderList(sb, wrapper.extendedTwo);
+        }
+
+        if (wrapper.extendedThree is not null)
+        {
+            sb.Append(" LIMIT ");
+            RenderNode(sb, wrapper.extendedThree);
+        }
+
+        if (wrapper.extendedFour is not null)
+        {
+            sb.Append(" OFFSET ");
+            RenderNode(sb, wrapper.extendedFour);
+        }
+    }
+
+    private void RenderSetOperationOperand(StringBuilder sb, NodeAst operand)
+    {
+        bool parenthesize = SetOperationAst.IsSetOperationSelect(operand)
+                            || operand.extendedTwo is not null
+                            || operand.extendedThree is not null
+                            || operand.extendedFour is not null;
+
+        if (parenthesize)
+            sb.Append('(');
+
+        RenderSelectInto(sb, operand);
+
+        if (parenthesize)
+            sb.Append(')');
     }
 
     /// <summary>

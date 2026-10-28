@@ -19,6 +19,13 @@ public sealed record BoundDerivedTableSource(
     IReadOnlyList<DerivedColumnSchema> Columns,
     BoundSelectQuery InnerBound)
 {
+    /// <summary>
+    /// The bound operands of the set operation this derived table stands for, or null for any other
+    /// derived table. When it is set, <see cref="InnerBound"/> is an empty shell with no sources and
+    /// <see cref="Columns"/> equals <see cref="BoundSetOperation.Columns"/>.
+    /// </summary>
+    public BoundSetOperation? SetOperation { get; init; }
+
     public bool HasColumn(string columnName)
     {
         foreach (DerivedColumnSchema column in Columns)

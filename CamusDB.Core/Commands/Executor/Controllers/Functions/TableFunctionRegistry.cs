@@ -76,6 +76,14 @@ internal static class TableFunctionRegistry
         if (Functions.TryGetValue(name, out function))
             return true;
 
+        // Kept out of the built-in map, so it stays out of every listing of the functions a user can
+        // call; only the query creator writes this name (see SingleRowTableFunction).
+        if (string.Equals(name, SingleRowTableFunction.InternalName, StringComparison.Ordinal))
+        {
+            function = SingleRowTableFunction.Instance;
+            return true;
+        }
+
         if (Extensions.ExtensionFunctionScope.CurrentInstalled is { } installed && installed.TryGetTableFunction(name, out Extensions.ExtensionTableFunction? extension))
         {
             function = extension;

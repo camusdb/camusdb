@@ -188,8 +188,14 @@ One row is emitted per physical plan node, in depth-first order (parent before c
 | `derived-table-scan`     | Subquery in the `FROM` clause | `alias=<alias>` |
 | `function-scan`          | A set-returning function in the `FROM` clause, such as `generate_series` (no table access). With constant arguments, `estimated_rows` is the exact row count | `<function>(<args>), alias=<alias>, column=<column>` |
 | `constant-source`        | The single synthetic row of a **FROM-less** `SELECT` (no table access) | `1 row` |
+| `union`                  | `UNION [ALL]` | `all`, or `distinct: hash` (`, spill` when spill is enabled) |
+| `intersect`, `except`    | `INTERSECT [ALL]`, `EXCEPT [ALL]` | `hash` or `all, hash` (`, spill` when spill is enabled) |
+| `operand`                | One operand of the set operation above it; the rows that follow are that operand's plan. Under `ANALYZE`, `actual_rows` is the rows the operand returned | `left` or `right` |
 
 Notes:
+- A set operation renders each operand's plan under an `operand` row; see
+  [`docs/set-operations.md`](./set-operations.md#explain). A FROM-less operand reads a one-row
+  `function-scan(*single_row*(), …)`.
 - Uncorrelated `IN`/`NOT IN` over an **indexed** inner column become a `semi-join` /
   `anti-join` / `null-aware-anti-join`. When the inner column is **not** indexed, the subquery
   is materialized instead and no join node appears.

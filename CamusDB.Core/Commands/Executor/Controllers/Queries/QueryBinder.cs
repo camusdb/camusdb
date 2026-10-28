@@ -152,6 +152,24 @@ internal sealed class QueryBinder
                     return;
                 }
 
+                // A set operation has no inner query to bind either: its two operands are bound
+                // instead, each one as a complete query of its own, so each one opens its own tables
+                // and so needs SELECT on them. The shell around them has no sources.
+                if (derivedSource.SetOperation is { } setOperation)
+                {
+                    BoundSetOperation bound = await BindSetOperationAsync(database, setOperation).ConfigureAwait(false);
+
+                    derivedSources.Add(new BoundDerivedTableSource(
+                        derivedSource,
+                        derivedSource.Alias,
+                        bound.Columns,
+                        new BoundSelectQuery(derivedSource.Query, [], new QueryRowNameResolver([])))
+                    {
+                        SetOperation = bound,
+                    });
+                    return;
+                }
+
                 // An expanded view's body binds as its OWNER, not as the caller. That is what a view
                 // is for: the caller was already checked on the view itself, and the tables underneath
                 // it are checked against whoever created it — so a view can expose a slice of a table
@@ -194,6 +212,26 @@ internal sealed class QueryBinder
                     CamusDBErrorCodes.InvalidInput,
                     $"Unsupported query source: {source.GetType().Name}");
         }
+    }
+
+    /// <summary>
+    /// Binds both operands of a set operation and resolves its output columns
+    /// (<see cref="SetOperationSchema"/>). The operands bind in the caller's authorization scope:
+    /// an operand that is an expanded view swaps to the view's owner for its own subtree only, in
+    /// the derived-table case above, exactly as it would in a plain FROM.
+    /// </summary>
+    private async Task<BoundSetOperation> BindSetOperationAsync(DatabaseDescriptor database, SetOperationSource setOperation)
+    {
+        BoundSelectQuery left = await BindAsync(database, setOperation.Left).ConfigureAwait(false);
+        BoundSelectQuery right = await BindAsync(database, setOperation.Right).ConfigureAwait(false);
+
+        IReadOnlyList<DerivedColumnSchema> leftColumns = DerivedTableSchemaBuilder.Build(setOperation.Left, left);
+        IReadOnlyList<DerivedColumnSchema> rightColumns = DerivedTableSchemaBuilder.Build(setOperation.Right, right);
+
+        (IReadOnlyList<DerivedColumnSchema> columns, IReadOnlyList<bool> untyped) =
+            SetOperationSchema.Resolve(setOperation, left, leftColumns, right, rightColumns);
+
+        return new BoundSetOperation(setOperation, left, right, leftColumns, rightColumns, columns, untyped);
     }
 
     /// <summary>

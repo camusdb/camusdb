@@ -79,7 +79,12 @@ internal static class QueryShapeComputer
             sb.Append(" ORDER_BY ");
             foreach (OrderByItem o in q.OrderBy)
             {
-                AppendExpr(o.Expression, sb);
+                // The ORDER BY of a set operation keeps its positions unresolved (see
+                // SelectQueryCreator), so a position is structure there, not a literal value.
+                if (o.Expression.nodeType == NodeType.Integer && q.Source is DerivedTableSource { SetOperation: not null })
+                    sb.Append('#').Append(o.Expression.yytext);
+                else
+                    AppendExpr(o.Expression, sb);
                 sb.Append(o.Direction == OrderType.Ascending ? " ASC," : " DESC,");
             }
         }
@@ -130,6 +135,16 @@ internal static class QueryShapeComputer
                 sb.Append("DERIVED(");
                 AppendQuery(dt.Query, sb);
                 sb.Append(") AS ").Append(dt.Alias);
+                break;
+
+            case SetOperationSource so:
+                // Without this arm the default writes the type name only, so two set operations over
+                // different operands would share a shape, and a cached plan of one would serve the other.
+                sb.Append("SET_OPERATION:").Append(so.OperatorText).Append(" LEFT(");
+                AppendQuery(so.Left, sb);
+                sb.Append(") RIGHT(");
+                AppendQuery(so.Right, sb);
+                sb.Append(')');
                 break;
 
             default:
