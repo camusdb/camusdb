@@ -473,7 +473,9 @@ This is the lock-free behavior described in §4/§5. What it does **not** promis
   A read waits only for a transaction that already started its commit, when that commit can land at or
   before the read's timestamp. The wait is about as long as the commit. It has a limit: about 5 s for a
   scan page and about 16 s for a point read, by default. After the limit, the statement fails with a
-  retryable error. A read of the latest value does not wait. This applies to a `SELECT` and to the
+  retryable error. CamusDB does not send a read again after 15 s of attempts, so a point read that
+  reached the limit once is not repeated and the statement does not wait longer. A read of the latest
+  value does not wait. This applies to a `SELECT` and to the
   read phase of a write statement.
 - ⚠️ **Pass the causal token at `BEGIN` when you read after a commit on another node.** A read at a
   timestamp does not show a value that another node committed at a later clock time, even when that

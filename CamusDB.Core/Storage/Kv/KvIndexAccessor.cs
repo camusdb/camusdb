@@ -832,6 +832,7 @@ internal sealed class KvIndexAccessor
         List<int>? pending = null;
         int pendingCount = count;
         int retries = 0;
+        long deadline = KahunaRetryPolicy.TransientRetryDeadlineTicks();
         TransactionOperationId operationId = coordinatorKey.Length == 0 ? default : TransactionOperationId.NewRandom();
 
         while (true)
@@ -896,9 +897,9 @@ internal sealed class KvIndexAccessor
             if (next is null)
                 return;
 
-            if (++retries >= KahunaRetryPolicy.MaxKahunaRetries)
+            if (!KahunaRetryPolicy.MayRetryTransient(ref retries, deadline))
                 throw new CamusDBException(CamusDBErrorCodes.TransactionMustRetry,
-                    $"Batched range probe of {bucketPrefix} was not ready after {KahunaRetryPolicy.MaxKahunaRetries} retries — retry the operation from BeginAsync");
+                    $"Batched range probe of {bucketPrefix} was not ready after {retries} attempts or {KahunaRetryPolicy.TransientRetryWindowMs} ms — retry the operation from BeginAsync");
 
             ServerDiagnostics.AddKvRetryWait("index_probe_batch");
             await Task.Delay(KahunaRetryPolicy.RetryDelayMs(retries), cancellationToken).ConfigureAwait(false);

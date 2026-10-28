@@ -201,7 +201,8 @@ internal sealed class KvBranchReader
     ///
     /// <para>
     /// MustRetry / WaitingForReplication mean a partition is not yet ready: only the affected subset is
-    /// retried, with exponential back-off, up to <see cref="KahunaRetryPolicy.MaxKahunaRetries"/>. Any
+    /// retried, with exponential back-off, up to <see cref="KahunaRetryPolicy.MaxKahunaRetries"/> times
+    /// and for at most <see cref="KahunaRetryPolicy.TransientRetryWindowMs"/>. Any
     /// other non-confirmed response, and an exhausted retry budget, throw
     /// <see cref="CamusDBErrorCodes.TransactionMustRetry"/> rather than decoding as an absence. A batch
     /// Kahuna refuses as malformed is a bug in the caller, not a transient, and throws
@@ -366,6 +367,7 @@ internal sealed class KvBranchReader
         List<int>? pending = null;
         int pendingCount = count;
         int retries = 0;
+        long deadline = KahunaRetryPolicy.TransientRetryDeadlineTicks();
 
         TransactionOperationId operationId = coordinatorKey.Length == 0 ? default : TransactionOperationId.NewRandom();
 
@@ -454,11 +456,11 @@ internal sealed class KvBranchReader
             if (next is null)
                 return true;
 
-            if (++retries >= KahunaRetryPolicy.MaxKahunaRetries)
+            if (!KahunaRetryPolicy.MayRetryTransient(ref retries, deadline))
             {
                 RetryableAbortSink.Raise(aborts,
                     new CamusDBException(CamusDBErrorCodes.TransactionMustRetry,
-                        $"Batch read was not ready after {KahunaRetryPolicy.MaxKahunaRetries} retries — retry the operation from BeginAsync"),
+                        $"Batch read was not ready after {retries} attempts or {KahunaRetryPolicy.TransientRetryWindowMs} ms — retry the operation from BeginAsync"),
                     ServerDiagnostics.Tags.AbortSite.ReadMany);
                 return false;
             }

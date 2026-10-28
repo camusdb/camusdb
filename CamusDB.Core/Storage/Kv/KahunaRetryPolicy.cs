@@ -23,8 +23,9 @@ namespace CamusDB.Core.Storage.Kv;
 /// caller must retry rather than decode them — turning an unknown into a definitive "not there" is
 /// the documented way a write gets silently dropped.</para>
 ///
-/// <para>Two families live here. The <b>static</b> overloads retry on a fixed budget and are what the
-/// read paths use, where a transient response is a 2PC signal rather than a lock conflict. The
+/// <para>Two families live here. The <b>static</b> overloads retry on a fixed budget, bounded by
+/// <see cref="TransientRetryWindowMs"/>, and are what the read paths use, where a transient response is
+/// a 2PC signal rather than a lock conflict. The
 /// <b>instance</b> members add a wall-clock deadline on every iteration and are what the write and
 /// lock-acquisition paths use: they bound deadlock and persistent-lock-conflict latency to roughly
 /// <see cref="CamusDBOptions.LockWaitDeadlineMs"/> per operation instead of spinning for the full
@@ -46,6 +47,41 @@ internal sealed class KahunaRetryPolicy
     internal const int MaxKahunaRetries = 32;
 
     private const int MaxRetryDelayMs = 50;
+
+    /// <summary>
+    /// How long, from its first attempt, a fixed-budget retry loop may start a new attempt after a
+    /// transient answer. Past it the loop returns the transient answer, and the caller fails the
+    /// statement with <see cref="CamusDBErrorCodes.TransactionMustRetry"/>.
+    ///
+    /// <para>The attempt cap alone does not bound the time. One Kahuna snapshot read can wait about
+    /// 16.5 s on a foreign intent whose commit is in progress before it answers <c>MustRetry</c>, so 32
+    /// attempts could hold a statement for about 9 minutes. A pessimistic UPDATE blocked by a foreign
+    /// row lock waited until the holder's session ceiling (330 s) and then wrote over the formerly
+    /// locked row. With this window, a read that meets such an intent fails after one Kahuna wait.</para>
+    ///
+    /// <para>The window is shorter than Kahuna's 16.5 s point-read wait on purpose. An answer that
+    /// arrives after one full wait is then always past the window, also when the two clocks round
+    /// differently, so no second wait starts. Fast transients, such as a partition that elects a
+    /// leader, still get their full attempt budget: 32 attempts with the back-off take about 1.4 s.
+    /// The documented limit of a point read (docs/transactions-locking-and-isolation.md) depends on
+    /// this value.</para>
+    /// </summary>
+    internal const int TransientRetryWindowMs = 15_000;
+
+    /// <summary>
+    /// The <see cref="Stopwatch"/> timestamp past which a fixed-budget retry loop starts no new
+    /// attempt. Read once, before the first attempt. See <see cref="TransientRetryWindowMs"/>.
+    /// </summary>
+    internal static long TransientRetryDeadlineTicks()
+        => Stopwatch.GetTimestamp() + Stopwatch.Frequency * TransientRetryWindowMs / 1000;
+
+    /// <summary>
+    /// Whether a fixed-budget retry loop may start another attempt: the attempt budget is not spent
+    /// and <paramref name="deadline"/>, from <see cref="TransientRetryDeadlineTicks"/>, is not reached.
+    /// Counts the attempt.
+    /// </summary>
+    internal static bool MayRetryTransient(ref int retries, long deadline)
+        => ++retries < MaxKahunaRetries && Stopwatch.GetTimestamp() < deadline;
 
     private readonly KvConflictMessageBuilder messages;
 
@@ -190,6 +226,7 @@ internal sealed class KahunaRetryPolicy
     {
         KeyValueResponseType type;
         int retries = 0;
+        long deadline = TransientRetryDeadlineTicks();
 
         do
         {
@@ -200,16 +237,18 @@ internal sealed class KahunaRetryPolicy
                 await Task.Delay(RetryDelayMs(retries), ct).ConfigureAwait(false);
             }
         }
-        while (type is KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication && ++retries < MaxKahunaRetries);
+        while (type is KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication && MayRetryTransient(ref retries, deadline));
 
         return type;
     }
 
     /// <summary>
     /// Retries a Kahuna get call that returns <see cref="KeyValueResponseType.MustRetry"/> up to
-    /// <see cref="MaxKahunaRetries"/> times with a 1 ms back-off. MustRetry is a transient
-    /// condition that occurs when a key has an active write intent from a 2PC prepare phase
-    /// that hasn't committed or rolled back yet.
+    /// <see cref="MaxKahunaRetries"/> times with the <see cref="RetryDelayMs"/> back-off, and starts no
+    /// new attempt after <see cref="TransientRetryWindowMs"/>. MustRetry is a transient condition that
+    /// occurs when a key has an active write intent from a 2PC prepare phase that hasn't committed or
+    /// rolled back yet. The transient answer is returned when the budget ends; the caller must not
+    /// decode it as an absence.
     /// </summary>
     internal static async Task<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> RetryOnMustRetry(
         Func<Task<(KeyValueResponseType, ReadOnlyKeyValueEntry?)>> fn,
@@ -218,6 +257,7 @@ internal sealed class KahunaRetryPolicy
         KeyValueResponseType type;
         ReadOnlyKeyValueEntry? entry;
         int retries = 0;
+        long deadline = TransientRetryDeadlineTicks();
 
         do
         {
@@ -228,7 +268,7 @@ internal sealed class KahunaRetryPolicy
                 await Task.Delay(RetryDelayMs(retries), ct).ConfigureAwait(false);
             }
         }
-        while (type is KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication && ++retries < MaxKahunaRetries);
+        while (type is KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication && MayRetryTransient(ref retries, deadline));
 
         return (type, entry);
     }
@@ -249,6 +289,7 @@ internal sealed class KahunaRetryPolicy
         KeyValueResponseType type;
         ReadOnlyKeyValueEntry? entry;
         int retries = 0;
+        long deadline = TransientRetryDeadlineTicks();
 
         do
         {
@@ -269,7 +310,7 @@ internal sealed class KahunaRetryPolicy
                 await Task.Delay(RetryDelayMs(retries), ct).ConfigureAwait(false);
             }
         }
-        while (type is KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication && ++retries < MaxKahunaRetries);
+        while (type is KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication && MayRetryTransient(ref retries, deadline));
 
         return (type, entry);
     }
@@ -285,6 +326,7 @@ internal sealed class KahunaRetryPolicy
         long revision;
         HLCTimestamp ts;
         int retries = 0;
+        long deadline = TransientRetryDeadlineTicks();
 
         do
         {
@@ -295,7 +337,7 @@ internal sealed class KahunaRetryPolicy
                 await Task.Delay(RetryDelayMs(retries), ct).ConfigureAwait(false);
             }
         }
-        while (type is KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication && ++retries < MaxKahunaRetries);
+        while (type is KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication && MayRetryTransient(ref retries, deadline));
 
         return (type, revision, ts);
     }
@@ -311,6 +353,7 @@ internal sealed class KahunaRetryPolicy
         string endpoint;
         KeyValueDurability durability;
         int retries = 0;
+        long deadline = TransientRetryDeadlineTicks();
 
         do
         {
@@ -321,7 +364,7 @@ internal sealed class KahunaRetryPolicy
                 await Task.Delay(RetryDelayMs(retries), ct).ConfigureAwait(false);
             }
         }
-        while (type is KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication && ++retries < MaxKahunaRetries);
+        while (type is KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication && MayRetryTransient(ref retries, deadline));
 
         return (type, endpoint, durability);
     }
