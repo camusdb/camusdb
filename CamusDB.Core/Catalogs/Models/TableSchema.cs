@@ -343,12 +343,28 @@ public sealed class TableSchema : IWriteShapeSource
 
             if (loaded is not null)
             {
+                // The stored layout keeps the names its columns had when the version was recorded;
+                // the decoder needs the names they have now (see TableSchemaHistory.TakeCurrentNames).
+                List<TableColumnSchema>? labeledWith = Columns;
+                loaded.TakeCurrentNames(labeledWith);
+
                 // Copy-on-write: readers outside the semaphore may be iterating the current
                 // list, so publish a new sorted list instead of mutating in place.
                 List<TableSchemaHistory> next = snapshot is null ? new(1) : new(snapshot);
                 next.Add(loaded);
                 next.Sort(static (a, b) => a.Version.CompareTo(b.Version));
                 SchemaHistory = next;
+
+                // A rename relabels the layouts already in the list under the schema semaphore,
+                // not under this one, so one that ran while this layout was loading missed it. Every
+                // DDL replaces Columns rather than editing it, so a changed reference is the sign
+                // that the names may have moved again; relabeling is idempotent.
+                while (!ReferenceEquals(labeledWith, Columns))
+                {
+                    labeledWith = Columns;
+                    loaded.TakeCurrentNames(labeledWith);
+                }
+
                 return loaded;
             }
         }

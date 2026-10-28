@@ -19,7 +19,9 @@ namespace CamusDB.Core.Catalogs.Meta;
 /// <summary>
 /// Reads the per-version column layouts that let a row written under an older schema still be
 /// decoded. The family is append-only: once a version is recorded it never changes, so a reader
-/// may cache an entry and load it under its own read timestamp without re-validating.
+/// may cache an entry and load it under its own read timestamp without re-validating. The one part
+/// of a recorded layout that can go stale is a column's name, which a rename moves; every layout is
+/// given the current names when it is loaded (<see cref="TableSchemaHistory.TakeCurrentNames"/>).
 ///
 /// <para><b>History is loaded lazily, and that is deliberate.</b> A table read from disk has
 /// <c>SchemaHistory == null</c> plus the loader delegate that
@@ -83,8 +85,14 @@ internal static class SchemaHistoryStore
             // history keys that describe those versions are append-only under the source relation's
             // id. A recovery publishes the contents under a *new* relation id, so it cannot reach
             // them there — they are copied into the record instead.
-            intent.RetiredSchema.SchemaHistory =
-                await LoadAllSchemaHistoryAsync(database, intent.SourceTableId).ConfigureAwait(false);
+            List<TableSchemaHistory> history = await LoadAllSchemaHistoryAsync(database, intent.SourceTableId).ConfigureAwait(false);
+
+            // The stored layouts keep the names of the version they record, and the retained rows
+            // must decode under the names the relation had when it was retired.
+            foreach (TableSchemaHistory layout in history)
+                layout.TakeCurrentNames(intent.RetiredSchema.Columns);
+
+            intent.RetiredSchema.SchemaHistory = history;
         }
     }
 

@@ -158,4 +158,9 @@ public sealed class TableColumnSchema
         DefaultSequenceId = defaultSequenceId;
         IdentityAlways = identityAlways;
     }
+
+    /// <summary>The same column under another name: every other property, the id included, is kept.</summary>
+    internal TableColumnSchema WithName(string name) => new(
+        Id, name, Type, NotNull, DefaultValue, State, MaxLength, ArrayElementType, DefaultFunction,
+        NotNullConstraintName, Comment, Storage, DefaultSequenceId, IdentityAlways);
 }
