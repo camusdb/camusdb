@@ -642,7 +642,7 @@ public sealed class TestAnalyzeTable : BaseTest
             });
 
             Assert.AreEqual(CamusDBErrorCodes.AnalyzeRequiresNoPendingWrites, ex!.Code,
-                "ANALYZE on a transaction with pending writes must be rejected, not stall on its own intents");
+                "ANALYZE on a transaction with pending writes must be rejected, not publish statistics that miss its own rows");
         }
         finally
         {

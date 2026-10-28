@@ -725,8 +725,10 @@ public sealed class KvTransactionsManager : IDisposable
     /// explicit Read Committed transaction does (<see cref="TryMintStatementTimestamp"/>). The
     /// transaction carries the default level as its label (<see cref="KvTransaction.CreateSnapshotReadOnly"/>).</para>
     ///
-    /// <para><b>Costs of the pin.</b> A read at <c>T</c> waits for a write that another transaction
-    /// staged before <c>T</c> and has not yet committed, where a latest read would not wait. And a node
+    /// <para><b>Costs of the pin.</b> A read at <c>T</c> waits for a transaction that already started its
+    /// commit when that commit can land at or before <c>T</c>, where a latest read would not wait. It does
+    /// not wait for an open transaction: Kahuna serves the committed value and puts that transaction's
+    /// commit above <c>T</c>. And a node
     /// whose clock is behind does not show a commit that another node made at a later clock time, so a
     /// client that reads its own commit through another node passes that commit's causal token.</para>
     ///

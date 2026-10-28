@@ -39,8 +39,9 @@ namespace CamusDB.Core.CommandsExecutor.Controllers;
 /// The scan always runs under ANALYZE's own read-only snapshot rather than the caller's
 /// transaction, so published statistics describe committed data only. That is also why a caller
 /// with uncommitted writes is rejected up front (<see cref="CamusDBErrorCodes.AnalyzeRequiresNoPendingWrites"/>):
-/// the snapshot would block on the caller's own unresolved write intents, which only the blocked
-/// caller could resolve.
+/// the statistics would not include the caller's own uncommitted rows, and nothing would tell the
+/// caller. A script that inserts rows, runs ANALYZE and then commits would publish statistics that
+/// miss every row it inserted. The refusal makes the caller commit first.
 /// </summary>
 internal sealed class TableAnalyzer
 {
@@ -68,10 +69,11 @@ internal sealed class TableAnalyzer
         TableDescriptor table,
         KvTransaction callerTxn)
     {
-        // The scan below runs under its own snapshot, which cannot see past the caller's unresolved
-        // write intents: the storage layer makes a snapshot read wait for an intent whose commit
-        // timestamp is undetermined, and nothing but this caller can resolve those intents — it is
-        // blocked here. Refuse instead of stalling until the transaction is reaped.
+        // The scan below runs under its own snapshot and reads committed data only, so it cannot see
+        // the caller's uncommitted rows. Refuse instead of publishing statistics that silently miss
+        // them. The scan does not stall on those writes: a snapshot read steps over the intents of a
+        // transaction that has not started its commit, and this caller cannot start it while it is
+        // blocked here.
         if (callerTxn.HasPendingWrites)
             throw new CamusDBException(
                 CamusDBErrorCodes.AnalyzeRequiresNoPendingWrites,

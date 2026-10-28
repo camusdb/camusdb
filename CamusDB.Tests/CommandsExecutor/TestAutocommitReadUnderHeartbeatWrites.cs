@@ -30,15 +30,15 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// does other work, and commits.
 ///
 /// <para>An autocommit read is a zero-identity snapshot pinned at a local timestamp <c>T</c>
-/// (<see cref="KvTransactionsManager.BeginReadOnly"/>). Kahuna makes a snapshot read wait on a live
-/// foreign write intent only when the writer could still commit at or before <c>T</c>: for an
-/// un-prepared intent the bound is the stamp of the write it staged on the key, so a writer that staged
-/// before <c>T</c> holds the page until it commits or rolls back, and a writer that staged after <c>T</c>
-/// never does, whatever its transaction id. The wait is a poll with sleeps capped at 50 ms, so the read
-/// is served within that of the intent clearing, and a page that still answers transient after the scan
-/// page retry budget fails the statement with <see cref="CamusDBErrorCodes.TransactionMustRetry"/>.
-/// These tests pin the three outcomes: no wait, a wait bounded by the writer's hold that ends with every
-/// row read, and the retryable failure. The timings they print are the measured cost of the wait.</para>
+/// (<see cref="KvTransactionsManager.BeginReadOnly"/>). Kahuna never makes a snapshot read wait for a
+/// writer that is still open. A write staged after <c>T</c> commits after <c>T</c>, whatever the
+/// writer's transaction id. A write staged at or before <c>T</c> is stepped over: the read records
+/// <c>T</c> as the intent's commit floor, reads the committed value, and Kahuna puts the writer's commit
+/// above the floor. So a heartbeat that holds its row for seconds does not hold the sweep, and a read asked
+/// again at the same snapshot after the commit answers the same value. A read waits only for a writer whose
+/// commit timestamp is already fixed (prepared, or claimed by its commit), for about the length of that
+/// commit; these tests cannot hold a writer in that state. The timings they print are the measured cost of
+/// the read.</para>
 /// </summary>
 [TestFixture]
 // Serial: the timings assert on wall-clock waits against the shared embedded node.
@@ -52,13 +52,9 @@ public sealed class TestAutocommitReadUnderHeartbeatWrites : BaseTest
         "SELECT usersId, id, createdAt, isOnline, location, updatedAt, version " +
         "FROM user_presence WHERE isOnline AND updatedAt < 500 ORDER BY updatedAt LIMIT 256";
 
-    /// <summary>Kahuna's default scan page retry budget; a hold past it fails the page.</summary>
-    private static readonly TimeSpan ScanPageRetryBudget = TimeSpan.FromSeconds(5);
-
     /// <summary>
-    /// What a read may take beyond the writer's hold: Kahuna's poll cap of 50 ms, the page round trips and
-    /// timer jitter. Far below the 1,023 ms a one-second back-off cost a 700 ms hold, so a regression to
-    /// that back-off fails here.
+    /// What a sweep may take while a writer is open: the page round trips and timer jitter. Far below the
+    /// 700 ms hold the writers use, so a regression to a read that waits for an open writer fails here.
     /// </summary>
     private static readonly TimeSpan WaitSlack = TimeSpan.FromMilliseconds(300);
 
@@ -196,38 +192,41 @@ public sealed class TestAutocommitReadUnderHeartbeatWrites : BaseTest
     }
 
     /// <summary>
-    /// A heartbeat that staged its write before the read's snapshot holds the page until it commits:
-    /// the read waits the writer's hold and little more, and then reads every row. The commit lands
-    /// above the snapshot, so the read still shows the value from before the heartbeat. A writer that
-    /// began before the snapshot but staged after it does not delay the read at all: Kahuna bounds an
-    /// un-prepared intent by the stage time, not by the writer's transaction id.
+    /// A heartbeat that staged its write before the read's snapshot does not delay the read: the sweep
+    /// runs while the writer is still open, reads every row at once, and shows the value from before the
+    /// heartbeat. The writer then commits, above the snapshot, so the same snapshot asked again still
+    /// shows the old value and a new snapshot shows the new one. A writer that began before the snapshot
+    /// but staged after it does not delay the read either: its commit lands above the snapshot.
     /// </summary>
     [Test]
-    public async Task WriterThatStagedBeforeTheSnapshot_DelaysTheReadByItsHold_ThenReadsEveryRow()
+    public async Task WriterThatStagedBeforeTheSnapshot_IsSteppedOver_AndCommitsAboveTheSnapshot()
     {
         (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupAsync();
 
         TimeSpan hold = TimeSpan.FromMilliseconds(700);
 
-        // Staged before the snapshot.
+        // Staged before the snapshot. The sweep finishes before the writer commits.
         {
             KvTransaction writer = await BeginHeartbeat(executor, dbname, database, 7);
             await StageHeartbeat(executor, dbname, writer, 7);
             KvTransaction reader = database.Transactions.BeginReadOnly();
-            Task commit = Task.Run(async () => { await Task.Delay(hold); await database.Transactions.CommitAsync(writer); });
 
             (TimeSpan elapsed, int rows) = await Sweep(executor, dbname, reader);
-            await commit;
-            TestContext.Out.WriteLine($"writer staged before the snapshot and held {hold.TotalMilliseconds:F0} ms: sweep took {elapsed.TotalMilliseconds:F0} ms");
+            TestContext.Out.WriteLine($"writer staged before the snapshot and still open: sweep took {elapsed.TotalMilliseconds:F0} ms");
 
             Assert.AreEqual(0, rows);
-            Assert.That(elapsed, Is.GreaterThanOrEqualTo(hold), "the read waits for the writer's intent");
-            Assert.That(elapsed, Is.LessThan(hold + WaitSlack), "the read is served soon after the intent clears");
-            Assert.AreEqual(1000, await UpdatedAtOf(executor, dbname, reader, 7), "the commit landed above the snapshot");
+            Assert.That(elapsed, Is.LessThan(WaitSlack), "the read steps over the open writer");
+            Assert.AreEqual(1000, await UpdatedAtOf(executor, dbname, reader, 7), "the snapshot shows the value from before the heartbeat");
 
             QueryResultRow entry = await LastSweepEntry(executor, dbname);
-            Assert.AreEqual(Rows, entry.Row["rows_read"].LongValue, "a page served after a wait counts every row");
+            Assert.AreEqual(Rows, entry.Row["rows_read"].LongValue);
             Assert.AreEqual("completed", entry.Row["outcome"].StrValue);
+
+            await database.Transactions.CommitAsync(writer);
+
+            Assert.AreEqual(1000, await UpdatedAtOf(executor, dbname, reader, 7), "the commit landed above the snapshot");
+            Assert.AreEqual(2000, await UpdatedAtOf(executor, dbname, database.Transactions.BeginReadOnly(), 7),
+                "a new snapshot sees the commit");
         }
 
         // Began before the snapshot, staged after it.
@@ -246,41 +245,5 @@ public sealed class TestAutocommitReadUnderHeartbeatWrites : BaseTest
             Assert.AreEqual(1000, await UpdatedAtOf(executor, dbname, reader, 8));
             Assert.AreEqual(Rows, (await LastSweepEntry(executor, dbname)).Row["rows_read"].LongValue);
         }
-    }
-
-    /// <summary>
-    /// A heartbeat that holds its intent past the scan page retry budget fails the read with the
-    /// retryable code instead of handing back a truncated result; the slow log records the failure
-    /// with no row read. Once the writer commits, a fresh read completes.
-    /// </summary>
-    [Test]
-    public async Task WriterThatHoldsPastThePageBudget_FailsTheReadWithTheRetryableCode()
-    {
-        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupAsync();
-
-        KvTransaction writer = await BeginHeartbeat(executor, dbname, database, 10);
-        await StageHeartbeat(executor, dbname, writer, 10);
-        KvTransaction reader = database.Transactions.BeginReadOnly();
-        Task commit = Task.Run(async () => { await Task.Delay(ScanPageRetryBudget + TimeSpan.FromMilliseconds(1500)); await database.Transactions.CommitAsync(writer); });
-
-        long started = Stopwatch.GetTimestamp();
-        CamusDBException failure = Assert.ThrowsAsync<CamusDBException>(async () => await Sweep(executor, dbname, reader))!;
-        TimeSpan elapsed = Stopwatch.GetElapsedTime(started);
-        await commit;
-        TestContext.Out.WriteLine($"writer held past the budget: the read failed after {elapsed.TotalMilliseconds:F0} ms: {failure.Message}");
-
-        Assert.AreEqual(CamusDBErrorCodes.TransactionMustRetry, failure.Code);
-        Assert.That(failure.Message, Does.Contain("row scan of table user_presence"));
-        Assert.That(elapsed, Is.GreaterThanOrEqualTo(ScanPageRetryBudget));
-
-        QueryResultRow entry = await LastSweepEntry(executor, dbname);
-        Assert.AreEqual("failed", entry.Row["outcome"].StrValue);
-        Assert.AreEqual(CamusDBErrorCodes.TransactionMustRetry, entry.Row["error_code"].StrValue);
-        Assert.AreEqual(0, entry.Row["rows_read"].LongValue, "the page was never served");
-
-        (TimeSpan retried, int rows) = await Sweep(executor, dbname, database.Transactions.BeginReadOnly());
-        Assert.AreEqual(0, rows);
-        Assert.That(retried, Is.LessThan(TimeSpan.FromMilliseconds(500)), "with the writer gone a fresh read completes at once");
-        Assert.AreEqual(2000, await UpdatedAtOf(executor, dbname, database.Transactions.BeginReadOnly(), 10));
     }
 }

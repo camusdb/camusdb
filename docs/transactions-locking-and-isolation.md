@@ -466,10 +466,13 @@ This is the lock-free behavior described in §4/§5. What it does **not** promis
   that a commit after the timestamp inserted or moved into the `WHERE` is not changed by the
   statement, as if the statement ran at its timestamp. Uniqueness and foreign-key checks read the
   latest value.
-- ⚠️ **A read at a statement timestamp can wait for another transaction's write.** Kahuna can meet a
-  write that another transaction staged and that can still commit at or before the timestamp. Then the
-  read waits until that transaction commits or rolls back. The wait has a limit: about 5 s for a scan
-  page and about 16 s for a point read, by default. After the limit, the statement fails with a
+- ⚠️ **A read at a statement timestamp can wait for a commit in progress.** A read does not wait for
+  a transaction that is still open. When it meets a write that such a transaction staged, it reads the
+  last committed value, and Kahuna puts the commit of that transaction above the read's timestamp. So
+  a transaction that holds a row for a long time before it commits does not hold the reads of that row.
+  A read waits only for a transaction that already started its commit, when that commit can land at or
+  before the read's timestamp. The wait is about as long as the commit. It has a limit: about 5 s for a
+  scan page and about 16 s for a point read, by default. After the limit, the statement fails with a
   retryable error. A read of the latest value does not wait. This applies to a `SELECT` and to the
   read phase of a write statement.
 - ⚠️ **Pass the causal token at `BEGIN` when you read after a commit on another node.** A read at a
@@ -484,9 +487,8 @@ This is the lock-free behavior described in §4/§5. What it does **not** promis
   one timestamp, which the node takes from its clock when the statement starts, as under the
   Serializable default. Every page, partition and sub-read (a join, a subquery, an index lookup) of
   the statement is read at that timestamp. The read takes no lock and has no Kahuna round trip. It
-  has the two costs of every read at a timestamp, above: it can wait for a write that another
-  transaction staged before the timestamp, and it needs the causal token to see a commit that another
-  node made at a later clock time. Pass the token as `causal_token_*` on the gRPC `SqlRequest`, or as
+  has the two costs of every read at a timestamp, above: it can wait for a commit in progress, and it
+  needs the causal token to see a commit that another node made at a later clock time. Pass the token as `causal_token_*` on the gRPC `SqlRequest`, or as
   `causalToken` on HTTP `/execute-sql-query`.
 - ⚠️ **No repeatable reads / phantom protection across statements.** Read a set of rows, read again,
   and a concurrent transaction may have changed or inserted rows in between.

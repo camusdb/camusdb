@@ -6,6 +6,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Text;
 using System.Text.Json;
@@ -33,9 +34,9 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// the failed range), never as the generic internal error. A read is idempotent, so retrying is
 /// always safe; buried under an internal error, a reconciliation-style caller abandons its retry
 /// budget on a condition that resolves in seconds, and the range that failed is only recorded in
-/// the node log. This drives the real chain end to end: a staged foreign intent with no commit
-/// timestamp wedges a page of the database-registry key space, the configured scan budget fails
-/// the scan loudly, and the query surface translates it.
+/// the node log. This drives the real chain end to end: a foreign intent that its commit claimed and
+/// that has no commit timestamp yet wedges a page of the table's row key space, the configured scan
+/// budget fails the scan loudly, and the query surface translates it.
 /// </summary>
 [TestFixture]
 [NonParallelizable]
@@ -99,8 +100,11 @@ internal sealed class TestKahunaReadErrorMapping : BaseTest
             await db.TableDescriptors["robots"];
         string wedgeKey = table.Store.RowKeySpace + "/zzzzzzzzzzzzzzzzzzzzzzzz";
 
-        // A foreign transaction stages a write inside the row key space and never decides. The
-        // staged intent carries no commit timestamp, so a scan page containing the key cannot
+        // A foreign transaction stages a write inside the row key space, claims the intent with the
+        // probe a coordinator sends right before it proposes its commit, and never decides: a
+        // coordinator that died there. A read steps over an open writer's intent (it raises the
+        // intent's commit floor and serves the committed value), but it cannot push a claimed one.
+        // The claimed intent carries no commit timestamp yet, so a scan page containing the key cannot
         // prove the write lands outside its snapshot and answers transient until the scan budget
         // fails it loudly — the production wedge shape, on the exact path reconciliation reads.
         HLCTimestamp foreignTx = TestNode!.Raft.HybridLogicalClock.SendOrLocalEvent(
@@ -109,6 +113,15 @@ internal sealed class TestKahunaReadErrorMapping : BaseTest
             foreignTx, wedgeKey, Encoding.UTF8.GetBytes("staged"), null, -1,
             KeyValueFlags.Set, 0, KeyValueDurability.Persistent, ct);
         Assert.That(staged, Is.EqualTo(KeyValueResponseType.Set));
+
+        List<(KeyValueResponseType type, string key, KeyValueDurability durability)> claimed =
+            await TestNode.Kahuna.LocateAndTryCheckManyWriteIntents(
+                foreignTx,
+                [new KeyValueConflictProbe(wedgeKey, KeyValueDurability.Persistent,
+                    KeyValueConflictChecks.OwnStagedIntent | KeyValueConflictChecks.CommitFloor)],
+                ct);
+        Assert.That(claimed[0].type, Is.EqualTo(KeyValueResponseType.DoesNotExist),
+            "the staged intent is still held, so the probe claims it");
 
         JsonResult result = await Sql(new { databaseName = dbName, sql = "SELECT id, name FROM robots" }).ExecuteSQLQuery();
         ExecuteSQLQueryResponse response = (ExecuteSQLQueryResponse)result.Value!;
