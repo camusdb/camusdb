@@ -152,9 +152,19 @@ public sealed class TestAutoAnalyzeCluster
 
         // Run a sweep on every node. Only the registry-partition leader does work; the rest return 0.
         // The owner discovers the stale table via authoritative metadata even if it never opened it.
+        // Discovery lists the databases from the registry's shared background snapshot, which another
+        // sweep on the owner (the orphan reclaimer at startup, a TTL tick) can take before this
+        // database is registered, and which stays valid for ten seconds. A sweep inside that window
+        // sees no database to inspect, so the sweep is repeated until the snapshot is rescanned.
         int analyzed = 0;
-        foreach (InProcessSchemaCluster.Node node in cluster.Nodes)
-            analyzed += await node.Executor.RunAutoAnalyzeForTestsAsync();
+        for (DateTime deadline = DateTime.UtcNow.AddSeconds(20); analyzed == 0 && DateTime.UtcNow < deadline; )
+        {
+            foreach (InProcessSchemaCluster.Node node in cluster.Nodes)
+                analyzed += await node.Executor.RunAutoAnalyzeForTestsAsync();
+
+            if (analyzed == 0)
+                await Task.Delay(500);
+        }
 
         Assert.GreaterOrEqual(analyzed, 1,
             "The registry-leader must discover and analyze the stale table via cluster metadata");

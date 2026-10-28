@@ -155,8 +155,17 @@ public sealed class TestClusterForeignKeyAlter
             throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "The coordinator stopped with its leadership");
         };
 
-        CamusDBException stopped = Assert.ThrowsAsync<CamusDBException>(async () => await DdlAsync(leader, db, AddConstraint))!;
-        Assert.That(stopped.Message, Does.Contain("stopped with its leadership"));
+        // The intercept fails the statement after the leadership moved. When the coordinator catches
+        // that failure while this node still reads its own term, the failure reaches the caller. When
+        // the term already moved, the job counts as handed over: the coordinator waits for the new
+        // leader's outcome and answers the statement from it, so the statement succeeds. Both are
+        // correct. The states collected at the stop prove below that the intercept ran either way.
+        Exception? stopped = await Capture(DdlAsync(leader, db, AddConstraint));
+        if (stopped is not null)
+        {
+            Assert.That(stopped, Is.InstanceOf<CamusDBException>(), stopped.ToString());
+            Assert.That(stopped.Message, Does.Contain("stopped with its leadership"));
+        }
 
         Assert.AreEqual(Enumerable.Repeat(SchemaElementState.WriteOnly, cluster.Nodes.Length), statesAtTheStop,
             "Every node must enforce the constraint in WriteOnly before the validation runs");

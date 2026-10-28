@@ -535,11 +535,11 @@ public sealed class TestSnapshotReadCluster
         await database.Transactions.CommitAsync(collectAfter);
         string afterIdStr = allRows.First(r => r.Row["label"].StrValue!.StartsWith("after")).Row["id"].StrValue!;
 
-        // Open the table descriptor to access the PK index store directly.
-        // The index name "~pk" is the KV key-space prefix — in-memory TableDescriptor.Indexes
-        // entries intentionally have Id=null; callers always use the name.
+        // Open the table descriptor to access the PK index store directly. The store addresses an
+        // index by its KV id: the allocated short id when the index has one, and the name only when
+        // it has none. A lookup by the bare name reads a key space that holds no entry.
         TableDescriptor table = await executor.OpenTable(new OpenTableTicket(dbname, "things"));
-        const string pkIndexName = "~pk";
+        string pkIndexName = table.Indexes["~pk"].KvId;
 
         // Obtain the after-row's physical rowId via a non-snapshot lookup so we can
         // pass it to GetRow independently of the index.

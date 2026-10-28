@@ -138,7 +138,18 @@ public sealed class TestInProcessSchemaCluster
     [Test]
     public async Task PausedNodeLagsAndCatchesUpOnResume()
     {
-        await using InProcessSchemaCluster cluster = await InProcessSchemaCluster.StartAsync(nodeCount: 3);
+        // The paused node must stay behind until the test resumes it. In cluster mode a node also
+        // repairs a stale schema from the durable checkpoint on its own: the freshness sweep probes
+        // the checkpoint through KV reads, which the pause does not block, and installs the new
+        // table before the assertion below. Both sweeps are off here, so the catch-up after the
+        // resume is the reopen's, which is the path under test.
+        await using InProcessSchemaCluster cluster = await InProcessSchemaCluster.StartAsync(
+            nodeCount: 3,
+            options: CamusDBOptions.Default with
+            {
+                SchemaFreshnessCheckIntervalMs = 0,
+                UnhostedControlLogProbeIntervalMs = 0,
+            });
         string db = cluster.NextSchemaLogDatabaseName();
 
         await cluster.OpenDatabaseOnAllNodesAsync(db);

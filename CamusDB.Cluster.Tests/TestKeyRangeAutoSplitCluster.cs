@@ -203,15 +203,25 @@ public sealed class TestKeyRangeAutoSplitCluster
     {
         KvTransaction tx = await writer.Database!.Transactions.BeginAsync();
 
-        for (int i = 0; i < count; i++)
-            await writer.Executor.Insert(new InsertTicket(
-                txnState: tx, databaseName: db, tableName: "readings",
-                values: new() { new() {
-                    { "id",     new(ColumnType.Id,        ObjectIdGenerator.Generate().ToString()) },
-                    { "amount", new(ColumnType.Integer64, (long)(startingAt + i)) },
-                }}));
+        // A batch that a moving boundary refuses is rolled back, as a client must roll it back: its
+        // staged intents would otherwise stay on the rows until the session lapses, and every later
+        // copy of the range would wait on them and fail, so the space would never divide.
+        try
+        {
+            for (int i = 0; i < count; i++)
+                await writer.Executor.Insert(new InsertTicket(
+                    txnState: tx, databaseName: db, tableName: "readings",
+                    values: new() { new() {
+                        { "id",     new(ColumnType.Id,        ObjectIdGenerator.Generate().ToString()) },
+                        { "amount", new(ColumnType.Integer64, (long)(startingAt + i)) },
+                    }}));
 
-        await writer.Database.Transactions.CommitAsync(tx);
+            await writer.Database.Transactions.CommitAsync(tx);
+        }
+        finally
+        {
+            await writer.Database.Transactions.RollbackIfNotCompletedAsync(tx);
+        }
     }
 
     /// <summary>
