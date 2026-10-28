@@ -100,6 +100,70 @@ internal partial class sqlParser
     }
 
     /// <summary>
+    /// The <see cref="NodeType.OnConflict"/> node of <c>UPSERT INTO t …</c>, after checking that the
+    /// statement's first word is UPSERT. UPSERT is a plain identifier, so a misspelled statement reaches
+    /// this action and not the tokenizer.
+    /// </summary>
+    private static NodeAst UpsertClause(string? word)
+    {
+        if (!string.Equals(word, "upsert", StringComparison.OrdinalIgnoreCase))
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInput, "Expected: UPSERT INTO <table> ..., got '" + word + " INTO'");
+
+        return new NodeAst(NodeType.OnConflict, null, null, null, null, null, null, null, OnConflictUpsert);
+    }
+
+    /// <summary>The <see cref="NodeAst.yytext"/> of an <see cref="NodeType.OnConflict"/> node for DO NOTHING.</summary>
+    internal const string OnConflictNothing = "nothing";
+
+    /// <summary>The <see cref="NodeAst.yytext"/> of an <see cref="NodeType.OnConflict"/> node for DO UPDATE.</summary>
+    internal const string OnConflictUpdate = "update";
+
+    /// <summary>The <see cref="NodeAst.yytext"/> of the <see cref="NodeType.OnConflict"/> node of an UPSERT.</summary>
+    internal const string OnConflictUpsert = "upsert";
+
+    /// <summary>
+    /// Joins the target and the action of an <c>ON CONFLICT</c> clause into one
+    /// <see cref="NodeType.OnConflict"/> node, after checking the CONFLICT word. DO UPDATE without a
+    /// target is refused here, as PostgreSQL refuses it: without an arbiter index the statement cannot
+    /// say which stored row the SET list changes.
+    /// </summary>
+    private static NodeAst OnConflictClause(string? conflictWord, NodeAst? target, NodeAst action)
+    {
+        if (!string.Equals(conflictWord, "conflict", StringComparison.OrdinalIgnoreCase))
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInput, "Expected: ON CONFLICT after the INSERT row source, got 'ON " + conflictWord + "'");
+
+        if (target is null && action.yytext == OnConflictUpdate)
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInput,
+                "ON CONFLICT DO UPDATE requires a conflict target: a column list such as ON CONFLICT (id), or ON CONFLICT ON CONSTRAINT <name>");
+
+        return new NodeAst(NodeType.OnConflict, target, action.rightAst, action.extendedOne, null, null, null, null, action.yytext);
+    }
+
+    /// <summary>The action part of <c>ON CONFLICT … DO NOTHING</c>, after checking the two plain words.</summary>
+    private static NodeAst ConflictDoNothing(string? doWord, string? nothingWord)
+    {
+        if (!string.Equals(doWord, "do", StringComparison.OrdinalIgnoreCase) ||
+            !string.Equals(nothingWord, "nothing", StringComparison.OrdinalIgnoreCase))
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInput, "Expected: DO NOTHING or DO UPDATE SET ..., got '" + doWord + " " + nothingWord + "'");
+
+        return new NodeAst(NodeType.OnConflict, null, null, null, null, null, null, null, OnConflictNothing);
+    }
+
+    /// <summary>The action part of <c>ON CONFLICT … DO UPDATE SET … [WHERE …]</c>, after checking the DO word.</summary>
+    private static NodeAst ConflictDoUpdate(string? doWord, NodeAst setList, NodeAst? where)
+    {
+        if (!string.Equals(doWord, "do", StringComparison.OrdinalIgnoreCase))
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInput, "Expected: DO UPDATE SET ..., got '" + doWord + " UPDATE'");
+
+        return new NodeAst(NodeType.OnConflict, null, setList, where, null, null, null, null, OnConflictUpdate);
+    }
+
+    /// <summary>
     /// Builds a <see cref="NodeType.CreateTrigger"/> node after checking the plain-identifier words
     /// (TRIGGER, BEFORE or AFTER, EXTERNAL NAME) and refusing a repeated event. The timing travels
     /// in <c>yytext</c> ("before" or "after"), the comma-joined events in <c>extendedOne.yytext</c>,

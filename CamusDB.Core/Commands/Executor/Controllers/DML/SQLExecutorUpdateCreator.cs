@@ -43,7 +43,7 @@ internal sealed class SQLExecutorUpdateCreator : SQLExecutorBaseCreator
         );
     }
 
-    private static void GetUpdateItemList(NodeAst updateAstItemList, List<(string, NodeAst)> updateItemList)
+    internal static void GetUpdateItemList(NodeAst updateAstItemList, List<(string, NodeAst)> updateItemList)
     {
         if (updateAstItemList.nodeType == NodeType.UpdateItem)
         {

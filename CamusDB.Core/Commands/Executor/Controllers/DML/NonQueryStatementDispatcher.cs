@@ -79,6 +79,9 @@ internal sealed class NonQueryStatementDispatcher
 
     internal readonly RowInsertSelector rowInsertSelector;
 
+    /// <summary>Runs an INSERT that carries an ON CONFLICT clause, and UPSERT; built over the inserter and the updater.</summary>
+    internal readonly RowUpserter rowUpserter;
+
     internal readonly QueryExecutor queryExecutor;
 
     internal readonly SubqueryRewriter subqueryRewriter;
@@ -143,6 +146,7 @@ internal sealed class NonQueryStatementDispatcher
         this.rowUpdater = rowUpdater;
         this.rowDeleter = rowDeleter;
         this.rowInsertSelector = rowInsertSelector;
+        rowUpserter = new RowUpserter(rowInserter, rowUpdater);
         this.queryExecutor = queryExecutor;
         this.subqueryRewriter = subqueryRewriter;
         this.matViewRefresher = matViewRefresher;
@@ -164,6 +168,40 @@ internal sealed class NonQueryStatementDispatcher
             writeAst.leftAst!,
             returningList,
             ticket);
+
+    /// <summary>
+    /// The ON CONFLICT clause of an INSERT (or the implied one of an UPSERT), or null for a plain
+    /// INSERT. A scalar, IN or EXISTS subquery in the DO UPDATE SET list or WHERE is replaced by its
+    /// value here, at one statement timestamp, as UPDATE replaces one. A subquery that is still left
+    /// reads the conflicting rows (a correlated one), which the per-row evaluation cannot run, so it
+    /// is refused before anything is written.
+    /// </summary>
+    private async Task<OnConflictClause?> PrepareOnConflictAsync(DatabaseDescriptor database, NodeAst ast, ExecuteSQLTicket ticket)
+    {
+        if (OnConflictClause.Of(ast) is not { } clause)
+            return null;
+
+        if (clause.SetValues is null)
+            return clause;
+
+        UpdateTicket assignments = new(
+            ticket.TxnState, ticket.DatabaseName, ast.leftAst!.yytext!, null, clause.SetValues, clause.Where, null, ticket.Parameters);
+
+        HLCTimestamp? statementTimestamp = MintStatementTimestamp(database, ticket.TxnState);
+        using (StatementSnapshotScope.Open(ticket.TxnState, statementTimestamp))
+            assignments = await RewriteUpdateSubqueriesAsync(database, assignments, ticket).ConfigureAwait(false);
+
+        bool subqueryLeft = assignments.Where is not null && RequiredColumnAnalyzer.ContainsSubqueryNode(assignments.Where);
+        foreach (NodeAst expression in assignments.ExprValues!.Values)
+            subqueryLeft |= RequiredColumnAnalyzer.ContainsSubqueryNode(expression);
+
+        if (subqueryLeft)
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInput,
+                "A correlated subquery is not supported in ON CONFLICT DO UPDATE; only a subquery that does not read the conflicting row can be used there");
+
+        return clause.WithAssignments(assignments.ExprValues, assignments.Where);
+    }
 
     /// <summary>
     /// Builds the result of an INSERT. With a RETURNING list and no count-only request, the
@@ -289,6 +327,10 @@ internal sealed class NonQueryStatementDispatcher
                     if (returningList is not null)
                         WriteReturningPlan.Validate(returningList);
 
+                    // Read, and its subqueries replaced by their values, once: outside the fence-retry loop,
+                    // so a retry does not run an inner query again.
+                    OnConflictClause? onConflict = await PrepareOnConflictAsync(database, ast, ticket).ConfigureAwait(false);
+
                     InsertTicket insertTicket = await sqlExecutor.CreateInsertTicket(executor, database, ticket, ast).ConfigureAwait(false);
 
                     for (int fenceAttempt = 0; ; fenceAttempt++)
@@ -314,6 +356,17 @@ internal sealed class NonQueryStatementDispatcher
                             List<QueryResultRow>? insertedRows = returning is not null && !ticket.DiscardReturningRows
                                 ? new(insertTicket.Values.Count)
                                 : null;
+
+                            if (onConflict is not null)
+                            {
+                                RowUpserter.UpsertCounts counts = await rowUpserter.Upsert(
+                                    database, table, insertTicket, onConflict, ticket.Parameters, insertedRows,
+                                    ticket.CancellationToken).ConfigureAwait(false);
+
+                                context.Statistics.TrackInsert(database, table, counts.Inserted, insertTicket.Values);
+                                context.Statistics.TrackUpdate(database, table, counts.Updated, updatedValues: null);
+                                return await CompleteInsertAsync(database, table, counts.Affected, warning: null, returning, insertedRows).ConfigureAwait(false);
+                            }
 
                             int inserted = await rowInserter.Insert(database, table, insertTicket, insertedRows: insertedRows).ConfigureAwait(false);
                             // Track statistics on the SQL path too, mirroring the ticket-based Insert()
@@ -341,6 +394,9 @@ internal sealed class NonQueryStatementDispatcher
 
                     InsertSelectTicket insertSelectTicket = sqlExecutor.CreateInsertSelectTicket(ticket, ast);
                     context.Validator.Validate(insertSelectTicket);
+
+                    // Outside the fence-retry loop, as in the VALUES arm.
+                    OnConflictClause? onConflict = await PrepareOnConflictAsync(database, ast, ticket).ConfigureAwait(false);
 
                     // One timestamp for the whole source query, kept across fence retries; see
                     // MintStatementTimestamp.
@@ -377,7 +433,8 @@ internal sealed class NonQueryStatementDispatcher
                                 .InsertSelect(
                                     rowInserter, context.Statistics, sequenceBinder, database, table,
                                     insertSelectTicket, ticket, source.Columns, source.Cursor, insertedRows,
-                                    sourceTimestamp: statementTimestamp)
+                                    sourceTimestamp: statementTimestamp,
+                                    upsert: onConflict is null ? null : (rowUpserter, onConflict))
                                 .ConfigureAwait(false);
 
                             string? insertWarning = ctasExecutor.WarnIfTimeTravelCopyReadNothing(

@@ -150,7 +150,7 @@ public sealed class RowUpdater
     /// primary key is not assigned) still run here, and every written row still passes the NOT NULL
     /// check after the trigger ran.
     /// </param>
-    private static void Validate(TableDescriptor table, UpdateTicket ticket, bool checkNotNull = true)
+    internal static void Validate(TableDescriptor table, UpdateTicket ticket, bool checkNotNull = true)
     {
         if (ticket.PlainValues is not null && ticket.ExprValues is not null)
             throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Cannot specify both plan and sql expr values at the same time");
@@ -166,6 +166,23 @@ public sealed class RowUpdater
     }
 
     /// <summary>
+    /// The statement's UPDATE triggers on <paramref name="table"/>, or null. For a statement that
+    /// updates rows it located itself (<c>INSERT … ON CONFLICT DO UPDATE</c>) and fires the AFTER
+    /// triggers once, after its last write.
+    /// </summary>
+    internal Extensions.StatementTriggers? CreateStatementTriggers(DatabaseDescriptor database, TableDescriptor table, KvTransaction tx) =>
+        triggers?.ForStatement(database, table, tx, TriggerEventSet.Update);
+
+    /// <summary>
+    /// The foreign-key checker for a statement that assigns <paramref name="exprValues"/> to rows it
+    /// located itself; see <see cref="ForeignKeyStatementChecker.ForUpdatesAsync"/>. Build it before the
+    /// first write, and complete it after the last.
+    /// </summary>
+    internal ValueTask<ForeignKeyStatementChecker> CreateStatementCheckerAsync(
+        DatabaseDescriptor database, TableDescriptor table, KvTransaction tx, Dictionary<string, NodeAst> exprValues, bool assignsEveryColumn) =>
+        ForeignKeyStatementChecker.ForUpdatesAsync(database, table, tableOpener, tx, plainValues: null, exprValues, assignsEveryColumn);
+
+    /// <summary>
     /// Updates the rows the ticket selects and returns how many it changed.
     ///
     /// <para>With <paramref name="aborts"/>, a retryable Kahuna abort of the locate scan's row read or
@@ -175,7 +192,7 @@ public sealed class RowUpdater
     ///
     /// <para>With <paramref name="returning"/>, each written chunk hands the new image of its rows to
     /// the collector after the chunk's batch write succeeded. The write phase then also decodes the
-    /// columns the RETURNING list reads; see <see cref="FlushUpdateChunk"/>.</para>
+    /// columns the RETURNING list reads; see <see cref="UpdateLocatedRowsAsync"/>.</para>
     ///
     /// <para>With <paramref name="statementTimestamp"/>, the locate scan reads at that timestamp in the
     /// statement read mode (<see cref="UpdateFluxState.StatementTimestamp"/>). Null reads the latest
@@ -609,10 +626,34 @@ public sealed class RowUpdater
         if (state.Triggers is not null)
             evaluatedColumns = null;
 
+        // One description of the write step for the whole statement: the statement's predicate is
+        // re-checked on each locked read, and every SET expression is evaluated against it.
+        QueryTicket locateTicket = state.LocateTicket;
+        LocatedRowUpdate update = new()
+        {
+            Database = state.Database,
+            Table = table,
+            Transaction = tx,
+            AssignedColumns = CollectAssignedColumns(ticket),
+            EvaluatedColumns = evaluatedColumns,
+            ForeignKeys = state.ForeignKeys,
+            Triggers = state.Triggers,
+            RetryableAborts = state.RetryableAborts,
+            ComputeNewRow = async (_, oldRow) =>
+            {
+                // A concurrent commit changed the row after the locate scan chose it, and it no longer
+                // matches the statement's predicate.
+                if (!recheck.IsEmpty && !await recheck.MatchesAsync(state.QueryExecutor, state.Database, locateTicket, oldRow).ConfigureAwait(false))
+                    return null;
+
+                return GetNewUpdatedRow(oldRow, ticket);
+            }
+        };
+
         // Drain the matched-row buffer in bounded chunks so the heap retains at most chunkSize
         // writable rows and their index mutation sets simultaneously. Mirrors the delete path.
         int chunkSize = state.Database.Options.SpillEffectiveThreshold;
-        List<QueryResultRow> chunkRows = new(Math.Min(chunkSize, 64));
+        List<ObjectIdValue> chunkRowIds = new(Math.Min(chunkSize, 64));
 
         await foreach (QueryResultRow queryRow in state.RowsToUpdate.EnumerateAsync().ConfigureAwait(false))
         {
@@ -622,26 +663,67 @@ public sealed class RowUpdater
             if (_stats is not null && queryRow.Row.Count > _stats.DmlLocateBufferMaxColumnsSeen)
                 _stats.DmlLocateBufferMaxColumnsSeen = queryRow.Row.Count;
 
-            chunkRows.Add(queryRow);
+            chunkRowIds.Add(queryRow.RowId);
 
-            if (chunkRows.Count >= chunkSize)
+            if (chunkRowIds.Count >= chunkSize)
             {
-                await FlushUpdateChunk(table, tx, ticket, chunkRows, state, recheck, evaluatedColumns).ConfigureAwait(false);
+                await FlushUpdateChunk(update, chunkRowIds, state).ConfigureAwait(false);
                 if (state.RetryableAborts is { HasAbort: true })
                     return FluxAction.Abort;
 
-                chunkRows.Clear();
+                chunkRowIds.Clear();
             }
         }
 
-        if (chunkRows.Count > 0)
+        if (chunkRowIds.Count > 0)
         {
-            await FlushUpdateChunk(table, tx, ticket, chunkRows, state, recheck, evaluatedColumns).ConfigureAwait(false);
+            await FlushUpdateChunk(update, chunkRowIds, state).ConfigureAwait(false);
             if (state.RetryableAborts is { HasAbort: true })
                 return FluxAction.Abort;
         }
 
         return FluxAction.Continue;
+    }
+
+    /// <summary>
+    /// Writes one chunk of located rows through <see cref="UpdateLocatedRowsAsync"/>, then hands the
+    /// written rows' new images to the RETURNING collector in chunk order.
+    /// </summary>
+    private async Task FlushUpdateChunk(LocatedRowUpdate update, List<ObjectIdValue> rowIds, UpdateFluxState state)
+    {
+        Dictionary<string, ColumnValue>?[]? newImages = state.Returning is not null ? new Dictionary<string, ColumnValue>?[rowIds.Count] : null;
+
+        int written = await UpdateLocatedRowsAsync(update, rowIds, newImages).ConfigureAwait(false);
+        if (state.RetryableAborts is { HasAbort: true })
+            return;
+
+        state.ModifiedRows += written;
+
+        if (newImages is null)
+            return;
+
+        List<QueryResultRow> returnedRows = new(written);
+
+        for (int i = 0; i < newImages.Length; i++)
+        {
+            if (newImages[i] is { } newRow)
+                returnedRows.Add(new QueryResultRow(rowIds[i], newRow));
+        }
+
+        await state.Returning!.AddChunkAsync(returnedRows).ConfigureAwait(false);
+    }
+
+    /// <summary>The columns an UPDATE ticket assigns (its SET list), compared case-insensitively.</summary>
+    internal static IReadOnlySet<string> CollectAssignedColumns(UpdateTicket ticket)
+    {
+        HashSet<string> assigned = new(StringComparer.OrdinalIgnoreCase);
+
+        if (ticket.PlainValues is not null)
+            assigned.UnionWith(ticket.PlainValues.Keys);
+        if (ticket.ExprValues is not null)
+            assigned.UnionWith(ticket.ExprValues.Keys);
+
+        return assigned;
     }
 
     /// <summary>
@@ -692,36 +774,82 @@ public sealed class RowUpdater
     }
 
     /// <summary>
-    /// Updates one chunk of located rows. The order is the fix for a lost update at Read Committed, and
-    /// it must be kept: <b>lock, then read, then re-check, then compute, then write</b>.
-    ///
-    /// <para>The locate scan reads without a lock. If the write phase computed <c>SET v = f(v)</c> from
-    /// a row it read before it held the row's exclusive lock, a transaction that committed in between
-    /// would be overwritten by a value computed from the older row, and both transactions would
-    /// commit. <see cref="KvTableStore.LockAndReadRowsForMutationAsync"/> takes the exclusive row locks
-    /// before the read, so the read returns the latest committed row and no other writer can change it
-    /// until this transaction ends. The predicate is then evaluated again on that row
-    /// (<see cref="MutationRowRecheck"/>): a row that a concurrent commit moved out of the WHERE, or
-    /// deleted, is skipped and not counted. The old index entries also come from that read, so a
-    /// concurrent change of an indexed column cannot leave a stale entry behind.</para>
-    ///
-    /// <para>For a RETURNING list, the new image of each row in the batch goes to the collector only
-    /// after the batch write succeeded. A row the re-check skipped is not in the batch, so the returned
-    /// rows are exactly the counted rows, and each one shows the value computed from the locked read.</para>
+    /// What <see cref="UpdateLocatedRowsAsync"/> needs to rewrite a set of rows whose ids the caller
+    /// already found: an UPDATE's locate scan, or the conflict set of an <c>INSERT … ON CONFLICT DO
+    /// UPDATE</c>. Built once per statement and reused for every chunk.
     /// </summary>
-    private async Task FlushUpdateChunk(
-        TableDescriptor table,
-        KvTransaction tx,
-        UpdateTicket ticket,
-        List<QueryResultRow> chunkRows,
-        UpdateFluxState state,
-        MutationRowRecheck recheck,
-        IReadOnlySet<string>? evaluatedColumns)
+    internal sealed class LocatedRowUpdate
     {
-        List<ObjectIdValue> rowIds = new(chunkRows.Count);
+        public required DatabaseDescriptor Database { get; init; }
 
-        for (int i = 0; i < chunkRows.Count; i++)
-            rowIds.Add(chunkRows[i].RowId);
+        public required TableDescriptor Table { get; init; }
+
+        public required KvTransaction Transaction { get; init; }
+
+        /// <summary>
+        /// The columns the statement assigns, compared case-insensitively. Every other large column is
+        /// carried from the stored row, and the NOT NULL check of a staged column judges only these
+        /// (see <see cref="CheckForNotNulls"/>).
+        /// </summary>
+        public required IReadOnlySet<string> AssignedColumns { get; init; }
+
+        /// <summary>
+        /// The columns <see cref="ComputeNewRow"/> reads on the locked read, in schema case. Null means
+        /// every column. With triggers, pass null: a trigger reads all of OLD.
+        /// </summary>
+        public IReadOnlySet<string>? EvaluatedColumns { get; init; }
+
+        public ForeignKeyStatementChecker ForeignKeys { get; init; } = ForeignKeyStatementChecker.None;
+
+        public Extensions.StatementTriggers? Triggers { get; init; }
+
+        public RetryableAbortSink? RetryableAborts { get; init; }
+
+        /// <summary>
+        /// Builds the new image of the row at the given chunk position from its locked read, or returns
+        /// null to leave the row unchanged and uncounted. The returned dictionary must be a new one,
+        /// keyed case-insensitively; the old row must not be changed. It runs before the BEFORE UPDATE
+        /// trigger, coercion and validation.
+        /// </summary>
+        public required Func<int, Dictionary<string, ColumnValue>, ValueTask<Dictionary<string, ColumnValue>?>> ComputeNewRow { get; init; }
+    }
+
+    /// <summary>
+    /// Rewrites the rows <paramref name="rowIds"/> names, with their index entries, and returns how many
+    /// it wrote. The order is the fix for a lost update at Read Committed, and it must be kept:
+    /// <b>lock, then read, then re-check, then compute, then write</b>.
+    ///
+    /// <para>The caller found the rows without a lock. If this step computed <c>SET v = f(v)</c> from a
+    /// row it read before it held the row's exclusive lock, a transaction that committed in between
+    /// would be overwritten by a value computed from the older row, and both transactions would commit.
+    /// <see cref="KvTableStore.LockAndReadRowsForMutationAsync"/> takes the exclusive row locks before
+    /// the read, so the read returns the latest committed row and no other writer can change it until
+    /// this transaction ends. <see cref="LocatedRowUpdate.ComputeNewRow"/> then decides on that row: an
+    /// UPDATE re-checks its predicate there (<see cref="MutationRowRecheck"/>), so a row that a
+    /// concurrent commit moved out of the WHERE is skipped and not counted. The old index entries also
+    /// come from that read, so a concurrent change of an indexed column cannot leave a stale entry
+    /// behind.</para>
+    ///
+    /// <para>A row that a concurrent transaction deleted before the lock has no read. It is skipped,
+    /// and <paramref name="missing"/> (when given) records it, so a caller that expected the row can act
+    /// on the absence.</para>
+    ///
+    /// <para><paramref name="newImages"/> (when given, aligned with <paramref name="rowIds"/>) receives
+    /// the stored new image of each written row, only after the batch write succeeded. A skipped row
+    /// keeps a null entry, so the images are exactly the counted rows, and each one shows the value
+    /// computed from the locked read. AFTER UPDATE triggers are queued at the same point.</para>
+    ///
+    /// <para>On a retryable abort recorded in <see cref="LocatedRowUpdate.RetryableAborts"/>, the step
+    /// stops and returns 0; the caller tests the sink.</para>
+    /// </summary>
+    internal async Task<int> UpdateLocatedRowsAsync(
+        LocatedRowUpdate update,
+        List<ObjectIdValue> rowIds,
+        Dictionary<string, ColumnValue>?[]? newImages = null,
+        bool[]? missing = null)
+    {
+        TableDescriptor table = update.Table;
+        KvTransaction tx = update.Transaction;
 
         // A nested statement run by an enclosing BEFORE trigger must not change a row that statement
         // still holds an image of; see TriggerReentrancyGuard.
@@ -733,31 +861,31 @@ public sealed class RowUpdater
 
         // Lock the chunk's row keys, then batch-load their bytes in one Kahuna round trip. The bytes are
         // read raw: which large values to fetch is decided per row below.
-        ReadOnlyMemory<byte>?[] rawRows = await table.Store.LockAndReadRowsForMutationAsync(tx, rowIds, default, LargeValueFetch.Raw, state.RetryableAborts).ConfigureAwait(false);
-        if (state.RetryableAborts is { HasAbort: true })
-            return;
+        ReadOnlyMemory<byte>?[] rawRows = await table.Store.LockAndReadRowsForMutationAsync(tx, rowIds, default, LargeValueFetch.Raw, update.RetryableAborts).ConfigureAwait(false);
+        if (update.RetryableAborts is { HasAbort: true })
+            return 0;
 
         // The rewritten row is stored under the current schema version, so its positional layout is
         // fixed for the whole chunk. Compiled once here rather than per row.
         CompiledRowCodec codec = await table.GetRowCodecAsync(tx.TransactionId, table.Schema.Version).ConfigureAwait(false);
         List<TableColumnSchema> schemaColumns = table.Schema.Columns!;
-        LargeValuePolicy largeValuePolicy = LargeValuePolicy.For(schemaColumns, state.Database.Options);
+        LargeValuePolicy largeValuePolicy = LargeValuePolicy.For(schemaColumns, update.Database.Options);
 
         // Index writability is fixed for the statement (the transaction pins the schema version),
         // so filter once per chunk instead of re-evaluating per index per row.
         List<TableIndexSchema> writableIndexes = SchemaElementStateRules.CollectWritableIndexes(table.Schema, table.Indexes);
 
-        // With triggers, evaluatedColumns is null, so a carried row still decodes every column. A row
-        // whose BEFORE trigger changes a carried column stops carrying below.
-        UpdateCarryPlan carry = UpdateCarryPlan.Build(table, ticket, writableIndexes, evaluatedColumns, state.ForeignKeys);
-        
+        // With triggers, the evaluated columns are null, so a carried row still decodes every column. A
+        // row whose BEFORE trigger changes a carried column stops carrying below.
+        UpdateCarryPlan carry = UpdateCarryPlan.Build(table, update.AssignedColumns, writableIndexes, update.EvaluatedColumns, update.ForeignKeys);
+
         (ReadOnlyMemory<byte>?[] oldRows, ReadOnlyMemory<byte>?[] storedRows, List<int>?[] oldOutOfLine, bool[] carried) =
             await ResolveRowsForUpdateAsync(table, tx, rowIds, rawRows, carry).ConfigureAwait(false);
 
-        List<KvTableStore.RowUpdate> batch = new(chunkRows.Count);
-        List<QueryResultRow>? returnedRows = state.Returning is not null ? new(chunkRows.Count) : null;
+        List<KvTableStore.RowUpdate> batch = new(rowIds.Count);
+        List<(int Position, Dictionary<string, ColumnValue> Row)>? writtenImages = newImages is not null ? new(rowIds.Count) : null;
         List<(Dictionary<string, ColumnValue> Old, Dictionary<string, ColumnValue> New)>? triggeredRows =
-            state.Triggers is { HasAfter: true } ? new(chunkRows.Count) : null;
+            update.Triggers is { HasAfter: true } ? new(rowIds.Count) : null;
 
         // Per-chunk decode-plan caches: every row at the same stored schema version shares one resolved
         // plan instead of re-running schema-history lookups and visibility resolution per row. A row that
@@ -766,20 +894,25 @@ public sealed class RowUpdater
         RowEncoder.DictionaryDecodeState carryDecodeState = new();
 
         // While this chunk's BEFORE triggers run, their SQL must not change a row this chunk read.
-        object? reentrancy = state.Triggers is { HasBefore: true }
+        object? reentrancy = update.Triggers is { HasBefore: true }
             ? Extensions.TriggerReentrancyGuard.Protect(table.Id, rowIds)
             : null;
 
-        for (int i = 0; i < chunkRows.Count; i++)
+        for (int i = 0; i < rowIds.Count; i++)
         {
-            ObjectIdValue rowId = chunkRows[i].RowId;
+            ObjectIdValue rowId = rowIds[i];
             ReadOnlyMemory<byte>? rawData = oldRows[i];
 
-            // A concurrent transaction deleted the row and committed after the locate scan chose it.
-            // There is nothing left to update, which is what the statement would have seen had it
-            // started later.
+            // A concurrent transaction deleted the row and committed after the caller found it. There
+            // is nothing left to update, which is what the statement would have seen had it started
+            // later.
             if (rawData is null || rawData.Value.Length == 0)
+            {
+                if (missing is not null)
+                    missing[i] = true;
+
                 continue;
+            }
 
             Dictionary<string, ColumnValue> oldRow = await RowEncoder.DecodeWritableAsync(
                 table.Schema, tx.TransactionId, rowId, rawData.Value,
@@ -788,12 +921,8 @@ public sealed class RowUpdater
                 decodeState: carried[i] ? carryDecodeState : decodeState
             ).ConfigureAwait(false);
 
-            // A concurrent commit changed the row after the locate scan chose it, and it no longer
-            // matches the statement's predicate.
-            if (!recheck.IsEmpty && !await recheck.MatchesAsync(state.QueryExecutor, state.Database, state.LocateTicket!, oldRow).ConfigureAwait(false))
+            if (await update.ComputeNewRow(i, oldRow).ConfigureAwait(false) is not { } newRow)
                 continue;
-
-            Dictionary<string, ColumnValue> newRow = GetNewUpdatedRow(oldRow, ticket);
 
             // Before coercion and validation, so what a BEFORE trigger writes must still pass them. A
             // trigger that changed a carried column turns carrying off for this row only: its stored cell
@@ -801,7 +930,7 @@ public sealed class RowUpdater
             // keeps copying its untouched large values.
             bool carryRow = carried[i];
 
-            if (state.Triggers is { HasBefore: true } beforeTriggers &&
+            if (update.Triggers is { HasBefore: true } beforeTriggers &&
                 await beforeTriggers.FireBeforeAsync(oldRow, newRow).ConfigureAwait(false) is { } changedByTrigger &&
                 carryRow && carry.CarriesAny(schemaColumns, changedByTrigger))
                 carryRow = false;
@@ -809,7 +938,7 @@ public sealed class RowUpdater
             CoerceRowValues(table, newRow);
             CheckForNotNulls(table, newRow, carry.AssignedColumns);
             CheckEnforcer.EnforceOnRow(table, newRow);
-            state.ForeignKeys.AddUpdatedRow(oldRow, newRow);
+            update.ForeignKeys.AddUpdatedRow(oldRow, newRow);
 
             // A carried cell is copied from the row as stored, never from the resolved row: resolution
             // clears the marks of a cell the update decodes, and copying that plain cell would write the
@@ -820,7 +949,7 @@ public sealed class RowUpdater
 
             (IReadOnlyList<KvTableStore.IndexDelete>? oldIndexEntries,
              IReadOnlyList<KvTableStore.IndexWrite>? newIndexEntries) =
-                CollectIndexUpdates(writableIndexes, rowId, oldRow, newRow, state.Database.Options);
+                CollectIndexUpdates(writableIndexes, rowId, oldRow, newRow, update.Database.Options);
 
             batch.Add(new()
             {
@@ -833,31 +962,34 @@ public sealed class RowUpdater
             });
 
             // The coerced new row is the value the encoder stored, so RETURNING reports the stored value.
-            returnedRows?.Add(new QueryResultRow(rowId, newRow));
+            writtenImages?.Add((i, newRow));
             triggeredRows?.Add((oldRow, newRow));
         }
 
-        if (state.Triggers is { HasBefore: true })
+        if (update.Triggers is { HasBefore: true })
             Extensions.TriggerReentrancyGuard.Release(reentrancy);
 
-        await table.Store.UpdateRowsBatch(tx, batch, default, state.RetryableAborts).ConfigureAwait(false);
-        if (state.RetryableAborts is { HasAbort: true })
-            return;
+        await table.Store.UpdateRowsBatch(tx, batch, default, update.RetryableAborts).ConfigureAwait(false);
+        if (update.RetryableAborts is { HasAbort: true })
+            return 0;
 
-        state.ModifiedRows += batch.Count;
-
-        if (returnedRows is not null)
-            await state.Returning!.AddChunkAsync(returnedRows).ConfigureAwait(false);
+        if (writtenImages is not null)
+        {
+            foreach ((int position, Dictionary<string, ColumnValue> row) in writtenImages)
+                newImages![position] = row;
+        }
 
         // Queued only once the batch is written: the AFTER triggers see exactly the counted rows.
         if (triggeredRows is not null)
         {
             foreach ((Dictionary<string, ColumnValue> oldImage, Dictionary<string, ColumnValue> newImage) in triggeredRows)
-                state.Triggers!.QueueAfter(oldImage, newImage);
+                update.Triggers!.QueueAfter(oldImage, newImage);
         }
 
         foreach (KvTableStore.RowUpdate row in batch)
             Log.LogRowUpdated(logger, row.RowId);
+
+        return batch.Count;
     }
 
     /// <summary>
@@ -929,15 +1061,9 @@ public sealed class RowUpdater
         /// The statement's foreign-key checker. The columns it compares between the old and the new row
         /// are decoded even when carried.
         /// </param>
-        public static UpdateCarryPlan Build(TableDescriptor table, UpdateTicket ticket, List<TableIndexSchema> writableIndexes, IReadOnlySet<string>? evaluatedColumns, ForeignKeyStatementChecker foreignKeys)
+        /// <param name="assigned">The columns the statement assigns, compared case-insensitively.</param>
+        public static UpdateCarryPlan Build(TableDescriptor table, IReadOnlySet<string> assigned, List<TableIndexSchema> writableIndexes, IReadOnlySet<string>? evaluatedColumns, ForeignKeyStatementChecker foreignKeys)
         {
-            HashSet<string> assigned = new(StringComparer.OrdinalIgnoreCase);
-
-            if (ticket.PlainValues is not null)
-                assigned.UnionWith(ticket.PlainValues.Keys);
-            if (ticket.ExprValues is not null)
-                assigned.UnionWith(ticket.ExprValues.Keys);
-
             HashSet<string> validated = new(StringComparer.OrdinalIgnoreCase);
 
             foreach (TableIndexSchema index in writableIndexes)

@@ -169,11 +169,17 @@ backticks: `` SELECT `returning` FROM t ``.
 
 - `OLD` and `NEW` qualifiers in an `UPDATE` RETURNING list (PostgreSQL 18). An `UPDATE` returns the
   new row only.
-- `ON CONFLICT`.
 - Rows of other tables. A `RETURNING` list returns rows of the target table only.
+
+## ON CONFLICT
+
+`INSERT … ON CONFLICT` and `UPSERT` return the inserted rows and the updated rows (their new
+values), in the order of the proposed rows. A skipped row returns nothing. See
+[insert-on-conflict.md](insert-on-conflict.md).
 
 ## Related
 
+- [insert-on-conflict.md](insert-on-conflict.md) — `INSERT … ON CONFLICT` and `UPSERT`.
 - [insert-select-and-ctas.md](insert-select-and-ctas.md) — `INSERT … SELECT`.
 - [sequences.md](sequences.md) — sequence and identity defaults.
 - [sql-authentication.md](sql-authentication.md) — privileges.

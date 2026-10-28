@@ -51,7 +51,7 @@ internal abstract class SQLExecutorBaseCreator
         return value;
     }
 
-    protected static void GetIdentifierList(NodeAst orderByAst, List<string> identifierList)
+    internal static void GetIdentifierList(NodeAst orderByAst, List<string> identifierList)
     {
         if (orderByAst.nodeType == NodeType.Identifier)
         {

@@ -62,6 +62,10 @@ internal sealed class RowInsertSelector
     /// Receives one (row id, stored values) pair for each written row, in source order, for an
     /// <c>INSERT … SELECT … RETURNING</c>. Null when the statement returns no rows.
     /// </param>
+    /// <param name="upsert">
+    /// The statement's ON CONFLICT clause and the executor that runs it, or null for a plain
+    /// <c>INSERT … SELECT</c>. The return value is then the inserted plus the updated rows.
+    /// </param>
     /// <param name="sourceTimestamp">
     /// The timestamp the drain of <paramref name="cursor"/> reads at, in the statement read mode, or null
     /// to read the latest committed value. A Read Committed transaction that takes statement snapshots
@@ -80,7 +84,8 @@ internal sealed class RowInsertSelector
         IReadOnlyList<DerivedColumnSchema> sourceColumns,
         IAsyncEnumerable<QueryResultRow> cursor,
         List<QueryResultRow>? insertedRows = null,
-        Kommander.Time.HLCTimestamp? sourceTimestamp = null)
+        Kommander.Time.HLCTimestamp? sourceTimestamp = null,
+        (RowUpserter Upserter, OnConflictClause Clause)? upsert = null)
     {
         // Target columns: the explicit list, or every column in schema order. The implicit list
         // deliberately mirrors INSERT … VALUES (which also takes every column) so the two forms
@@ -188,6 +193,22 @@ internal sealed class RowInsertSelector
             rows.Add(shaper.ShapeRow(slots, bound.Parameters));
 
         Functions.SequenceStatementBinder.RecordDrawnValues(bound.Parameters, statementTicket.TxnState);
+
+        // ON CONFLICT: every source row is read and shaped by now, so the upsert runs over them all and
+        // chunks them itself. Its fence, probe and split need the rows of a chunk together, which the
+        // paged insert below does not give.
+        if (upsert is { } onConflict)
+        {
+            InsertTicket allRows = new(ticket.TxnState, ticket.DatabaseName, ticket.TableName, rows);
+
+            RowUpserter.UpsertCounts counts = await onConflict.Upserter.Upsert(
+                database, table, allRows, onConflict.Clause, statementTicket.Parameters, insertedRows,
+                statementTicket.CancellationToken).ConfigureAwait(false);
+
+            statisticsManager.TrackInsert(database, table, counts.Inserted, rows);
+            statisticsManager.TrackUpdate(database, table, counts.Updated, updatedValues: null);
+            return counts.Affected;
+        }
 
         // One foreign-key checker for the whole statement, completed after the last page: a parent
         // that a later page writes still satisfies a child in an earlier page, as in INSERT … VALUES.

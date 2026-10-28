@@ -64,7 +64,12 @@ internal sealed class RowInserter
     internal ValueTask<ForeignKeyStatementChecker> CreateStatementCheckerAsync(DatabaseDescriptor database, TableDescriptor table, KvTransaction tx) =>
         ForeignKeyStatementChecker.ForChildWritesAsync(database, table, tableOpener, tx);
 
-    private static void Validate(TableDescriptor table, InsertTicket ticket)
+    /// <summary>
+    /// Refuses a row that names a column the table cannot take, leaves a NOT NULL column empty, passes
+    /// a length bound, or fails a CHECK constraint. Runs after the BEFORE INSERT triggers, so what a
+    /// trigger writes is judged too.
+    /// </summary>
+    internal static void Validate(TableDescriptor table, InsertTicket ticket)
     {
         List<TableColumnSchema> columns = table.Schema.Columns!;
 
@@ -291,6 +296,36 @@ internal sealed class RowInserter
             await rowTriggers.FireAfterAsync().ConfigureAwait(false);
 
         return inserted;
+    }
+
+    /// <summary>
+    /// Writes rows that already went through the BEFORE INSERT triggers and <see cref="Validate"/>, for a
+    /// caller that owns the statement: <c>INSERT … ON CONFLICT</c> writes the rows of each chunk that
+    /// found no conflict here. The caller passes the statement's foreign-key checker and triggers,
+    /// completes the checker after its last write, and fires the AFTER triggers itself.
+    /// </summary>
+    /// <param name="insertedRows">Receives one (row id, stored values) pair for each written row, in
+    /// order; null when the caller needs none.</param>
+    internal Task<int> InsertPreparedRowsAsync(
+        DatabaseDescriptor database,
+        TableDescriptor table,
+        InsertTicket ticket,
+        ForeignKeyStatementChecker statementChecker,
+        List<QueryResultRow>? insertedRows,
+        Extensions.StatementTriggers? statementTriggers)
+    {
+        InsertFluxState state = new(
+            database: database,
+            table: table,
+            ticket: ticket
+        )
+        {
+            ForeignKeys = statementChecker,
+            ReturningRows = insertedRows,
+            Triggers = statementTriggers is { HasAfter: true } ? statementTriggers : null
+        };
+
+        return InsertInternal(new FluxMachine<InsertFluxSteps, InsertFluxState>(state), state);
     }
 
     private async Task<FluxAction> InsertRowsAndIndexes(InsertFluxState state)
