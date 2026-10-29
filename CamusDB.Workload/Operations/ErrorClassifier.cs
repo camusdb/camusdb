@@ -22,6 +22,7 @@ public static class ErrorClassifier
     private const string LockConflict = "CADB0502";
     private const string MustRetry = "CADB0504";
     private const string LifetimeExceeded = "CADB0505";
+    private const string DuplicateKey = "CADB0300";
 
     /// <summary>
     /// Classifies a write-path failure with knowledge of whether the commit request had already been
@@ -250,6 +251,16 @@ public static class ErrorClassifier
             text = text[..200] + "…";
         return ex is CamusException ? text : $"{ex.GetType().Name}: {text}";
     }
+
+    /// <summary>
+    /// True when an exception is CamusDB's duplicate-unique-key error (CADB0300). The gRPC client does
+    /// not always carry the server code across the wire, so the message is checked when the code is
+    /// absent. What a duplicate means is the operation's call: a seed batch reads it as "already in",
+    /// the token and append shapes as a race that a fresh attempt resolves.
+    /// </summary>
+    public static bool IsDuplicateKey(Exception ex) =>
+        ex is CamusException camus
+        && (camus.Code == DuplicateKey || camus.Message.Contains("Duplicate entry", StringComparison.OrdinalIgnoreCase));
 
     public static (OperationStatus Status, string Code) Classify(Exception ex)
     {

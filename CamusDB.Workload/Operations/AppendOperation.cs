@@ -26,10 +26,12 @@ namespace CamusDB.Workload.Operations;
 ///
 /// <para>A list is one row of <see cref="TableName"/>, its elements joined with commas. An append is
 /// <c>UPDATE … SET v = concat(v, ',x')</c>, so the engine does the read-modify-write itself, under
-/// its own locks; an UPDATE that matches no row falls back to an INSERT that starts the list. Two
-/// transactions that both start the same list collide on the primary key, and one aborts — a definite
-/// failure, which Elle handles. Keys carry a per-run tag, so lists left by an earlier run in the same
-/// database are never read as this run's.</para>
+/// its own locks; an UPDATE that matches no row falls back to an INSERT that starts the list. The
+/// INSERT can meet a list that exists by then: two transactions start it at once and one wins, or, at
+/// Read Committed, the UPDATE's statement snapshot predates the commit that started it. The duplicate
+/// key is a definite abort that Elle records as a failure, and the transaction is retried from a
+/// fresh BEGIN like a lock conflict (<see cref="ClassifyFailure"/>). Keys carry a per-run tag, so
+/// lists left by an earlier run in the same database are never read as this run's.</para>
 ///
 /// <para>Outcomes map onto Jepsen's: a commit that returns is <c>:ok</c>, any definite abort is
 /// <c>:fail</c>, and a commit that was sent with no verdict back is <c>:info</c>. A read-only
@@ -214,11 +216,7 @@ public sealed class AppendOperation : IWriteOperation, IReadOperation
         }
         catch (Exception ex)
         {
-            // A read-only transaction cannot have applied anything, so a lost commit reply is not an
-            // ambiguity for it.
-            (OperationStatus status, string code) = readOnly
-                ? ErrorClassifier.Classify(ex)
-                : ErrorClassifier.Classify(ex, commitSubmitted);
+            (OperationStatus status, string code, bool retry) = ClassifyFailure(ex, readOnly, commitSubmitted);
             string message = ErrorClassifier.MessageOf(ex);
 
             if (status == OperationStatus.Indeterminate)
@@ -235,9 +233,38 @@ public sealed class AppendOperation : IWriteOperation, IReadOperation
             }
 
             _history.Complete(invocation, ElleOutcome.Fail);
-            bool retry = !readOnly && status == OperationStatus.Conflict;
             return (!retry, OperationResult.Failure(kind, status, code, message));
         }
+    }
+
+    /// <summary>
+    /// Judges a failed attempt: its status and code for the result, and whether a read-write attempt
+    /// is run again from a fresh BEGIN.
+    ///
+    /// <para>A read-only transaction cannot have applied anything, so a lost commit reply is not an
+    /// ambiguity for it, and it is never retried: a failed read has no effect on the history. A
+    /// read-write attempt is retried on a conflict, and on the duplicate key of the INSERT fallback.
+    /// That duplicate is not a domain error of the workload: the UPDATE matched no row because its
+    /// statement snapshot predates the commit that started the list, or because another starter won
+    /// the race, and the list exists by the time the INSERT runs. The server answered, so the attempt
+    /// applied nothing, and the next attempt's UPDATE finds the list. Under optimistic locking the
+    /// same duplicate can arrive at the commit; a coded answer is still a verdict, so it is retried
+    /// too. A commit reply with no verdict stays indeterminate and is never retried.</para>
+    /// </summary>
+    public static (OperationStatus Status, string Code, bool Retry) ClassifyFailure(
+        Exception ex, bool readOnly, bool commitSubmitted)
+    {
+        (OperationStatus status, string code) = readOnly
+            ? ErrorClassifier.Classify(ex)
+            : ErrorClassifier.Classify(ex, commitSubmitted);
+
+        if (readOnly || status == OperationStatus.Indeterminate)
+            return (status, code, false);
+        if (status == OperationStatus.Conflict)
+            return (status, code, true);
+        if (ErrorClassifier.IsDuplicateKey(ex))
+            return (OperationStatus.Conflict, code, true);
+        return (status, code, false);
     }
 
     private async Task AppendAsync(CamusConnection conn, CamusTransaction tx, ElleMicroOp step, CancellationToken ct)

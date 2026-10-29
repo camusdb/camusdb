@@ -165,7 +165,7 @@ public sealed class TokenOperation : IWriteOperation, IReadOperation
 
                     // An indeterminate commit of an earlier attempt may have landed: a duplicate seed key
                     // means the batch is in. The seeded rows are judged at the end with everything else.
-                    if (IsDuplicateKey(ex))
+                    if (ErrorClassifier.IsDuplicateKey(ex))
                         break;
 
                     OperationStatus status = ErrorClassifier.Classify(ex).Status;
@@ -325,7 +325,7 @@ public sealed class TokenOperation : IWriteOperation, IReadOperation
             // taken by a racing move of the same slot, or (for a Back key) is a row whose committed delete
             // came back. The server answered, so this attempt applied nothing, and the final check finds a
             // resurrected row on its own.
-            bool retry = status == OperationStatus.Conflict || IsDuplicateKey(ex);
+            bool retry = status == OperationStatus.Conflict || ErrorClassifier.IsDuplicateKey(ex);
             return (!retry, OperationResult.Failure(OperationKind.Write, retry ? OperationStatus.Conflict : status, code, message), fromGen);
         }
     }
@@ -437,10 +437,6 @@ public sealed class TokenOperation : IWriteOperation, IReadOperation
             }
         }
     }
-
-    private static bool IsDuplicateKey(Exception ex) =>
-        ex is CamusException camus
-        && (camus.Code == "CADB0300" || camus.Message.Contains("Duplicate entry", StringComparison.OrdinalIgnoreCase));
 
     private static double Lap(ref long ts)
     {
