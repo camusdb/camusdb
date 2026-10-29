@@ -33,10 +33,10 @@ namespace CamusDB.Tests.Storage;
 /// <see cref="CamusDBOptions.KeyRangeShardingEnabled"/>, on one persistent node with three data
 /// partitions. These tests pin what a mode change does to data that already exists:
 /// <list type="bullet">
-///   <item>Hash to key-range: hash routing and the key-range seed pick a key space's partition with
-///   different hash functions, so most spaces move to another partition. The rows stay readable only
-///   because Kahuna's storage is node-global: the store keys a row by its key, not by its partition,
-///   so a read through the new partition on the same node finds it.</item>
+///   <item>Hash to key-range: Kahuna seeds a new key-range space on the partition hash routing gives
+///   its placement group, so every space keeps its partition and its rows are where the new route
+///   looks. Eight tables on three partitions make a seed that used any other function move some of
+///   them.</item>
 ///   <item>Key-range to hash: turning the flag off does not change the routing of a space that was
 ///   registered. Kahuna rebuilds its key-space registry from the replicated range map at startup, so a
 ///   space with a descriptor stays key-range routed. Only spaces registered later stay hash-routed.</item>
@@ -216,12 +216,19 @@ public sealed class TestRoutingModeChangeOnExistingData
     [Test]
     public async Task Control_KeyRangeToKeyRange_Flushed() => AssertAllReadable(await RunAsync(KeyRange, KeyRange, flushBeforeRestart: true));
 
-    /// <summary>Most spaces change partition, every space is key-range routed, and every row is still readable.</summary>
-    private static void AssertMovedToKeyRangeAndReadable(List<TableOutcome> outcomes)
+    /// <summary>Every space keeps its hash-routed partition, every space is key-range routed, and every row is readable.</summary>
+    private static void AssertKeptPartitionUnderKeyRangeAndReadable(List<TableOutcome> outcomes)
     {
-        Assert.That(outcomes.Count(o => o.PartitionBefore != o.PartitionAfter), Is.GreaterThan(outcomes.Count / 2),
-            "the key-range seed and hash routing must disagree on most spaces, or the case proves nothing");
-        Assert.That(outcomes.All(o => o.KeyRangeAfter), Is.True, "every registered space is key-range routed");
+        Assert.Multiple(() =>
+        {
+            foreach (TableOutcome o in outcomes)
+            {
+                Assert.That(o.PartitionAfter, Is.EqualTo(o.PartitionBefore), $"{o.Id}: the key-range seed lands on the hash-routed partition");
+                Assert.That(o.KeyRangeAfter, Is.True, $"{o.Id}: every registered space is key-range routed");
+            }
+        });
+        Assert.That(outcomes.Select(o => o.PartitionBefore).Distinct().Count(), Is.GreaterThan(1),
+            "the tables must spread over more than one partition, or the case proves nothing");
         AssertAllReadable(outcomes);
     }
 
@@ -275,10 +282,10 @@ public sealed class TestRoutingModeChangeOnExistingData
     }
 
     [Test]
-    public async Task HashToKeyRange_Flushed() => AssertMovedToKeyRangeAndReadable(await RunAsync(Hash, KeyRange, flushBeforeRestart: true));
+    public async Task HashToKeyRange_Flushed() => AssertKeptPartitionUnderKeyRangeAndReadable(await RunAsync(Hash, KeyRange, flushBeforeRestart: true));
 
     [Test]
-    public async Task HashToKeyRange_NotFlushed() => AssertMovedToKeyRangeAndReadable(await RunAsync(Hash, KeyRange, flushBeforeRestart: false));
+    public async Task HashToKeyRange_NotFlushed() => AssertKeptPartitionUnderKeyRangeAndReadable(await RunAsync(Hash, KeyRange, flushBeforeRestart: false));
 
     [Test]
     public async Task KeyRangeToHash_Flushed() => AssertStillKeyRangeAndReadable(await RunAsync(KeyRange, Hash, flushBeforeRestart: true));

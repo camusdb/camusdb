@@ -18,7 +18,7 @@ Hash routing remains the default. Key-range routing is enabled per deployment wi
 
 | | Hash routing (default) | Key-range routing |
 |---|---|---|
-| Placement of a table's rows | One partition, fixed at startup | One or more ranges, each on a partition |
+| Placement of a table's rows | One partition, fixed at startup | One or more ranges, each on a partition; the first range starts on the partition hash routing would use |
 | Placement of a secondary index | The same partition as the table's rows | Its own ranges, independent of the table's; the first range is seeded on the rows' partition |
 | Range locks | Cover the whole space | Clipped per range — disjoint scans do not conflict |
 | Scans | One partition answers | Every intersecting range answers; results merged in key order |
@@ -74,13 +74,13 @@ A cluster created before the record existed has its mode inferred once, on the f
 version, and then recorded: a table key space that has a range descriptor means key-range, a
 registered database without one means hash, and a cluster with no database takes the configured value.
 
-**Why the mode cannot change on existing data.** The two modes place a table's keys on different
-partitions, so turning key-range sharding on moves most existing tables. Their rows stay reachable
-today only because Kahuna's storage is node-global and, at full replication, every node holds every
-partition; under replica placement or a partition-scoped store they would not. Turning it off does
-not undo it either: Kahuna rebuilds its routing registry from the replicated range map, so a table
-that has a range descriptor stays key-range routed whatever the flag says. To move data to the other
-mode, dump it and reimport it into a new cluster (see
+**Why the mode cannot change on existing data.** A table's first range starts on the partition that
+hash routing gives the table, so turning key-range sharding on does not move a table that has not been
+registered yet. A table that an earlier Kahuna release (before 1.14.7) seeded can sit on another
+partition: that release chose the seed with a different hash. Turning the mode off does not undo it:
+Kahuna rebuilds its routing registry from the replicated range map, so a table that has a range
+descriptor stays key-range routed whatever the flag says, on the partition its descriptor names. To
+move data to the other mode, dump it and reimport it into a new cluster (see
 [logical-dump-and-reimport.md](logical-dump-and-reimport.md)).
 
 **Start an existing node first after the upgrade.** The inference for a cluster without a record reads
@@ -329,3 +329,8 @@ nodes is a reasonable way to spot one that is behind.
   arbitrary partition, so its registrations and commit are usually forwarded.
 - **Orphaned data after a split is reclaimed by compaction**, not immediately, so disk usage does not
   drop the moment a range moves.
+- **A table's first partition is a hash of the table, as under hash routing.** With a handful of
+  tables, two of them can start on one partition while another partition holds none. Only a split or
+  a manual range move changes a range's partition later; the leader balancer moves leaders, not
+  ranges. A new index or large-value space of a table starts with the table's other spaces, not at
+  its own hash, so a table stays on one partition until its first split.
