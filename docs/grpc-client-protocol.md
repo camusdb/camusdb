@@ -678,7 +678,7 @@ Domain errors are surfaced two ways depending on the call shape:
 | `FAILED_PRECONDITION` | Non-retryable transaction/state precondition | transaction already completed, database has live descendants, `CANCEL QUERY` of a write (`CADB0552`), a commit of a rollback-only transaction (`CADB0824`), a trigger's SQL changing a row its statement still holds (`CADB0825`), an extension name conflict, dependents or a node without the build (`CADB0832`, `CADB0833`, `CADB0835`) |
 | `CANCELLED` | `CANCEL QUERY` stopped the statement | query cancelled (`CADB0554`) |
 | `UNAVAILABLE` | The node that may own a statement did not answer a cancel, or this node cannot run the statement | query owner unreachable (`CADB0553`); the cancel can be sent again. A statement uses an extension the database installed and this node does not load in that build (`CADB0834`), or a trigger's type that the installed version does not define (`CADB0817`); a node that deploys the right file can run it |
-| `ABORTED` | **Retryable** transaction family | transaction conflict (`CADB0502`), must-retry (`CADB0504`), lifetime exceeded (`CADB0505`), finalize unresolved (`CADB0509`) |
+| `ABORTED` | **Retryable** transaction family | transaction conflict (`CADB0502`), must-retry (`CADB0504`), lifetime exceeded (`CADB0505`), finalize unresolved (`CADB0509`); also `SELECT … FOR UPDATE NOWAIT` on a row another transaction holds (`CADB0555`), which ends the transaction but is **not** retried for you (§8.2) |
 | `RESOURCE_EXHAUSTED` | Permanent for this op | mutation limit exceeded, spill storage unavailable, AFTER-trigger rows over the byte budget (`CADB0826`) |
 | `INTERNAL` | Unexpected server error | `CADB0000` |
 
@@ -690,6 +690,10 @@ Never branch on the message text — branch on the code:
 - **`CADB0502` / `CADB0504` / `CADB0505` → replay from a fresh `BEGIN`.** The transaction is dead;
   start a new transaction (`StartTransaction`) and re-run the statements from the beginning. On the
   autocommit path this means re-issuing the request. Use exponential backoff between attempts.
+- **`CADB0555` (lock not available) → do not replay automatically.** Only `SELECT … FOR UPDATE
+  NOWAIT` raises it, when another transaction holds a row the statement wants. The transaction is
+  dead, as for `CADB0502`, but the caller asked not to wait, so a retry loop must not hide it. Let the
+  application decide (for example, pick other work). See [select-for-update.md](select-for-update.md).
 - **`CADB0509` (finalize unresolved) → retry the SAME commit/rollback on the SAME handle.** Do not
   start a new transaction; re-issue the exact commit (or rollback) against the same `TxnHandle` until
   it resolves.

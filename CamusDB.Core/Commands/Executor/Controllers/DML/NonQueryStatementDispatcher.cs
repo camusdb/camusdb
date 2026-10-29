@@ -793,7 +793,7 @@ internal sealed class NonQueryStatementDispatcher
     /// <summary>Maps a parsed statement's node type to the bounded <c>statement</c> metric family tag.</summary>
     internal static string MapStatementFamily(NodeType nodeType) => nodeType switch
     {
-        NodeType.Select => ServerDiagnostics.Tags.Statement.Select,
+        NodeType.Select or NodeType.SelectForUpdate => ServerDiagnostics.Tags.Statement.Select,
         NodeType.Insert or NodeType.InsertSelect => ServerDiagnostics.Tags.Statement.Insert,
         NodeType.Update => ServerDiagnostics.Tags.Statement.Update,
         NodeType.Delete => ServerDiagnostics.Tags.Statement.Delete,

@@ -202,10 +202,11 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
             NodeAst ast = executor.ParseSql(sql);
             QueryStreamSink sink = new(responseStream);
 
-            // A write with a RETURNING list (INSERT, UPDATE or DELETE) needs a writable transaction, no
-            // row may reach the wire before its commit, and a Kahuna failure must not be reported as a
-            // retryable read failure.
-            bool writesRows = StatementScope.IsWriteReturningRows(ast);
+            // A write with a RETURNING list (INSERT, UPDATE or DELETE), and a SELECT … FOR UPDATE, whose
+            // row locks need a transaction to own them, need a writable transaction; no row may reach the
+            // wire before its commit, and a Kahuna failure must not be reported as a retryable read
+            // failure.
+            bool writesRows = StatementScope.BeginsWritableTransaction(ast);
 
             // A server-level query needs no database context and no transaction.
             if (StatementScope.IsServerLevelQuery(ast.nodeType))
@@ -1568,8 +1569,9 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
 
         // An INSERT, UPDATE or DELETE reaches the query kind only with a RETURNING list (without one
         // the executor refuses it). It writes, so its autocommit form takes a writable transaction and
-        // sends its rows only after the commit.
-        bool writesRows = StatementScope.CanReturnWrittenRows(resolved.RootType);
+        // sends its rows only after the commit. A SELECT … FOR UPDATE takes the same path: its row
+        // locks need a transaction to own them.
+        bool writesRows = StatementScope.BeginsWritableTransaction(resolved.RootType);
         HLCTimestamp commitToken = default;
         CacheMetadataHolder cacheMeta = new();
         Core.Routing.StatementRoutingCollector? routingCollector = null;

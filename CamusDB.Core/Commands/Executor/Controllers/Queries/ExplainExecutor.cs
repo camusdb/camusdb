@@ -89,12 +89,22 @@ internal sealed class ExplainExecutor
     /// <param name="selectAst">The inner SELECT AST wrapped by the EXPLAIN node.</param>
     /// <param name="ticket">The originating execution ticket (provides parameters and txn).</param>
     /// <param name="stage">The stage label to emit in each row ("physical" or "logical").</param>
+    /// <param name="lockingClause">
+    /// The locking clause of <c>EXPLAIN SELECT … FOR UPDATE</c>, or null. The plan then shows the lock
+    /// step, and no lock is taken. As in PostgreSQL, the query and privilege checks of the locking read
+    /// apply (UPDATE is needed too), and the transaction rules do not: plain EXPLAIN of a locking read
+    /// works in a read-only or optimistic transaction.
+    /// </param>
     public async Task<IAsyncEnumerable<QueryResultRow>> ExplainQueryAsync(
         DatabaseDescriptor database,
         NodeAst selectAst,
         ExecuteSQLTicket ticket,
-        string stage)
+        string stage,
+        NodeAst? lockingClause = null)
     {
+        if (lockingClause is not null)
+            RowLockingRules.RequireLockableSelect(selectAst);
+
         // A FROM-less SELECT (null table node) never reaches the planner: it projects a single
         // synthetic row directly, so there is no scan/join/plan tree to walk. Render a fixed
         // constant-source → project shape instead. Projection subqueries are left symbolic here
@@ -102,7 +112,7 @@ internal sealed class ExplainExecutor
         if (selectAst.rightAst is null)
             return RenderFromlessPlan(selectAst, stage).ToAsyncEnumerable();
 
-        QueryPlan plan = await BuildPlanAsync(database, selectAst, ticket).ConfigureAwait(false);
+        QueryPlan plan = await BuildPlanAsync(database, selectAst, ticket, lockingClause: lockingClause).ConfigureAwait(false);
         AttachSetOperationOperands(plan, ticket, traceEstimates: false, analyze: false);
 
         return RenderPlan(plan, stage).ToAsyncEnumerable();
@@ -238,12 +248,22 @@ internal sealed class ExplainExecutor
     /// on <see cref="ExplainQueryAsync"/>: the tables are resolved, and so authorized, in the flow that
     /// runs the statement. Only the execution and the rendering are deferred to the cursor, and neither
     /// resolves a table.</para>
+    ///
+    /// <para><b>A locking read</b> (<paramref name="lockingClause"/> set) runs as the statement runs: every
+    /// check of <c>SELECT … FOR UPDATE</c> applies, and the rows it returns stay locked until the
+    /// transaction ends, as in PostgreSQL. NOWAIT fails the statement as the query fails. The lock step's
+    /// row adds three counters to its detail, which PostgreSQL does not have: <c>locked=</c>,
+    /// <c>skipped-held=</c> and <c>recheck-dropped=</c> (see <see cref="PlanNodeStats.RowsLocked"/>).</para>
     /// </summary>
     public async Task<IAsyncEnumerable<QueryResultRow>> ExplainAnalyzeQueryAsync(
         DatabaseDescriptor database,
         NodeAst selectAst,
-        ExecuteSQLTicket ticket)
+        ExecuteSQLTicket ticket,
+        NodeAst? lockingClause = null)
     {
+        if (lockingClause is not null)
+            RowLockingRules.RequireLockableStatement(selectAst, ticket.TxnState, RowLockingRules.PolicyOf(lockingClause));
+
         // A FROM-less SELECT has no plan tree to instrument (see ExplainQuery). There are no
         // storage reads to measure, so ANALYZE would add nothing over plain EXPLAIN; reject it
         // clearly rather than fabricate zeroed runtime stats.
@@ -255,7 +275,7 @@ internal sealed class ExplainExecutor
 
         // Bind and plan, timed together: the planning time a client waits for before the first row.
         Stopwatch planning = Stopwatch.StartNew();
-        QueryPlan plan = await BuildPlanAsync(database, selectAst, ticket, traceEstimates: true).ConfigureAwait(false);
+        QueryPlan plan = await BuildPlanAsync(database, selectAst, ticket, traceEstimates: true, lockingClause).ConfigureAwait(false);
         AttachSetOperationOperands(plan, ticket, traceEstimates: true, analyze: true);
         planning.Stop();
 
@@ -495,7 +515,8 @@ internal sealed class ExplainExecutor
     /// Appends what only execution knows to a node's detail: <c>ran=</c> when the operator ran a
     /// different strategy than the plan names, <c>probe-memo-hits=</c> when an index nested-loop
     /// join answered probes from its memo, <c>probe-batches=</c> when it probed a unique index in
-    /// batches, and, on a join the join-order search costed,
+    /// batches, the three lock counters on the lock step of a locking read, and, on a join the
+    /// join-order search costed,
     /// <c>join-order-est-rows=</c>, the search's estimate of the join's output. The last is a plan
     /// fact, but it is shown only here: it is useful only beside <c>actual_rows</c>, and plain
     /// EXPLAIN output stays unchanged.
@@ -513,6 +534,11 @@ internal sealed class ExplainExecutor
 
         if (node.JoinOrderEstimatedRows is { } searchRows)
             detail += ", join-order-est-rows=" + searchRows.ToString("0", System.Globalization.CultureInfo.InvariantCulture);
+
+        // Printed also when zero: on the lock step a zero says something (no row was held).
+        if (node is LockRowsNode && stats is not null)
+            detail += string.Create(System.Globalization.CultureInfo.InvariantCulture,
+                $", locked={stats.RowsLocked}, skipped-held={stats.RowsSkippedHeld}, recheck-dropped={stats.RowsDroppedByRecheck}");
 
         return detail;
     }
@@ -566,11 +592,17 @@ internal sealed class ExplainExecutor
     /// True to plan with the tracing planners, so every node records how its estimate was made.
     /// Only the <c>ANALYZE</c> path asks for it: the trace is useful next to the actual rows.
     /// </param>
+    /// <param name="lockingClause">
+    /// The locking clause of a locking read, or null. The bound query gets the checks and the UPDATE
+    /// privilege check of <c>SELECT … FOR UPDATE</c>, and the plan gets its lock step, with the same
+    /// planner changes the statement gets, so the plan shown is the plan the statement runs.
+    /// </param>
     private async Task<QueryPlan> BuildPlanAsync(
         DatabaseDescriptor database,
         NodeAst selectAst,
         ExecuteSQLTicket ticket,
-        bool traceEstimates = false)
+        bool traceEstimates = false,
+        NodeAst? lockingClause = null)
     {
         SelectQuery selectQuery = selectQueryCreator.CreateSelectQuery(selectAst);
 
@@ -581,6 +613,13 @@ internal sealed class ExplainExecutor
 
         QueryTicket queryTicket = QueryTicketAdapter.ToQueryTicket(
             boundQuery, ticket, bound.ExistsRegistry, bound.SemiJoinSpecsOrNull);
+
+        if (lockingClause is not null)
+        {
+            RowLockingRules.RequireLockableQuery(boundQuery, queryTicket, lockingClause);
+            RowLockingRules.RequireUpdatePrivilege(database, boundQuery.PrimaryTable);
+            queryTicket.RowLocking = RowLockingRules.PolicyOf(lockingClause);
+        }
 
         if (boundQuery.IsMultiSource)
         {

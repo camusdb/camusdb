@@ -103,6 +103,7 @@ list    : stat { $$.n = $1.n; }
         ;
 
 stat    : select_stmt { $$.n = $1.n; }
+        | select_stmt locking_clause { $$.n = RowLockingAst.Wrap($1.n, $2.n); }
         | explain_stmt { $$.n = $1.n; }
         | update_stmt { $$.n = $1.n; }
         | delete_stmt { $$.n = $1.n; }
@@ -149,6 +150,26 @@ stat    : select_stmt { $$.n = $1.n; }
         | alter_extension_stmt { $$.n = $1.n; }
         | drop_extension_stmt { $$.n = $1.n; }
         ;
+
+/* SELECT … FOR UPDATE [OF t] [NOWAIT | SKIP LOCKED], and FOR NO KEY UPDATE as its synonym. Accepted
+   only after a top-level select_stmt (the stat production above) and after the query of an EXPLAIN
+   (explain_target), so a subquery, a view body, CTAS and INSERT … SELECT reject it as a syntax error.
+   The strength words other than UPDATE and KEY
+   and every option word are plain identifiers, checked by RowLockingAst, so no common word becomes
+   reserved. FOR SHARE and FOR KEY SHARE parse here only to be refused with a clear error. */
+locking_clause : TFOR lock_strength lock_options { $$.n = RowLockingAst.Clause($3.n); }
+               ;
+
+lock_strength : TUPDATE { $$.s = RowLockingAst.Strength(null, false, true); }
+              | TIDENTIFIER TKEY TUPDATE { $$.s = RowLockingAst.Strength($1.s, true, true); }
+              | TIDENTIFIER { $$.s = RowLockingAst.Strength($1.s, false, false); }
+              | TKEY TIDENTIFIER { $$.s = RowLockingAst.Strength($2.s, true, false); }
+              ;
+
+lock_options : { $$.n = null; }
+             | lock_options identifier { $$.n = RowLockingAst.AppendWord($1.n, $2.n); }
+             | lock_options escaped_identifier { $$.n = RowLockingAst.AppendWord($1.n, $2.n); }
+             ;
 
 opt_distinct : TDISTINCT { $$.s = "1"; }
              | { $$.s = null; }
@@ -233,15 +254,17 @@ as_of_value : string { $$.n = $1.n; $$.s = $1.s; }
             | placeholder { $$.n = $1.n; $$.s = $1.s; }
             ;
 
-/* EXPLAIN [( LOGICAL | PHYSICAL | ANALYZE )] select_stmt
+/* EXPLAIN [( LOGICAL | PHYSICAL | ANALYZE )] select_stmt [locking_clause]
    LOGICAL and PHYSICAL are plain identifiers dispatched at runtime.
    ANALYZE is a reserved keyword (TANALYZE) since ANALYZE TABLE was added, so it
-   gets its own grammar alternative instead of going through the TIDENTIFIER branch. */
-explain_stmt : TEXPLAIN select_stmt
+   gets its own grammar alternative instead of going through the TIDENTIFIER branch.
+   A locking read under EXPLAIN (ANALYZE) gets its own root type, because ANALYZE takes the row locks
+   and a transport that knows only the root type must begin a writable transaction for it. */
+explain_stmt : TEXPLAIN explain_target
              { $$.n = new(NodeType.Explain, $2.n, null, null, null, null, null, null, null); }
-             | TEXPLAIN LPAREN TANALYZE RPAREN select_stmt
-             { $$.n = new(NodeType.ExplainAnalyze, $5.n, null, null, null, null, null, null, null); }
-             | TEXPLAIN LPAREN TIDENTIFIER RPAREN select_stmt
+             | TEXPLAIN LPAREN TANALYZE RPAREN explain_target
+             { $$.n = new(RowLockingAst.ExplainAnalyzeTypeOf($5.n), $5.n, null, null, null, null, null, null, null); }
+             | TEXPLAIN LPAREN TIDENTIFIER RPAREN explain_target
              {
                string opt = $3.s.ToUpperInvariant();
                if (opt == "LOGICAL")
@@ -254,6 +277,11 @@ explain_stmt : TEXPLAIN select_stmt
                        "Unknown EXPLAIN option '" + $3.s + "'. Valid options are: LOGICAL, PHYSICAL, ANALYZE.");
              }
              ;
+
+/* The query of an EXPLAIN: a select_stmt, or a locking read wrapped as at the statement root. */
+explain_target : select_stmt { $$.n = $1.n; }
+               | select_stmt locking_clause { $$.n = RowLockingAst.Wrap($1.n, $2.n); }
+               ;
 
 opt_having : THAVING condition { $$.n = new(NodeType.Having, $2.n, null, null, null, null, null, null, null); }
            | { $$.n = null; }

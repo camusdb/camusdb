@@ -148,11 +148,12 @@ public sealed class ExecuteSQLController : CommandsController
     }
 
     /// <summary>
-    /// True for a statement the row-returning endpoints answer by writing: an INSERT, UPDATE or DELETE,
-    /// which reaches those endpoints only with a RETURNING list. Its autocommit transaction must be a
-    /// writable one, not the read-only snapshot a SELECT runs in.
+    /// True for a statement the row-returning endpoints must run in a writable autocommit transaction,
+    /// not the read-only snapshot a SELECT runs in: an INSERT, UPDATE or DELETE, which reaches those
+    /// endpoints only with a RETURNING list, and a <c>SELECT … FOR UPDATE</c>, whose row locks need a
+    /// transaction to own them. Its rows are sent only after the commit.
     /// </summary>
-    private static bool WritesRows(NodeType rootType) => StatementScope.CanReturnWrittenRows(rootType);
+    private static bool WritesRows(NodeType rootType) => StatementScope.BeginsWritableTransaction(rootType);
 
     // The credential redaction runs only when the log level is enabled, so it is not "expensive and
     // unnecessary". CA1873's guard recognition does not extend to the source-generated Log.* form, so

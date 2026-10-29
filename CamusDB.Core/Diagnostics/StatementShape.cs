@@ -50,7 +50,7 @@ public static class StatementShape
     /// </summary>
     public static string? KindOf(NodeType nodeType) => nodeType switch
     {
-        NodeType.Select => "select",
+        NodeType.Select or NodeType.SelectForUpdate => "select",
         NodeType.Insert or NodeType.InsertSelect => "insert",
         NodeType.Update => "update",
         NodeType.Delete => "delete",

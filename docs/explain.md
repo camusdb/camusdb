@@ -14,6 +14,7 @@ EXPLAIN SELECT ...
 EXPLAIN (PHYSICAL) SELECT ...   -- identical to plain EXPLAIN
 EXPLAIN (LOGICAL)  SELECT ...   -- same plan, stage column = "logical"
 EXPLAIN (ANALYZE)  SELECT ...   -- executes the query and adds actual counters
+EXPLAIN [( ... )]  SELECT ... FOR UPDATE [NOWAIT | SKIP LOCKED]   -- a locking read, see below
 ```
 
 `EXPLAIN` without `ANALYZE` builds the physical plan but does **not** open any table cursor
@@ -22,6 +23,17 @@ reports actual runtime counters alongside the estimated columns.
 
 An unrecognized option word (e.g. `EXPLAIN (VERBOSE) ...`) is rejected with an error rather
 than silently treated as a plain `EXPLAIN`.
+
+Every form reads as the query reads: in a Read Committed transaction it runs at one statement
+timestamp, as the `SELECT` does.
+
+> **Locking reads.** Every form accepts a [`FOR UPDATE` clause](./select-for-update.md#explain), as
+> in PostgreSQL. The plan then has a `lock_rows` row below the `limit` and above the `sort`.
+> - Plain `EXPLAIN` takes no lock. It needs `SELECT` and `UPDATE` on the table, as the statement
+>   does, but it also works in a read-only or optimistic transaction.
+> - `EXPLAIN (ANALYZE)` runs the statement and takes real row locks, which stay until the
+>   transaction ends. Every check of the statement applies, and `NOWAIT` fails it as it fails the
+>   statement. In autocommit it runs in a writable transaction.
 
 > **Subquery note:** planning a statement that contains an uncorrelated subquery executes that
 > inner subquery once (it is materialized during planning), so `EXPLAIN` of such a statement
@@ -161,6 +173,31 @@ build. The rows that a peer scanned and did not ship are only in its `broadcast-
 
 ---
 
+### The lock step under EXPLAIN ANALYZE
+
+The `lock_rows` row of a locking read adds three counters to its detail. They are printed also
+when they are zero. PostgreSQL does not have them: it shows only the rows in and out of the step.
+
+| Counter | Meaning |
+|---------|---------|
+| `locked=<n>` | Row locks the step got. This includes the rows that `recheck-dropped` counts, because their locks stay until the transaction ends. |
+| `skipped-held=<n>` | Rows that `SKIP LOCKED` left out because another transaction held them. Always 0 for the other wait policies, which fail the statement on a held row. |
+| `recheck-dropped=<n>` | Rows the step locked and then did not return: a concurrent commit deleted the row, or changed it so that it no longer matches the `WHERE` clause, after the scan chose it. |
+
+`actual_rows` of the step is `locked − recheck-dropped`. Example, with rows 2 and 3 held by another
+transaction:
+
+```text
+EXPLAIN (ANALYZE) SELECT id FROM jobs ORDER BY id LIMIT 3 FOR UPDATE SKIP LOCKED
+
+node       detail                                                                 actual_rows
+limit      3                                                                      3
+lock_rows  for update, skip locked, locked=3, skipped-held=2, recheck-dropped=0   3
+...
+```
+
+The step sent rows 1, 2 and 3 (it locked row 1 and skipped rows 2 and 3), and then rows 4 and 5.
+
 ## Canonical node names
 
 One row is emitted per physical plan node, in depth-first order (parent before children).
@@ -191,6 +228,7 @@ One row is emitted per physical plan node, in depth-first order (parent before c
 | `union`                  | `UNION [ALL]` | `all`, or `distinct: hash` (`, spill` when spill is enabled) |
 | `intersect`, `except`    | `INTERSECT [ALL]`, `EXCEPT [ALL]` | `hash` or `all, hash` (`, spill` when spill is enabled) |
 | `operand`                | One operand of the set operation above it; the rows that follow are that operand's plan. Under `ANALYZE`, `actual_rows` is the rows the operand returned | `left` or `right` |
+| `lock_rows`              | `SELECT … FOR UPDATE`: locks each candidate row, reads it again and checks the `WHERE` clause again. Under `ANALYZE`, the detail adds `locked=<n>, skipped-held=<n>, recheck-dropped=<n>` (see below) | `for update`, `for update, nowait` or `for update, skip locked` |
 
 Notes:
 - A set operation renders each operand's plan under an `operand` row; see

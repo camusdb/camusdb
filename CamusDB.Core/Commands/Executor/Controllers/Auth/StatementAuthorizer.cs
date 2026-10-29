@@ -547,10 +547,16 @@ internal sealed class StatementAuthorizer
     internal static Privilege? MapRequiredPrivilege(NodeType nodeType) => nodeType switch
     {
         NodeType.Select => Privilege.Select,
+        // FOR UPDATE needs SELECT *and* UPDATE on the locked table, as in PostgreSQL: it reads the
+        // rows and holds the lock an UPDATE of them takes. Only one privilege rides the ambient scope,
+        // so this names SELECT (the per-table chokepoint checks it while the table resolves) and the
+        // row-locking path checks UPDATE itself, separately, as TRUNCATE does with DROP.
+        NodeType.SelectForUpdate or NodeType.ExplainAnalyzeForUpdate => Privilege.Select,
         // Every EXPLAIN form reads the tables it names, so it needs what a SELECT over them needs. Plan
         // output is not metadata only: preparing the plan runs scalar and IN subqueries against storage
         // and folds their results into literals that the rendered plan prints, and ANALYZE runs the whole
-        // query. Select is the complete requirement because the grammar only accepts a SELECT here.
+        // query. Select is the requirement of the SELECT itself; when the query carries FOR UPDATE, the
+        // row-locking path checks UPDATE too, for plain EXPLAIN as well, as PostgreSQL does.
         NodeType.Explain or NodeType.ExplainLogical or NodeType.ExplainPhysical
             or NodeType.ExplainAnalyze => Privilege.Select,
         // INSERT … SELECT maps to the privilege for its TARGET. Its source tables are resolved under

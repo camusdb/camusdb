@@ -118,6 +118,14 @@ internal sealed class QueryExecutor
     /// locked the row. Uses the same filter as the locate scan, so both reads of one row are judged
     /// by one rule. See <see cref="MutationRowRecheck"/>.
     /// </summary>
+    /// <summary>
+    /// Test-only interleaving hook of <c>SELECT … FOR UPDATE</c>, awaited after the scan chose a page of
+    /// candidate rows and before the lock step locks and reads them again. Lets a test commit a change
+    /// inside that window, which no external caller can time deterministically. Null (zero-cost) in
+    /// production.
+    /// </summary>
+    internal Func<Task>? TestBeforeRowLockHook;
+
     internal ValueTask<bool> MeetMutationPredicateAsync(
         NodeAst predicate,
         IReadOnlyDictionary<string, ColumnValue> row,
@@ -630,6 +638,11 @@ internal sealed class QueryExecutor
             case LimitNode:
                 Trace(QueryPlanStepType.Limit);
                 cursor = queryLimiter.LimitResultset(plan.Ticket, RequireInput(input));
+                break;
+
+            case LockRowsNode lockRows:
+                Trace(QueryPlanStepType.LockRows);
+                cursor = QueryRowLocker.LockRowsAsync(plan, this, RequireInput(input), lockRows);
                 break;
 
             case SemiJoinNode semiJoinNode:

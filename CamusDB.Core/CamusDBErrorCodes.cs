@@ -628,6 +628,19 @@ public static class CamusDBErrorCodes
     /// </summary>
     public const string QueryCancelled = "CADB0554";
 
+    /// <summary>
+    /// A <c>SELECT … FOR UPDATE NOWAIT</c> found a row that another transaction holds locked, and the
+    /// caller asked not to wait. Only NOWAIT raises it: the default policy reports the same situation as
+    /// <see cref="TransactionConflict"/>, and SKIP LOCKED leaves the row out instead.
+    ///
+    /// <para>It is deliberately <b>not</b> in the automatic retry set of
+    /// <c>SerializableRetryHelper</c>: a retry is a wait, and the caller asked not to wait. The failure
+    /// ends the transaction, because there are no savepoints to roll back to. A transient holder (an
+    /// intent that waits for replication or settlement) is not a held lock and never raises this code;
+    /// that short wait still runs. Maps to HTTP 409 and gRPC <c>ABORTED</c>.</para>
+    /// </summary>
+    public const string LockNotAvailable = "CADB0555";
+
     public const string InvalidConfig = "CADB0600";
 
     /// <summary>
@@ -1058,6 +1071,7 @@ public static class CamusDBErrorCodes
         QueryNotCancellable => 409,
         QueryOwnerUnreachable => 503,
         QueryCancelled => 409,
+        LockNotAvailable => 409,
         SnapshotPrecedesContentsGeneration => 400,
         StatementNotAllowedInTransaction => 400,
         BranchSnapshotProtectionLost => 410,

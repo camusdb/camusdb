@@ -1097,4 +1097,36 @@ public enum NodeType
     /// constraint name; <c>leftAst</c> is its identifier node.
     /// </summary>
     OnConflictConstraint,
+
+    /// <summary>
+    /// A row-locking read, <c>SELECT … FOR UPDATE [OF t] [NOWAIT | SKIP LOCKED]</c>. Only ever a
+    /// statement root: <c>leftAst</c> is the plain <see cref="Select"/> and <c>rightAst</c> the
+    /// <see cref="LockingClause"/>. Besides the statement root, the parser accepts it only as the query
+    /// of an EXPLAIN form, so a subquery, a view body, CTAS and INSERT … SELECT never carry it (see
+    /// <c>RowLockingAst</c>).
+    ///
+    /// <para>It reads like a SELECT and locks like an UPDATE: each returned row holds the same exclusive
+    /// row-key lock that an UPDATE of the row takes, until the transaction ends. A transport must
+    /// therefore begin a writable transaction for it, not the read-only snapshot of a query.</para>
+    ///
+    /// <para>Appended at the end of the enum, because the AST wire codec sends a node type by its
+    /// ordinal.</para>
+    /// </summary>
+    SelectForUpdate,
+
+    /// <summary>
+    /// The locking clause of a <see cref="SelectForUpdate"/>. <c>yytext</c> is the wait policy:
+    /// <c>"wait"</c> (no option), <c>"nowait"</c> or <c>"skip locked"</c>. <c>leftAst</c> is the
+    /// identifier that <c>OF</c> names, or null.
+    /// </summary>
+    LockingClause,
+
+    /// <summary>
+    /// <c>EXPLAIN (ANALYZE) SELECT … FOR UPDATE</c>. <c>leftAst</c> is the <see cref="SelectForUpdate"/>.
+    /// It is its own root type, not an <see cref="ExplainAnalyze"/>, because ANALYZE runs the query and
+    /// takes real row locks: a transport that knows only the root type of a statement (a batch frame,
+    /// the REST endpoints) must begin a writable transaction for it. Plain EXPLAIN of a locking read
+    /// stays an <see cref="Explain"/>: it takes no lock.
+    /// </summary>
+    ExplainAnalyzeForUpdate,
 }

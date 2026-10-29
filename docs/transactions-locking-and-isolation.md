@@ -352,6 +352,27 @@ These locks **never escalate** to a whole-index lock (unlike the point read lock
 escalated shared lock on the parent's index would block every new parent INSERT until the child
 transaction ends. A child transaction holds at most one such lock per distinct parent key.
 
+### 6.6 Row-locking reads — `SELECT … FOR UPDATE`
+`SELECT … FOR UPDATE` takes, on each row it returns, the per-key exclusive lock of §6.1: the same lock
+an `UPDATE` of the row takes. It takes it at **every** isolation level, also at Serializable, where an
+`UPDATE` relies on its §6.3 point lock until it writes. Without the key lock, a Read Committed
+`FOR UPDATE` of the same row would not see the Serializable one, because a key-lock grant does not
+check range locks. At Serializable the statement also makes its point lock on the row exclusive.
+
+The statement locks first, then reads each row again at its latest committed value, then checks the
+`WHERE` clause again, as the write phase of an `UPDATE` does (§5). It needs a pessimistic, read-write
+transaction. The options:
+
+- no option: a held row fails the statement with `CADB0502`, as an `UPDATE` fails;
+- `NOWAIT`: a held row fails the statement with `CADB0555`, which is not retried automatically;
+- `SKIP LOCKED`: a held row is left out. Read Committed only.
+
+At Serializable, the shared scan lock of §6.2 comes before the row locks. A full scan that covers a row
+another transaction holds fails at that lock with `CADB0502`, also under `NOWAIT`.
+
+The user-facing rules, the refused shapes and the autocommit behavior are in
+[select-for-update.md](select-for-update.md).
+
 ---
 
 ## 7. MVCC, in one picture

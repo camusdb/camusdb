@@ -416,6 +416,81 @@ public sealed partial class KvTableStore
     }
 
     /// <summary>
+    /// Locks a page of rows for <c>SELECT … FOR UPDATE</c> and reads each locked row at its latest
+    /// committed head. The order is the one <see cref="LockAndReadRowsForMutationAsync"/> keeps, for the
+    /// same reason: a row read before its lock could be changed by a commit in the gap, and the
+    /// statement would return a value that the lock no longer protects.
+    ///
+    /// <para><b>The locks.</b> Every row takes the exclusive row-key lock that an UPDATE of the row
+    /// takes (<see cref="KvBatchWriter.AcquireRowLocksForLockingReadAsync"/>). A Serializable read-write
+    /// transaction also turns its point lock on the row key into an exclusive one, with wait-die, so a
+    /// Serializable reader cannot take a shared lock on the row before this transaction ends, and a
+    /// later UPDATE of the row finds the lock already exclusive. The key lock is taken first: a held
+    /// row then fails or is skipped at once, and only a conflict with a reader's shared range lock
+    /// waits.</para>
+    ///
+    /// <para><b>The result.</b> Aligned with <paramref name="rowIds"/>. A row comes back null when a
+    /// concurrent commit deleted it, and also, under <see cref="RowLockWaitPolicy.SkipLocked"/>, when
+    /// another transaction holds it; <c>Skipped</c> tells the two apart (null for the other policies).
+    /// A held row under the other policies throws. Every cell of a returned row is resolved: the caller
+    /// re-checks the predicate and returns the row, and either may read any column.</para>
+    ///
+    /// <para>The locks stay until the transaction commits or rolls back, also on a row the caller then
+    /// drops because its re-check fails. Kahuna releases a transaction's locks only when it ends.</para>
+    /// </summary>
+    internal async Task<(ReadOnlyMemory<byte>?[] Rows, bool[]? Skipped)> LockAndReadRowsForLockingReadAsync(
+        KvTransaction tx,
+        IReadOnlyList<ObjectIdValue> rowIds,
+        RowLockWaitPolicy policy,
+        CancellationToken cancellationToken = default)
+    {
+        if (rowIds.Count == 0)
+            return ([], policy == RowLockWaitPolicy.SkipLocked ? [] : null);
+
+        bool[]? skipped = await batch.AcquireRowLocksForLockingReadAsync(tx, rowIds, policy, cancellationToken).ConfigureAwait(false);
+
+        List<ObjectIdValue> locked;
+        if (skipped is null || Array.IndexOf(skipped, true) < 0)
+        {
+            locked = rowIds as List<ObjectIdValue> ?? [.. rowIds];
+        }
+        else
+        {
+            locked = new(rowIds.Count);
+            for (int i = 0; i < rowIds.Count; i++)
+            {
+                if (!skipped[i])
+                    locked.Add(rowIds[i]);
+            }
+        }
+
+        if (KvRangeLockManager.IsSerializableReadWrite(tx))
+        {
+            foreach (ObjectIdValue rowId in locked)
+            {
+                string key = keys.BuildRowKey(rowId);
+                if (!tx.HasPointLock(keys.RowBucketPrefix, key, RangeLockMode.Exclusive))
+                    await locks.UpgradeToExclusivePointLockAsync(tx, keys.RowBucketPrefix, key, cancellationToken).ConfigureAwait(false);
+            }
+        }
+
+        ReadOnlyMemory<byte>?[] lockedRows = await GetRowsBatchLockedForMutation(tx, locked, cancellationToken).ConfigureAwait(false);
+
+        if (ReferenceEquals(locked, rowIds) || locked.Count == rowIds.Count)
+            return (lockedRows, skipped);
+
+        ReadOnlyMemory<byte>?[] aligned = new ReadOnlyMemory<byte>?[rowIds.Count];
+        int next = 0;
+        for (int i = 0; i < rowIds.Count; i++)
+        {
+            if (!skipped![i])
+                aligned[i] = lockedRows[next++];
+        }
+
+        return (aligned, skipped);
+    }
+
+    /// <summary>
     /// Resolves, in place, the cells <paramref name="largeValues"/> requires in rows that were read
     /// with <see cref="LargeValueFetch.Raw"/>. Lets a mutation read which keys a row points at first
     /// and then resolve only the values it must compare.

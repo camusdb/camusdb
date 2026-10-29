@@ -161,6 +161,7 @@ public sealed class QueryPlanner
     private static long? ComputeFragmentSurvivorCap(QueryTicket ticket, bool scanSatisfiesOrderBy)
     {
         if (ticket.Limit is null
+            || ticket.RowLocking is not null
             || ticket.IsDistinct
             || ticket.GroupBy is { Count: > 0 }
             || ticket.Having is not null
@@ -500,7 +501,11 @@ public sealed class QueryPlanner
             scanNode.OutputOrdering = ticket.OrderBy;
 
         bool scanSatisfiesOrderBy = scanNode.OutputOrdering is not null;
-        plan.ScanRowLimit = TryComputeScanRowLimit(ticket, plan.ExecutionFilter, scanSatisfiesOrderBy);
+        // A row-locking read must not cut its scan by the LIMIT: a row the lock step skips or re-checks
+        // away does not use up the LIMIT, so the scan has to be able to supply the next one.
+        plan.ScanRowLimit = ticket.RowLocking is null
+            ? TryComputeScanRowLimit(ticket, plan.ExecutionFilter, scanSatisfiesOrderBy)
+            : null;
 
         // The streaming DISTINCT / GROUP BY overrides below may swap the scan for a full ordered index
         // scan only when the scan they replace reads every row and applies no predicate itself. A null
@@ -713,6 +718,21 @@ public sealed class QueryPlanner
                 if (ticket.OrderBy is not null && ticket.OrderBy.Count > 0 && !scanSatisfiesOrderBy)
                     root = new SortNode(root) { OrderBy = ticket.OrderBy, OutputOrdering = ticket.OrderBy };
 
+                // SELECT … FOR UPDATE: lock after the sort, so rows are locked in the order they are
+                // returned, and before the projection, so the step re-reads and re-checks whole rows.
+                // The executor admits only this plain shape (no grouping, DISTINCT or aggregate). The
+                // node also stops ApplyTopKBound below, which walks only through projections, from
+                // bounding the sort to the LIMIT.
+                if (ticket.RowLocking is { } waitPolicy)
+                {
+                    root = new LockRowsNode(root)
+                    {
+                        WaitPolicy = waitPolicy,
+                        RowBudget = ComputeLockRowBudget(ticket),
+                        OutputOrdering = root.OutputOrdering,
+                    };
+                }
+
                 if (ticket.Projection is not null && ticket.Projection.Count > 0)
                 {
                     if (QueryPostScanPipeline.HasAggregation(ticket.Projection, ticket))
@@ -779,6 +799,30 @@ public sealed class QueryPlanner
         }
 
         return plan;
+    }
+
+    /// <summary>
+    /// The number of rows the lock step of a <c>SELECT … FOR UPDATE</c> may emit: <c>limit + offset</c>
+    /// when the LIMIT is a known value, or null to emit every row. The rows OFFSET skips count, because
+    /// they pass through the lock step before the LIMIT drops them.
+    /// </summary>
+    private static long? ComputeLockRowBudget(QueryTicket ticket)
+    {
+        if (EvalLong(ticket.Limit, ticket) is not { } limit || limit < 0)
+            return null;
+
+        long offset = EvalLong(ticket.Offset, ticket) ?? 0;
+        if (offset < 0)
+            return null;
+
+        try
+        {
+            return checked(limit + offset);
+        }
+        catch (OverflowException)
+        {
+            return null;
+        }
     }
 
     private static long? TryComputeScanRowLimit(

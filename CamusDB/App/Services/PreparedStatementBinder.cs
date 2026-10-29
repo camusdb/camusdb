@@ -44,6 +44,7 @@ public static class PreparedStatementBinder
     /// </summary>
     public static bool IsPreparable(NodeType rootType) => rootType is
         NodeType.Select or
+        NodeType.SelectForUpdate or
         NodeType.Insert or
         NodeType.Update or
         NodeType.Delete or

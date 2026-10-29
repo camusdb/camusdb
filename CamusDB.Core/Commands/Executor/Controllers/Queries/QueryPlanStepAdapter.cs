@@ -249,6 +249,11 @@ internal static class QueryPlanStepAdapter
                 stepNodes.Add(node);
                 return;
 
+            case LockRowsNode:
+                steps.Add(new QueryPlanStep(QueryPlanStepType.LockRows));
+                stepNodes.Add(node);
+                return;
+
             case AggregateNode:
                 steps.Add(new QueryPlanStep(QueryPlanStepType.Aggregate));
                 stepNodes.Add(node);

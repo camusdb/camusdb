@@ -21,5 +21,8 @@ public enum QueryPlanStepType
     QueryFromIndex,
     RangeScanFromIndex,
     SemiJoinProbe,
-    InListScanFromIndex
+    InListScanFromIndex,
+
+    /// <summary>The lock step of <c>SELECT … FOR UPDATE</c> (<see cref="Plans.LockRowsNode"/>).</summary>
+    LockRows
 }

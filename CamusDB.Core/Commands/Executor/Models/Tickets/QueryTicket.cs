@@ -164,6 +164,15 @@ public sealed class QueryTicket
     /// </summary>
     internal Transactions.RetryableAbortSink? RetryableAborts { get; }
 
+    /// <summary>
+    /// The wait policy of a <c>SELECT … FOR UPDATE</c>, or null for an ordinary read. When set, the
+    /// planner puts a <see cref="Plans.LockRowsNode"/> below the projection and turns off every cut of
+    /// the scan by the LIMIT (see that node). Set once by the SELECT executor after it validated the
+    /// statement shape and the transaction, before the ticket is planned, and never copied into a
+    /// ticket built from this one: a subquery reads, it does not lock.
+    /// </summary>
+    internal Storage.Kv.RowLockWaitPolicy? RowLocking { get; set; }
+
     public QueryTicket(
         KvTransaction txnState,
         string databaseName,

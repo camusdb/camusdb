@@ -915,6 +915,9 @@ public sealed class CommandExecutor : IAsyncDisposable
     /// <summary>The DELETE controller, so a test can install its interleaving hook.</summary>
     internal RowDeleter RowDeleterForTests => rowDeleter;
 
+    /// <summary>Test-only access to the query executor, for its row-locking interleaving hook.</summary>
+    internal QueryExecutor QueryExecutorForTests => queryExecutor;
+
     /// <summary>The INSERT … SELECT controller, so a test can install its interleaving hook.</summary>
     internal RowInsertSelector RowInsertSelectorForTests => rowInsertSelector;
 

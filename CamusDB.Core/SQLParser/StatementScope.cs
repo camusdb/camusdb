@@ -152,8 +152,9 @@ public static class StatementScope
     /// here goes to the non-query path and is refused as unknown.</para>
     /// </summary>
     public static bool ReturnsRows(NodeType nodeType) => nodeType is
-        NodeType.Select or
+        NodeType.Select or NodeType.SelectForUpdate or
         NodeType.Explain or NodeType.ExplainLogical or NodeType.ExplainPhysical or NodeType.ExplainAnalyze or
+        NodeType.ExplainAnalyzeForUpdate or
         NodeType.AnalyzeTable or
         NodeType.ShowTables or NodeType.ShowColumns or NodeType.ShowIndexes or NodeType.ShowStatistics or
         NodeType.ShowRanges or NodeType.ShowCreateTable or NodeType.ShowDatabase or
@@ -187,6 +188,31 @@ public static class StatementScope
     /// </summary>
     public static bool CanReturnWrittenRows(NodeType nodeType) =>
         nodeType is NodeType.Insert or NodeType.InsertSelect or NodeType.Update or NodeType.Delete;
+
+    /// <summary>
+    /// True for a statement that a row-returning endpoint must run in a writable autocommit
+    /// transaction instead of the read-only snapshot a query runs in: a write with a RETURNING list,
+    /// a row-locking read (<c>SELECT … FOR UPDATE</c>), whose locks need a transaction identity to own
+    /// them, and <c>EXPLAIN (ANALYZE)</c> of a row-locking read, which runs it and takes the same locks.
+    /// As for a RETURNING list, no row may reach the client before that transaction commits.
+    /// </summary>
+    public static bool BeginsWritableTransaction(NodeAst ast) =>
+        IsWriteReturningRows(ast) || TakesRowLocks(ast.nodeType);
+
+    /// <summary>
+    /// The root-type form of <see cref="BeginsWritableTransaction(NodeAst)"/>, for a transport that
+    /// knows only the root type of a statement (a prepared statement, a batch frame). See
+    /// <see cref="CanReturnWrittenRows"/> for why the root type is enough for a write.
+    /// </summary>
+    public static bool BeginsWritableTransaction(NodeType rootType) =>
+        CanReturnWrittenRows(rootType) || TakesRowLocks(rootType);
+
+    /// <summary>
+    /// True for a read that takes row locks: <c>SELECT … FOR UPDATE</c> and <c>EXPLAIN (ANALYZE)</c> of
+    /// it. Plain EXPLAIN of a locking read is not one: it plans the query and takes no lock.
+    /// </summary>
+    private static bool TakesRowLocks(NodeType rootType) =>
+        rootType is NodeType.SelectForUpdate or NodeType.ExplainAnalyzeForUpdate;
 
     /// <summary>
     /// The RETURNING list of a write statement, or null when the statement is not a write or has no

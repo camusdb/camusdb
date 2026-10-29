@@ -103,6 +103,7 @@ public static class PlanRenderer
             AggregateNode n => RenderAggregate(n),
             SortNode n => RenderSort(n),
             LimitNode n => RenderLimit(n),
+            LockRowsNode n => RenderLockRows(n),
             ProjectNode => "project",
             DistinctNode n => n.IsStreaming ? "distinct(streaming: true)" : "distinct(hash)",
             NestedLoopJoinNode n => RenderNestedLoopJoin(n),
@@ -255,6 +256,13 @@ public static class PlanRenderer
             ? $"topk(k: {k}, {cols})"
             : $"sort({cols})";
     }
+
+    private static string RenderLockRows(LockRowsNode node) => node.WaitPolicy switch
+    {
+        Storage.Kv.RowLockWaitPolicy.NoWait => "lock_rows(for update, nowait)",
+        Storage.Kv.RowLockWaitPolicy.SkipLocked => "lock_rows(for update, skip locked)",
+        _ => "lock_rows(for update)",
+    };
 
     private static string RenderLimit(LimitNode node)
     {

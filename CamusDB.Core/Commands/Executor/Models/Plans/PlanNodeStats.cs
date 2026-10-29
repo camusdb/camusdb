@@ -92,4 +92,27 @@ public sealed class PlanNodeStats
     /// did not ship are visible only here.
     /// </summary>
     public GatherSpanExecution[]? BroadcastSpans;
+
+    /// <summary>
+    /// Row locks that the lock step of a locking read (<see cref="LockRowsNode"/>) got: one per
+    /// candidate row it sent, less the rows SKIP LOCKED left out. It includes the rows that
+    /// <see cref="RowsDroppedByRecheck"/> counts, because their locks stay until the transaction ends.
+    /// So <c>locked − recheck-dropped</c> is the rows the step emitted. EXPLAIN ANALYZE prints it as
+    /// <c>locked=</c> on the lock step.
+    /// </summary>
+    public long RowsLocked;
+
+    /// <summary>
+    /// Candidate rows that SKIP LOCKED left out because another transaction held them. Always zero for
+    /// the other wait policies, which fail the statement on a held row. Printed as
+    /// <c>skipped-held=</c>.
+    /// </summary>
+    public long RowsSkippedHeld;
+
+    /// <summary>
+    /// Rows the lock step locked and then did not emit, because the read after the lock found the row
+    /// deleted or no longer matching the WHERE clause (a concurrent commit changed it after the scan
+    /// chose it). Printed as <c>recheck-dropped=</c>.
+    /// </summary>
+    public long RowsDroppedByRecheck;
 }

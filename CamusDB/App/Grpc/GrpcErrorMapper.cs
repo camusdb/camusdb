@@ -144,6 +144,10 @@ public static class GrpcErrorMapper
         CamusDBErrorCodes.TransactionLifetimeExceeded => StatusCode.Aborted,
         CamusDBErrorCodes.TransactionFinalizeUnresolved => StatusCode.Aborted,
 
+        // FOR UPDATE NOWAIT met a held row. ABORTED because the transaction ended; the trailer code
+        // tells the client this one is not retried for it.
+        CamusDBErrorCodes.LockNotAvailable => StatusCode.Aborted,
+
         // Resource exhaustion (permanent for this operation)
         CamusDBErrorCodes.TransactionMutationLimitExceeded => StatusCode.ResourceExhausted,
         CamusDBErrorCodes.ReturningResultTooLarge           => StatusCode.ResourceExhausted,

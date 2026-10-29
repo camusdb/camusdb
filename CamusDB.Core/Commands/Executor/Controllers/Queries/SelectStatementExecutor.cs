@@ -617,6 +617,23 @@ internal sealed class SelectStatementExecutor
         using (Diagnostics.QueryStageProfile.Measure(Diagnostics.QueryStage.DbOpen))
             database = await context.DatabaseOpener.Open(ticket.DatabaseName);
 
+        // SELECT … FOR UPDATE runs the SELECT path with its locking clause carried beside the query, so
+        // view expansion, binding and planning see the plain Select they know (see RowLockingAst). An
+        // EXPLAIN of it is unwrapped the same way: the EXPLAIN node is rebuilt over the plain Select (the
+        // parsed tree can be shared from the parser cache, so it is never changed in place).
+        NodeAst? lockingClause = null;
+        if (ast.nodeType == NodeType.SelectForUpdate)
+        {
+            lockingClause = ast.rightAst;
+            ast = ast.leftAst!;
+        }
+        else if (ast.nodeType is NodeType.Explain or NodeType.ExplainLogical or NodeType.ExplainPhysical or NodeType.ExplainAnalyzeForUpdate
+            && ast.leftAst is { nodeType: NodeType.SelectForUpdate } lockedQuery)
+        {
+            lockingClause = lockedQuery.rightAst;
+            ast = new NodeAst(ast.nodeType, lockedQuery.leftAst, null, null, null, null, null, null, null);
+        }
+
         ast = ExpandViews(database, ast);
 
         // Expansion can pull a session call (current_user() and friends) or a clock call (now()) in
@@ -638,13 +655,13 @@ internal sealed class SelectStatementExecutor
                     // AS OF SYSTEM TIME clause rebinds the ticket to a snapshot.
                     KvTransaction statementTx = ticket.TxnState;
                     if (!database.Transactions.TryMintStatementTimestamp(statementTx, out HLCTimestamp statementTimestamp))
-                        return await ExecuteSelectAsync(database, ast, ticket, metaOut, schemaOut).ConfigureAwait(false);
+                        return await ExecuteSelectAsync(database, ast, ticket, metaOut, schemaOut, lockingClause).ConfigureAwait(false);
 
                     object statementSnapshot = statementTx.BeginStatementSnapshot(statementTimestamp);
                     try
                     {
                         (DatabaseDescriptor selectDatabase, IAsyncEnumerable<QueryResultRow> cursor) =
-                            await ExecuteSelectAsync(database, ast, ticket, metaOut, schemaOut).ConfigureAwait(false);
+                            await ExecuteSelectAsync(database, ast, ticket, metaOut, schemaOut, lockingClause).ConfigureAwait(false);
 
                         return (selectDatabase, CloseStatementSnapshotAtEnd(cursor, statementTx, statementSnapshot));
                     }
@@ -923,25 +940,10 @@ internal sealed class SelectStatementExecutor
 
             case NodeType.Explain:
             case NodeType.ExplainPhysical:
-                {
-                    if (schemaOut is not null)
-                        schemaOut.Schema = DerivedTableSchemaBuilder.ExplainSchema;
-                    return (database, await explainExecutor.ExplainQueryAsync(database, ast.leftAst!, ticket, "physical").ConfigureAwait(false));
-                }
-
             case NodeType.ExplainLogical:
-                {
-                    if (schemaOut is not null)
-                        schemaOut.Schema = DerivedTableSchemaBuilder.ExplainSchema;
-                    return (database, await explainExecutor.ExplainQueryAsync(database, ast.leftAst!, ticket, "logical").ConfigureAwait(false));
-                }
-
             case NodeType.ExplainAnalyze:
-                {
-                    if (schemaOut is not null)
-                        schemaOut.Schema = DerivedTableSchemaBuilder.ExplainAnalyzeSchema;
-                    return (database, await explainExecutor.ExplainAnalyzeQueryAsync(database, ast.leftAst!, ticket).ConfigureAwait(false));
-                }
+            case NodeType.ExplainAnalyzeForUpdate:
+                return (database, await ExplainInStatementSnapshotAsync(database, ast, ticket, schemaOut, lockingClause).ConfigureAwait(false));
 
             case NodeType.AnalyzeTable:
                 {
@@ -961,6 +963,50 @@ internal sealed class SelectStatementExecutor
             default:
                 throw new CamusDBException(CamusDBErrorCodes.InvalidAstStmt, "Unknown query AST stmt: " + ast.nodeType);
         }
+    }
+
+    /// <summary>
+    /// Runs an EXPLAIN form in the statement snapshot that the <see cref="NodeType.Select"/> case opens
+    /// for the query, so the EXPLAIN reads as the statement reads. Without it, a Read Committed
+    /// transaction reads in the default mode instead of at one statement timestamp
+    /// (<see cref="KvTransaction.QueryReadView"/>). That changes what the subqueries folded at bind time
+    /// see, what EXPLAIN (ANALYZE) counts, and, for a locking read, how the read after the lock meets a
+    /// row that a concurrent commit deleted.
+    /// </summary>
+    private async Task<IAsyncEnumerable<QueryResultRow>> ExplainInStatementSnapshotAsync(
+        DatabaseDescriptor database, NodeAst ast, ExecuteSQLTicket ticket, QuerySchemaHolder? schemaOut, NodeAst? lockingClause)
+    {
+        KvTransaction statementTx = ticket.TxnState;
+        if (!database.Transactions.TryMintStatementTimestamp(statementTx, out HLCTimestamp statementTimestamp))
+            return await ExplainAsync(database, ast, ticket, schemaOut, lockingClause).ConfigureAwait(false);
+
+        object statementSnapshot = statementTx.BeginStatementSnapshot(statementTimestamp);
+        try
+        {
+            IAsyncEnumerable<QueryResultRow> cursor = await ExplainAsync(database, ast, ticket, schemaOut, lockingClause).ConfigureAwait(false);
+            return CloseStatementSnapshotAtEnd(cursor, statementTx, statementSnapshot);
+        }
+        catch
+        {
+            statementTx.EndStatementSnapshot(statementSnapshot);
+            throw;
+        }
+    }
+
+    /// <param name="lockingClause">The locking clause of the explained query, or null.</param>
+    private Task<IAsyncEnumerable<QueryResultRow>> ExplainAsync(
+        DatabaseDescriptor database, NodeAst ast, ExecuteSQLTicket ticket, QuerySchemaHolder? schemaOut, NodeAst? lockingClause)
+    {
+        bool analyze = ast.nodeType is NodeType.ExplainAnalyze or NodeType.ExplainAnalyzeForUpdate;
+
+        if (schemaOut is not null)
+            schemaOut.Schema = analyze ? DerivedTableSchemaBuilder.ExplainAnalyzeSchema : DerivedTableSchemaBuilder.ExplainSchema;
+
+        if (analyze)
+            return explainExecutor.ExplainAnalyzeQueryAsync(database, ast.leftAst!, ticket, lockingClause);
+
+        string stage = ast.nodeType == NodeType.ExplainLogical ? "logical" : "physical";
+        return explainExecutor.ExplainQueryAsync(database, ast.leftAst!, ticket, stage, lockingClause);
     }
 
     /// <summary>
@@ -994,9 +1040,22 @@ internal sealed class SelectStatementExecutor
     /// Plans and starts one SELECT statement whose AST has been expanded: a FROM-less projection, a join
     /// plan, or a single-source query. The caller owns the statement snapshot around it.
     /// </summary>
+    /// <param name="lockingClause">
+    /// The <see cref="NodeType.LockingClause"/> of a <c>SELECT … FOR UPDATE</c>, or null for a plain
+    /// read. With it, the statement and its transaction are checked before anything is bound
+    /// (<see cref="RowLockingRules"/>), and the single-table plan gets its lock step.
+    /// </param>
     private async Task<(DatabaseDescriptor database, IAsyncEnumerable<QueryResultRow> cursor)> ExecuteSelectAsync(
-        DatabaseDescriptor database, NodeAst ast, ExecuteSQLTicket ticket, CacheMetadataHolder? metaOut, QuerySchemaHolder? schemaOut)
+        DatabaseDescriptor database, NodeAst ast, ExecuteSQLTicket ticket, CacheMetadataHolder? metaOut, QuerySchemaHolder? schemaOut,
+        NodeAst? lockingClause = null)
     {
+        RowLockWaitPolicy? lockPolicy = null;
+        if (lockingClause is not null)
+        {
+            lockPolicy = RowLockingRules.PolicyOf(lockingClause);
+            RowLockingRules.RequireLockableStatement(ast, ticket.TxnState, lockPolicy.Value);
+        }
+
         // FROM-less SELECT (no table node): project scalar expressions against a single
         // synthetic row. The grammar only admits a projection list plus optional
         // LIMIT/OFFSET here, so there is no scan, join, filter, or grouping to plan.
@@ -1010,6 +1069,13 @@ internal sealed class SelectStatementExecutor
 
         (BoundSelectQuery boundQuery, QueryTicket queryTicket) =
             await BuildBoundQueryAsync(database, ast, ticket, metaOut: metaOut).ConfigureAwait(false);
+
+        if (lockPolicy is { } policy)
+        {
+            RowLockingRules.RequireLockableQuery(boundQuery, queryTicket, lockingClause!);
+            RowLockingRules.RequireUpdatePrivilege(database, boundQuery.PrimaryTable);
+            queryTicket.RowLocking = policy;
+        }
 
         SelectQuery selectQuery = boundQuery.Query;
 
