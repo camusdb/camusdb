@@ -532,6 +532,7 @@ initial_partitions: 1      # Raft partition count (>= 1). Unset, it is 1 in stan
 #   memory   — no persistence; data is lost on restart. Dev/test only.
 #   sqlite   — per-partition files under {data_dir}/kv.
 #   rocksdb  — the default; the highest write throughput.
+#   solarium - alternative managed highest write throughput.
 #
 # wal_sync_writes fsyncs the WAL on every write. On macOS/APFS an fsync is ~10 ms, so a write-heavy
 # load can be dominated by it. Set it false only for dev or bulk loads; keep it true in production.
@@ -560,8 +561,15 @@ initial_partitions: 1      # Raft partition count (>= 1). Unset, it is 1 in stan
 #   wal_storage: sqlite
 #
 # kahuna:
-#   storage: rocksdb              # memory | sqlite | rocksdb
-#   wal_storage: rocksdb          # memory | sqlite | rocksdb
+#   storage: rocksdb              # memory | sqlite | rocksdb | solarium
+#   wal_storage: rocksdb          # memory | sqlite | rocksdb | solarium
+#   # solarium is a managed engine with no native RocksDB library. It cannot read RocksDB files, so a
+#   # change of engine on a node with data is a logical dump and reimport. See docs/configuration.md.
+#   solarium_environment: default # default | io_uring (Linux only); used only by a solarium layer
+#   # Pacing of the store's flush and compaction writes, for rocksdb and solarium. Unset = no limit and
+#   # the engine's own compaction count (1 for solarium, max(2, CPUs / 2) for rocksdb).
+#   storage_compaction_rate_mbps: 50          # MB/s; about a third to half of the disk's synced-write rate
+#   storage_max_background_compactions: 4
 #   # storage_revision / wal_revision name the on-disk layout directory. The baseline pins both to the
 #   # current layout (v2). Do not set an older revision to reach older data: that layout is not
 #   # readable, and every table would look empty. Move old data with a logical dump and reimport
@@ -625,7 +633,8 @@ initial_partitions: 1      # Raft partition count (>= 1). Unset, it is 1 in stan
 #   max_entries_per_compaction: 5000    # entries one pass may tombstone
 #
 #   # RocksDB memory sharing: one block cache and one write-buffer manager serve both the KV store and
-#   # the Raft WAL. On whenever storage and wal_storage are both rocksdb; a no-op otherwise.
+#   # the Raft WAL. On whenever storage and wal_storage are both rocksdb; a no-op otherwise. The two
+#   # budgets below also size the cache and memtable budget a solarium store and WAL share.
 #   rocksdb_shared_memory: true
 #   rocksdb_shared_memory_budget_mb:            # total block-cache budget (MiB). Unset = sized from memory
 #   rocksdb_shared_memtable_budget_mb:          # memtable sub-budget (MiB), charged INSIDE the total; must be <= it. Unset = sized from memory

@@ -218,7 +218,52 @@ on the order of a hundred entries. With a RocksDB Raft log, the log is reclaimed
 files below a persisted compaction floor, and every pass advances that floor to the true floor. The
 cadence therefore decides only how often a pass runs, not how much it may reclaim.
 
-Storage backends: `memory`, `sqlite`, `rocksdb`.
+Storage backends: `memory`, `sqlite`, `rocksdb`, `solarium`.
+
+### Solarium storage engine
+
+`solarium` selects [Solarium](https://solariumdb.github.io/docs/integrations/kahuna/), a managed
+key-value store with the RocksDB API, for the key-value store (`storage`), the Raft WAL
+(`wal_storage`), or both. A node on Solarium needs no native RocksDB library. CamusDB ships the
+`SolariumDb.Kahuna` package and registers its two engines with the embedded node, so no extension
+assembly is necessary.
+
+```yaml
+kahuna:
+  storage: solarium
+  wal_storage: solarium
+  solarium_environment: default         # default | io_uring (Linux only)
+  storage_compaction_rate_mbps: 50      # optional pacing, see below
+```
+
+Rules:
+
+- Solarium does not read RocksDB files, and RocksDB does not read Solarium files. A change of engine
+  on a node with data needs a logical dump and reimport, see
+  [logical-dump-and-reimport.md](logical-dump-and-reimport.md). Every node of a cluster must use the
+  same `storage` and `wal_storage`.
+- The `rocksdb_*` tuning keys and the `wal_shard_*` keys do not apply to Solarium. The exceptions are
+  `rocksdb_shared_memory_budget_mb` and `rocksdb_shared_memtable_budget_mb`. They size the one cache
+  and the one memtable budget that a Solarium store and a Solarium WAL share. Solarium shares them
+  whenever a size is above 0, and `rocksdb_shared_memory` has no effect on it.
+- `solarium_environment` selects the file I/O of both layers. `io_uring` needs Linux with io_uring,
+  and the node does not start where the kernel cannot create a ring. Solarium ignores the key unless
+  one layer is `solarium`.
+- A backup bootstrap (`pitr_bootstrap_from`) still needs RocksDB for the store and the WAL, see
+  [backups-and-point-in-time-recovery.md](backups-and-point-in-time-recovery.md).
+
+Two keys pace the flush and compaction writes of the key-value store. Both engines read them:
+
+| Key | Effect |
+|-----|--------|
+| `storage_compaction_rate_mbps` | Rate limit in MB/s (10^6 bytes) for flush and compaction writes. 0 or unset = no limit. |
+| `storage_max_background_compactions` | The number of compactions that run at once. 0 or unset = the engine default. |
+
+Without either key, Solarium runs one compaction at a time and paces nothing. RocksDB runs
+max(2, CPUs / 2). With a rate, Solarium also runs max(2, CPUs / 2), unless
+`storage_max_background_compactions` sets the number. Several unpaced compactions take the disk from
+the synced writes of a large store. Choose a rate of about a third to half of what the disk commits in
+synced writes. A rate that is too low lets level 0 grow until writes slow down.
 
 ### One-phase apply-time validation
 
@@ -428,7 +473,12 @@ KV store and the Raft WAL. The memtable sub-budget is charged **inside** the tot
 budget, not added to it, and must be ≤ it. That comparison is made against the *effective*
 post-merge pair, so overriding only one of the two can produce an inconsistent pair — a 100 MiB
 total against an explicit 512 MiB memtable — and fails startup with `InvalidConfig`. The computed
-memtable default never exceeds the total, with or without the flush-unit floor. Set both together. Likewise `max_bytes_per_actor` is **per actor**: multiply by the actor count (`key_value_workers`,
+memtable default never exceeds the total, with or without the flush-unit floor. Set both together.
+
+A Solarium WAL (`wal_storage: solarium`) always charges its memtables to the shared memtable budget.
+The memory-proportional sizing therefore raises an unset budget to 256 MiB, the Solarium WAL's
+128 MiB flush unit plus one memtable of headroom, but never past half the cache. Below that size, the
+Solarium WAL writes a warning at open and flushes the Raft log in small pieces. Likewise `max_bytes_per_actor` is **per actor**: multiply by the actor count (`key_value_workers`,
 default max(32, 4 × CPU cores)) to get the total.
 
 `kahuna.key_value_write_max_in_flight_batches_per_partition` (default **1**, Kahuna 1.7.1) is how many
@@ -546,6 +596,8 @@ combination silently.
 | `large_value_rewrite_batch_rows` ≤ 0, or above half of `max_mutations_per_transaction` (when the limit > 0) | `InvalidConfig` |
 | Unknown `kahuna` key | `InvalidConfig` |
 | Unknown `kahuna.storage` / `kahuna.wal_storage` | `InvalidConfig` |
+| `kahuna.solarium_environment` other than `default` / `io_uring` | `InvalidConfig` |
+| Negative `kahuna.storage_compaction_rate_mbps` / `kahuna.storage_max_background_compactions` | `InvalidConfig` |
 | `kahuna.start_election_timeout_ms` ≥ `kahuna.end_election_timeout_ms` | `InvalidConfig` |
 | `kahuna.staged_base_fence_retention_ms` ≤ 0 | `InvalidConfig` |
 | `kahuna.persistent_revision_retention_count` < 0, or `..._age_seconds` < 0 | `InvalidConfig` |

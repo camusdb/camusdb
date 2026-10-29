@@ -103,4 +103,11 @@
     <PackageReference Include="Nito.AsyncEx" Version="5.1.2" />
     <PackageReference Include="YamlDotNet" Version="18.1.0" />
   </ItemGroup>
+
+  <!-- The Solarium storage engine for the key-value store and the Raft WAL (kahuna.storage /
+       kahuna.wal_storage = solarium). It needs files and threads, which the browser runtime does not
+       have, so the browser target leaves it out. -->
+  <ItemGroup Condition="!$(TargetFramework.EndsWith('-browser'))">
+    <PackageReference Include="SolariumDb.Kahuna" Version="0.1.3" />
+  </ItemGroup>
 </Project>

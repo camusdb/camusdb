@@ -15,7 +15,8 @@ namespace CamusDB.Core.Config.Models;
 /// (see <see cref="Storage.Kv.EmbeddedKahunaOptionsBuilder"/>: standalone via
 /// <see cref="Storage.Kv.EmbeddedKahunaOptionsBuilder.StandaloneRocksDbBaseline"/>, cluster via
 /// <see cref="Storage.Kv.EmbeddedKahunaOptionsBuilder.ClusterBaseline"/> which adds election timeouts);
-/// a <c>kahuna: { storage: sqlite, wal_storage: sqlite }</c> override restores the sqlite backend.
+/// a <c>kahuna: { storage: sqlite, wal_storage: sqlite }</c> override restores the sqlite backend, and
+/// <c>solarium</c> selects the Solarium engine (see <see cref="Storage"/>).
 /// </summary>
 public sealed class KahunaOptionsConfig
 {
@@ -68,6 +69,9 @@ public sealed class KahunaOptionsConfig
         "rocksdb_shared_memory_budget_mb",
         "rocksdb_shared_memtable_budget_mb",
         "rocksdb_direct_reads",
+        "storage_compaction_rate_mbps",
+        "storage_max_background_compactions",
+        "solarium_environment",
         "key_value_write_max_in_flight_batches_per_partition",
         "key_value_write_linger_ms",
         "key_value_write_post_completion_hold_ms",
@@ -123,12 +127,24 @@ public sealed class KahunaOptionsConfig
         "min_leader_stability_ms",
     };
 
-    /// <summary>Persistence backend: <c>memory</c>, <c>sqlite</c>, or <c>rocksdb</c>.</summary>
+    /// <summary>
+    /// Persistence backend: <c>memory</c>, <c>sqlite</c>, <c>rocksdb</c>, or <c>solarium</c>.
+    ///
+    /// <para><c>solarium</c> is the SolariumDb.Kahuna engine, a managed port of the RocksDB backend
+    /// that needs no native RocksDB library. It is not file-compatible with <c>rocksdb</c>: a data
+    /// directory written by one engine cannot be opened by the other, so a change of engine on a node
+    /// with data is a logical dump and reimport (<c>docs/logical-dump-and-reimport.md</c>). The
+    /// <c>rocksdb_*</c> tuning keys do not apply to it, except the two shared-memory budgets, which
+    /// size the cache and the memtable budget the Solarium store and a Solarium WAL share.</para>
+    /// </summary>
     public string? Storage { get; set; }
 
     public string? StorageRevision { get; set; }
 
-    /// <summary>Raft WAL backend: <c>memory</c>, <c>sqlite</c>, or <c>rocksdb</c>.</summary>
+    /// <summary>
+    /// Raft WAL backend: <c>memory</c>, <c>sqlite</c>, <c>rocksdb</c>, or <c>solarium</c>. The
+    /// engine can differ from <see cref="Storage"/>. Every node of a cluster must run the same pair.
+    /// </summary>
     public string? WalStorage { get; set; }
 
     public string? WalRevision { get; set; }
@@ -435,7 +451,9 @@ public sealed class KahunaOptionsConfig
     /// <summary>
     /// Total shared block-cache budget in MiB when <see cref="RocksdbSharedMemory"/> is enabled.
     /// The memtable sub-budget (<see cref="RocksdbSharedMemtableBudgetMb"/>) lives inside this budget
-    /// and must be &lt;= this value. Must be &gt; 0 when set.
+    /// and must be &lt;= this value. Must be &gt; 0 when set. With <c>solarium</c> it is the index and
+    /// filter cache that a Solarium store and a Solarium WAL share, with no switch:
+    /// <see cref="RocksdbSharedMemory"/> does not apply to Solarium.
     /// Maps to <see cref="Kahuna.EmbeddedKahunaOptions.StorageSharedCacheMb"/>.
     /// </summary>
     public int? RocksdbSharedMemoryBudgetMb { get; set; }
@@ -443,6 +461,7 @@ public sealed class KahunaOptionsConfig
     /// <summary>
     /// Memtable sub-budget in MiB, cost-charged into the shared block-cache budget. Must be &gt; 0
     /// when set, and must be &lt;= <see cref="RocksdbSharedMemoryBudgetMb"/> when both are provided.
+    /// With <c>solarium</c> it is the memtable budget that a Solarium store and a Solarium WAL share.
     /// Maps to <see cref="Kahuna.EmbeddedKahunaOptions.StorageSharedMemtableBudgetMb"/>.
     /// </summary>
     public int? RocksdbSharedMemtableBudgetMb { get; set; }
@@ -461,6 +480,37 @@ public sealed class KahunaOptionsConfig
     /// block-cache-only footprint. Maps to <see cref="Kahuna.EmbeddedKahunaOptions.RocksDbDirectReads"/>.
     /// </summary>
     public bool? RocksdbDirectReads { get; set; }
+
+    /// <summary>
+    /// Throughput budget in MB/s (10^6 bytes) for the flush and compaction writes of the key/value
+    /// store; 0 or unset = unlimited. Both <c>rocksdb</c> and <c>solarium</c> honor it. Pacing leaves
+    /// the device to the store's synced writes: about a third to half of what the disk commits in
+    /// synced writes is a good start, and too low a rate lets level 0 grow until writes slow down.
+    ///
+    /// <para>For <c>solarium</c> a rate also raises the number of compactions that run at once from 1
+    /// to max(2, CPUs / 2), unless <see cref="StorageMaxBackgroundCompactions"/> sets it. Without a rate,
+    /// Solarium runs one compaction at a time on purpose: several unpaced compactions take the drive
+    /// from synced writes on a large store. Maps to
+    /// <see cref="Kahuna.EmbeddedKahunaOptions.StorageCompactionRateBytesPerSec"/>.</para>
+    /// </summary>
+    public int? StorageCompactionRateMbps { get; set; }
+
+    /// <summary>
+    /// The most key/value store compactions that run at once; 0 or unset = the engine's default
+    /// (max(2, CPUs / 2) for <c>rocksdb</c>; 1 for <c>solarium</c> without
+    /// <see cref="StorageCompactionRateMbps"/>). Maps to
+    /// <see cref="Kahuna.EmbeddedKahunaOptions.StorageMaxBackgroundCompactions"/>.
+    /// </summary>
+    public int? StorageMaxBackgroundCompactions { get; set; }
+
+    /// <summary>
+    /// The storage environment the Solarium store and WAL do their file I/O through: <c>default</c>
+    /// (ordinary .NET file I/O, every platform) or <c>io_uring</c> (Linux with io_uring only; the node
+    /// refuses to start where the kernel cannot create a ring). Unset = <c>default</c>. Ignored unless
+    /// <see cref="Storage"/> or <see cref="WalStorage"/> is <c>solarium</c>. Reaches the engine as the
+    /// extension option <c>solarium.environment</c>.
+    /// </summary>
+    public string? SolariumEnvironment { get; set; }
 
     /// <summary>
     /// How many write-aggregator batches a partition may have waiting on Raft at once (Kahuna 1.7.1,
@@ -1035,6 +1085,15 @@ public sealed class KahunaOptionsConfig
         ValidateStorage(Storage, "kahuna.storage");
         ValidateStorage(WalStorage, "kahuna.wal_storage");
 
+        if (StorageCompactionRateMbps is < 0)
+            throw InvalidConfig($"'kahuna.storage_compaction_rate_mbps' must be >= 0, got {StorageCompactionRateMbps}");
+
+        if (StorageMaxBackgroundCompactions is < 0)
+            throw InvalidConfig($"'kahuna.storage_max_background_compactions' must be >= 0, got {StorageMaxBackgroundCompactions}");
+
+        if (SolariumEnvironment is not (null or "default" or "io_uring"))
+            throw InvalidConfig($"'kahuna.solarium_environment' must be 'default' or 'io_uring', got '{SolariumEnvironment}'");
+
         if (WalGroupCommitLingerMs is < 0)
             throw InvalidConfig($"'kahuna.wal_group_commit_linger_ms' must be >= 0, got {WalGroupCommitLingerMs}");
 
@@ -1512,8 +1571,8 @@ public sealed class KahunaOptionsConfig
         if (value is null)
             return;
 
-        if (value is not ("memory" or "sqlite" or "rocksdb"))
-            throw InvalidConfig($"'{field}' must be 'memory', 'sqlite', or 'rocksdb', got '{value}'");
+        if (value is not ("memory" or "sqlite" or "rocksdb" or "solarium"))
+            throw InvalidConfig($"'{field}' must be 'memory', 'sqlite', 'rocksdb', or 'solarium', got '{value}'");
     }
 
     private static CamusDBException InvalidConfig(string message)

@@ -326,6 +326,8 @@ public static class EmbeddedKahunaOptionsBuilder
         if (kahuna.WalRevision is not null)
             baseline.WalRevision = kahuna.WalRevision;
 
+        RegisterStorageExtensions(baseline, kahuna);
+
         if (kahuna.WalSyncWrites is bool walSync)
             baseline.WalSyncWrites = walSync;
 
@@ -462,6 +464,12 @@ public static class EmbeddedKahunaOptionsBuilder
 
         if (kahuna.RocksdbDirectReads is bool directReads)
             baseline.RocksDbDirectReads = directReads;
+
+        if (kahuna.StorageCompactionRateMbps is int compactionRateMbps)
+            baseline.StorageCompactionRateBytesPerSec = compactionRateMbps * 1_000_000L;
+
+        if (kahuna.StorageMaxBackgroundCompactions is int maxCompactions)
+            baseline.StorageMaxBackgroundCompactions = maxCompactions;
 
         if (kahuna.KeyValueWriteMaxInFlightBatchesPerPartition is int inFlight)
             baseline.KeyValueWriteMaxInFlightBatchesPerPartition = inFlight;
@@ -991,8 +999,10 @@ public static class EmbeddedKahunaOptionsBuilder
     /// <summary>
     /// The smallest memtable budget the proportional sizing may choose: the Raft log's flush unit plus
     /// headroom (<see cref="RaftLogFlushUnitHeadroomBytes"/>) when the store and the WAL share one
-    /// WriteBufferManager, else 0 (no floor — an unshared WAL has its own memtables and ignores the
-    /// budget).
+    /// WriteBufferManager, the Solarium WAL's flush unit plus headroom
+    /// (<see cref="SolariumWalFlushUnitHeadroomBytes"/>) when the WAL is Solarium, which always charges
+    /// its memtables to the node's shared budget, else 0 (no floor — an unshared WAL has its own
+    /// memtables and ignores the budget).
     ///
     /// <para>The floor yields to <b>half of the total budget</b>. The memtable budget is charged inside
     /// the block cache, so a memtable floor that took the whole cache would leave no read cache under
@@ -1014,13 +1024,92 @@ public static class EmbeddedKahunaOptionsBuilder
     /// </summary>
     internal static int RaftLogFlushUnitFloorMb(EmbeddedKahunaOptions options)
     {
-        if (!SharesRocksDbMemory(options))
+        long neededBytes;
+
+        if (SharesRocksDbMemory(options))
+            neededBytes = RaftLogFlushUnitHeadroomBytes(options);
+        else if (options.WalStorage == SolariumEngine)
+            neededBytes = SolariumWalFlushUnitHeadroomBytes();
+        else
             return 0;
 
         const long OneMb = 1024L * 1024;
-        long neededMb = (RaftLogFlushUnitHeadroomBytes(options) + OneMb - 1) / OneMb;
+        long neededMb = (neededBytes + OneMb - 1) / OneMb;
 
         return (int)Math.Min(neededMb, options.StorageSharedCacheMb / 2);
+    }
+
+    /// <summary>
+    /// Registers the storage engines that ship outside Kahuna.Core with the node's
+    /// <see cref="EmbeddedKahunaOptions.StorageProviders"/>, when the store or the WAL selects one.
+    /// Kahuna resolves <see cref="EmbeddedKahunaOptions.Storage"/> and
+    /// <see cref="EmbeddedKahunaOptions.WalStorage"/> by name in that registry when it builds the node,
+    /// so an engine missing from it stops the node at boot with an unknown-engine error.
+    ///
+    /// <para>Today that is Solarium (SolariumDb.Kahuna), the engine for both <c>solarium</c> names.
+    /// Both providers are registered together even when only one layer selects it, because Kahuna looks
+    /// up each layer separately and a registration costs nothing. The providers take no storage
+    /// environment, so the node's <c>solarium.environment</c> extension option chooses it; that option
+    /// is set only from <see cref="KahunaOptionsConfig.SolariumEnvironment"/>, and the same value reaches
+    /// both layers, which is what lets a Solarium store and a Solarium WAL share one cache and one
+    /// memtable budget (see <see cref="SolariumWalFlushUnitHeadroomBytes"/>).</para>
+    ///
+    /// <para>Must run after the <c>storage</c> and <c>wal_storage</c> overrides, which pick the names.
+    /// The browser build has no Solarium (it needs files and threads), so there the names are
+    /// refused here with a config error rather than by Kahuna's registry at boot.</para>
+    /// </summary>
+    internal static void RegisterStorageExtensions(EmbeddedKahunaOptions baseline, KahunaOptionsConfig kahuna)
+    {
+        if (!UsesSolarium(baseline))
+            return;
+
+#if CAMUSDB_BROWSER
+        throw new CamusDBException(
+            CamusDBErrorCodes.InvalidConfig,
+            $"The browser build has no Solarium engine; storage '{baseline.Storage}' and WAL '{baseline.WalStorage}' must not be 'solarium'");
+#else
+        baseline.StorageProviders.Register(new Solarium.Kahuna.SolariumPersistenceBackendProvider());
+        baseline.StorageProviders.Register(new Solarium.Kahuna.SolariumWalProvider());
+
+        if (kahuna.SolariumEnvironment is { } environment)
+            baseline.ExtensionOptions = new Dictionary<string, string>(baseline.ExtensionOptions, StringComparer.Ordinal)
+            {
+                [SolariumEnvironmentOption] = environment,
+            };
+#endif
+    }
+
+    /// <summary>The extension option through which SolariumDb.Kahuna reads its storage environment.</summary>
+    internal const string SolariumEnvironmentOption = "solarium.environment";
+
+    /// <summary>True when the key/value store or the Raft WAL runs on the Solarium engine.</summary>
+    internal static bool UsesSolarium(EmbeddedKahunaOptions options) =>
+        options.Storage == SolariumEngine || options.WalStorage == SolariumEngine;
+
+    /// <summary>The name that selects Solarium for <c>kahuna.storage</c> and <c>kahuna.wal_storage</c>.</summary>
+    internal const string SolariumEngine = "solarium";
+
+    /// <summary>
+    /// The shared memtable budget below which a Solarium WAL cannot flush the Raft log at its own flush
+    /// unit: one shard memtable (<c>SolariumWalOptions.ShardWriteBufferSizeBytes</c>, 128 MiB) plus one
+    /// more for what shares the budget — 256 MiB. This is the figure <c>SolariumWAL</c> checks at open,
+    /// and it warns when the budget is smaller. The reason is the one
+    /// <see cref="RaftLogFlushUnitHeadroomBytes"/> gives for the RocksDB WAL: the database that writes
+    /// next flushes its own oldest memtable once the budget is full, the WAL writes on every Raft batch,
+    /// so a small budget turns the 128 MiB flush unit into a few MiB.
+    ///
+    /// <para>Unlike the RocksDB pair, a Solarium WAL needs no switch to share: Kahuna hands every
+    /// engine the node's shared memory whenever a shared size is above 0, and CamusDB's sizing always
+    /// sets one. The <c>wal_shard_*</c> keys are RocksDB WAL tuning and do not move this figure; it is
+    /// read from Solarium's own defaults, so a Solarium retune moves it with them.</para>
+    /// </summary>
+    internal static long SolariumWalFlushUnitHeadroomBytes()
+    {
+#if CAMUSDB_BROWSER
+        return 0;
+#else
+        return 2 * Solarium.Kommander.SolariumWalOptions.Default.ShardWriteBufferSizeBytes;
+#endif
     }
 
     /// <summary>
