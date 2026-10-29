@@ -55,19 +55,26 @@ public sealed class TransferLedger
     /// starting balance — and carries the row id so ledger rows join to the final table state.</summary>
     public async Task WriteAsync(string outputDir, Workload.Dataset dataset, long rows, CancellationToken ct)
     {
-        StringBuilder ledger = new(lines.Count * 48 + 64);
-        ledger.AppendLine("wall_ms,low_index,high_index,low_delta,attempt,outcome,code");
-        while (lines.TryDequeue(out string? line))
-            ledger.AppendLine(line);
-        await File.WriteAllTextAsync(Path.Combine(outputDir, "transfer-ledger.csv"), ledger.ToString(), ct).ConfigureAwait(false);
+        // Streamed line by line: a two-hour run at several thousand write transactions per second
+        // journals tens of millions of attempts, and one string holding them all passes the 2 GB
+        // object limit (a 25-million-line ledger is ~2.3 GB of UTF-16) and fails the write with
+        // OutOfMemoryException after the measured window completed.
+        await using (StreamWriter ledger = new(Path.Combine(outputDir, "transfer-ledger.csv"), append: false, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false), bufferSize: 1 << 16))
+        {
+            await ledger.WriteLineAsync("wall_ms,low_index,high_index,low_delta,attempt,outcome,code").ConfigureAwait(false);
+            while (lines.TryDequeue(out string? line))
+            {
+                ct.ThrowIfCancellationRequested();
+                await ledger.WriteLineAsync(line).ConfigureAwait(false);
+            }
+        }
 
-        StringBuilder baseline = new((int)rows * 48 + 32);
-        baseline.AppendLine("index,id,seeded_balance");
+        await using StreamWriter baseline = new(Path.Combine(outputDir, "row-baseline.csv"), append: false, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false), bufferSize: 1 << 16);
+        await baseline.WriteLineAsync("index,id,seeded_balance").ConfigureAwait(false);
         for (long index = 0; index < rows; index++)
         {
             (string id, _, long seededBalance, _) = dataset.RowFor(index);
-            baseline.AppendLine(string.Create(CultureInfo.InvariantCulture, $"{index},{id},{seededBalance}"));
+            await baseline.WriteLineAsync(string.Create(CultureInfo.InvariantCulture, $"{index},{id},{seededBalance}")).ConfigureAwait(false);
         }
-        await File.WriteAllTextAsync(Path.Combine(outputDir, "row-baseline.csv"), baseline.ToString(), ct).ConfigureAwait(false);
     }
 }

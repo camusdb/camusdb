@@ -283,10 +283,14 @@ public sealed class TokenLedger
     /// <summary>Writes <c>token-ledger.csv</c>: one line per terminal move attempt and per read violation.</summary>
     public async Task WriteAsync(string outputDir, CancellationToken ct)
     {
-        StringBuilder csv = new(_lines.Count * 56 + 64);
-        csv.AppendLine("wall_ms,event,slot,from_gen,kind,attempt,outcome,code");
+        // Streamed for the same reason as the transfer ledger: one string of every attempt of a long
+        // run can pass the 2 GB object limit.
+        await using StreamWriter csv = new(Path.Combine(outputDir, "token-ledger.csv"), append: false, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false), bufferSize: 1 << 16);
+        await csv.WriteLineAsync("wall_ms,event,slot,from_gen,kind,attempt,outcome,code").ConfigureAwait(false);
         while (_lines.TryDequeue(out string? line))
-            csv.AppendLine(line);
-        await File.WriteAllTextAsync(Path.Combine(outputDir, "token-ledger.csv"), csv.ToString(), ct).ConfigureAwait(false);
+        {
+            ct.ThrowIfCancellationRequested();
+            await csv.WriteLineAsync(line).ConfigureAwait(false);
+        }
     }
 }
