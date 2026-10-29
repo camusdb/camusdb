@@ -246,6 +246,24 @@ Rules:
   `rocksdb_shared_memory_budget_mb` and `rocksdb_shared_memtable_budget_mb`. They size the one cache
   and the one memtable budget that a Solarium store and a Solarium WAL share. Solarium shares them
   whenever a size is above 0, and `rocksdb_shared_memory` has no effect on it.
+- **Solarium's cache and memtables are managed objects.** RocksDB holds its block cache and memtables
+  in native memory, outside the .NET heap; Solarium holds them inside it. On a Solarium node the two
+  budgets therefore count against the GC heap limit (`DOTNET_GCHeapHardLimit`,
+  `DOTNET_GCHeapHardLimitPercent`, or the runtime's 75% default inside a memory-limited container),
+  beside the actor caches and the application heap, and a heap limit chosen for RocksDB is too small.
+  When the two keys are unset, the [memory-proportional sizing](#memory-proportional-cache-defaults)
+  derives them from the managed heap budget instead of the machine memory, so they fit. When you set
+  them explicitly, size the heap limit to hold them plus the working heap. Measured on a 4,096 MiB
+  container with explicit 768 / 256 MiB budgets under a 2-hour fault soak:
+
+  | Heap limit | GC committed (p50 / max) | Outcome |
+  |-----|-----|-----|
+  | 60% (2,458 MiB) | 2,140 / 2,420 MiB | leader died of a managed `OutOfMemoryException` at 57 min |
+  | 3,072 MiB (75%) | 2,470 / 3,000 MiB | passed; the RocksDB control at 60% ran 1,550 / 2,360 MiB |
+
+  The node logs the budgets it runs with once at startup (`Solarium shared memory: ...`, see the
+  sizing section), and `gc_memory_limit_bytes` in the [node stats](node-stats.md) reports the limit
+  in force.
 - `solarium_environment` selects the file I/O of both layers. `io_uring` needs Linux with io_uring,
   and the node does not start where the kernel cannot create a ring. Solarium ignores the key unless
   one layer is `solarium`.
@@ -396,17 +414,20 @@ Two different memory sizes feed the computation, one for each kind of cache:
 - **Managed heap budget** sizes the actor caches, which live in the managed heap. It is what the GC
   reports: the heap hard limit when one is in force (`DOTNET_GCHeapHardLimit`,
   `DOTNET_GCHeapHardLimitPercent`, or the runtime's own 75% default inside a memory-limited
-  container), else the machine memory.
+  container), else the machine memory. On a node where `storage` or `wal_storage` is `solarium` it
+  also sizes the shared cache and memtable budget, because
+  [Solarium keeps them in the managed heap](#solarium-storage-engine).
 
 With no heap limit the two sizes are the same. With a heap limit they differ, and the difference
-matters: the RocksDB budgets sit **outside** the heap limit and count against the container beside it.
-On a 4,096 MiB container with `DOTNET_GCHeapHardLimitPercent=3C` (60%, the value is hexadecimal), the
-heap budget is 2,457 MiB but RocksDB is sized from 4,096 MiB. Leave room for both when you pick the
-heap percentage.
+matters: the RocksDB budgets sit **outside** the heap limit and count against the container beside it,
+while Solarium's sit **inside** it. On a 4,096 MiB container with `DOTNET_GCHeapHardLimitPercent=3C`
+(60%, the value is hexadecimal), the heap budget is 2,457 MiB; RocksDB is sized from 4,096 MiB
+(409 MiB cache, 192 MiB memtables) and Solarium from 2,457 MiB (245 MiB cache, 122 MiB memtables).
+Leave room for both when you pick the heap percentage.
 
 | Key | Computed when unset | Clamp |
 |-----|---------------------|-------|
-| `rocksdb_shared_memory_budget_mb` | 10% of machine memory | 64 MiB – 2 GiB (320 MiB floor only when 10% reaches it) |
+| `rocksdb_shared_memory_budget_mb` | 10% of machine memory (RocksDB), or of the managed heap budget (Solarium) | 64 MiB – 2 GiB (320 MiB floor only when 10% reaches it) |
 | `rocksdb_shared_memtable_budget_mb` | a quarter of the block cache, raised to the Raft-log flush unit (never past half the cache) | 16 MiB – 1 GiB (128 MiB floor only when a quarter reaches it) |
 | `max_bytes_per_actor` | 6.25% of the managed heap budget (≥ 64 MiB for the layer) ÷ the key/value actor count | 1 MiB – 2 GiB per actor (8 MiB floor only when the share reaches it) |
 | `max_entries_per_actor` | `max_bytes_per_actor` ÷ ~512 B | 2k – 4M (10k floor only when the share reaches it) |
@@ -447,6 +468,13 @@ At startup the node logs the values it uses, once, before RocksDB opens:
 RocksDB shared memory: block cache 409 MiB, memtable budget 192 MiB; Raft-log flush unit plus headroom 192 MiB (covered). Native budgets sit outside the managed heap: machine memory 4096 MiB (cgroup), managed heap budget 2457 MiB.
 ```
 
+A Solarium node logs the same figures with the budgets' place named, since there they are the
+managed heap's:
+
+```text
+Solarium shared memory: cache 245 MiB, memtable budget 122 MiB; Raft-log flush unit plus headroom 256 MiB (NOT covered: Raft-log flushes will be budget-forced). Managed budgets sit inside the heap limit: managed heap budget 2457 MiB, machine memory 4096 MiB (cgroup).
+```
+
 The machine-memory source is `cgroup`, `meminfo` (Linux RAM), `sysctl` (macOS RAM), or `gc` (no
 readable machine size, so the GC figure is used).
 
@@ -478,7 +506,10 @@ memtable default never exceeds the total, with or without the flush-unit floor. 
 A Solarium WAL (`wal_storage: solarium`) always charges its memtables to the shared memtable budget.
 The memory-proportional sizing therefore raises an unset budget to 256 MiB, the Solarium WAL's
 128 MiB flush unit plus one memtable of headroom, but never past half the cache. Below that size, the
-Solarium WAL writes a warning at open and flushes the Raft log in small pieces. Likewise `max_bytes_per_actor` is **per actor**: multiply by the actor count (`key_value_workers`,
+Solarium WAL writes a warning at open and flushes the Raft log in small pieces. Because the Solarium
+budgets are sized from the managed heap budget, the 256 MiB fits in half the cache only from a heap
+budget of 5 GiB (a container of about 6.7 GiB at the runtime's 75% default); a smaller Solarium node
+that wants the unit covered sets both budgets explicitly and a heap limit that holds them. Likewise `max_bytes_per_actor` is **per actor**: multiply by the actor count (`key_value_workers`,
 default max(32, 4 × CPU cores)) to get the total.
 
 `kahuna.key_value_write_max_in_flight_batches_per_partition` (default **1**, Kahuna 1.7.1) is how many

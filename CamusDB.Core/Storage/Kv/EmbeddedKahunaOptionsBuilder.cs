@@ -776,6 +776,15 @@ public static class EmbeddedKahunaOptionsBuilder
     /// 245 MB block cache and a 61 MB memtable budget. Under a heap limit the RocksDB budgets therefore
     /// sit <i>outside</i> it and count against the container beside it.</para>
     ///
+    /// <para><b>Solarium is the exception.</b> Solarium (<see cref="UsesSolarium"/>) keeps its cache and
+    /// its memtables as managed objects, so on a Solarium node the same two budgets live <i>inside</i>
+    /// the heap limit, next to the actor caches and the application heap, and are sized from the
+    /// managed heap budget instead: a 4,096 MB container with a 60% heap limit gets a 245 MB cache
+    /// and a 122 MB memtable budget rather than 409 and 192. Sizing them from the container is the
+    /// mirror-image mistake: a 2-hour fault soak on such a node with explicit 768/256 MiB budgets ran
+    /// the heap at 2,100-2,420 MiB of its 2,458 MiB limit and the leader died of a managed
+    /// OutOfMemoryException; the same budgets under a 3,072 MiB heap limit passed.</para>
+    ///
     /// <para>Sizing policy: RocksDB block cache = 10% of machine memory; memtable budget = a quarter of
     /// the block cache, raised to the Raft log's flush unit where the two databases share one
     /// WriteBufferManager (<see cref="RaftLogFlushUnitFloorMb"/>, gated by
@@ -887,7 +896,8 @@ public static class EmbeddedKahunaOptionsBuilder
     /// tests can assert the floor behavior at container and heap-limit sizes the test machine does
     /// not have; the private path above always passes the real sizes.
     /// <paramref name="machineMemoryBytes"/> sizes the native RocksDB budgets and
-    /// <paramref name="managedHeapBytes"/> sizes the managed actor caches.
+    /// <paramref name="managedHeapBytes"/> sizes the managed actor caches, and the shared budgets
+    /// too when Solarium holds them (<see cref="UsesSolarium"/>).
     /// <paramref name="raftLogFlushUnitFloor"/> overrides <see cref="RaftWalFlushUnitFloorEnabled"/>
     /// when given (a test seam); null takes the shipped gate.
     /// </summary>
@@ -900,9 +910,14 @@ public static class EmbeddedKahunaOptionsBuilder
     {
         const long OneMb = 1024L * 1024;
 
+        // The shared cache and memtable budget are native RocksDB memory, sized from the container,
+        // unless Solarium holds them: its cache and memtables are managed objects and count against
+        // the heap limit, so there the heap budget is the base (see the summary).
+        long sharedBudgetBaseBytes = UsesSolarium(baseline) ? managedHeapBytes : machineMemoryBytes;
+
         if (kahuna.RocksdbSharedMemoryBudgetMb is null)
             baseline.StorageSharedCacheMb = (int)(ClampWithYieldingFloor(
-                machineMemoryBytes / 10, historicFloor: 320 * OneMb, degenerateFloor: 64 * OneMb, ceiling: 2048 * OneMb) / OneMb);
+                sharedBudgetBaseBytes / 10, historicFloor: 320 * OneMb, degenerateFloor: 64 * OneMb, ceiling: 2048 * OneMb) / OneMb);
 
         if (kahuna.RocksdbSharedMemtableBudgetMb is null)
         {

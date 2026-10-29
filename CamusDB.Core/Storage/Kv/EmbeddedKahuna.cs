@@ -419,7 +419,7 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
         ArgumentNullException.ThrowIfNull(options);
         Options = options;
         logger = loggerFactory?.CreateLogger<EmbeddedKahuna>();
-        LogRocksDbMemoryBudgets();
+        LogSharedMemoryBudgets();
         node = new EmbeddedKahunaNode(options, loggerFactory);
         isClusterMode = false;
         WireWalRestoreBuffer();
@@ -446,7 +446,7 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
         ArgumentNullException.ThrowIfNull(options);
         Options = options;
         logger = loggerFactory?.CreateLogger<EmbeddedKahuna>();
-        LogRocksDbMemoryBudgets();
+        LogSharedMemoryBudgets();
         node = new EmbeddedKahunaNode(options, interNode, raftComm, discovery, loggerFactory);
         isClusterMode = true;
         WireWalRestoreBuffer();
@@ -554,33 +554,69 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
     }
 
     /// <summary>
-    /// Logs, once per node and before the node opens RocksDB, the shared RocksDB memory budgets the
-    /// node will run with and the Raft-log flush unit they were checked against, plus the two memory
-    /// sizes the defaults are derived from. Kommander warns at WAL open when the memtable budget is
-    /// below that unit; this line puts the numbers the warning is about (and whether the native
-    /// budgets came from a cgroup limit or from RAM) next to it. Logged only when the store and the
-    /// WAL share one WriteBufferManager, since the budgets are ignored otherwise.
+    /// Logs, once per node and before the node opens its storage, the shared cache and memtable
+    /// budgets the node will run with and the Raft-log flush unit they were checked against, plus the
+    /// two memory sizes the defaults are derived from. Kommander and Solarium warn at WAL open when the
+    /// memtable budget is below that unit; this line puts the numbers the warning is about (and whether
+    /// the budgets came from a cgroup limit or from RAM) next to it. Logged only when an engine uses
+    /// the budgets: the store and the WAL share one RocksDB WriteBufferManager, or either layer is
+    /// Solarium, which always takes them. The two cases get different lines because the memory sits in
+    /// different places: RocksDB's is native and outside the managed heap, Solarium's is managed and
+    /// inside the heap limit, which is what an operator sizing the heap needs to read.
     /// </summary>
-    private void LogRocksDbMemoryBudgets()
+    private void LogSharedMemoryBudgets()
     {
-        if (logger is null || !logger.IsEnabled(LogLevel.Information) || !EmbeddedKahunaOptionsBuilder.SharesRocksDbMemory(Options))
+        if (logger is null || !logger.IsEnabled(LogLevel.Information))
+            return;
+
+        bool sharesRocksDb = EmbeddedKahunaOptionsBuilder.SharesRocksDbMemory(Options);
+        bool solarium = EmbeddedKahunaOptionsBuilder.UsesSolarium(Options);
+
+        if (!sharesRocksDb && !solarium)
             return;
 
         const long OneMb = 1024L * 1024;
         (long machineBytes, string machineSource) = MachineMemory.ReadTotal();
-        long flushUnitHeadroomBytes = EmbeddedKahunaOptionsBuilder.RaftLogFlushUnitHeadroomBytes(Options);
-        bool coversFlushUnit = (long)Options.StorageSharedMemtableBudgetMb * OneMb >= flushUnitHeadroomBytes;
+        long heapBytes = MachineMemory.ManagedHeapBytes();
+
+        if (sharesRocksDb)
+        {
+            long flushUnitHeadroomBytes = EmbeddedKahunaOptionsBuilder.RaftLogFlushUnitHeadroomBytes(Options);
+            bool coversFlushUnit = (long)Options.StorageSharedMemtableBudgetMb * OneMb >= flushUnitHeadroomBytes;
+
+            logger.LogInformation(
+                "RocksDB shared memory: block cache {BlockCacheMb} MiB, memtable budget {MemtableMb} MiB; Raft-log flush unit plus headroom {FlushUnitMb} MiB ({Fit}). " +
+                "Native budgets sit outside the managed heap: machine memory {MachineMb} MiB ({MachineSource}), managed heap budget {HeapMb} MiB.",
+                Options.StorageSharedCacheMb,
+                Options.StorageSharedMemtableBudgetMb,
+                flushUnitHeadroomBytes / OneMb,
+                coversFlushUnit ? "covered" : "NOT covered: Raft-log flushes will be budget-forced",
+                machineBytes / OneMb,
+                machineSource,
+                heapBytes / OneMb);
+            return;
+        }
+
+        string fit;
+
+        if (Options.WalStorage == EmbeddedKahunaOptionsBuilder.SolariumEngine)
+        {
+            long flushUnitHeadroomBytes = EmbeddedKahunaOptionsBuilder.SolariumWalFlushUnitHeadroomBytes();
+            bool coversFlushUnit = (long)Options.StorageSharedMemtableBudgetMb * OneMb >= flushUnitHeadroomBytes;
+            fit = $"Raft-log flush unit plus headroom {flushUnitHeadroomBytes / OneMb} MiB ({(coversFlushUnit ? "covered" : "NOT covered: Raft-log flushes will be budget-forced")})";
+        }
+        else
+            fit = "no Raft log charged to the budget";
 
         logger.LogInformation(
-            "RocksDB shared memory: block cache {BlockCacheMb} MiB, memtable budget {MemtableMb} MiB; Raft-log flush unit plus headroom {FlushUnitMb} MiB ({Fit}). " +
-            "Native budgets sit outside the managed heap: machine memory {MachineMb} MiB ({MachineSource}), managed heap budget {HeapMb} MiB.",
+            "Solarium shared memory: cache {CacheMb} MiB, memtable budget {MemtableMb} MiB; {Fit}. " +
+            "Managed budgets sit inside the heap limit: managed heap budget {HeapMb} MiB, machine memory {MachineMb} MiB ({MachineSource}).",
             Options.StorageSharedCacheMb,
             Options.StorageSharedMemtableBudgetMb,
-            flushUnitHeadroomBytes / OneMb,
-            coversFlushUnit ? "covered" : "NOT covered: Raft-log flushes will be budget-forced",
+            fit,
+            heapBytes / OneMb,
             machineBytes / OneMb,
-            machineSource,
-            MachineMemory.ManagedHeapBytes() / OneMb);
+            machineSource);
     }
 
     /// <summary>

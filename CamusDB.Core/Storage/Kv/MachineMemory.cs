@@ -23,7 +23,9 @@ namespace CamusDB.Core.Storage.Kv;
 /// operator pins the heap to keep the node inside its container: a 4,096 MB container with a 60%
 /// heap limit reported 2,458 MB, which sized a 61 MB memtable budget, below the Raft log's flush
 /// unit. The managed caches (the key/value actor caches) are a different matter; they live inside
-/// the heap and are still sized from <see cref="ManagedHeapBytes"/>.</para>
+/// the heap and are still sized from <see cref="ManagedHeapBytes"/>. So are the shared cache and
+/// memtable budget when the Solarium engine holds them: Solarium's cache and memtables are managed
+/// objects, not native memory, and a node that sized them from the container OOMed its heap.</para>
 ///
 /// <para><b>Sources, in order.</b> On Linux, the smallest numeric cgroup limit on the path from
 /// this process's cgroup up to the hierarchy root (v2 <c>memory.max</c>, or v1
