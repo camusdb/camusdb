@@ -263,7 +263,17 @@ Rules:
 
   The node logs the budgets it runs with once at startup (`Solarium shared memory: ...`, see the
   sizing section), and `gc_memory_limit_bytes` in the [node stats](node-stats.md) reports the limit
-  in force.
+  in force. When the shared cache budget plus the actor caches take more than a third of the heap
+  budget, the node also logs a warning at startup, since the configuration that died above sat at
+  37% and the one that passed at 30%:
+
+  ```text
+  Solarium charges its cache and memtables to the managed heap: 921 MiB of budgets (shared cache 768 MiB, actor caches 153 MiB) take 37% of the 2457 MiB heap budget, above the 33% guard. A node at 37% ran out of heap under load. Raise the heap limit (DOTNET_GCHeapHardLimit / DOTNET_GCHeapHardLimitPercent) or lower kahuna.rocksdb_shared_memory_budget_mb and kahuna.max_bytes_per_actor.
+  ```
+
+  The computed defaults stay near 16% of the heap budget and never reach the guard; only explicit
+  budgets do. The guard is not a sizing rule: the application heap under load needed about 2 GiB on
+  that node whatever the budgets were.
 - `solarium_environment` selects the file I/O of both layers. `io_uring` needs Linux with io_uring,
   and the node does not start where the kernel cannot create a ring. Solarium ignores the key unless
   one layer is `solarium`.

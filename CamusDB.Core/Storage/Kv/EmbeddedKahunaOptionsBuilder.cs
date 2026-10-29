@@ -1105,6 +1105,53 @@ public static class EmbeddedKahunaOptionsBuilder
     internal const string SolariumEngine = "solarium";
 
     /// <summary>
+    /// The share of the managed heap budget above which the memory Solarium charges to the heap is
+    /// warned about at startup, in percent. The proportional sizing gives the cache 10% of the heap
+    /// budget and the actor caches 6.25%, so an unset node sits near 16% and never warns; a third is
+    /// twice that share. The one measured pair of points brackets it: a 4,096 MiB node with explicit
+    /// 768 MiB cache and 2458 MiB heap limit (37%) died of a managed OutOfMemoryException 57 minutes into
+    /// a fault soak, the same budgets under a 3,072 MiB limit (30%) ran 2 hours with the heap committed
+    /// peaking near the limit. The rule is a guard against the configuration that was measured to fail,
+    /// not a sizing recommendation: the application heap under load needs about 2 GiB on that node
+    /// whatever the budgets are.
+    /// </summary>
+    internal const int SolariumHeapShareWarnPercent = 33;
+
+    /// <summary>
+    /// The bytes a Solarium node's budgets place inside the managed heap: the shared cache budget
+    /// (the memtable budget is charged inside it, so it is not added) plus the key/value actor caches
+    /// (<see cref="EmbeddedKahunaOptions.MaxBytesPerActor"/> times <see cref="EffectiveActorCount"/>).
+    /// The actor caches are managed on every engine; they are counted here because the warning is about
+    /// the heap as a whole. 0 when neither layer is Solarium.
+    /// </summary>
+    internal static long SolariumHeapChargedBytes(EmbeddedKahunaOptions options)
+    {
+        if (!UsesSolarium(options))
+            return 0;
+
+        return options.StorageSharedCacheMb * 1024L * 1024 + options.MaxBytesPerActor * EffectiveActorCount(options);
+    }
+
+    /// <summary>
+    /// Whether the memory a Solarium node charges to the managed heap (<see cref="SolariumHeapChargedBytes"/>)
+    /// takes more than <see cref="SolariumHeapShareWarnPercent"/> of <paramref name="managedHeapBytes"/>, the
+    /// heap budget the GC reports. Pure, so tests can drive it with the reference node's sizes; the embedded
+    /// node calls it once at construction with the real budget and logs a warning when it is true. Never
+    /// true on a RocksDB node, whose engine memory is native, or when the heap budget is unknown (0).
+    /// </summary>
+    internal static bool SolariumBudgetsCrowdTheHeap(EmbeddedKahunaOptions options, long managedHeapBytes, out long chargedBytes, out int percent)
+    {
+        chargedBytes = SolariumHeapChargedBytes(options);
+        percent = 0;
+
+        if (chargedBytes <= 0 || managedHeapBytes <= 0)
+            return false;
+
+        percent = (int)(chargedBytes * 100 / managedHeapBytes);
+        return percent > SolariumHeapShareWarnPercent;
+    }
+
+    /// <summary>
     /// The shared memtable budget below which a Solarium WAL cannot flush the Raft log at its own flush
     /// unit: one shard memtable (<c>SolariumWalOptions.ShardWriteBufferSizeBytes</c>, 128 MiB) plus one
     /// more for what shares the budget — 256 MiB. This is the figure <c>SolariumWAL</c> checks at open,
