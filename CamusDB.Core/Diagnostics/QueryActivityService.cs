@@ -33,6 +33,9 @@ public sealed class QueryActivityService
 
     private CamusDBOptions options;
 
+    /// <summary>Cluster fan-outs running now, for <see cref="CamusDBOptions.ClusterActivityMaxConcurrentFanOuts"/>.</summary>
+    private int fanOutsInFlight;
+
     /// <param name="registry">This node's running statements and connections.</param>
     /// <param name="transport">The channel to peers, or null on an engine that has none.</param>
     /// <param name="peers">
@@ -72,8 +75,18 @@ public sealed class QueryActivityService
         if (targets.Count == 0)
             return rows;
 
-        List<QueryActivityRow>[] fromPeers = await Task.WhenAll(
-            targets.Select(target => FetchQueriesAsync(target, viewer, cancellationToken))).ConfigureAwait(false);
+        List<QueryActivityRow>[] fromPeers;
+
+        EnterFanOut();
+        try
+        {
+            fromPeers = await Task.WhenAll(
+                targets.Select(target => FetchQueriesAsync(target, viewer, cancellationToken))).ConfigureAwait(false);
+        }
+        finally
+        {
+            Interlocked.Decrement(ref fanOutsInFlight);
+        }
 
         foreach (List<QueryActivityRow> peerRows in fromPeers)
             rows.AddRange(peerRows);
@@ -98,14 +111,47 @@ public sealed class QueryActivityService
         if (targets.Count == 0)
             return rows;
 
-        List<ConnectionActivityRow>[] fromPeers = await Task.WhenAll(
-            targets.Select(target => FetchConnectionsAsync(target, viewer, cancellationToken))).ConfigureAwait(false);
+        List<ConnectionActivityRow>[] fromPeers;
+
+        EnterFanOut();
+        try
+        {
+            fromPeers = await Task.WhenAll(
+                targets.Select(target => FetchConnectionsAsync(target, viewer, cancellationToken))).ConfigureAwait(false);
+        }
+        finally
+        {
+            Interlocked.Decrement(ref fanOutsInFlight);
+        }
 
         foreach (List<ConnectionActivityRow> peerRows in fromPeers)
             rows.AddRange(peerRows);
 
         rows.Sort(static (a, b) => a.OpenedAt.CompareTo(b.OpenedAt));
         return rows;
+    }
+
+    /// <summary>
+    /// Takes one slot of <see cref="CamusDBOptions.ClusterActivityMaxConcurrentFanOuts"/>, or refuses
+    /// with <see cref="CamusDBErrorCodes.ConcurrencyLimitExceeded"/>. One cluster statement asks every
+    /// peer, so without a cap a flood of them multiplies internal traffic by the cluster size. Refusal,
+    /// not a queue: a queue would hold the flood in memory and still send it. The caller must release
+    /// the slot in a <c>finally</c> once the peers answered. The node-local forms and
+    /// <see cref="CancelAsync"/> take no slot: they ask at most the owner of one id.
+    /// </summary>
+    private void EnterFanOut()
+    {
+        int limit = options.ClusterActivityMaxConcurrentFanOuts;
+        int running = Interlocked.Increment(ref fanOutsInFlight);
+
+        if (limit > 0 && running > limit)
+        {
+            Interlocked.Decrement(ref fanOutsInFlight);
+            throw new CamusDBException(
+                CamusDBErrorCodes.ConcurrencyLimitExceeded,
+                $"This node already runs {limit} cluster activity statements, the most it allows at one time " +
+                "(cluster_activity_max_concurrent_fan_outs). Retry later, or use the node-local form.");
+        }
     }
 
     /// <summary>

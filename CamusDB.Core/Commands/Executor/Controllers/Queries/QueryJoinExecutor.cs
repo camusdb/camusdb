@@ -356,13 +356,16 @@ internal sealed class QueryJoinExecutor : IJoinNodeExecutor
 
             case DerivedTableScanNode { BoundSource: not null } derivedScanNode:
             {
-                // The root of the plan runs once, so a set operation there streams.
+                // The root of the plan runs once, so a set operation there streams. A windowed SELECT's
+                // derived table is the one source of its outer query, which has no join to read it
+                // again, so it always streams.
                 await foreach (QueryResultRow row in leafScanner.ScanDerivedTable(
                     derivedScanNode.BoundSource,
                     derivedScanNode.ExecutionFilter,
                     plan,
-                    readOnce: ReferenceEquals(derivedScanNode, plan.Root),
-                    setOperationStats: derivedScanNode.SetOperationStats).ConfigureAwait(false))
+                    readOnce: ReferenceEquals(derivedScanNode, plan.Root) || derivedScanNode.BoundSource.Source.Windows is not null,
+                    setOperationStats: derivedScanNode.SetOperationStats,
+                    windowStats: derivedScanNode.WindowStats).ConfigureAwait(false))
                     yield return row;
 
                 yield break;

@@ -29,6 +29,9 @@ public sealed class ClientConnectionRegistry
 
     private readonly ActivityIdMinter ids;
 
+    /// <summary>Connections admitted by <see cref="TryAdmit"/> and not yet released.</summary>
+    private int admitted;
+
     internal ClientConnectionRegistry(ActivityIdMinter ids)
     {
         this.ids = ids;
@@ -48,6 +51,32 @@ public sealed class ClientConnectionRegistry
         byTransportId[transportConnectionId] = connection;
         return connection;
     }
+
+    /// <summary>
+    /// Takes one slot of <see cref="CamusDBOptions.MaxClientConnections"/> for a connection the host
+    /// just accepted, or returns false when the node is at <paramref name="limit"/>; a limit of zero
+    /// or less admits every connection. A caller that gets true must call
+    /// <see cref="ReleaseAdmission"/> once, when the connection closes.
+    ///
+    /// <para>A counter of its own, not <see cref="Count"/>: the count takes every lock of the map, and
+    /// a check of the count followed by <see cref="Open"/> lets two concurrent accepts both take the
+    /// last slot. Increment first, then compare, makes the check and the take one step.</para>
+    /// </summary>
+    public bool TryAdmit(int limit)
+    {
+        int open = Interlocked.Increment(ref admitted);
+
+        if (limit > 0 && open > limit)
+        {
+            Interlocked.Decrement(ref admitted);
+            return false;
+        }
+
+        return true;
+    }
+
+    /// <summary>Releases the slot of a connection that <see cref="TryAdmit"/> admitted.</summary>
+    public void ReleaseAdmission() => Interlocked.Decrement(ref admitted);
 
     /// <summary>The open connection with the web server id <paramref name="transportConnectionId"/>, or null.</summary>
     public ClientConnection? Find(string transportConnectionId)

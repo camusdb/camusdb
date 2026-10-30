@@ -469,6 +469,19 @@ public sealed record CamusDBOptions
     public int ClusterActivityPeerTimeoutMs { get; init; } = 2000;
 
     /// <summary>
+    /// Most <c>SHOW CLUSTER QUERIES</c> and <c>SHOW CLUSTER CONNECTIONS</c> statements that may ask the
+    /// peers at one time on this node. One such statement makes one request to every peer, so a flood
+    /// of them multiplies internal traffic by the cluster size. A statement past the cap is refused with
+    /// <see cref="CamusDBErrorCodes.ConcurrencyLimitExceeded"/>; the node-local forms are never refused.
+    ///
+    /// <para>Runtime-mutable: the fan-out reads the current snapshot on each statement.</para>
+    /// <para><c>&lt;= 0</c> — limit is disabled.</para>
+    /// Default: <c>8</c>.
+    /// </summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Node)]
+    public int ClusterActivityMaxConcurrentFanOuts { get; init; } = 8;
+
+    /// <summary>
     /// Serves the browser operator dashboard on the HTTP port. When false the host maps neither the
     /// dashboard pages nor the <c>/v1/dashboard/</c> endpoints, and a browser at <c>/</c> gets a 404.
     ///
@@ -1687,6 +1700,93 @@ public sealed record CamusDBOptions
     /// </summary>
     [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Cluster)]
     public int MaxTablesPerDatabase { get; init; } = 10_000;
+
+    /// <summary>
+    /// Maximum number of databases the registry may hold. Checked at <c>CREATE DATABASE</c>, at a
+    /// branch create and at a relink, under the registry's write lock, against this node's view of
+    /// the registry. Each database costs a descriptor, a transaction manager and a schema-log
+    /// subscription on every node that opens it, so without a cap a loop of short statements grows
+    /// memory and meta keys with no bound. A create refused by this cap gets
+    /// <see cref="CamusDBErrorCodes.SchemaLimitExceeded"/>.
+    ///
+    /// <para>The count is the registry cache of the node that runs the create. Two creates on two
+    /// nodes at the same moment can each see one free slot, so the cluster can go past the cap by the
+    /// number of nodes that create at once. That is acceptable for a resource bound; it is not a
+    /// uniqueness guarantee.</para>
+    /// <para><c>&lt;= 0</c> — limit is disabled.</para>
+    /// Default: <c>10000</c>.
+    /// </summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Cluster)]
+    public int MaxDatabases { get; init; } = 10_000;
+
+    /// <summary>
+    /// Largest inline SQL statement this node parses, in UTF-8 bytes. Checked before the parse, so a
+    /// statement over the limit costs no lexer or parser work and no parse-tree memory. A unique
+    /// statement always misses the parse cache, so without this bound every request can make the node
+    /// parse a statement as large as the request body. A refused statement gets
+    /// <see cref="CamusDBErrorCodes.StatementTooLarge"/>.
+    ///
+    /// <para>Bound parameter values do not count: they are not parsed. A large bulk INSERT can bind its
+    /// values instead of inlining them. A prepared statement has its own, smaller limit,
+    /// <see cref="MaxPreparedStatementBytes"/>, because the node keeps its text.</para>
+    /// <para><c>&lt;= 0</c> — limit is disabled.</para>
+    /// Default: <c>8388608</c> (8 MiB).
+    /// </summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Node)]
+    public int MaxStatementBytes { get; init; } = 8 * 1024 * 1024;
+
+    /// <summary>
+    /// Most rows one response of a buffered transport may hold: <c>/execute-sql-query</c>,
+    /// <c>/query</c>, and the RETURNING rows that the stream endpoints collect before their commit. These
+    /// transports keep the whole result in memory before they send the first byte, so without a bound
+    /// one short statement such as <c>SELECT * FROM generate_series(1, 1000000000)</c> fills the managed
+    /// heap and the process dies with no error to the caller. A result past the cap is refused with
+    /// <see cref="CamusDBErrorCodes.ResultSetTooLarge"/> and its transaction is rolled back.
+    ///
+    /// <para>The streaming transports (<c>/execute-sql-query-stream</c> and the gRPC query stream) send
+    /// rows as they are read and are not bounded by this setting. A caller that needs a larger result
+    /// uses one of them, or pages with <c>LIMIT</c>/<c>OFFSET</c>.</para>
+    /// <para><c>&lt;= 0</c> — limit is disabled.</para>
+    /// Default: <c>1000000</c>.
+    /// </summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Node)]
+    public int MaxBufferedResultRows { get; init; } = 1_000_000;
+
+    /// <summary>
+    /// Most estimated memory, in bytes, that one response of a buffered transport may hold. The
+    /// companion of <see cref="MaxBufferedResultRows"/>: a row count alone allows a result of a
+    /// million wide rows. The estimate is the one the query result cache uses, and it errs high.
+    /// <para><c>&lt;= 0</c> — limit is disabled.</para>
+    /// Default: <c>268435456</c> (256 MiB).
+    /// </summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Node)]
+    public long MaxBufferedResultBytes { get; init; } = 256L * 1024 * 1024;
+
+    /// <summary>
+    /// Most explicit transactions (<c>/start-transaction</c>, gRPC <c>BeginTransaction</c> and the
+    /// <c>BEGIN</c> of a batch stream) that this node keeps open at one time. Each one holds tracking
+    /// state, and after its first write a Kahuna session, its locks and its key set, until a commit,
+    /// a rollback or the idle reaper ends it. Without a cap a loop of empty begins grows that state
+    /// with no bound. A begin past the cap is refused with
+    /// <see cref="CamusDBErrorCodes.ConcurrencyLimitExceeded"/>, which the caller can retry after other
+    /// transactions end. Autocommit statements are not counted and never refused by this cap.
+    /// <para><c>&lt;= 0</c> — limit is disabled.</para>
+    /// Default: <c>10000</c>.
+    /// </summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Node)]
+    public int MaxOpenExplicitTransactions { get; init; } = 10_000;
+
+    /// <summary>
+    /// Most client connections (HTTP, HTTPS and gRPC listeners together) this node accepts at one
+    /// time. A connection past the cap is closed when it is accepted, before a request is read. The
+    /// Raft listener is not counted, so peer traffic is never refused by this cap.
+    /// <para>The check reads the current snapshot for each accepted connection, so a new value applies
+    /// to the next connection. Connections that are already open are not closed.</para>
+    /// <para><c>&lt;= 0</c> — limit is disabled.</para>
+    /// Default: <c>10000</c>.
+    /// </summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Node)]
+    public int MaxClientConnections { get; init; } = 10_000;
 
     /// <summary>
     /// PBKDF2-HMAC-SHA256 iteration count used when hashing a user password

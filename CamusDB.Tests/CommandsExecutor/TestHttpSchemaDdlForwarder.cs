@@ -301,6 +301,39 @@ public sealed class TestHttpSchemaDdlForwarder
         Assert.AreEqual("name", doc.RootElement.GetProperty("columns")[0].GetProperty("name").GetString());
     }
 
+    /// <summary>
+    /// The leader rebuilds the ticket from this body only. A covering index whose INCLUDE list is not
+    /// on the wire is built without it, and a DROP INDEX IF EXISTS without its flag fails on the leader.
+    /// </summary>
+    [Test]
+    public async Task ForwardAlterIndex_SerializesIncludeColumnsAndIfExists()
+    {
+        FakeMessageHandler addHandler = new(OkResponse(true));
+        AlterIndexTicket add = new("mydb", "robots", "name_idx",
+            [new ColumnIndexInfo("name", OrderType.Ascending)],
+            AlterIndexOperation.AddIndex,
+            includeColumns: ["year", "score"]);
+
+        await BuildForwarder(addHandler).ForwardAlterIndexAsync("leader:7070", add, StableOperationId, CancellationToken.None);
+
+        using (JsonDocument doc = JsonDocument.Parse(await addHandler.LastRequest!.Content!.ReadAsStringAsync()))
+        {
+            JsonElement include = doc.RootElement.GetProperty("includeColumns");
+            Assert.AreEqual(2, include.GetArrayLength());
+            Assert.AreEqual("year", include[0].GetString());
+            Assert.AreEqual("score", include[1].GetString());
+            Assert.IsFalse(doc.RootElement.GetProperty("ifExists").GetBoolean());
+        }
+
+        FakeMessageHandler dropHandler = new(OkResponse(false));
+        AlterIndexTicket drop = new("mydb", "robots", "name_idx", [], AlterIndexOperation.DropIndex, ifExists: true);
+
+        await BuildForwarder(dropHandler).ForwardAlterIndexAsync("leader:7070", drop, StableOperationId, CancellationToken.None);
+
+        using (JsonDocument doc = JsonDocument.Parse(await dropHandler.LastRequest!.Content!.ReadAsStringAsync()))
+            Assert.IsTrue(doc.RootElement.GetProperty("ifExists").GetBoolean());
+    }
+
     // ── ForwardDropTableAsync ──────────────────────────────────────────────────
 
     [Test]

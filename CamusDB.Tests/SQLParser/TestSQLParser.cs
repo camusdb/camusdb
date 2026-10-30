@@ -1441,6 +1441,40 @@ public class TestSQLParser
         Assert.AreEqual(NodeType.IndexIdentifierList, ast.extendedOne!.nodeType);
     }
 
+    [TestCase("DROP INDEX `year_index` ON `some_table`", NodeType.AlterTableDropIndex)]
+    [TestCase("DROP INDEX year_index ON some_table", NodeType.AlterTableDropIndex)]
+    [TestCase("DROP INDEX some_table.year_index", NodeType.AlterTableDropIndex)]
+    [TestCase("DROP INDEX `some_table`.`year_index`", NodeType.AlterTableDropIndex)]
+    [TestCase("DROP INDEX IF EXISTS year_index ON some_table", NodeType.AlterTableDropIndexIfExists)]
+    [TestCase("DROP INDEX IF EXISTS some_table.year_index", NodeType.AlterTableDropIndexIfExists)]
+    [TestCase("ALTER TABLE some_table DROP INDEX year_index", NodeType.AlterTableDropIndex)]
+    [TestCase("ALTER TABLE some_table DROP INDEX IF EXISTS year_index", NodeType.AlterTableDropIndexIfExists)]
+    public void TestParseDropIndex_EveryFormBuildsTheAlterTableShape(string sql, NodeType expected)
+    {
+        NodeAst ast = SQLParserProcessor.Parse(sql);
+
+        Assert.AreEqual(expected, ast.nodeType);
+        Assert.AreEqual(NodeType.Identifier, ast.leftAst!.nodeType);
+        Assert.AreEqual("some_table", ast.leftAst!.yytext);
+        Assert.AreEqual(NodeType.Identifier, ast.rightAst!.nodeType);
+        Assert.AreEqual("year_index", ast.rightAst!.yytext);
+    }
+
+    /// <summary>
+    /// Index names are unique per table only, so a bare name has nothing to resolve against, and a
+    /// name with two dots is not a table and an index. Both are refused before execution.
+    /// </summary>
+    [TestCase("DROP INDEX year_index")]
+    [TestCase("DROP INDEX IF EXISTS year_index")]
+    [TestCase("DROP INDEX db.some_table.year_index")]
+    public void TestParseDropIndex_RefusesANameWithoutExactlyOneTable(string sql)
+    {
+        CamusDBException exception = Assert.Throws<CamusDBException>(() => SQLParserProcessor.Parse(sql))!;
+
+        Assert.AreEqual(CamusDBErrorCodes.InvalidInput, exception.Code);
+        StringAssert.Contains("DROP INDEX <index> ON <table>", exception.Message);
+    }
+
     [Test]
     public void TestParseCreateUniqueIndexIfNotExists()
     {

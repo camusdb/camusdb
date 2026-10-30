@@ -29,16 +29,27 @@ public sealed class HttpTransactionCoordinator
     private readonly ConcurrentDictionary<(long L, uint C), ActiveTransaction> active = new();
 
     /// <summary>
+    /// Explicit transactions this node tracks, for <see cref="CamusDBOptions.MaxOpenExplicitTransactions"/>.
+    /// A slot is reserved before the begin and released when the begin fails or when the entry leaves
+    /// <see cref="active"/>. The release rides the map's removal, which succeeds exactly once per
+    /// entry, so a retried commit or a reap that races a rollback cannot release a slot twice.
+    /// </summary>
+    private int openExplicit;
+
+    /// <summary>
     /// A tracked in-flight transaction plus a monotonic marker of when the client last touched it.
     /// The marker is a <see cref="Stopwatch.GetTimestamp"/> tick (not wall-clock) so idle detection
     /// is immune to NTP/clock jumps, consistent with the rest of the transaction machinery. It is
     /// refreshed on begin and on every <see cref="GetState"/> (i.e. every statement issued against
     /// the transaction), and read by the abandoned-transaction reaper.
     /// </summary>
-    private sealed class ActiveTransaction(KvTransactionsManager manager, KvTransaction transaction)
+    private sealed class ActiveTransaction(KvTransactionsManager manager, KvTransaction transaction, bool isExplicit)
     {
         public KvTransactionsManager Manager { get; } = manager;
         public KvTransaction Transaction { get; } = transaction;
+
+        /// <summary>True when the entry holds a slot of <see cref="openExplicit"/>.</summary>
+        public bool IsExplicit { get; } = isExplicit;
 
         private long lastActivityTicks = Stopwatch.GetTimestamp();
 
@@ -87,6 +98,9 @@ public sealed class HttpTransactionCoordinator
     /// </summary>
     public int ActiveCount => active.Count;
 
+    /// <summary>Number of explicit (client-owned) transactions this node is tracking.</summary>
+    public int OpenExplicitCount => Volatile.Read(ref openExplicit);
+
     public async Task<KvTransaction> StartAsync(string databaseName, CancellationToken cancellationToken = default) =>
         await StartAsync(databaseName, isolationLevel: null, transactionMode: null, locking: null, cancellationToken: cancellationToken).ConfigureAwait(false);
 
@@ -128,16 +142,63 @@ public sealed class HttpTransactionCoordinator
         if (string.IsNullOrEmpty(databaseName))
             throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "DatabaseName is required to start a transaction");
 
-        DatabaseDescriptor database = await executor.OpenDatabase(databaseName).ConfigureAwait(false);
-
-        KvTransaction tx = await database.Transactions.BeginAsync(
-            isolationLevel, transactionMode, locking: locking, deferStart: deferStart,
-            priority: priority, cancellationToken: cancellationToken, causalToken: causalToken).ConfigureAwait(false);
         if (sessionOwned)
-            tx.MarkSessionOwned();
+            ReserveExplicitSlot();
 
-        await RegisterAsync(database.Transactions, tx).ConfigureAwait(false);
-        return tx;
+        bool registered = false;
+        try
+        {
+            DatabaseDescriptor database = await executor.OpenDatabase(databaseName).ConfigureAwait(false);
+
+            KvTransaction tx = await database.Transactions.BeginAsync(
+                isolationLevel, transactionMode, locking: locking, deferStart: deferStart,
+                priority: priority, cancellationToken: cancellationToken, causalToken: causalToken).ConfigureAwait(false);
+            if (sessionOwned)
+                tx.MarkSessionOwned();
+
+            await RegisterAsync(database.Transactions, tx, sessionOwned).ConfigureAwait(false);
+            registered = true;
+            return tx;
+        }
+        finally
+        {
+            // A begin that failed holds no entry, so nothing else will release its slot.
+            if (sessionOwned && !registered)
+                Interlocked.Decrement(ref openExplicit);
+        }
+    }
+
+    /// <summary>
+    /// Takes one slot of <see cref="CamusDBOptions.MaxOpenExplicitTransactions"/>, or refuses with
+    /// <see cref="CamusDBErrorCodes.ConcurrencyLimitExceeded"/>. Increment first, then compare, so two
+    /// concurrent begins cannot both take the last slot. The limit is read from the engine's current
+    /// snapshot on each begin, so a changed value applies to the next begin.
+    /// </summary>
+    private void ReserveExplicitSlot()
+    {
+        int limit = executor.Options.MaxOpenExplicitTransactions;
+        int open = Interlocked.Increment(ref openExplicit);
+
+        if (limit > 0 && open > limit)
+        {
+            Interlocked.Decrement(ref openExplicit);
+            throw new CamusDBException(
+                CamusDBErrorCodes.ConcurrencyLimitExceeded,
+                $"This node already has {limit} open explicit transactions, the most it allows " +
+                "(max_open_explicit_transactions). Commit or roll back open transactions, or retry later.");
+        }
+    }
+
+    /// <summary>Removes the entry under <paramref name="key"/> and releases its slot when it holds one.</summary>
+    private bool TryRemoveEntry((long L, uint C) key, out ActiveTransaction? entry)
+    {
+        if (!active.TryRemove(key, out entry))
+            return false;
+
+        if (entry.IsExplicit)
+            Interlocked.Decrement(ref openExplicit);
+
+        return true;
     }
 
     /// <summary>
@@ -203,7 +264,7 @@ public sealed class HttpTransactionCoordinator
 
             // Remove first so a client racing in with a commit/rollback for the same id either
             // already removed it (we skip) or finds it gone (its lookup fails cleanly).
-            if (!active.TryRemove(pair.Key, out _))
+            if (!TryRemoveEntry(pair.Key, out _))
                 continue;
 
             // Then claim the finalize gate: a commit/rollback that resolved this entry before the
@@ -466,9 +527,9 @@ public sealed class HttpTransactionCoordinator
     /// transaction's statements and finalize to the other; refuse loudly instead of overwriting,
     /// and roll the newcomer back so it cannot leak a live session.
     /// </summary>
-    private async Task RegisterAsync(KvTransactionsManager manager, KvTransaction tx)
+    private async Task RegisterAsync(KvTransactionsManager manager, KvTransaction tx, bool isExplicit)
     {
-        if (active.TryAdd(Key(tx), new ActiveTransaction(manager, tx)))
+        if (active.TryAdd(Key(tx), new ActiveTransaction(manager, tx, isExplicit)))
             return;
 
         try { await manager.RollbackIfNotCompletedAsync(tx).ConfigureAwait(false); }
@@ -480,7 +541,7 @@ public sealed class HttpTransactionCoordinator
     }
 
     private void Unregister(KvTransaction tx) =>
-        active.TryRemove(Key(tx), out _);
+        TryRemoveEntry(Key(tx), out _);
 
     /// <summary>Test seam: claims the finalize gate of a tracked transaction as a concurrent commit would,
     /// so a test can observe the in-flight rejection path without racing two real finalizes.</summary>

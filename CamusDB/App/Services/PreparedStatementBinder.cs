@@ -88,10 +88,14 @@ public static class PreparedStatementBinder
     /// whichever execution happens to be the first — a client learns its statement is broken when it
     /// registers it.
     /// </summary>
-    public static PreparedStatement Create(string database, string sql)
+    public static PreparedStatement Create(string database, string sql, int maxStatementBytes = 0)
     {
         if (string.IsNullOrEmpty(sql))
             throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "PREPARE requires a 'sql' statement");
+
+        // The registries check their own, smaller size limits only after this returns, so the
+        // inline limit is what keeps an oversized PREPARE from costing a full parse.
+        StatementSizeGuard.Check(sql, maxStatementBytes);
 
         NodeAst ast = SQLParserProcessor.Parse(sql);
 

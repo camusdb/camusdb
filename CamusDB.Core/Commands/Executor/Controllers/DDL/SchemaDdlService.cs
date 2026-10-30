@@ -1173,6 +1173,31 @@ internal sealed partial class SchemaDdlService
         return columnIds;
     }
 
+    /// <summary>
+    /// Opens the table an index statement names. For <c>DROP INDEX IF EXISTS</c> a missing table returns
+    /// null, which the caller reports as "not applied": an index cannot exist when its table does not.
+    /// The miss comes from <see cref="TableOpener"/>, so a stale local catalog is reconciled before it
+    /// counts as missing. Every other ticket still fails with <c>TableDoesntExist</c>.
+    /// </summary>
+    /// <remarks>
+    /// Runs after the forward to the schema leader, as <c>DROP TABLE IF EXISTS</c> does, so a follower
+    /// with a stale catalog never decides the outcome on its own.
+    /// </remarks>
+    internal async ValueTask<TableDescriptor?> OpenIndexTableAsync(DatabaseDescriptor database, AlterIndexTicket ticket)
+    {
+        if (!ticket.IfExists)
+            return await context.TableOpener.Open(database, ticket.TableName).ConfigureAwait(false);
+
+        try
+        {
+            return await context.TableOpener.Open(database, ticket.TableName).ConfigureAwait(false);
+        }
+        catch (CamusDBException ex) when (ex.Code == CamusDBErrorCodes.TableDoesntExist)
+        {
+            return null;
+        }
+    }
+
     public async Task<bool> AlterIndex(AlterIndexTicket ticket)
     {
         context.Validator.Validate(ticket);
@@ -1184,7 +1209,9 @@ internal sealed partial class SchemaDdlService
         if (forwarded is not null)
             return forwarded.Value;
 
-        TableDescriptor table = await context.TableOpener.Open(database, ticket.TableName).ConfigureAwait(false);
+        TableDescriptor? table = await OpenIndexTableAsync(database, ticket).ConfigureAwait(false);
+        if (table is null)
+            return false;
 
         // RenameIndex is metadata-only (no KV data changes); use single-phase DDL on all paths.
         if (ticket.Operation == AlterIndexOperation.RenameIndex)

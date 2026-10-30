@@ -641,6 +641,38 @@ public static class CamusDBErrorCodes
     /// </summary>
     public const string LockNotAvailable = "CADB0555";
 
+    /// <summary>
+    /// The result of a statement sent to a buffered transport (<c>/execute-sql-query</c>, <c>/query</c>,
+    /// or the RETURNING rows a stream endpoint collects before its commit) is larger than
+    /// <see cref="CamusDBOptions.MaxBufferedResultRows"/> rows or
+    /// <see cref="CamusDBOptions.MaxBufferedResultBytes"/> estimated bytes. The transport keeps the
+    /// whole result in memory before it sends it, so the node refuses the result rather than risk an
+    /// out-of-memory crash.
+    ///
+    /// <para>The refusal comes before the commit, so the statement's transaction is rolled back and
+    /// nothing it wrote is kept. Use a streaming transport (<c>/execute-sql-query-stream</c> or the gRPC
+    /// query stream), or page the result with <c>LIMIT</c>. Not retryable as is. Maps to HTTP 400 and
+    /// gRPC <c>RESOURCE_EXHAUSTED</c>.</para>
+    /// </summary>
+    public const string ResultSetTooLarge = "CADB0556";
+
+    /// <summary>
+    /// An inline SQL statement is longer than <see cref="CamusDBOptions.MaxStatementBytes"/> UTF-8
+    /// bytes. The check runs before the parse. Bind large values as parameters, which are not parsed,
+    /// or split the statement. Not retryable as is. Maps to HTTP 413 and gRPC
+    /// <c>INVALID_ARGUMENT</c>.
+    /// </summary>
+    public const string StatementTooLarge = "CADB0557";
+
+    /// <summary>
+    /// The node refused new work because a per-node concurrency cap is reached: the open explicit
+    /// transactions (<see cref="CamusDBOptions.MaxOpenExplicitTransactions"/>) or the concurrent
+    /// cluster activity fan-outs (<see cref="CamusDBOptions.ClusterActivityMaxConcurrentFanOuts"/>).
+    /// Nothing ran. The caller may retry after a back-off, when other work ended. Maps to HTTP 503 and
+    /// gRPC <c>RESOURCE_EXHAUSTED</c>.
+    /// </summary>
+    public const string ConcurrencyLimitExceeded = "CADB0558";
+
     public const string InvalidConfig = "CADB0600";
 
     /// <summary>
@@ -1067,6 +1099,9 @@ public static class CamusDBErrorCodes
         InsufficientDiskSpace => 507,
         SpillLimitExceeded => 507,
         ReturningResultTooLarge => 400,
+        ResultSetTooLarge => 400,
+        StatementTooLarge => 413,
+        ConcurrencyLimitExceeded => 503,
         QueryNotFound => 404,
         QueryNotCancellable => 409,
         QueryOwnerUnreachable => 503,

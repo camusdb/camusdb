@@ -343,7 +343,7 @@ public sealed class ClusterController : CommandsController
             principal = await EnsureClusterAdminAllowedAsync().ConfigureAwait(false);
 
             using StreamReader reader = new(Request.Body);
-            string body = await reader.ReadToEndAsync().ConfigureAwait(false);
+            string body = await reader.ReadToEndAsync(HttpContext.RequestAborted).ConfigureAwait(false);
 
             SetReplicationFactorRequest? request = string.IsNullOrWhiteSpace(body)
                 ? null
@@ -420,7 +420,7 @@ public sealed class ClusterController : CommandsController
             principal = await EnsureClusterAdminAllowedAsync().ConfigureAwait(false);
 
             using StreamReader reader = new(Request.Body);
-            string body = await reader.ReadToEndAsync().ConfigureAwait(false);
+            string body = await reader.ReadToEndAsync(HttpContext.RequestAborted).ConfigureAwait(false);
 
             request = string.IsNullOrWhiteSpace(body)
                 ? null

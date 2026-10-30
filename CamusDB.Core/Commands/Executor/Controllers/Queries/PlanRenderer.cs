@@ -375,6 +375,9 @@ public static class PlanRenderer
         if (node.BoundSource.SetOperation is { } setOperation)
             return RenderSetOperation(setOperation.Source, plan.Database.Options.SpillEnabled);
 
+        if (node.BoundSource.Source.Windows is { } windows)
+            return RenderWindows(windows, node.WindowStats);
+
         if (node.BoundSource.Source.Function is not { } call)
             return $"derived-table-scan(alias={node.BoundSource.Alias})";
 
@@ -382,6 +385,96 @@ public static class PlanRenderer
         string arguments = string.Join(", ", call.Arguments.Select(RenderExpr));
         return $"function-scan({call.FunctionName}({arguments}), alias={node.BoundSource.Alias}, column={call.ColumnName})";
     }
+
+    /// <summary>
+    /// A windowed SELECT's derived table is named <c>window</c>, with one entry per spec group — the
+    /// calls that share a PARTITION BY and an ORDER BY, and so one sort: <c>partition=[…]</c>,
+    /// <c>order=[…]</c> and the calls, each with its frame when the call reads one. The expressions
+    /// are printed as written, not as the hidden inner columns they became. After an EXPLAIN (ANALYZE)
+    /// run it adds <c>partitions=</c>, <c>rows=</c> (summed over the groups) and <c>spilled=</c>, the
+    /// partition buffers that went to disk.
+    /// </summary>
+    private static string RenderWindows(IReadOnlyList<WindowFunctionCall> windows, WindowStats? stats)
+    {
+        List<(string Key, List<WindowFunctionCall> Calls)> groups = [];
+
+        foreach (WindowFunctionCall window in windows)
+        {
+            string key = string.Join(",", window.PartitionColumns) + "|"
+                + string.Join(",", window.OrderColumns.Select(o => o.ColumnName + (o.Type == OrderType.Descending ? "-" : "+")));
+
+            int index = groups.FindIndex(g => g.Key == key);
+
+            if (index < 0)
+                groups.Add((key, [window]));
+            else
+                groups[index].Calls.Add(window);
+        }
+
+        StringBuilder sb = new("window(");
+
+        for (int g = 0; g < groups.Count; g++)
+        {
+            if (g > 0)
+                sb.Append("; ");
+
+            NodeAst spec = groups[g].Calls[0].Call.rightAst!;
+
+            List<NodeAst> partition = [];
+            if (spec.leftAst is { } partitionAst)
+                ExpressionChains.Flatten(partitionAst, NodeType.ExprList, partition);
+
+            List<NodeAst> order = [];
+            if (spec.rightAst is { } orderAst)
+                ExpressionChains.Flatten(orderAst, NodeType.IdentifierList, order);
+
+            sb.Append("partition=[").Append(string.Join(", ", partition.Select(RenderExpr))).Append("] ");
+            sb.Append("order=[").Append(string.Join(", ", order.Select(RenderWindowOrderItem))).Append("] ");
+            sb.Append("functions=[");
+
+            for (int i = 0; i < groups[g].Calls.Count; i++)
+            {
+                WindowFunctionCall call = groups[g].Calls[i];
+
+                if (i > 0)
+                    sb.Append(", ");
+
+                // RenderExpr prints a call with no argument node as name(*), the count(*) form;
+                // a ranking function takes no argument and prints as name().
+                NodeAst function = call.Call.leftAst!;
+                sb.Append(function.rightAst is null ? $"{function.leftAst?.yytext}()" : RenderExpr(function));
+
+                if (call.UsesFrame)
+                    sb.Append(' ').Append(RenderFrame(call.Frame));
+            }
+
+            sb.Append(']');
+        }
+
+        if (stats is not null)
+            sb.Append($" partitions={stats.Partitions} rows={stats.Rows} spilled={stats.SpilledPartitions}");
+
+        return sb.Append(')').ToString();
+    }
+
+    private static string RenderWindowOrderItem(NodeAst item) => item.nodeType switch
+    {
+        NodeType.SortAsc => RenderExpr(item.leftAst!) + " ASC",
+        NodeType.SortDesc => RenderExpr(item.leftAst!) + " DESC",
+        _ => RenderExpr(item),
+    };
+
+    private static string RenderFrame(WindowFrameSpec frame) =>
+        $"{(frame.IsRange ? "range" : "rows")} between {RenderBound(frame.Start)} and {RenderBound(frame.End)}";
+
+    private static string RenderBound(WindowBound bound) => bound.Kind switch
+    {
+        WindowBoundKind.UnboundedPreceding => "unbounded preceding",
+        WindowBoundKind.Preceding => RenderExpr(bound.Offset!) + " preceding",
+        WindowBoundKind.CurrentRow => "current row",
+        WindowBoundKind.Following => RenderExpr(bound.Offset!) + " following",
+        _ => "unbounded following",
+    };
 
     /// <summary>
     /// A set operation is named for its operator, with how it combines the rows: <c>union(all)</c>

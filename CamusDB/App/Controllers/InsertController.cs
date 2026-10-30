@@ -34,7 +34,7 @@ public sealed class InsertController : CommandsController
         try
         {
             using StreamReader reader = new(Request.Body);
-            string body = await reader.ReadToEndAsync().ConfigureAwait(false);
+            string body = await reader.ReadToEndAsync(HttpContext.RequestAborted).ConfigureAwait(false);
 
             Log.LogRequestBody(logger, body);
 

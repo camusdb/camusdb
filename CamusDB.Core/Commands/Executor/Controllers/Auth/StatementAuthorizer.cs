@@ -575,7 +575,7 @@ internal sealed class StatementAuthorizer
         NodeType.TruncateTable => Privilege.Delete,
         NodeType.AlterTableAddIndex or NodeType.AlterTableAddIndexIfNotExists
             or NodeType.AlterTableAddUniqueIndex or NodeType.AlterTableAddUniqueIndexIfNotExists
-            or NodeType.AlterTableDropIndex => Privilege.Index,
+            or NodeType.AlterTableDropIndex or NodeType.AlterTableDropIndexIfExists => Privilege.Index,
         NodeType.AlterTableAddColumn or NodeType.AlterTableDropColumn or NodeType.AlterTableRenameTo
             or NodeType.AlterTableRenameColumn or NodeType.AlterTableRenameIndex
             or NodeType.AlterTableAddConstraintCheck or NodeType.AlterTableAddConstraintForeignKey or NodeType.AlterTableDropConstraint

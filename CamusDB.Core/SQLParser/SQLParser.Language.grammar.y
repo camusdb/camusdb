@@ -93,6 +93,13 @@
 /* RETURNING is reserved, as it is in PostgreSQL: it ends an INSERT, an UPDATE or a DELETE and starts
    the list of values the statement sends back, so it cannot also be a bare table or column name there. */
 %token TRETURNING
+/* OVER is reserved, as it is in the SQL standard. It cannot be a soft keyword: inside a window
+   specification an expression can be followed by a frame clause that starts with a plain word
+   (ROWS, RANGE), so after `f(x)` one token of lookahead cannot tell a frame from a nested
+   `f(x) OVER (...)`. Every other word a window uses — PARTITION, ROWS, RANGE, GROUPS, PRECEDING,
+   FOLLOWING, UNBOUNDED, CURRENT, ROW, EXCLUDE — is a plain identifier checked in the parse action
+   (WindowAst), so each stays usable as a table or column name. */
+%token TOVER
 /* One unquoted "table@index" pair, produced by a single scanner rule so the '@' never reaches the
    parser as a placeholder. Accepted only in the SHOW ... FROM INDEX productions and split there. */
 %token TQUALIFIED_INDEX
@@ -117,6 +124,7 @@ stat    : select_stmt { $$.n = $1.n; }
         | alter_table_stmt { $$.n = $1.n; }
         | show_stmt { $$.n = $1.n; }
         | create_index_stmt { $$.n = $1.n; }
+        | drop_index_stmt { $$.n = $1.n; }
         | begin_stmt { $$.n = $1.n; }
         | commit_stmt { $$.n = $1.n; }
         | rollback_stmt { $$.n = $1.n; }
@@ -939,6 +947,7 @@ alter_table_stmt : TALTER TTABLE any_identifier TWADD any_identifier field_type 
                  | TALTER TTABLE any_identifier TWADD TUNIQUE TINDEX any_identifier LPAREN identifier_index_list RPAREN index_include_clause { $$.n = new(NodeType.AlterTableAddUniqueIndex, $3.n, $7.n, $9.n, $11.n, null, null, null, null); }
                  | TALTER TTABLE any_identifier TWADD TUNIQUE TINDEX any_identifier TON LPAREN identifier_index_list RPAREN index_include_clause { $$.n = new(NodeType.AlterTableAddUniqueIndex, $3.n, $7.n, $10.n, $12.n, null, null, null, null); }
                  | TALTER TTABLE any_identifier TDROP TINDEX any_identifier { $$.n = new(NodeType.AlterTableDropIndex, $3.n, $6.n, null, null, null, null, null, null); }
+                 | TALTER TTABLE any_identifier TDROP TINDEX TIF TEXISTS any_identifier { $$.n = new(NodeType.AlterTableDropIndexIfExists, $3.n, $8.n, null, null, null, null, null, null); }
                  | TALTER TTABLE any_identifier TWADD TPRIMARY TKEY LPAREN identifier_index_list RPAREN { $$.n = new(NodeType.AlterTableAddPrimaryKey, $3.n, $8.n, null, null, null, null, null, null); }
                  | TALTER TTABLE any_identifier TDROP TPRIMARY TKEY { $$.n = new(NodeType.AlterTableDropPrimaryKey, $3.n, null, null, null, null, null, null, null); }
                  | TALTER TTABLE any_identifier TRENAME TTO any_identifier { $$.n = new(NodeType.AlterTableRenameTo, $3.n, $6.n, null, null, null, null, null, null); }
@@ -1009,6 +1018,16 @@ create_index_stmt : TCREATE TINDEX any_identifier TON any_identifier LPAREN iden
                   | TCREATE TUNIQUE TINDEX any_identifier TON any_identifier LPAREN identifier_index_list RPAREN index_include_clause { $$.n = new(NodeType.AlterTableAddUniqueIndex, $6.n, $4.n, $8.n, $10.n, null, null, null, null); }
                   | TCREATE TUNIQUE TINDEX TIF TNOT TEXISTS any_identifier TON any_identifier LPAREN identifier_index_list RPAREN index_include_clause { $$.n = new(NodeType.AlterTableAddUniqueIndexIfNotExists, $9.n, $7.n, $11.n, $13.n, null, null, null, null); }
                   ;
+
+/* DROP INDEX [IF EXISTS] <index> ON <table>, and DROP INDEX [IF EXISTS] <table>.<index>. Both build
+   the AST of ALTER TABLE <table> DROP INDEX [IF EXISTS] <index>, so all three forms share one path.
+   Index names are unique per table, not per database, so the bare DROP INDEX <index> has nothing to
+   resolve against: the qualified rule reaches DropIndexQualified, which refuses it. */
+drop_index_stmt : TDROP TINDEX any_identifier TON any_identifier { $$.n = new(NodeType.AlterTableDropIndex, $5.n, $3.n, null, null, null, null, null, null); }
+                | TDROP TINDEX TIF TEXISTS any_identifier TON any_identifier { $$.n = new(NodeType.AlterTableDropIndexIfExists, $7.n, $5.n, null, null, null, null, null, null); }
+                | TDROP TINDEX any_identifier { $$.n = DropIndexQualified(NodeType.AlterTableDropIndex, $3.n.yytext); }
+                | TDROP TINDEX TIF TEXISTS any_identifier { $$.n = DropIndexQualified(NodeType.AlterTableDropIndexIfExists, $5.n.yytext); }
+                ;
 
 index_include_clause : { $$.n = null; }
                      | TINCLUDE LPAREN identifier_index_list RPAREN { $$.n = $3.n; }
@@ -1859,6 +1878,7 @@ expr       : equals_expr { $$.n = $1.n; }
            | simple_expr { $$.n = $1.n; }
            | group_paren_expr { $$.n = $1.n; }
            | fcall_expr { $$.n = $1.n; }
+           | window_call_expr { $$.n = $1.n; }
            | cast_expr { $$.n = $1.n; }
            | extract_expr { $$.n = $1.n; }
            | position_expr { $$.n = $1.n; }
@@ -2086,6 +2106,55 @@ fcall_expr : identifier LPAREN RPAREN { $$.n = new(NodeType.ExprFuncCall, $1.n, 
            | qualified_identifier LPAREN fcall_argument_list RPAREN { $$.n = new(NodeType.ExprFuncCall, $1.n, $3.n, null, null, null, null, null, null); }
            | identifier query_expr { $$.n = new(NodeType.ExprFuncCall, $1.n, new NodeAst(NodeType.ExprScalarSubquery, $2.n, null, null, null, null, null, null, null), null, null, null, null, null, null); }
            ;
+
+/* A window function call: fn(args) OVER (PARTITION BY … ORDER BY … frame). Only `expr` admits it,
+   not the narrower operand rules (between_bound, position_operand, default_expr), so a window call in
+   a BETWEEN bound or a column DEFAULT is a syntax error. WindowAst checks every plain word and
+   refuses the frame forms CamusDB does not run with a named InvalidInput error. `OVER name` names a
+   window from a WINDOW clause, which is not supported; it is parsed only to refuse it by name. */
+window_call_expr : fcall_expr TOVER LPAREN RPAREN { $$.n = WindowAst.Call($1.n, null); }
+                 | fcall_expr TOVER LPAREN window_spec RPAREN { $$.n = WindowAst.Call($1.n, $4.n); }
+                 | fcall_expr TOVER identifier { $$.n = WindowAst.RefuseNamedWindow($3.n); }
+                 ;
+
+/* Each clause is optional, but the alternatives list the combinations instead of using empty rules:
+   PARTITION BY and a frame both start with a plain word, so an empty partition rule would have to be
+   reduced before the parser can see which of the two it is reading. */
+window_spec : window_partition { $$.n = WindowAst.Spec($1.n, null, null); }
+            | window_partition window_order { $$.n = WindowAst.Spec($1.n, $2.n, null); }
+            | window_partition window_order window_frame { $$.n = WindowAst.Spec($1.n, $2.n, $3.n); }
+            | window_partition window_frame { $$.n = WindowAst.Spec($1.n, null, $2.n); }
+            | window_order { $$.n = WindowAst.Spec(null, $1.n, null); }
+            | window_order window_frame { $$.n = WindowAst.Spec(null, $1.n, $2.n); }
+            | window_frame { $$.n = WindowAst.Spec(null, null, $1.n); }
+            ;
+
+window_partition : TIDENTIFIER TBY window_partition_list { $$.n = WindowAst.Partition($1.s, $3.n); }
+                 ;
+
+window_partition_list : window_partition_list TCOMMA expr { $$.n = new(NodeType.ExprList, $1.n, $3.n, null, null, null, null, null, null); }
+                      | expr { $$.n = $1.n; }
+                      ;
+
+window_order : TORDER TBY order_list { $$.n = $3.n; }
+             ;
+
+/* ROWS|RANGE|GROUPS <bound> or ROWS|RANGE|GROUPS BETWEEN <bound> AND <bound>, then an optional
+   EXCLUDE clause. GROUPS and EXCLUDE are parsed so that WindowAst can refuse them by name. The
+   EXCLUDE rule reads two words only: its action throws, so EXCLUDE NO OTHERS is refused before the
+   third word is read, and a three-word alternative would only add a shift/reduce conflict. */
+window_frame : TIDENTIFIER window_frame_bound { $$.n = WindowAst.Frame($1.s, $2.n, null); }
+             | TIDENTIFIER TBETWEEN window_frame_bound TAND window_frame_bound { $$.n = WindowAst.Frame($1.s, $3.n, $5.n); }
+             | window_frame TIDENTIFIER TIDENTIFIER { $$.n = WindowAst.RefuseExclude($2.s); }
+             | window_frame TIDENTIFIER TGROUP { $$.n = WindowAst.RefuseExclude($2.s); }
+             ;
+
+window_frame_bound : TIDENTIFIER TIDENTIFIER { $$.n = WindowAst.Bound($1.s, $2.s); }
+                   | int TIDENTIFIER { $$.n = WindowAst.OffsetBound($1.n, $2.s); }
+                   | placeholder TIDENTIFIER { $$.n = WindowAst.OffsetBound($1.n, $2.s); }
+                   | float TIDENTIFIER { $$.n = WindowAst.OffsetBound($1.n, $2.s); }
+                   | string TIDENTIFIER { $$.n = WindowAst.OffsetBound($1.n, $2.s); }
+                   ;
 
 /* EXTRACT(field FROM x) and EXTRACT('field' FROM x). EXTRACT is matched as a plain identifier, not a
    keyword, so a table or column named extract keeps working; the FROM inside the parentheses is what

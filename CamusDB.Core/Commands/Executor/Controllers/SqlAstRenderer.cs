@@ -70,7 +70,7 @@ internal class SqlAstRenderer
         NodeType.Null or NodeType.String or NodeType.ObjectIdLiteral or
         NodeType.ExprFuncCall or NodeType.ExprCast or NodeType.ExprCase or
         NodeType.ArrayLiteral or NodeType.ExprSubscript or
-        NodeType.Placeholder;
+        NodeType.Placeholder or NodeType.ExprWindowCall;
 
     /// <summary>Renders <paramref name="e"/> as an operand, wrapping compound expressions in parens.</summary>
     protected void RenderOperand(StringBuilder sb, NodeAst e)
@@ -254,6 +254,14 @@ internal class SqlAstRenderer
                 sb.Append(')');
                 return;
 
+            // ── Window call: fn(args) OVER (PARTITION BY … ORDER BY … frame) ────
+            case NodeType.ExprWindowCall:
+                RenderNode(sb, expr.leftAst!);
+                sb.Append(" OVER (");
+                RenderWindowSpec(sb, expr.rightAst);
+                sb.Append(')');
+                return;
+
             // ── CAST ────────────────────────────────────────────────────────────
             case NodeType.ExprCast:
                 sb.Append("CAST(");
@@ -375,4 +383,93 @@ internal class SqlAstRenderer
         NodeType.TypeNumeric   => "numeric",
         _ => throw Unsupported(typeNode),
     };
+
+    /// <summary>
+    /// Renders the inside of <c>OVER (…)</c>. A frame always prints in the <c>BETWEEN … AND …</c> form
+    /// when it has an end, and in the one-bound form otherwise, so the text re-parses to the same node.
+    /// </summary>
+    private void RenderWindowSpec(StringBuilder sb, NodeAst? spec)
+    {
+        if (spec is null)
+            return;
+
+        bool needsSpace = false;
+
+        if (spec.leftAst is { } partition)
+        {
+            List<NodeAst> expressions = [];
+            ExpressionChains.Flatten(partition, NodeType.ExprList, expressions);
+
+            sb.Append("PARTITION BY ");
+            for (int i = 0; i < expressions.Count; i++)
+            {
+                if (i > 0)
+                    sb.Append(", ");
+                RenderNode(sb, expressions[i]);
+            }
+
+            needsSpace = true;
+        }
+
+        if (spec.rightAst is { } order)
+        {
+            List<NodeAst> items = [];
+            ExpressionChains.Flatten(order, NodeType.IdentifierList, items);
+
+            if (needsSpace)
+                sb.Append(' ');
+
+            sb.Append("ORDER BY ");
+            for (int i = 0; i < items.Count; i++)
+            {
+                if (i > 0)
+                    sb.Append(", ");
+
+                NodeAst item = items[i];
+
+                if (item.nodeType is NodeType.SortAsc or NodeType.SortDesc)
+                {
+                    RenderNode(sb, item.leftAst!);
+                    sb.Append(item.nodeType == NodeType.SortAsc ? " ASC" : " DESC");
+                }
+                else
+                {
+                    RenderNode(sb, item);
+                }
+            }
+
+            needsSpace = true;
+        }
+
+        if (spec.extendedOne is { } frame)
+        {
+            if (needsSpace)
+                sb.Append(' ');
+
+            sb.Append(frame.yytext == WindowAst.Range ? "RANGE " : "ROWS ");
+
+            if (frame.rightAst is { } end)
+            {
+                sb.Append("BETWEEN ");
+                RenderFrameBound(sb, frame.leftAst!);
+                sb.Append(" AND ");
+                RenderFrameBound(sb, end);
+            }
+            else
+            {
+                RenderFrameBound(sb, frame.leftAst!);
+            }
+        }
+    }
+
+    private void RenderFrameBound(StringBuilder sb, NodeAst bound)
+    {
+        if (bound.leftAst is { } offset)
+        {
+            RenderNode(sb, offset);
+            sb.Append(' ');
+        }
+
+        sb.Append(bound.yytext!.ToUpperInvariant());
+    }
 }

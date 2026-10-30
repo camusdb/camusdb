@@ -1074,6 +1074,13 @@ internal abstract class SQLExecutorBaseCreator
     /// </summary>
     private static CamusDBException UnevaluableExpression(NodeType nodeType) => nodeType switch
     {
+        // A window call is replaced by its result column when a SELECT is created. One that reaches a
+        // per-row evaluator sits where SQL allows none: UPDATE SET, INSERT VALUES, a CHECK, an index
+        // expression. That is the caller's error, not the engine's.
+        NodeType.ExprWindowCall => new CamusDBException(
+            CamusDBErrorCodes.InvalidInput,
+            "Window functions are only allowed in the select list and ORDER BY of a query"),
+
         NodeType.ExprScalarSubquery => new CamusDBException(
             CamusDBErrorCodes.InvalidInternalOperation,
             "Scalar subquery must be resolved before expression evaluation"),

@@ -28,6 +28,13 @@ public sealed class DerivedTableScanNode : PhysicalPlanNode
     internal Controllers.Queries.SetOperationStats? SetOperationStats { get; set; }
 
     /// <summary>
+    /// The window operator's counters when the derived table is a windowed SELECT's and EXPLAIN
+    /// (ANALYZE) collects runtime statistics; null otherwise. The explain path sets it before the plan
+    /// runs, and the render after the run prints it.
+    /// </summary>
+    internal Controllers.Queries.WindowStats? WindowStats { get; set; }
+
+    /// <summary>
     /// The operand plans of a set operation, left then right, when EXPLAIN built them; null otherwise.
     /// See <see cref="SetOperationOperandNode"/>.
     /// </summary>

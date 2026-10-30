@@ -215,6 +215,11 @@ internal sealed class QueryBinder
                 IReadOnlyList<DerivedColumnSchema> columns =
                     DerivedTableSchemaBuilder.Build(derivedSource.Query, innerBound);
 
+                // A windowed SELECT's derived table also holds one result column per window call,
+                // which the window operator adds to each row after the inner query ran.
+                if (derivedSource.Windows is { } windows)
+                    columns = WindowResultSchema.Build(columns, windows);
+
                 derivedSources.Add(new BoundDerivedTableSource(
                     derivedSource,
                     derivedSource.Alias,

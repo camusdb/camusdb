@@ -18,6 +18,7 @@ Query planning and pipeline execution for `SELECT` statements.
 | `ProjectionPushdownPlanner` | Computes `RequiredColumns` for each plan node so scans fetch only needed columns |
 | `RequiredColumnAnalyzer` | Walks an expression AST to collect the set of column names it references |
 | `CommaJoinNormalizer` | Rewrites comma-separated `FROM` lists into explicit `INNER JOIN` syntax |
+| `WindowQueryRewriter` | Turns a SELECT with window calls into an ordinary query over a derived table that carries the windows (`docs/window-functions.md`) |
 | `BoundSourceCatalog` | Resolves column references when multiple sources are in scope |
 
 ## Execution pipeline
@@ -35,6 +36,7 @@ Query planning and pipeline execution for `SELECT` statements.
 | `QueryDistincter` | Deduplicates rows for `SELECT DISTINCT` |
 | `QueryJoinExecutor` | Executes nested-loop and index nested-loop joins |
 | `QueryPostScanPipeline` | Chains the post-scan pipeline stages (filter → project → sort → limit → aggregate) |
+| `WindowOperator` | Computes the window calls of a windowed SELECT's derived table, one sort per `(PARTITION BY, ORDER BY)` and one partition at a time |
 | `CorrelatedRowMerger` | Merges correlated outer rows with inner rows for joined results |
 | `QueryRowMerger` | Merges two row dictionaries from different table sources |
 
@@ -60,6 +62,7 @@ Query planning and pipeline execution for `SELECT` statements.
 |------|------|
 | `DerivedTableExecutor` | Executes a subquery used as a table source (`FROM (SELECT ...) AS alias`) |
 | `DerivedTableSchemaBuilder` | Infers the output schema of a derived table |
+| `WindowResultSchema` | Adds the hidden window result columns, with their types, to a windowed SELECT's derived table |
 
 ## Helpers
 

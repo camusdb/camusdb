@@ -26,6 +26,15 @@ public sealed class QueryController : CommandsController
 
     }
 
+    /// <summary>The column values of each collected row, in order, for the <see cref="QueryResponse"/> shape.</summary>
+    private static List<IReadOnlyDictionary<string, ColumnValue>> RowsOf(List<QueryResultRow> collected)
+    {
+        List<IReadOnlyDictionary<string, ColumnValue>> rows = new(collected.Count);
+        foreach (QueryResultRow row in collected)
+            rows.Add(row.Row);
+        return rows;
+    }
+
     [HttpPost]
     [Route("/query")]
     public async Task<JsonResult> Query()
@@ -62,10 +71,8 @@ public sealed class QueryController : CommandsController
                         parameters: null,
                         cancellationToken: requestAborted
                     );
-                    List<IReadOnlyDictionary<string, ColumnValue>> rows = new();
                     (DatabaseDescriptor database, IAsyncEnumerable<QueryResultRow> cursor) = await executor.Query(ticket).ConfigureAwait(false);
-                    await foreach (QueryResultRow row in cursor)
-                        rows.Add(row.Row);
+                    List<IReadOnlyDictionary<string, ColumnValue>> rows = RowsOf(await BufferedResultCollector.CollectAsync(cursor, options).ConfigureAwait(false));
                     return new JsonResult(new QueryResponse("ok", rows.Count, rows));
                 }
                 catch (Exception)
@@ -100,10 +107,8 @@ public sealed class QueryController : CommandsController
                         parameters: null,
                         cancellationToken: requestAborted
                     );
-                    List<IReadOnlyDictionary<string, ColumnValue>> rows = [];
                     (DatabaseDescriptor db, IAsyncEnumerable<QueryResultRow> cursor) = await executor.Query(ticket).ConfigureAwait(false);
-                    await foreach (QueryResultRow row in cursor)
-                        rows.Add(row.Row);
+                    List<IReadOnlyDictionary<string, ColumnValue>> rows = RowsOf(await BufferedResultCollector.CollectAsync(cursor, options).ConfigureAwait(false));
                     causalToken = await transactions.CommitAsync(db, tx, ct).ConfigureAwait(false);
                     resultRows = rows;
                 }
@@ -141,9 +146,9 @@ public sealed class QueryController : CommandsController
     {
         try
         {
-            QueryByIdRequest? request = await JsonSerializer.DeserializeAsync<QueryByIdRequest>(Request.Body, jsonOptions).ConfigureAwait(false);
+            QueryByIdRequest? request = await JsonSerializer.DeserializeAsync<QueryByIdRequest>(Request.Body, jsonOptions, HttpContext.RequestAborted).ConfigureAwait(false);
             if (request == null)
-                throw new Exception("QueryById request is not valid");
+                throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "QueryById request is not valid");
 
             (bool _, KvTransaction txnState) = await BeginOrResumeAsync(
                 request.DatabaseName,
@@ -170,13 +175,13 @@ public sealed class QueryController : CommandsController
         {
             LogCommandFailure(e);
 
-            return new JsonResult(new QueryResponse("failed", e.Code, e.Message));
+            return new JsonResult(new QueryResponse("failed", e.Code, e.Message)) { StatusCode = CamusDBErrorCodes.GetHttpStatus(e.Code) };
         }
         catch (Exception e)
         {
             logger.LogError("{Name}: {Message}\n{StackTrace}", e.GetType().Name, e.Message, e.StackTrace);
 
-            return new JsonResult(new QueryResponse("failed", UnclassifiedErrorCode, LogUnclassifiedFailure(e)));
+            return new JsonResult(new QueryResponse("failed", UnclassifiedErrorCode, LogUnclassifiedFailure(e))) { StatusCode = 500 };
         }
     }
 }

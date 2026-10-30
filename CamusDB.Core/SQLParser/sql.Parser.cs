@@ -343,6 +343,38 @@ internal partial class sqlParser
     }
 
     /// <summary>
+    /// Builds the AST of <c>DROP INDEX [IF EXISTS] &lt;table&gt;.&lt;index&gt;</c>: the same shape as
+    /// <c>ALTER TABLE &lt;table&gt; DROP INDEX &lt;index&gt;</c> (<c>leftAst</c> = table, <c>rightAst</c> =
+    /// index). The grammar's qualified identifier joins its parts with a dot, so the split happens here.
+    /// A bare name is refused: index names are unique per table only, and there is no per-database
+    /// index registry to resolve one against. A name with two dots is refused as well.
+    /// </summary>
+    /// <remarks>
+    /// The split is on the joined text, so a quoted table name that contains a dot cannot use this form;
+    /// <c>DROP INDEX &lt;index&gt; ON &lt;table&gt;</c> covers it. <c>COMMENT ON INDEX</c> has the same limit.
+    /// </remarks>
+    private static NodeAst DropIndexQualified(NodeType nodeType, string? qualifiedName)
+    {
+        string name = qualifiedName ?? "";
+        int dot = name.IndexOf('.');
+
+        if (dot <= 0 || dot == name.Length - 1 || name.IndexOf('.', dot + 1) >= 0)
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInput,
+                $"DROP INDEX requires a table: use DROP INDEX <index> ON <table> or DROP INDEX <table>.<index>, got '{name}'");
+
+        NodeAst table = new(
+            NodeType.Identifier, null, null, null, null, null, null, null,
+            name[..dot]);
+
+        NodeAst index = new(
+            NodeType.Identifier, null, null, null, null, null, null, null,
+            name[(dot + 1)..]);
+
+        return new NodeAst(nodeType, table, index, null, null, null, null, null, null);
+    }
+
+    /// <summary>
     /// Splits the single <c>table@index</c> token the scanner produced into the relation name and
     /// the index name. The scanner matches the pair as one token so the '@' is never seen as a bind
     /// placeholder; the split belongs here because the token's text is the only place both halves

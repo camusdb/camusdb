@@ -70,6 +70,9 @@ internal sealed class QueryProjector
         string[]? starRowKeys = null;
         RowLayout? starKeysLayout = null;
 
+        // Over a windowed SELECT's derived table, a * must not expand to the hidden window columns.
+        bool skipHidden = QueryPostScanPipeline.IsWindowedSource(ticket);
+
         await foreach (QueryResultRow resultRow in dataCursor)
         {
             RowLayout? inputLayout = (resultRow.Row as QueryRow)?.Layout;
@@ -89,7 +92,12 @@ internal sealed class QueryProjector
                 if (ast.nodeType == NodeType.ExprAllFields)
                 {
                     foreach (KeyValuePair<string, ColumnValue> keyValue in resultRow.Row)
+                    {
+                        if (skipHidden && WindowQueryRewriter.IsHiddenColumn(keyValue.Key))
+                            continue;
+
                         projected[keyValue.Key] = keyValue.Value;
+                    }
 
                     continue;
                 }

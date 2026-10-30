@@ -242,8 +242,16 @@ public sealed class CommandExecutor : IAsyncDisposable
     /// this, an inline request pays a full, uncached lex+parse per request just to read the root
     /// node type, and then the executor parses the same text again (cached) during execution.
     /// The returned AST is the same cached, immutable, share-safe instance execution will use.
+    ///
+    /// <para>Text longer than <see cref="CamusDBOptions.MaxStatementBytes"/> is refused before the
+    /// parse (<see cref="StatementSizeGuard"/>): transports call this on raw request text, before any
+    /// ticket validation runs.</para>
     /// </summary>
-    public NodeAst ParseSql(string sql) => SQLParserProcessor.Parse(sql, sqlParserCache);
+    public NodeAst ParseSql(string sql)
+    {
+        StatementSizeGuard.Check(sql, options.MaxStatementBytes);
+        return SQLParserProcessor.Parse(sql, sqlParserCache);
+    }
 
     /// <summary>
     /// The running statements and client connections of this node. The host feeds the connection

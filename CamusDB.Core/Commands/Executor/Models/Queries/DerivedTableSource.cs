@@ -51,4 +51,19 @@ public sealed record DerivedTableSource(
     /// <see cref="SetOperationSource"/>).
     /// </summary>
     public SetOperationSource? SetOperation => Query.Source as SetOperationSource;
+
+    /// <summary>
+    /// The window calls of the windowed SELECT this derived table stands for, or null for any other
+    /// derived table. <c>WindowQueryRewriter</c> sets it: <see cref="Query"/> is then the inner query
+    /// that computes every window input, and <c>DerivedTableExecutor</c> runs the window operator over
+    /// its rows, which adds one <see cref="WindowFunctionCall.ResultColumn"/> per call. The alias is
+    /// <see cref="WindowDerivedAlias"/>, which no query can name.
+    /// </summary>
+    public IReadOnlyList<WindowFunctionCall>? Windows { get; init; }
+
+    /// <summary>
+    /// The alias of the derived table that holds a windowed SELECT. The asterisks keep it apart from
+    /// any identifier a user can write without quotes, as for <see cref="SetOperationSource.DerivedAlias"/>.
+    /// </summary>
+    public const string WindowDerivedAlias = "*window*";
 }

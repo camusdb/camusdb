@@ -1129,4 +1129,52 @@ public enum NodeType
     /// stays an <see cref="Explain"/>: it takes no lock.
     /// </summary>
     ExplainAnalyzeForUpdate,
+
+    /// <summary>
+    /// A window function call, <c>fn(args) OVER (…)</c>. <c>leftAst</c> is the
+    /// <see cref="ExprFuncCall"/> node, so the function name is looked up the same way as for a plain
+    /// call; <c>rightAst</c> is the <see cref="WindowSpec"/>, never null (an empty one for
+    /// <c>OVER ()</c>).
+    ///
+    /// <para>The node lives only between the parser and the query creator: <c>WindowQueryRewriter</c>
+    /// replaces every one in a SELECT list and ORDER BY with a reference to the cell the window
+    /// operator fills, so no operator below the creator evaluates it. Reaching a per-row evaluator
+    /// means the call sits somewhere a window is not allowed, and that evaluator refuses it.</para>
+    ///
+    /// <para>Appended at the end of the enum, because the AST wire codec sends a node type by its
+    /// ordinal.</para>
+    /// </summary>
+    ExprWindowCall,
+
+    /// <summary>
+    /// The specification inside <c>OVER (…)</c>. <c>leftAst</c> is the PARTITION BY list (one
+    /// expression or an <see cref="ExprList"/> chain), <c>rightAst</c> the ORDER BY list (the same
+    /// shape as a SELECT's ORDER BY: <see cref="IdentifierList"/> of items, each an expression or a
+    /// <see cref="SortAsc"/> / <see cref="SortDesc"/>), and <c>extendedOne</c> the
+    /// <see cref="WindowFrame"/>. Each slot is null when its clause is absent.
+    /// </summary>
+    WindowSpec,
+
+    /// <summary>
+    /// The frame clause of a window. <c>yytext</c> is the unit, <c>"rows"</c> or <c>"range"</c>;
+    /// <c>leftAst</c> is the start <see cref="WindowFrameBound"/> and <c>rightAst</c> the end bound,
+    /// or null for the one-bound form, whose end is the current row.
+    /// </summary>
+    WindowFrame,
+
+    /// <summary>
+    /// One bound of a <see cref="WindowFrame"/>. <c>yytext</c> is one of <c>"unbounded preceding"</c>,
+    /// <c>"preceding"</c>, <c>"current row"</c>, <c>"following"</c> and <c>"unbounded following"</c>;
+    /// <c>leftAst</c> is the offset (an integer literal or a placeholder) of the two offset forms.
+    /// </summary>
+    WindowFrameBound,
+
+    /// <summary>
+    /// <c>DROP INDEX IF EXISTS</c> in any of its three forms (<c>… ON t</c>, <c>t.i</c>,
+    /// <c>ALTER TABLE t DROP INDEX IF EXISTS i</c>). Same shape as <see cref="AlterTableDropIndex"/>:
+    /// <c>leftAst</c> = table, <c>rightAst</c> = index. A missing index or table is a no-op.
+    ///
+    /// <para>Appended at the end for the reason given on <see cref="TypeBytesSized"/>.</para>
+    /// </summary>
+    AlterTableDropIndexIfExists,
 }

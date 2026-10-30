@@ -31,7 +31,7 @@ public sealed class DropDatabaseController : CommandsController
         try
         {
             using StreamReader reader = new(Request.Body);
-            string body = await reader.ReadToEndAsync();
+            string body = await reader.ReadToEndAsync(HttpContext.RequestAborted);
 
             DropDatabaseRequest? request = JsonSerializer.Deserialize<DropDatabaseRequest>(body, jsonOptions);
             if (request == null)

@@ -127,6 +127,11 @@ A member that does not answer within `cluster_activity_peer_timeout_ms` does not
 statement. It gives one row with its `node` and the `error` column set, and every other column NULL.
 A list that failed because one node is down would fail exactly when you need it.
 
+One cluster statement makes one request to every peer. To stop a flood of them from multiplying
+internal traffic by the cluster size, a node runs at most `cluster_activity_max_concurrent_fan_outs`
+cluster statements at one time. A statement past that cap fails with **CADB0558**
+(`ConcurrencyLimitExceeded`, HTTP 503). It is safe to retry. The local forms are never refused.
+
 On a standalone node, the cluster forms return the same rows as the local forms.
 
 ## Settings
@@ -135,6 +140,7 @@ On a standalone node, the cluster forms return the same rows as the local forms.
 query_activity_enabled: true
 query_activity_max_sql_length: 1024
 cluster_activity_peer_timeout_ms: 2000
+cluster_activity_max_concurrent_fan_outs: 8
 ```
 
 | Setting | Default | What it does |
@@ -142,8 +148,9 @@ cluster_activity_peer_timeout_ms: 2000
 | `query_activity_enabled` | `true` | Lists running statements. Off: no statement is listed, and none can be cancelled with `CANCEL QUERY`. |
 | `query_activity_max_sql_length` | `1024` | Characters of statement text shown per row. |
 | `cluster_activity_peer_timeout_ms` | `2000` | How long the cluster forms and a forwarded cancel wait for one peer. |
+| `cluster_activity_max_concurrent_fan_outs` | `8` | Most cluster forms that one node runs at one time. `0` disables the cap. |
 
-All three are runtime settings: `SET CLUSTER SETTING` changes them without a restart, and a change
+All four are runtime settings: `SET CLUSTER SETTING` changes them without a restart, and a change
 affects the next statement. Turning `query_activity_enabled` off does not remove statements that
 are already listed; they leave when they end. `SHOW CONNECTIONS` works with the setting off, and a
 connection still records the user of each statement on it.

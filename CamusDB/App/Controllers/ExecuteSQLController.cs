@@ -245,9 +245,7 @@ public sealed class ExecuteSQLController : CommandsController
                         discardReturningRows: request.DiscardReturningRows
                 );
                 (_, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(ticket, schemaOut: schemaHolder).ConfigureAwait(false);
-                List<QueryResultRow> rows = [];
-                await foreach (QueryResultRow row in cursor)
-                    rows.Add(row);
+                List<QueryResultRow> rows = await BufferedResultCollector.CollectAsync(cursor, options).ConfigureAwait(false);
                 PositionalRowSet rowSet = new(rows, schemaHolder.Schema);
                 return new JsonResult(new ExecuteSQLQueryResponse("ok", rowSet.Count, ColumnSchemaDto.FromSchema(schemaHolder.Schema, rows), rowSet) { ServerTimeMs = stopwatch.Elapsed.TotalMilliseconds });
             }
@@ -273,10 +271,8 @@ public sealed class ExecuteSQLController : CommandsController
                         routing: txnCollector,
                         discardReturningRows: request.DiscardReturningRows
                     );
-                    List<QueryResultRow> rows = [];
                     (DatabaseDescriptor database, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(ticket, schemaOut: schemaHolder).ConfigureAwait(false);
-                    await foreach (QueryResultRow row in cursor)
-                        rows.Add(row);
+                    List<QueryResultRow> rows = await BufferedResultCollector.CollectAsync(cursor, options).ConfigureAwait(false);
                     PositionalRowSet rowSet = new(rows, schemaHolder.Schema);
                     ExecuteSQLQueryResponse txnResponse = new("ok", rowSet.Count, ColumnSchemaDto.FromSchema(schemaHolder.Schema, rows), rowSet) { ServerTimeMs = stopwatch.Elapsed.TotalMilliseconds };
                     txnResponse.Routing = ResolveRoutingDto(database, txnCollector);
@@ -326,11 +322,10 @@ public sealed class ExecuteSQLController : CommandsController
                     );
                     // Fully buffer the decoded, transaction-independent rows, THEN commit — so a
                     // serializable retry can restart cleanly (no bytes are written until the
-                    // response is serialized after this handler returns, well after commit).
-                    List<QueryResultRow> rows = [];
+                    // response is serialized after this handler returns, well after commit). The
+                    // collector refuses a result too large to hold, before the commit.
                     (DatabaseDescriptor? db, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(ticket, cacheMeta, schemaHolder).ConfigureAwait(false);
-                    await foreach (QueryResultRow row in cursor)
-                        rows.Add(row);
+                    List<QueryResultRow> rows = await BufferedResultCollector.CollectAsync(cursor, options).ConfigureAwait(false);
                     causalToken = await transactions.CommitOrReleaseAsync(db, tx, ct).ConfigureAwait(false);
                     resultRows = rows;
                     resultColumns = ColumnSchemaDto.FromSchema(schemaHolder.Schema, rows);
@@ -619,11 +614,9 @@ public sealed class ExecuteSQLController : CommandsController
                     discardReturningRows: request.DiscardReturningRows
                 );
 
-                List<QueryResultRow> attemptRows = [];
                 (DatabaseDescriptor? db, IAsyncEnumerable<QueryResultRow> cursor) =
                     await executor.ExecuteSQLQuery(ticket, schemaOut: schemaHolder).ConfigureAwait(false);
-                await foreach (QueryResultRow row in cursor)
-                    attemptRows.Add(row);
+                List<QueryResultRow> attemptRows = await BufferedResultCollector.CollectAsync(cursor, options).ConfigureAwait(false);
 
                 causalToken = await transactions.CommitOrReleaseAsync(db, tx, ct).ConfigureAwait(false);
                 schema = schemaHolder.Schema;
@@ -744,7 +737,7 @@ public sealed class ExecuteSQLController : CommandsController
 
         try
         {
-            ExecuteSQLRequest? request = await JsonSerializer.DeserializeAsync<ExecuteSQLRequest>(Request.Body, jsonOptions).ConfigureAwait(false);
+            ExecuteSQLRequest? request = await JsonSerializer.DeserializeAsync<ExecuteSQLRequest>(Request.Body, jsonOptions, HttpContext.RequestAborted).ConfigureAwait(false);
             if (request == null)
                 throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "ExecuteNonSQLQuery request is not valid");
 
@@ -884,7 +877,7 @@ public sealed class ExecuteSQLController : CommandsController
         try
         {
             using StreamReader reader = new(Request.Body);
-            string body = await reader.ReadToEndAsync().ConfigureAwait(false);
+            string body = await reader.ReadToEndAsync(HttpContext.RequestAborted).ConfigureAwait(false);
 
             ExecuteSQLRequest? request = JsonSerializer.Deserialize<ExecuteSQLRequest>(body, jsonOptions);
 
@@ -906,7 +899,7 @@ public sealed class ExecuteSQLController : CommandsController
             try
             {
                 string sql = request.Sql ?? "";
-                NodeAst ast = SQLParserProcessor.Parse(sql);
+                NodeAst ast = executor.ParseSql(sql);
 
                 // Database-scoped statements need neither a context database nor a transaction:
                 // CommandExecutor handles them before databaseOpener.Open and returns no descriptor,

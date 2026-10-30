@@ -31,7 +31,7 @@ public sealed class CloseDatabaseController : CommandsController
         try
         {
             using StreamReader reader = new(Request.Body);
-            string body = await reader.ReadToEndAsync();
+            string body = await reader.ReadToEndAsync(HttpContext.RequestAborted);
 
             CloseDatabaseRequest? request = JsonSerializer.Deserialize<CloseDatabaseRequest>(body, jsonOptions);
             if (request == null)

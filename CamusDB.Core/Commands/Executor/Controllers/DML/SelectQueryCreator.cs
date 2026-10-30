@@ -51,7 +51,10 @@ internal sealed class SelectQueryCreator
         BoundPredicate? having = CreateHaving(ast.extendedSix);
         CacheHintOptions? cacheHint = ExtractQueryCacheHint(source);
 
-        return new SelectQuery(
+        // A window call in the select list or ORDER BY turns the query into an ordinary query over a
+        // derived table that runs the windows (see WindowQueryRewriter). Last, so the rewrite sees the
+        // ordinals and GROUP BY positions already resolved against the select list as written.
+        return WindowQueryRewriter.Rewrite(new SelectQuery(
             Source: source,
             Projections: projections,
             Where: where,
@@ -61,7 +64,7 @@ internal sealed class SelectQueryCreator
             Limit: ast.extendedThree,
             Offset: ast.extendedFour,
             IsDistinct: ast.yytext is not null,
-            CacheHint: cacheHint);
+            CacheHint: cacheHint));
     }
 
     private (QuerySource Source, BoundPredicate? Where) CreateFromClause(NodeAst fromAst, NodeAst? whereAst)

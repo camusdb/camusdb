@@ -120,7 +120,9 @@ public sealed class HttpSchemaDdlForwarder : ISchemaDdlForwarder, ISchemaAckSend
             Columns = ticket.Columns.Select(c => new ColumnIndexInfoRequest { Name = c.Name, Order = c.Order }).ToArray(),
             Operation = ticket.Operation,
             IfNotExists = ticket.IfNotExists,
+            IfExists = ticket.IfExists,
             NewName = ticket.NewName,
+            IncludeColumns = ticket.IncludeColumns,
         };
 
         return await PostAsync(leader, "alter-index", request, cancellationToken).ConfigureAwait(false);

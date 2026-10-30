@@ -1373,7 +1373,7 @@ internal sealed class QueryAggregator
     /// partial total may legitimately pass the NUMERIC range (or even 128 bits) before the final
     /// result comes back inside it. A mutable struct: call it in place.
     /// </summary>
-    private struct ExactTotal
+    internal struct ExactTotal
     {
         private Int128 narrow;
         private BigInteger? wide;
@@ -1408,6 +1408,16 @@ internal sealed class QueryAggregator
 
         public readonly double ToDouble() =>
             wide is { } big ? (double)big / NumericMath.ScaleFactor : NumericMath.ToDouble(narrow);
+
+        /// <summary>The total as a double, with no scale applied: the value of an exact Integer64 total.</summary>
+        public readonly double ToUnscaledDouble() => wide is { } big ? (double)big : (double)narrow;
+
+        /// <summary>
+        /// The low 64 bits of the total. For a total of Integer64 values this is the Integer64 SUM
+        /// result, which wraps on overflow exactly as a running <see langword="long"/> sum does.
+        /// </summary>
+        public readonly long ToWrappedInt64() =>
+            wide is { } big ? unchecked((long)(ulong)(big & ulong.MaxValue)) : unchecked((long)narrow);
 
         /// <summary>The total as an in-range unscaled NUMERIC; anything else is a NUMERIC overflow.</summary>
         public readonly Int128 ToNumeric(string operation)

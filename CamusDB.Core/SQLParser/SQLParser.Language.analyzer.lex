@@ -208,6 +208,7 @@ TGrant          (G|g)(R|r)(A|a)(N|n)(T|t)
 TRevoke         (R|r)(E|e)(V|v)(O|o)(K|k)(E|e)
 TPrivileges     (P|p)(R|r)(I|i)(V|v)(I|i)(L|l)(E|e)(G|g)(E|e)(S|s)
 TFor            (F|f)(O|o)(R|r)
+TOver           (O|o)(V|v)(E|e)(R|r)
 TViews          (V|v)(I|i)(E|e)(W|w)(S|s)
 TView           (V|v)(I|i)(E|e)(W|w)
 TMaterialized   (M|m)(A|a)(T|t)(E|e)(R|r)(I|i)(A|a)(L|l)(I|i)(Z|z)(E|e)(D|d)
@@ -558,6 +559,8 @@ TSequence       (S|s)(E|e)(Q|q)(U|u)(E|e)(N|n)(C|c)(E|e)
 {TPrivileges} { return (int)Token.TPRIVILEGES; }
 
 {TFor} { return (int)Token.TFOR; }
+
+{TOver} { return (int)Token.TOVER; }
 
 {TViews} { return (int)Token.TVIEWS; }
 

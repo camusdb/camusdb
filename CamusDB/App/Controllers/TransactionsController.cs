@@ -35,7 +35,7 @@ public sealed class TransactionsController : CommandsController
         try
         {
             using StreamReader reader = new(Request.Body);
-            string body = await reader.ReadToEndAsync().ConfigureAwait(false);
+            string body = await reader.ReadToEndAsync(HttpContext.RequestAborted).ConfigureAwait(false);
 
             StartTransactionRequest? request = string.IsNullOrWhiteSpace(body)
                 ? null
@@ -78,7 +78,7 @@ public sealed class TransactionsController : CommandsController
         {
             LogCommandFailure(e);
 
-            return new JsonResult(new StartTransactionResponse("failed", e.Code, e.Message)) { StatusCode = 500 };
+            return new JsonResult(new StartTransactionResponse("failed", e.Code, e.Message)) { StatusCode = CamusDBErrorCodes.GetHttpStatus(e.Code) };
         }
         catch (Exception e)
         {
@@ -95,7 +95,7 @@ public sealed class TransactionsController : CommandsController
         try
         {
             using StreamReader reader = new(Request.Body);
-            string body = await reader.ReadToEndAsync().ConfigureAwait(false);
+            string body = await reader.ReadToEndAsync(HttpContext.RequestAborted).ConfigureAwait(false);
 
             CommitTransactionRequest? request = JsonSerializer.Deserialize<CommitTransactionRequest>(body, jsonOptions);
             if (request == null)
@@ -116,7 +116,7 @@ public sealed class TransactionsController : CommandsController
         {
             LogCommandFailure(e);
 
-            return new JsonResult(new CommitTransactionResponse("failed", e.Code, e.Message)) { StatusCode = 500 };
+            return new JsonResult(new CommitTransactionResponse("failed", e.Code, e.Message)) { StatusCode = CamusDBErrorCodes.GetHttpStatus(e.Code) };
         }
         catch (Exception e)
         {
@@ -133,7 +133,7 @@ public sealed class TransactionsController : CommandsController
         try
         {
             using StreamReader reader = new(Request.Body);
-            string body = await reader.ReadToEndAsync().ConfigureAwait(false);
+            string body = await reader.ReadToEndAsync(HttpContext.RequestAborted).ConfigureAwait(false);
 
             CommitTransactionRequest? request = JsonSerializer.Deserialize<CommitTransactionRequest>(body, jsonOptions);
             if (request == null)
@@ -152,7 +152,7 @@ public sealed class TransactionsController : CommandsController
         {
             LogCommandFailure(e);
 
-            return new JsonResult(new CommitTransactionResponse("failed", e.Code, e.Message)) { StatusCode = 500 };
+            return new JsonResult(new CommitTransactionResponse("failed", e.Code, e.Message)) { StatusCode = CamusDBErrorCodes.GetHttpStatus(e.Code) };
         }
         catch (Exception e)
         {

@@ -77,7 +77,7 @@ public static class StatementScope
         NodeType.AlterTableAddColumn or NodeType.AlterTableDropColumn or
         NodeType.AlterTableAddIndex or NodeType.AlterTableAddIndexIfNotExists or
         NodeType.AlterTableAddUniqueIndex or NodeType.AlterTableAddUniqueIndexIfNotExists or
-        NodeType.AlterTableDropIndex or
+        NodeType.AlterTableDropIndex or NodeType.AlterTableDropIndexIfExists or
         NodeType.AlterTableAddPrimaryKey or NodeType.AlterTableDropPrimaryKey or
         NodeType.AlterTableRenameTo or NodeType.AlterTableRenameColumn or NodeType.AlterTableRenameIndex or
         NodeType.AlterTableAddConstraintCheck or NodeType.AlterTableAddConstraintForeignKey or NodeType.AlterTableDropConstraint or

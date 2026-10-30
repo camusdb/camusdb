@@ -126,7 +126,7 @@ part of the wire contract.
 
 **Indexes are table-qualified.** PostgreSQL indexes live in a schema-global namespace, so
 `COMMENT ON INDEX idx` is unambiguous there. CamusDB indexes are per-table and are referenced by
-name within a table (`ALTER TABLE t DROP INDEX …`, `ALTER TABLE t RENAME INDEX …`), and there is no
+name within a table (`DROP INDEX … ON t`, `ALTER TABLE t RENAME INDEX …`), and there is no
 global index registry to resolve a bare name against. `COMMENT ON INDEX` therefore requires the
 table-qualified form:
 

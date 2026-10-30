@@ -1122,6 +1122,12 @@ public sealed class DatabaseRegistry : IAsyncDisposable
     public IReadOnlyList<DatabaseRegistryEntry> List() => [.. byName.Values];
 
     /// <summary>
+    /// Number of databases in this node's registry cache. It takes every lock of the map, so it is
+    /// for DDL-rate callers, never a per-statement path.
+    /// </summary>
+    public int Count => byName.Count;
+
+    /// <summary>
     /// Returns <c>true</c> if any registered database has <paramref name="targetId"/> in
     /// its ancestry chain — i.e. the target is not a leaf and cannot be safely dropped.
     ///
@@ -1220,13 +1226,22 @@ public sealed class DatabaseRegistry : IAsyncDisposable
     /// Branch ancestry chain, nearest parent first.  Pass <c>null</c> or an empty list
     /// for root databases.  The list is stored verbatim and is immutable after registration.
     /// </param>
+    /// <param name="maxDatabases">
+    /// <see cref="CamusDBOptions.MaxDatabases"/> from the caller's current snapshot; zero or less
+    /// disables the check. It is checked under <see cref="writeSem"/>, so two registrations on this
+    /// node cannot both take the last slot. The count is this node's cache, so concurrent creates on
+    /// other nodes can still go past it by a few; see the option's summary.
+    /// </param>
     /// <exception cref="CamusDBException">
-    ///   <c>DatabaseAlreadyExists</c> if the name is already registered or reserved.
+    ///   <c>DatabaseAlreadyExists</c> if the name is already registered or reserved;
+    ///   <c>SchemaLimitExceeded</c> if the registry already holds <paramref name="maxDatabases"/>
+    ///   databases. Both are thrown before the commit request, so nothing was published.
     /// </exception>
     public async Task<DatabaseRegistryEntry> RegisterAsync(
         string name, string id,
         IReadOnlyList<DatabaseBranchAncestor>? ancestors = null,
-        string? immediateParentHoldId = null)
+        string? immediateParentHoldId = null,
+        int maxDatabases = 0)
     {
         // Preserve the original case for storage/display; key the KV write and cache by the normalized form.
         string normalized = Normalize(name);
@@ -1243,6 +1258,11 @@ public sealed class DatabaseRegistry : IAsyncDisposable
                 throw new CamusDBException(
                     CamusDBErrorCodes.DatabaseAlreadyExists,
                     $"Database '{name}' is already registered");
+
+            if (maxDatabases > 0 && byName.Count >= maxDatabases)
+                throw new CamusDBException(
+                    CamusDBErrorCodes.SchemaLimitExceeded,
+                    $"Database '{name}' would exceed the maximum of {maxDatabases} databases (max_databases)");
 
             // One id maps to at most one live name. Reject registering an id that is already live under
             // a different name — the guard that stops a stale-orphan relink from minting a second alias

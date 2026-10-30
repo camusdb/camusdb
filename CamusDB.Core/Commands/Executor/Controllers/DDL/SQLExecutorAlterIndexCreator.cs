@@ -76,13 +76,14 @@ internal sealed class SQLExecutorAlterIndexCreator : SQLExecutorBaseCreator
             );
         }
 
-        if (ast.nodeType == NodeType.AlterTableDropIndex)
+        if (ast.nodeType is NodeType.AlterTableDropIndex or NodeType.AlterTableDropIndexIfExists)
             return new(
                 ticket.DatabaseName,
                 tableName,
                 ast.rightAst!.yytext!,
                 Array.Empty<ColumnIndexInfo>(),
-                AlterIndexOperation.DropIndex
+                AlterIndexOperation.DropIndex,
+                ifExists: ast.nodeType == NodeType.AlterTableDropIndexIfExists
             );
 
         if (ast.nodeType == NodeType.AlterTableDropPrimaryKey)

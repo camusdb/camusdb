@@ -77,6 +77,9 @@ internal sealed class SpillableRowList : IAsyncDisposable
     /// <summary>Total row count (memory + spill).</summary>
     public int Count { get; private set; }
 
+    /// <summary>True once the rows went to a spill file, for the counters EXPLAIN (ANALYZE) prints.</summary>
+    public bool Spilled => _overflowed;
+
     /// <summary>
     /// Appends a row to the list. When <see cref="_context.Options.SpillEnabled"/> is
     /// <c>true</c> and the buffer reaches <see cref="_context.Options.SpillEffectiveThreshold"/> rows

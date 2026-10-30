@@ -129,7 +129,7 @@ public sealed class PreparedStatementRegistry
     /// </summary>
     public (string Handle, PreparedStatement Statement) Prepare(Principal? principal, string database, string sql)
     {
-        PreparedStatement statement = PreparedStatementBinder.Create(database, sql);
+        PreparedStatement statement = PreparedStatementBinder.Create(database, sql, options.MaxStatementBytes);
         string ownerKey = OwnerKey(principal);
         long bytes = RetainedBytesOf(statement);
 

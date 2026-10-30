@@ -135,6 +135,19 @@ internal static class QueryShapeComputer
                 sb.Append("DERIVED(");
                 AppendQuery(dt.Query, sb);
                 sb.Append(") AS ").Append(dt.Alias);
+
+                // A windowed SELECT's calls live on its derived table, not in either query: two
+                // statements that differ only in a direction or a frame must not share a shape.
+                if (dt.Windows is { } windows)
+                {
+                    sb.Append(" WINDOWS(");
+                    foreach (WindowFunctionCall window in windows)
+                    {
+                        AppendExpr(window.Call, sb);
+                        sb.Append(',');
+                    }
+                    sb.Append(')');
+                }
                 break;
 
             case SetOperationSource so:
