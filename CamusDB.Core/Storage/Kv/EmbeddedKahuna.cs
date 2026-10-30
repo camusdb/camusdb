@@ -420,7 +420,6 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
         Options = options;
         logger = loggerFactory?.CreateLogger<EmbeddedKahuna>();
         LogSharedMemoryBudgets();
-        WarnIfSolariumBudgetsCrowdTheHeap();
         node = new EmbeddedKahunaNode(options, loggerFactory);
         isClusterMode = false;
         WireWalRestoreBuffer();
@@ -448,7 +447,6 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
         Options = options;
         logger = loggerFactory?.CreateLogger<EmbeddedKahuna>();
         LogSharedMemoryBudgets();
-        WarnIfSolariumBudgetsCrowdTheHeap();
         node = new EmbeddedKahunaNode(options, interNode, raftComm, discovery, loggerFactory);
         isClusterMode = true;
         WireWalRestoreBuffer();
@@ -562,9 +560,9 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
     /// memtable budget is below that unit; this line puts the numbers the warning is about (and whether
     /// the budgets came from a cgroup limit or from RAM) next to it. Logged only when an engine uses
     /// the budgets: the store and the WAL share one RocksDB WriteBufferManager, or either layer is
-    /// Solarium, which always takes them. The two cases get different lines because the memory sits in
-    /// different places: RocksDB's is native and outside the managed heap, Solarium's is managed and
-    /// inside the heap limit, which is what an operator sizing the heap needs to read.
+    /// Solarium, which always takes them. The two cases get different lines because the flush unit they
+    /// are checked against differs (the RocksDB pair's shard tuning, or the Solarium WAL's fixed unit);
+    /// both engines hold the budgets in native memory outside the managed heap.
     /// </summary>
     private void LogSharedMemoryBudgets()
     {
@@ -612,50 +610,13 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
 
         logger.LogInformation(
             "Solarium shared memory: cache {CacheMb} MiB, memtable budget {MemtableMb} MiB; {Fit}. " +
-            "Managed budgets sit inside the heap limit: managed heap budget {HeapMb} MiB, machine memory {MachineMb} MiB ({MachineSource}).",
+            "Native budgets sit outside the managed heap, as RocksDB's: machine memory {MachineMb} MiB ({MachineSource}), managed heap budget {HeapMb} MiB.",
             Options.StorageSharedCacheMb,
             Options.StorageSharedMemtableBudgetMb,
             fit,
-            heapBytes / OneMb,
             machineBytes / OneMb,
-            machineSource);
-    }
-
-    /// <summary>
-    /// Warns, once per node at construction, when the budgets a Solarium node charges to the managed
-    /// heap take more than <see cref="EmbeddedKahunaOptionsBuilder.SolariumHeapShareWarnPercent"/> of
-    /// the heap budget the GC reports (<see cref="EmbeddedKahunaOptionsBuilder.SolariumBudgetsCrowdTheHeap"/>).
-    /// Solarium's cache and memtables are managed objects, so a heap limit chosen for RocksDB, whose engine
-    /// memory is native, leaves the application heap too little: the configuration this guards against ran
-    /// a 2-hour fault soak within 2-13% of its heap limit and the leader died of a managed
-    /// OutOfMemoryException on a large transient allocation, with nothing in the log before the crash
-    /// naming the cause. Logged at Warning, the level soaks and production nodes run at, so it reaches the
-    /// operator even when the Information budget line above does not. Explicit budgets are the only way to
-    /// reach the threshold: the proportional sizing stays near half of it.
-    /// </summary>
-    private void WarnIfSolariumBudgetsCrowdTheHeap()
-    {
-        if (logger is null || !logger.IsEnabled(LogLevel.Warning))
-            return;
-
-        long heapBytes = MachineMemory.ManagedHeapBytes();
-
-        if (!EmbeddedKahunaOptionsBuilder.SolariumBudgetsCrowdTheHeap(Options, heapBytes, out long chargedBytes, out int percent))
-            return;
-
-        const long OneMb = 1024L * 1024;
-
-        logger.LogWarning(
-            "Solarium charges its cache and memtables to the managed heap: {ChargedMb} MiB of budgets (shared cache {CacheMb} MiB, " +
-            "actor caches {ActorMb} MiB) take {Percent}% of the {HeapMb} MiB heap budget, above the {Threshold}% guard. " +
-            "A node at 37% ran out of heap under load. Raise the heap limit (DOTNET_GCHeapHardLimit / DOTNET_GCHeapHardLimitPercent) " +
-            "or lower kahuna.rocksdb_shared_memory_budget_mb and kahuna.max_bytes_per_actor.",
-            chargedBytes / OneMb,
-            Options.StorageSharedCacheMb,
-            Options.MaxBytesPerActor * EmbeddedKahunaOptionsBuilder.EffectiveActorCount(Options) / OneMb,
-            percent,
-            heapBytes / OneMb,
-            EmbeddedKahunaOptionsBuilder.SolariumHeapShareWarnPercent);
+            machineSource,
+            heapBytes / OneMb);
     }
 
     /// <summary>

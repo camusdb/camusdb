@@ -634,10 +634,9 @@ initial_partitions: 1      # Raft partition count (>= 1). Unset, it is 1 in stan
 #
 #   # RocksDB memory sharing: one block cache and one write-buffer manager serve both the KV store and
 #   # the Raft WAL. On whenever storage and wal_storage are both rocksdb; a no-op otherwise. The two
-#   # budgets below also size the cache and memtable budget a solarium store and WAL share. RocksDB
-#   # holds them in native memory outside the .NET heap; solarium holds them INSIDE the managed heap,
-#   # so there they count against the GC heap limit (unset, they are sized from the heap budget, not
-#   # the machine; explicit, the heap limit must hold them).
+#   # budgets below also size the cache and memtable budget a solarium store and WAL share. Both engines
+#   # hold them in native memory outside the .NET heap (solarium since SolariumDb 0.1.4), so they are
+#   # sized from the machine memory and a heap limit chosen for one engine fits the other.
 #   rocksdb_shared_memory: true
 #   rocksdb_shared_memory_budget_mb:            # total block-cache budget (MiB). Unset = sized from memory
 #   rocksdb_shared_memtable_budget_mb:          # memtable sub-budget (MiB), charged INSIDE the total; must be <= it. Unset = sized from memory

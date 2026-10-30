@@ -776,14 +776,16 @@ public static class EmbeddedKahunaOptionsBuilder
     /// 245 MB block cache and a 61 MB memtable budget. Under a heap limit the RocksDB budgets therefore
     /// sit <i>outside</i> it and count against the container beside it.</para>
     ///
-    /// <para><b>Solarium is the exception.</b> Solarium (<see cref="UsesSolarium"/>) keeps its cache and
-    /// its memtables as managed objects, so on a Solarium node the same two budgets live <i>inside</i>
-    /// the heap limit, next to the actor caches and the application heap, and are sized from the
-    /// managed heap budget instead: a 4,096 MB container with a 60% heap limit gets a 245 MB cache
-    /// and a 122 MB memtable budget rather than 409 and 192. Sizing them from the container is the
-    /// mirror-image mistake: a 2-hour fault soak on such a node with explicit 768/256 MiB budgets ran
-    /// the heap at 2,100-2,420 MiB of its 2,458 MiB limit and the leader died of a managed
-    /// OutOfMemoryException; the same budgets under a 3,072 MiB heap limit passed.</para>
+    /// <para><b>Solarium follows the same split.</b> Since SolariumDb 0.1.4 the engine keeps its
+    /// memtables in native arenas and its cached data blocks in native memory, so a Solarium node
+    /// (<see cref="UsesSolarium"/>) sizes the two shared budgets from the machine memory exactly as a
+    /// RocksDB node does, and a heap limit chosen for RocksDB fits it. What Solarium keeps on the heap
+    /// is the index and filter partitions in the cache, about 2% of the table bytes (4% with LZ4), and
+    /// their handles. SolariumDb 0.1.3 held the whole cache and the memtables as managed objects, and a
+    /// 2-hour fault soak on a 4,096 MB container with explicit 768/256 MiB budgets under a 60% heap
+    /// limit then ran the heap at 2,100-2,420 MiB of its 2,458 MiB and the leader died of a managed
+    /// OutOfMemoryException; that is why this sizing briefly used the heap budget as the base for
+    /// Solarium. The engine change made that exception unnecessary.</para>
     ///
     /// <para>Sizing policy: RocksDB block cache = 10% of machine memory; memtable budget = a quarter of
     /// the block cache, raised to the Raft log's flush unit where the two databases share one
@@ -895,9 +897,8 @@ public static class EmbeddedKahunaOptionsBuilder
     /// Core of the proportional sizing, driven by explicit memory sizes. Split out (internal) so
     /// tests can assert the floor behavior at container and heap-limit sizes the test machine does
     /// not have; the private path above always passes the real sizes.
-    /// <paramref name="machineMemoryBytes"/> sizes the native RocksDB budgets and
-    /// <paramref name="managedHeapBytes"/> sizes the managed actor caches, and the shared budgets
-    /// too when Solarium holds them (<see cref="UsesSolarium"/>).
+    /// <paramref name="machineMemoryBytes"/> sizes the native shared budgets of either engine and
+    /// <paramref name="managedHeapBytes"/> sizes the managed actor caches.
     /// <paramref name="raftLogFlushUnitFloor"/> overrides <see cref="RaftWalFlushUnitFloorEnabled"/>
     /// when given (a test seam); null takes the shipped gate.
     /// </summary>
@@ -910,14 +911,12 @@ public static class EmbeddedKahunaOptionsBuilder
     {
         const long OneMb = 1024L * 1024;
 
-        // The shared cache and memtable budget are native RocksDB memory, sized from the container,
-        // unless Solarium holds them: its cache and memtables are managed objects and count against
-        // the heap limit, so there the heap budget is the base (see the summary).
-        long sharedBudgetBaseBytes = UsesSolarium(baseline) ? managedHeapBytes : machineMemoryBytes;
-
+        // The shared cache and memtable budget are native memory on both engines (RocksDB's block cache
+        // and memtables; Solarium's memtable arenas and cached data blocks since SolariumDb 0.1.4), so
+        // they are sized from the container, outside the heap limit (see the summary).
         if (kahuna.RocksdbSharedMemoryBudgetMb is null)
             baseline.StorageSharedCacheMb = (int)(ClampWithYieldingFloor(
-                sharedBudgetBaseBytes / 10, historicFloor: 320 * OneMb, degenerateFloor: 64 * OneMb, ceiling: 2048 * OneMb) / OneMb);
+                machineMemoryBytes / 10, historicFloor: 320 * OneMb, degenerateFloor: 64 * OneMb, ceiling: 2048 * OneMb) / OneMb);
 
         if (kahuna.RocksdbSharedMemtableBudgetMb is null)
         {
@@ -1103,53 +1102,6 @@ public static class EmbeddedKahunaOptionsBuilder
 
     /// <summary>The name that selects Solarium for <c>kahuna.storage</c> and <c>kahuna.wal_storage</c>.</summary>
     internal const string SolariumEngine = "solarium";
-
-    /// <summary>
-    /// The share of the managed heap budget above which the memory Solarium charges to the heap is
-    /// warned about at startup, in percent. The proportional sizing gives the cache 10% of the heap
-    /// budget and the actor caches 6.25%, so an unset node sits near 16% and never warns; a third is
-    /// twice that share. The one measured pair of points brackets it: a 4,096 MiB node with explicit
-    /// 768 MiB cache and 2458 MiB heap limit (37%) died of a managed OutOfMemoryException 57 minutes into
-    /// a fault soak, the same budgets under a 3,072 MiB limit (30%) ran 2 hours with the heap committed
-    /// peaking near the limit. The rule is a guard against the configuration that was measured to fail,
-    /// not a sizing recommendation: the application heap under load needs about 2 GiB on that node
-    /// whatever the budgets are.
-    /// </summary>
-    internal const int SolariumHeapShareWarnPercent = 33;
-
-    /// <summary>
-    /// The bytes a Solarium node's budgets place inside the managed heap: the shared cache budget
-    /// (the memtable budget is charged inside it, so it is not added) plus the key/value actor caches
-    /// (<see cref="EmbeddedKahunaOptions.MaxBytesPerActor"/> times <see cref="EffectiveActorCount"/>).
-    /// The actor caches are managed on every engine; they are counted here because the warning is about
-    /// the heap as a whole. 0 when neither layer is Solarium.
-    /// </summary>
-    internal static long SolariumHeapChargedBytes(EmbeddedKahunaOptions options)
-    {
-        if (!UsesSolarium(options))
-            return 0;
-
-        return options.StorageSharedCacheMb * 1024L * 1024 + options.MaxBytesPerActor * EffectiveActorCount(options);
-    }
-
-    /// <summary>
-    /// Whether the memory a Solarium node charges to the managed heap (<see cref="SolariumHeapChargedBytes"/>)
-    /// takes more than <see cref="SolariumHeapShareWarnPercent"/> of <paramref name="managedHeapBytes"/>, the
-    /// heap budget the GC reports. Pure, so tests can drive it with the reference node's sizes; the embedded
-    /// node calls it once at construction with the real budget and logs a warning when it is true. Never
-    /// true on a RocksDB node, whose engine memory is native, or when the heap budget is unknown (0).
-    /// </summary>
-    internal static bool SolariumBudgetsCrowdTheHeap(EmbeddedKahunaOptions options, long managedHeapBytes, out long chargedBytes, out int percent)
-    {
-        chargedBytes = SolariumHeapChargedBytes(options);
-        percent = 0;
-
-        if (chargedBytes <= 0 || managedHeapBytes <= 0)
-            return false;
-
-        percent = (int)(chargedBytes * 100 / managedHeapBytes);
-        return percent > SolariumHeapShareWarnPercent;
-    }
 
     /// <summary>
     /// The shared memtable budget below which a Solarium WAL cannot flush the Raft log at its own flush

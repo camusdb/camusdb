@@ -158,32 +158,31 @@ public sealed class TestSolariumStorageEngine
     }
 
     [Test]
-    public void SolariumBudgets_AreSizedFromTheManagedHeapUnderAHeapLimit()
+    public void SolariumBudgets_AreSizedFromTheMachineLikeRocksDb()
     {
         // The reference node: a 4,096 MiB container with DOTNET_GCHeapHardLimitPercent at 60%, so the GC
-        // reports a 2,458 MiB budget. RocksDB's cache and memtables are native and are sized from the
-        // container (409 / 192, see TestMemoryProfile). Solarium's are managed objects inside the heap
-        // limit, so they are sized from the heap budget: 245 MiB of cache, and the 256 MiB WAL floor
-        // yields to half of it (122). A soak that sized them from the container ran the heap into its
-        // limit and the leader died of a managed OutOfMemoryException.
+        // reports a 2,458 MiB budget. Both engines hold the shared budgets in native memory (Solarium since
+        // SolariumDb 0.1.4: memtable arenas and cached data blocks), so both are sized from the container:
+        // a 409 MiB cache, and the memtable budget at the Solarium WAL's 256 MiB floor capped at half the
+        // cache (204). Only the actor caches read the heap budget.
         EmbeddedKahunaOptions solarium = new() { KeyValueWorkers = 32, Storage = "solarium", WalStorage = "solarium" };
         EmbeddedKahunaOptionsBuilder.ApplyMemoryProportionalDefaults(
             solarium, new KahunaOptionsConfig(), machineMemoryBytes: 4096 * OneMb, managedHeapBytes: 2458 * OneMb, raftLogFlushUnitFloor: true);
 
-        Assert.That(solarium.StorageSharedCacheMb, Is.EqualTo(245));
-        Assert.That(solarium.StorageSharedMemtableBudgetMb, Is.EqualTo(122));
-        Assert.That(solarium.MaxBytesPerActor, Is.EqualTo(2458 * OneMb / 16 / 32)); // the actor layer is unchanged
+        Assert.That(solarium.StorageSharedCacheMb, Is.EqualTo(409));
+        Assert.That(solarium.StorageSharedMemtableBudgetMb, Is.EqualTo(204));
+        Assert.That(solarium.MaxBytesPerActor, Is.EqualTo(2458 * OneMb / 16 / 32));
 
-        // A Solarium store beside a RocksDB WAL still holds the budgets in the heap; only the Raft-log
-        // floor goes away (an unshared RocksDB WAL has its own memtables), leaving the proportional quarter.
+        // A Solarium store beside a RocksDB WAL: the same cache, and no Raft-log floor (an unshared RocksDB
+        // WAL has its own memtables), leaving the proportional quarter.
         EmbeddedKahunaOptions storeOnly = new() { KeyValueWorkers = 32, Storage = "solarium", WalStorage = "rocksdb" };
         EmbeddedKahunaOptionsBuilder.ApplyMemoryProportionalDefaults(
             storeOnly, new KahunaOptionsConfig(), machineMemoryBytes: 4096 * OneMb, managedHeapBytes: 2458 * OneMb, raftLogFlushUnitFloor: true);
 
-        Assert.That(storeOnly.StorageSharedCacheMb, Is.EqualTo(245));
-        Assert.That(storeOnly.StorageSharedMemtableBudgetMb, Is.EqualTo(61));
+        Assert.That(storeOnly.StorageSharedCacheMb, Is.EqualTo(409));
+        Assert.That(storeOnly.StorageSharedMemtableBudgetMb, Is.EqualTo(102));
 
-        // With no heap limit the two sizes are the same and nothing changes for Solarium either.
+        // The heap budget does not move the shared budgets at all.
         EmbeddedKahunaOptions noLimit = new() { KeyValueWorkers = 32, Storage = "solarium", WalStorage = "solarium" };
         EmbeddedKahunaOptionsBuilder.ApplyMemoryProportionalDefaults(
             noLimit, new KahunaOptionsConfig(), machineMemoryBytes: 4096 * OneMb, managedHeapBytes: 4096 * OneMb, raftLogFlushUnitFloor: true);
@@ -193,11 +192,10 @@ public sealed class TestSolariumStorageEngine
     }
 
     [Test]
-    public void ExplicitSolariumBudgets_AreNotResizedByTheHeapLimit()
+    public void ExplicitSolariumBudgets_AlwaysWin()
     {
-        // Through the full build, on whatever heap budget this machine reports: an operator's explicit
-        // pair always wins, so a Solarium node keeps budgets larger than the sizing would choose, and the
-        // heap limit must then be sized to hold them (see the docs).
+        // Through the full build, on whatever memory this machine reports: an operator's explicit pair
+        // is never resized.
         EmbeddedKahunaOptions options = EmbeddedKahunaOptionsBuilder.BuildStandaloneRocksDb(
             "/tmp/solarium-explicit-pair",
             new KahunaOptionsConfig { Storage = "solarium", WalStorage = "solarium", RocksdbSharedMemoryBudgetMb = 768, RocksdbSharedMemtableBudgetMb = 256 },
@@ -205,55 +203,6 @@ public sealed class TestSolariumStorageEngine
 
         Assert.That(options.StorageSharedCacheMb, Is.EqualTo(768));
         Assert.That(options.StorageSharedMemtableBudgetMb, Is.EqualTo(256));
-    }
-
-    [Test]
-    public void SolariumBudgets_WarnWhenTheyCrowdTheHeap()
-    {
-        // The configuration that died: the reference node with explicit 768 / 256 MiB budgets under a 2,458 MiB
-        // heap limit, actor caches at the proportional share. 768 + 153 MiB is 37% of the heap: warned.
-        EmbeddedKahunaOptions died = new()
-        {
-            KeyValueWorkers = 32, Storage = "solarium", WalStorage = "solarium",
-            StorageSharedCacheMb = 768, StorageSharedMemtableBudgetMb = 256, MaxBytesPerActor = 2458 * OneMb / 16 / 32,
-        };
-
-        Assert.That(EmbeddedKahunaOptionsBuilder.SolariumBudgetsCrowdTheHeap(died, 2458 * OneMb, out long charged, out int percent), Is.True);
-        Assert.That(charged / OneMb, Is.EqualTo(768 + 153));
-        Assert.That(percent, Is.EqualTo(37));
-
-        // The same budgets under the 3,072 MiB limit that passed the soak: 30%, below the guard.
-        Assert.That(EmbeddedKahunaOptionsBuilder.SolariumBudgetsCrowdTheHeap(died, 3072 * OneMb, out _, out percent), Is.False);
-        Assert.That(percent, Is.EqualTo(30));
-
-        // RocksDB with the same budgets: native memory, never warned about.
-        EmbeddedKahunaOptions rocksDb = new()
-        {
-            KeyValueWorkers = 32, Storage = "rocksdb", WalStorage = "rocksdb",
-            StorageSharedCacheMb = 768, StorageSharedMemtableBudgetMb = 256, MaxBytesPerActor = 2458 * OneMb / 16 / 32,
-        };
-
-        Assert.That(EmbeddedKahunaOptionsBuilder.SolariumBudgetsCrowdTheHeap(rocksDb, 2458 * OneMb, out charged, out _), Is.False);
-        Assert.That(charged, Is.EqualTo(0));
-
-        // An unknown heap budget cannot be judged.
-        Assert.That(EmbeddedKahunaOptionsBuilder.SolariumBudgetsCrowdTheHeap(died, 0, out _, out _), Is.False);
-    }
-
-    [Test]
-    public void ProportionalSolariumSizing_StaysBelowTheHeapGuard()
-    {
-        // The sizing gives the cache 10% and the actor layer 6.25% of the heap budget, so an unset Solarium
-        // node never trips its own guard, on the reference node or on a large one.
-        foreach (long heapMb in new long[] { 1536, 2458, 8L * 1024, 32L * 1024 })
-        {
-            EmbeddedKahunaOptions options = new() { KeyValueWorkers = 32, Storage = "solarium", WalStorage = "solarium" };
-            EmbeddedKahunaOptionsBuilder.ApplyMemoryProportionalDefaults(
-                options, new KahunaOptionsConfig(), machineMemoryBytes: heapMb * 4 / 3 * OneMb, managedHeapBytes: heapMb * OneMb, raftLogFlushUnitFloor: true);
-
-            Assert.That(EmbeddedKahunaOptionsBuilder.SolariumBudgetsCrowdTheHeap(options, heapMb * OneMb, out _, out int percent), Is.False, $"{heapMb} MiB");
-            Assert.That(percent, Is.LessThanOrEqualTo(17), $"{heapMb} MiB");
-        }
     }
 
     [Test]
