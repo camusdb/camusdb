@@ -657,6 +657,10 @@ internal sealed class SQLExecutorCreateTableCreator : SQLExecutorBaseCreator
                 throw new CamusDBException(CamusDBErrorCodes.InvalidInput,
                     "CHECK constraint conditions cannot contain subqueries");
 
+            case NodeType.ExprWindowCall:
+                throw new CamusDBException(CamusDBErrorCodes.InvalidInput,
+                    "CHECK constraint conditions cannot contain window functions");
+
             case NodeType.ExprFuncCall:
             {
                 string? fnName = condition.leftAst?.yytext?.ToLowerInvariant();

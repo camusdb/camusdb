@@ -655,6 +655,10 @@ internal static class DerivedTableSchemaBuilder
             // by row key, so the expansion carries the key through rather than the shared name.
             foreach (DerivedColumnSchema col in derived.Columns)
             {
+                // A windowed SELECT's internal columns are read by name only; a * never shows them.
+                if (col.Hidden)
+                    continue;
+
                 string name = qualify
                     ? QueryRowNameResolver.FormatQualifiedKey(derived.Alias, col.Name)
                     : col.Name;

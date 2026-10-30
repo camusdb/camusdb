@@ -35,6 +35,8 @@ internal sealed class DerivedTableExecutor
     private readonly QueryJoinExecutor queryJoinExecutor;
     private readonly QueryFilterer queryFilterer = new(new ExistsSubqueryExecutor());
 
+    private readonly QuerySorter querySorter = new();
+
     private readonly SetOperationExecutor setOperationExecutor;
 
     public DerivedTableExecutor(QueryExecutor queryExecutor, QueryJoinExecutor queryJoinExecutor)
@@ -91,7 +93,8 @@ internal sealed class DerivedTableExecutor
         BoundDerivedTableSource source,
         QueryTicket outerTicket,
         NodeAst? executionFilter,
-        SetOperationStats? stats = null)
+        SetOperationStats? stats = null,
+        WindowStats? windowStats = null)
     {
         IAsyncEnumerable<QueryResultRow> cursor;
 
@@ -123,6 +126,20 @@ internal sealed class DerivedTableExecutor
             cursor = innerBound.IsMultiSource
                 ? queryJoinExecutor.ExecuteJoinQuery(database, innerBound, innerTicket)
                 : queryExecutor.Query(database, innerBound.PrimaryTable, innerTicket);
+
+            // A windowed SELECT's derived table: the inner query computed every window input, and the
+            // window operator adds the results. It runs before the filter below, so a filter on a
+            // window result (WHERE rn <= 3 over this derived table) sees whole partitions.
+            if (source.Source.Windows is { } windows)
+                cursor = WindowOperator.Apply(
+                    cursor,
+                    windows,
+                    source.Columns,
+                    QueryExecutionContext.For(database, outerTicket),
+                    querySorter,
+                    outerTicket.Parameters,
+                    windowStats,
+                    outerTicket.CancellationToken);
         }
 
         // A cell can carry a narrower numeric type than its column declares (COALESCE(p, 0) gives an

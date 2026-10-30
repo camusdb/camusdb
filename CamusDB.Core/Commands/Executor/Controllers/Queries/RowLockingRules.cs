@@ -103,6 +103,11 @@ internal static class RowLockingRules
     /// </summary>
     internal static void RequireLockableQuery(BoundSelectQuery bound, QueryTicket ticket, NodeAst lockingClause)
     {
+        // A windowed SELECT reads through the derived table that runs its windows; name the window,
+        // which is what the caller wrote, rather than a derived table they did not.
+        if (bound.Query.Source is DerivedTableSource { Windows: not null })
+            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "FOR UPDATE is not allowed with window functions");
+
         if (bound.IsMultiSource || bound.Query.Source is not TableSource source)
             throw new CamusDBException(
                 CamusDBErrorCodes.InvalidInput,

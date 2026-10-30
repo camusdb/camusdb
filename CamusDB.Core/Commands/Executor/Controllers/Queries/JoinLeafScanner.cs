@@ -380,18 +380,22 @@ internal sealed class JoinLeafScanner
     /// caller, such as the inner side of a nested-loop join, may read it again and gets the kept rows.
     /// </param>
     /// <param name="setOperationStats">The per-operand row counts of a set operation, for EXPLAIN (ANALYZE).</param>
+    /// <param name="windowStats">The window operator's counters of a windowed SELECT, for EXPLAIN (ANALYZE).</param>
     internal async IAsyncEnumerable<QueryResultRow> ScanDerivedTable(
         BoundDerivedTableSource source,
         NodeAst? executionFilter,
         QueryPlan plan,
         [EnumeratorCancellation] CancellationToken ct = default,
         bool readOnce = false,
-        SetOperationStats? setOperationStats = null)
+        SetOperationStats? setOperationStats = null,
+        WindowStats? windowStats = null)
     {
-        if (readOnce && source.SetOperation is not null)
+        // A windowed SELECT's derived table is read once too: its window operator already holds what
+        // it must, and keeping its output again would copy every row a second time.
+        if (readOnce && (source.SetOperation is not null || source.Source.Windows is not null))
         {
             await foreach (QueryResultRow row in derivedTableExecutor
-                .Stream(plan.Database, source, plan.Ticket, executionFilter, setOperationStats)
+                .Stream(plan.Database, source, plan.Ticket, executionFilter, setOperationStats, windowStats)
                 .WithCancellation(ct)
                 .ConfigureAwait(false))
                 yield return row;

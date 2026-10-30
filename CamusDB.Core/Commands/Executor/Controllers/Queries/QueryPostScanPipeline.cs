@@ -8,6 +8,7 @@
 
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
+using CamusDB.Core.CommandsExecutor.Models.Queries;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.SQLParser;
 
@@ -46,7 +47,7 @@ internal static class QueryPostScanPipeline
             if (ticket.OrderBy is not null && ticket.OrderBy.Count > 0)
                 cursor = querySorter.SortResultset(ticket, cursor, context);
 
-            if (ticket.Projection is not null && ticket.Projection.Count > 0 && !IsFullProjection(ticket.Projection))
+            if (ticket.Projection is not null && ticket.Projection.Count > 0 && !IsFullProjection(ticket))
                 cursor = queryProjector.ProjectResultset(ticket, cursor);
 
             if (ticket.Limit is not null || ticket.Offset is not null)
@@ -66,7 +67,7 @@ internal static class QueryPostScanPipeline
                     havingApplied = true;
                 }
 
-                if (!IsFullProjection(ticket.Projection))
+                if (!IsFullProjection(ticket))
                     cursor = queryProjector.ProjectResultset(ticket, cursor);
             }
 
@@ -100,7 +101,7 @@ internal static class QueryPostScanPipeline
                 havingApplied = true;
             }
 
-            if (!IsFullProjection(ticket.Projection))
+            if (!IsFullProjection(ticket))
                 cursor = queryProjector.ProjectResultset(ticket, cursor);
         }
 
@@ -121,6 +122,21 @@ internal static class QueryPostScanPipeline
 
     internal static bool IsFullProjection(List<NodeAst> projection) =>
         projection is [{ nodeType: NodeType.ExprAllFields }];
+
+    /// <summary>
+    /// True when the rows can leave without the projector: a lone <c>*</c> over any source but the
+    /// derived table of a windowed SELECT. That source's rows also hold the hidden window columns,
+    /// which only the projector removes (see <see cref="IsWindowedSource"/>).
+    /// </summary>
+    private static bool IsFullProjection(QueryTicket ticket) =>
+        IsFullProjection(ticket.Projection!) && !IsWindowedSource(ticket);
+
+    /// <summary>
+    /// True when the ticket reads the derived table that <see cref="WindowQueryRewriter"/> built. Its
+    /// rows carry hidden window inputs and results, which a <c>*</c> must not expand to.
+    /// </summary>
+    internal static bool IsWindowedSource(QueryTicket ticket) =>
+        ticket.SelectQuery?.Source is DerivedTableSource { Windows: not null };
 
     /// <summary>
     /// True when the projection aggregates. Without <c>GROUP BY</c> every projection must then be an

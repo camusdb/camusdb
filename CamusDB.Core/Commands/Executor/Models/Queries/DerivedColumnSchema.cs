@@ -28,6 +28,14 @@ public sealed record DerivedColumnSchema(string Name, ColumnType Type)
     public string RowKey { get; init; } = Name;
 
     /// <summary>
+    /// True for an internal column that a <c>*</c> over this derived table must not expand to: the
+    /// window inputs (<c>~win_in{k}</c>) and window results (<c>~win{n}</c>) of a windowed SELECT's
+    /// derived table. The outer query of that SELECT still reads them by name. With them left out, the
+    /// outer <c>*</c> expands to exactly the columns of the inner <c>*</c>.
+    /// </summary>
+    public bool Hidden { get; init; }
+
+    /// <summary>
     /// The element type of an <see cref="ColumnType.Array"/> column when the planner knows it
     /// statically: a table column (from <see cref="TableColumnSchema.ArrayElementType"/>), a column
     /// of a derived table that knew it, or a cast to <c>ARRAY(T)</c>. Null for every other column,

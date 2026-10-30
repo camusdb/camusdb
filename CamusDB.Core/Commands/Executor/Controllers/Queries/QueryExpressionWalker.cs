@@ -177,6 +177,13 @@ internal static class QueryExpressionWalker
             case NodeType.Placeholder:
                 return;
 
+            // A SELECT replaces every window call before binding, so one met here sits where SQL
+            // allows none (UPDATE SET, a DML WHERE). That is the caller's error, named as such.
+            case NodeType.ExprWindowCall:
+                throw new CamusDBException(
+                    CamusDBErrorCodes.InvalidInput,
+                    "Window functions are only allowed in the select list and ORDER BY of a query");
+
             default:
                 throw new CamusDBException(
                     CamusDBErrorCodes.InvalidAstStmt,

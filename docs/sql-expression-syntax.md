@@ -15,6 +15,7 @@ often:
 | Negated predicates | `year NOT BETWEEN 2020 AND 2021` | The same as `NOT (year BETWEEN 2020 AND 2021)` |
 | Concatenation | `first_name \|\| ' ' \|\| last_name` | The two strings joined; `NULL` if one side is `NULL` |
 | Bitwise operators | `flags & 4`, `a \| b`, `a # b`, `~a`, `1 << n`, `a >> n` | AND, OR, XOR, NOT and shifts on `int64` and `bytes` |
+| Window functions | `row_number() OVER (PARTITION BY g ORDER BY t)` | A value per row computed from related rows; see [window-functions.md](./window-functions.md) |
 
 Together they run a statement such as:
 

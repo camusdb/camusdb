@@ -651,6 +651,10 @@ internal sealed class ExplainExecutor
     {
         for (PhysicalPlanNode? node = plan.Root; node is not null; node = node.Input)
         {
+            // A windowed SELECT's derived table gets the window operator's counters.
+            if (analyze && node is DerivedTableScanNode { BoundSource.Source.Windows: not null } windowScan)
+                windowScan.WindowStats = new WindowStats();
+
             if (node is not DerivedTableScanNode { BoundSource.SetOperation: { } setOperation } scan)
                 continue;
 

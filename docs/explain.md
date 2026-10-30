@@ -223,6 +223,7 @@ One row is emitted per physical plan node, in depth-first order (parent before c
 | `hash-join`              | Equi-join using an in-memory hash table; chosen over INLJ when the outer side is large relative to the inner | `on=<left>=<right>, build=<alias>` (build-filter appended when a pushed-down filter is present) |
 | `merge-join`             | Equi-join using a streaming two-pointer merge; chosen when both sides have free index ordering on the join key | `on=<left>=<right>, right-order=forced-index=<name>\|sort` (right-filter appended when present) |
 | `derived-table-scan`     | Subquery in the `FROM` clause | `alias=<alias>` |
+| `window`                 | The window functions of a `SELECT`, one entry per distinct `(PARTITION BY, ORDER BY)`. Under `ANALYZE`, the detail adds `partitions=<n> rows=<n> spilled=<n>` ([window-functions.md](./window-functions.md#explain)) | `partition=[…] order=[…] functions=[…]` |
 | `function-scan`          | A set-returning function in the `FROM` clause, such as `generate_series` (no table access). With constant arguments, `estimated_rows` is the exact row count | `<function>(<args>), alias=<alias>, column=<column>` |
 | `constant-source`        | The single synthetic row of a **FROM-less** `SELECT` (no table access) | `1 row` |
 | `union`                  | `UNION [ALL]` | `all`, or `distinct: hash` (`, spill` when spill is enabled) |
