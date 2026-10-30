@@ -186,6 +186,18 @@ internal static class SubqueryValueListAst
         if (lhs.Type == ColumnType.Null)
             return ColumnValue.Null;
 
+        // A long list of constants is evaluated once per node into a hash set, instead of once per
+        // row here; see InListMemo for which lists qualify and why the result is the same.
+        if (InListMemo.TryGet(expr, parameters) is { } prepared)
+        {
+            ColumnValue member = prepared.Evaluate(lhs);
+
+            if (!negated || member.Type == ColumnType.Null)
+                return member;
+
+            return ColumnValue.FromBool(!member.BoolValue);
+        }
+
         bool sawNull = ReadBool(expr.extendedOne);
 
         foreach (ColumnValue candidate in Enumerate(expr.rightAst, parameters))

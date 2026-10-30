@@ -32,6 +32,10 @@ internal sealed class ExecuteSQLValidator : ValidatorBase
                 "SQL statement is required"
             );
 
+        // Before the parse below and before execution parses: an oversized statement costs no
+        // parser work at all.
+        StatementSizeGuard.Check(ticket.Sql, Options.MaxStatementBytes);
+
         if (string.IsNullOrWhiteSpace(ticket.DatabaseName))
         {
             // Statements that operate at the server level (not tied to a specific database)

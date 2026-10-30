@@ -6,6 +6,7 @@
  */
 
 using System.Net;
+using CamusDB.Core;
 using CamusDB.Core.CommandsExecutor;
 using CamusDB.Core.Diagnostics;
 using Microsoft.AspNetCore.Connections;
@@ -90,11 +91,30 @@ public sealed class ClientActivityMiddleware
     /// under the id that every request on it later reports as <c>HttpContext.Connection.Id</c>, so
     /// <see cref="InvokeAsync"/> finds an HTTP/3 connection the same way it finds a TCP one. The
     /// multiplexed hook is only built when the listener serves HTTP/3.</para>
+    ///
+    /// <para><b>The connection cap.</b> Each accepted connection first takes a slot of
+    /// <see cref="CamusDBOptions.MaxClientConnections"/>, shared by every client-facing listener of
+    /// the engine. A connection with no slot is aborted before a request is read and is never added to
+    /// the registry. The limit is read from the engine's current snapshot for each connection.</para>
     /// </summary>
     public static ListenOptions UseClientConnectionTracking(ListenOptions listen)
     {
         IServiceProvider services = listen.ApplicationServices;
+        CommandExecutor? executor = null;
         ClientConnectionRegistry? registry = null;
+
+        bool TryAdmit(BaseConnectionContext connectionContext)
+        {
+            executor ??= services.GetRequiredService<CommandExecutor>();
+            registry ??= executor.QueryActivity.Connections;
+
+            if (registry.TryAdmit(executor.Options.MaxClientConnections))
+                return true;
+
+            connectionContext.Abort(new ConnectionAbortedException(
+                "The node is at its client connection limit (max_client_connections)"));
+            return false;
+        }
 
         ClientConnection Open(BaseConnectionContext connectionContext)
         {
@@ -109,29 +129,49 @@ public sealed class ClientActivityMiddleware
 
         listen.Use(nextConnection => async connectionContext =>
         {
-            ClientConnection connection = Open(connectionContext);
+            if (!TryAdmit(connectionContext))
+                return;
 
             try
             {
-                await nextConnection(connectionContext).ConfigureAwait(false);
+                ClientConnection connection = Open(connectionContext);
+
+                try
+                {
+                    await nextConnection(connectionContext).ConfigureAwait(false);
+                }
+                finally
+                {
+                    connection.Close();
+                }
             }
             finally
             {
-                connection.Close();
+                registry!.ReleaseAdmission();
             }
         });
 
         ((IMultiplexedConnectionBuilder)listen).Use(nextConnection => async connectionContext =>
         {
-            ClientConnection connection = Open(connectionContext);
+            if (!TryAdmit(connectionContext))
+                return;
 
             try
             {
-                await nextConnection(connectionContext).ConfigureAwait(false);
+                ClientConnection connection = Open(connectionContext);
+
+                try
+                {
+                    await nextConnection(connectionContext).ConfigureAwait(false);
+                }
+                finally
+                {
+                    connection.Close();
+                }
             }
             finally
             {
-                connection.Close();
+                registry!.ReleaseAdmission();
             }
         });
 

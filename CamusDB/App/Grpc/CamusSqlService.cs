@@ -482,11 +482,9 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
                     discardReturningRows: request.DiscardReturningRows
                 );
 
-                List<QueryResultRow> attemptRows = [];
                 (DatabaseDescriptor? db, IAsyncEnumerable<QueryResultRow> cursor) =
                     await executor.ExecuteSQLQuery(ticket, schemaOut: schemaHolder).ConfigureAwait(false);
-                await foreach (QueryResultRow row in cursor.ConfigureAwait(false))
-                    attemptRows.Add(row);
+                List<QueryResultRow> attemptRows = await BufferedResultCollector.CollectAsync(cursor, options).ConfigureAwait(false);
 
                 commitToken = await transactions.CommitOrReleaseAsync(db, tx, innerCt).ConfigureAwait(false);
                 committedDb = db;
@@ -1639,8 +1637,7 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
                     discardReturningRows: request.DiscardReturningRows);
                 (DatabaseDescriptor? db, IAsyncEnumerable<QueryResultRow> cursor) =
                     await executor.ExecuteSQLQuery(ticket, schemaOut: schemaHolder).ConfigureAwait(false);
-                await foreach (QueryResultRow row in cursor.ConfigureAwait(false))
-                    rows.Add(row);
+                rows = await BufferedResultCollector.CollectAsync(cursor, options).ConfigureAwait(false);
                 schema = schemaHolder.Schema;
                 commitToken = await transactions.CommitOrReleaseAsync(db, tx, CancellationToken.None).ConfigureAwait(false);
                 routingDb = db;
@@ -2456,7 +2453,7 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
             throw new CamusDBException(
                 CamusDBErrorCodes.InvalidInput, "PREPARE must not carry a 'statement_id'");
 
-        PreparedStatement statement = PreparedStatementBinder.Create(request.Database, request.Sql ?? "");
+        PreparedStatement statement = PreparedStatementBinder.Create(request.Database, request.Sql ?? "", options.MaxStatementBytes);
         int id = prepared.Add(statement);
 
         PrepareReply reply = new() { StatementId = id };

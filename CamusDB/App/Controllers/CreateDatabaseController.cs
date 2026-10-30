@@ -31,7 +31,7 @@ public sealed class CreateDatabaseController : CommandsController
         try
         {
             using StreamReader reader = new(Request.Body);
-            string body = await reader.ReadToEndAsync();
+            string body = await reader.ReadToEndAsync(HttpContext.RequestAborted);
 
             CreateDatabaseRequest? request = JsonSerializer.Deserialize<CreateDatabaseRequest>(body, jsonOptions);
             if (request == null)

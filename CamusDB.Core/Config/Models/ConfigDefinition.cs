@@ -451,6 +451,13 @@ public class ConfigDefinition
     public int ClusterActivityPeerTimeoutMs { get; set; } = 2000;
 
     /// <summary>
+    /// Most cluster activity statements that may ask the peers at one time on this node.
+    /// Maps to <c>CamusDBOptions.ClusterActivityMaxConcurrentFanOuts</c> (yml
+    /// <c>cluster_activity_max_concurrent_fan_outs</c>). &lt;= 0 disables. Default 8.
+    /// </summary>
+    public int ClusterActivityMaxConcurrentFanOuts { get; set; } = 8;
+
+    /// <summary>
     /// Serves the browser operator dashboard on the HTTP port. Maps to
     /// <c>CamusDBOptions.DashboardEnabled</c> (yml <c>dashboard_enabled</c>). Default on.
     /// </summary>
@@ -844,6 +851,24 @@ public class ConfigDefinition
 
     /// <summary>Max tables per database. &lt;= 0 disables. Default 10 000.</summary>
     public int MaxTablesPerDatabase { get; set; } = 10_000;
+
+    /// <summary>Max databases in the registry. &lt;= 0 disables. Default 10 000.</summary>
+    public int MaxDatabases { get; set; } = 10_000;
+
+    /// <summary>Largest inline SQL statement parsed, in UTF-8 bytes. &lt;= 0 disables. Default 8 MiB.</summary>
+    public int MaxStatementBytes { get; set; } = 8 * 1024 * 1024;
+
+    /// <summary>Most rows one buffered response may hold. &lt;= 0 disables. Default 1 000 000.</summary>
+    public int MaxBufferedResultRows { get; set; } = 1_000_000;
+
+    /// <summary>Most estimated bytes one buffered response may hold. &lt;= 0 disables. Default 256 MiB.</summary>
+    public long MaxBufferedResultBytes { get; set; } = 256L * 1024 * 1024;
+
+    /// <summary>Most explicit transactions open at one time on this node. &lt;= 0 disables. Default 10 000.</summary>
+    public int MaxOpenExplicitTransactions { get; set; } = 10_000;
+
+    /// <summary>Most client connections open at one time on this node. &lt;= 0 disables. Default 10 000.</summary>
+    public int MaxClientConnections { get; set; } = 10_000;
 
     /// <summary>
     /// Max key + stored/payload (<c>INCLUDE</c>) columns in one index. Guards a covering index from

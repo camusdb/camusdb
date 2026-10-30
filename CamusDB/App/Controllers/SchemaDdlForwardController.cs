@@ -764,7 +764,7 @@ public sealed class SchemaDdlForwardController : CommandsController
     private async Task<T?> ReadJsonBodyAsync<T>()
     {
         using StreamReader reader = new(Request.Body);
-        string body = await reader.ReadToEndAsync().ConfigureAwait(false);
+        string body = await reader.ReadToEndAsync(HttpContext.RequestAborted).ConfigureAwait(false);
         if (string.IsNullOrWhiteSpace(body))
             return default;
         try

@@ -112,6 +112,13 @@ Example: YAML `mode: cluster` with `--mode standalone` starts in standalone mode
 | `query_activity_enabled` | — | `true` |
 | `query_activity_max_sql_length` | — | `1024` |
 | `cluster_activity_peer_timeout_ms` | — | `2000` |
+| `cluster_activity_max_concurrent_fan_outs` | — | `8` |
+| `max_databases` | — | `10000` (see [request-resource-limits.md](request-resource-limits.md)) |
+| `max_statement_bytes` | — | `8388608` |
+| `max_buffered_result_rows` | — | `1000000` |
+| `max_buffered_result_bytes` | — | `268435456` |
+| `max_open_explicit_transactions` | — | `10000` |
+| `max_client_connections` | — | `10000` |
 | `kahuna.*` | — | mode-specific baseline |
 
 The table covers every key with a CLI flag plus a selection of YAML-only keys. `config.yml` documents

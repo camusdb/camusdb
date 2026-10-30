@@ -287,6 +287,7 @@ initial_partitions: 1      # Raft partition count (>= 1). Unset, it is 1 in stan
 # max_columns_per_table: 512            # user-declared columns per table
 # max_indexes_per_table: 64             # secondary indexes per table (the primary key is exempt)
 # max_tables_per_database: 10000
+# max_databases: 10000                  # databases in the registry; checked at CREATE DATABASE, branch and relink
 # max_index_columns: 32                 # key + INCLUDE columns in one index
 # max_index_include_tuple_bytes: 4096   # encoded bytes of one index entry's key + INCLUDE tuple, checked at write time
 # max_mutations_per_transaction: 20000  # rows one user transaction may mutate; DDL and backfill always run unlimited
@@ -295,6 +296,16 @@ initial_partitions: 1      # Raft partition count (>= 1). Unset, it is 1 in stan
 # min_free_disk_bytes: free space on the data directory's volume below which new user DML is refused
 #   with CADB0536. Reads, DDL and internal transactions are still admitted. Default 64 MiB.
 # min_free_disk_bytes: 67108864
+
+# ── Request resource limits ───────────────────────────────────────────────────
+# Caps that stop one client from exhausting the node with cheap inputs. For every limit below,
+# <= 0 disables it. All are runtime settings. See docs/request-resource-limits.md.
+# max_statement_bytes: 8388608            # inline SQL text parsed per statement, UTF-8 bytes (CADB0557)
+# max_buffered_result_rows: 1000000       # rows one /execute-sql-query or /query response holds (CADB0556)
+# max_buffered_result_bytes: 268435456    # estimated bytes one buffered response holds (CADB0556)
+# max_open_explicit_transactions: 10000   # explicit transactions open at one time on this node (CADB0558)
+# max_client_connections: 10000           # client connections on the HTTP, HTTPS and gRPC listeners
+# cluster_activity_max_concurrent_fan_outs: 8   # concurrent SHOW CLUSTER QUERIES/CONNECTIONS (CADB0558)
 
 # ── Large values ──────────────────────────────────────────────────────────────
 # See docs/storage-layout.md.

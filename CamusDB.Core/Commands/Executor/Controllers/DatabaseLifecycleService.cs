@@ -111,6 +111,14 @@ internal sealed class DatabaseLifecycleService
         if (TestInterceptAfterExistenceCheck is { } afterExistenceCheck)
             await afterExistenceCheck().ConfigureAwait(false);
 
+        // An early refusal, so that a branch create does not copy metadata that it then discards.
+        // RegisterAsync makes the authoritative check under the registry's write lock.
+        int maxDatabases = options.MaxDatabases;
+        if (maxDatabases > 0 && registry.Count >= maxDatabases)
+            throw new CamusDBException(
+                CamusDBErrorCodes.SchemaLimitExceeded,
+                $"Database '{name}' would exceed the maximum of {maxDatabases} databases (max_databases)");
+
         // The existence check above and the registration below are not atomic: a concurrent create of
         // the same name (on this node or another) can pass the check too and register first. The
         // registry's name-key write is the arbiter, and the loser gets DatabaseAlreadyExists from it.
@@ -139,7 +147,7 @@ internal sealed class DatabaseLifecycleService
 
         try
         {
-            await registry.RegisterAsync(name, id).ConfigureAwait(false);
+            await registry.RegisterAsync(name, id, maxDatabases: options.MaxDatabases).ConfigureAwait(false);
         }
         catch (CamusDBException ex) when (ticket.IfNotExists && ex.Code == CamusDBErrorCodes.DatabaseAlreadyExists)
         {
@@ -384,7 +392,7 @@ internal sealed class DatabaseLifecycleService
                 creationKeepAlive.ThrowIfLost($"the creation of branch '{branchName}'");
 
                 registerAttempted = true;
-                await registry.RegisterAsync(branchName, branchId, ancestors, holdId).ConfigureAwait(false);
+                await registry.RegisterAsync(branchName, branchId, ancestors, holdId, options.MaxDatabases).ConfigureAwait(false);
                 childRegistered = true;
 
                 // Cross-node drop-vs-branch-create fence: check whether DropDatabase set a drop-intent
@@ -834,7 +842,7 @@ internal sealed class DatabaseLifecycleService
                     $"No orphaned database with id '{ticket.OrphanId}' is available to relink (never dropped, or already reclaimed)");
 
             // Re-register the name to the preserved id; the keyspace is already on disk.
-            await registry.RegisterAsync(ticket.NewName, orphan.Id).ConfigureAwait(false);
+            await registry.RegisterAsync(ticket.NewName, orphan.Id, maxDatabases: options.MaxDatabases).ConfigureAwait(false);
 
             // The database is live again — remove the orphan record so the GC leaves it alone.
             await registry.Orphans.DeleteDatabaseOrphanAsync(orphan.Id).ConfigureAwait(false);
