@@ -877,6 +877,81 @@ public sealed class TestSchemaDdlForwardController
         }
     }
 
+    /// <summary>
+    /// A covering index forwarded the real way: the follower's forwarder serializes the ticket and the
+    /// leader's controller rebuilds it from that exact body. A lost INCLUDE list is not an error on the
+    /// leader, it builds an index that silently stops covering, so only the round trip shows it.
+    /// </summary>
+    [Test]
+    public async Task ForwardAlterIndex_AsLeader_KeepsTheIncludeColumns()
+    {
+        string db = await CreateTestDatabaseAsync();
+        try
+        {
+            await executor!.ExecuteDDLSQL(new ExecuteSQLTicket(txnState: null!, database: db,
+                sql: "CREATE TABLE robots (id int64 PRIMARY KEY NOT NULL, name string, score int64)", parameters: null));
+
+            const string sql = "CREATE INDEX name_idx ON robots (name) INCLUDE (score)";
+
+            AlterIndexTicket ticket = new CamusDB.Core.CommandsExecutor.Controllers.DDL.SQLExecutorAlterIndexCreator().CreateAlterIndexTicket(
+                new ExecuteSQLTicket(txnState: null!, database: db, sql: sql, parameters: null),
+                CamusDB.Core.SQLParser.SQLParserProcessor.Parse(sql));
+
+            CapturingHandler handler = new();
+            HttpSchemaDdlForwarder forwarder = new(new System.Net.Http.HttpClient(handler), _ => new Uri("http://leader:5095"), nodeSecret: "", NullLogger<ICamusDB>.Instance);
+            await forwarder.ForwardAlterIndexAsync("leader:7070", ticket, Guid.NewGuid().ToString("N"), CancellationToken.None);
+
+            SchemaDdlForwardController ctrl = BuildController(handler.Body!, clusterNode: node);
+            SchemaDdlForwardResponse? resp = ExtractResponse(await ctrl.ForwardAlterIndex());
+
+            Assert.AreEqual("ok", resp!.Status, resp.Message);
+
+            DatabaseDescriptor descriptor = await executor!.OpenDatabase(db);
+            CamusDB.Core.Catalogs.Models.TableIndexSchema index = descriptor.Schema.Tables["robots"].Indexes!
+                .Single(ix => ix.Name == "name_idx");
+            Assert.IsTrue(index.HasIncludeColumns, "the leader must build the index with its INCLUDE columns");
+        }
+        finally
+        {
+            await DropTestDatabaseAsync(db);
+        }
+    }
+
+    /// <summary>
+    /// <c>DROP INDEX IF EXISTS</c> forwarded the real way: the flag must survive the wire, or the leader
+    /// fails a statement the follower accepted as a no-op.
+    /// </summary>
+    [Test]
+    public async Task ForwardAlterIndex_AsLeader_DropIfExistsOfAMissingIndex_IsANoOp()
+    {
+        string db = await CreateTestDatabaseAsync();
+        try
+        {
+            await executor!.ExecuteDDLSQL(new ExecuteSQLTicket(txnState: null!, database: db,
+                sql: "CREATE TABLE robots (id int64 PRIMARY KEY NOT NULL, name string)", parameters: null));
+
+            const string sql = "DROP INDEX IF EXISTS no_such_idx ON robots";
+
+            AlterIndexTicket ticket = new CamusDB.Core.CommandsExecutor.Controllers.DDL.SQLExecutorAlterIndexCreator().CreateAlterIndexTicket(
+                new ExecuteSQLTicket(txnState: null!, database: db, sql: sql, parameters: null),
+                CamusDB.Core.SQLParser.SQLParserProcessor.Parse(sql));
+
+            CapturingHandler handler = new();
+            HttpSchemaDdlForwarder forwarder = new(new System.Net.Http.HttpClient(handler), _ => new Uri("http://leader:5095"), nodeSecret: "", NullLogger<ICamusDB>.Instance);
+            await forwarder.ForwardAlterIndexAsync("leader:7070", ticket, Guid.NewGuid().ToString("N"), CancellationToken.None);
+
+            SchemaDdlForwardController ctrl = BuildController(handler.Body!, clusterNode: node);
+            SchemaDdlForwardResponse? resp = ExtractResponse(await ctrl.ForwardAlterIndex());
+
+            Assert.AreEqual("ok", resp!.Status, resp.Message);
+            Assert.IsFalse(resp.Applied, "a missing index under IF EXISTS is not applied");
+        }
+        finally
+        {
+            await DropTestDatabaseAsync(db);
+        }
+    }
+
     [Test]
     public async Task ForwardDropTable_AsLeader_DropsTable_ReturnsOkApplied()
     {

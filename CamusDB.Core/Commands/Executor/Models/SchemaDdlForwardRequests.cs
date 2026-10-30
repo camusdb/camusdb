@@ -144,7 +144,17 @@ public sealed class ForwardAlterIndexRequest
     public ColumnIndexInfoRequest[] Columns { get; set; } = [];
     public AlterIndexOperation Operation { get; set; }
     public bool IfNotExists { get; set; }
+
+    /// <summary>Carries <c>AlterIndexTicket.IfExists</c> (<c>DROP INDEX IF EXISTS</c>) to the leader.</summary>
+    public bool IfExists { get; set; }
+
     public string? NewName { get; set; }
+
+    /// <summary>
+    /// Carries <c>AlterIndexTicket.IncludeColumns</c> to the leader. Without it a forwarded
+    /// <c>CREATE INDEX … INCLUDE (…)</c> builds an index that does not cover, and nothing reports it.
+    /// </summary>
+    public string[] IncludeColumns { get; set; } = [];
 }
 
 public sealed class ForwardDropTableRequest

@@ -124,6 +124,7 @@ stat    : select_stmt { $$.n = $1.n; }
         | alter_table_stmt { $$.n = $1.n; }
         | show_stmt { $$.n = $1.n; }
         | create_index_stmt { $$.n = $1.n; }
+        | drop_index_stmt { $$.n = $1.n; }
         | begin_stmt { $$.n = $1.n; }
         | commit_stmt { $$.n = $1.n; }
         | rollback_stmt { $$.n = $1.n; }
@@ -946,6 +947,7 @@ alter_table_stmt : TALTER TTABLE any_identifier TWADD any_identifier field_type 
                  | TALTER TTABLE any_identifier TWADD TUNIQUE TINDEX any_identifier LPAREN identifier_index_list RPAREN index_include_clause { $$.n = new(NodeType.AlterTableAddUniqueIndex, $3.n, $7.n, $9.n, $11.n, null, null, null, null); }
                  | TALTER TTABLE any_identifier TWADD TUNIQUE TINDEX any_identifier TON LPAREN identifier_index_list RPAREN index_include_clause { $$.n = new(NodeType.AlterTableAddUniqueIndex, $3.n, $7.n, $10.n, $12.n, null, null, null, null); }
                  | TALTER TTABLE any_identifier TDROP TINDEX any_identifier { $$.n = new(NodeType.AlterTableDropIndex, $3.n, $6.n, null, null, null, null, null, null); }
+                 | TALTER TTABLE any_identifier TDROP TINDEX TIF TEXISTS any_identifier { $$.n = new(NodeType.AlterTableDropIndexIfExists, $3.n, $8.n, null, null, null, null, null, null); }
                  | TALTER TTABLE any_identifier TWADD TPRIMARY TKEY LPAREN identifier_index_list RPAREN { $$.n = new(NodeType.AlterTableAddPrimaryKey, $3.n, $8.n, null, null, null, null, null, null); }
                  | TALTER TTABLE any_identifier TDROP TPRIMARY TKEY { $$.n = new(NodeType.AlterTableDropPrimaryKey, $3.n, null, null, null, null, null, null, null); }
                  | TALTER TTABLE any_identifier TRENAME TTO any_identifier { $$.n = new(NodeType.AlterTableRenameTo, $3.n, $6.n, null, null, null, null, null, null); }
@@ -1016,6 +1018,16 @@ create_index_stmt : TCREATE TINDEX any_identifier TON any_identifier LPAREN iden
                   | TCREATE TUNIQUE TINDEX any_identifier TON any_identifier LPAREN identifier_index_list RPAREN index_include_clause { $$.n = new(NodeType.AlterTableAddUniqueIndex, $6.n, $4.n, $8.n, $10.n, null, null, null, null); }
                   | TCREATE TUNIQUE TINDEX TIF TNOT TEXISTS any_identifier TON any_identifier LPAREN identifier_index_list RPAREN index_include_clause { $$.n = new(NodeType.AlterTableAddUniqueIndexIfNotExists, $9.n, $7.n, $11.n, $13.n, null, null, null, null); }
                   ;
+
+/* DROP INDEX [IF EXISTS] <index> ON <table>, and DROP INDEX [IF EXISTS] <table>.<index>. Both build
+   the AST of ALTER TABLE <table> DROP INDEX [IF EXISTS] <index>, so all three forms share one path.
+   Index names are unique per table, not per database, so the bare DROP INDEX <index> has nothing to
+   resolve against: the qualified rule reaches DropIndexQualified, which refuses it. */
+drop_index_stmt : TDROP TINDEX any_identifier TON any_identifier { $$.n = new(NodeType.AlterTableDropIndex, $5.n, $3.n, null, null, null, null, null, null); }
+                | TDROP TINDEX TIF TEXISTS any_identifier TON any_identifier { $$.n = new(NodeType.AlterTableDropIndexIfExists, $7.n, $5.n, null, null, null, null, null, null); }
+                | TDROP TINDEX any_identifier { $$.n = DropIndexQualified(NodeType.AlterTableDropIndex, $3.n.yytext); }
+                | TDROP TINDEX TIF TEXISTS any_identifier { $$.n = DropIndexQualified(NodeType.AlterTableDropIndexIfExists, $5.n.yytext); }
+                ;
 
 index_include_clause : { $$.n = null; }
                      | TINCLUDE LPAREN identifier_index_list RPAREN { $$.n = $3.n; }

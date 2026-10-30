@@ -229,7 +229,9 @@ public sealed class SchemaDdlForwardController : CommandsController
                 columns: req.Columns.Select(c => new ColumnIndexInfo(c.Name, c.Order)).ToArray(),
                 operation: req.Operation,
                 ifNotExists: req.IfNotExists,
-                newName: req.NewName
+                newName: req.NewName,
+                includeColumns: req.IncludeColumns,
+                ifExists: req.IfExists
             );
 
             bool result = await executor.AlterIndex(ticket).ConfigureAwait(false);

@@ -1168,4 +1168,13 @@ public enum NodeType
     /// <c>leftAst</c> is the offset (an integer literal or a placeholder) of the two offset forms.
     /// </summary>
     WindowFrameBound,
+
+    /// <summary>
+    /// <c>DROP INDEX IF EXISTS</c> in any of its three forms (<c>… ON t</c>, <c>t.i</c>,
+    /// <c>ALTER TABLE t DROP INDEX IF EXISTS i</c>). Same shape as <see cref="AlterTableDropIndex"/>:
+    /// <c>leftAst</c> = table, <c>rightAst</c> = index. A missing index or table is a no-op.
+    ///
+    /// <para>Appended at the end for the reason given on <see cref="TypeBytesSized"/>.</para>
+    /// </summary>
+    AlterTableDropIndexIfExists,
 }

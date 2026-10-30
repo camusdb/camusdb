@@ -31,6 +31,14 @@ public readonly struct AlterIndexTicket
 
     public bool IfNotExists { get; }
 
+    /// <summary>
+    /// <c>DROP INDEX IF EXISTS</c>: a missing index, or a missing table, is a no-op that reports
+    /// "not applied" instead of an error. The index check runs inside the DDL work under the DDL gate,
+    /// so two concurrent drops of one index give one drop and one no-op. Meaningful only for
+    /// <see cref="AlterIndexOperation.DropIndex"/>.
+    /// </summary>
+    public bool IfExists { get; }
+
     public string? NewName { get; }
 
     public AlterIndexTicket(
@@ -41,7 +49,8 @@ public readonly struct AlterIndexTicket
         AlterIndexOperation operation,
         bool ifNotExists = false,
         string? newName = null,
-        string[]? includeColumns = null
+        string[]? includeColumns = null,
+        bool ifExists = false
     )
     {
         DatabaseName = databaseName;
@@ -50,6 +59,7 @@ public readonly struct AlterIndexTicket
         Columns = columns;
         Operation = operation;
         IfNotExists = ifNotExists;
+        IfExists = ifExists;
         NewName = newName;
         IncludeColumns = includeColumns ?? [];
     }

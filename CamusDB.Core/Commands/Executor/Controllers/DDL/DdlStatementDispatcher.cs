@@ -421,6 +421,7 @@ internal sealed class DdlStatementDispatcher
             case NodeType.AlterTableAddUniqueIndex:
             case NodeType.AlterTableAddUniqueIndexIfNotExists:
             case NodeType.AlterTableDropIndex:
+            case NodeType.AlterTableDropIndexIfExists:
             case NodeType.AlterTableAddPrimaryKey:
             case NodeType.AlterTableDropPrimaryKey:
                 {
@@ -431,7 +432,9 @@ internal sealed class DdlStatementDispatcher
                     if (forwarded is not null)
                         return new ExecuteDDLSQLResult(database, forwarded.Value);
 
-                    TableDescriptor table = await context.TableOpener.Open(database, alterIndexTicket.TableName).ConfigureAwait(false);
+                    TableDescriptor? table = await schemaDdl.OpenIndexTableAsync(database, alterIndexTicket).ConfigureAwait(false);
+                    if (table is null)
+                        return new ExecuteDDLSQLResult(database, false);
 
                     bool sqlAddIndex = alterIndexTicket.Operation is
                         AlterIndexOperation.AddIndex or
