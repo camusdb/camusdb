@@ -531,6 +531,10 @@ if (diagnosticsActive)
                 metrics.AddMeter(CamusDB.Core.Diagnostics.QueryStageProfile.MeterName);
             metrics.AddMeter("Kahuna");
             metrics.AddMeter("Kommander");
+            // Kommander publishes the raft.wal.* instruments that read the storage engine for RocksDbWAL only;
+            // the Solarium WAL publishes the same names on its own meter, so a node on wal_storage: solarium
+            // has no raft_wal_* gauges without it. Harmless when the WAL is RocksDB: the meter stays silent.
+            metrics.AddMeter(Solarium.Kommander.SolariumWalMetrics.MeterName);
             metrics.AddAspNetCoreInstrumentation();
             if (config.Diagnostics.IncludeRuntimeMetrics)
                 metrics.AddRuntimeInstrumentation();
