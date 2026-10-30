@@ -1302,11 +1302,17 @@ internal sealed partial class SchemaDdlService
     }
 
     /// <summary>
-    /// Two-phase execution for cluster index DDL. Phase 1 commits the backfill data
-    /// (tx1) so the index KV entries are visible before Phase 2 replicates the schema
+    /// Two-phase execution for index DDL that writes or removes index data. Phase 1 commits the
+    /// backfill data (tx1) so the index KV entries are visible before Phase 2 replicates the schema
     /// delta. Both phases run under the DDL gate so <c>SchemaVersion</c> stays stable across the
     /// pair; a standalone index build therefore still holds every DDL of its database for the length of
-    /// its backfill, unlike the staged cluster build. Only called in cluster mode.
+    /// its backfill, unlike the staged cluster build.
+    ///
+    /// <para>Called in both modes, by the SQL dispatcher and by <see cref="AlterIndex"/>: on a
+    /// standalone node for every index operation except a rename, and in a cluster for a drop of an
+    /// index or a primary key. A cluster add goes through the staged
+    /// <see cref="ExecuteClusterAddIndexAsync"/> instead, and a rename through
+    /// <see cref="ExecuteDdlInTransaction"/> in both modes.</para>
     /// </summary>
     internal async Task<bool> ExecuteClusteredIndexDdlAsync(
         DatabaseDescriptor database,
