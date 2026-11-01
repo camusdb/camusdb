@@ -46,8 +46,8 @@ integers exactly — never renumber or reuse them:
 | `INTEGER64`  | 2   | `int64_value`       | signed 64-bit int |
 | `STRING`     | 3   | `string_value`      | UTF-8 string |
 | `BOOL`       | 4   | `bool_value`        | bool |
-| `FLOAT64`    | 5   | `float64_value`     | IEEE-754 double |
-| `FLOAT32`    | 6   | `float32_value`     | IEEE-754 float |
+| `FLOAT64`    | 5   | `float64_value`     | IEEE-754 double; ±infinity, NaN and -0 travel as they are |
+| `FLOAT32`    | 6   | `float32_value`     | IEEE-754 float; ±infinity, NaN and -0 travel as they are |
 | `BYTES`      | 7   | `bytes_value`       | raw bytes |
 | `DATE`       | 8   | `date_value`        | **raw tick count**, `int64`, UTC, midnight-truncated (see below) |
 | `DATETIME`   | 9   | `datetime_value`    | **raw tick count**, `int64`, UTC |
@@ -116,6 +116,11 @@ integers exactly — never renumber or reuse them:
 
 8. **Float32 vs Float64 are separate cases.** Do not widen a `float32_value` into
    `float64_value` on the wire; keep the type the column declares.
+   - Infinity, -Infinity and NaN are column values, not errors. A cell carries them in the IEEE
+     field with no conversion, and a parameter can send them. `NaN` equals `NaN` in SQL and sorts
+     above every number. A client must not map NaN to NULL or 0. The HTTP JSON API writes these
+     three values as strings, because JSON has no number for them (see
+     [data-types.md](data-types.md#over-the-wire)).
 
 > **Single mapping point.** Server-side, all of this lives in one converter
 > (`GrpcValueCodec`) so REST and gRPC can never drift. Your client should likewise centralize the
@@ -693,7 +698,7 @@ Domain errors are surfaced two ways depending on the call shape:
 | gRPC `StatusCode` | Meaning | Example CamusDB codes |
 |-------------------|---------|-----------------------|
 | `INVALID_ARGUMENT` | Bad client input | invalid input, SQL syntax error, invalid AST, unknown column, unknown type, value too long, schema limit exceeded, statement too deeply nested (`CADB0413`), invalid JSON text or a document nested too deep (`CADB0418`, `CADB0419`), NOT NULL violation, CHECK constraint violation, a C# extension function, trigger or procedure that threw (`CADB0809`, `CADB0818`, `CADB0822`), trigger DDL refusals (`CADB0811`-`CADB0813`, `CADB0816`), extension nesting too deep (`CADB0819`), a statement an extension's SQL session refuses (`CADB0820`), an extension that caught an error from its own SQL (`CADB0823`), an extension or version this node does not load (`CADB0828`), a required extension that is not installed (`CADB0831`) |
-| `OUT_OF_RANGE` | A value outside its type's range | NUMERIC out of range, a NUMERIC that does not fit an extension's `decimal` (`CADB0810`) |
+| `OUT_OF_RANGE` | A value outside its type's range | NUMERIC out of range (`CADB0417`), INT64 out of range (`CADB0420`), float overflow or underflow (`CADB0421`), a NUMERIC that does not fit an extension's `decimal` (`CADB0810`) |
 | `NOT_FOUND` | Missing object | database/table/index doesn't exist, unknown key, no running query with the id given to `CANCEL QUERY` (`CADB0551`), unknown trigger on `DROP TRIGGER` (`CADB0815`), unknown procedure on `CALL` (`CADB0821`), extension not installed (`CADB0830`) |
 | `ALREADY_EXISTS` | Duplicate | duplicate unique key, duplicate primary key, database/table already exists, trigger already exists (`CADB0814`), extension already installed (`CADB0829`) |
 | `FAILED_PRECONDITION` | Non-retryable transaction/state precondition | transaction already completed, database has live descendants, `CANCEL QUERY` of a write (`CADB0552`), a commit of a rollback-only transaction (`CADB0824`), a trigger's SQL changing a row its statement still holds (`CADB0825`), an extension name conflict, dependents or a node without the build (`CADB0832`, `CADB0833`, `CADB0835`) |

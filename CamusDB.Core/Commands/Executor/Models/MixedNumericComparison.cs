@@ -105,7 +105,8 @@ public static class MixedNumericComparison
             return true;
         }
 
-        result = ToDouble(left).CompareTo(ToDouble(right));
+        // The float order, not double.CompareTo: NaN sorts above every number (see FloatMath).
+        result = FloatMath.Compare(ToDouble(left), ToDouble(right));
         return true;
     }
 

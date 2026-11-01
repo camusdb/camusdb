@@ -21,7 +21,10 @@ namespace CamusDB.Core.CommandsExecutor.Models.Plans;
 /// typed post-merge step, never a SQL expression: the engine's <c>/</c> integer-divides
 /// Integer64 operands, which would corrupt integer-column averages.
 /// </summary>
-public sealed record PartialAvgFinalizer(string OutputName, string SumName, string CountName);
+/// <param name="IntegerArgument">The AVG argument is an Integer64 column, and its span sums ship as
+/// exact NUMERIC totals (a span's Integer64 SUM would be range-checked). The finalizer then gives
+/// the Float64 average of the exact total, the value the single-node AVG gives.</param>
+public sealed record PartialAvgFinalizer(string OutputName, string SumName, string CountName, bool IntegerArgument = false);
 
 /// <summary>
 /// Everything the executor needs to run an aggregate as per-span partials below a gather:
@@ -51,4 +54,16 @@ public sealed class PartialAggregatePlan
 
     /// <summary>AVG pairs to divide and project after the merge; empty when no AVG.</summary>
     public IReadOnlyList<PartialAvgFinalizer> AvgFinalizers { get; init; } = [];
+
+    /// <summary>
+    /// Output names of the SUMs of an Integer64 column. Their span totals ship as exact NUMERIC
+    /// values, and after the merge each total converts back to Integer64, or fails with
+    /// <see cref="CamusDBErrorCodes.IntegerValueOutOfRange"/> when it is outside the int64 range. This
+    /// is the rule the single-node SUM applies: only the final total is checked, so a span total
+    /// past the range that the other spans bring back in range is not an error.
+    /// </summary>
+    public IReadOnlyList<string> IntegerSumOutputs { get; init; } = [];
+
+    /// <summary>True when the merged row needs a typed step after the merge (AVG or Integer64 SUM).</summary>
+    public bool NeedsFinalization => AvgFinalizers.Count > 0 || IntegerSumOutputs.Count > 0;
 }

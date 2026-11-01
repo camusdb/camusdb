@@ -435,15 +435,16 @@ public sealed class ColumnValue : IComparable<ColumnValue>
             case ColumnType.Integer64:
                 return LongValue.CompareTo(other.LongValue);
 
+            // NaN = NaN and sorts above +infinity, and -0 = 0 (the PostgreSQL order, see FloatMath).
             case ColumnType.Float64:
-                return FloatValue.CompareTo(other.FloatValue);
+                return FloatMath.Compare(FloatValue, other.FloatValue);
 
             case ColumnType.Bool:
                 return BoolValue.CompareTo(other.BoolValue);
 
             case ColumnType.Float32:
                 // Compare as float (single precision) to be consistent with stored precision.
-                return ((float)FloatValue).CompareTo((float)other.FloatValue);
+                return FloatMath.Compare((float)FloatValue, (float)other.FloatValue);
 
             case ColumnType.Date:
             case ColumnType.DateTime:

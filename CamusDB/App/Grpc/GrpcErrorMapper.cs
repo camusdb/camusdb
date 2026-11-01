@@ -85,8 +85,10 @@ public static class GrpcErrorMapper
         CamusDBErrorCodes.ExtensionNotAvailable => StatusCode.InvalidArgument,
         CamusDBErrorCodes.ExtensionRequirementMissing => StatusCode.InvalidArgument,
 
-        // A NUMERIC value outside the type's range, as Spanner reports it.
+        // A NUMERIC, Integer64 or float value outside the type's range, as Spanner reports it.
         CamusDBErrorCodes.NumericValueOutOfRange => StatusCode.OutOfRange,
+        CamusDBErrorCodes.IntegerValueOutOfRange => StatusCode.OutOfRange,
+        CamusDBErrorCodes.FloatValueOutOfRange => StatusCode.OutOfRange,
         CamusDBErrorCodes.ExtensionValueOutOfRange => StatusCode.OutOfRange,
 
         // Not found

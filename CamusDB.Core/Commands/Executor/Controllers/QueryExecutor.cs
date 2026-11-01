@@ -979,7 +979,7 @@ internal sealed class QueryExecutor
             await foreach (QueryResultRow merged in queryAggregator.AggregateResultset(
                 mergeTicket, partialRows.ToAsyncEnumerable(), QueryExecutionContext.For(database, plan.Ticket)).ConfigureAwait(false))
             {
-                yield return partialPlan.AvgFinalizers.Count == 0 ? merged : FinalizeAverages(merged, partialPlan);
+                yield return partialPlan.NeedsFinalization ? FinalizePartials(merged, partialPlan) : merged;
             }
         }
         finally
@@ -1090,20 +1090,32 @@ internal sealed class QueryExecutor
     }
 
     /// <summary>
-    /// Replaces each AVG's internal sum/count pair with the final average (NULL when the count is
-    /// zero — the aggregator's own empty-input answer), leaving every other column untouched. The
-    /// average has the type the sequential aggregator gives: NUMERIC when the merged sum is NUMERIC
-    /// (exact division, half away from zero), Float64 otherwise. A NUMERIC sum read as a double
+    /// Converts each Integer64 SUM's exact NUMERIC total back to Integer64 (see
+    /// <see cref="PartialAggregatePlan.IntegerSumOutputs"/>), and replaces each AVG's internal
+    /// sum/count pair with the final average (NULL when the count is zero — the aggregator's own
+    /// empty-input answer), leaving every other column untouched. The
+    /// average has the type the sequential aggregator gives: Float64 for an Integer64 column (its
+    /// span sums ship as exact NUMERIC totals, see <see cref="PartialAvgFinalizer.IntegerArgument"/>),
+    /// otherwise NUMERIC when the merged sum is NUMERIC (exact division, half away from zero), and
+    /// Float64 for the rest. A NUMERIC sum read as a double
     /// would be zero (<see cref="ColumnValue.FloatValue"/> is unused for NUMERIC), so it must never
     /// reach the Float64 arm. Internal so tests can drive it with a merged row: no standalone test
     /// reaches the gather partial-aggregation path that calls it.
     /// </summary>
-    internal static QueryResultRow FinalizeAverages(QueryResultRow merged, PartialAggregatePlan partialPlan)
+    internal static QueryResultRow FinalizePartials(QueryResultRow merged, PartialAggregatePlan partialPlan)
     {
         Dictionary<string, ColumnValue> finalized = new(StringComparer.OrdinalIgnoreCase);
 
         foreach (KeyValuePair<string, ColumnValue> cell in merged.Row)
             finalized[cell.Key] = cell.Value;
+
+        foreach (string output in partialPlan.IntegerSumOutputs)
+        {
+            ColumnValue total = finalized[output];
+
+            if (total.Type == ColumnType.Numeric)
+                finalized[output] = new ColumnValue(ColumnType.Integer64, IntegerTotalOf(total, "SUM"));
+        }
 
         foreach (PartialAvgFinalizer finalizer in partialPlan.AvgFinalizers)
         {
@@ -1117,6 +1129,10 @@ internal sealed class QueryExecutor
 
             finalized[finalizer.OutputName] = countValue == 0 || sum.Type == ColumnType.Null
                 ? ColumnValue.Null
+                : finalizer.IntegerArgument && sum.Type == ColumnType.Numeric
+                    // An exact total of Integer64 values has no fraction, so the division by the
+                    // scale is exact, and the result is the single-node (double)total / count.
+                    ? new ColumnValue(ColumnType.Float64, (double)(sum.NumericUnscaled / NumericMath.ScaleFactor) / countValue)
                 : sum.Type == ColumnType.Numeric
                     ? ColumnValue.FromNumeric(NumericMath.Divide(sum.NumericUnscaled, NumericMath.FromInt64(countValue)))
                     : new ColumnValue(
@@ -1125,6 +1141,23 @@ internal sealed class QueryExecutor
         }
 
         return new QueryResultRow(merged.RowId, finalized);
+    }
+
+    /// <summary>
+    /// The merged exact total of an Integer64 SUM, shipped as NUMERIC, as an Integer64. The total of
+    /// Integer64 values has no fraction, so the division by the scale is exact. A total outside the
+    /// int64 range is <see cref="CamusDBErrorCodes.IntegerValueOutOfRange"/>, the error the single-node
+    /// SUM gives for the same rows.
+    /// </summary>
+    private static long IntegerTotalOf(ColumnValue total, string operation)
+    {
+        Int128 whole = total.NumericUnscaled / NumericMath.ScaleFactor;
+
+        if (whole < long.MinValue || whole > long.MaxValue)
+            throw Int64Math.OutOfRange(
+                $"{operation} integer overflow: the total {whole.ToString(System.Globalization.CultureInfo.InvariantCulture)} is outside the int64 range");
+
+        return (long)whole;
     }
 
     private static async IAsyncEnumerable<QueryResultRow> CountRowsEmitted(

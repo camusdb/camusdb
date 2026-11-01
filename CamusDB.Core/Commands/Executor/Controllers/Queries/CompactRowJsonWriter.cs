@@ -129,11 +129,11 @@ public static class CompactRowJsonWriter
                 break;
 
             case ColumnType.Float64:
-                writer.WriteNumberValue(value.FloatValue);
+                WriteDouble(writer, value.FloatValue);
                 break;
 
             case ColumnType.Float32:
-                writer.WriteNumberValue((float)value.FloatValue);
+                WriteSingle(writer, (float)value.FloatValue);
                 break;
 
             case ColumnType.Bytes:
@@ -166,6 +166,32 @@ public static class CompactRowJsonWriter
                 writer.WriteNullValue();
                 break;
         }
+    }
+
+    /// <summary>
+    /// Writes a Float64 cell. JSON has no token for ±infinity or NaN, and
+    /// <see cref="Utf8JsonWriter.WriteNumberValue(double)"/> throws for them, which ended the response
+    /// in the middle of a row. A non-finite value is written as the string <c>"Infinity"</c>,
+    /// <c>"-Infinity"</c> or <c>"NaN"</c> (<see cref="FloatMath.NonFiniteText"/>), the spelling
+    /// PostgreSQL's JSON functions and <c>System.Text.Json</c> named literals use; the column schema
+    /// still says float64, so a client reads a string in a float column as that value. Every finite
+    /// value, -0 included, stays a JSON number.
+    /// </summary>
+    private static void WriteDouble(Utf8JsonWriter writer, double value)
+    {
+        if (double.IsFinite(value))
+            writer.WriteNumberValue(value);
+        else
+            writer.WriteStringValue(FloatMath.NonFiniteText(value));
+    }
+
+    /// <summary>The Float32 counterpart of <see cref="WriteDouble"/>.</summary>
+    private static void WriteSingle(Utf8JsonWriter writer, float value)
+    {
+        if (float.IsFinite(value))
+            writer.WriteNumberValue(value);
+        else
+            writer.WriteStringValue(FloatMath.NonFiniteText(value));
     }
 
     /// <summary>
@@ -331,11 +357,11 @@ public static class CompactRowJsonWriter
                 break;
 
             case ColumnType.Float64:
-                writer.WriteNumberValue(slot.AsDouble);
+                WriteDouble(writer, slot.AsDouble);
                 break;
 
             case ColumnType.Float32:
-                writer.WriteNumberValue((float)slot.AsDouble);
+                WriteSingle(writer, (float)slot.AsDouble);
                 break;
 
             case ColumnType.Bytes:

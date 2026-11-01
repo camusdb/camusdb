@@ -140,6 +140,14 @@ internal sealed class ExactDoubleSum
         target[top] += carry;
     }
 
+    /// <summary>
+    /// True when the accumulator holds an infinite or NaN value, so a non-finite <see cref="ToDouble"/>
+    /// is the IEEE result of those values. When it is false, a non-finite total is a finite total past
+    /// the double range: an overflow, which the caller reports as
+    /// <see cref="CamusDBErrorCodes.FloatValueOutOfRange"/>.
+    /// </summary>
+    public bool HoldsNonFinite => nanCount != 0 || positiveInfinityCount != 0 || negativeInfinityCount != 0;
+
     /// <summary>The total, rounded once to the nearest double (ties to even); ±infinity past the range.</summary>
     public double ToDouble()
     {

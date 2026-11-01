@@ -264,9 +264,14 @@ CAMUSDB_PASSWORD=app-secret camus-dump -e https://db1.internal:5096 -A -u admin 
    environment or `--ask-password`, not on the command line.
 
 4. Read the end of the dump output on standard error. `camus-dump` reports every value it could
-   not render exactly. A non-finite float (`NaN`, `Infinity`) becomes `NULL`, and a `DATETIME`
-   is truncated to milliseconds. Pass `--strict` to fail the dump instead when such a value
-   exists.
+   not render exactly, and `--strict` fails the dump instead when such a value exists. A non-finite
+   float (`NaN`, `Infinity`, `-Infinity`) is written as `CAST('NaN' AS float64)`, which a server
+   with the PostgreSQL float rule reads back as the same value (see
+   [data-types.md](data-types.md#float-values-infinity-nan-and-overflow)); the dump prints a note
+   when it holds one. A `camus-dump` older than that change wrote such a value as `NULL`. Dump
+   over gRPC, the default, when a table holds such values: over REST, CamusDB.Client 0.17.1 reads
+   the value as text, and an array that mixes it with numbers does not load. A later client release
+   reads it as the float value.
 
 5. Record the objects that a dump does not carry (section 2). The point in time of the dump is
    written in the header of each file:

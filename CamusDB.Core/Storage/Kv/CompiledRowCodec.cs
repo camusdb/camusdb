@@ -699,7 +699,10 @@ internal sealed class CompiledRowCodec
                 break;
             
             case ColumnType.Float32:
-                BinaryPrimitives.WriteInt32LittleEndian(dest, BitConverter.SingleToInt32Bits((float)slot.AsDouble));
+                // Checked: a Float32 cell built from a double past the float range (a typed row, a
+                // parameter) would otherwise be stored as ±infinity or 0. A decoded float32 cell
+                // narrows exactly, so a rewrite of a stored row never fails here.
+                BinaryPrimitives.WriteInt32LittleEndian(dest, BitConverter.SingleToInt32Bits(FloatMath.NarrowToSingle(slot.AsDouble)));
                 break;
             
             case ColumnType.Id:
@@ -1054,7 +1057,7 @@ internal sealed class CompiledRowCodec
                 BinaryPrimitives.WriteInt64LittleEndian(dest, BitConverter.DoubleToInt64Bits(slot.AsDouble));
                 break;
             case ColumnType.Float32:
-                BinaryPrimitives.WriteInt32LittleEndian(dest, BitConverter.SingleToInt32Bits((float)slot.AsDouble));
+                BinaryPrimitives.WriteInt32LittleEndian(dest, BitConverter.SingleToInt32Bits(FloatMath.NarrowToSingle(slot.AsDouble)));
                 break;
             case ColumnType.Uuid:
                 BinaryPrimitives.WriteInt64LittleEndian(dest, slot.UuidHigh);

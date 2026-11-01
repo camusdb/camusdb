@@ -1084,7 +1084,7 @@ internal static class WindowOperator
                     if (numericCount > 0)
                         return ColumnValue.FromNumeric(QueryAggregator.ExactTotal.Combine(numerics, integers).ToNumeric("SUM"));
 
-                    return Int(integers.ToWrappedInt64());
+                    return Int(integers.ToInt64("SUM"));
 
                 default:
                     if (nonNull == 0)
@@ -1103,12 +1103,15 @@ internal static class WindowOperator
         /// <summary>
         /// The Float64 total of a frame that holds a Float64 value: the correctly rounded sum of its
         /// Float64 and Integer64 values, plus its NUMERIC values as a double, which is how the plain
-        /// SUM combines the three.
+        /// SUM combines the three. The exact total is checked once: a total past the float64 range
+        /// from finite values is <see cref="CamusDBErrorCodes.FloatValueOutOfRange"/>, the rule of the
+        /// plain SUM, and an infinite or NaN value in the frame gives the IEEE total.
         /// </summary>
         private double FloatTotal()
         {
             double total = doubles!.ToDouble();
-            return numericCount > 0 ? total + numerics.ToDouble() : total;
+            total = numericCount > 0 ? total + numerics.ToDouble() : total;
+            return QueryAggregator.CheckFloatTotal(kind == WindowFunctionKind.Sum ? "SUM" : "AVG", total, doubles.HoldsNonFinite);
         }
     }
 

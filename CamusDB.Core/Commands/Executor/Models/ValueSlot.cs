@@ -223,11 +223,12 @@ internal readonly struct ValueSlot
             case ColumnType.Bool:
                 return AsBool.CompareTo(other.AsBool);
 
+            // The ColumnValue order: NaN = NaN above +infinity, and -0 = 0 (see FloatMath).
             case ColumnType.Float64:
-                return AsDouble.CompareTo(other.AsDouble);
+                return FloatMath.Compare(AsDouble, other.AsDouble);
 
             case ColumnType.Float32:
-                return ((float)AsDouble).CompareTo((float)other.AsDouble);
+                return FloatMath.Compare((float)AsDouble, (float)other.AsDouble);
 
             case ColumnType.Uuid:
             {
@@ -289,8 +290,14 @@ internal readonly struct ValueSlot
                 return HashCode.Combine(_type, AsString is null ? 0 : string.GetHashCode(AsString, StringComparison.Ordinal));
 
             case ColumnType.Float32:
-                // Hash on the narrowed float so it matches the float-precision CompareTo.
+                // Hash on the narrowed float so it matches the float-precision CompareTo. The float
+                // hash treats 0 and -0 as one value, and every NaN as one value, as CompareTo does.
                 return HashCode.Combine(_type, (float)AsDouble);
+
+            case ColumnType.Float64:
+                // Not the raw bits: -0 and 0, and two NaNs with different bits, compare equal, so
+                // they must hash equal. The double hash folds both cases.
+                return HashCode.Combine(_type, AsDouble);
 
             case ColumnType.Bytes:
             {
@@ -320,7 +327,7 @@ internal readonly struct ValueSlot
             }
 
             default:
-                // Integer64/Date/DateTime/Bool/Float64/Uuid/Numeric — payload lives in the integer fields.
+                // Integer64/Date/DateTime/Bool/Uuid/Numeric — payload lives in the integer fields.
                 return HashCode.Combine(_type, _low, _high);
         }
     }

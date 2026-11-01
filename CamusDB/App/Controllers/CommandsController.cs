@@ -41,6 +41,11 @@ public abstract class CommandsController : ControllerBase
         this.jsonOptions = new JsonSerializerOptions
         {
             PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+
+            // A float parameter or typed-row value can be ±infinity or NaN, legal float64 values that
+            // JSON has no number for: a request sends them as "Infinity", "-Infinity" or "NaN", and a
+            // response writes them the same way. Finite numbers do not change.
+            NumberHandling = System.Text.Json.Serialization.JsonNumberHandling.AllowNamedFloatingPointLiterals,
         };
     }
 

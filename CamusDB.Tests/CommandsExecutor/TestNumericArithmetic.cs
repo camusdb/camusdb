@@ -227,7 +227,7 @@ internal sealed class TestNumericArithmetic : SharedNodeBaseTest
             ["b_count"] = new(ColumnType.Integer64, 4),
         });
 
-        QueryResultRow finalized = QueryExecutor.FinalizeAverages(merged, plan);
+        QueryResultRow finalized = QueryExecutor.FinalizePartials(merged, plan);
 
         AssertNumeric("3.333333333", finalized.Row["a"]);
         Assert.AreEqual(ColumnType.Float64, finalized.Row["b"].Type);

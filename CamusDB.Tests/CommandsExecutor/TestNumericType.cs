@@ -146,10 +146,11 @@ internal sealed class TestNumericType : SharedNodeBaseTest
         Assert.AreEqual(CamusDBErrorCodes.NumericValueOutOfRange, above.Code);
 
         // An integer literal must fit in INT64, as in Spanner, so a wider one is refused before it
-        // reaches the column. NUMERIC '…' or a decimal point writes such a value.
+        // reaches the column, with the int64 range error. NUMERIC '…' or a decimal point writes such
+        // a value.
         CamusDBException wideInteger = await AssertExecThrows(executor, db,
             "INSERT INTO t (id, p) VALUES (3, 12345678901234567890123)");
-        Assert.AreEqual(CamusDBErrorCodes.InvalidInput, wideInteger.Code);
+        Assert.AreEqual(CamusDBErrorCodes.IntegerValueOutOfRange, wideInteger.Code);
 
         CamusDBException below = await AssertExecThrows(executor, db,
             "INSERT INTO t (id, p) VALUES (3, -99999999999999999999999999999.9999999995)");

@@ -81,9 +81,13 @@ not enough to tell the two apart. The SQL standard also reserves `OVER`.
 - The aggregates have the result types and the NULL rules of the plain aggregates: `sum` of int64 is
   int64, `avg` of int64 is float64, `sum` and `avg` of numeric are numeric. An empty frame gives NULL,
   and 0 for `count`.
+- `sum` of int64 values adds the frame exactly. A frame total outside the int64 range fails with
+  `CADB0420`, and is never wrapped (see [INT64 overflow](data-types.md#int64-overflow)).
 - `sum` and `avg` over float64 values add the exact values of the frame and round once, so a frame's
   result does not depend on the order of its rows, and a sliding frame costs the same as a running
-  one. The plain `sum` adds in row order, so `sum(x) OVER ()` and `sum(x)` can differ in the last
+  one. A frame total past the float64 range from finite values fails with `CADB0421`; a frame that
+  holds an infinity or a NaN gives the IEEE total (see
+  [Float values](data-types.md#float-values-infinity-nan-and-overflow)). The plain `sum` adds in row order, so `sum(x) OVER ()` and `sum(x)` can differ in the last
   binary digit of a float64.
 
 ## Frames and peers

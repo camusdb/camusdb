@@ -393,7 +393,9 @@ public static class RowEncoder
 
             case ColumnType.Float32:
                 Serializator.WriteType(buffer, SerializatorTypes.TypeFloat, ref pointer);
-                Serializator.WriteFloat(buffer, (float)columnValue.FloatValue, ref pointer);
+                // Checked: a Float32 value built from a double past the float range (a typed row, an
+                // HTTP value) would otherwise be stored as ±infinity or 0 (see FloatMath.NarrowToSingle).
+                Serializator.WriteFloat(buffer, FloatMath.NarrowToSingle(columnValue.FloatValue), ref pointer);
                 break;
 
             case ColumnType.Date:
@@ -1500,7 +1502,7 @@ public static class RowEncoder
                 break;
             case ColumnType.Float32:
                 Serializator.WriteType(buffer, SerializatorTypes.TypeFloat, ref pointer);
-                Serializator.WriteFloat(buffer, (float)el.FloatValue, ref pointer);
+                Serializator.WriteFloat(buffer, FloatMath.NarrowToSingle(el.FloatValue), ref pointer);
                 break;
             case ColumnType.Float64:
                 Serializator.WriteType(buffer, SerializatorTypes.TypeDouble, ref pointer);

@@ -157,7 +157,7 @@ public class TestMathScalarFunctions : SharedNodeBaseTest
             dbname,
             $"SELECT abs({long.MinValue}) FROM robots");
 
-        Assert.AreEqual(CamusDBErrorCodes.InvalidInput, ex.Code);
+        Assert.AreEqual(CamusDBErrorCodes.IntegerValueOutOfRange, ex.Code);
         StringAssert.Contains("Function 'abs' integer overflow", ex.Message);
     }
 

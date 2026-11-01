@@ -607,8 +607,9 @@ internal sealed class TableAnalyzer
     private static string BoundKey(ScalarBound b) => b.Type switch
     {
         ColumnType.Integer64 => b.LongValue.ToString(),
-        ColumnType.Float64   => b.FloatValue.ToString("R"),
-        ColumnType.Float32   => b.FloatValue.ToString("R"),
+        // The canonical value, so -0 and 0 count as one value, and every NaN as one, as `=` treats them.
+        ColumnType.Float64   => FloatMath.Canonical(b.FloatValue).ToString("R", System.Globalization.CultureInfo.InvariantCulture),
+        ColumnType.Float32   => FloatMath.Canonical(b.FloatValue).ToString("R", System.Globalization.CultureInfo.InvariantCulture),
         ColumnType.String    => b.StrValue ?? "",
         ColumnType.Id        => b.StrValue ?? "",
         ColumnType.Date      => b.LongValue.ToString(),

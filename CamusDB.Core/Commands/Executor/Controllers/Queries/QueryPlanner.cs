@@ -250,6 +250,7 @@ public sealed class QueryPlanner
         List<NodeAst> ship = new(ticket.Projection.Count + 1);
         List<NodeAst> merge = new(ticket.Projection.Count + 1);
         List<PartialAvgFinalizer> avgFinalizers = [];
+        List<string> integerSums = [];
         HashSet<string> projectedGroupCols = new(StringComparer.OrdinalIgnoreCase);
 
         foreach (NodeAst projection in ticket.Projection)
@@ -304,11 +305,32 @@ public sealed class QueryPlanner
                 string sumName = $"__partial_{alias}_sum";
                 string countName = $"__partial_{alias}_cnt";
 
-                ship.Add(AliasedCall("sum", funcCall.rightAst, sumName));
+                // The single-node AVG of Integer64 values divides an exact total, which never
+                // overflows. A span's Integer64 SUM is range-checked, so values near the int64 limit
+                // (nanosecond timestamps, 64-bit hashes) would fail a span although the average is in
+                // range. An Integer64 column therefore ships its span sums as exact NUMERIC totals,
+                // and the finalizer turns the merged total back into the Float64 average.
+                bool integerColumn = IsInteger64Column(funcCall.rightAst, table);
+                NodeAst shippedSum = integerColumn ? CastToNumeric(funcCall.rightAst) : funcCall.rightAst;
+
+                ship.Add(AliasedCall("sum", shippedSum, sumName));
                 ship.Add(AliasedCall("count", funcCall.rightAst, countName));
                 merge.Add(AliasedCall("sum", Identifier(sumName), sumName));
                 merge.Add(AliasedCall("sum", Identifier(countName), countName));
-                avgFinalizers.Add(new PartialAvgFinalizer(alias, sumName, countName));
+                avgFinalizers.Add(new PartialAvgFinalizer(alias, sumName, countName, integerColumn));
+                continue;
+            }
+
+            // The single-node SUM of Integer64 values checks only its exact final total. A span's
+            // Integer64 SUM would be range-checked on its own, so a span total past the int64 range
+            // would fail the query although the full total fits. An Integer64 column therefore ships
+            // exact NUMERIC span totals, and the finalizer range-checks the merged total once.
+            if (funcName.Equals("sum", StringComparison.OrdinalIgnoreCase)
+                && IsInteger64Column(funcCall.rightAst, table))
+            {
+                ship.Add(AliasedCall("sum", CastToNumeric(funcCall.rightAst!), alias));
+                merge.Add(AliasedCall("sum", Identifier(alias), alias));
+                integerSums.Add(alias);
                 continue;
             }
 
@@ -328,8 +350,23 @@ public sealed class QueryPlanner
             MergeProjections = merge,
             MergeGroupBy = grouped ? groupCols!.Select(Identifier).ToArray() : null,
             AvgFinalizers = avgFinalizers,
+            IntegerSumOutputs = integerSums,
         };
     }
+
+    /// <summary>
+    /// True when <paramref name="argument"/> is a bare or qualified reference to an Integer64 column
+    /// of <paramref name="table"/>. Only such an argument is known to give Integer64 values on every
+    /// row, so only it may ship its span sums as exact NUMERIC totals: a cast of a float would change
+    /// the result.
+    /// </summary>
+    private static bool IsInteger64Column(NodeAst? argument, TableDescriptor table) =>
+        argument is { nodeType: NodeType.Identifier }
+        && ColumnTypeOf(table, argument.yytext) == ColumnType.Integer64;
+
+    /// <summary><c>CAST(argument AS numeric)</c>: an Integer64 value always fits, exactly.</summary>
+    private static NodeAst CastToNumeric(NodeAst argument) =>
+        new(NodeType.ExprCast, argument, NodeAst.TypeNumeric, null, null, null, null, null, null);
 
     /// <summary>
     /// True when <paramref name="argument"/> can evaluate to a NUMERIC value. A NUMERIC value can only

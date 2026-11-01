@@ -143,6 +143,33 @@ public static class CamusDBErrorCodes
     /// </summary>
     public const string JsonNestingTooDeep = "CADB0419";
 
+    /// <summary>
+    /// An Integer64 (<c>int64</c>) value or result is outside the 64-bit signed range
+    /// [-9223372036854775808, 9223372036854775807]: the result of <c>+</c>, <c>-</c>, <c>*</c>,
+    /// <c>/</c> or unary minus, the total of <c>SUM</c> (plain, grouped or windowed), an integer
+    /// literal, or a conversion to <c>int64</c> (<c>CAST</c>, <c>abs</c>, a string or a
+    /// <c>jsonb</c> number). The value is never wrapped, so a statement that overflows stores nothing
+    /// and returns nothing. PostgreSQL reports the same condition as <c>bigint out of range</c>
+    /// (SQLSTATE 22003). A permanent caller mistake — maps to HTTP 400 and to gRPC
+    /// <c>OUT_OF_RANGE</c>, as <see cref="NumericValueOutOfRange"/> does.
+    /// </summary>
+    public const string IntegerValueOutOfRange = "CADB0420";
+
+    /// <summary>
+    /// A float (<c>float64</c> or <c>float32</c>) result from finite inputs is outside the range of
+    /// its type. An <em>overflow</em> is a result too large to hold, which IEEE arithmetic would make
+    /// infinity: <c>1e308 * 10</c>, <c>pow(10, 400)</c>, the literal <c>1e400</c>, a <c>SUM</c> past
+    /// the range, or a <c>float64</c> past the <c>float32</c> range written to a <c>float32</c>
+    /// column. An <em>underflow</em> is a nonzero result too small to hold, which IEEE arithmetic would
+    /// make zero: <c>1e-300 * 1e-300</c> or the literal <c>1e-400</c>. A subnormal result is not an
+    /// underflow, because it is a stored, nonzero value. The value <c>'Infinity'</c>,
+    /// <c>'-Infinity'</c> or <c>'NaN'</c> written on purpose is legal and is not this error. This is
+    /// the PostgreSQL rule, which reports <c>value out of range: overflow</c> or <c>underflow</c>
+    /// (SQLSTATE 22003). A permanent caller mistake — maps to HTTP 400 and to gRPC
+    /// <c>OUT_OF_RANGE</c>, as <see cref="IntegerValueOutOfRange"/> does.
+    /// </summary>
+    public const string FloatValueOutOfRange = "CADB0421";
+
     public const string DuplicateUniqueKeyValue = "CADB0300";
     public const string NotNullViolation = "CADB0301";
     public const string ValueTooLong = "CADB0302";
@@ -1091,6 +1118,8 @@ public static class CamusDBErrorCodes
         InvalidForeignKeyDefinition => 400,
         ForeignKeyCycle => 400,
         NumericValueOutOfRange => 400,
+        IntegerValueOutOfRange => 400,
+        FloatValueOutOfRange => 400,
         InvalidJsonText => 400,
         JsonNestingTooDeep => 400,
         MalformedVector => 400,

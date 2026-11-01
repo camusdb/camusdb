@@ -288,7 +288,9 @@ internal abstract class SQLExecutorBaseCreator
     /// <summary>
     /// Applies <c>+ - * /</c> to two numeric operands using SQL-style numeric promotion: the wider
     /// operand type wins, so <c>Integer64 op Integer64</c> is the only combination that stays integral
-    /// (and division there truncates), any <see cref="ColumnType.Float64"/> operand promotes both sides
+    /// (division there truncates, and a result outside the int64 range, such as
+    /// <c>long.MinValue / -1</c>, is <see cref="CamusDBErrorCodes.IntegerValueOutOfRange"/> through
+    /// <see cref="Int64Math"/>, never a wrapped value), any <see cref="ColumnType.Float64"/> operand promotes both sides
     /// to double, and a <see cref="ColumnType.Float32"/> operand mixed with Integer64 yields Float32.
     /// A <see cref="ColumnType.Numeric"/> operand with an Integer64 or NUMERIC one computes exactly in
     /// <see cref="NumericMath"/> (multiplication and division round half away from zero to nine digits,
@@ -297,9 +299,13 @@ internal abstract class SQLExecutorBaseCreator
     /// <see cref="MixedNumericComparison.ArithmeticResultType"/>, which static typing uses too.
     /// Float32 results are rounded through <c>float</c> before being carried in the double-backed
     /// <see cref="ColumnValue.FloatValue"/>, so a Float32 expression never reports precision the type
-    /// cannot hold. Non-numeric operands are rejected rather than silently coerced — mixed-type
-    /// comparison lives in <see cref="CompareValues"/>, which has different (ordering) semantics.
-    /// Division by a zero of any type raises an error instead of yielding IEEE infinity/NaN.
+    /// cannot hold. A float result that overflows to ±infinity or underflows to zero from finite,
+    /// nonzero operands is <see cref="CamusDBErrorCodes.FloatValueOutOfRange"/> through
+    /// <see cref="FloatMath"/>, the PostgreSQL rule; an infinite or NaN operand gives the IEEE result
+    /// (<c>'Infinity' + 1</c> is infinity). Non-numeric operands are rejected rather than silently
+    /// coerced — mixed-type comparison lives in <see cref="CompareValues"/>, which has different
+    /// (ordering) semantics. Division by a zero of any type raises an error instead of yielding IEEE
+    /// infinity/NaN.
     /// <para>A NULL operand gives NULL, as in <c>mod</c> and standard SQL. The NULL check runs before
     /// the type check, because NULL is not numeric and the type check would otherwise turn every NULL
     /// row into a query error. It also runs before the division-by-zero check, so <c>NULL / 0</c> is
@@ -341,12 +347,13 @@ internal abstract class SQLExecutorBaseCreator
             if (op == NodeType.ExprDiv && r == 0)
                 throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Division by zero");
 
+            // Checked: a result outside the int64 range is an error, never a wrapped value.
             long integerResult = op switch
             {
-                NodeType.ExprAdd => l + r,
-                NodeType.ExprSub => l - r,
-                NodeType.ExprMult => l * r,
-                _ => l / r
+                NodeType.ExprAdd => Int64Math.Add(l, r),
+                NodeType.ExprSub => Int64Math.Subtract(l, r),
+                NodeType.ExprMult => Int64Math.Multiply(l, r),
+                _ => Int64Math.Divide(l, r)
             };
 
             return new ColumnValue(ColumnType.Integer64, integerResult);
@@ -360,21 +367,25 @@ internal abstract class SQLExecutorBaseCreator
         if (op == NodeType.ExprDiv && dr == 0.0)
             throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Division by zero");
 
+        // Checked: an overflow or an underflow from finite operands is an error, never ±infinity or 0.
         double result = op switch
         {
-            NodeType.ExprAdd => dl + dr,
-            NodeType.ExprSub => dl - dr,
-            NodeType.ExprMult => dl * dr,
-            _ => dl / dr
+            NodeType.ExprAdd => FloatMath.Add(dl, dr),
+            NodeType.ExprSub => FloatMath.Subtract(dl, dr),
+            NodeType.ExprMult => FloatMath.Multiply(dl, dr),
+            _ => FloatMath.Divide(dl, dr)
         };
 
-        return new ColumnValue(resultType, resultType == ColumnType.Float32 ? (float)result : result);
+        // A Float32 result past the single-precision range is an overflow too: 3e38 + 3e38 is finite
+        // as a double but not as a float.
+        return new ColumnValue(resultType, resultType == ColumnType.Float32 ? FloatMath.NarrowToSingle(result) : result);
     }
 
     /// <summary>
     /// Applies unary minus. NULL gives NULL, the same rule as <see cref="EvalArithmetic"/>. The
     /// result keeps the operand's numeric type. Negating <see cref="long.MinValue"/> has no Integer64
-    /// result, so it is an error rather than a silent wrap to itself — the same choice <c>abs</c> makes.
+    /// result, so it is <see cref="CamusDBErrorCodes.IntegerValueOutOfRange"/> rather than a silent
+    /// wrap to itself — the same choice <c>abs</c> makes.
     /// </summary>
     internal static ColumnValue EvalNegate(ColumnValue value)
     {
@@ -384,12 +395,7 @@ internal abstract class SQLExecutorBaseCreator
                 return ColumnValue.Null;
 
             case ColumnType.Integer64:
-                if (value.LongValue == long.MinValue)
-                    throw new CamusDBException(
-                        CamusDBErrorCodes.InvalidInput,
-                        $"Integer overflow in unary minus for value {value.LongValue}");
-
-                return new ColumnValue(ColumnType.Integer64, -value.LongValue);
+                return new ColumnValue(ColumnType.Integer64, Int64Math.Negate(value.LongValue));
 
             case ColumnType.Float64:
                 return new ColumnValue(ColumnType.Float64, -value.FloatValue);
@@ -674,7 +680,15 @@ internal abstract class SQLExecutorBaseCreator
             return cached;
 
         if (!long.TryParse(expr.yytext!, NumberStyles.Integer, CultureInfo.InvariantCulture, out long longValue))
+        {
+            // A decimal digit string that does not parse is a value past the int64 range: it is
+            // refused as out of range, never stored as a wrapped or truncated value. Any other text
+            // (the lexer also passes a 0x hex form) is not an int64 literal at all.
+            if (Int64Math.IsDecimalIntegerText(expr.yytext))
+                throw Int64Math.OutOfRange("Invalid Int64: " + expr.yytext! + " is outside the int64 range");
+
             throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Invalid Int64: " + expr.yytext!);
+        }
 
         return CacheLiteralValue(expr, new ColumnValue(ColumnType.Integer64, longValue));
     }
@@ -684,8 +698,22 @@ internal abstract class SQLExecutorBaseCreator
         if (LiteralValueCache.TryGetValue(expr, out ColumnValue? cached))
             return cached;
 
-        if (!double.TryParse(expr.yytext!, NumberStyles.Float, CultureInfo.InvariantCulture, out double doubleValue))
-            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Invalid Float64: " + expr.yytext!);
+        // A literal past the float64 range is an error, as in PostgreSQL. It never becomes ±infinity
+        // (1e400) or zero (1e-400); a subnormal literal (4e-320) is a value and is kept.
+        switch (FloatMath.TryParseFloat64(expr.yytext, out double doubleValue))
+        {
+            case FloatMath.ParseStatus.Ok:
+                break;
+
+            case FloatMath.ParseStatus.Overflow:
+                throw FloatMath.OutOfRange("Float64 overflow: the literal " + expr.yytext! + " is outside the float64 range");
+
+            case FloatMath.ParseStatus.Underflow:
+                throw FloatMath.OutOfRange("Float64 underflow: the literal " + expr.yytext! + " is a nonzero value too small for float64");
+
+            default:
+                throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Invalid Float64: " + expr.yytext!);
+        }
 
         // The text goes with the value, so a NUMERIC target converts the literal exactly (see FloatLiteralText).
         ColumnValue literal = FloatLiteralText.Remember(new ColumnValue(ColumnType.Float64, doubleValue), expr.yytext!);

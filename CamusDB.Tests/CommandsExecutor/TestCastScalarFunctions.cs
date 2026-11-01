@@ -258,7 +258,7 @@ public class TestCastScalarFunctions : SharedNodeBaseTest
             dbname,
             "SELECT to_int64(\"9223372036854775808\") FROM robots");
 
-        Assert.AreEqual(CamusDBErrorCodes.InvalidInput, ex.Code);
+        Assert.AreEqual(CamusDBErrorCodes.IntegerValueOutOfRange, ex.Code);
     }
 
     [Test]
@@ -273,7 +273,7 @@ public class TestCastScalarFunctions : SharedNodeBaseTest
             dbname,
             "SELECT to_int64(pow(2, 63)) FROM robots");
 
-        Assert.AreEqual(CamusDBErrorCodes.InvalidInput, ex.Code);
+        Assert.AreEqual(CamusDBErrorCodes.IntegerValueOutOfRange, ex.Code);
         StringAssert.Contains("integer overflow", ex.Message);
     }
 

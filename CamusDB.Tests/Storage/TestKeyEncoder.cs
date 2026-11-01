@@ -93,17 +93,14 @@ public class TestKeyEncoder
     }
 
     // Float64 corner cases -- NaN, infinities, subnormals, ±max -- must encode in exactly the order
-    // ColumnValue.CompareTo (i.e. double.CompareTo) defines, so a ranged Float64 index never misroutes
-    // a pathological value. The expected order is derived from CompareTo itself (asserted as a
-    // precondition), not hand-asserted. NB: signed zero is deliberately excluded here because it is the
-    // one CompareTo/encoding divergence -- see SignedZeroEncodesDistinctlyDespiteCompareToEquality.
+    // ColumnValue.CompareTo defines, the SQL order: -infinity < finite values < +infinity < NaN. A ranged
+    // Float64 index then never misroutes a pathological value, and an index range scan returns the rows
+    // a table scan does. The expected order is checked against CompareTo first, not hand-asserted.
     [Test]
     public void FloatEdgeCasesSortConsistentlyWithCompareTo()
     {
-        // All strictly distinct under double.CompareTo: NaN < -Inf < ... < 0.0 < ... < +Inf.
         double[] ascending =
         {
-            double.NaN,
             double.NegativeInfinity,
             double.MinValue,
             -1.0,
@@ -112,45 +109,71 @@ public class TestKeyEncoder
             double.Epsilon,    // smallest positive subnormal
             1.0,
             double.MaxValue,
-            double.PositiveInfinity
+            double.PositiveInfinity,
+            double.NaN,
         };
 
-        for (int i = 0; i + 1 < ascending.Length; i++)
+        foreach (bool descending in new[] { false, true })
         {
-            ColumnValue a = new(ColumnType.Float64, ascending[i]);
-            ColumnValue b = new(ColumnType.Float64, ascending[i + 1]);
+            for (int i = 0; i + 1 < ascending.Length; i++)
+            {
+                ColumnValue a = new(ColumnType.Float64, ascending[i]);
+                ColumnValue b = new(ColumnType.Float64, ascending[i + 1]);
 
-            Assert.That(a.CompareTo(b), Is.LessThan(0),
-                $"Precondition: {ascending[i]} must be < {ascending[i + 1]} under CompareTo");
+                Assert.That(a.CompareTo(b), Is.LessThan(0),
+                    $"Precondition: {ascending[i]} must be < {ascending[i + 1]} under CompareTo");
 
-            string ea = KeyEncoder.Encode(Single(a));
-            string eb = KeyEncoder.Encode(Single(b));
-            Assert.That(string.CompareOrdinal(ea, eb), Is.LessThan(0),
-                $"Encoding order must match CompareTo for {ascending[i]} < {ascending[i + 1]}");
+                string ea = Enc(a, descending);
+                string eb = Enc(b, descending);
+                Assert.That(Math.Sign(string.CompareOrdinal(ea, eb)), Is.EqualTo(descending ? 1 : -1),
+                    $"Encoding order (descending={descending}) must match CompareTo for {ascending[i]} < {ascending[i + 1]}");
+            }
         }
     }
 
-    // KNOWN CAVEAT (pre-existing, independent of routing): double.CompareTo treats -0.0 and +0.0 as
-    // EQUAL, but KeyEncoder encodes them to two distinct, adjacent keys (negative-side vs positive-side
-    // of the sign boundary). Consequence for a ranged (or hash) Float64 index: a stored -0.0 sorts just
-    // before +0.0, so a half-open scan starting at +0.0 (e.g. `x >= 0`) would not see a -0.0 row. This
-    // test PINS that divergence so it is visible and intentional rather than a silent surprise; closing
-    // it would require normalising -0.0 -> +0.0 in KeyEncoder (a separate encoding change affecting all
-    // indexes, not part of the routing/lock work).
+    private static string Enc(ColumnValue value, bool descending) =>
+        KeyEncoder.Encode(Single(value), descending ? [OrderType.Descending] : null);
+
+    // -0 and 0 are one SQL value (CompareTo is 0), and so are two NaNs with different bits. Each pair must
+    // get one key: with two keys a UNIQUE index accepted -0 next to 0, and a seek for 0 missed a -0 row
+    // that a table scan returned. The key decodes to the canonical value.
     [Test]
-    public void SignedZeroEncodesDistinctlyDespiteCompareToEquality()
+    public void EqualFloatValuesShareOneKey()
     {
-        ColumnValue negZero = new(ColumnType.Float64, -0.0);
-        ColumnValue posZero = new(ColumnType.Float64, 0.0);
+        double positiveNaN = BitConverter.Int64BitsToDouble(0x7FF8_0000_0000_0000);
+        double negativeNaN = BitConverter.Int64BitsToDouble(unchecked((long)0xFFF8_0000_0000_0000));
+        double payloadNaN = BitConverter.Int64BitsToDouble(0x7FF0_0000_0000_0001);
 
-        Assert.AreEqual(0, negZero.CompareTo(posZero),
-            "CompareTo treats -0.0 and +0.0 as equal");
+        foreach (bool descending in new[] { false, true })
+        {
+            foreach ((double a, double b) in new[] { (-0.0, 0.0), (negativeNaN, positiveNaN), (payloadNaN, double.NaN) })
+            {
+                ColumnValue left = new(ColumnType.Float64, a);
+                ColumnValue right = new(ColumnType.Float64, b);
+                Assert.AreEqual(0, left.CompareTo(right), $"Precondition: {a} and {b} compare equal");
+                Assert.AreEqual(Enc(left, descending), Enc(right, descending),
+                    $"{BitConverter.DoubleToInt64Bits(a):X16} and {BitConverter.DoubleToInt64Bits(b):X16} (descending={descending})");
+            }
 
-        string encNeg = KeyEncoder.Encode(Single(negZero));
-        string encPos = KeyEncoder.Encode(Single(posZero));
+            CompositeColumnValue decoded = KeyEncoder.Decode(Enc(new ColumnValue(ColumnType.Float64, -0.0), descending),
+                [ColumnType.Float64], descending ? [OrderType.Descending] : null);
+            Assert.AreEqual(0L, BitConverter.DoubleToInt64Bits(decoded.Values[0].FloatValue), "a -0 key decodes to 0");
 
-        Assert.That(string.CompareOrdinal(encNeg, encPos), Is.LessThan(0),
-            "Known caveat: -0.0 encodes strictly before +0.0 even though CompareTo says they are equal");
+            float singleNegativeZero = -0.0f;
+            float singleNaN = BitConverter.Int32BitsToSingle(unchecked((int)0xFFC0_0000));
+            Assert.AreEqual(Enc(new ColumnValue(ColumnType.Float32, singleNegativeZero), descending),
+                Enc(new ColumnValue(ColumnType.Float32, 0.0), descending), "float32 -0 and 0");
+            Assert.AreEqual(Enc(new ColumnValue(ColumnType.Float32, singleNaN), descending),
+                Enc(new ColumnValue(ColumnType.Float32, double.NaN), descending), "float32 NaNs");
+        }
+
+        // Float32 order: -infinity < 0 < +infinity < NaN.
+        float[] singles = { float.NegativeInfinity, -1f, 0f, float.Epsilon, 1f, float.PositiveInfinity, float.NaN };
+        for (int i = 0; i + 1 < singles.Length; i++)
+            Assert.That(string.CompareOrdinal(
+                KeyEncoder.Encode(Single(new ColumnValue(ColumnType.Float32, singles[i]))),
+                KeyEncoder.Encode(Single(new ColumnValue(ColumnType.Float32, singles[i + 1])))), Is.LessThan(0),
+                $"float32 {singles[i]} < {singles[i + 1]}");
     }
 
     [Test]

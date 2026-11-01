@@ -97,9 +97,7 @@ internal static class MathScalarFunctions
 
             if (value == long.MinValue)
             {
-                throw new CamusDBException(
-                    CamusDBErrorCodes.InvalidInput,
-                    $"Function '{calledName}' integer overflow for argument value {value}");
+                throw Int64Math.OutOfRange($"Function '{calledName}' integer overflow for argument value {value}");
             }
 
             return new ColumnValue(ColumnType.Integer64, Math.Abs(value));
@@ -201,9 +199,7 @@ internal static class MathScalarFunctions
             return new ColumnValue(ColumnType.Integer64, arguments[0].LongValue / unit * unit);
         }
 
-        double number = arguments[0].FloatValue;
-        double factor = Math.Pow(10, digits);
-        return new ColumnValue(ColumnType.Float64, Math.Truncate(number * factor) / factor);
+        return new ColumnValue(ColumnType.Float64, RoundAtScale(calledName, arguments[0].FloatValue, (int)digits, Math.Truncate));
     }
 
     /// <summary>
@@ -254,6 +250,15 @@ internal static class MathScalarFunctions
         return new ColumnValue(ColumnType.Float64, Math.Sqrt(value));
     }
 
+    /// <summary>
+    /// <c>pow(x, y)</c> with the PostgreSQL rules. <c>pow(0, y)</c> for a negative <c>y</c> and a
+    /// negative <c>x</c> to a finite non-integer power have no real result, so they are
+    /// <see cref="CamusDBErrorCodes.InvalidInput"/>; IEEE would give infinity and NaN. A result past
+    /// the range from finite arguments (<c>pow(10, 400)</c>) is an overflow, and a zero result from a
+    /// nonzero base (<c>pow(10, -400)</c>) is an underflow: both are
+    /// <see cref="CamusDBErrorCodes.FloatValueOutOfRange"/>. NaN and infinite arguments give the IEEE
+    /// result: <c>pow('NaN', 0)</c> is 1, <c>pow(2, 'Infinity')</c> is infinity.
+    /// </summary>
     private static ColumnValue EvaluatePow(string calledName, IReadOnlyList<ColumnValue> arguments)
     {
         if (PropagateNull(arguments) is ColumnValue nullResult)
@@ -265,7 +270,24 @@ internal static class MathScalarFunctions
         double left = ScalarFunctionArguments.ToDouble(arguments[0]);
         double right = ScalarFunctionArguments.ToDouble(arguments[1]);
 
-        return new ColumnValue(ColumnType.Float64, Math.Pow(left, right));
+        if (left == 0 && right < 0)
+        {
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInput,
+                $"Function '{calledName}' domain error: zero raised to a negative power is undefined");
+        }
+
+        if (left < 0 && double.IsFinite(right) && Math.Floor(right) != right)
+        {
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInput,
+                $"Function '{calledName}' domain error: a negative number raised to a non-integer power yields a complex result");
+        }
+
+        double result = Math.Pow(left, right);
+
+        return new ColumnValue(ColumnType.Float64, FloatMath.CheckFunctionResult(
+            calledName, result, finiteInputs: double.IsFinite(left) && double.IsFinite(right), nonzeroInput: left != 0));
     }
 
     private static ColumnValue EvaluateMod(string calledName, IReadOnlyList<ColumnValue> arguments)
@@ -345,6 +367,16 @@ internal static class MathScalarFunctions
             return ColumnValue.FromNumeric(NumericMath.FromInt64(Int128.Sign(arguments[0].NumericUnscaled)));
 
         double floatValue = arguments[0].FloatValue;
+
+        // The result is an Integer64, which has no NaN, and NaN has no sign; the comparisons below are
+        // false for it, so without this check it would report -1.
+        if (double.IsNaN(floatValue))
+        {
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInput,
+                $"Function '{calledName}' domain error: NaN has no sign");
+        }
+
         long floatSign = floatValue == 0 ? 0 : floatValue > 0 ? 1 : -1;
         return new ColumnValue(ColumnType.Integer64, floatSign);
     }
@@ -359,20 +391,59 @@ internal static class MathScalarFunctions
 
         double number = ScalarFunctionArguments.ToDouble(value);
 
+        return new ColumnValue(
+            ColumnType.Float64,
+            RoundAtScale("round", number, scale, static x => Math.Round(x, MidpointRounding.AwayFromZero)));
+    }
+
+    /// <summary>
+    /// Rounds <paramref name="number"/> to <paramref name="scale"/> decimal places with
+    /// <paramref name="roundUnit"/> (a negative scale rounds left of the point): the value is scaled
+    /// by 10^scale, rounded to a whole number and scaled back. A plain <c>number * 10^scale</c> gives
+    /// infinity or NaN for a large scale (10^400 is infinity, and 0 × infinity is NaN), so a finite
+    /// argument would give a non-finite result. The edge cases are handled instead:
+    /// <list type="bullet">
+    ///   <item>±infinity and NaN are returned as they are.</item>
+    ///   <item>When the scaled value is past the range, the value has no digit at that place, so it
+    ///   is returned unchanged. A double that large relative to 10^-scale has a spacing far wider
+    ///   than the rounding step, so this is exact.</item>
+    ///   <item>Past 323 places every double is its own nearest value at that step, and past -308
+    ///   places every double rounds to zero.</item>
+    ///   <item>A result past the range (<c>round(1.7e308, -308)</c> is 2e308) is
+    ///   <see cref="CamusDBErrorCodes.FloatValueOutOfRange"/>.</item>
+    /// </list>
+    /// </summary>
+    private static double RoundAtScale(string calledName, double number, int scale, Func<double, double> roundUnit)
+    {
+        if (!double.IsFinite(number))
+            return number;
+
         if (scale >= 0)
         {
-            double factor = Math.Pow(10, scale);
-            double rounded = Math.Round(number * factor, MidpointRounding.AwayFromZero) / factor;
+            if (scale > 323)
+                return number;
 
-            if (scale == 0 && value.Type == ColumnType.Integer64)
-                return new ColumnValue(ColumnType.Integer64, (long)rounded);
+            // 10^scale in two factors, so each is finite up to scale 323.
+            double factor = Math.Pow(10, Math.Min(scale, 308));
+            double extra = scale > 308 ? Math.Pow(10, scale - 308) : 1;
+            double scaled = number * factor * extra;
 
-            return new ColumnValue(ColumnType.Float64, rounded);
+            if (!double.IsFinite(scaled))
+                return number;
+
+            return roundUnit(scaled) / extra / factor;
         }
 
+        if (scale < -308)
+            return 0.0;
+
         double divisor = Math.Pow(10, -scale);
-        double roundedLeft = Math.Round(number / divisor, MidpointRounding.AwayFromZero) * divisor;
-        return new ColumnValue(ColumnType.Float64, roundedLeft);
+        double rounded = roundUnit(number / divisor) * divisor;
+
+        if (double.IsInfinity(rounded))
+            throw FloatMath.OutOfRange($"Function '{calledName}' float64 overflow: the result is outside the float64 range");
+
+        return rounded;
     }
 
     private static ColumnValue? PropagateNull(IReadOnlyList<ColumnValue> arguments)

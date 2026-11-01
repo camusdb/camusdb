@@ -86,6 +86,38 @@ non-`NULL` dividend.
 makes the result UNKNOWN, so `WHERE name LIKE 'a%'` skips the rows where `name` is `NULL`.
 `name !~ 'x'` is also UNKNOWN for those rows, not `true`.
 
+## Integer overflow
+
+`+`, `-`, `*` and `/` with two `int64` operands never wrap. A result outside the `int64` range fails
+with `CADB0420`, as PostgreSQL fails with `bigint out of range`:
+
+```sql
+SELECT 9223372036854775807 + 1;       -- error CADB0420
+SELECT -9223372036854775808 / -1;     -- error CADB0420
+SELECT 9223372036854775807 + 0;       -- 9223372036854775807
+```
+
+`SUM`, literals and conversions follow the same rule. See
+[INT64 overflow](data-types.md#int64-overflow).
+
+## Float overflow, Infinity and NaN
+
+A `float64` or `float32` result that overflows or underflows from finite operands fails with
+`CADB0421`, as PostgreSQL fails with `value out of range: overflow` or `underflow`. It never becomes an
+infinity or a zero. `'Infinity'`, `'-Infinity'` and `'NaN'` written on purpose are values, and an
+operation on them gives the IEEE result:
+
+```sql
+SELECT 1e308 * 10;                          -- error CADB0421 (overflow)
+SELECT 1e-300 * 1e-300;                     -- error CADB0421 (underflow)
+SELECT 1e400;                               -- error CADB0421: the literal is past the range
+SELECT CAST('Infinity' AS float64) + 1;     -- Infinity
+SELECT CAST('NaN' AS float64) = CAST('NaN' AS float64);   -- true
+```
+
+`NaN` equals `NaN` and sorts above every number, and `-0` equals `0`. See
+[Float values](data-types.md#float-values-infinity-nan-and-overflow).
+
 ## Unary minus
 
 `-x` negates any numeric expression: a column, a parameter, a call or a parenthesised expression.
@@ -99,7 +131,7 @@ SELECT -total, -(price * qty), 3 - -4;   -- 3 - -4 is 7
 - The result has the type of the operand.
 - `-NULL` is `NULL`.
 - A non-numeric operand is an error.
-- Negating the smallest `int64` value is an overflow error.
+- Negating the smallest `int64` value is an overflow error (`CADB0420`).
 
 A minus sign directly before a number, as in `-5` or `- 5`, gives a negative constant, not a
 negation. The planner can then use it as an index bound.

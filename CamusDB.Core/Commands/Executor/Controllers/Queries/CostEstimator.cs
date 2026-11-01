@@ -1490,6 +1490,11 @@ internal static class CostEstimator
         {
             double min = colMin.FloatValue;
             double max = colMax.FloatValue;
+
+            // A column that holds ±infinity or NaN has no finite width to interpolate over: the
+            // fraction below would be NaN or 0 for every range. No estimate makes the caller use its
+            // default selectivity instead.
+            if (!double.IsFinite(min) || !double.IsFinite(max)) return null;
             if (max <= min) return null;
 
             double lo = fromBound?.Type == CamusDB.Core.Catalogs.Models.ColumnType.Float64
@@ -1500,8 +1505,13 @@ internal static class CostEstimator
                 ? Math.Min(max, toBound.FloatValue)
                 : max;
 
+            // A NaN bound (WHERE f < 'NaN') has no place on the finite axis.
+            if (double.IsNaN(lo) || double.IsNaN(hi)) return null;
             if (hi < lo) return 0.0;
-            return Math.Min(1.0, (hi - lo) / (max - min));
+
+            // Halved first: max - min overflows to infinity when the column spans most of the range
+            // (-1e308 to 1e308), and the fraction would then be 0 for every range.
+            return Math.Min(1.0, (hi / 2 - lo / 2) / (max / 2 - min / 2));
         }
 
         // NUMERIC (and FLOAT32) interpolate as doubles; a bound of another numeric type converts.

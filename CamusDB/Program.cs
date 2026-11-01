@@ -351,6 +351,12 @@ foreach ((string category, LogLevel level) in LogLevelResolver.ParseFilters(Envi
 // Add services to the container.
 builder.Services.AddRazorPages();
 
+// A float64 value can be ±infinity or NaN, which JSON has no number for. The default options throw
+// while the response is written, so a row that holds one could not be read over HTTP. Named literals
+// write "Infinity", "-Infinity" and "NaN", and read them in a request. Finite numbers do not change.
+builder.Services.Configure<Microsoft.AspNetCore.Mvc.JsonOptions>(jsonOptions =>
+    jsonOptions.JsonSerializerOptions.NumberHandling |= System.Text.Json.Serialization.JsonNumberHandling.AllowNamedFloatingPointLiterals);
+
 if (config.IsClusterMode)
 {
     // One raft-endpoint → HTTP base-URI resolver shared by every node-to-node channel

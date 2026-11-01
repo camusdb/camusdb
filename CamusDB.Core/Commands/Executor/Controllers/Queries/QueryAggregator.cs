@@ -7,6 +7,7 @@
  */
 
 using System.IO;
+using System.Globalization;
 using System.Numerics;
 using System.Runtime.CompilerServices;
 using CamusDB.Core.Catalogs.Models;
@@ -1252,21 +1253,27 @@ internal sealed class QueryAggregator
     /// <summary>
     /// The running state of one <c>SUM</c>, shared by the global and the grouped paths so both apply
     /// one rule. The result type follows the values: any Float64 gives Float64; otherwise any NUMERIC
-    /// gives NUMERIC, exact, with Integer64 values scaled in; otherwise Integer64 (which wraps on
-    /// overflow, as it always has). A NUMERIC total past the range is
-    /// <see cref="CamusDBErrorCodes.NumericValueOutOfRange"/>, as Spanner reports it. Only the final
-    /// total is checked: the running total is an <see cref="ExactTotal"/>, which can pass the range on
-    /// the way and come back. A mutable struct: hold it in a field or a local and call it in place.
+    /// gives NUMERIC, exact, with Integer64 values scaled in; otherwise Integer64. A NUMERIC total past
+    /// the range is <see cref="CamusDBErrorCodes.NumericValueOutOfRange"/>, as Spanner reports it, and
+    /// an Integer64 total past the int64 range is <see cref="CamusDBErrorCodes.IntegerValueOutOfRange"/>;
+    /// a total is never wrapped. Only the final total is checked: the running total is an
+    /// <see cref="ExactTotal"/>, which can pass the range on the way and come back, so the result does
+    /// not depend on the order in which the rows arrive. A Float64 total adds in row order, as
+    /// PostgreSQL does, and a total that overflows to ±infinity although every value is finite is
+    /// <see cref="CamusDBErrorCodes.FloatValueOutOfRange"/>; a running double that reaches infinity
+    /// stays there, so checking the final total catches every overflow on the way. An infinite or
+    /// NaN value gives the IEEE total. A mutable struct: hold it in a field or a local and call it
+    /// in place.
     /// </summary>
     private struct SumAccumulator
     {
-        private long intSum;            // Integer64 values, wrapping (the Integer64 result)
-        private ExactTotal exactIntSum; // the same values, exact (scaled into a NUMERIC result)
+        private ExactTotal exactIntSum; // Integer64 values, exact (the Integer64 result, or scaled into a NUMERIC one)
         private double floatSum;        // Integer64 and Float64 values as doubles (the Float64 result)
         private ExactTotal numericSum;  // NUMERIC values, unscaled
         private bool hasValue;
         private bool hasFloat;
         private bool hasNumeric;
+        private bool hasNonFinite;      // a Float64 value was ±infinity or NaN, so a non-finite total is not an overflow
 
         public void Add(ColumnValue value)
         {
@@ -1275,13 +1282,13 @@ internal sealed class QueryAggregator
             switch (value.Type)
             {
                 case ColumnType.Integer64:
-                    intSum += value.LongValue;
                     exactIntSum.Add(value.LongValue);
                     floatSum += value.LongValue;
                     break;
 
                 case ColumnType.Float64:
                     hasFloat = true;
+                    hasNonFinite |= !double.IsFinite(value.FloatValue);
                     floatSum += value.FloatValue;
                     break;
 
@@ -1301,12 +1308,13 @@ internal sealed class QueryAggregator
                 return ColumnValue.Null;
 
             if (hasFloat)
-                return new ColumnValue(ColumnType.Float64, hasNumeric ? floatSum + numericSum.ToDouble() : floatSum);
+                return new ColumnValue(ColumnType.Float64,
+                    CheckFloatTotal("SUM", hasNumeric ? floatSum + numericSum.ToDouble() : floatSum, hasNonFinite));
 
             if (hasNumeric)
                 return ColumnValue.FromNumeric(ExactTotal.Combine(numericSum, exactIntSum).ToNumeric("SUM"));
 
-            return new ColumnValue(ColumnType.Integer64, intSum);
+            return new ColumnValue(ColumnType.Integer64, exactIntSum.ToInt64("SUM"));
         }
     }
 
@@ -1315,8 +1323,10 @@ internal sealed class QueryAggregator
     /// NUMERIC values (with or without Integer64 ones) is NUMERIC: the exact total divided by the count,
     /// rounded half away from zero. The total may pass the NUMERIC range while the average does not
     /// (the average of two maximum values is the maximum), so only the average is range-checked. Any
-    /// Float64 value, or only Integer64 values, gives Float64, as before. A mutable struct: call it in
-    /// place.
+    /// Float64 value, or only Integer64 values, gives Float64, as before. A Float64 total that
+    /// overflows from finite values is <see cref="CamusDBErrorCodes.FloatValueOutOfRange"/>, the
+    /// PostgreSQL rule, which checks the running sum of an average the same way. A mutable struct:
+    /// call it in place.
     /// </summary>
     private struct AverageAccumulator
     {
@@ -1326,6 +1336,7 @@ internal sealed class QueryAggregator
         private long count;
         private bool hasFloat;
         private bool hasNumeric;
+        private bool hasNonFinite;      // a Float64 value was ±infinity or NaN
 
         public void Add(ColumnValue value)
         {
@@ -1338,6 +1349,7 @@ internal sealed class QueryAggregator
 
                 case ColumnType.Float64:
                     hasFloat = true;
+                    hasNonFinite |= !double.IsFinite(value.FloatValue);
                     sum += value.FloatValue;
                     break;
 
@@ -1361,9 +1373,23 @@ internal sealed class QueryAggregator
             if (hasNumeric && !hasFloat)
                 return ColumnValue.FromNumeric(ExactTotal.Combine(numericSum, exactIntSum).AverageToNumeric(count, "AVG"));
 
-            double total = hasNumeric ? sum + numericSum.ToDouble() : sum;
+            double total = CheckFloatTotal("AVG", hasNumeric ? sum + numericSum.ToDouble() : sum, hasNonFinite);
             return new ColumnValue(ColumnType.Float64, total / count);
         }
+    }
+
+    /// <summary>
+    /// The overflow check of a Float64 <c>SUM</c> or <c>AVG</c> total: a non-finite total from values
+    /// that are all finite passed the float64 range, which is
+    /// <see cref="CamusDBErrorCodes.FloatValueOutOfRange"/>. With an infinite or NaN value the IEEE
+    /// total is the result.
+    /// </summary>
+    internal static double CheckFloatTotal(string operation, double total, bool hasNonFiniteValue)
+    {
+        if (!hasNonFiniteValue && !double.IsFinite(total))
+            throw FloatMath.OutOfRange($"{operation} float64 overflow: the total is outside the float64 range");
+
+        return total;
     }
 
     /// <summary>
@@ -1413,11 +1439,18 @@ internal sealed class QueryAggregator
         public readonly double ToUnscaledDouble() => wide is { } big ? (double)big : (double)narrow;
 
         /// <summary>
-        /// The low 64 bits of the total. For a total of Integer64 values this is the Integer64 SUM
-        /// result, which wraps on overflow exactly as a running <see langword="long"/> sum does.
+        /// The total of Integer64 values as the Integer64 SUM result. A total outside the int64 range
+        /// is <see cref="CamusDBErrorCodes.IntegerValueOutOfRange"/>: it is never wrapped to its low
+        /// 64 bits, which would return (and let an UPDATE store) a value of the wrong sign.
         /// </summary>
-        public readonly long ToWrappedInt64() =>
-            wide is { } big ? unchecked((long)(ulong)(big & ulong.MaxValue)) : unchecked((long)narrow);
+        public readonly long ToInt64(string operation)
+        {
+            if (wide is null && narrow >= long.MinValue && narrow <= long.MaxValue)
+                return (long)narrow;
+
+            throw Int64Math.OutOfRange(
+                $"{operation} integer overflow: the total {(wide ?? (BigInteger)narrow).ToString(CultureInfo.InvariantCulture)} is outside the int64 range");
+        }
 
         /// <summary>The total as an in-range unscaled NUMERIC; anything else is a NUMERIC overflow.</summary>
         public readonly Int128 ToNumeric(string operation)

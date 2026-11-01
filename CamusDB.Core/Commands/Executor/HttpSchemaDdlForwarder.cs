@@ -36,6 +36,10 @@ public sealed class HttpSchemaDdlForwarder : ISchemaDdlForwarder, ISchemaAckSend
     {
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
         PropertyNameCaseInsensitive = true,
+
+        // A forwarded DDL ticket can carry a float64 DEFAULT of ±infinity or NaN, which JSON has no
+        // number for; named literals send them as "Infinity", "-Infinity" or "NaN".
+        NumberHandling = System.Text.Json.Serialization.JsonNumberHandling.AllowNamedFloatingPointLiterals,
     };
 
     private const string NodeSecretHeader = "X-Camus-Node-Secret";

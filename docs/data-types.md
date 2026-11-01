@@ -15,9 +15,9 @@ and reserved keywords.
 | Type | Stores | Indexable | Notes |
 |------|--------|-----------|-------|
 | `oid` | 12-byte ObjectId | yes | CamusDB's native identifier type; shares its key encoding with `string`. Spelled `oid`/`object_id` in SQL, `id` over HTTP (see [aliases](#aliases)). |
-| `int64` | 64-bit signed integer | yes | |
-| `float64` | IEEE-754 double | yes | |
-| `float32` | IEEE-754 single | yes | Stored at single precision; comparisons and storage narrow to `float`. |
+| `int64` | 64-bit signed integer | yes | Range `-9223372036854775808` to `9223372036854775807`. A result outside it is an error, never a wrapped value. See [INT64 overflow](#int64-overflow). |
+| `float64` | IEEE-754 double | yes | `'Infinity'`, `'-Infinity'` and `'NaN'` are values. An overflow or an underflow is an error. See [Float values](#float-values-infinity-nan-and-overflow). |
+| `float32` | IEEE-754 single | yes | Stored at single precision; comparisons and storage narrow to `float`. A value past the `float32` range is an error, never infinity. |
 | `numeric` | exact decimal: 38 digits, 9 after the point | yes | Fixed precision and scale, as Spanner's NUMERIC. See [NUMERIC](#numeric). |
 | `bool` | boolean | yes | |
 | `string` | UTF-16 text | yes | Length-bounded — see [String and bytes length](#string-and-bytes-length-bounds). |
@@ -66,6 +66,122 @@ CREATE TABLE events (
 ```
 
 (Here the column is *named* `id` — a plain identifier — and its *type* is `oid`.)
+
+---
+
+## INT64 overflow
+
+An `int64` value is never wrapped. A result outside the range `-9223372036854775808` to
+`9223372036854775807` fails with `CADB0420` (`IntegerValueOutOfRange`): HTTP 400, gRPC
+`OUT_OF_RANGE`. PostgreSQL reports the same condition as `bigint out of range`. A statement that
+overflows stores nothing: an `UPDATE`, `INSERT` or `DELETE` fails as a whole, and in an explicit
+transaction the failed statement aborts the transaction.
+
+These operations are checked:
+
+- `+`, `-`, `*` and `/` with two `int64` operands, and unary minus. `-9223372036854775808 / -1` and
+  `-(-9223372036854775807 - 1)` fail.
+- `SUM` of `int64` values, as a plain, grouped or window aggregate. Only the final total is checked,
+  so a running total that passes the range and comes back gives the exact result, whatever the order
+  of the rows. `AVG` divides the exact total and never overflows.
+- An integer literal past the range, such as `9223372036854775808`. Write a wider number as
+  `NUMERIC '…'`.
+- A conversion to `int64`: `CAST` of a `float64`, a `numeric`, a `string` or a `jsonb` number, and
+  `abs(-9223372036854775808)`. A string that is not an integer, such as `'12abc'`, fails with
+  `CADB0400` instead.
+
+These operations do not fail:
+
+- `%` (`mod`): `-9223372036854775808 % -1` is `0`, as in PostgreSQL.
+- The shift operators `<<` and `>>` work on bits, not on values, and use the count modulo 64 (see
+  [SQL expression syntax](sql-expression-syntax.md)).
+- A sequence never wraps. `nextval` past `MAXVALUE`, which is at most `9223372036854775807`, fails
+  with `CADB0544`.
+
+An overflow in a `WHERE` clause is an error too, so `WHERE v + 1 > 0` cannot drop or keep a row by a
+wrapped comparison. In a cluster, a `SUM` or `AVG` of an `int64` column that is split into a partial
+aggregate for each range adds each range exactly, and checks only the final total.
+
+---
+
+## Float values: Infinity, NaN and overflow
+
+`float64` and `float32` follow the PostgreSQL rule for `float8` and `float4`.
+
+### Infinity and NaN are values
+
+`'Infinity'`, `'-Infinity'` and `'NaN'` are legal values. Write them as text, which converts to a
+float column as a PostgreSQL string literal does, or with `CAST`, or as a parameter:
+
+```sql
+INSERT INTO readings (id, v) VALUES (1, 'Infinity'), (2, '-Infinity'), (3, 'NaN');
+SELECT CAST('NaN' AS float64);
+SELECT * FROM readings WHERE v = CAST('Infinity' AS float64);
+```
+
+- The text form is case-insensitive and accepts `NaN`, `Infinity`, `+Infinity`, `-Infinity`, `inf`,
+  `+inf` and `-inf`, with white space around it. Other spellings, such as `∞`, fail with `CADB0400`.
+- A row that holds one of these values works like any other row. You can read, compare, sort, group,
+  index, update and delete it, and the value survives a restart.
+- An operation on an infinite or NaN value gives the IEEE result: `'Infinity' + 1` is `Infinity`,
+  `'Infinity' - 'Infinity'` is `NaN`, and `1 / 'Infinity'` is `0`.
+- A `SUM` or `AVG` over values that include an infinity or a NaN gives the IEEE total.
+- `CAST` to `int64` of an infinity or a NaN fails with `CADB0420`, as PostgreSQL reports
+  `bigint out of range`. `CAST` to `numeric` fails with `CADB0400`, because a CamusDB `numeric` has
+  no infinity and no NaN.
+- `CAST(x AS string)` gives `Infinity`, `-Infinity`, `NaN` and `-0`.
+- `to_jsonb` of an infinity or a NaN gives the JSON string `"Infinity"`, `"-Infinity"` or `"NaN"`,
+  as in PostgreSQL, because JSON has no number for it.
+
+### Order and equality
+
+- The order is: `-Infinity` < every number < `Infinity` < `NaN`. `NaN` sorts above every other value,
+  so `ORDER BY v DESC` puts it first, and `MAX(v)` is `NaN` when a row holds it.
+- `NaN = NaN` is true, so `WHERE v = CAST('NaN' AS float64)` finds the NaN rows, and `GROUP BY` and
+  `DISTINCT` give one group for them. `NaN > 1` is true.
+- `-0` equals `0`. A UNIQUE index refuses `-0` next to `0`, and `WHERE v = 0` finds both rows. A stored
+  `-0` reads back as `-0`, except where a query reads the value from an index key (a covering index
+  read), which gives `0`.
+- This order differs from IEEE comparison, where every comparison with NaN is false. It is the order of
+  PostgreSQL.
+
+### Overflow and underflow are errors
+
+A result from finite values that a float cannot hold fails with `CADB0421`
+(`FloatValueOutOfRange`): HTTP 400, gRPC `OUT_OF_RANGE`. It never becomes an infinity or a zero.
+
+- An *overflow* is a result too large for the type: `1e308 * 10`, `pow(10, 400)`, the literal `1e400`,
+  `CAST('1e400' AS float64)`, or a `SUM` or `AVG` total past the range.
+- An *underflow* is a nonzero result too small for the type: `1e-300 * 1e-300`, `pow(10, -400)`, or
+  the literal `1E-400`. A literal or a text with a zero mantissa, such as `0e-400`, is zero.
+- A subnormal result is a value, not an underflow: `4e-320` is stored as it is.
+- A `float64` value written to a `float32` column, or cast to `float32`, fails when it is past the
+  `float32` range (`1e300`) or rounds to zero (`1e-300`). Arithmetic on `float32` values checks the
+  `float32` range too.
+- A statement that overflows stores nothing, as an `int64` overflow does (see
+  [INT64 overflow](#int64-overflow)).
+- A plain `SUM` adds in row order and fails when the running total passes the range. A window `SUM`
+  adds the frame exactly and checks only its total.
+
+These operations have no real result and fail with `CADB0400`: `x / 0` for every `x`, `pow(0, y)` for
+a negative `y`, `pow(x, y)` for a negative `x` and a finite non-integer `y`, `sqrt` of a negative
+number, and `sign(NaN)`. `round(x, n)` and `trunc(x, n)` accept any scale and never turn a finite
+value into a NaN or an infinity.
+
+### Over the wire
+
+- **HTTP JSON** has no number for an infinity or a NaN. A `float64` or `float32` cell writes them as
+  the strings `"Infinity"`, `"-Infinity"` and `"NaN"`. The column's `type` is still the float type, so
+  a client reads a string in a float column as that value. Every finite value, `-0` included, is a
+  JSON number. A float parameter accepts the same strings: `{"type": 5, "floatValue": "NaN"}`.
+- **gRPC** carries the IEEE value in the `double` or `float` field, with no conversion.
+
+### Indexes that hold -0 or NaN from before
+
+An index key now encodes `-0` as `0`, and every NaN as one key above `Infinity`. Before, `-0` had its
+own key below `0`, and a NaN with the sign bit set had a key below `-Infinity`. An index built before
+this rule on a float column that holds `-0` or a NaN has keys of the old form. Rebuild such an index
+with `DROP INDEX` and `CREATE INDEX`. An index on a column that holds neither value needs no rebuild.
 
 ---
 
@@ -377,7 +493,8 @@ The HTTP API exchanges values as JSON:
 
 | Type | JSON form |
 |------|-----------|
-| `int64`, `float64`, `float32` | JSON number |
+| `int64` | JSON number |
+| `float64`, `float32` | JSON number; an infinity or a NaN is the string `"Infinity"`, `"-Infinity"` or `"NaN"` (see [Float values](#over-the-wire)) |
 | `numeric` | JSON string, canonical decimal text |
 | `string` | JSON string |
 | `bool` | JSON boolean |
@@ -658,6 +775,10 @@ cannot be indexed.
 
 `string` and `oid` share the same key encoding, so a quoted string literal in a query matches an
 `oid`-typed stored key (e.g. `WHERE id = '652b...'`, where `id` is an `oid`-typed column).
+
+A float key encodes the value in the SQL order: `-0` has the key of `0`, and every NaN has one key
+above `Infinity`. An index seek and a table scan therefore return the same rows for every float
+predicate (see [Float values](#order-and-equality)).
 
 ---
 

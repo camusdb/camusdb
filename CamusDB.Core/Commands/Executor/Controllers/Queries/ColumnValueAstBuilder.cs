@@ -28,6 +28,17 @@ internal static class ColumnValueAstBuilder
                 extendedFour: null,
                 extendedFive: null,
                 yytext: value.LongValue.ToString()),
+            // ±infinity and NaN have no literal: they are re-expressed as CAST('Infinity' AS float64),
+            // which parses back to the same value. A finite value keeps its shortest round-trip literal.
+            ColumnType.Float64 when !double.IsFinite(value.FloatValue) =>
+                TypedCast(FloatMath.NonFiniteText(value.FloatValue), NodeAst.TypeFloat64),
+            // A Float32 value is re-expressed as CAST('<text>' AS float32), so it keeps its type; the
+            // single-precision round-trip text parses back to the same float.
+            ColumnType.Float32 => TypedCast(
+                double.IsFinite(value.FloatValue)
+                    ? ((float)value.FloatValue).ToString("R", System.Globalization.CultureInfo.InvariantCulture)
+                    : FloatMath.NonFiniteText(value.FloatValue),
+                NodeAst.TypeFloat32),
             ColumnType.Float64 => new NodeAst(
                 NodeType.Float,
                 leftAst: null,
@@ -146,4 +157,25 @@ internal static class ColumnValueAstBuilder
                 "Unsupported scalar subquery result type: " + value.Type),
         };
     }
+
+    /// <summary>The node <c>CAST('&lt;text&gt;' AS &lt;type&gt;)</c>, the form of a value that has no literal token.</summary>
+    private static NodeAst TypedCast(string text, NodeAst type) => new(
+        NodeType.ExprCast,
+        leftAst: new NodeAst(
+            NodeType.String,
+            leftAst: null,
+            rightAst: null,
+            extendedOne: null,
+            extendedTwo: null,
+            extendedThree: null,
+            extendedFour: null,
+            extendedFive: null,
+            yytext: SqlStringLiteral.Quote(text)),
+        rightAst: type,
+        extendedOne: null,
+        extendedTwo: null,
+        extendedThree: null,
+        extendedFour: null,
+        extendedFive: null,
+        yytext: null);
 }

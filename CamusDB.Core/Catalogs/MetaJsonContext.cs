@@ -120,4 +120,9 @@ namespace CamusDB.Core.Catalogs;
 [JsonSerializable(typeof(OrderType[]))]
 [JsonSerializable(typeof(CamusDB.Core.CommandsExecutor.Controllers.Ttl.TtlRunManifest))]
 [JsonSerializable(typeof(CamusDB.Core.CommandsExecutor.Controllers.Ttl.TtlSpanCheckpoint))]
+// A float64 value can be ±infinity or NaN (a column DEFAULT, a histogram bound, a most-common value),
+// and JSON has no number for them, so the default options throw on write and the DDL or the ANALYZE
+// fails. Named literals write them as "Infinity", "-Infinity" and "NaN" and read them back. A finite
+// value is still a number, so every catalog record written before reads the same.
+[JsonSourceGenerationOptions(NumberHandling = JsonNumberHandling.AllowNamedFloatingPointLiterals)]
 internal sealed partial class MetaJsonContext : JsonSerializerContext;

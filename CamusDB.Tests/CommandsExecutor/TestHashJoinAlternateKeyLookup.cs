@@ -144,8 +144,8 @@ internal sealed class TestHashJoinAlternateKeyLookup
     [Test]
     public void FloatEdgeCases_SpanAndObjectLookupAgree()
     {
-        // Semantics come from ColumnValue.CompareTo (NaN equals NaN; -0.0 orders below 0.0,
-        // so they are distinct keys). The assertion here is parity: whatever the object form
+        // Semantics come from ColumnValue.CompareTo (NaN equals NaN, and -0.0 equals 0.0, the
+        // SQL rule of FloatMath). The assertion here is parity: whatever the object form
         // decides, the span form must decide identically.
         ColumnValue[] edgeValues =
         [

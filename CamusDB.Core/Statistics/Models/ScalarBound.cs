@@ -62,13 +62,13 @@ public sealed class ScalarBound
     public int CompareTo(ScalarBound other)
     {
         if (Type != other.Type)
-            return TryToDouble(out double left) && other.TryToDouble(out double right) ? left.CompareTo(right) : 0;
+            return TryToDouble(out double left) && other.TryToDouble(out double right) ? FloatMath.Compare(left, right) : 0;
 
         return Type switch
         {
             ColumnType.Integer64 => LongValue.CompareTo(other.LongValue),
-            ColumnType.Float64   => FloatValue.CompareTo(other.FloatValue),
-            ColumnType.Float32   => ((float)FloatValue).CompareTo((float)other.FloatValue),
+            ColumnType.Float64   => FloatMath.Compare(FloatValue, other.FloatValue),
+            ColumnType.Float32   => FloatMath.Compare((float)FloatValue, (float)other.FloatValue),
             ColumnType.Date      => LongValue.CompareTo(other.LongValue),
             ColumnType.DateTime  => LongValue.CompareTo(other.LongValue),
             ColumnType.String    => string.Compare(StrValue, other.StrValue, StringComparison.Ordinal),

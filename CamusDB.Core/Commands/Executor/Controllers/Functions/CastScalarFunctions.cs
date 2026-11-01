@@ -186,6 +186,11 @@ internal static class CastScalarFunctions
             (ColumnType.Integer64, ColumnType.Float64)  => CastToFloat64("coerce", value),
             (ColumnType.Float64,   ColumnType.Float32)  => CastToFloat32("coerce", value),
             (ColumnType.Integer64, ColumnType.Float32)  => CastToFloat32("coerce", value),
+            // A float column accepts the float text form, as a PostgreSQL string literal is: this is
+            // how 'Infinity', '-Infinity' and 'NaN' are written in VALUES, a DEFAULT or a text HTTP
+            // parameter. A number past the range is FloatValueOutOfRange, as in CAST.
+            (ColumnType.String,    ColumnType.Float64)  => CastToFloat64("coerce", value),
+            (ColumnType.String,    ColumnType.Float32)  => CastToFloat32("coerce", value),
             (ColumnType.String,    ColumnType.Date)     => CastToDate("coerce", value),
             (ColumnType.String,    ColumnType.DateTime) => CastToDateTime("coerce", value),
             // A date widens to midnight UTC of that day, as in PostgreSQL and MySQL, so a datetime
@@ -266,21 +271,29 @@ internal static class CastScalarFunctions
             ColumnType.Bool => new ColumnValue(ColumnType.Integer64, value.BoolValue ? 1 : 0),
             ColumnType.String => FromStringToInt64(castName, value.StrValue!),
             ColumnType.Numeric => FromNumericToInt64(castName, value),
-            ColumnType.Jsonb => FromNumericToInt64(castName, JsonbScalarToNumeric(castName, value, "bigint")),
+            ColumnType.Jsonb => FromJsonbToInt64(castName, value),
             _ => throw InvalidConversion(castName, value.Type, ColumnType.Integer64),
         };
     }
 
+    /// <summary>
+    /// The cast to <c>float64</c>. A Float64 value, ±infinity and NaN included, casts to itself, and a
+    /// Float32 value widens exactly. A string uses the PostgreSQL <c>float8</c> text form, so
+    /// <c>'Infinity'</c>, <c>'-Infinity'</c> and <c>'NaN'</c> are values, and a number past the range
+    /// is <see cref="CamusDBErrorCodes.FloatValueOutOfRange"/> (see <see cref="FloatMath"/>). A jsonb
+    /// number keeps its decimal text, so <c>'1e400'::jsonb</c> is out of range too, as in PostgreSQL.
+    /// </summary>
     private static ColumnValue CastToFloat64(string castName, ColumnValue value)
     {
         return value.Type switch
         {
-            ColumnType.Float64 => RejectNonFinite(castName, value.FloatValue),
+            ColumnType.Float64 => value,
+            ColumnType.Float32 => new ColumnValue(ColumnType.Float64, (double)(float)value.FloatValue),
             ColumnType.Integer64 => new ColumnValue(ColumnType.Float64, (double)value.LongValue),
             ColumnType.Bool => new ColumnValue(ColumnType.Float64, value.BoolValue ? 1.0 : 0.0),
             ColumnType.String => FromStringToFloat64(castName, value.StrValue!),
             ColumnType.Numeric => new ColumnValue(ColumnType.Float64, NumericMath.ToDouble(value.NumericUnscaled)),
-            ColumnType.Jsonb => new ColumnValue(ColumnType.Float64, JsonbScalarNumber(castName, value, "double precision").ToDouble()),
+            ColumnType.Jsonb => FromStringToFloat64(castName, JsonbScalarNumber(castName, value, "double precision").ToString()),
             _ => throw InvalidConversion(castName, value.Type, ColumnType.Float64),
         };
     }
@@ -369,9 +382,7 @@ internal static class CastScalarFunctions
     private static ColumnValue FromNumericToInt64(string castName, ColumnValue value)
     {
         if (!NumericMath.TryToInt64(value.NumericUnscaled, out long result))
-            throw new CamusDBException(
-                CamusDBErrorCodes.InvalidInput,
-                $"Function '{castName}' integer overflow for value {value.NumericValue}");
+            throw Int64Math.OutOfRange($"Function '{castName}' integer overflow for value {value.NumericValue}");
 
         return new ColumnValue(ColumnType.Integer64, result);
     }
@@ -385,12 +396,18 @@ internal static class CastScalarFunctions
         return ColumnValue.FromUuid(parsed);
     }
 
+    /// <summary>
+    /// The cast to <c>float32</c>, also the write of a wider value into a <c>float32</c> column. A
+    /// finite Float64 past the single-precision range, or a nonzero one that rounds to zero, is
+    /// <see cref="CamusDBErrorCodes.FloatValueOutOfRange"/>, never ±infinity or zero (see
+    /// <see cref="FloatMath.NarrowToSingle"/>). ±infinity and NaN narrow to themselves.
+    /// </summary>
     private static ColumnValue CastToFloat32(string castName, ColumnValue value)
     {
         return value.Type switch
         {
             ColumnType.Float32   => value,
-            ColumnType.Float64   => new ColumnValue(ColumnType.Float32, (double)(float)value.FloatValue),
+            ColumnType.Float64   => new ColumnValue(ColumnType.Float32, (double)FloatMath.NarrowToSingle(value.FloatValue)),
             ColumnType.Integer64 => new ColumnValue(ColumnType.Float32, (double)(float)value.LongValue),
             ColumnType.String    => FromStringToFloat32(castName, value.StrValue!),
             ColumnType.Numeric   => new ColumnValue(ColumnType.Float32, (double)NumericMath.ToSingle(value.NumericUnscaled)),
@@ -432,15 +449,29 @@ internal static class CastScalarFunctions
         };
     }
 
+    /// <summary>
+    /// Parses the PostgreSQL <c>float4</c> text form (see <see cref="FloatMath.TryParseFloat32"/>):
+    /// a number past the float32 range is <see cref="CamusDBErrorCodes.FloatValueOutOfRange"/>, and
+    /// text that is not a number is <see cref="CamusDBErrorCodes.InvalidInput"/>.
+    /// </summary>
     private static ColumnValue FromStringToFloat32(string castName, string text)
     {
-        if (!float.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out float parsed)
-            || float.IsNaN(parsed) || float.IsInfinity(parsed))
-            throw new CamusDBException(
-                CamusDBErrorCodes.InvalidInput,
-                $"Function '{castName}' cannot convert string '{text}' to float32");
+        switch (FloatMath.TryParseFloat32(text, out float parsed))
+        {
+            case FloatMath.ParseStatus.Ok:
+                return new ColumnValue(ColumnType.Float32, (double)parsed);
 
-        return new ColumnValue(ColumnType.Float32, (double)parsed);
+            case FloatMath.ParseStatus.Overflow:
+                throw FloatMath.OutOfRange($"Function '{castName}' float32 overflow: '{Truncate(text)}' is outside the float32 range");
+
+            case FloatMath.ParseStatus.Underflow:
+                throw FloatMath.OutOfRange($"Function '{castName}' float32 underflow: '{Truncate(text)}' is a nonzero value too small for float32");
+
+            default:
+                throw new CamusDBException(
+                    CamusDBErrorCodes.InvalidInput,
+                    $"Function '{castName}' cannot convert string '{text}' to float32");
+        }
     }
 
     private static ColumnValue FromStringToDate(string castName, string text)
@@ -556,20 +587,46 @@ internal static class CastScalarFunctions
         return ticks - (ticks % ticksPerDay);
     }
 
+    /// <summary>
+    /// Parses a decimal integer string. A well-formed integer past the int64 range is
+    /// <see cref="CamusDBErrorCodes.IntegerValueOutOfRange"/>, as PostgreSQL reports <c>value out of
+    /// range for type bigint</c>; any other text is a conversion error.
+    /// </summary>
     private static ColumnValue FromStringToInt64(string castName, string text)
     {
         if (!long.TryParse(text, NumberStyles.Integer, CultureInfo.InvariantCulture, out long parsed))
+        {
+            if (Int64Math.IsDecimalIntegerText(text))
+                throw Int64Math.OutOfRange($"Function '{castName}' integer overflow for value '{Truncate(text)}'");
+
             throw InvalidStringConversion(castName, text, ColumnType.Integer64, "a 64-bit integer");
+        }
 
         return new ColumnValue(ColumnType.Integer64, parsed);
     }
 
+    /// <summary>
+    /// Parses the PostgreSQL <c>float8</c> text form (see <see cref="FloatMath.TryParseFloat64"/>):
+    /// <c>'Infinity'</c> and <c>'NaN'</c> are values, a number past the float64 range is
+    /// <see cref="CamusDBErrorCodes.FloatValueOutOfRange"/>, and text that is not a number is
+    /// <see cref="CamusDBErrorCodes.InvalidInput"/>.
+    /// </summary>
     private static ColumnValue FromStringToFloat64(string castName, string text)
     {
-        if (!double.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out double parsed))
-            throw InvalidStringConversion(castName, text, ColumnType.Float64, "a number");
+        switch (FloatMath.TryParseFloat64(text, out double parsed))
+        {
+            case FloatMath.ParseStatus.Ok:
+                return new ColumnValue(ColumnType.Float64, parsed);
 
-        return new ColumnValue(ColumnType.Float64, RejectNonFinite(castName, parsed).FloatValue);
+            case FloatMath.ParseStatus.Overflow:
+                throw FloatMath.OutOfRange($"Function '{castName}' float64 overflow: '{Truncate(text)}' is outside the float64 range");
+
+            case FloatMath.ParseStatus.Underflow:
+                throw FloatMath.OutOfRange($"Function '{castName}' float64 underflow: '{Truncate(text)}' is a nonzero value too small for float64");
+
+            default:
+                throw InvalidStringConversion(castName, text, ColumnType.Float64, "a number");
+        }
     }
 
     private static ColumnValue FromStringToBool(string castName, string text)
@@ -611,30 +668,20 @@ internal static class CastScalarFunctions
 
     private const double MinInt64InclusiveLowerBound = -9223372036854775808.0;
 
+    /// <summary>
+    /// A float to Integer64. ±infinity and NaN have no integer value, so they are out of range like
+    /// a value past the int64 bounds, as PostgreSQL reports <c>bigint out of range</c> for
+    /// <c>'NaN'::float8::bigint</c>. The comparisons are false for NaN, so it is tested first.
+    /// </summary>
     private static ColumnValue FromDoubleToInt64(string castName, double value)
     {
-        ColumnValue finite = RejectNonFinite(castName, value);
-
-        if (finite.FloatValue >= MaxInt64ExclusiveUpperBound || finite.FloatValue < MinInt64InclusiveLowerBound)
+        if (!double.IsFinite(value) || value >= MaxInt64ExclusiveUpperBound || value < MinInt64InclusiveLowerBound)
         {
-            throw new CamusDBException(
-                CamusDBErrorCodes.InvalidInput,
+            throw Int64Math.OutOfRange(
                 $"Function '{castName}' integer overflow for value {value.ToString(CultureInfo.InvariantCulture)}");
         }
 
-        return new ColumnValue(ColumnType.Integer64, (long)finite.FloatValue);
-    }
-
-    private static ColumnValue RejectNonFinite(string castName, double value)
-    {
-        if (double.IsNaN(value) || double.IsInfinity(value))
-        {
-            throw new CamusDBException(
-                CamusDBErrorCodes.InvalidInput,
-                $"Function '{castName}' cannot convert non-finite float value");
-        }
-
-        return new ColumnValue(ColumnType.Float64, value);
+        return new ColumnValue(ColumnType.Integer64, (long)value);
     }
 
     internal static bool IsValidLowerHexObjectId(string value)
@@ -688,6 +735,24 @@ internal static class CastScalarFunctions
     {
         string text = JsonbScalarNumber(castName, value, targetName).ToString();
         return ToNumeric(castName, text, NumericMath.TryParse(text, out Int128 parsed), parsed);
+    }
+
+    /// <summary>
+    /// A <c>jsonb</c> number to int64, rounded half away from zero as a NUMERIC is. A number past the
+    /// int64 range is <see cref="CamusDBErrorCodes.IntegerValueOutOfRange"/>, also when it is past the
+    /// NUMERIC range: the target is int64, so the int64 error is the one that describes the refusal,
+    /// as PostgreSQL reports <c>bigint out of range</c> for both.
+    /// </summary>
+    private static ColumnValue FromJsonbToInt64(string castName, ColumnValue value)
+    {
+        string text = JsonbScalarNumber(castName, value, "bigint").ToString();
+
+        NumericConversionStatus status = NumericMath.TryParse(text, out Int128 parsed);
+
+        if (status == NumericConversionStatus.Overflow)
+            throw Int64Math.OutOfRange($"Function '{castName}' integer overflow for value {Truncate(text)}");
+
+        return FromNumericToInt64(castName, ToNumeric(castName, text, status, parsed));
     }
 
     private static ColumnValue JsonbScalarToBool(string castName, ColumnValue value)

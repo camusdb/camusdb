@@ -16,7 +16,8 @@ namespace CamusDB.Core.CommandsExecutor.Models;
 /// than raw row bytes) must cross the node boundary — partial aggregation states are the
 /// first consumer. Every <see cref="ColumnType"/> is covered; per-type payload fields keep
 /// frames compact: <c>{"t":type, "s"|"l"|"f"|"b"|"y"|"u"+"l"|"a"+"e": payload}</c>.
-/// Doubles round-trip exactly (System.Text.Json uses shortest round-trippable formatting) and
+/// Doubles round-trip exactly (System.Text.Json uses shortest round-trippable formatting; ±infinity
+/// and NaN, which JSON has no number for, travel as the strings Infinity, -Infinity and NaN) and
 /// bytes travel as base64. Arrays recurse. A Uuid and a NUMERIC both travel as their two signed
 /// 64-bit halves (<c>"u"</c> high, <c>"l"</c> low); the type tag tells them apart, and the read
 /// path range-checks a NUMERIC, so a corrupt frame cannot carry a value past ±(10³⁸−1) unscaled.
@@ -47,7 +48,12 @@ public static class ColumnValueWireCodec
 
             case ColumnType.Float64:
             case ColumnType.Float32:
-                writer.WriteNumber("f", value.FloatValue);
+                // JSON has no number for ±infinity or NaN (WriteNumber throws for them), so they travel
+                // as their names; a finite value, -0 included, is an exact JSON number.
+                if (double.IsFinite(value.FloatValue))
+                    writer.WriteNumber("f", value.FloatValue);
+                else
+                    writer.WriteString("f", FloatMath.NonFiniteText(value.FloatValue));
                 break;
 
             case ColumnType.String:
@@ -97,7 +103,7 @@ public static class ColumnValueWireCodec
             ColumnType.Integer64 or ColumnType.Date or ColumnType.DateTime =>
                 new ColumnValue(type, element.GetProperty("l").GetInt64()),
             ColumnType.Float64 or ColumnType.Float32 =>
-                new ColumnValue(type, element.GetProperty("f").GetDouble()),
+                new ColumnValue(type, ReadFloat(element.GetProperty("f"))),
             ColumnType.String or ColumnType.Id =>
                 new ColumnValue(type, element.GetProperty("s").GetString()!),
             ColumnType.Bytes =>
@@ -110,6 +116,26 @@ public static class ColumnValueWireCodec
             _ => throw new CamusDBException(
                 CamusDBErrorCodes.InvalidInternalOperation,
                 $"Column type {type} has no wire decoding"),
+        };
+    }
+
+    /// <summary>
+    /// A float payload: a JSON number, or the name of a non-finite value as <see cref="Write"/> sends
+    /// it. Any other string is a corrupt frame.
+    /// </summary>
+    private static double ReadFloat(JsonElement payload)
+    {
+        if (payload.ValueKind == JsonValueKind.Number)
+            return payload.GetDouble();
+
+        return payload.GetString() switch
+        {
+            "Infinity" => double.PositiveInfinity,
+            "-Infinity" => double.NegativeInfinity,
+            "NaN" => double.NaN,
+            _ => throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInternalOperation,
+                "A float wire value is neither a number nor Infinity, -Infinity or NaN"),
         };
     }
 

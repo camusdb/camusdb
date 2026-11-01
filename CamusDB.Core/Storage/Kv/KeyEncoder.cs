@@ -30,9 +30,15 @@ namespace CamusDB.Core.Storage.Kv;
 ///
 /// Bodies:
 ///   Integer64  : 16-char uppercase hex of (ulong)value with the sign bit flipped (fixed width).
-///   Float64    : 16-char uppercase hex of an order-preserving transform of the IEEE-754 bits.
+///   Float64    : 16-char uppercase hex of an order-preserving transform of the IEEE-754 bits of the
+///                canonical value (FloatMath.Canonical): -0 encodes as 0 and every NaN as the positive
+///                quiet NaN, so one SQL value has one key, and NaN sorts above +infinity, as the SQL
+///                order puts it. A key decodes to the canonical value, so a key read of a -0 cell
+///                gives 0. Keys written before the canonical form held -0 below 0 and a sign-bit NaN
+///                below -infinity; an index on such a column is rebuilt with DROP INDEX and CREATE
+///                INDEX.
 ///   Float32    : 8-char uppercase hex of an order-preserving transform of the single-precision bits
-///                (same sign-bit / complement trick as Float64, but on 32-bit).
+///                (same canonical value and sign-bit / complement trick as Float64, but on 32-bit).
 ///   Date       : 16-char uppercase hex of the backing long (UTC ticks, midnight-aligned) via the
 ///                same sign-bit-flipped integer transform — inherits Integer64 ordering.
 ///   DateTime   : 16-char uppercase hex of the backing long (UTC ticks) via the integer transform.
@@ -427,10 +433,13 @@ public static class KeyEncoder
     /// <summary>
     /// Order-preserving transform of a double's IEEE-754 bits: for negatives all bits are flipped;
     /// for non-negatives only the sign bit is flipped. This yields ascending order for ascending doubles.
+    /// The bits are those of <see cref="FloatMath.Canonical(double)"/>: -0 and 0 compare equal, and so
+    /// do two NaNs, so a raw-bits key would give one SQL value two keys. A UNIQUE index would then
+    /// accept -0 next to 0, and a seek for 0 would miss a -0 row that a table scan returns.
     /// </summary>
     private static ulong Float64Ordered(double value)
     {
-        long bits = BitConverter.DoubleToInt64Bits(value);
+        long bits = BitConverter.DoubleToInt64Bits(FloatMath.Canonical(value));
 
         if (bits < 0)
             bits = ~bits;
@@ -441,11 +450,12 @@ public static class KeyEncoder
     }
 
     /// <summary>
-    /// Single-precision counterpart of <see cref="Float64Ordered"/>, on 32-bit IEEE-754 bits.
+    /// Single-precision counterpart of <see cref="Float64Ordered"/>, on the 32-bit IEEE-754 bits of the
+    /// canonical value.
     /// </summary>
     private static uint Float32Ordered(float value)
     {
-        int bits = BitConverter.SingleToInt32Bits(value);
+        int bits = BitConverter.SingleToInt32Bits(FloatMath.Canonical(value));
 
         if (bits < 0)
             bits = ~bits;

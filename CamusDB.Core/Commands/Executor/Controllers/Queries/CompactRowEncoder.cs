@@ -70,8 +70,9 @@ public static class CompactRowEncoder
             ColumnType.String    => value.StrValue,
             ColumnType.Integer64 => value.LongValue,
             ColumnType.Bool      => value.BoolValue,
-            ColumnType.Float64   => value.FloatValue,
-            ColumnType.Float32   => (float)value.FloatValue,
+            // JSON has no number for ±infinity or NaN: they encode as their names, as CompactRowJsonWriter writes them.
+            ColumnType.Float64   => double.IsFinite(value.FloatValue) ? value.FloatValue : FloatMath.NonFiniteText(value.FloatValue),
+            ColumnType.Float32   => float.IsFinite((float)value.FloatValue) ? (float)value.FloatValue : FloatMath.NonFiniteText(value.FloatValue),
             ColumnType.Bytes     => value.BytesValue is null ? null : Convert.ToBase64String(value.BytesValue),
             ColumnType.Date      => value.LongValue,
             ColumnType.DateTime  => value.LongValue,

@@ -315,7 +315,8 @@ internal sealed class SemiJoinExecutor
             ColumnType.Integer64 => a.LongValue == b.LongValue,
             ColumnType.String => string.Equals(a.StrValue, b.StrValue, StringComparison.Ordinal),
             ColumnType.Id => string.Equals(a.StrValue, b.StrValue, StringComparison.Ordinal),
-            ColumnType.Float64 => a.FloatValue == b.FloatValue,
+            // SQL equality, the rule of `=`: NaN equals NaN (see FloatMath).
+            ColumnType.Float64 => FloatMath.SqlEquals(a.FloatValue, b.FloatValue),
             ColumnType.Bool => a.BoolValue == b.BoolValue,
             ColumnType.Null => false,
             _ => false,
