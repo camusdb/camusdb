@@ -690,7 +690,7 @@ internal abstract class AddColumnConstraintScenarios : SharedNodeBaseTest
         await executor.Catalogs.PersistCoordinatorJobAsync(database, new PersistedCoordinatorJob
         {
             TableName = "items",
-            TableId = items.Id,
+            TableId = items.Id!,
             ElementName = "rid",
             TargetState = SchemaElementState.Absent,
             ElementKind = SchemaElementKind.Column,
@@ -715,7 +715,7 @@ internal abstract class AddColumnConstraintScenarios : SharedNodeBaseTest
         await executor.Catalogs.PersistCoordinatorJobAsync(database, new PersistedCoordinatorJob
         {
             TableName = "items",
-            TableId = items.Id,
+            TableId = items.Id!,
             ElementName = "rid",
             TargetState = SchemaElementState.Absent,
             ElementKind = SchemaElementKind.Column,

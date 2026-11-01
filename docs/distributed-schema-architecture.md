@@ -1624,9 +1624,12 @@ on an older layout decode with their own version and read `age` with current vis
   single-node paths and neither goes through the coordinator (§4.1); routing them through a table
   hold is the remaining piece of that change.
 - **Backfill cost per row.** A staged backfill writes each entry with a lock and a set, and a batch
-  holds its row locks for the length of the batch; under a foreground load a 20,000-row index build
-  took 134–148 s and cost the load a quarter of its throughput. Batching the entry writes of a batch
-  into one Kahuna call is the lever that has not been pulled.
+  holds its row locks for the length of the batch. Under the bank load, a 20,000-row index build
+  took 40 s (about 500 rows/s), and the load ran at 52% of its throughput during the build and at
+  72% once the index was maintained (Caraxes `schema-preflight`, 2026-10-21). An earlier build
+  took 134–148 s at about 70% of the load's throughput, so the build is now shorter but its dip is
+  deeper. Batching the entry writes of a batch into one Kahuna call is the lever that has not been
+  pulled; measure it by the dip per second, not by the build time alone.
 - **Legacy index cleanup.** `SystemSchema` index storage is read-only legacy (§7.3); remove it
   once all databases are known to be migrated.
 - **Broader failure-injection coverage.** The in-process harness supports concurrent DML during
