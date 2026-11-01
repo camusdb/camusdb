@@ -149,12 +149,12 @@ internal static class ForeignKeyInsertScenarios
     }
 
     /// <summary>
-    /// Records what an explicit transaction looks like after a violation. The engine does not roll back
-    /// a failed statement: its rows stay staged in the transaction, as after a duplicate key in the middle
-    /// of a statement. The transports roll the whole transaction back when a statement in it fails, so a
-    /// client never commits them; a caller of the engine API must do the same.
+    /// A violation inside an explicit transaction aborts it, as in PostgreSQL: the next statement is
+    /// refused, the commit rolls the transaction back, and the refused row never reaches the table. The
+    /// check runs after the row write, so that row is staged in the transaction until the rollback; the
+    /// rule is what keeps a caller from committing it.
     /// </summary>
-    public static async Task ExplicitTransactionAfterAViolationStillHoldsTheRows(CommandExecutor executor, DatabaseDescriptor database, string dbname)
+    public static async Task ExplicitTransactionAfterAViolationIsAborted(CommandExecutor executor, DatabaseDescriptor database, string dbname)
     {
         await CreateCitiesAndWeather(executor, database, dbname);
 
@@ -165,8 +165,12 @@ internal static class ForeignKeyInsertScenarios
                 await Run(executor, tx, dbname, "INSERT INTO weather (id, city) VALUES (1, 'nowhere')"))!;
             Assert.AreEqual(CamusDBErrorCodes.ForeignKeyViolation, violation.Code, violation.Message);
 
-            Assert.AreEqual(1, await CountIn(executor, tx, dbname, "weather"),
-                "The failed statement's row is still staged in the transaction");
+            CamusDBException refused = Assert.ThrowsAsync<CamusDBException>(async () => await CountIn(executor, tx, dbname, "weather"))!;
+            Assert.AreEqual(CamusDBErrorCodes.TransactionRollbackOnly, refused.Code, refused.Message);
+
+            CamusDBException commit = Assert.ThrowsAsync<CamusDBException>(() => database.Transactions.CommitAsync(tx))!;
+            Assert.AreEqual(CamusDBErrorCodes.TransactionRollbackOnly, commit.Code, commit.Message);
+            Assert.AreEqual(KvTransactionStatus.RolledBack, tx.Status);
         }
         finally
         {
@@ -443,7 +447,7 @@ public sealed class TestForeignKeyInsert : BaseTest
     [Test] public async Task SelfReferenceInsideOneStatementIsAccepted() => await Run(ForeignKeyInsertScenarios.SelfReferenceInsideOneStatementIsAccepted);
     [Test] public async Task ParentThenChildInOneTransactionIsAccepted() => await Run(ForeignKeyInsertScenarios.ParentThenChildInOneTransactionIsAccepted);
     [Test] public async Task ChildOfAParentDeletedInTheSameTransactionIsRefused() => await Run(ForeignKeyInsertScenarios.ChildOfAParentDeletedInTheSameTransactionIsRefused);
-    [Test] public async Task ExplicitTransactionAfterAViolationStillHoldsTheRows() => await Run(ForeignKeyInsertScenarios.ExplicitTransactionAfterAViolationStillHoldsTheRows);
+    [Test] public async Task ExplicitTransactionAfterAViolationIsAborted() => await Run(ForeignKeyInsertScenarios.ExplicitTransactionAfterAViolationIsAborted);
     [Test] public async Task InsertSelectIsCheckedOnceAcrossPages() => await Run(ForeignKeyInsertScenarios.InsertSelectIsCheckedOnceAcrossPages);
     [Test] public async Task ChildInsertNeverCommitsAgainstAPendingParentDelete() => await Run(ForeignKeyInsertScenarios.ChildInsertNeverCommitsAgainstAPendingParentDelete);
     [Test] public async Task RowApiInsertIsChecked() => await Run(ForeignKeyInsertScenarios.RowApiInsertIsChecked);
@@ -483,7 +487,7 @@ public sealed class TestForeignKeyInsertCluster : SharedNodeBaseTest
     [Test] public async Task SelfReferenceInsideOneStatementIsAccepted() => await Run(ForeignKeyInsertScenarios.SelfReferenceInsideOneStatementIsAccepted);
     [Test] public async Task ParentThenChildInOneTransactionIsAccepted() => await Run(ForeignKeyInsertScenarios.ParentThenChildInOneTransactionIsAccepted);
     [Test] public async Task ChildOfAParentDeletedInTheSameTransactionIsRefused() => await Run(ForeignKeyInsertScenarios.ChildOfAParentDeletedInTheSameTransactionIsRefused);
-    [Test] public async Task ExplicitTransactionAfterAViolationStillHoldsTheRows() => await Run(ForeignKeyInsertScenarios.ExplicitTransactionAfterAViolationStillHoldsTheRows);
+    [Test] public async Task ExplicitTransactionAfterAViolationIsAborted() => await Run(ForeignKeyInsertScenarios.ExplicitTransactionAfterAViolationIsAborted);
     [Test] public async Task InsertSelectIsCheckedOnceAcrossPages() => await Run(ForeignKeyInsertScenarios.InsertSelectIsCheckedOnceAcrossPages);
     [Test] public async Task ChildInsertNeverCommitsAgainstAPendingParentDelete() => await Run(ForeignKeyInsertScenarios.ChildInsertNeverCommitsAgainstAPendingParentDelete);
     [Test] public async Task RowApiInsertIsChecked() => await Run(ForeignKeyInsertScenarios.RowApiInsertIsChecked);

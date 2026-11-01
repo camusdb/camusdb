@@ -466,31 +466,30 @@ internal sealed class TestLargeValueRewriteResilience : SharedNodeBaseTest
 
         // The default explicit transaction is Serializable: the rows this SELECT reads stay locked until
         // commit. Were the statement accepted, every batch over them would wait out the lock deadline and
-        // be deferred, and the statement would report success having converted nothing.
-        KvTransaction sessionTx = await database.Transactions.BeginAsync();
-        sessionTx.MarkSessionOwned();
-        try
+        // be deferred, and the statement would report success having converted nothing. The refusal
+        // aborts the transaction, as any failed statement does, so each form gets a transaction of its own.
+        foreach (string sql in new[] { "ALTER TABLE docs REWRITE STORAGE", "ALTER TABLE docs REWRITE STORAGE INLINE" })
         {
-            (_, IAsyncEnumerable<QueryResultRow> read) = await engine.ExecuteSQLQuery(new ExecuteSQLTicket(sessionTx, db, "SELECT title FROM docs", null));
-            Assert.AreEqual(4, (await read.ToListAsync()).Count);
-
-            foreach (string sql in new[] { "ALTER TABLE docs REWRITE STORAGE", "ALTER TABLE docs REWRITE STORAGE INLINE" })
+            KvTransaction sessionTx = await database.Transactions.BeginAsync();
+            sessionTx.MarkSessionOwned();
+            try
             {
+                (_, IAsyncEnumerable<QueryResultRow> read) = await engine.ExecuteSQLQuery(new ExecuteSQLTicket(sessionTx, db, "SELECT title FROM docs", null));
+                Assert.AreEqual(4, (await read.ToListAsync()).Count);
+
                 CamusDBException? refused = Assert.ThrowsAsync<CamusDBException>(() =>
                     engine.ExecuteDDLSQL(new ExecuteSQLTicket(sessionTx, db, sql, null)));
                 Assert.AreEqual(CamusDBErrorCodes.StatementNotAllowedInTransaction, refused!.Code, sql);
                 StringAssert.Contains("REWRITE STORAGE", refused.Message);
                 StringAssert.Contains("Commit or roll back first", refused.Message, "the message names the fix");
+
+                Assert.IsTrue((await RowStatesAsync(database)).All(r => !r.converted), "the refusal writes no row");
+                Assert.IsNull(await CursorAsync(database), "the refusal leaves no cursor");
             }
-
-            Assert.IsTrue((await RowStatesAsync(database)).All(r => !r.converted), "the refusal writes no row");
-            Assert.IsNull(await CursorAsync(database), "the refusal leaves no cursor");
-
-            await database.Transactions.CommitAsync(sessionTx);
-        }
-        finally
-        {
-            await database.Transactions.RollbackIfNotCompletedAsync(sessionTx);
+            finally
+            {
+                await database.Transactions.RollbackIfNotCompletedAsync(sessionTx);
+            }
         }
 
         // Outside an explicit transaction the same statement runs as before.

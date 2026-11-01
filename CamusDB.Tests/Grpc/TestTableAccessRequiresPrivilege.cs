@@ -337,12 +337,18 @@ internal sealed class TestTableAccessRequiresPrivilege : BaseTest
         return req;
     }
 
+    // The row-write requests carry a filter because a filterless UpdateRows or DeleteRows is refused
+    // before the privilege check runs, and these requests exist to reach the privilege check.
     private static UpdateRowsRequest UpdateRowsReq(string db) => new()
     {
         Database = db,
         Table = "items",
         Values = { { "secret", new Value { StringValue = "pwned" } } },
+        Filters = { AnySecret() },
     };
+
+    private static CamusDB.Grpc.QueryFilter AnySecret() =>
+        new() { ColumnName = "secret", Op = "!=", Value = new Value { StringValue = "" } };
 
     private static UpdateByIdRequest UpdateByIdReq(string db) => new()
     {
@@ -352,7 +358,7 @@ internal sealed class TestTableAccessRequiresPrivilege : BaseTest
         Values = { { "secret", new Value { StringValue = "pwned" } } },
     };
 
-    private static DeleteRowsRequest DeleteRowsReq(string db) => new() { Database = db, Table = "items" };
+    private static DeleteRowsRequest DeleteRowsReq(string db) => new() { Database = db, Table = "items", Filters = { AnySecret() } };
 
     private static RowByIdRequest ById(string db) => new() { Database = db, Table = "items", Id = SecretRowId };
 

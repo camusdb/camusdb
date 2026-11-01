@@ -787,11 +787,17 @@ public sealed class KvTransactionsManager : IDisposable
     {
         ArgumentNullException.ThrowIfNull(tx);
 
-        // Refused before anything is finalized; the caller then rolls the transaction back.
+        // An aborted transaction ends in a rollback whatever the caller asked for, as in PostgreSQL. The
+        // refusal then names the statement that aborted it, so a commit that stored nothing is never
+        // mistaken for one that did, and nothing is left open for the caller to clean up.
         if (tx.RollbackOnlyReason is { } rollbackOnly)
+        {
+            await RollbackIfNotCompletedAsync(tx, cancellationToken).ConfigureAwait(false);
+
             throw new CamusDBException(
                 CamusDBErrorCodes.TransactionRollbackOnly,
-                $"Transaction {tx.UniqueId} can only roll back: {rollbackOnly}");
+                $"Transaction {tx.UniqueId} was aborted by a failed statement and has been rolled back: {rollbackOnly}");
+        }
 
         if (tx.TransactionId == Kommander.Time.HLCTimestamp.Zero)
         {

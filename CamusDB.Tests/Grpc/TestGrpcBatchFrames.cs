@@ -533,6 +533,33 @@ public class TestGrpcBatchFrames : BaseTest
         Assert.AreEqual(12, written.Count(m => m.RequestId == 60));
     }
 
+    // ─── A failed statement cannot be committed by a later op of its chain ────
+
+    [Test]
+    public async Task AFailedInsertInATransaction_IsNotStoredByAPlainCommitLaterInTheFrame()
+    {
+        string db = await CreateDatabaseWithTableAsync();
+
+        // The second INSERT is refused as a whole: its key conflict makes Kahuna stage none of its keys,
+        // neither row 2 nor the twin of row 1. A plain COMMIT, not COMMIT_IF_OK, follows it in the same
+        // chain: the service rolled the transaction back when the statement failed, so the commit is
+        // refused and the first insert is lost with it.
+        List<BatchExecuteResponse> flat = await RunAsync(service,
+            Frame(
+                Start(1, db),
+                NonQuery(2, db, "INSERT INTO items (id, name) VALUES (1, 'one')", startRef: 1),
+                NonQuery(3, db, "INSERT INTO items (id, name) VALUES (2, 'two'), (1, 'twin')", startRef: 1),
+                Op(BatchStatementKind.Commit, 4, db, startRef: 1)));
+
+        Assert.AreEqual(1, ForId(flat, 2).Single().NonQuery.AffectedRows);
+        Assert.AreEqual(CamusDBErrorCodes.DuplicateUniqueKeyValue, ForId(flat, 3).Single().Error.Code, Shape(ForId(flat, 3)));
+        Assert.IsTrue(IsError(ForId(flat, 4).Single()), "the plain COMMIT after the failed statement is refused: " + Shape(ForId(flat, 4)));
+
+        List<BatchExecuteResponse> after = await RunAsync(service, Query(9, db, "SELECT id FROM items ORDER BY id"));
+        Assert.IsEmpty(after.Where(IsRow), "neither the first insert nor the failed statement's rows were stored");
+        await TableIntegrityChecker.AssertConsistentAsync(serviceExecutor, db, "items", "id");
+    }
+
     // ─── A transaction in one frame: txn_start_ref and COMMIT_IF_OK ───────────
 
     [Test]

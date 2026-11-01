@@ -268,14 +268,17 @@ public sealed class TestCreateTableAsSelect : SharedNodeBaseTest
     {
         (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupSource(rows: 2);
 
+        KvTransaction first = await database.Transactions.BeginAsync();
+        await Ddl(executor, dbname, first, "CREATE TABLE copied AS SELECT name FROM src");
+        await database.Transactions.CommitAsync(first);
+
         KvTransaction txn = await database.Transactions.BeginAsync();
 
-        await Ddl(executor, dbname, txn, "CREATE TABLE copied AS SELECT name FROM src");
-
-        Assert.ThrowsAsync<CamusDBException>(async () =>
+        CamusDBException? ex = Assert.ThrowsAsync<CamusDBException>(async () =>
             await Ddl(executor, dbname, txn, "CREATE TABLE copied AS SELECT name FROM src"));
+        Assert.AreEqual(CamusDBErrorCodes.TableAlreadyExists, ex!.Code);
 
-        await database.Transactions.CommitAsync(txn);
+        await database.Transactions.RollbackAsync(txn);
     }
 
     [Test]
@@ -292,10 +295,13 @@ public sealed class TestCreateTableAsSelect : SharedNodeBaseTest
         Assert.AreEqual(CamusDBErrorCodes.InvalidInput, ex!.Code);
         StringAssert.Contains("alias", ex.Message);
 
-        // Nothing was created.
-        Assert.ThrowsAsync<CamusDBException>(async () => await Query(executor, dbname, txn, "SELECT * FROM bad"));
+        // The failed statement aborted the transaction; a new one shows nothing was created.
+        await database.Transactions.RollbackAsync(txn);
 
-        await database.Transactions.CommitAsync(txn);
+        KvTransaction verify = await database.Transactions.BeginAsync();
+        CamusDBException? missing = Assert.ThrowsAsync<CamusDBException>(async () => await Query(executor, dbname, verify, "SELECT * FROM bad"));
+        Assert.AreEqual(CamusDBErrorCodes.TableDoesntExist, missing!.Code);
+        await database.Transactions.RollbackAsync(verify);
     }
 
     [Test]
@@ -312,7 +318,7 @@ public sealed class TestCreateTableAsSelect : SharedNodeBaseTest
         Assert.AreEqual(CamusDBErrorCodes.InvalidInput, ex!.Code);
         StringAssert.Contains("CAST", ex.Message);
 
-        await database.Transactions.CommitAsync(txn);
+        await database.Transactions.RollbackAsync(txn);
     }
 
     [Test]
@@ -329,7 +335,7 @@ public sealed class TestCreateTableAsSelect : SharedNodeBaseTest
         Assert.AreEqual(CamusDBErrorCodes.InvalidInput, ex!.Code);
         StringAssert.Contains("more than one output column", ex.Message);
 
-        await database.Transactions.CommitAsync(txn);
+        await database.Transactions.RollbackAsync(txn);
     }
 
     /// <summary>
@@ -370,7 +376,7 @@ public sealed class TestCreateTableAsSelect : SharedNodeBaseTest
         Assert.AreEqual(CamusDBErrorCodes.InvalidInput, ex!.Code);
         StringAssert.Contains("join", ex.Message);
 
-        await database.Transactions.CommitAsync(txn);
+        await database.Transactions.RollbackAsync(txn);
     }
 
     /// <summary>
@@ -525,7 +531,7 @@ public sealed class TestCreateTableAsSelect : SharedNodeBaseTest
         CamusDBException? ex = Assert.ThrowsAsync<CamusDBException>(async () =>
             await Query(executor, dbname, verify, "SELECT * FROM copied"));
         Assert.AreEqual(CamusDBErrorCodes.TableDoesntExist, ex!.Code);
-        await database.Transactions.CommitAsync(verify);
+        await database.Transactions.RollbackAsync(verify);
     }
 
     /// <summary>

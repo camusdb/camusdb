@@ -43,6 +43,8 @@ public sealed class UpdateController : CommandsController
                 try
                 {
                     txnState = transactions.GetState(request.TxnIdPT, request.TxnIdCounter);
+                    // A refused request ends the transaction, as a failed SQL statement does.
+                    RowWriteFilterRule.Require(request.Filters?.Count ?? 0, RowWriteFilterRule.Update);
                     UpdateTicket ticket = new(
                         txnState: txnState,
                         databaseName: request.DatabaseName ?? "",
@@ -63,6 +65,8 @@ public sealed class UpdateController : CommandsController
                     throw;
                 }
             }
+
+            RowWriteFilterRule.Require(request.Filters?.Count ?? 0, RowWriteFilterRule.Update);
 
             // Autocommit: retry transparently on transient serialization failures when the
             // resolved level is Serializable; run once for Read Committed.

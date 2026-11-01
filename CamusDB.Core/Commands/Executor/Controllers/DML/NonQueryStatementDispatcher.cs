@@ -267,13 +267,52 @@ internal sealed class NonQueryStatementDispatcher
             fence);
 
     /// <summary>
-    /// Execute a SQL statement that doesn't return rows
+    /// Executes a SQL statement that returns no rows, and guards the statement boundary with
+    /// PostgreSQL's rule: a statement on an aborted transaction is refused before it runs, and a
+    /// statement that fails aborts its transaction (marks it rollback-only) before the error leaves
+    /// the engine, so no caller can commit the rows of a statement it was told failed, and no later
+    /// statement runs on top of them.
+    ///
+    /// <para>The guard sits here, not in the transports, because every DML path meets this method:
+    /// the SQL entry points, the query entry point's <c>RETURNING</c> hand-off, and the SQL an
+    /// extension runs. A transactional Kahuna batch stages every key or none, so a duplicate key in a
+    /// multi-row INSERT leaves nothing staged; a foreign-key check refused after the row writes, or a
+    /// later batch of a large statement, does leave intents behind. The rule does not distinguish the
+    /// two, because a client cannot see which one it got (see
+    /// <see cref="Transactions.KvTransaction.MarkRollbackOnly(string)"/>).</para>
+    ///
+    /// <para>A retryable abort carried in <see cref="ExecuteSQLTicket.RetryableAborts"/> instead of
+    /// thrown is a failure of the same kind and is guarded the same way.</para>
     /// </summary>
     /// <param name="ticket"></param>
     /// <param name="activity">The statement's entry in the running-statement list, which the parse names; or null.</param>
     /// <returns>The number of inserted/modified/deleted rows</returns>
     internal async Task<ExecuteNonSQLResult> ExecuteNonSQLQuery(
         CommandExecutor executor, ExecuteSQLTicket ticket, Diagnostics.QueryActivityEntry? activity = null)
+    {
+        // Null for a database-scoped mutation (CREATE USER, GRANT, ...), which writes no transaction.
+        Transactions.KvTransaction? tx = ticket.TxnState;
+        tx?.ThrowIfRollbackOnly();
+
+        try
+        {
+            ExecuteNonSQLResult result = await ExecuteNonSQLQueryCore(executor, ticket, activity).ConfigureAwait(false);
+
+            if (tx is not null && ticket.RetryableAborts is { Abort: { } abort })
+                tx.MarkRollbackOnly(abort);
+
+            return result;
+        }
+        catch (Exception ex)
+        {
+            tx?.MarkRollbackOnly(ex);
+            throw;
+        }
+    }
+
+    /// <summary>The statement dispatch behind <see cref="ExecuteNonSQLQuery"/>; see there for the guard around it.</summary>
+    private async Task<ExecuteNonSQLResult> ExecuteNonSQLQueryCore(
+        CommandExecutor executor, ExecuteSQLTicket ticket, Diagnostics.QueryActivityEntry? activity)
     {
         context.Validator.Validate(ticket);
 

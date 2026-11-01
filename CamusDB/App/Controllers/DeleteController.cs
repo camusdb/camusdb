@@ -43,6 +43,8 @@ public sealed class DeleteController : CommandsController
                 try
                 {
                     txnState = transactions.GetState(request.TxnIdPT, request.TxnIdCounter);
+                    // A refused request ends the transaction, as a failed SQL statement does.
+                    RowWriteFilterRule.Require(request.Filters?.Count ?? 0, RowWriteFilterRule.Delete);
                     DeleteTicket ticket = new(
                         txnState: txnState,
                         databaseName: request.DatabaseName ?? "",
@@ -60,6 +62,8 @@ public sealed class DeleteController : CommandsController
                     throw;
                 }
             }
+
+            RowWriteFilterRule.Require(request.Filters?.Count ?? 0, RowWriteFilterRule.Delete);
 
             // Autocommit: retry transparently on transient serialization failures when the
             // resolved level is Serializable; run once for Read Committed.

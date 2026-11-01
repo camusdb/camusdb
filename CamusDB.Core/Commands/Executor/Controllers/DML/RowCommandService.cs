@@ -70,9 +70,31 @@ internal sealed class RowCommandService
         this.sequenceBinder = sequenceBinder;
     }
 
+    /// <summary>
+    /// Inserts the ticket's rows. Guards the statement boundary as the SQL dispatcher does, under
+    /// PostgreSQL's rule: a ticket on an aborted transaction is refused, and a ticket that fails (a
+    /// later row's key conflict, a foreign-key check, a validation error) aborts the transaction, so
+    /// the caller cannot commit the rows it was told were refused, nor run anything else on them. See
+    /// <see cref="Transactions.KvTransaction.MarkRollbackOnly(string)"/>.
+    /// </summary>
     internal async Task<InsertResult> Insert(InsertTicket ticket)
     {
-        context.Validator.Validate(ticket);
+        ticket.TxnState.ThrowIfRollbackOnly();
+
+        try
+        {
+            context.Validator.Validate(ticket);
+            return await InsertCore(ticket).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            ticket.TxnState.MarkRollbackOnly(ex);
+            throw;
+        }
+    }
+
+    private async Task<InsertResult> InsertCore(InsertTicket ticket)
+    {
         ticket.TxnState.MarkStatementExecuted();
 
         DatabaseDescriptor database = await context.DatabaseOpener.Open(ticket.DatabaseName).ConfigureAwait(false);
@@ -208,13 +230,27 @@ internal sealed class RowCommandService
     }
 
     /// <summary>
-    /// Updates rows specifying filters and sorts
+    /// Updates the rows the ticket's filters select. Guarded at the statement boundary like
+    /// <see cref="Insert"/>: refused on an aborted transaction, and a failure aborts the transaction.
     /// </summary>
-    /// <param name="ticket"></param>
-    /// <returns></returns>
     internal async Task<UpdateResult> Update(UpdateTicket ticket)
     {
-        context.Validator.Validate(ticket);
+        ticket.TxnState.ThrowIfRollbackOnly();
+
+        try
+        {
+            context.Validator.Validate(ticket);
+            return await UpdateCore(ticket).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            ticket.TxnState.MarkRollbackOnly(ex);
+            throw;
+        }
+    }
+
+    private async Task<UpdateResult> UpdateCore(UpdateTicket ticket)
+    {
         ticket.TxnState.MarkStatementExecuted();
 
         DatabaseDescriptor database = await context.DatabaseOpener.Open(ticket.DatabaseName).ConfigureAwait(false);
@@ -236,13 +272,29 @@ internal sealed class RowCommandService
     }
 
     /// <summary>
-    /// Deletes rows specifying a filter criteria
+    /// Deletes the rows the ticket's filters select. Guarded at the statement boundary like
+    /// <see cref="Insert"/>: refused on an aborted transaction, and a failure (a foreign-key check runs
+    /// after the row deletes) aborts the transaction.
     /// </summary>
-    /// <param name="ticket"></param>
     /// <returns>The number of deleted rows</returns>
     internal async Task<DeleteResult> Delete(DeleteTicket ticket)
     {
-        context.Validator.Validate(ticket);
+        ticket.TxnState.ThrowIfRollbackOnly();
+
+        try
+        {
+            context.Validator.Validate(ticket);
+            return await DeleteCore(ticket).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            ticket.TxnState.MarkRollbackOnly(ex);
+            throw;
+        }
+    }
+
+    private async Task<DeleteResult> DeleteCore(DeleteTicket ticket)
+    {
         ticket.TxnState.MarkStatementExecuted();
 
         DatabaseDescriptor database = await context.DatabaseOpener.Open(ticket.DatabaseName).ConfigureAwait(false);
@@ -270,32 +322,54 @@ internal sealed class RowCommandService
     /// <returns></returns>
     internal async Task<(DatabaseDescriptor, IAsyncEnumerable<QueryResultRow>)> Query(QueryTicket ticket)
     {
-        context.Validator.Validate(ticket);
-        ticket.TxnState.MarkStatementExecuted();
+        // A read on an aborted transaction is refused, and a read that fails aborts the transaction, as
+        // every statement does (see Insert).
+        ticket.TxnState.ThrowIfRollbackOnly();
 
-        DatabaseDescriptor database = await context.DatabaseOpener.Open(ticket.DatabaseName).ConfigureAwait(false);
+        try
+        {
+            context.Validator.Validate(ticket);
+            ticket.TxnState.MarkStatementExecuted();
 
-        TableDescriptor table = await context.TableOpener.Open(database, ticket.TableName).ConfigureAwait(false);
-        MaterializedViewAccessGuard.RequireReadable(table);
-        SelectStatementExecutor.PinSchemaVersion(database, table, ticket.TxnState);
+            DatabaseDescriptor database = await context.DatabaseOpener.Open(ticket.DatabaseName).ConfigureAwait(false);
 
-        return (database, queryExecutor.Query(database, table, ticket));
+            TableDescriptor table = await context.TableOpener.Open(database, ticket.TableName).ConfigureAwait(false);
+            MaterializedViewAccessGuard.RequireReadable(table);
+            SelectStatementExecutor.PinSchemaVersion(database, table, ticket.TxnState);
+
+            return (database, ticket.TxnState.AbortOnFailure(queryExecutor.Query(database, table, ticket)));
+        }
+        catch (Exception ex)
+        {
+            ticket.TxnState.MarkRollbackOnly(ex);
+            throw;
+        }
     }
 
     /// <summary>
-    /// Queries a table by the row's id
+    /// Queries a table by the row's id. Guarded like <see cref="Query"/>.
     /// </summary>
     /// <param name="ticket"></param>
     /// <returns></returns>
     internal async Task<IAsyncEnumerable<Dictionary<string, ColumnValue>>> QueryById(QueryByIdTicket ticket)
     {
-        context.Validator.Validate(ticket);
+        ticket.TxnState.ThrowIfRollbackOnly();
 
-        DatabaseDescriptor database = await context.DatabaseOpener.Open(ticket.DatabaseName).ConfigureAwait(false);
+        try
+        {
+            context.Validator.Validate(ticket);
 
-        TableDescriptor table = await context.TableOpener.Open(database, ticket.TableName).ConfigureAwait(false);
-        MaterializedViewAccessGuard.RequireReadable(table);
-        SelectStatementExecutor.PinSchemaVersion(database, table, ticket.TxnState);
+            DatabaseDescriptor database = await context.DatabaseOpener.Open(ticket.DatabaseName).ConfigureAwait(false);
 
-        return queryExecutor.QueryById(database, table, ticket);
+            TableDescriptor table = await context.TableOpener.Open(database, ticket.TableName).ConfigureAwait(false);
+            MaterializedViewAccessGuard.RequireReadable(table);
+            SelectStatementExecutor.PinSchemaVersion(database, table, ticket.TxnState);
+
+            return ticket.TxnState.AbortOnFailure(queryExecutor.QueryById(database, table, ticket));
+        }
+        catch (Exception ex)
+        {
+            ticket.TxnState.MarkRollbackOnly(ex);
+            throw;
+        }
     }}

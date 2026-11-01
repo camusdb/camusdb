@@ -191,9 +191,35 @@ internal sealed class DdlStatementDispatcher
         return sequenceDdl.SetCommentAsync(database, commentedSequence, sequenceComment);
     }
 
+    /// <summary>
+    /// Executes a schema statement, and guards the statement boundary as the DML dispatcher does,
+    /// under PostgreSQL's rule: a statement on an aborted transaction is refused, and a statement that
+    /// fails aborts the caller's transaction (a single-node schema change persists its metadata inside
+    /// that transaction, so a half-applied change must never be committed). See
+    /// <see cref="Transactions.KvTransaction.MarkRollbackOnly(string)"/>.
+    /// </summary>
     /// <param name="activity">The statement's entry in the running-statement list, which the parse names; or null.</param>
     internal async Task<ExecuteDDLSQLResult> ExecuteDDLSQL(
         CommandExecutor executor, ExecuteSQLTicket ticket, Diagnostics.QueryActivityEntry? activity = null)
+    {
+        // Null for a database-scoped statement (CREATE DATABASE, CREATE USER, ...), which writes no transaction.
+        Transactions.KvTransaction? tx = ticket.TxnState;
+        tx?.ThrowIfRollbackOnly();
+
+        try
+        {
+            return await ExecuteDDLSQLCore(executor, ticket, activity).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            tx?.MarkRollbackOnly(ex);
+            throw;
+        }
+    }
+
+    /// <summary>The statement dispatch behind <see cref="ExecuteDDLSQL"/>; see there for the guard around it.</summary>
+    private async Task<ExecuteDDLSQLResult> ExecuteDDLSQLCore(
+        CommandExecutor executor, ExecuteSQLTicket ticket, Diagnostics.QueryActivityEntry? activity)
     {
         context.Validator.Validate(ticket);
 

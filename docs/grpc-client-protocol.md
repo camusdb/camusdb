@@ -329,9 +329,9 @@ For code paths that operate on rows directly without composing SQL:
 | `InsertRow` | `InsertRowRequest{database, table, map values}` | `NonQueryReply` | `values` maps column name → `Value`. A column left out of `values` takes its default, as in SQL `INSERT`; see [sequences](sequences.md#identity-columns) for identity columns. |
 | `Query` | `RowQueryRequest{database, table, index_name, filters, order_by}` | `stream QueryStreamMessage` | Schema-first (§3). `index_name` empty = primary scan. |
 | `QueryById` | `RowByIdRequest{database, table, id}` | `stream QueryStreamMessage` | Fetch by primary key. Schema-first even when the row is absent (schema, zero rows). |
-| `UpdateRows` | `UpdateRowsRequest{…, values, filters}` | `NonQueryReply` | Update matching rows. |
+| `UpdateRows` | `UpdateRowsRequest{…, values, filters}` | `NonQueryReply` | Update matching rows. At least one filter is required (see below). |
 | `UpdateById` | `UpdateByIdRequest{…, id, values}` | `NonQueryReply` | Update the row with that primary key. |
-| `DeleteRows` | `DeleteRowsRequest{…, filters}` | `NonQueryReply` | Delete matching rows. |
+| `DeleteRows` | `DeleteRowsRequest{…, filters}` | `NonQueryReply` | Delete matching rows. At least one filter is required (see below). |
 | `DeleteById` | `RowByIdRequest{…, id}` | `NonQueryReply` | Delete by primary key. |
 
 ### Filters and ordering
@@ -341,6 +341,12 @@ For code paths that operate on rows directly without composing SQL:
   drifts from what the executor accepts. Multiple filters combine as the engine defines (AND).
 - `OrderBy { column_name, direction }` where `direction` is `ORDER_ASCENDING` (0) or
   `ORDER_DESCENDING` (1).
+- **`UpdateRows` and `DeleteRows` need at least one filter.** A request with no filter is refused
+  with `INVALID_ARGUMENT` (`camus-error-code` = `CADB0400`, InvalidInput), and nothing changes. This is
+  the same safety rule as SQL, where `UPDATE` and `DELETE` without `WHERE` are refused: one request
+  must not change or delete every row by accident. To touch every row on purpose, use SQL with
+  `WHERE TRUE`. The HTTP `/update` and `/delete` endpoints follow the same rule. Inside an explicit
+  transaction, the refusal ends the transaction, as any failed statement does.
 
 ### Primary-key resolution (important)
 

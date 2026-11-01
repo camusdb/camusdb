@@ -659,8 +659,8 @@ public sealed class KvTransaction
         if (count == 0)
             return;
 
-        // Counted whatever the limit: the statement retry boundary reads it to tell an attempt that
-        // wrote nothing from one that did. See WriteCount.
+        // Counted whatever the limit: the schema-fence retry reads it to tell an attempt that wrote
+        // nothing from one that did. See WriteCount.
         Interlocked.Increment(ref writeBatches);
 
         if (mutationLimit <= 0)
@@ -692,11 +692,15 @@ public sealed class KvTransaction
     private long writeBatches;
 
     /// <summary>
-    /// How many write batches this transaction reserved, counted even when the mutation limit is off.
-    /// A statement that retries a transient error in the <b>same</b> transaction compares it before and
-    /// after an attempt: the retry is safe only when the attempt wrote nothing, because nothing undoes
-    /// a failed attempt's writes short of a rollback. That covers writes made by triggers and
-    /// procedures too, since their SQL reserves on this transaction.
+    /// A monotonic mark of this transaction's write activity: it moves when a write path reserves a
+    /// batch of mutations (<see cref="ReserveMutations"/>, before the Kahuna call) and when a key is
+    /// recorded as modified (<see cref="TrackModified"/>, after one), whatever the mutation limit. It
+    /// is a tell-tale, not a count of rows. A statement that meets a schema fence may retry in the
+    /// <b>same</b> transaction only when its failed attempt wrote nothing, because nothing undoes a
+    /// failed attempt's writes short of a rollback; that reader compares the mark before and after the
+    /// attempt. The mark is conservative: a reservation whose Kahuna write never happened also moves
+    /// it. Writes made by triggers and procedures count too, since their SQL reserves on this
+    /// transaction.
     /// </summary>
     public long WriteCount => Interlocked.Read(ref writeBatches);
 
@@ -709,13 +713,115 @@ public sealed class KvTransaction
     public string? RollbackOnlyReason => Volatile.Read(ref rollbackOnlyReason);
 
     /// <summary>
-    /// Marks the transaction rollback-only. Used when SQL that a C# extension ran in it failed: the
-    /// failed statement may have staged part of its writes (a foreign-key check runs after the row
-    /// writes), there are no savepoints to undo them alone, and extension code may have caught the
-    /// error. The first reason is kept.
+    /// Marks the transaction rollback-only, which is PostgreSQL's aborted state: every later statement
+    /// is refused (<see cref="ThrowIfRollbackOnly"/>), a commit rolls the transaction back and reports
+    /// the refusal (<see cref="CamusDBErrorCodes.TransactionRollbackOnly"/>), and only a rollback ends
+    /// it cleanly. There are no savepoints, so a failed statement may have left write intents in the
+    /// Kahuna transaction with no way to undo them alone. The rule applies to every failed statement,
+    /// whether or not it wrote: a transactional Kahuna batch stages every key or none, so a duplicate
+    /// key in a multi-row INSERT leaves nothing behind, while a foreign-key check refused after the row
+    /// writes does, and a client cannot tell the two apart from the outside, so one rule is the one it
+    /// can rely on. The first reason is kept, so the refusals name the statement that aborted the
+    /// transaction, not a later one.
     /// </summary>
     public void MarkRollbackOnly(string reason) =>
         Interlocked.CompareExchange(ref rollbackOnlyReason, reason, null);
+
+    /// <summary>
+    /// The statement-boundary form of <see cref="MarkRollbackOnly(string)"/>: records the failure that
+    /// ended a statement run on this transaction, by its error code and message.
+    /// </summary>
+    public void MarkRollbackOnly(Exception failure)
+    {
+        string code = failure is CamusDBException camus ? camus.Code : failure.GetType().Name;
+        MarkRollbackOnly($"a statement failed ({code}: {failure.Message})");
+    }
+
+    /// <summary>
+    /// Refuses a statement on an aborted transaction. Every statement entry point calls this before it
+    /// validates or parses anything, so a client that ignores an error and goes on sees the refusal at
+    /// once, as in PostgreSQL, rather than at commit.
+    /// </summary>
+    public void ThrowIfRollbackOnly()
+    {
+        if (Volatile.Read(ref rollbackOnlyReason) is { } reason)
+            throw new CamusDBException(
+                CamusDBErrorCodes.TransactionRollbackOnly,
+                $"Transaction {UniqueId} is aborted, commands are ignored until the end of the transaction block: {reason}");
+    }
+
+    /// <summary>
+    /// Wraps a statement's lazy cursor so a failure while the rows stream aborts the transaction exactly
+    /// as a failure while the statement planned: the rows the client already read stand, the error
+    /// reaches the client as before, and the transaction is rollback-only from then on. A cancellation
+    /// counts as a failure, as PostgreSQL treats a cancelled statement.
+    ///
+    /// <para>This is a hand-written wrapper, not a compiler-built iterator, on purpose. An iterator opens
+    /// the inner cursor only on its first <c>MoveNextAsync</c>, so a caller that takes the enumerator and
+    /// disposes it unread would never reach the inner cursor, and the clean-up that cursor does on
+    /// dispose (ending the statement's entry on the running-statement list) would never run. This
+    /// wrapper opens and disposes the inner enumerator together with its own.</para>
+    /// </summary>
+    public IAsyncEnumerable<T> AbortOnFailure<T>(IAsyncEnumerable<T> cursor) => new AbortingCursor<T>(this, cursor);
+
+    /// <summary>The enumerable half of <see cref="AbortOnFailure{T}"/>.</summary>
+    private sealed class AbortingCursor<T>(KvTransaction tx, IAsyncEnumerable<T> rows) : IAsyncEnumerable<T>
+    {
+        public IAsyncEnumerator<T> GetAsyncEnumerator(CancellationToken cancellationToken = default)
+        {
+            try
+            {
+                return new AbortingEnumerator<T>(tx, rows.GetAsyncEnumerator(cancellationToken));
+            }
+            catch (Exception ex)
+            {
+                tx.MarkRollbackOnly(ex);
+                throw;
+            }
+        }
+    }
+
+    /// <summary>
+    /// The enumerator half of <see cref="AbortOnFailure{T}"/>: a step that fails, synchronously or after
+    /// an await, aborts the transaction and rethrows. A step that completes at once is returned as is,
+    /// without a state machine, because most rows of a buffered result arrive that way.
+    /// </summary>
+    private sealed class AbortingEnumerator<T>(KvTransaction tx, IAsyncEnumerator<T> inner) : IAsyncEnumerator<T>
+    {
+        public T Current => inner.Current;
+
+        public ValueTask<bool> MoveNextAsync()
+        {
+            ValueTask<bool> step;
+
+            try
+            {
+                step = inner.MoveNextAsync();
+            }
+            catch (Exception ex)
+            {
+                tx.MarkRollbackOnly(ex);
+                throw;
+            }
+
+            return step.IsCompletedSuccessfully ? step : AwaitStep(step);
+        }
+
+        private async ValueTask<bool> AwaitStep(ValueTask<bool> step)
+        {
+            try
+            {
+                return await step.ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                tx.MarkRollbackOnly(ex);
+                throw;
+            }
+        }
+
+        public ValueTask DisposeAsync() => inner.DisposeAsync();
+    }
 
     public KvTransaction(
         HLCTimestamp transactionId,
@@ -1181,6 +1287,10 @@ public sealed class KvTransaction
     /// </summary>
     public void TrackModified(string key, KeyValueDurability durability)
     {
+        // Moves the write mark too: a path that writes without a reservation (catalog, registry and
+        // statistics writers) must still count as a write for the schema-fence retry. See WriteCount.
+        Interlocked.Increment(ref writeBatches);
+
         lock (trackSync)
         {
             modifiedKeys ??= [];
@@ -1196,6 +1306,8 @@ public sealed class KvTransaction
     /// </summary>
     public void TrackModifiedRange(IReadOnlyList<(string key, int expiresMs, KeyValueDurability durability)> keys, KeyValueDurability durability)
     {
+        Interlocked.Increment(ref writeBatches);
+
         lock (trackSync)
         {
             modifiedKeys ??= [];
@@ -1211,6 +1323,8 @@ public sealed class KvTransaction
     /// </summary>
     public void TrackModifiedRange(IReadOnlyList<string> keys, KeyValueDurability durability)
     {
+        Interlocked.Increment(ref writeBatches);
+
         lock (trackSync)
         {
             modifiedKeys ??= [];

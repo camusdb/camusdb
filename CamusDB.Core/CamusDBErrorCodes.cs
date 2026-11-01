@@ -952,9 +952,14 @@ public static class CamusDBErrorCodes
     public const string ExtensionCaughtSqlError = "CADB0823";
 
     /// <summary>
-    /// A commit of a transaction that was marked rollback-only, because SQL that an extension ran in it
-    /// failed. The writes of that SQL may be partly staged, so the only safe outcome is a rollback.
-    /// Maps to HTTP 409.
+    /// A statement on a transaction that an earlier failed statement aborted, or the commit of such a
+    /// transaction. This is PostgreSQL's rule: any failed statement inside an explicit transaction
+    /// marks it rollback-only, every later statement is refused, and a commit rolls it back and reports
+    /// this code. The rule does not depend on whether the failed statement staged a write (a
+    /// transactional Kahuna batch stages every key or none, so a duplicate key in a multi-row INSERT
+    /// stages nothing, while a foreign-key check refused after the row writes leaves intents behind),
+    /// because a client cannot tell the two apart. The message names the statement that aborted the
+    /// transaction. Maps to HTTP 409.
     /// </summary>
     public const string TransactionRollbackOnly = "CADB0824";
 

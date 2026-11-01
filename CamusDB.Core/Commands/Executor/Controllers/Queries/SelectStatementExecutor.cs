@@ -254,7 +254,34 @@ internal sealed class SelectStatementExecutor
     }
 
     /// <summary>
-    /// Executes a SQL statement that returns rows, and times it for the slow query log.
+    /// Executes a SQL statement that returns rows, under PostgreSQL's rule for an explicit transaction:
+    /// a statement on an aborted transaction is refused before it runs, and a failure, while the
+    /// statement plans or while its rows stream, aborts the transaction
+    /// (<see cref="KvTransaction.MarkRollbackOnly(string)"/>). The write-with-RETURNING hand-off meets
+    /// the same rule again in the DML dispatcher; the first reason is kept.
+    /// </summary>
+    public async Task<(DatabaseDescriptor database, IAsyncEnumerable<QueryResultRow> cursor)> ExecuteSQLQuery(ExecuteSQLTicket ticket, CacheMetadataHolder? metaOut = null, QuerySchemaHolder? schemaOut = null)
+    {
+        // Null when the ticket carries no transaction.
+        KvTransaction? tx = ticket.TxnState;
+        tx?.ThrowIfRollbackOnly();
+
+        try
+        {
+            (DatabaseDescriptor database, IAsyncEnumerable<QueryResultRow> cursor) =
+                await ExecuteSQLQueryTracked(ticket, metaOut, schemaOut).ConfigureAwait(false);
+
+            return (database, tx is null ? cursor : tx.AbortOnFailure(cursor));
+        }
+        catch (Exception ex)
+        {
+            tx?.MarkRollbackOnly(ex);
+            throw;
+        }
+    }
+
+    /// <summary>
+    /// Runs the statement on the running-statement list and times it for the slow query log.
     ///
     /// <para><b>The returned cursor is lazy, and that is why the timing is where it is.</b> When
     /// this method returns, the statement has been parsed, authorized and planned, and no row has
@@ -265,7 +292,7 @@ internal sealed class SelectStatementExecutor
     /// <para>With the log off, <paramref name="ticket"/> is passed through untouched and nothing is
     /// allocated: no probe, no clock, no wrapper around the cursor.</para>
     /// </summary>
-    public async Task<(DatabaseDescriptor database, IAsyncEnumerable<QueryResultRow> cursor)> ExecuteSQLQuery(ExecuteSQLTicket ticket, CacheMetadataHolder? metaOut = null, QuerySchemaHolder? schemaOut = null)
+    private async Task<(DatabaseDescriptor database, IAsyncEnumerable<QueryResultRow> cursor)> ExecuteSQLQueryTracked(ExecuteSQLTicket ticket, CacheMetadataHolder? metaOut, QuerySchemaHolder? schemaOut)
     {
         // A read observes its ticket's token for its whole run, so CANCEL QUERY can stop it: the
         // ticket from here on carries the entry's token, which is linked to the transport's. The

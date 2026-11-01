@@ -268,9 +268,12 @@ public sealed class TestInsertSelect : SharedNodeBaseTest
         Assert.AreEqual(CamusDBErrorCodes.InvalidInput, ex!.Code);
         StringAssert.Contains("number of target columns", ex.Message);
 
-        Assert.IsEmpty(await Query(executor, dbname, txn, "SELECT * FROM dest"));
+        // The failed statement aborted the transaction; a new one shows the table is still empty.
+        await database.Transactions.RollbackAsync(txn);
 
-        await database.Transactions.CommitAsync(txn);
+        KvTransaction verify = await database.Transactions.BeginAsync();
+        Assert.IsEmpty(await Query(executor, dbname, verify, "SELECT * FROM dest"));
+        await database.Transactions.RollbackAsync(verify);
     }
 
     [Test]
@@ -287,7 +290,7 @@ public sealed class TestInsertSelect : SharedNodeBaseTest
         Assert.AreEqual(CamusDBErrorCodes.InvalidInput, ex!.Code);
         StringAssert.Contains("more than once", ex.Message);
 
-        await database.Transactions.CommitAsync(txn);
+        await database.Transactions.RollbackAsync(txn);
     }
 
     /// <summary>

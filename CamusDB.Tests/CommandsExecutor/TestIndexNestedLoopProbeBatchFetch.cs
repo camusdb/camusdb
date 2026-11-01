@@ -240,12 +240,16 @@ public sealed class TestIndexNestedLoopProbeBatchFetch : SharedNodeBaseTest
             await foreach (QueryResultRow row in cursor.WithCancellation(cancellationToken))
                 rows.Add(row);
 
+            if (ownsTxn)
+                await fixture.Database.Transactions.CommitAsync(txn);
+
             return rows;
         }
         finally
         {
+            // A failed or cancelled read aborts the transaction, so only a rollback can end it.
             if (ownsTxn)
-                await fixture.Database.Transactions.CommitAsync(txn);
+                await fixture.Database.Transactions.RollbackIfNotCompletedAsync(txn);
         }
     }
 

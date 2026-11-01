@@ -309,6 +309,8 @@ public sealed class CamusRowsService : CamusRows.CamusRowsBase
                 try
                 {
                     txnState = transactions.GetState(handle.TxnIdPt, (uint)handle.TxnIdCounter);
+                    // A refused request ends the transaction, as a failed SQL statement does.
+                    RowWriteFilterRule.Require(filters?.Count ?? 0, RowWriteFilterRule.Update);
                     UpdateTicket ticket = new(
                         txnState: txnState,
                         databaseName: request.Database,
@@ -329,6 +331,8 @@ public sealed class CamusRowsService : CamusRows.CamusRowsBase
                     throw;
                 }
             }
+
+            RowWriteFilterRule.Require(filters?.Count ?? 0, RowWriteFilterRule.Update);
 
             // Autocommit.
             int updatedRows = 0;
@@ -479,6 +483,8 @@ public sealed class CamusRowsService : CamusRows.CamusRowsBase
                 try
                 {
                     txnState = transactions.GetState(handle.TxnIdPt, (uint)handle.TxnIdCounter);
+                    // A refused request ends the transaction, as a failed SQL statement does.
+                    RowWriteFilterRule.Require(filters?.Count ?? 0, RowWriteFilterRule.Delete);
                     DeleteTicket ticket = new(
                         txnState: txnState,
                         databaseName: request.Database,
@@ -496,6 +502,8 @@ public sealed class CamusRowsService : CamusRows.CamusRowsBase
                     throw;
                 }
             }
+
+            RowWriteFilterRule.Require(filters?.Count ?? 0, RowWriteFilterRule.Delete);
 
             // Autocommit.
             int deletedRows = 0;

@@ -223,26 +223,42 @@ public sealed class TestKvTableStoreRetry
         //
         // For the partial-mix case (SetManyPartialFaultPredicate), keys matching the predicate
         // return MustRetry WITHOUT being sent to the real node; all other keys are delegated
-        // immediately. The predicate is cleared after the first activation so the retry (which
-        // sends only the faulted keys) goes straight to the real node. This exercises the guard
-        // in SetManyWithRetry that rebuilds pending from MustRetry-only responses rather than
-        // resending the full original batch — if that guard regressed, an already-Set unique key
-        // would come back NotSet → false DuplicateUniqueKeyValue.
+        // immediately, as their own all-or-nothing batch. The predicate is cleared after the first
+        // activation so the retry (which sends only the faulted keys) goes straight to the real node.
+        // This models the one shape Kahuna stages in part (a batch over several actors under optimistic
+        // locking) and exercises the guard in SetManyWithRetry that never resends an already-Set key —
+        // if that guard regressed, an already-Set unique key would come back NotSet → false
+        // DuplicateUniqueKeyValue.
         public Func<string, bool>? SetManyPartialFaultPredicate;
+
+        // One transient item holds a transactional batch back, as Kahuna answers it: item 0 MustRetry,
+        // every other item NotApplied, and nothing written. The resend must carry the whole batch again.
+        public int InjectSetManyHeldBackFaults;
 
         // Whole batch answered with a terminal type the retry loop does not absorb: Aborted (a lost
         // optimistic write) by default, or Errored.
         public int InjectSetManyTerminalFaults;
         public KeyValueResponseType SetManyTerminalType = KeyValueResponseType.Aborted;
 
+        /// <summary>The item count of every set-many call, in call order, beside <see cref="SetManyOpIds"/>.</summary>
+        public List<int> SetManyItemCounts { get; } = [];
+
         public override async Task<List<KahunaSetKeyValueResponseItem>> LocateAndTrySetManyKeyValue(
             List<KahunaSetKeyValueRequestItem> items, CancellationToken ct,
             string coordinatorKey = "", TransactionOperationId operationId = default)
         {
             SetManyOpIds.Add(operationId);
+            SetManyItemCounts.Add(items.Count);
 
             if (InjectSetManyFaults-- > 0)
                 return items.Select(i => new KahunaSetKeyValueResponseItem { Key = i.Key, Type = KeyValueResponseType.MustRetry }).ToList();
+
+            if (InjectSetManyHeldBackFaults-- > 0)
+                return items.Select((i, index) => new KahunaSetKeyValueResponseItem
+                {
+                    Key = i.Key,
+                    Type = index == 0 ? KeyValueResponseType.MustRetry : KeyValueResponseType.NotApplied,
+                }).ToList();
 
             if (InjectSetManyLagFaults-- > 0)
                 return items.Select(i => new KahunaSetKeyValueResponseItem { Key = i.Key, Type = KeyValueResponseType.WaitingForReplication }).ToList();
@@ -881,6 +897,103 @@ public sealed class TestKvTableStoreRetry
         Assert.That(stub.SetManyOpIds.Count, Is.GreaterThanOrEqualTo(2), "the partial fault forced a resend");
         Assert.That(stub.SetManyOpIds[0], Is.Not.EqualTo(stub.SetManyOpIds[1]),
             "a shrinking (partial) resend must mint a fresh operation id");
+    }
+
+    // -----------------------------------------------------------------------
+    // All-or-nothing set-many: a refused batch stages nothing, a held-back batch is resent whole
+    // -----------------------------------------------------------------------
+
+    /// <summary>
+    /// A transactional set-many is all-or-nothing in Kahuna. A batch with a refused unique entry answers
+    /// that entry <c>NotSet</c> and every sibling <c>NotApplied</c>, and stages nothing: the sibling row
+    /// is not readable in the same transaction and its unique entry is absent. This is the storage-level
+    /// proof that a duplicate key leaves no twin row behind; the engine still aborts the transaction on
+    /// any failed statement, which the command fixtures pin. Here the Kahuna transaction is committed
+    /// directly, and nothing of the batch is in it.
+    /// </summary>
+    [Test]
+    public async Task WriteRowsBatch_RefusedUniqueEntry_StagesNothing()
+    {
+        (EmbeddedKahuna node, FaultInjectingKahuna stub, KvTableStore store) = await CreateStoreAsync("tbl_aon_refused");
+        await using EmbeddedKahuna __ = node;
+
+        const string IndexId = "idx_aon_unique";
+        CompositeColumnValue taken = new([new ColumnValue(ColumnType.Integer64, 42L)]);
+        CompositeColumnValue free = new([new ColumnValue(ColumnType.Integer64, 43L)]);
+
+        ObjectIdValue holder = Generate();
+        KvTransaction seed = await BeginTransaction(stub, "aon_seed");
+        await store.WriteRowsBatch(seed, [new KvTableStore.RowWrite { RowId = holder, RowData = BranchKvCodec.EncodeValue([1]), IndexEntries = [new KvTableStore.IndexWrite(IndexId, taken, Unique: true)] }]);
+        await CommitTransaction(stub, seed);
+
+        // The sibling comes first in the batch, so its keys precede the refused entry in request order.
+        ObjectIdValue sibling = Generate();
+        ObjectIdValue twin = Generate();
+        List<KvTableStore.RowWrite> batch =
+        [
+            new() { RowId = sibling, RowData = BranchKvCodec.EncodeValue([2]), IndexEntries = [new KvTableStore.IndexWrite(IndexId, free, Unique: true)] },
+            new() { RowId = twin, RowData = BranchKvCodec.EncodeValue([3]), IndexEntries = [new KvTableStore.IndexWrite(IndexId, taken, Unique: true)] },
+        ];
+
+        KvTransaction tx = await BeginTransaction(stub, "aon_w");
+
+        CamusDBException failure = Assert.ThrowsAsync<CamusDBException>(() => store.WriteRowsBatch(tx, batch))!;
+        Assert.AreEqual(CamusDBErrorCodes.DuplicateUniqueKeyValue, failure.Code, failure.Message);
+
+        Assert.IsNull(await store.GetRow(tx, sibling), "the sibling row of the refused batch is not staged");
+        Assert.IsNull(await store.GetRow(tx, twin), "the twin row of the refused batch is not staged");
+        Assert.IsNull(await store.LookupUnique(tx, IndexId, free), "the sibling's unique entry is not staged");
+        Assert.AreEqual(holder, await store.LookupUnique(tx, IndexId, taken), "the taken entry still names its holder");
+
+        await CommitTransaction(stub, tx);
+
+        KvTransaction readTx = await BeginTransaction(stub, "aon_r");
+        Assert.IsNull(await store.GetRow(readTx, sibling), "nothing of the refused batch was committed");
+        Assert.IsNull(await store.GetRow(readTx, twin), "nothing of the refused batch was committed");
+        Assert.AreEqual(holder, await store.LookupUnique(readTx, IndexId, taken));
+        await CommitTransaction(stub, readTx);
+    }
+
+    /// <summary>
+    /// One transient item holds a whole transactional batch back: Kahuna answers it <c>MustRetry</c> and
+    /// every sibling <c>NotApplied</c>, and stages nothing. The resend must carry the whole batch again,
+    /// held-back items included, under the same operation id, because the declaration did not change.
+    /// </summary>
+    [Test]
+    public async Task WriteRowsBatch_BatchHeldBackByOneTransient_IsResentWhole_UnderTheSameId()
+    {
+        (EmbeddedKahuna node, FaultInjectingKahuna stub, KvTableStore store) = await CreateStoreAsync("tbl_aon_heldback");
+        await using EmbeddedKahuna __ = node;
+
+        const string IndexId = "idx_aon_heldback";
+        List<(ObjectIdValue rowId, byte[] data, CompositeColumnValue key)> expected = Enumerable.Range(0, 3)
+            .Select(i => (Generate(), new byte[] { (byte)(i + 20) }, new CompositeColumnValue([new ColumnValue(ColumnType.Integer64, 100L + i)])))
+            .ToList();
+
+        List<KvTableStore.RowWrite> batch = expected.Select(e => new KvTableStore.RowWrite
+        {
+            RowId = e.rowId,
+            RowData = BranchKvCodec.EncodeValue(e.data),
+            IndexEntries = [new KvTableStore.IndexWrite(IndexId, e.key, Unique: true)],
+        }).ToList();
+
+        stub.InjectSetManyHeldBackFaults = 1;
+
+        KvTransaction tx = await BeginTransaction(stub, "aon_hb_w");
+        await store.WriteRowsBatch(tx, batch);
+        await CommitTransaction(stub, tx);
+
+        Assert.That(stub.SetManyOpIds.Count, Is.GreaterThanOrEqualTo(2), "the held-back answer forced a resend");
+        Assert.That(stub.SetManyOpIds.Distinct().Count(), Is.EqualTo(1), "the whole-batch resend keeps the operation id");
+        Assert.AreEqual(stub.SetManyItemCounts[0], stub.SetManyItemCounts[1], "the resend carries every item of the batch, the held-back ones included");
+
+        KvTransaction readTx = await BeginTransaction(stub, "aon_hb_r");
+        foreach ((ObjectIdValue rowId, byte[] data, CompositeColumnValue key) in expected)
+        {
+            Assert.AreEqual(data, (await store.GetRow(readTx, rowId))!.Value.ToArray(), $"row {rowId} must be readable after the resend");
+            Assert.AreEqual(rowId, await store.LookupUnique(readTx, IndexId, key), "every unique entry of the batch was staged by the resend");
+        }
+        await CommitTransaction(stub, readTx);
     }
 
     /// <summary>

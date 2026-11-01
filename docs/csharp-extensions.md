@@ -498,11 +498,12 @@ CALL transfer(@from, @to, 10 * 3);
   the triggers of the tables they write.
 - An error raised by the session's own SQL keeps its error code when your code lets it escape: a
   duplicate key stays a duplicate key.
-- **An error from the session ends the calling statement, even if your code catches it.** There are
-  no savepoints: a failed statement can leave part of its writes staged (a foreign-key check runs
-  after the row writes). So the session marks the transaction rollback-only, and a trigger or
-  procedure that catches the error and returns still fails its statement with `CADB0823`. A commit of
-  that transaction is refused with `CADB0824`.
+- **An error from the session ends the calling statement, even if your code catches it.** Any
+  failed statement inside a transaction aborts the transaction, as in PostgreSQL (see
+  `transactions-locking-and-isolation.md`, §9.4), and the session's own SQL is no exception: the
+  session marks the transaction on every failure of its SQL, so a trigger or procedure that catches
+  the error and returns still fails its statement with `CADB0823`, every later statement on the
+  transaction is refused, and its commit rolls it back with `CADB0824`.
 - Byte arrays are copies in both directions. Changing an array that `GetBytes`, a function argument
   or a procedure argument gave you changes nothing stored, and the server copies every array you
   hand it.

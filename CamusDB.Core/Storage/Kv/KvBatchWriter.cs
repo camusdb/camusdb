@@ -27,6 +27,19 @@ namespace CamusDB.Core.Storage.Kv;
 /// index entries still use <c>SetIfNotExists</c>, and a <c>NotSet</c> on one still raises
 /// <see cref="CamusDBErrorCodes.DuplicateUniqueKeyValue"/>.</para>
 ///
+/// <para><b>A transactional set-many stages every item or none.</b> Kahuna checks every item of a
+/// transactional batch before it stages any of them, so a batch with a refused unique entry leaves no
+/// write intent behind: not the sibling rows, and not a second row record for the conflicting key. A
+/// refused item answers <c>NotSet</c>, a transient item its transient type, and every item that passed
+/// but was held back answers <c>NotApplied</c>, so a held-back batch is resent whole. The statement
+/// that sent a refused batch wrote nothing; the statement boundary aborts its transaction all the
+/// same, under the one rule for every failed statement (see
+/// <see cref="KvTransaction.MarkRollbackOnly(string)"/>). The one shape Kahuna cannot keep atomic is a
+/// batch that spans several of its actors or partition leaders under optimistic locking, where a
+/// foreign write between the check round and the stage round can refuse one group after another was
+/// staged; the answers then carry the staged items as <c>Set</c>, and the writer records them as
+/// modified before it throws, so the transaction's account of what Kahuna holds stays exact.</para>
+///
 /// <para><b>The row write goes first.</b> A statement's exclusion of every other writer of a row is
 /// its exclusive lock on the row's key, taken in phase 1, or, under optimistic locking, the write
 /// intent its row write plants: an optimistic statement takes no lock before it writes, and Kahuna
@@ -52,8 +65,9 @@ namespace CamusDB.Core.Storage.Kv;
 ///
 /// <para><b>Retry identity.</b> Each retry loop binds one operation id to its current pending
 /// declaration. The id is reused while the pending set is unchanged — that is an ack-loss resend of
-/// an identical batch, which the coordinator can only replay idempotently under the same id — and a
-/// fresh id is minted only when the set actually shrinks. Resending an identical unique batch under a
+/// an identical batch, which the coordinator can only replay idempotently under the same id, and also
+/// the whole-batch resend of a transactional set-many that a transient item held back entirely — and
+/// a fresh id is minted only when the set actually shrinks. Resending an identical unique batch under a
 /// new id would let an already-staged <c>SetIfNotExists</c> read back as a false duplicate and strand
 /// the original pending operation, blocking finalize drain.</para>
 /// </summary>
@@ -206,7 +220,7 @@ internal sealed class KvBatchWriter
 
         if (!isBranch)
         {
-            // Phase 2 (root) — set every value in one round-trip.
+            // Phase 2 (root) — set every value in one round-trip, all or none.
             await SetManyWithRetry(tx, setItems, uniqueByKey, cancellationToken).ConfigureAwait(false);
         }
         else
@@ -1155,11 +1169,24 @@ internal sealed class KvBatchWriter
     }
 
     /// <summary>
-    /// Writes every item of a batch in one round-trip, resending only the keys that came back
-    /// transient. <paramref name="uniqueByKey"/> marks the keys whose <c>NotSet</c> means a genuine
-    /// duplicate; for every other key a <c>NotSet</c> mirrors the per-row path and is acceptable.
-    /// Returns false only when <paramref name="aborts"/> is given and a retryable abort was recorded in
-    /// it instead of thrown; the caller must stop.
+    /// Writes every item of a batch in one round trip. A transactional set-many is all-or-nothing in
+    /// Kahuna: either every item answers <c>Set</c> and is staged, or no item is staged. A refused item
+    /// answers <c>NotSet</c>, a transient item <c>MustRetry</c> or <c>WaitingForReplication</c>, and
+    /// every item that passed its own condition but was held back by a sibling answers
+    /// <c>NotApplied</c>. A round with a transient answer is therefore resent whole, under the same
+    /// operation id, since nothing of it was answered finally. The exception is a batch Kahuna could
+    /// stage only in part (see the class summary): its <c>Set</c> items are staged for good, and the
+    /// resend covers only the rest, under a fresh id because the declaration shrank.
+    ///
+    /// <para><paramref name="uniqueByKey"/> marks the keys whose <c>NotSet</c> means a genuine
+    /// duplicate. The whole answer is read before the first such key is thrown as
+    /// <see cref="CamusDBErrorCodes.DuplicateUniqueKeyValue"/>, so the keys a partially staged batch did
+    /// set are recorded as modified before the throw and the transaction's account of what Kahuna holds
+    /// stays exact. For every other key a <c>NotSet</c> mirrors the per-row path and is acceptable: the
+    /// key already holds its value, and the items it held back are resent without it.</para>
+    ///
+    /// <para>Returns false only when <paramref name="aborts"/> is given and a retryable abort was
+    /// recorded in it instead of thrown; the caller must stop.</para>
     /// </summary>
     private async Task<bool> SetManyWithRetry(
         KvTransaction tx,
@@ -1174,6 +1201,9 @@ internal sealed class KvBatchWriter
         int retries = 0;
         int rounds = 0;
 
+        // Keys that answered Set in any round: staged in Kahuna whatever happens to the rest of the batch.
+        List<string>? staged = null;
+
         // Bind one operation id to the current pending batch declaration; see the class summary.
         TransactionOperationId batchOperationId = TransactionOperationId.NewRandom();
 
@@ -1186,12 +1216,14 @@ internal sealed class KvBatchWriter
                     () => kahuna.LocateAndTrySetManyKeyValue(pending, ct, tx.CoordinatorKey, batchOperationId),
                     ct).ConfigureAwait(false);
 
-            // Only rebuilt if a transient response forces a retry. Re-sending an already-Set
-            // unique key would falsely report a duplicate (its MVCC entry now exists), so we
-            // resend only the keys that came back MustRetry/WaitingForReplication.
+            // The items to send again: the transient ones and the ones a transient or refused sibling held
+            // back. An already-Set key is never resent: its SetIfNotExists would read back as a false
+            // duplicate, since its MVCC entry now exists.
             List<KahunaSetKeyValueRequestItem> retryBatch = [];
+            List<string>? transientKeys = null;
             Dictionary<string, KahunaSetKeyValueRequestItem>? byKey = null;
             TransientAnswers transients = default;
+            string? duplicateKey = null;
 
             if (responses is null)
                 retryBatch.AddRange(pending);
@@ -1203,16 +1235,26 @@ internal sealed class KvBatchWriter
                 switch (resp.Type)
                 {
                     case KeyValueResponseType.Set:
+                        (staged ??= []).Add(key);
                         break;
 
                     case KeyValueResponseType.NotSet:
+                        // The first duplicate names the error; the rest of the answer is still read, so the
+                        // keys a partially staged batch did set are recorded before the throw.
                         if (uniqueByKey.TryGetValue(key, out bool unique) && unique)
-                            throw new CamusDBException(CamusDBErrorCodes.DuplicateUniqueKeyValue, $"Duplicate entry for key '{keys.IndexNameFromKvKey(key)}'");
-                        break; // non-unique NotSet mirrors the per-row path and is acceptable
+                            duplicateKey ??= key;
+                        break; // a non-unique NotSet mirrors the per-row path and is acceptable
+
+                    case KeyValueResponseType.NotApplied:
+                        byKey ??= pending.ToDictionary(i => i.Key!, i => i);
+                        if (byKey.TryGetValue(key, out KahunaSetKeyValueRequestItem? heldBack))
+                            retryBatch.Add(heldBack);
+                        break;
 
                     case KeyValueResponseType.MustRetry:
                     case KeyValueResponseType.WaitingForReplication:
                         transients.Count(resp.Type);
+                        (transientKeys ??= []).Add(key);
                         byKey ??= pending.ToDictionary(i => i.Key!, i => i);
                         if (byKey.TryGetValue(key, out KahunaSetKeyValueRequestItem? item))
                             retryBatch.Add(item);
@@ -1239,15 +1281,38 @@ internal sealed class KvBatchWriter
                 }
             }
 
+            if (duplicateKey is not null)
+            {
+                // Every item this writer sends is persistent, so the staged keys are recorded as such.
+                if (staged is not null)
+                    tx.TrackModifiedRange(staged, KeyValueDurability.Persistent);
+
+                throw new CamusDBException(CamusDBErrorCodes.DuplicateUniqueKeyValue, $"Duplicate entry for key '{keys.IndexNameFromKvKey(duplicateKey)}'");
+            }
+
             if (retryBatch.Count == 0)
                 return true;
+
+            // Nothing waited: an acceptable non-unique NotSet held its siblings back. They are a smaller
+            // declaration, sent again at once under a fresh id. A round that shrank nothing takes the timed
+            // path below, so a malformed answer cannot spin here.
+            if (responses is not null && !transients.Any && retryBatch.Count < pending.Count)
+            {
+                batchOperationId = TransactionOperationId.NewRandom();
+                pending = retryBatch;
+                continue;
+            }
+
+            // The keys the message names: the transient ones, or every pending key when the forward was
+            // not answered at all.
+            IReadOnlyList<string> conflicting = transientKeys ?? retryBatch.Select(i => i.Key ?? "").ToList();
 
             if (transients.DeadlinePassed(deadline, replicationDeadline))
             {
                 RetryableAbortSink.Raise(aborts,
                     new CamusDBException(
                         CamusDBErrorCodes.TransactionMustRetry,
-                        transients.DeadlineMessage(messages, tx, "batched write", retryBatch.Select(i => i.Key ?? "").ToList(), retryBatch.Count)),
+                        transients.DeadlineMessage(messages, tx, "batched write", conflicting, conflicting.Count)),
                     ServerDiagnostics.Tags.AbortSite.SetMany);
                 return false;
             }
@@ -1257,7 +1322,7 @@ internal sealed class KvBatchWriter
                 RetryableAbortSink.Raise(aborts,
                     new CamusDBException(
                         CamusDBErrorCodes.TransactionMustRetry,
-                        messages.WriteConflictMessage(tx, "batched write", retryBatch.Select(i => i.Key ?? "").ToList(), retryBatch.Count)),
+                        messages.WriteConflictMessage(tx, "batched write", conflicting, conflicting.Count)),
                     ServerDiagnostics.Tags.AbortSite.SetMany);
                 return false;
             }
@@ -1265,8 +1330,8 @@ internal sealed class KvBatchWriter
             ServerDiagnostics.AddKvRetryWait("set_many");
             await Task.Delay(KahunaRetryPolicy.RetryDelayMs(rounds++), ct).ConfigureAwait(false);
 
-            // Shrinking set (some keys confirmed Set/NotSet) → new, smaller declaration under a fresh id.
-            // Unchanged set (every key transient) → identical resend of a lost ack → keep the same id.
+            // Shrinking set (some keys confirmed Set or NotSet) → new, smaller declaration under a fresh id.
+            // Unchanged set (every key transient or held back) → identical resend → keep the same id.
             if (retryBatch.Count != pending.Count)
                 batchOperationId = TransactionOperationId.NewRandom();
             pending = retryBatch;

@@ -144,11 +144,14 @@ public sealed class TestJoinLeafBatchFetch : SharedNodeBaseTest
             await foreach (QueryResultRow row in cursor.WithCancellation(cancellationToken))
                 rows.Add(row);
 
+            await fixture.Database.Transactions.CommitAsync(txn);
+
             return rows;
         }
         finally
         {
-            await fixture.Database.Transactions.CommitAsync(txn);
+            // A failed or cancelled read aborts the transaction, so only a rollback can end it.
+            await fixture.Database.Transactions.RollbackIfNotCompletedAsync(txn);
         }
     }
 

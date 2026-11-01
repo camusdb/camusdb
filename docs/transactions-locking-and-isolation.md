@@ -446,8 +446,11 @@ What CamusDB guarantees right now:
 - ✅ **Write-write conflict detection.** Two transactions that modify the same row don't silently
   overwrite each other — one fails and can retry.
 - ✅ **Non-blocking reads.** Concurrent reads never block each other or writers.
+- ✅ **A failed statement aborts its transaction.** Any error inside an explicit transaction makes
+  it rollback-only, as in PostgreSQL: later statements are refused and the commit rolls it back
+  (`CADB0824`). A write batch Kahuna refuses stages none of its keys. See §9.4.
 
-Those five hold at **every** isolation level. On top of them, CamusDB offers **two isolation levels**,
+Those six hold at **every** isolation level. On top of them, CamusDB offers **two isolation levels**,
 chosen per transaction (the default applies when you don't ask for anything).
 
 ### 9.1 Serializable (the default)
@@ -622,6 +625,35 @@ else is cheaper and fully concurrent under Read Committed.
 > for very large reads (per-row read locks collapse to one whole-table lock past a threshold), and
 > **tighter predicate-lock bounds** so a bounded scan / `UPDATE` / `DELETE` locks only its key range
 > rather than the whole table.
+
+### 9.4 A failed statement inside an explicit transaction
+
+CamusDB follows PostgreSQL here. **Any statement that fails inside an explicit transaction aborts
+the transaction.** From then on every statement on it, reads included, is refused with `CADB0824`
+(the message says the transaction is aborted and commands are ignored until the end of the
+transaction block), `COMMIT` rolls it back and reports the same code, and `ROLLBACK` ends it. Each
+refusal names the statement that failed. There are no savepoints, so there is no statement-level
+recovery: a client that wants to continue after an error rolls back and starts a new transaction.
+
+The rule is the same whether or not the failed statement wrote anything, and that is the point. A
+transactional Kahuna batch is all-or-nothing, so a multi-row `INSERT` whose later row conflicts on
+the primary key stages nothing: no sibling row, and no second record for the conflicting key. But a
+`DELETE` or `UPDATE` that a foreign-key check refuses has its row writes staged, because that check
+runs after them, and a statement whose rows needed several batches has the earlier batches staged.
+A client cannot tell these cases apart from the error it receives, so one rule covers them all.
+MySQL and Oracle instead undo the failed statement alone and keep the transaction usable; that needs
+statement-level undo in the storage layer, which Kahuna does not offer.
+
+The engine enforces the rule itself, at every statement entry point: the SQL query and non-query
+dispatchers (which the `RETURNING` hand-off, procedures and an extension's SQL session also use), the
+DDL dispatcher, and the typed insert / update / delete / query services behind the row endpoints. A
+failure while a query's rows stream aborts the transaction too, and so do a cancelled statement and
+a statement refused because it cannot run inside a transaction block (such as `ALTER TABLE … REWRITE
+STORAGE`), exactly as in PostgreSQL. The HTTP and gRPC transports go one step further and roll an explicit transaction back as soon as a statement in it fails, so a client
+of those APIs sees the failure once and then an unknown-transaction error on its next use of the
+handle. The engine rule is the guarantee underneath: a caller that reaches the engine directly, an
+extension that catches its own SQL error, or a future transport that forgets the rollback cannot
+commit, and cannot run anything else on the aborted transaction.
 
 ---
 

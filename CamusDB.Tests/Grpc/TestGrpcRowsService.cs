@@ -455,6 +455,52 @@ public class TestGrpcRowsService : BaseTest
         Assert.That(reply.AffectedRows, Is.EqualTo(0));
     }
 
+    // ─── No filter: refused, like SQL UPDATE and DELETE without WHERE ────────
+
+    [Test]
+    public async Task UpdateRows_WithoutAFilter_IsRefused_AndTheRowIsUnchanged()
+    {
+        string db = await CreateTestDatabaseAsync();
+        await CreateTestTableAsync(db);
+
+        string id = NewId();
+        await rowsService.InsertRow(InsertReq(db, "users", new() { ["id"] = Id(id), ["name"] = Str("Hal"), ["age"] = Int64(40), ["active"] = Bool(true) }), Ctx());
+
+        UpdateRowsRequest req = new()
+        {
+            Database = db,
+            Table    = "users",
+            Values   = { { "age", Int64(0) } },
+        };
+        RpcException ex = Assert.ThrowsAsync<RpcException>(async () => await rowsService.UpdateRows(req, Ctx()))!;
+        Assert.That(ex.StatusCode, Is.EqualTo(StatusCode.InvalidArgument));
+        Assert.That(ex.Trailers.GetValue("camus-error-code"), Is.EqualTo(CamusDBErrorCodes.InvalidInput));
+        StringAssert.StartsWith("UPDATE requires at least one filter", ex.Status.Detail);
+
+        (List<QueryStreamMessage> msgs, _) = await QueryByIdAsync(db, "users", id);
+        ResultSchema schema = GrpcAssert.AssertSchemaFirst(msgs, expectedRowCount: 1);
+        Assert.That(GrpcAssert.RowValues(msgs, schema)["age"].Int64Value, Is.EqualTo(40));
+    }
+
+    [Test]
+    public async Task DeleteRows_WithoutAFilter_IsRefused_AndTheRowRemains()
+    {
+        string db = await CreateTestDatabaseAsync();
+        await CreateTestTableAsync(db);
+
+        string id = NewId();
+        await rowsService.InsertRow(InsertReq(db, "users", new() { ["id"] = Id(id), ["name"] = Str("Ida"), ["age"] = Int64(41), ["active"] = Bool(true) }), Ctx());
+
+        DeleteRowsRequest req = new() { Database = db, Table = "users" };
+        RpcException ex = Assert.ThrowsAsync<RpcException>(async () => await rowsService.DeleteRows(req, Ctx()))!;
+        Assert.That(ex.StatusCode, Is.EqualTo(StatusCode.InvalidArgument));
+        Assert.That(ex.Trailers.GetValue("camus-error-code"), Is.EqualTo(CamusDBErrorCodes.InvalidInput));
+        StringAssert.StartsWith("DELETE requires at least one filter", ex.Status.Detail);
+
+        (List<QueryStreamMessage> msgs, _) = await QueryByIdAsync(db, "users", id);
+        GrpcAssert.AssertSchemaFirst(msgs, expectedRowCount: 1);
+    }
+
     // ─── DeleteById ───────────────────────────────────────────────────────────
 
     [Test]

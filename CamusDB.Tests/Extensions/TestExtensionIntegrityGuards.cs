@@ -119,7 +119,7 @@ public sealed class TestExtensionIntegrityGuards : ExtensionTestBase
 
         CamusDBException commit = Assert.ThrowsAsync<CamusDBException>(() => database.Transactions.CommitAsync(tx))!;
         Assert.AreEqual(CamusDBErrorCodes.TransactionRollbackOnly, commit.Code);
-        await database.Transactions.RollbackAsync(tx);
+        Assert.AreEqual(KvTransactionStatus.RolledBack, tx.Status, "the refused commit rolled the transaction back");
 
         Assert.IsEmpty(await ExecQuery(executor, db, "SELECT id FROM events"));
         Assert.IsEmpty(await ExecQuery(executor, db, "SELECT id FROM child WHERE id = 99"));
