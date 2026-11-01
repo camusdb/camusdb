@@ -8,6 +8,7 @@
 
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
+using CamusDB.Core.CommandsExecutor.Models.Jsonb;
 using CamusDB.Core.CommandsExecutor.Models.Queries;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
@@ -24,7 +25,10 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 /// and the two big-endian 64-bit halves <c>[high, low]</c> for <see cref="ColumnType.Uuid"/>. A
 /// <see cref="ColumnType.Numeric"/> is its canonical decimal text (<c>"1.1"</c>), the form Spanner
 /// sends: a JSON number would lose precision in any client that reads numbers as doubles. A
-/// null cell is always JSON null regardless of column type.
+/// <see cref="ColumnType.Jsonb"/> cell is the document itself as native JSON (its numbers keep their
+/// exact digits), not a string that holds it. A null cell is always JSON null regardless of column
+/// type; a JSON <c>null</c> document is also JSON null, and the column type tells a client nothing
+/// more, as in PostgreSQL's JSON output of a row.
 /// </para>
 /// </summary>
 public static class CompactRowEncoder
@@ -73,6 +77,7 @@ public static class CompactRowEncoder
             ColumnType.DateTime  => value.LongValue,
             ColumnType.Uuid      => new long[] { value.UuidHigh, value.LongValue },
             ColumnType.Numeric   => value.NumericValue,
+            ColumnType.Jsonb     => JsonbJsonWriter.ToElement(JsonbDocument.Item(value.BytesValue)),
             ColumnType.Array     => EncodeArray(value),
             _                    => null,
         };

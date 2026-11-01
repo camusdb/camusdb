@@ -31,7 +31,7 @@ internal sealed class TableIndexDropper
 
     private static void Validate(TableDescriptor table, AlterIndexTicket ticket)
     {
-        if (!table.Indexes.ContainsKey(ticket.IndexName))
+        if (!table.AllIndexes.ContainsKey(ticket.IndexName))
             throw new CamusDBException(
                 CamusDBErrorCodes.InvalidInput,
                 $"Index '{ticket.IndexName}' does not exist in table '{table.Name}'"

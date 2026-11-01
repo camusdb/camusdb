@@ -679,6 +679,13 @@ public sealed class KvTransaction
         }
     }
 
+    /// <summary>
+    /// The mutation budget of this transaction; zero or negative means unlimited. A write path reads it
+    /// to refuse one row that alone needs more writes than the budget, with a message that names the
+    /// cause, before <see cref="ReserveMutations"/> refuses it with the generic one.
+    /// </summary>
+    public int MutationLimit => mutationLimit;
+
     /// <summary>Running total of mutations reserved so far in this transaction.</summary>
     public int MutationCount { get { lock (trackSync) return mutationCount; } }
 

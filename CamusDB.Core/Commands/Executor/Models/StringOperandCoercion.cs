@@ -12,9 +12,11 @@ namespace CamusDB.Core.CommandsExecutor.Models;
 
 /// <summary>
 /// The one rule for comparing a <see cref="ColumnType.String"/> value with a
-/// <see cref="ColumnType.Uuid"/> or <see cref="ColumnType.Id"/> value: the string is parsed into the
-/// other operand's type, then the two compare as that type. So <c>uuid_col = '0190…'</c> works without
-/// a CAST, a parameter bound as a string matches a stored Uuid, and an Id string matches in any casing.
+/// <see cref="ColumnType.Uuid"/>, <see cref="ColumnType.Id"/> or <see cref="ColumnType.Jsonb"/> value:
+/// the string is parsed into the other operand's type, then the two compare as that type. So
+/// <c>uuid_col = '0190…'</c> works without a CAST, a parameter bound as a string matches a stored Uuid,
+/// an Id string matches in any casing, and <c>doc = '{"a": 1}'</c> compares documents, as PostgreSQL
+/// resolves the untyped literal to jsonb.
 ///
 /// <para>Every SQL surface that decides equality must use this rule: the WHERE comparison
 /// evaluator, <c>IN</c> / <c>NOT IN</c> membership on both the AST path and the prepared hash set,
@@ -29,10 +31,10 @@ namespace CamusDB.Core.CommandsExecutor.Models;
 public static class StringOperandCoercion
 {
     /// <summary>True for the types that a string operand is parsed into before a comparison.</summary>
-    public static bool IsTarget(ColumnType type) => type is ColumnType.Uuid or ColumnType.Id;
+    public static bool IsTarget(ColumnType type) => type is ColumnType.Uuid or ColumnType.Id or ColumnType.Jsonb;
 
     /// <summary>
-    /// Parses the string <paramref name="value"/> into <paramref name="target"/> (Uuid or Id).
+    /// Parses the string <paramref name="value"/> into <paramref name="target"/> (Uuid, Id or Jsonb).
     /// Returns false when the string is not a valid value of that type. A table scan can call this
     /// once per row, so a string that does not parse is rejected without an exception.
     /// </summary>
@@ -42,6 +44,20 @@ public static class StringOperandCoercion
 
         if (value.Type != ColumnType.String || value.StrValue is not { } text)
             return false;
+
+        if (target == ColumnType.Jsonb)
+        {
+            // Text that is not a document equals no document (PostgreSQL would refuse the literal).
+            try
+            {
+                coerced = ColumnValue.FromJsonText(text);
+                return true;
+            }
+            catch (CamusDBException)
+            {
+                return false;
+            }
+        }
 
         if (target == ColumnType.Uuid)
         {
@@ -82,7 +98,7 @@ public static class StringOperandCoercion
     }
 
     /// <summary>
-    /// When one operand is a String and the other is a Uuid or Id, parses the string into that type
+    /// When one operand is a String and the other is a Uuid, Id or Jsonb, parses the string into that type
     /// in place. See <see cref="Alignment"/> for the outcomes.
     /// </summary>
     public static Alignment TryAlign(ref ColumnValue left, ref ColumnValue right)

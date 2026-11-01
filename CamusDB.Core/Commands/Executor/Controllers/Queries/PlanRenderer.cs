@@ -98,6 +98,7 @@ public static class PlanRenderer
             IndexLookupNode n => RenderIndexLookup(n, plan),
             IndexRangeScanNode n => RenderIndexRangeScan(n, plan),
             IndexInListScanNode n => RenderIndexInListScan(n),
+            GinIndexScanNode n => $"gin-scan(index={n.Index.Name}, groups={n.Query.Groups.Count}, entries={n.RequirementCount})",
             FilterNode n => RenderFilter(n),
             HavingFilterNode n => RenderHavingFilter(n),
             AggregateNode n => RenderAggregate(n),
@@ -383,7 +384,7 @@ public static class PlanRenderer
 
         // A function in FROM streams computed rows, so it is named for what it is, with its arguments.
         string arguments = string.Join(", ", call.Arguments.Select(RenderExpr));
-        return $"function-scan({call.FunctionName}({arguments}), alias={node.BoundSource.Alias}, column={call.ColumnName})";
+        return $"function-scan({call.FunctionName}({arguments}), alias={node.BoundSource.Alias}, column={string.Join(", ", call.ColumnNames)})";
     }
 
     /// <summary>

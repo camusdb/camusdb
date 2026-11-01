@@ -310,6 +310,10 @@ internal abstract class SQLExecutorBaseCreator
         if (left.Type == ColumnType.Null || right.Type == ColumnType.Null)
             return ColumnValue.Null;
 
+        // `jsonb - text | integer | text[]` removes keys or an element; it is not arithmetic.
+        if (op == NodeType.ExprSub && left.Type == ColumnType.Jsonb)
+            return JsonbScalarFunctions.Delete(left, right);
+
         if (MixedNumericComparison.ArithmeticResultType(left.Type, right.Type) is not { } resultType)
             throw new CamusDBException(
                 CamusDBErrorCodes.InvalidInput,

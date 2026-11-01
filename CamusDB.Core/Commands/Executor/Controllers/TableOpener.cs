@@ -344,6 +344,9 @@ internal sealed class TableOpener
             {
                 case IndexType.Unique:
                 case IndexType.Multi:
+                case IndexType.Inverted:
+                    // A GIN index (Inverted) takes the same projection: its entry keys are ordinary
+                    // non-unique index keys over one string column, so the store treats them as such.
                     // In-memory projection: carries resolved column names, State, Type, and Id.
                     // The immutable Id is propagated so that KvId resolves to the stable identifier
                     // used as the Kahuna key segment — not the mutable name. ColumnIds and

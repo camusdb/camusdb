@@ -106,10 +106,17 @@ public sealed class QueryStreamNdjsonWriter
     /// </summary>
     public bool HeaderWritten { get; private set; }
 
-    public QueryStreamNdjsonWriter(Utf8JsonWriter writer, IBufferWriter<byte> buffer)
+    /// <summary>
+    /// True to write each jsonb cell as a JSON string that holds its text form (the request's
+    /// <c>jsonbAsText</c>). The header then marks each jsonb column with <c>jsonbAsText: true</c>.
+    /// </summary>
+    private readonly bool jsonbAsText;
+
+    public QueryStreamNdjsonWriter(Utf8JsonWriter writer, IBufferWriter<byte> buffer, bool jsonbAsText = false)
     {
         this.writer = writer;
         this.buffer = buffer;
+        this.jsonbAsText = jsonbAsText;
     }
 
     /// <summary>
@@ -122,7 +129,7 @@ public sealed class QueryStreamNdjsonWriter
     /// </param>
     public void WriteHeader(IReadOnlyList<DerivedColumnSchema> schema, IReadOnlyList<QueryResultRow>? firstRows = null)
     {
-        QueryStreamHeader header = new() { Columns = ColumnSchemaDto.FromSchema(schema, firstRows) };
+        QueryStreamHeader header = new() { Columns = ColumnSchemaDto.FromSchema(schema, firstRows, jsonbAsText) };
         JsonSerializer.Serialize(writer, header, MetaOptions);
         EndLine();
         HeaderWritten = true;
@@ -131,7 +138,7 @@ public sealed class QueryStreamNdjsonWriter
     /// <summary>Writes one positional row array line, aligned to <paramref name="schema"/>.</summary>
     public void WriteRow(QueryResultRow row, IReadOnlyList<DerivedColumnSchema> schema)
     {
-        CompactRowJsonWriter.WriteRow(writer, row, schema, ref boundLayout, ref ordinals);
+        CompactRowJsonWriter.WriteRow(writer, row, schema, ref boundLayout, ref ordinals, jsonbAsText);
         EndLine();
     }
 

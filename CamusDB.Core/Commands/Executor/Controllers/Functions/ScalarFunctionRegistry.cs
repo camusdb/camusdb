@@ -53,6 +53,7 @@ internal sealed class ScalarFunctionRegistry
         BytesScalarFunctions.Register(registry);
         VectorScalarFunctions.Register(registry);
         JsonScalarFunctions.Register(registry);
+        JsonbScalarFunctions.Register(registry);
         CastScalarFunctions.Register(registry);
         NullScalarFunctions.Register(registry);
         RegexScalarFunctions.Register(registry);

@@ -300,7 +300,7 @@ internal sealed class DdlForwardingCoordinator
         // may exist before all its constraints are visible.
         foreach (ConstraintInfo constraint in ticket.Constraints)
         {
-            if (constraint.Type is ConstraintType.PrimaryKey or ConstraintType.IndexUnique or ConstraintType.IndexMulti)
+            if (constraint.Type is ConstraintType.PrimaryKey or ConstraintType.IndexUnique or ConstraintType.IndexMulti or ConstraintType.IndexInverted)
             {
                 if (tableSchema.Indexes?.Any(ix => string.Equals(ix.Name, constraint.Name, StringComparison.OrdinalIgnoreCase)) != true)
                     return false;
@@ -350,7 +350,7 @@ internal sealed class DdlForwardingCoordinator
 
         return ticket.Operation switch
         {
-            AlterIndexOperation.AddIndex or AlterIndexOperation.AddUniqueIndex or AlterIndexOperation.AddPrimaryKey => existsInSchema,
+            AlterIndexOperation.AddIndex or AlterIndexOperation.AddUniqueIndex or AlterIndexOperation.AddPrimaryKey or AlterIndexOperation.AddInvertedIndex => existsInSchema,
             AlterIndexOperation.DropIndex or AlterIndexOperation.DropPrimaryKey => !existsInSchema,
             _ => false
         };

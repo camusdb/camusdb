@@ -1236,8 +1236,8 @@ public sealed class StatisticsManager
     // Must be called under entry.ColumnStatsLock.
     private static void UpdateMinMax(Dictionary<string, ColumnMinMax> stats, string col, ColumnValue val)
     {
-        if (val.Type is ColumnType.Null or ColumnType.Bool)
-            return; // unordered types: not useful for range selectivity
+        if (val.Type is ColumnType.Null or ColumnType.Bool or ColumnType.Jsonb)
+            return; // unordered types (for range selectivity): not useful here
 
         ScalarBound bound = ScalarBound.FromColumnValue(val);
 

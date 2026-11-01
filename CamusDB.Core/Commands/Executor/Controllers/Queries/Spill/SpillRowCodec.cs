@@ -33,6 +33,7 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Queries.Spill;
 /// <item>Bool — 1 byte (0 or 1)</item>
 /// <item>String — [int32 utf8Len][utf8 bytes]</item>
 /// <item>Bytes — [int32 len][raw bytes]</item>
+/// <item>Jsonb — [int32 len][the jsonb cell bytes]</item>
 /// <item>Uuid, Numeric — 16 bytes: <c>UuidHigh</c> then <c>LongValue</c> (little-endian int64 each)</item>
 /// <item>Array — [1-byte elementType][int32 count][element…] where each
 ///   element is [1-byte isNull flag: 0=null, 1=present][value bytes for elementType if present]</item>
@@ -258,6 +259,7 @@ public static class SpillRowCodec
                 break;
 
             case ColumnType.Bytes:
+            case ColumnType.Jsonb:
             {
                 byte[] bytes = cv.BytesValue ?? [];
                 WriteInt32(buf, bytes.Length, ref pos);
@@ -395,6 +397,14 @@ public static class SpillRowCodec
                 data.Slice(pos, len).CopyTo(bytes);
                 pos += len;
                 return new ColumnValue(bytes);
+            }
+
+            case ColumnType.Jsonb:
+            {
+                int len = ReadInt32(data, ref pos);
+                byte[] cell = data.Slice(pos, len).ToArray();
+                pos += len;
+                return ColumnValue.FromJsonbCell(cell);
             }
 
             case ColumnType.Uuid:
@@ -558,7 +568,7 @@ public static class SpillRowCodec
             ColumnType.Integer64 or ColumnType.Date or ColumnType.DateTime or ColumnType.Float64 => 8,
             ColumnType.Float32 => 4,
             ColumnType.Bool => 1,
-            ColumnType.Bytes => 4 + (cv.BytesValue?.Length ?? 0),
+            ColumnType.Bytes or ColumnType.Jsonb => 4 + (cv.BytesValue?.Length ?? 0),
             ColumnType.Uuid or ColumnType.Numeric => 16,
             _ => throw new InvalidOperationException($"SpillRowCodec: unsupported ColumnType {type}"),
         };

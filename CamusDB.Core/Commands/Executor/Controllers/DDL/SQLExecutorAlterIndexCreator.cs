@@ -38,7 +38,7 @@ internal sealed class SQLExecutorAlterIndexCreator : SQLExecutorBaseCreator
                 tableName,
                 ast.rightAst!.yytext!,
                 indexColumns.ToArray(),
-                AlterIndexOperation.AddIndex,
+                ast.yytext == SQLParser.sqlParser.GinIndexMethod ? AlterIndexOperation.AddInvertedIndex : AlterIndexOperation.AddIndex,
                 ast.nodeType == NodeType.AlterTableAddIndexIfNotExists,
                 includeColumns: GetIncludeColumns(ast.extendedTwo)
             );

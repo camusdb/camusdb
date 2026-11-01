@@ -970,7 +970,8 @@ internal sealed partial class SchemaDdlService
             indexInfo.IndexName,
             Unique: indexInfo.IndexType == IndexType.Unique,
             indexInfo.ColumnNames,
-            indexInfo.IncludeColumnNames is { Length: > 0 } includeColumnNames ? includeColumnNames : null);
+            indexInfo.IncludeColumnNames is { Length: > 0 } includeColumnNames ? includeColumnNames : null,
+            Inverted: indexInfo.IndexType == IndexType.Inverted);
 
         // After each full batch: persist the cursor (the coordinator's callback), then run the test
         // seam, so a test can pause or force a leader change between two batches.
@@ -1007,22 +1008,26 @@ internal sealed partial class SchemaDdlService
     {
         CamusDBOptions currentOptions = options;
 
-        if (table.Indexes.ContainsKey(ticket.IndexName))
+        if (table.AllIndexes.ContainsKey(ticket.IndexName))
         {
             if (ticket.IfNotExists)
                 return false;
             throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Index '{ticket.IndexName}' already exists on table '{table.Name}'");
         }
 
-        IndexType indexType = ticket.Operation is AlterIndexOperation.AddUniqueIndex or AlterIndexOperation.AddPrimaryKey
-            ? IndexType.Unique
-            : IndexType.Multi;
+        IndexType indexType = ticket.Operation switch
+        {
+            AlterIndexOperation.AddUniqueIndex or AlterIndexOperation.AddPrimaryKey => IndexType.Unique,
+            AlterIndexOperation.AddInvertedIndex => IndexType.Inverted,
+            _ => IndexType.Multi,
+        };
 
         IndexColumnOrder.RejectDescendingOnUnsupportedType(
             ticket.Columns,
             ticket.IndexName,
             name => table.Schema.Columns!.Find(c => string.Equals(c.Name, name, StringComparison.OrdinalIgnoreCase))?.Type);
 
+        TableIndexAdder.RejectUnorderedKeyColumns(table, ticket);
         TableIndexAdder.ValidateIncludeColumns(table, ticket, currentOptions);
 
         string indexId = ObjectIdGenerator.Generate().ToString();
@@ -1224,12 +1229,13 @@ internal sealed partial class SchemaDdlService
         bool addIndexOperation = ticket.Operation is
             AlterIndexOperation.AddIndex or
             AlterIndexOperation.AddUniqueIndex or
-            AlterIndexOperation.AddPrimaryKey;
+            AlterIndexOperation.AddPrimaryKey or
+            AlterIndexOperation.AddInvertedIndex;
 
         if (context.IsClusterMode && addIndexOperation)
             return await ExecuteClusterAddIndexAsync(database, table, ticket).ConfigureAwait(false);
 
-        bool indexExistedBefore = table.Indexes.ContainsKey(ticket.IndexName);
+        bool indexExistedBefore = table.AllIndexes.ContainsKey(ticket.IndexName);
         bool compensateOnAbort = addIndexOperation && !indexExistedBefore;
 
         // Both cluster (non-add) and standalone paths use two-phase DDL: local work + schema
@@ -1411,7 +1417,7 @@ internal sealed partial class SchemaDdlService
             return;
 
         TableDescriptor table = await context.TableOpener.Open(database, tableName).ConfigureAwait(false);
-        if (!table.Indexes.ContainsKey(indexName))
+        if (!table.AllIndexes.ContainsKey(indexName))
             return;
 
         AlterIndexTicket ticket = new(database.Name, tableName, indexName, [], AlterIndexOperation.DropIndex);

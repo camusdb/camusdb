@@ -10,6 +10,7 @@ using System.Buffers;
 using System.Text.Json;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
+using CamusDB.Core.CommandsExecutor.Models.Jsonb;
 using CamusDB.Core.CommandsExecutor.Models.Queries;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
@@ -29,6 +30,15 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 /// mapping is resolved once via <see cref="WriteRow(Utf8JsonWriter, QueryResultRow, IReadOnlyList{DerivedColumnSchema}, ref RowLayout?, ref int[]?)"/>
 /// so the per-cell path is a direct array index rather than a dictionary lookup.
 /// </para>
+///
+/// <para>
+/// A jsonb cell has two forms. By default it is the document itself as native JSON. Then the token
+/// <c>null</c> is both SQL NULL and a document that is JSON null, and a client cannot tell them apart.
+/// With <c>jsonbAsText</c> set, the cell is a JSON string that holds the PostgreSQL text form of the
+/// document (the form gRPC sends), so JSON null is the string <c>"null"</c> and SQL NULL stays the
+/// token <c>null</c>. A client asks for this form with <c>jsonbAsText</c> on the request, and the
+/// response marks each jsonb column that uses it (see <c>ColumnSchemaDto.JsonbAsText</c>).
+/// </para>
 /// </summary>
 public static class CompactRowJsonWriter
 {
@@ -44,7 +54,8 @@ public static class CompactRowJsonWriter
         QueryResultRow row,
         IReadOnlyList<DerivedColumnSchema> schema,
         ref RowLayout? boundLayout,
-        ref int[]? ordinals)
+        ref int[]? ordinals,
+        bool jsonbAsText = false)
     {
         writer.WriteStartArray();
 
@@ -69,9 +80,9 @@ public static class CompactRowJsonWriter
             {
                 int ord = ordinals![i];
                 if (ord >= 0 && queryRow.TryGetSlot(ord, out ValueSlot slot))
-                    WriteSlot(writer, in slot);
+                    WriteSlot(writer, in slot, jsonbAsText);
                 else
-                    WriteValue(writer, ord >= 0 ? queryRow.GetColumnValue(ord) : null);
+                    WriteValue(writer, ord >= 0 ? queryRow.GetColumnValue(ord) : null, jsonbAsText);
             }
         }
         else
@@ -80,7 +91,7 @@ public static class CompactRowJsonWriter
             for (int i = 0; i < schema.Count; i++)
             {
                 dict.TryGetValue(schema[i].RowKey, out ColumnValue? value);
-                WriteValue(writer, value);
+                WriteValue(writer, value, jsonbAsText);
             }
         }
 
@@ -92,7 +103,7 @@ public static class CompactRowJsonWriter
     /// <see cref="ColumnType.Null"/> cell is always JSON null. Kept token-for-token equivalent to
     /// serializing <see cref="CompactRowEncoder.EncodeValue"/>'s result.
     /// </summary>
-    public static void WriteValue(Utf8JsonWriter writer, ColumnValue? value)
+    public static void WriteValue(Utf8JsonWriter writer, ColumnValue? value, bool jsonbAsText = false)
     {
         if (value is null || value.Type == ColumnType.Null)
         {
@@ -143,8 +154,12 @@ public static class CompactRowJsonWriter
                 WriteNumericString(writer, value.NumericUnscaled);
                 break;
 
+            case ColumnType.Jsonb:
+                WriteJsonb(writer, JsonbDocument.Item(value.BytesValue), jsonbAsText);
+                break;
+
             case ColumnType.Array:
-                WriteArray(writer, value);
+                WriteArray(writer, value, jsonbAsText);
                 break;
 
             default:
@@ -233,13 +248,54 @@ public static class CompactRowJsonWriter
         }
     }
 
-    private static void WriteArray(Utf8JsonWriter writer, ColumnValue array)
+    /// <summary>
+    /// Writes one jsonb document: as native JSON by default, or as a JSON string that holds its text
+    /// form when <paramref name="asText"/> is set (see the class remarks).
+    /// </summary>
+    private static void WriteJsonb(Utf8JsonWriter writer, ReadOnlySpan<byte> item, bool asText)
+    {
+        if (asText)
+        {
+            writer.WriteStringValue(JsonbText.ToText(item));
+            return;
+        }
+
+        // A document can be 512 levels deep, but the response writer has its own depth limit: ASP.NET
+        // Core MVC writes JSON results with a MaxDepth of 32. A deeper document written token by token
+        // would throw in the middle of the response, which then fails with HTTP 500. Such a document is
+        // written into its own buffer, by a writer that allows the full depth, and then copied into the
+        // response as one raw value, which adds no depth to the response writer.
+        int limit = writer.Options.MaxDepth == 0 ? DefaultWriterMaxDepth : writer.Options.MaxDepth;
+        int room = limit - writer.CurrentDepth;
+
+        if (room > JsonbLimits.MaxNestingDepth || room > JsonbDocument.Depth(item))
+        {
+            JsonbJsonWriter.Write(writer, item);
+            return;
+        }
+
+        ArrayBufferWriter<byte> buffer = new();
+        JsonWriterOptions options = writer.Options;
+        options.MaxDepth = JsonbLimits.MaxNestingDepth + 1;
+        options.Indented = false;
+
+        using (Utf8JsonWriter nested = new(buffer, options))
+            JsonbJsonWriter.Write(nested, item);
+
+        // The bytes come from a JSON writer, so they need no second validation.
+        writer.WriteRawValue(buffer.WrittenSpan, skipInputValidation: true);
+    }
+
+    /// <summary>The depth a <see cref="Utf8JsonWriter"/> allows when its options set none.</summary>
+    private const int DefaultWriterMaxDepth = 1000;
+
+    private static void WriteArray(Utf8JsonWriter writer, ColumnValue array, bool jsonbAsText)
     {
         writer.WriteStartArray();
         if (array.ArrayValues is not null)
         {
             for (int i = 0; i < array.ArrayValues.Count; i++)
-                WriteValue(writer, array.ArrayValues[i]);
+                WriteValue(writer, array.ArrayValues[i], jsonbAsText);
         }
         writer.WriteEndArray();
     }
@@ -251,7 +307,7 @@ public static class CompactRowJsonWriter
     /// result — every case below must stay in lockstep with that method, including the shared
     /// <see cref="WriteBase64String"/> path for a Bytes cell and its escaping contract.
     /// </summary>
-    internal static void WriteSlot(Utf8JsonWriter writer, in ValueSlot slot)
+    internal static void WriteSlot(Utf8JsonWriter writer, in ValueSlot slot, bool jsonbAsText = false)
     {
         switch (slot.Type)
         {
@@ -300,12 +356,16 @@ public static class CompactRowJsonWriter
                 WriteNumericString(writer, slot.NumericUnscaled);
                 break;
 
+            case ColumnType.Jsonb:
+                WriteJsonb(writer, JsonbDocument.Item(slot.AsBytes), jsonbAsText);
+                break;
+
             case ColumnType.Array:
             {
                 writer.WriteStartArray();
                 ValueSlot[] elements = slot.ArrayElements;
                 for (int i = 0; i < elements.Length; i++)
-                    WriteSlot(writer, in elements[i]);
+                    WriteSlot(writer, in elements[i], jsonbAsText);
                 writer.WriteEndArray();
                 break;
             }

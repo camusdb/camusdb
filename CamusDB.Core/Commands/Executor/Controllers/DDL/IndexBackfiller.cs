@@ -83,14 +83,17 @@ internal static class IndexBackfiller
     /// <summary>
     /// The index to build. <paramref name="KeyColumns"/> are the key columns in index order and
     /// <paramref name="IncludeColumns"/> the covering columns, both by name; null when the index
-    /// carries none.
+    /// carries none. <paramref name="Inverted"/> marks a GIN index: its one key column is a jsonb
+    /// document, and the backfill writes one entry per distinct document entry
+    /// (<see cref="JsonbGinIndexKeys"/>) instead of one key per row.
     /// </summary>
     internal readonly record struct Target(
         string IndexId,
         string IndexName,
         bool Unique,
         string[] KeyColumns,
-        string[]? IncludeColumns
+        string[]? IncludeColumns,
+        bool Inverted = false
     );
 
     /// <summary>
@@ -228,6 +231,23 @@ internal static class IndexBackfiller
                 // non-unique index keeps every row (the row id breaks ties).
                 if (target.Unique && HasNullKeyColumn(row, target.KeyColumns))
                     continue;
+
+                // A GIN index: one non-unique entry per distinct entry of the document, none for NULL.
+                // The insert path builds the same entries, so a backfilled index matches one built row
+                // by row.
+                if (target.Inverted)
+                {
+                    if (JsonbGinIndexKeys.EntriesOf(target.KeyColumns[0], row) is { } entries)
+                    {
+                        JsonbGinIndexKeys.CheckEntryWrites(target.IndexName, target.KeyColumns[0], entries.Count, tx.MutationLimit);
+                        ColumnValue rowIdValue = JsonbGinIndexKeys.RowIdValue(rowId);
+                        foreach (string entry in entries)
+                            await table.Store.PutIndexEntry(
+                                tx, target.IndexId, JsonbGinIndexKeys.Key(entry, rowIdValue), rowId, unique: false,
+                                backfillMode: true, includeTuple: null, cancellationToken: cancellationToken).ConfigureAwait(false);
+                    }
+                    continue;
+                }
 
                 int k = 0;
                 ColumnValue[] columnValues = target.Unique

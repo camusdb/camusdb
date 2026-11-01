@@ -582,13 +582,99 @@ internal abstract class OnlineBackfillUnderWritesScenarios : SharedNodeBaseTest
     }
 
     /// <summary>
+    /// A GIN index is built over a jsonb column while writers keep changing the documents. The build
+    /// must complete, and afterwards the index finds every row by its current document and holds
+    /// exactly its entries: two for each row, none left from a document a writer replaced.
+    /// </summary>
+    [Test]
+    public async Task GinIndexBuild_CompletesUnderSustainedWrites_AndFindsEveryRowByItsCurrentDocument()
+    {
+        const int rows = 300;
+        const int writers = 4;
+
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+        await ExecuteDdl(executor, dbname, "CREATE TABLE docs (id INT64 PRIMARY KEY, doc JSONB NOT NULL)");
+
+        for (int start = 1; start <= rows; start += 100)
+        {
+            int end = Math.Min(rows, start + 99);
+            string values = string.Join(", ", Enumerable.Range(start, end - start + 1).Select(i => $"({i}, '{{\"v\": {i}, \"k\": \"x\"}}')"));
+            await ExecuteNonQuery(executor, dbname, "INSERT INTO docs (id, doc) VALUES " + values);
+        }
+
+        ConcurrentDictionary<long, int> applied = new();
+        ConcurrentDictionary<long, int> unresolved = new();
+        writerErrors.Clear();
+        lastWriterError = null;
+        using CancellationTokenSource stop = new();
+
+        static string Bump(long id) =>
+            $"UPDATE docs SET doc = jsonb_build_object('v', (doc ->> 'v')::int64 + 1, 'k', 'x') WHERE id = {id}";
+
+        Task[] writerTasks = new Task[writers];
+        for (int w = 0; w < writers; w++)
+            writerTasks[w] = Task.Run(() => WriteUntilStopped(executor, dbname, rows, applied, unresolved, stop.Token, Bump));
+
+        try
+        {
+            // Let the writers start before the build, so the first batches meet them.
+            await Task.Delay(100);
+            await ExecuteDdl(executor, dbname, "CREATE INDEX docs_gin ON docs USING GIN (doc)");
+        }
+        finally
+        {
+            stop.Cancel();
+            await Task.WhenAll(writerTasks);
+            Progress($"writers stopped; applied {applied.Values.Sum()}, unresolved {unresolved.Values.Sum()}; writer errors {WriterErrors()}");
+        }
+
+        Assert.That(applied.Values.Sum(), Is.GreaterThan(0), "the writers must have run");
+
+        List<Dictionary<string, ColumnValue>> table = await Query(executor, dbname, "SELECT id, (doc ->> 'v')::int64 AS v FROM docs");
+        Assert.That(table, Has.Count.EqualTo(rows));
+
+        foreach (Dictionary<string, ColumnValue> row in table)
+        {
+            long id = row["id"].LongValue;
+            long expected = id + applied.GetValueOrDefault(id);
+            Assert.That(row["v"].LongValue, Is.InRange(expected, expected + unresolved.GetValueOrDefault(id)), $"row {id} must hold every committed update");
+        }
+
+        List<Dictionary<string, ColumnValue>> plan = await Query(executor, dbname, "EXPLAIN SELECT id FROM docs WHERE doc @> '{\"v\": 1}'");
+        Assert.That(plan.Any(r => r["node"].StrValue == "gin-scan"), Is.True, "the lookups must be served by the GIN index");
+
+        foreach (IGrouping<long, long> byValue in table.GroupBy(r => r["v"].LongValue, r => r["id"].LongValue))
+        {
+            List<Dictionary<string, ColumnValue>> found = await Query(executor, dbname, $"SELECT id FROM docs WHERE doc @> '{{\"v\": {byValue.Key}}}'");
+            Assert.That(found.Select(r => r["id"].LongValue).OrderBy(v => v).ToList(), Is.EqualTo(byValue.OrderBy(v => v).ToList()),
+                $"the GIN index must find every row whose v = {byValue.Key}");
+        }
+
+        TableIndexSchema index = database.Schema.Tables["docs"].Indexes!.First(ix => ix.Name == "docs_gin");
+        TableDescriptor descriptor = await executor.OpenTable(new OpenTableTicket(dbname, "docs"));
+        KvTransaction tx = await database.Transactions.BeginAsync();
+        try
+        {
+            int entries = 0;
+            await foreach (var _ in descriptor.Store.ScanIndex(tx, index.Id!, CamusDB.Core.Storage.Kv.JsonbGinIndexKeys.KeyTypes, from: null, to: null, unique: false))
+                entries++;
+            Assert.That(entries, Is.EqualTo(rows * 2), "two entries per row, no stale entry");
+        }
+        finally
+        {
+            await database.Transactions.RollbackIfNotCompletedAsync(tx);
+        }
+    }
+
+    /// <summary>
     /// Increments <c>val</c> of random rows, one autocommit statement at a time, until stopped. A
     /// statement the engine refuses with a retryable code is run again; one whose commit outcome is
     /// unknown is counted as possibly applied.
     /// </summary>
     private static async Task WriteUntilStopped(
         CommandExecutor executor, string dbname, int rows,
-        ConcurrentDictionary<long, int> applied, ConcurrentDictionary<long, int> unresolved, CancellationToken stop)
+        ConcurrentDictionary<long, int> applied, ConcurrentDictionary<long, int> unresolved, CancellationToken stop,
+        Func<long, string>? statement = null)
     {
         DatabaseDescriptor database = await executor.OpenDatabase(dbname);
         Random random = new();
@@ -600,7 +686,8 @@ internal abstract class OnlineBackfillUnderWritesScenarios : SharedNodeBaseTest
             KvTransaction tx = await database.Transactions.BeginAsync();
             try
             {
-                await executor.ExecuteNonSQLQuery(new ExecuteSQLTicket(tx, dbname, $"UPDATE items SET val = val + 1 WHERE id = {id}", null));
+                string sql = statement is null ? $"UPDATE items SET val = val + 1 WHERE id = {id}" : statement(id);
+                await executor.ExecuteNonSQLQuery(new ExecuteSQLTicket(tx, dbname, sql, null));
                 await database.Transactions.CommitAsync(tx);
                 applied.AddOrUpdate(id, 1, static (_, n) => n + 1);
             }

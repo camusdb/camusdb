@@ -83,7 +83,8 @@ internal sealed class TableDropper
             // until the DropTable delta removes the table as a whole, so a refusal of that delta rolls
             // this transaction back and leaves nothing to repair. The stable index id is the Kahuna
             // key segment, so the purge reaches the physical key space even after a RENAME INDEX.
-            foreach (TableIndexSchema index in table.Indexes.Values)
+            // AllIndexes: a GIN index's key space is purged with the ordered ones.
+            foreach (TableIndexSchema index in table.AllIndexes.Values)
             {
                 int purged = await table.Store.DropIndexEntries(tx, index.KvId).ConfigureAwait(false);
                 Log.LogIndexEntriesPurged(logger, purged, index.Name);

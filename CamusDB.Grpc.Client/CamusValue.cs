@@ -7,6 +7,8 @@
  */
 
 using System.Globalization;
+using System.Text.Json;
+using System.Text.Json.Nodes;
 using Google.Protobuf;
 
 namespace CamusDB.Grpc.Client;
@@ -26,7 +28,10 @@ public static class CamusValue
     /// Maps <paramref name="value"/> onto the wire representation, passing an already-built
     /// <see cref="Value"/> through unchanged. A <see cref="decimal"/> binds as NUMERIC with all of its
     /// digits; the server rounds more than 9 fraction digits half away from zero. A NUMERIC parameter
-    /// also binds into a FLOAT64 or FLOAT32 column, which converts it.
+    /// also binds into a FLOAT64 or FLOAT32 column, which converts it. A <see cref="JsonDocument"/>,
+    /// <see cref="JsonElement"/> or <see cref="JsonNode"/> binds as a jsonb document (<c>json_value</c>,
+    /// its JSON text); a <see cref="string"/> stays a string, which a jsonb column also accepts and
+    /// parses.
     /// </summary>
     public static Value From(object? value) => value switch
     {
@@ -45,6 +50,9 @@ public static class CamusValue
         DateTime dt     => new Value { DatetimeValue = dt.ToUniversalTime().Ticks },
         DateOnly date   => new Value { DateValue = date.ToDateTime(TimeOnly.MinValue, DateTimeKind.Utc).Ticks },
         Guid guid       => new Value { UuidValue = ByteString.CopyFrom(ToBigEndian(guid)) },
+        JsonDocument document => new Value { JsonValue = document.RootElement.GetRawText() },
+        JsonElement element   => new Value { JsonValue = element.GetRawText() },
+        JsonNode node         => new Value { JsonValue = node.ToJsonString() },
         _ => throw new ArgumentException(
             $"Cannot bind a value of type {value.GetType().Name}; build a Value explicitly for it",
             nameof(value)),
@@ -80,6 +88,17 @@ public static class CamusValue
 
         result = parsed;
         return true;
+    }
+
+    /// <summary>
+    /// Reads a jsonb cell as its JSON text (the PostgreSQL form, <c>{"a": 1}</c>). Returns false when
+    /// the value is not a jsonb document (NULL included). The text keeps every digit of a number, so
+    /// parse it with a reader that does not round when exact numbers matter.
+    /// </summary>
+    public static bool TryGetJson(Value value, out string json)
+    {
+        json = value.KindCase == Value.KindOneofCase.JsonValue ? value.JsonValue : "";
+        return value.KindCase == Value.KindOneofCase.JsonValue;
     }
 
     /// <summary>

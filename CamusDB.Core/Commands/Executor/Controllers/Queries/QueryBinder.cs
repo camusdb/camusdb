@@ -157,16 +157,27 @@ internal sealed class QueryBinder
                         $"Duplicate alias '{derivedSource.Alias}'");
                 }
 
-                // A function in FROM has no inner query to bind: its one column and type come from
-                // the function, and it opens no table, so there is nothing to authorize.
+                // A function in FROM has no inner query to bind: its columns and types come from the
+                // function, and it opens no table, so there is nothing to authorize.
                 if (derivedSource.Function is { } call)
                 {
                     TableFunction function = TableFunctionRegistry.Resolve(call.FunctionName, call.Arguments.Count);
 
+                    List<DerivedColumnSchema> functionColumns = new(call.ColumnNames.Count);
+                    if (function.OutputColumns is { } outputs)
+                    {
+                        for (int i = 0; i < outputs.Count; i++)
+                            functionColumns.Add(new DerivedColumnSchema(call.ColumnNames[i], outputs[i].Type));
+                    }
+                    else
+                    {
+                        functionColumns.Add(new DerivedColumnSchema(call.ColumnNames[0], function.OutputType) { ElementType = function.OutputElementType });
+                    }
+
                     derivedSources.Add(new BoundDerivedTableSource(
                         derivedSource,
                         derivedSource.Alias,
-                        [new DerivedColumnSchema(call.ColumnName, function.OutputType) { ElementType = function.OutputElementType }],
+                        functionColumns,
                         new BoundSelectQuery(derivedSource.Query, [], new QueryRowNameResolver([]))));
                     return;
                 }

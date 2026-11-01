@@ -94,6 +94,17 @@ public sealed class NodeAst
     /// return-type rule for both spellings. A rendered view body or EXPLAIN therefore shows
     /// <c>mod(a, b)</c> where the user wrote <c>a % b</c>; the two are equivalent.
     /// </summary>
+    /// <summary>
+    /// A call of the two-argument function <paramref name="name"/>: the tree an operator that
+    /// PostgreSQL defines through a function (the jsonb operators) parses to, built the way
+    /// <see cref="ModCall"/> builds <c>a % b</c>.
+    /// </summary>
+    public static NodeAst FunctionCall(string name, NodeAst left, NodeAst right) =>
+        new(NodeType.ExprFuncCall,
+            new NodeAst(NodeType.Identifier, null, null, null, null, null, null, null, name),
+            new NodeAst(NodeType.ExprArgumentList, left, right, null, null, null, null, null, null),
+            null, null, null, null, null, null);
+
     public static NodeAst ModCall(NodeAst dividend, NodeAst divisor) =>
         new(NodeType.ExprFuncCall,
             new NodeAst(NodeType.Identifier, null, null, null, null, null, null, null, "mod"),
@@ -165,6 +176,7 @@ public sealed class NodeAst
     public static readonly NodeAst TypeDateTime = Leaf(NodeType.TypeDateTime);
     public static readonly NodeAst TypeUuid = Leaf(NodeType.TypeUuid);
     public static readonly NodeAst TypeNumeric = Leaf(NodeType.TypeNumeric);
+    public static readonly NodeAst TypeJsonb = Leaf(NodeType.TypeJsonb);
 
     /// <summary>
     /// Called by the grammar for <c>NUMERIC(P)</c> and <c>NUMERIC(P,S)</c> (and the <c>DECIMAL</c> spellings).

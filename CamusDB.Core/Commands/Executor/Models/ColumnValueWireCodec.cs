@@ -20,6 +20,8 @@ namespace CamusDB.Core.CommandsExecutor.Models;
 /// bytes travel as base64. Arrays recurse. A Uuid and a NUMERIC both travel as their two signed
 /// 64-bit halves (<c>"u"</c> high, <c>"l"</c> low); the type tag tells them apart, and the read
 /// path range-checks a NUMERIC, so a corrupt frame cannot carry a value past ±(10³⁸−1) unscaled.
+/// A jsonb value travels as its cell bytes in base64 (<c>"j"</c>); the read path checks the format
+/// version.
 /// </summary>
 public static class ColumnValueWireCodec
 {
@@ -55,6 +57,10 @@ public static class ColumnValueWireCodec
 
             case ColumnType.Bytes:
                 writer.WriteBase64String("y", value.BytesValue ?? []);
+                break;
+
+            case ColumnType.Jsonb:
+                writer.WriteBase64String("j", value.BytesValue ?? []);
                 break;
 
             case ColumnType.Uuid:
@@ -96,6 +102,8 @@ public static class ColumnValueWireCodec
                 new ColumnValue(type, element.GetProperty("s").GetString()!),
             ColumnType.Bytes =>
                 new ColumnValue(element.GetProperty("y").GetBytesFromBase64()),
+            ColumnType.Jsonb =>
+                ColumnValue.FromJsonbCell(element.GetProperty("j").GetBytesFromBase64()),
             ColumnType.Uuid or ColumnType.Numeric =>
                 new ColumnValue(type, element.GetProperty("u").GetInt64(), element.GetProperty("l").GetInt64()),
             ColumnType.Array => ReadArray(element),

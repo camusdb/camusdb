@@ -57,5 +57,10 @@ public static class SerializatorTypes
     // A NUMERIC value: the signed Int128 (value times 10⁹) as two 64-bit halves, the 16-byte layout
     // TypeUuid uses. A distinct tag so a reader can tell the two 128-bit types apart.
     public const int TypeNumeric = 27;
+
+    // A jsonb value: a length-prefixed payload, the layout TypeBytes uses, that holds the jsonb cell
+    // (a format-version byte, then one canonical CBOR item). A distinct tag so a reader can tell a
+    // document from raw bytes.
+    public const int TypeJsonb = 28;
 }
 

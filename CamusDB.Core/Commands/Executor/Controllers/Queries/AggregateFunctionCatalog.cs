@@ -6,6 +6,7 @@
  */
 
 using System.Collections.Frozen;
+using CamusDB.Core.CommandsExecutor.Controllers.Functions;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.Extensions;
 
@@ -29,6 +30,12 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 /// in the database the statement runs on, as this engine loaded them. A flow with no scope sees
 /// built-ins only. Built-in lookups never read the scope, and a process that never loaded an extension
 /// never reads it at all (<see cref="ExtensionRegistry.AnyLoaded"/>).</para>
+///
+/// <para><b>Built-in state aggregates.</b> <c>jsonb_agg</c> and <c>jsonb_object_agg</c> (and their
+/// <c>json_*</c> spellings) are built-ins that run on the extension path: their kind is
+/// <see cref="QueryAggregationType.Extension"/> and <see cref="ResolveStateAggregate"/> returns their
+/// state object, but they need no loaded extension and their names are reserved
+/// (<see cref="JsonbAggregates"/>).</para>
 ///
 /// <para><b>Never shipped.</b> <see cref="IsDecomposable"/> and <see cref="IsPartialMergeable"/> answer
 /// for built-ins only. An extension aggregate therefore always runs on the node that runs the statement,
@@ -62,6 +69,10 @@ internal static class AggregateFunctionCatalog
     private static readonly FrozenSet<string> PartialMergeable =
         new[] { "count", "sum", "min", "max", "avg" }.ToFrozenSet(StringComparer.OrdinalIgnoreCase);
 
+    /// <summary>The built-in aggregates that run on the state-object path (see the class summary).</summary>
+    private static readonly FrozenDictionary<string, ExtensionAggregate> BuiltInStateAggregates =
+        JsonbAggregates.All().ToFrozenDictionary(a => a.Name, StringComparer.OrdinalIgnoreCase);
+
     /// <summary>True for a built-in aggregate the query pipeline computes.</summary>
     public static bool IsBuiltIn(string name) => BuiltIns.ContainsKey(name);
 
@@ -69,7 +80,13 @@ internal static class AggregateFunctionCatalog
     /// True when a call to <paramref name="name"/> is an aggregate in this flow: a built-in, or an
     /// aggregate of an extension installed in the statement's database (bound on this node or not).
     /// </summary>
-    public static bool IsAggregate(string name) => BuiltIns.ContainsKey(name) || IsExtensionAggregate(name);
+    public static bool IsAggregate(string name) => BuiltIns.ContainsKey(name) || IsStateAggregate(name);
+
+    /// <summary>
+    /// True when <paramref name="name"/> runs on the state-object path: a built-in state aggregate or
+    /// an aggregate of an extension installed in the statement's database.
+    /// </summary>
+    public static bool IsStateAggregate(string name) => BuiltInStateAggregates.ContainsKey(name) || IsExtensionAggregate(name);
 
     /// <summary>True when <paramref name="name"/> is an aggregate of an extension installed in the statement's database.</summary>
     public static bool IsExtensionAggregate(string name) =>
@@ -79,7 +96,8 @@ internal static class AggregateFunctionCatalog
     /// Every name the engine treats as an aggregate whatever the flow: the built-ins and the reserved
     /// names. The extension loader refuses a member under one of them.
     /// </summary>
-    public static bool IsReservedName(string name) => BuiltIns.ContainsKey(name) || ReservedOnly.Contains(name);
+    public static bool IsReservedName(string name) =>
+        BuiltIns.ContainsKey(name) || BuiltInStateAggregates.ContainsKey(name) || ReservedOnly.Contains(name);
 
     /// <summary>
     /// True when a CHECK constraint or a column DEFAULT must refuse a call to <paramref name="name"/> as
@@ -93,16 +111,20 @@ internal static class AggregateFunctionCatalog
         if (BuiltIns.TryGetValue(name, out QueryAggregationType type))
             return type;
 
-        return IsExtensionAggregate(name) ? QueryAggregationType.Extension : QueryAggregationType.None;
+        return IsStateAggregate(name) ? QueryAggregationType.Extension : QueryAggregationType.None;
     }
 
     /// <summary>
-    /// The extension aggregate <paramref name="name"/> names. Throws
-    /// <see cref="CamusDBErrorCodes.ExtensionNotLoadedOnNode"/> when it is installed but this node does
-    /// not load its build, and "function not found" when nothing defines it.
+    /// The state aggregate <paramref name="name"/> names: a built-in state aggregate, or an extension
+    /// aggregate. Throws <see cref="CamusDBErrorCodes.ExtensionNotLoadedOnNode"/> when an extension
+    /// aggregate is installed but this node does not load its build, and "function not found" when
+    /// nothing defines it.
     /// </summary>
-    public static ExtensionAggregate ResolveExtension(string name)
+    public static ExtensionAggregate ResolveStateAggregate(string name)
     {
+        if (BuiltInStateAggregates.TryGetValue(name, out ExtensionAggregate? builtIn))
+            return builtIn;
+
         if (ExtensionFunctionScope.CurrentInstalled is { } installed && installed.TryGetAggregate(name, out ExtensionAggregate aggregate))
             return aggregate;
 

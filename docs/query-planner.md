@@ -325,6 +325,7 @@ All extend `PhysicalPlanNode` (`Models/Plans/PhysicalPlanNode.cs`): a single `In
 | `DistinctNode` | `Distinct` | Duplicate elimination over projection tuples (hash, or `IsStreaming` adjacent-row dedup) |
 | `SemiJoinNode` | `SemiJoinProbe` | Index-probing semi / anti / null-aware-anti join from an `IN`/`NOT IN` rewrite |
 | `IndexInListScanNode` | `InListScanFromIndex` | One index seek per value for `x IN (v1, v2, …)`, unioned and row-id-deduped |
+| `GinIndexScanNode` | `GinScanFromIndex` | Entry scans of a GIN index for a jsonb predicate; candidate rows checked by the filter (§4c′) |
 | `LimitNode` | `Limit` | LIMIT / OFFSET |
 | `NestedLoopJoinNode` | _(join path only)_ | Nested-loop inner join |
 | `IndexNestedLoopJoinNode` | _(join path only)_ | Index-probed inner join |
@@ -452,6 +453,68 @@ comes from a comparison on it, and no comparison admits NULL. The evaluator side
 in `SQLExecutorBaseCreator.EvalComparison`, `EvalAnd` and `EvalOr`, which every predicate walker
 (WHERE, its synchronous twin, HAVING) shares, so UNKNOWN propagates through `NOT`, `AND`, `OR` and
 `CASE` identically on the table-scan and index paths.
+
+### 4c′. GIN index scans
+
+<a id="gin-index-scans"></a>
+
+**Files:** `Controllers/Queries/GinScanSelector.cs` (match), `Models/Jsonb/JsonbGinEntries.cs`
+(entries), `QueryExecutor.QueryUsingGinIndex` (execution). A GIN index (`IndexType.Inverted`) over a
+`jsonb` column is not in `TableDescriptor.Indexes`: that map holds the ordered indexes, which every
+ordered-scan rule reads. GIN indexes are in `TableDescriptor.InvertedIndexes` (and both in
+`AllIndexes`, which the write and drop paths read). So no ordered-index rule can pick a GIN index by
+mistake.
+
+**When.** The single-table planner tries a GIN scan when no ordered index narrows the scan: after the
+rule-based selection and the IN-list scan find nothing, and in the cost-based path when the cheapest
+plan is the full scan. A `FORCE_INDEX` hint that names a GIN index takes the GIN scan when the
+predicate can use that index, and the primary-row scan when it cannot. The join planner does not use
+GIN indexes.
+
+**Match.** `GinScanSelector` reads the top-level conjuncts in `PredicateAnalysis.ResidualConjuncts`.
+The jsonb operators arrive there as calls of their functions (`@>` is `jsonb_contains`, and so on).
+These shapes match on the index column when the other operand is a constant (`PredicateAnalyzer.
+TryGetConstant`: a literal, a parameter, or an expression without columns):
+
+| Conjunct | Requirements (an AND of OR groups) |
+|---|---|
+| `col @> c`, `c <@ col` | one group for each leaf of `c`, each with its exact entry; an empty container below the root asks for its path as a prefix |
+| `col ? k` | one group: the prefix `k<key>;`, or the exact entries `[=s<key>` and `=s<key>` |
+| `col ?\| ks` | one group with the requirements of every key |
+| `col ?& ks` | one group per key |
+| `col ->> 'k' = t` | one group: the string entry of `t`, and the boolean or number entry whose text is `t` |
+| `col -> 'k' = d` | the requirements of `col @> {"k": d}` |
+
+All matching conjuncts on one index are ANDed. When several GIN indexes match, the one with the most
+groups wins. `@>` with `{}`, `[]` or a top-level scalar, and `->>` with text that starts with `{` or
+`[`, give no requirement, because no entry names them.
+
+**Superset and check.** Entries lose array positions and structure, so a row can hold every required
+entry and still fail the operator (`[{"a":1},{"b":2}]` holds the entries of `[{"a":1,"b":2}]`). The scan
+absorbs no conjunct: `BuildExecutionFilter` keeps the full predicate, and the executor checks each
+candidate with `MeetPlanFilterAsync`. A requirement must never exclude a matching row; it can include
+extra ones.
+
+**Execution.** Each requirement is one index scan: an exact entry reads `[e]` inclusive (the store
+appends the index sentinel, so every row id under it is in range), a prefix reads
+`[p, p + U+007F)`. The row ids of a group are united, and the groups are intersected in order, so a
+later group keeps only the ids the earlier groups kept; an empty set ends the scans. The candidates
+are fetched in row-id order through `GetRowsBatch`, `IndexScanFetchBatchSize` at a time.
+
+**Locks.** Each scanned range takes `AcquireBoundedIndexRangeLockAsync` first: shared for a read,
+exclusive for the locate phase of UPDATE and DELETE. A row that starts to match writes an entry into
+each group's ranges, so the first group's lock covers it, also when the scan stops early.
+
+**Cost.** Statistics do not describe documents, so the node is priced at the fallback filter
+selectivity (`FilterSelectivity`, 0.10 of the table) with `rows × requirements` scanned entries. The
+estimate does not change the choice: the GIN scan is used whenever it matches and no ordered index
+does.
+
+**Plan cache.** A GIN decision is not cached. Its entries come from the literal, which the query shape
+abstracts away, so the next execution computes its own (the same rule as the IN-list scan).
+
+**EXPLAIN** shows `gin-scan(index=<name>, groups=<n>, entries=<m>)` under the `filter(...)` node that
+holds the check.
 
 ### 4d. Join planner — `JoinQueryPlanner`
 

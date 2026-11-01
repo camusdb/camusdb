@@ -16,5 +16,12 @@ public enum AlterIndexOperation
     ModifyIndex,
     DropIndex,
     DropPrimaryKey,
-    RenameIndex
+    RenameIndex,
+
+    /// <summary>
+    /// <c>CREATE INDEX ... USING GIN</c> / <c>CREATE INVERTED INDEX</c>: a GIN index over one jsonb
+    /// column (<see cref="Catalogs.Models.IndexType.Inverted"/>). Appended: the value travels in
+    /// forwarded DDL requests.
+    /// </summary>
+    AddInvertedIndex,
 }

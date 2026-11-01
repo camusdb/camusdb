@@ -13,7 +13,8 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Functions;
 
 /// <summary>
 /// A set-returning function that can stand as a relation in <c>FROM</c> (see
-/// <see cref="TableFunctionRegistry"/>). It produces one output column.
+/// <see cref="TableFunctionRegistry"/>). It produces one output column, or several when it declares
+/// <see cref="OutputColumns"/> (as <c>jsonb_each</c> does: <c>key</c> and <c>value</c>).
 ///
 /// <para><b>Contract.</b> <see cref="Generate"/> must be lazy: the caller pulls one value at a time and
 /// may stop at any point (a <c>LIMIT</c>, a cancelled statement), so an implementation must never
@@ -60,6 +61,24 @@ internal abstract class TableFunction
     /// are raised when the first value is pulled, before any value is yielded.
     /// </summary>
     public abstract IEnumerable<ColumnValue> Generate(IReadOnlyList<ColumnValue> arguments);
+
+    /// <summary>
+    /// The names and types of the output columns of a function with more than one, in order; null for
+    /// a one-column function, whose column follows <see cref="OutputType"/> and the naming rule of
+    /// <see cref="DefaultColumnName"/>. A column alias list renames them from the left.
+    /// </summary>
+    public virtual IReadOnlyList<(string Name, ColumnType Type)>? OutputColumns => null;
+
+    /// <summary>
+    /// Yields one array of values per output row, one value per output column. The default wraps
+    /// <see cref="Generate"/> for a one-column function; a function with <see cref="OutputColumns"/>
+    /// overrides it. The same laziness and purity rules apply.
+    /// </summary>
+    public virtual IEnumerable<ColumnValue[]> GenerateRows(IReadOnlyList<ColumnValue> arguments)
+    {
+        foreach (ColumnValue value in Generate(arguments))
+            yield return [value];
+    }
 
     /// <summary>
     /// The exact number of values <see cref="Generate"/> would yield, or null when the arguments do

@@ -527,6 +527,48 @@ public sealed class TestShowCreateTableRoundTrip : BaseTest
     }
 
     [Test]
+    public async Task ShowCreateTable_FloatDefaults_KeepNegativeZero_RoundTrips()
+    {
+        // A whole-number float default must render with a point. Without it, DEFAULT(-0) parses as the
+        // INT64 0, and a replayed dump loses the sign of a -0.0 default (nightly dump fuzz, seed 41189722541).
+        (string dbname, DatabaseDescriptor db, CommandExecutor executor) = await CreateDatabase();
+
+        KvTransaction tx = await db.Transactions.BeginAsync();
+        await executor.ExecuteDDLSQL(new ExecuteSQLTicket(tx, dbname,
+            "CREATE TABLE floats (" +
+            "  id int64 NOT NULL, " +
+            "  f32_zero float32 DEFAULT(-0.0), " +
+            "  f64_zero float64 DEFAULT(-0.0), " +
+            "  f64_whole float64 DEFAULT(5.0), " +
+            "  f64_frac float64 DEFAULT(1.5), " +
+            "  PRIMARY KEY (id))", null));
+        await db.Transactions.CommitAsync(tx);
+
+        List<QueryResultRow> showRows = await QueryAsync(executor, db, dbname, "SHOW CREATE TABLE floats");
+        string ddl = showRows[0].Row["Create Table"].StrValue!;
+
+        Assert.That(ddl, Does.Contain("`f32_zero` FLOAT32 NULL DEFAULT(-0.0)"), ddl);
+        Assert.That(ddl, Does.Contain("`f64_zero` FLOAT64 NULL DEFAULT(-0.0)"), ddl);
+        Assert.That(ddl, Does.Contain("`f64_whole` FLOAT64 NULL DEFAULT(5.0)"), ddl);
+        Assert.That(ddl, Does.Contain("`f64_frac` FLOAT64 NULL DEFAULT(1.5)"), ddl);
+
+        await DdlAsync(executor, db, dbname, ddl.Replace("`floats`", "`floats2`", System.StringComparison.Ordinal));
+
+        KvTransaction tx2 = await db.Transactions.BeginAsync();
+        await executor.ExecuteNonSQLQuery(new ExecuteSQLTicket(tx2, dbname,
+            "INSERT INTO floats2 (id) VALUES (1)", null));
+        await db.Transactions.CommitAsync(tx2);
+
+        List<QueryResultRow> rows = await QueryAsync(executor, db, dbname,
+            "SELECT f32_zero, f64_zero, f64_whole, f64_frac FROM floats2");
+        Assert.AreEqual(1, rows.Count);
+        Assert.IsTrue(double.IsNegative(rows[0].Row["f32_zero"].FloatValue), "FLOAT32 -0.0 default keeps its sign");
+        Assert.IsTrue(double.IsNegative(rows[0].Row["f64_zero"].FloatValue), "FLOAT64 -0.0 default keeps its sign");
+        Assert.AreEqual(5.0, rows[0].Row["f64_whole"].FloatValue);
+        Assert.AreEqual(1.5, rows[0].Row["f64_frac"].FloatValue);
+    }
+
+    [Test]
     public async Task ShowCreateTable_StringDefaultWithSingleQuote_RendersDoubleQuoted_RoundTrips()
     {
         // The lexer does no '' / "" doubling and no escape decoding, so a default whose value contains

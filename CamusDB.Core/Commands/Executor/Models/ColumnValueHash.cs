@@ -6,6 +6,7 @@
  */
 
 using CamusDB.Core.Catalogs.Models;
+using CamusDB.Core.CommandsExecutor.Models.Jsonb;
 
 namespace CamusDB.Core.CommandsExecutor.Models;
 
@@ -21,6 +22,8 @@ namespace CamusDB.Core.CommandsExecutor.Models;
 /// <item>Uuid and Numeric hash both 64-bit halves. With the low half only, values that differ in the
 ///   high half share one bucket.</item>
 /// <item>An array hashes its count and each element, and a NULL element hashes as its type only.</item>
+/// <item>Jsonb hashes the document by value (<see cref="JsonbDocument.AddHash"/>): numbers with
+///   trailing fraction zeros hash as the number without them, so 1.0 and 1 share a bucket.</item>
 /// </list>
 ///
 /// <para>A type with no arm here still gives correct results, because equality still separates the
@@ -103,6 +106,10 @@ internal static class ColumnValueHash
 
             case ColumnType.Bytes:
                 hash.AddBytes(value.BytesValue ?? []);
+                break;
+
+            case ColumnType.Jsonb:
+                JsonbDocument.AddHash(ref hash, JsonbDocument.Item(value.BytesValue));
                 break;
 
             case ColumnType.Uuid:

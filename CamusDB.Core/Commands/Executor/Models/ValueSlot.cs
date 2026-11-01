@@ -36,6 +36,8 @@ namespace CamusDB.Core.CommandsExecutor.Models;
 ///   (including non-canonical literal text). Packing the 96-bit ObjectId inline is a decode-time
 ///   optimization deferred to where the value is a guaranteed-valid <see cref="Util.ObjectIds.ObjectIdValue"/>.</item>
 /// <item><see cref="ColumnType.Bytes"/> — the <c>byte[]</c> in <c>_reference</c>.</item>
+/// <item><see cref="ColumnType.Jsonb"/> — the jsonb cell <c>byte[]</c> in <c>_reference</c>; compared and
+///   hashed by document value (<see cref="Jsonb.JsonbDocument"/>), not by bytes.</item>
 /// <item><see cref="ColumnType.Array"/> — the element <c>ValueSlot[]</c> in <c>_reference</c> and the
 ///   element <see cref="ColumnType"/> in <c>_high</c>.</item>
 /// <item><see cref="ColumnType.Null"/> — type only.</item>
@@ -72,6 +74,7 @@ internal readonly struct ValueSlot
     public static ValueSlot FromString(string value) => new(ColumnType.String, 0, 0, value);
     public static ValueSlot FromId(string value) => new(ColumnType.Id, 0, 0, value);
     public static ValueSlot FromBytes(byte[]? value) => new(ColumnType.Bytes, 0, 0, value);
+    public static ValueSlot FromJsonb(byte[] cell) => new(ColumnType.Jsonb, 0, 0, cell);
     public static ValueSlot FromUuid(long high, long low) => new(ColumnType.Uuid, low, high, null);
     public static ValueSlot FromNumeric(long high, long low) => new(ColumnType.Numeric, low, high, null);
     public static ValueSlot FromArray(ColumnType elementType, ValueSlot[] elements) => new(ColumnType.Array, 0, (long)(int)elementType, elements);
@@ -130,6 +133,9 @@ internal readonly struct ValueSlot
             case ColumnType.Bytes:
                 return FromBytes(value.BytesValue);
 
+            case ColumnType.Jsonb:
+                return FromJsonb(value.BytesValue!);
+
             case ColumnType.Array:
             {
                 IReadOnlyList<ColumnValue> src = value.ArrayValues ?? [];
@@ -165,6 +171,7 @@ internal readonly struct ValueSlot
             case ColumnType.Uuid:      return new ColumnValue(ColumnType.Uuid, _high, _low);
             case ColumnType.Numeric:   return new ColumnValue(ColumnType.Numeric, _high, _low);
             case ColumnType.Bytes:     return AsBytes is null ? ColumnValue.Null : new ColumnValue(AsBytes);
+            case ColumnType.Jsonb:     return ColumnValue.FromJsonbCell(AsBytes!);
 
             case ColumnType.Array:
             {
@@ -238,6 +245,9 @@ internal readonly struct ValueSlot
                 return a.SequenceCompareTo(b);
             }
 
+            case ColumnType.Jsonb:
+                return Jsonb.JsonbDocument.Compare(Jsonb.JsonbDocument.Item(AsBytes), Jsonb.JsonbDocument.Item(other.AsBytes));
+
             case ColumnType.Array:
             {
                 ValueSlot[] a = ArrayElements;
@@ -287,6 +297,14 @@ internal readonly struct ValueSlot
                 HashCode hc = new();
                 hc.Add(_type);
                 hc.AddBytes(AsBytes ?? []);
+                return hc.ToHashCode();
+            }
+
+            case ColumnType.Jsonb:
+            {
+                HashCode hc = new();
+                hc.Add(_type);
+                Jsonb.JsonbDocument.AddHash(ref hc, Jsonb.JsonbDocument.Item(AsBytes));
                 return hc.ToHashCode();
             }
 

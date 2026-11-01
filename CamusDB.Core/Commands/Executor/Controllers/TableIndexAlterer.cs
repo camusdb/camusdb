@@ -35,7 +35,7 @@ internal sealed class TableIndexAlterer
     {
         return ticket.Operation switch
         {
-            AlterIndexOperation.AddIndex or AlterIndexOperation.AddUniqueIndex or AlterIndexOperation.AddPrimaryKey
+            AlterIndexOperation.AddIndex or AlterIndexOperation.AddUniqueIndex or AlterIndexOperation.AddPrimaryKey or AlterIndexOperation.AddInvertedIndex
                 => await AddIndex(catalogs, queryExecutor, database, table, ticket, tx).ConfigureAwait(false),
 
             AlterIndexOperation.DropIndex or AlterIndexOperation.DropPrimaryKey
@@ -51,7 +51,7 @@ internal sealed class TableIndexAlterer
 
     private async Task<bool> AddIndex(CatalogsManager catalogs, QueryExecutor queryExecutor, DatabaseDescriptor database, TableDescriptor table, AlterIndexTicket ticket, KvTransaction tx)
     {
-        if (ticket.IfNotExists && table.Indexes.ContainsKey(ticket.IndexName))
+        if (ticket.IfNotExists && table.AllIndexes.ContainsKey(ticket.IndexName))
             return false;
 
         await tableIndexAdder.AddIndex(catalogs, tx, queryExecutor, database, table, ticket).ConfigureAwait(false);
@@ -63,7 +63,7 @@ internal sealed class TableIndexAlterer
         // Checked here, inside the DDL work under the DDL gate, and not by the caller: a concurrent drop
         // of the same index then makes this one a no-op instead of an error. Returning false also stops
         // the caller before it replicates a schema change.
-        if (ticket.IfExists && !table.Indexes.ContainsKey(ticket.IndexName))
+        if (ticket.IfExists && !table.AllIndexes.ContainsKey(ticket.IndexName))
             return false;
 
         await tableIndexDropper.DropIndex(catalogs, tx, queryExecutor, database, table, ticket).ConfigureAwait(false);

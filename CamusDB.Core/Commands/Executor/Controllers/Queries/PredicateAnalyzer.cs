@@ -1094,7 +1094,7 @@ public static class PredicateAnalyzer
         return true;
     }
 
-    private static bool TryGetConstant(NodeAst nodeAst, Dictionary<string, ColumnValue>? parameters, out ColumnValue? columnValue)
+    internal static bool TryGetConstant(NodeAst nodeAst, Dictionary<string, ColumnValue>? parameters, out ColumnValue? columnValue)
     {
         try
         {

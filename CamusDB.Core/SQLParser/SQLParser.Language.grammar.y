@@ -36,6 +36,12 @@
    which is already the intended parse (a AND b IS NULL -> a AND (b IS NULL); a.b as one name). Declaring
    their precedence makes that resolution explicit and removes the warnings without changing any parse. */
 %left TIS TIN TDOT
+/* The jsonb operators bind tighter than IS and IN, so `doc ->> 'deleted_at' IS NULL` and
+   `doc ->> 'kind' IN ('a', 'b')` test the extracted value, the way applications write them. In
+   PostgreSQL they share the "any other operator" level with ||, below IS; at that level CamusDB's
+   IS-above-every-operator rule would read the first form as `doc ->> ('deleted_at' IS NULL)`. They
+   stay below unary minus and the postfix cast, so `doc -> -1` and `doc -> 'k'::text` parse as written. */
+%left TJSONFIELD TJSONFIELDTEXT TJSONPATH TJSONPATHTEXT TJSONCONTAINS TJSONCONTAINEDBY TJSONEXISTS TJSONEXISTSANY TJSONEXISTSALL TJSONDELETEPATH
 /* Unary minus binds tighter than every binary operator and IS, as in PostgreSQL: `-a * b` is
    `(-a) * b` and `-a IS NULL` is `(-a) IS NULL`. It stays below the postfix cast and subscript, so
    `-x::int` negates the cast value. UMINUS is a precedence name only; no token carries it. */
@@ -55,6 +61,8 @@
 %token TCOLUMNS TTABLES TDESCRIBE TDATABASES TDATABASE TAT LBRACE RBRACE TINDEXES TLIKE TILIKE TDEFAULT TIF TEXISTS TON TIN TIS
 %token TREGEXMATCH TREGEXIMATCH TREGEXNOTMATCH TREGEXNOTIMATCH
 %token TCONCAT TBITAND TBITOR TBITXOR TSHIFTLEFT TSHIFTRIGHT
+%token TJSONFIELD TJSONFIELDTEXT TJSONPATH TJSONPATHTEXT TJSONCONTAINS TJSONCONTAINEDBY
+%token TJSONEXISTS TJSONEXISTSANY TJSONEXISTSALL TJSONDELETEPATH
 %token TBEGIN TSTART TTRANSACTION TROLLBACK TCOMMIT TJOIN TINNER TDOT THAVING TDISTINCT TBETWEEN TEXPLAIN
 /* LEFT, RIGHT, OUTER and CROSS are reserved for the join forms, as they are in PostgreSQL. FULL,
    NATURAL and USING are not: FULL is already a plain identifier that the foreign-key MATCH FULL
@@ -405,11 +413,28 @@ insert_values : LPAREN values_list RPAREN { $$.n = $2.n; $$.s = $2.s; }
    StatementScope.GetReturningList knows the slot of each statement; read the list through it. */
 update_stmt : TUPDATE any_identifier TSET update_list TWHERE condition opt_limit opt_returning
             { $$.n = new(NodeType.Update, $2.n, $4.n, $6.n, $7.n, $8.n, null, null, null); }
+            /* UPDATE and DELETE without WHERE are refused on purpose, so one statement cannot change
+               every row by accident. The rules exist only to name that rule in the error; without
+               them the parser would report a bare "expecting TWHERE" syntax error. */
+            | TUPDATE any_identifier TSET update_list opt_limit opt_returning
+            {
+                throw new CamusDBException(
+                    CamusDBErrorCodes.InvalidInput,
+                    "UPDATE requires a WHERE clause, so that one statement cannot change every row by accident. " +
+                    "To update every row, write WHERE TRUE");
+            }
 		    ;
 
 /* The optional RETURNING list hangs off extendedTwo, the first free slot after LIMIT. */
 delete_stmt : TDELETE TFROM any_identifier TWHERE condition opt_limit opt_returning
             { $$.n = new(NodeType.Delete, $3.n, $5.n, $6.n, $7.n, null, null, null, null); }
+            | TDELETE TFROM any_identifier opt_limit opt_returning
+            {
+                throw new CamusDBException(
+                    CamusDBErrorCodes.InvalidInput,
+                    "DELETE requires a WHERE clause, so that one statement cannot delete every row by accident. " +
+                    "To delete every row, write WHERE TRUE");
+            }
 			;
 
 begin_stmt : TBEGIN { $$.n = NodeAst.Begin; }
@@ -938,6 +963,12 @@ alter_table_stmt : TALTER TTABLE any_identifier TWADD any_identifier field_type 
                  | TALTER TTABLE any_identifier TWADD any_identifier field_type create_table_field_constraint_list { $$.n = new(NodeType.AlterTableAddColumn, $3.n, $5.n, $6.n, $7.n, null, null, null, null); }
                  | TALTER TTABLE any_identifier TWADD TCOLUMN any_identifier field_type { $$.n = new(NodeType.AlterTableAddColumn, $3.n, $6.n, $7.n, null, null, null, null, null); }
                  | TALTER TTABLE any_identifier TWADD TCOLUMN any_identifier field_type create_table_field_constraint_list { $$.n = new(NodeType.AlterTableAddColumn, $3.n, $6.n, $7.n, $8.n, null, null, null, null); }
+                 /* ADD COLUMN with a type written as an identifier: only JSONB / JSON (SERIAL needs a new
+                    identity, which ADD COLUMN does not create). */
+                 | TALTER TTABLE any_identifier TWADD any_identifier TIDENTIFIER { $$.n = new(NodeType.AlterTableAddColumn, $3.n, $5.n, TypeFromWord($6.s), null, null, null, null, null); }
+                 | TALTER TTABLE any_identifier TWADD any_identifier TIDENTIFIER create_table_field_constraint_list { $$.n = new(NodeType.AlterTableAddColumn, $3.n, $5.n, TypeFromWord($6.s), $7.n, null, null, null, null); }
+                 | TALTER TTABLE any_identifier TWADD TCOLUMN any_identifier TIDENTIFIER { $$.n = new(NodeType.AlterTableAddColumn, $3.n, $6.n, TypeFromWord($7.s), null, null, null, null, null); }
+                 | TALTER TTABLE any_identifier TWADD TCOLUMN any_identifier TIDENTIFIER create_table_field_constraint_list { $$.n = new(NodeType.AlterTableAddColumn, $3.n, $6.n, TypeFromWord($7.s), $8.n, null, null, null, null); }
 				 | TALTER TTABLE any_identifier TDROP any_identifier { $$.n = new(NodeType.AlterTableDropColumn, $3.n, $5.n, null, null, null, null, null, null); }
                  | TALTER TTABLE any_identifier TDROP TCOLUMN any_identifier { $$.n = new(NodeType.AlterTableDropColumn, $3.n, $6.n, null, null, null, null, null, null); }
                  | TALTER TTABLE any_identifier TWADD TINDEX any_identifier LPAREN identifier_index_list RPAREN index_include_clause { $$.n = new(NodeType.AlterTableAddIndex, $3.n, $6.n, $8.n, $10.n, null, null, null, null); }
@@ -1017,6 +1048,25 @@ create_index_stmt : TCREATE TINDEX any_identifier TON any_identifier LPAREN iden
                   | TCREATE TINDEX TIF TNOT TEXISTS any_identifier TON any_identifier LPAREN identifier_index_list RPAREN index_include_clause { $$.n = new(NodeType.AlterTableAddIndexIfNotExists, $8.n, $6.n, $10.n, $12.n, null, null, null, null); }
                   | TCREATE TUNIQUE TINDEX any_identifier TON any_identifier LPAREN identifier_index_list RPAREN index_include_clause { $$.n = new(NodeType.AlterTableAddUniqueIndex, $6.n, $4.n, $8.n, $10.n, null, null, null, null); }
                   | TCREATE TUNIQUE TINDEX TIF TNOT TEXISTS any_identifier TON any_identifier LPAREN identifier_index_list RPAREN index_include_clause { $$.n = new(NodeType.AlterTableAddUniqueIndexIfNotExists, $9.n, $7.n, $11.n, $13.n, null, null, null, null); }
+                  /* CREATE INDEX ... USING <method> (col [opclass]) and the CockroachDB CREATE INVERTED INDEX.
+                     USING, GIN, BTREE, INVERTED and the operator class are plain identifiers, so none of them
+                     becomes a reserved word; the actions check the words. A GIN index builds the AST of
+                     CREATE INDEX with "gin" in its text, so every consumer of that node handles it. */
+                  | TCREATE TINDEX any_identifier TON any_identifier TIDENTIFIER TIDENTIFIER LPAREN method_index_list RPAREN { $$.n = new(NodeType.AlterTableAddIndex, $5.n, $3.n, $9.n, null, null, null, null, IndexMethod($6.s, $7.s, $9.n)); }
+                  | TCREATE TINDEX TIF TNOT TEXISTS any_identifier TON any_identifier TIDENTIFIER TIDENTIFIER LPAREN method_index_list RPAREN { $$.n = new(NodeType.AlterTableAddIndexIfNotExists, $8.n, $6.n, $12.n, null, null, null, null, IndexMethod($9.s, $10.s, $12.n)); }
+                  | TCREATE TIDENTIFIER TINDEX any_identifier TON any_identifier LPAREN identifier_index_list RPAREN { $$.n = new(NodeType.AlterTableAddIndex, $6.n, $4.n, $8.n, null, null, null, null, InvertedIndexWord($2.s)); }
+                  | TCREATE TIDENTIFIER TINDEX TIF TNOT TEXISTS any_identifier TON any_identifier LPAREN identifier_index_list RPAREN { $$.n = new(NodeType.AlterTableAddIndexIfNotExists, $9.n, $7.n, $11.n, null, null, null, null, InvertedIndexWord($2.s)); }
+                  ;
+
+/* The column list of CREATE INDEX ... USING: an index column, optionally followed by an operator class
+   name (jsonb_ops, jsonb_path_ops). The class is checked by IndexMethod and not kept: both jsonb
+   classes build the same GIN index. */
+method_index_list : method_index_list TCOMMA method_index_item { $$.n = new(NodeType.IndexIdentifierList, $1.n, $3.n, null, null, null, null, null, null); }
+                  | method_index_item { $$.n = $1.n; $$.s = $1.s; }
+                  ;
+
+method_index_item : identifier_index { $$.n = $1.n; $$.s = $1.s; }
+                  | any_identifier TIDENTIFIER { $$.n = OperatorClassColumn($1.n, $2.s); }
                   ;
 
 /* DROP INDEX [IF EXISTS] <index> ON <table>, and DROP INDEX [IF EXISTS] <table>.<index>. Both build
@@ -1617,6 +1667,9 @@ create_table_inline_constraint : TCONSTRAINT any_identifier TPRIMARY TKEY LPAREN
                                | TCONSTRAINT TSTRING TPRIMARY TKEY LPAREN identifier_index_list RPAREN { $$.n = new(NodeType.CreateTableConstraintPrimaryKey, $6.n, null, null, null, null, null, null, null); }
                                | TPRIMARY TKEY LPAREN identifier_index_list RPAREN { $$.n = new(NodeType.CreateTableConstraintPrimaryKey, $4.n, null, null, null, null, null, null, null); }
                                | TKEY any_identifier LPAREN identifier_index_list RPAREN index_include_clause opt_inline_comment { $$.n = new(NodeType.CreateTableConstraintMultiIndex, $2.n, $4.n, $6.n, $7.n, null, null, null, null); }
+                               /* INVERTED INDEX name (col), the CockroachDB inline form: a GIN index, which
+                                  SHOW CREATE TABLE renders this way. "gin" in the text marks it. */
+                               | TIDENTIFIER TINDEX any_identifier LPAREN identifier_index_list RPAREN opt_inline_comment { $$.n = new(NodeType.CreateTableConstraintMultiIndex, $3.n, $5.n, null, $7.n, null, null, null, InvertedIndexWord($1.s)); }
                                | TUNIQUE TKEY any_identifier LPAREN identifier_index_list RPAREN index_include_clause opt_inline_comment { $$.n = new(NodeType.CreateTableConstraintUniqueIndex, $3.n, $5.n, $7.n, $8.n, null, null, null, null); }
                                | TCONSTRAINT any_identifier TCHECK LPAREN condition RPAREN { $$.n = new(NodeType.CreateTableConstraintCheck, $5.n, null, null, null, null, null, null, $2.n.yytext); }
                                | TCHECK LPAREN condition RPAREN { $$.n = new(NodeType.CreateTableConstraintCheck, $3.n, null, null, null, null, null, null, null); }
@@ -1671,21 +1724,19 @@ fk_action : TIDENTIFIER { $$.s = ForeignKeyActionWord($1.s); }
 
 create_table_item : any_identifier field_type { $$.n = new(NodeType.CreateTableItem, $1.n, $2.n, null, null, null, null, null, null); }
                   | any_identifier field_type create_table_field_constraint_list { $$.n = new(NodeType.CreateTableItem, $1.n, $2.n, $3.n, null, null, null, null, null); }
-                  /* SERIAL / BIGSERIAL: a declaration shorthand, not a storage type. It resolves to
-                     int64 plus an identity constraint, so no ColumnType member is spent on spelling
-                     a default. The word is a plain identifier — no field_type alternative begins
-                     with one — so "serial" stays usable as a table and column name. */
+                  /* A type written as a plain identifier: SERIAL / BIGSERIAL, and JSONB / JSON.
+                     SERIAL is a declaration shorthand, not a storage type: it resolves to int64 plus
+                     an identity constraint, so no ColumnType member is spent on spelling a default.
+                     JSONB is a real type whose words stay identifiers. No field_type alternative
+                     begins with an identifier, so all four words stay usable as table and column
+                     names. */
                   | any_identifier TIDENTIFIER
                     {
-                      RequireSerialTypeWord($2.s);
-                      $$.n = new(NodeType.CreateTableItem, $1.n, NodeAst.TypeInteger64, NodeAst.ConstraintIdentityByDefault, null, null, null, null, null);
+                      $$.n = ColumnFromTypeWord($1.n, $2.s, null);
                     }
                   | any_identifier TIDENTIFIER create_table_field_constraint_list
                     {
-                      RequireSerialTypeWord($2.s);
-                      $$.n = new(NodeType.CreateTableItem, $1.n, NodeAst.TypeInteger64,
-                                 new(NodeType.CreateTableFieldConstraintList, $3.n, NodeAst.ConstraintIdentityByDefault, null, null, null, null, null, null),
-                                 null, null, null, null, null);
+                      $$.n = ColumnFromTypeWord($1.n, $2.s, $3.n);
                     }
                   ;
 
@@ -1771,6 +1822,7 @@ default_expr : int { $$.n = $1.n; $$.s = $1.s; }
              | null { $$.n = $1.n; $$.s = $1.s; }
              | fcall_expr { $$.n = $1.n; $$.s = $1.s; }
              | numeric_literal { $$.n = $1.n; $$.s = $1.s; }
+             | identifier_typed_literal { $$.n = $1.n; $$.s = $1.s; }
 			 ;
 
 field_type : TTYPE_OBJECT_ID { $$.n = NodeAst.TypeObjectId; }
@@ -1866,6 +1918,7 @@ expr       : equals_expr { $$.n = $1.n; }
            | mod_expr { $$.n = $1.n; }
            | concat_expr { $$.n = $1.n; }
            | bitwise_expr { $$.n = $1.n; }
+           | json_op_expr { $$.n = $1.n; }
            | bit_not_expr { $$.n = $1.n; }
            | postfix_cast_expr { $$.n = $1.n; }
            | subscript_expr { $$.n = $1.n; }
@@ -1938,6 +1991,16 @@ between_bound : simple_expr { $$.n = $1.n; }
               | between_bound TBITXOR between_bound { $$.n = new(NodeType.ExprBitXor, $1.n, $3.n, null, null, null, null, null, null); }
               | between_bound TSHIFTLEFT between_bound { $$.n = new(NodeType.ExprShiftLeft, $1.n, $3.n, null, null, null, null, null, null); }
               | between_bound TSHIFTRIGHT between_bound { $$.n = new(NodeType.ExprShiftRight, $1.n, $3.n, null, null, null, null, null, null); }
+              | between_bound TJSONFIELD between_bound { $$.n = NodeAst.FunctionCall("jsonb_object_field", $1.n, $3.n); }
+              | between_bound TJSONFIELDTEXT between_bound { $$.n = NodeAst.FunctionCall("jsonb_object_field_text", $1.n, $3.n); }
+              | between_bound TJSONPATH between_bound { $$.n = NodeAst.FunctionCall("jsonb_path_get", $1.n, $3.n); }
+              | between_bound TJSONPATHTEXT between_bound { $$.n = NodeAst.FunctionCall("jsonb_path_get_text", $1.n, $3.n); }
+              | between_bound TJSONCONTAINS between_bound { $$.n = NodeAst.FunctionCall("jsonb_contains", $1.n, $3.n); }
+              | between_bound TJSONCONTAINEDBY between_bound { $$.n = NodeAst.FunctionCall("jsonb_contained", $1.n, $3.n); }
+              | between_bound TJSONEXISTS between_bound { $$.n = NodeAst.FunctionCall("jsonb_exists", $1.n, $3.n); }
+              | between_bound TJSONEXISTSANY between_bound { $$.n = NodeAst.FunctionCall("jsonb_exists_any", $1.n, $3.n); }
+              | between_bound TJSONEXISTSALL between_bound { $$.n = NodeAst.FunctionCall("jsonb_exists_all", $1.n, $3.n); }
+              | between_bound TJSONDELETEPATH between_bound { $$.n = NodeAst.FunctionCall("jsonb_delete_path", $1.n, $3.n); }
               | TMINUS between_bound %prec UMINUS { $$.n = NodeAst.Negate($2.n); }
               | TREGEXMATCH between_bound %prec UMINUS { $$.n = new(NodeType.ExprBitNot, $2.n, null, null, null, null, null, null, null); }
               | between_bound TCOLONCOLON cast_target_type { $$.n = new(NodeType.ExprCast, $1.n, $3.n, null, null, null, null, null, null); }
@@ -2004,6 +2067,24 @@ mod_expr  : condition TMOD condition { $$.n = NodeAst.ModCall($1.n, $3.n); }
    not a call to concat(). */
 concat_expr : condition TCONCAT condition { $$.n = new(NodeType.ExprConcat, $1.n, $3.n, null, null, null, null, null, null); }
             ;
+
+/* The jsonb operators of PostgreSQL. They group left to right and bind tighter than comparison, IS
+   and IN (see the precedence table), so `doc -> 'a' ->> 'b' = 'x'` is `((doc -> 'a') ->> 'b') = 'x'`. Each one is a call to the function
+   PostgreSQL defines it through (`@>` is jsonb_contains, `?` is jsonb_exists, `#-` is
+   jsonb_delete_path), as `%` is a call to mod(): every walker already handles a call, and a view body
+   renders the call form, which parses back to the same tree. `->` and `->>` take a key or an index
+   and `#>` / `#>>` a path, which the functions tell apart by the operand's type. */
+json_op_expr : condition TJSONFIELD condition { $$.n = NodeAst.FunctionCall("jsonb_object_field", $1.n, $3.n); }
+             | condition TJSONFIELDTEXT condition { $$.n = NodeAst.FunctionCall("jsonb_object_field_text", $1.n, $3.n); }
+             | condition TJSONPATH condition { $$.n = NodeAst.FunctionCall("jsonb_path_get", $1.n, $3.n); }
+             | condition TJSONPATHTEXT condition { $$.n = NodeAst.FunctionCall("jsonb_path_get_text", $1.n, $3.n); }
+             | condition TJSONCONTAINS condition { $$.n = NodeAst.FunctionCall("jsonb_contains", $1.n, $3.n); }
+             | condition TJSONCONTAINEDBY condition { $$.n = NodeAst.FunctionCall("jsonb_contained", $1.n, $3.n); }
+             | condition TJSONEXISTS condition { $$.n = NodeAst.FunctionCall("jsonb_exists", $1.n, $3.n); }
+             | condition TJSONEXISTSANY condition { $$.n = NodeAst.FunctionCall("jsonb_exists_any", $1.n, $3.n); }
+             | condition TJSONEXISTSALL condition { $$.n = NodeAst.FunctionCall("jsonb_exists_all", $1.n, $3.n); }
+             | condition TJSONDELETEPATH condition { $$.n = NodeAst.FunctionCall("jsonb_delete_path", $1.n, $3.n); }
+             ;
 
 /* The binary bitwise operators. `#` is XOR, as in PostgreSQL; `^` is not an operator here, because
    it is power in PostgreSQL and XOR in MySQL. */
@@ -2217,6 +2298,11 @@ group_paren_expr : LPAREN condition RPAREN { $$.n = $2.n; $$.s = $2.s; }
                  ;
 
 simple_expr : any_identifier { $$.n = $1.n; $$.s = $1.s; }
+            /* KEY is reserved (PRIMARY KEY, FOREIGN KEY, FOR NO KEY UPDATE), but jsonb_each names its
+               first column "key", as in PostgreSQL. So inside an expression, and after a dot, the word
+               is a column reference. It stays reserved where a name is declared, which keeps the
+               grammar free of conflicts. */
+            | TKEY { $$.n = new(NodeType.Identifier, null, null, null, null, null, null, null, "key"); }
 			| int { $$.n = $1.n; $$.s = $1.s; }
             | bytes { $$.n = $1.n; $$.s = $1.s; }
             | array_literal { $$.n = $1.n; $$.s = $1.s; }
@@ -2226,7 +2312,13 @@ simple_expr : any_identifier { $$.n = $1.n; $$.s = $1.s; }
             | null { $$.n = $1.n; $$.s = $1.s; }
             | placeholder { $$.n = $1.n; $$.s = $1.s; }
             | numeric_literal { $$.n = $1.n; $$.s = $1.s; }
+            | identifier_typed_literal { $$.n = $1.n; $$.s = $1.s; }
 			;
+
+/* JSONB '{"a": 1}' (also JSON '…'): the PostgreSQL typed literal for a type whose name is a plain
+   identifier. It builds the same ExprCast node as '…'::jsonb, so the text is parsed by the cast. */
+identifier_typed_literal : TIDENTIFIER string { $$.n = new(NodeType.ExprCast, $2.n, TypeFromWord($1.s), null, null, null, null, null, null); }
+                         ;
 
 /* NUMERIC '1.23' is the Spanner typed literal. It builds the ExprCast node that CAST('1.23' AS NUMERIC)
    builds, so the string is parsed exactly by the cast and never passes through a float. */
@@ -2246,6 +2338,8 @@ any_identifier : qualified_identifier { $$.n = $1.n; $$.s = $1.s; }
 
 qualified_identifier : any_identifier TDOT any_identifier
                      { $$.n = new(NodeType.Identifier, null, null, null, null, null, null, null, string.Concat($1.n.yytext, ".", $3.n.yytext)); }
+                     | any_identifier TDOT TKEY
+                     { $$.n = new(NodeType.Identifier, null, null, null, null, null, null, null, string.Concat($1.n.yytext, ".key")); }
                      ;
            
 identifier  : TIDENTIFIER { $$.n = new(NodeType.Identifier, null, null, null, null, null, null, null, $$.s); }

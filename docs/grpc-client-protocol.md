@@ -54,6 +54,7 @@ integers exactly — never renumber or reuse them:
 | `ARRAY`      | 10  | `array_value`       | `ArrayValue { element_type, repeated Value items }` |
 | `UUID`       | 11  | `uuid_value`        | **exactly 16 bytes, big-endian** (high 8 bytes ‖ low 8 bytes) |
 | `NUMERIC`    | 12  | `numeric_value`     | decimal text, for example `"-12.5"` (see below) |
+| `JSONB`      | 13  | `json_value`        | the document's JSON text, for example `{"a": [1, 2.50]}` (see below) |
 
 ### Encoding rules you MUST implement precisely
 
@@ -99,7 +100,21 @@ integers exactly — never renumber or reuse them:
    - A client built before this field existed reads a NUMERIC cell as an unset `oneof`, that is, as
      NULL. Upgrade the client before a table gets a NUMERIC column.
 
-7. **Float32 vs Float64 are separate cases.** Do not widen a `float32_value` into
+7. **JSONB is JSON text.** A `jsonb` cell arrives in `json_value` as the PostgreSQL text form of the
+   document: `{"a": 1, "b": [1, 2]}`, with a space after every `:` and `,`, keys in the stored order
+   (shorter keys first), duplicate keys removed and numbers exact (`12345678901234567890.50` keeps
+   every digit and its scale). Parse it with any JSON reader; read numbers as decimals or text when
+   exact values matter.
+   - On input `json_value` accepts any valid JSON text. Text that is not valid JSON, a `\u0000`
+     escape, a lone surrogate or a number past the PostgreSQL limits fails with `CADB0418`
+     (`INVALID_ARGUMENT`). A document nested deeper than 512 levels fails with `CADB0419`
+     (`INVALID_ARGUMENT`).
+   - A string sent in `string_value` is a STRING. It converts when it is written into a `jsonb`
+     column, and it compares with a `jsonb` value as a document.
+   - A client built before this field existed reads a `jsonb` cell as an unset `oneof`, that is, as
+     NULL, with no error. Upgrade the client before a table gets a `jsonb` column.
+
+8. **Float32 vs Float64 are separate cases.** Do not widen a `float32_value` into
    `float64_value` on the wire; keep the type the column declares.
 
 > **Single mapping point.** Server-side, all of this lives in one converter
@@ -671,7 +686,7 @@ Domain errors are surfaced two ways depending on the call shape:
 
 | gRPC `StatusCode` | Meaning | Example CamusDB codes |
 |-------------------|---------|-----------------------|
-| `INVALID_ARGUMENT` | Bad client input | invalid input, SQL syntax error, invalid AST, unknown column, unknown type, value too long, schema limit exceeded, statement too deeply nested (`CADB0413`), NOT NULL violation, CHECK constraint violation, a C# extension function, trigger or procedure that threw (`CADB0809`, `CADB0818`, `CADB0822`), trigger DDL refusals (`CADB0811`-`CADB0813`, `CADB0816`), extension nesting too deep (`CADB0819`), a statement an extension's SQL session refuses (`CADB0820`), an extension that caught an error from its own SQL (`CADB0823`), an extension or version this node does not load (`CADB0828`), a required extension that is not installed (`CADB0831`) |
+| `INVALID_ARGUMENT` | Bad client input | invalid input, SQL syntax error, invalid AST, unknown column, unknown type, value too long, schema limit exceeded, statement too deeply nested (`CADB0413`), invalid JSON text or a document nested too deep (`CADB0418`, `CADB0419`), NOT NULL violation, CHECK constraint violation, a C# extension function, trigger or procedure that threw (`CADB0809`, `CADB0818`, `CADB0822`), trigger DDL refusals (`CADB0811`-`CADB0813`, `CADB0816`), extension nesting too deep (`CADB0819`), a statement an extension's SQL session refuses (`CADB0820`), an extension that caught an error from its own SQL (`CADB0823`), an extension or version this node does not load (`CADB0828`), a required extension that is not installed (`CADB0831`) |
 | `OUT_OF_RANGE` | A value outside its type's range | NUMERIC out of range, a NUMERIC that does not fit an extension's `decimal` (`CADB0810`) |
 | `NOT_FOUND` | Missing object | database/table/index doesn't exist, unknown key, no running query with the id given to `CANCEL QUERY` (`CADB0551`), unknown trigger on `DROP TRIGGER` (`CADB0815`), unknown procedure on `CALL` (`CADB0821`), extension not installed (`CADB0830`) |
 | `ALREADY_EXISTS` | Duplicate | duplicate unique key, duplicate primary key, database/table already exists, trigger already exists (`CADB0814`), extension already installed (`CADB0829`) |

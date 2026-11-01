@@ -1177,4 +1177,11 @@ public enum NodeType
     /// <para>Appended at the end for the reason given on <see cref="TypeBytesSized"/>.</para>
     /// </summary>
     AlterTableDropIndexIfExists,
+
+    /// <summary>
+    /// The <c>jsonb</c> column type (<c>json</c> is an alias). Both words are plain identifiers in
+    /// the lexer, so they stay usable as names; the parser turns them into this node where a type
+    /// belongs. Appended at the end for the reason given on <see cref="TypeBytesSized"/>.
+    /// </summary>
+    TypeJsonb,
 }

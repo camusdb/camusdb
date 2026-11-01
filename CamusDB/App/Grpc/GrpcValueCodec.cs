@@ -10,6 +10,7 @@ using System.Buffers.Binary;
 using Google.Protobuf;
 using CamusDB.Core;
 using CamusDB.Core.CommandsExecutor.Models;
+using CamusDB.Core.CommandsExecutor.Models.Jsonb;
 
 using CoreColumnType = CamusDB.Core.Catalogs.Models.ColumnType;
 using ProtoValue     = CamusDB.Grpc.Value;
@@ -35,6 +36,10 @@ namespace CamusDB.App.Grpc;
 ///             9 fraction digits round half away from zero, and a value past the range is refused with
 ///             <see cref="CamusDBErrorCodes.NumericValueOutOfRange"/>. An old client that does not know
 ///             the field reads the cell as an unset oneof, that is, as NULL.
+///   Jsonb — the PostgreSQL text form (<c>{"a": 1}</c>) in <c>json_value</c>, so a value carries
+///           its type and every client language can parse it with its own JSON reader. A client
+///           value is parsed as JSON; invalid text is <see cref="CamusDBErrorCodes.InvalidJsonText"/>.
+///           An old client that does not know the field reads the cell as NULL, as for NUMERIC.
 ///   Id  — carried in <c>id_value</c>, not <c>string_value</c>, so <see cref="CoreColumnType.Id"/>
 ///          and <see cref="CoreColumnType.String"/> stay distinct across the wire.
 ///   Array — wraps an <c>ArrayValue</c> that carries the element type so an empty array still
@@ -67,6 +72,7 @@ public static class GrpcValueCodec
             CoreColumnType.Array    => new ProtoValue { ArrayValue = ToProtoArray(cv) },
             CoreColumnType.Uuid     => new ProtoValue { UuidValue = UuidToBytes(cv.UuidHigh, cv.LongValue) },
             CoreColumnType.Numeric  => new ProtoValue { NumericValue = NumericMath.Format(cv.NumericUnscaled) },
+            CoreColumnType.Jsonb    => new ProtoValue { JsonValue = JsonbText.ToText(JsonbDocument.Item(cv.BytesValue)) },
 
             _ => throw new CamusDBException(
                 CamusDBErrorCodes.InvalidInput,
@@ -98,6 +104,7 @@ public static class GrpcValueCodec
             CoreColumnType.Array    => new ProtoValue { ArrayValue = ToProtoArray(in slot) },
             CoreColumnType.Uuid     => new ProtoValue { UuidValue = UuidToBytes(slot.UuidHigh, slot.UuidLow) },
             CoreColumnType.Numeric  => new ProtoValue { NumericValue = NumericMath.Format(slot.NumericUnscaled) },
+            CoreColumnType.Jsonb    => new ProtoValue { JsonValue = JsonbText.ToText(JsonbDocument.Item(slot.AsBytes)) },
 
             _ => throw new CamusDBException(
                 CamusDBErrorCodes.InvalidInput,
@@ -125,6 +132,7 @@ public static class GrpcValueCodec
         ProtoValue.KindOneofCase.ArrayValue   => FromProtoArray(v.ArrayValue),
         ProtoValue.KindOneofCase.UuidValue    => UuidFromBytes(v.UuidValue),
         ProtoValue.KindOneofCase.NumericValue => ColumnValue.FromNumericString(v.NumericValue),
+        ProtoValue.KindOneofCase.JsonValue    => ColumnValue.FromJsonText(v.JsonValue),
         ProtoValue.KindOneofCase.None         => ColumnValue.Null,
 
         _ => throw new CamusDBException(

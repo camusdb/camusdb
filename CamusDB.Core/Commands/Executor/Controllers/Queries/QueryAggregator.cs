@@ -949,7 +949,7 @@ internal sealed class QueryAggregator
         public ExtensionAggregateCall(NodeAst funcCall)
         {
             CalledName = funcCall.leftAst!.yytext!;
-            Aggregate = AggregateFunctionCatalog.ResolveExtension(CalledName);
+            Aggregate = AggregateFunctionCatalog.ResolveStateAggregate(CalledName);
 
             List<NodeAst> arguments = [];
 

@@ -261,26 +261,111 @@ internal partial class sqlParser
         return new NodeAst(NodeType.Call, name, arguments, null, null, null, null, null, null);
     }
 
+    /// <summary>The text an add-index node carries when the index is a GIN (inverted) index.</summary>
+    internal const string GinIndexMethod = "gin";
+
     /// <summary>
-    /// Validates the word written where a column's type belongs when that word is a plain
-    /// identifier rather than a type token. Only the serial shorthands are accepted there.
+    /// Checks <c>USING &lt;method&gt;</c> of CREATE INDEX and returns the node text: <see cref="GinIndexMethod"/>
+    /// for <c>gin</c>, null for <c>btree</c> (the ordered index every other CREATE INDEX builds). An
+    /// operator class is accepted only on a GIN index (see <see cref="OperatorClassColumn"/>).
+    /// </summary>
+    private static string? IndexMethod(string? usingWord, string? method, NodeAst columns)
+    {
+        if (!string.Equals(usingWord, "using", StringComparison.OrdinalIgnoreCase))
+            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Syntax error: expected USING, got '{usingWord}'");
+
+        if (string.Equals(method, "gin", StringComparison.OrdinalIgnoreCase))
+            return GinIndexMethod;
+
+        if (string.Equals(method, "btree", StringComparison.OrdinalIgnoreCase))
+        {
+            if (HasOperatorClass(columns))
+                throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "an operator class is only supported on a GIN index");
+            return null;
+        }
+
+        throw new CamusDBException(CamusDBErrorCodes.FeatureNotSupported,
+            $"index method '{method}' is not supported; use btree (the default) or gin");
+    }
+
+    /// <summary>The word before INDEX in CREATE INVERTED INDEX and the inline INVERTED INDEX form.</summary>
+    private static string InvertedIndexWord(string? word) =>
+        string.Equals(word, "inverted", StringComparison.OrdinalIgnoreCase)
+            ? GinIndexMethod
+            : throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Syntax error: unexpected '{word}' before INDEX");
+
+    /// <summary>
+    /// An index column with an operator class (<c>doc jsonb_path_ops</c>). The two jsonb classes are
+    /// accepted for script compatibility and build the same GIN index, so the class is not kept.
+    /// </summary>
+    private static NodeAst OperatorClassColumn(NodeAst column, string? operatorClass)
+    {
+        if (!string.Equals(operatorClass, "jsonb_ops", StringComparison.OrdinalIgnoreCase) &&
+            !string.Equals(operatorClass, "jsonb_path_ops", StringComparison.OrdinalIgnoreCase))
+            throw new CamusDBException(CamusDBErrorCodes.FeatureNotSupported,
+                $"operator class '{operatorClass}' is not supported; use jsonb_ops or jsonb_path_ops");
+
+        return new NodeAst(NodeType.IndexIdentifierAsc, column, null, null, null, null, null, null, "opclass");
+    }
+
+    private static bool HasOperatorClass(NodeAst? columns)
+    {
+        NodeAst? node = columns;
+        while (node is not null)
+        {
+            if (node.nodeType == NodeType.IndexIdentifierList)
+            {
+                if (HasOperatorClass(node.rightAst))
+                    return true;
+                node = node.leftAst;
+                continue;
+            }
+
+            return node.nodeType == NodeType.IndexIdentifierAsc && node.yytext == "opclass";
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Builds a column definition whose type is written as a plain identifier rather than a type
+    /// token: SERIAL / BIGSERIAL (int64 plus an identity) or JSONB / JSON.
     /// </summary>
     /// <remarks>
-    /// SERIAL is matched as an identifier so the word stays usable as a table and column name,
-    /// which means every mistyped type name — <c>varchar</c>, <c>text</c>, <c>int</c> — also lands
-    /// here. The message therefore names the shorthand rather than only rejecting the word, because
-    /// the parser cannot tell the two mistakes apart.
+    /// The words are identifiers so they stay usable as table and column names, which means every
+    /// mistyped type name — <c>varchar</c>, <c>text</c>, <c>int</c> — also lands here. The message
+    /// therefore names the accepted words rather than only rejecting the word, because the parser
+    /// cannot tell the two mistakes apart.
     /// </remarks>
-    private static void RequireSerialTypeWord(string? word)
+    private static NodeAst ColumnFromTypeWord(NodeAst name, string? word, NodeAst? constraints)
     {
         if (string.Equals(word, "serial", StringComparison.OrdinalIgnoreCase) ||
             string.Equals(word, "bigserial", StringComparison.OrdinalIgnoreCase))
-            return;
+        {
+            NodeAst identity = constraints is null
+                ? NodeAst.ConstraintIdentityByDefault
+                : new(NodeType.CreateTableFieldConstraintList, constraints, NodeAst.ConstraintIdentityByDefault, null, null, null, null, null, null);
+
+            return new(NodeType.CreateTableItem, name, NodeAst.TypeInteger64, identity, null, null, null, null, null);
+        }
+
+        return new(NodeType.CreateTableItem, name, TypeFromWord(word), constraints, null, null, null, null, null);
+    }
+
+    /// <summary>
+    /// The type node for a type name written as a plain identifier: <c>jsonb</c> or its alias
+    /// <c>json</c>. Used by column definitions, ADD COLUMN and the <c>JSONB '…'</c> typed literal.
+    /// </summary>
+    private static NodeAst TypeFromWord(string? word)
+    {
+        if (string.Equals(word, "jsonb", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(word, "json", StringComparison.OrdinalIgnoreCase))
+            return NodeAst.TypeJsonb;
 
         throw new CamusDBException(
             CamusDBErrorCodes.InvalidInput,
-            $"'{word}' is not a column type. Use one of the declared types, or SERIAL for an " +
-            "auto-numbered int64 column.");
+            $"'{word}' is not a column type. Use one of the declared types, JSONB for a JSON document, " +
+            "or SERIAL for an auto-numbered int64 column.");
     }
 
     /// <summary>

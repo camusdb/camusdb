@@ -464,7 +464,7 @@ internal sealed class JoinLeafScanner
 
         ColumnValue[] arguments = TableFunctionEvaluation.EvaluateArguments(call, plan.Ticket.Parameters);
 
-        RowLayout layout = RowLayout.ForColumns([call.ColumnName]);
+        RowLayout layout = RowLayout.ForColumns(call.ColumnNames);
 
         bool qualifyForFilter = executionFilter is not null
                                 && plan.Ticket.RowNameResolver is { } resolver
@@ -478,7 +478,7 @@ internal sealed class JoinLeafScanner
         // The foreach disposes the function's enumerator when the consumer stops early (a LIMIT, a
         // cancel, an error above this scan), which is what runs a finally block in an extension's
         // iterator method.
-        foreach (ColumnValue value in function.Generate(arguments))
+        foreach (ColumnValue[] values in function.GenerateRows(arguments))
         {
             if (--untilCheck == 0)
             {
@@ -487,7 +487,7 @@ internal sealed class JoinLeafScanner
                 ct.ThrowIfCancellationRequested();
             }
 
-            QueryRow row = new(default, layout, [value]);
+            QueryRow row = new(default, layout, values);
 
             if (executionFilter is not null)
             {

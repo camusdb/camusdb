@@ -37,6 +37,11 @@ internal static class ConcatAndBitwiseOperators
         if (left.Type == ColumnType.Null || right.Type == ColumnType.Null)
             return ColumnValue.Null;
 
+        // A document on either side makes it the jsonb concatenation (a text operand parses as a
+        // document), as in PostgreSQL, where `doc || '{"a": 1}'` resolves the literal to jsonb.
+        if (JsonbScalarFunctions.IsJsonbOperation(left, right))
+            return JsonbScalarFunctions.Concat(left, right);
+
         if (left.Type == ColumnType.Array || right.Type == ColumnType.Array)
             throw new CamusDBException(
                 CamusDBErrorCodes.InvalidInput,
@@ -166,6 +171,9 @@ internal static class ConcatAndBitwiseOperators
         switch (op)
         {
             case NodeType.ExprConcat:
+                if (left == ColumnType.Jsonb || right == ColumnType.Jsonb)
+                    return ColumnType.Jsonb;
+
                 if (IsOrNull(left, ColumnType.Bytes) && IsOrNull(right, ColumnType.Bytes)
                     && (left == ColumnType.Bytes || right == ColumnType.Bytes))
                     return ColumnType.Bytes;

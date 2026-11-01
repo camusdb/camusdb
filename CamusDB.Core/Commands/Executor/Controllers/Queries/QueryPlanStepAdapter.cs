@@ -88,6 +88,10 @@ internal static class QueryPlanStepAdapter
                     shape.Append(inList.Index.KvId);
                     break;
 
+                case GinIndexScanNode gin:
+                    shape.Append(gin.Index.KvId);
+                    break;
+
                 case SemiJoinNode semi:
                     shape.Append(semi.InnerIndex?.KvId);
                     break;
@@ -200,6 +204,11 @@ internal static class QueryPlanStepAdapter
 
             case IndexInListScanNode:
                 steps.Add(new QueryPlanStep(QueryPlanStepType.InListScanFromIndex));
+                stepNodes.Add(node);
+                return;
+
+            case GinIndexScanNode:
+                steps.Add(new QueryPlanStep(QueryPlanStepType.GinScanFromIndex));
                 stepNodes.Add(node);
                 return;
 

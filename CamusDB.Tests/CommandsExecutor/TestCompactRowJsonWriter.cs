@@ -290,6 +290,102 @@ public sealed class TestCompactRowJsonWriter
         Assert.AreEqual(OldJson([dictRow], schema), NewJson([slotRow], schema));
     }
 
+    /// <summary>
+    /// <c>jsonbAsText</c> writes each jsonb cell as a string that holds its text, on the dictionary,
+    /// the <see cref="QueryRow"/> and the slot path alike. A document that is JSON null becomes the
+    /// string <c>"null"</c>, so it no longer looks like SQL NULL. Without the option the paths keep the
+    /// native JSON form.
+    /// </summary>
+    [Test]
+    public void JsonbAsText_WritesTheDocumentText_OnEveryRowPath()
+    {
+        DerivedColumnSchema[] schema =
+        [
+            new("obj",  ColumnType.Jsonb),
+            new("jnul", ColumnType.Jsonb),
+            new("str",  ColumnType.Jsonb),
+            new("nul",  ColumnType.Jsonb),
+        ];
+        RowLayout layout = new(schema.Select(c => c.Name));
+
+        ColumnValue[] values =
+        [
+            ColumnValue.FromJsonText("{\"b\":1,   \"a\":[1.50, \"x\\\"y\"]}"),
+            ColumnValue.FromJsonText("null"),
+            ColumnValue.FromJsonText("\"abc\""),
+            ColumnValue.Null,
+        ];
+
+        QueryResultRow[] rows =
+        [
+            DictRow(schema, values),
+            QueryRowBacked(layout, schema, values),
+            SlotRowBacked(layout, schema, values),
+        ];
+
+        foreach (QueryResultRow row in rows)
+        {
+            string text = JsonSerializer.Serialize(new PositionalRowSet([row], schema, jsonbAsText: true), Options);
+            using (JsonDocument parsed = JsonDocument.Parse(text))
+            {
+                JsonElement cells = parsed.RootElement[0];
+                Assert.AreEqual("{\"a\": [1.50, \"x\\\"y\"], \"b\": 1}", cells[0].GetString(), text);
+                Assert.AreEqual("null", cells[1].GetString(), text);
+                Assert.AreEqual("\"abc\"", cells[2].GetString(), text);
+                Assert.AreEqual(JsonValueKind.Null, cells[3].ValueKind, text);
+            }
+
+            string native = JsonSerializer.Serialize(new PositionalRowSet([row], schema), Options);
+            using (JsonDocument parsed = JsonDocument.Parse(native))
+            {
+                JsonElement cells = parsed.RootElement[0];
+                Assert.AreEqual(JsonValueKind.Object, cells[0].ValueKind, native);
+                Assert.AreEqual("1.50", cells[0].GetProperty("a")[0].GetRawText(), native);
+                Assert.AreEqual(JsonValueKind.Null, cells[1].ValueKind, native);
+                Assert.AreEqual("abc", cells[2].GetString(), native);
+                Assert.AreEqual(JsonValueKind.Null, cells[3].ValueKind, native);
+            }
+        }
+    }
+
+    /// <summary>
+    /// ASP.NET Core MVC writes JSON results with a MaxDepth of 32, and a document can be 512 levels
+    /// deep. A deep document in the native form must still serialize, on every row path, and a shallow
+    /// one next to it must keep its exact tokens.
+    /// </summary>
+    [Test]
+    public void DeepJsonbDocument_SerializesUnderTheMvcDepthLimit()
+    {
+        const int depth = 300;
+        string deep = new string('[', depth) + "{\"n\": 1.50}" + new string(']', depth);
+
+        DerivedColumnSchema[] schema = [new("deep", ColumnType.Jsonb), new("flat", ColumnType.Jsonb)];
+        RowLayout layout = new(schema.Select(c => c.Name));
+        ColumnValue[] values = [ColumnValue.FromJsonText(deep), ColumnValue.FromJsonText("{\"a\": [1, 2.50]}")];
+
+        JsonSerializerOptions mvc = new(JsonSerializerDefaults.Web) { MaxDepth = 32 };
+
+        QueryResultRow[] rows =
+        [
+            DictRow(schema, values),
+            QueryRowBacked(layout, schema, values),
+            SlotRowBacked(layout, schema, values),
+        ];
+
+        foreach (QueryResultRow row in rows)
+        {
+            string json = JsonSerializer.Serialize(new PositionalRowSet([row], schema), mvc);
+
+            using JsonDocument parsed = JsonDocument.Parse(json, new JsonDocumentOptions { MaxDepth = 1000 });
+            JsonElement cell = parsed.RootElement[0][0];
+            for (int i = 0; i < depth; i++)
+                cell = cell[0];
+
+            Assert.AreEqual("1.50", cell.GetProperty("n").GetRawText());
+            Assert.AreEqual("2.50", parsed.RootElement[0][1].GetProperty("a")[1].GetRawText());
+        }
+    }
+
     [Test]
     public void SlotBackedRow_StaysUnmaterialized_AfterSerialization()
     {

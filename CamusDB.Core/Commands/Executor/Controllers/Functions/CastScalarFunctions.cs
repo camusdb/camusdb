@@ -9,6 +9,7 @@
 using System.Globalization;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
+using CamusDB.Core.CommandsExecutor.Models.Jsonb;
 using CamusDB.Core.SQLParser;
 using CamusDB.Core.Util.ObjectIds;
 using System.Buffers.Text;
@@ -118,6 +119,7 @@ internal static class CastScalarFunctions
             ColumnType.Bytes     => CastToBytes(castName, value),
             ColumnType.Uuid      => CastToUuid(castName, value),
             ColumnType.Numeric   => CastToNumeric(castName, value),
+            ColumnType.Jsonb     => CastToJsonb(castName, value),
             _ => throw UnknownTargetType(castName, targetType.ToString()),
         };
     }
@@ -200,6 +202,9 @@ internal static class CastScalarFunctions
             (ColumnType.String,    ColumnType.Numeric)  => CastToNumeric("coerce", value),
             (ColumnType.Numeric,   ColumnType.Float64)  => CastToFloat64("coerce", value),
             (ColumnType.Numeric,   ColumnType.Float32)  => CastToFloat32("coerce", value),
+            // A jsonb column accepts JSON text, as PostgreSQL accepts a string literal or a text
+            // parameter there; text that is not a document is InvalidJsonText.
+            (ColumnType.String,    ColumnType.Jsonb)    => CastToJsonb("coerce", value),
             _ => value,
         };
     }
@@ -219,6 +224,7 @@ internal static class CastScalarFunctions
             NodeType.TypeBytes     => ColumnType.Bytes,
             NodeType.TypeUuid      => ColumnType.Uuid,
             NodeType.TypeNumeric   => ColumnType.Numeric,
+            NodeType.TypeJsonb     => ColumnType.Jsonb,
             NodeType.TypeStringSized => ColumnType.String,
             NodeType.TypeBytesSized  => ColumnType.Bytes,
             NodeType.Identifier    => ResolveIdentifierTargetType(castName, targetTypeAst.yytext!),
@@ -235,6 +241,7 @@ internal static class CastScalarFunctions
             "char" or "varchar" or "text" => ColumnType.String,
             "double" => ColumnType.Float64,
             "uuid" or "guid" => ColumnType.Uuid,
+            "jsonb" or "json" => ColumnType.Jsonb,
             _ => throw UnknownTargetType(castName, identifier),
         };
     }
@@ -259,6 +266,7 @@ internal static class CastScalarFunctions
             ColumnType.Bool => new ColumnValue(ColumnType.Integer64, value.BoolValue ? 1 : 0),
             ColumnType.String => FromStringToInt64(castName, value.StrValue!),
             ColumnType.Numeric => FromNumericToInt64(castName, value),
+            ColumnType.Jsonb => FromNumericToInt64(castName, JsonbScalarToNumeric(castName, value, "bigint")),
             _ => throw InvalidConversion(castName, value.Type, ColumnType.Integer64),
         };
     }
@@ -272,6 +280,7 @@ internal static class CastScalarFunctions
             ColumnType.Bool => new ColumnValue(ColumnType.Float64, value.BoolValue ? 1.0 : 0.0),
             ColumnType.String => FromStringToFloat64(castName, value.StrValue!),
             ColumnType.Numeric => new ColumnValue(ColumnType.Float64, NumericMath.ToDouble(value.NumericUnscaled)),
+            ColumnType.Jsonb => new ColumnValue(ColumnType.Float64, JsonbScalarNumber(castName, value, "double precision").ToDouble()),
             _ => throw InvalidConversion(castName, value.Type, ColumnType.Float64),
         };
     }
@@ -282,6 +291,7 @@ internal static class CastScalarFunctions
         {
             ColumnType.Bool => value,
             ColumnType.String => FromStringToBool(castName, value.StrValue!),
+            ColumnType.Jsonb => JsonbScalarToBool(castName, value),
             _ => throw InvalidConversion(castName, value.Type, ColumnType.Bool),
         };
     }
@@ -319,6 +329,9 @@ internal static class CastScalarFunctions
         {
             case ColumnType.Numeric:
                 return value;
+
+            case ColumnType.Jsonb:
+                return JsonbScalarToNumeric(castName, value, "numeric");
 
             case ColumnType.Integer64:
                 return ColumnValue.FromNumeric(NumericMath.FromInt64(value.LongValue));
@@ -638,6 +651,56 @@ internal static class CastScalarFunctions
         }
 
         return true;
+    }
+
+    /// <summary>
+    /// The cast to <c>jsonb</c>: only text parses into a document, as in PostgreSQL, where a number or
+    /// a boolean becomes a document through <c>to_jsonb</c>, not through a cast.
+    /// </summary>
+    private static ColumnValue CastToJsonb(string castName, ColumnValue value) => value.Type switch
+    {
+        ColumnType.Jsonb => value,
+        ColumnType.String => ColumnValue.FromJsonText(value.StrValue!),
+        _ => throw new CamusDBException(
+            CamusDBErrorCodes.InvalidInput,
+            $"Function '{castName}' cannot convert {value.Type} to jsonb; use to_jsonb(...) to build a document from a value"),
+    };
+
+    /// <summary>
+    /// The number of a scalar jsonb document, for the PostgreSQL casts <c>jsonb::numeric</c>,
+    /// <c>jsonb::bigint</c> and <c>jsonb::float8</c>. Any other kind is refused with the PostgreSQL
+    /// wording ("cannot cast jsonb string to type numeric").
+    /// </summary>
+    private static JsonbNumber JsonbScalarNumber(string castName, ColumnValue value, string targetName)
+    {
+        ReadOnlySpan<byte> item = JsonbDocument.Item(value.BytesValue);
+        JsonbKind kind = JsonbDocument.Kind(item);
+        if (kind != JsonbKind.Number)
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInput,
+                $"Function '{castName}' cannot cast jsonb {JsonbDocument.TypeName(kind)} to type {targetName}");
+
+        int pos = 0;
+        return JsonbCbor.ReadNumber(item, ref pos);
+    }
+
+    private static ColumnValue JsonbScalarToNumeric(string castName, ColumnValue value, string targetName)
+    {
+        string text = JsonbScalarNumber(castName, value, targetName).ToString();
+        return ToNumeric(castName, text, NumericMath.TryParse(text, out Int128 parsed), parsed);
+    }
+
+    private static ColumnValue JsonbScalarToBool(string castName, ColumnValue value)
+    {
+        ReadOnlySpan<byte> item = JsonbDocument.Item(value.BytesValue);
+        JsonbKind kind = JsonbDocument.Kind(item);
+        if (kind != JsonbKind.Boolean)
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInput,
+                $"Function '{castName}' cannot cast jsonb {JsonbDocument.TypeName(kind)} to type boolean");
+
+        int pos = 0;
+        return ColumnValue.FromBool(JsonbCbor.ReadBoolean(item, ref pos));
     }
 
     private static CamusDBException UnknownTargetType(string castName, string targetType)

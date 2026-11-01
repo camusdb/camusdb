@@ -439,7 +439,8 @@ internal sealed class DdlStatementDispatcher
                     bool sqlAddIndex = alterIndexTicket.Operation is
                         AlterIndexOperation.AddIndex or
                         AlterIndexOperation.AddUniqueIndex or
-                        AlterIndexOperation.AddPrimaryKey;
+                        AlterIndexOperation.AddPrimaryKey or
+                        AlterIndexOperation.AddInvertedIndex;
 
                     if (context.IsClusterMode && sqlAddIndex)
                     {
@@ -450,7 +451,7 @@ internal sealed class DdlStatementDispatcher
                     // Both cluster (non-add) and standalone paths require the two-phase DDL sequence
                     // so Phase 2 (ReplicateIndexChangeAsync) persists the schema change across
                     // close/reopen. ExecuteDdlInTransaction is single-phase and skips that step.
-                    bool indexExistedBefore = table.Indexes.ContainsKey(alterIndexTicket.IndexName);
+                    bool indexExistedBefore = table.AllIndexes.ContainsKey(alterIndexTicket.IndexName);
                     bool compensateOnAbort = sqlAddIndex && !indexExistedBefore;
                     {
                         bool ok = await schemaDdl.ExecuteClusteredIndexDdlAsync(

@@ -411,6 +411,12 @@ public static class RowEncoder
                 Serializator.WriteBytesPayload(buffer, columnValue.BytesValue ?? [], ref pointer);
                 break;
 
+            case ColumnType.Jsonb:
+                // The jsonb cell, in the length-prefixed layout of Bytes under its own tag.
+                Serializator.WriteType(buffer, SerializatorTypes.TypeJsonb, ref pointer);
+                Serializator.WriteBytesPayload(buffer, columnValue.BytesValue ?? [], ref pointer);
+                break;
+
             case ColumnType.Uuid:
                 Serializator.WriteType(buffer, SerializatorTypes.TypeUuid, ref pointer);
                 Serializator.WriteUuid(buffer, columnValue.UuidHigh, columnValue.LongValue, ref pointer);
@@ -466,7 +472,7 @@ public static class RowEncoder
             SerializatorTypeSizes.TypeBool,
         ColumnType.Date or ColumnType.DateTime =>
             SerializatorTypeSizes.TypeInteger8 + SerializatorTypeSizes.TypeInteger64,
-        ColumnType.Bytes =>
+        ColumnType.Bytes or ColumnType.Jsonb =>
             SerializatorTypeSizes.TypeInteger8 + SerializatorTypeSizes.TypeInteger32
             + (columnValue.BytesValue?.Length ?? 0),
         ColumnType.Uuid or ColumnType.Numeric =>
@@ -1254,6 +1260,19 @@ public static class RowEncoder
                 };
             }
 
+            case ColumnType.Jsonb:
+            {
+                int t = Serializator.ReadType(data, ref pointer);
+                return t switch
+                {
+                    SerializatorTypes.TypeJsonb =>
+                        ColumnValue.FromJsonbCell(Serializator.ReadBytesPayload(data, ref pointer)),
+                    SerializatorTypes.TypeNull =>
+                        ColumnValue.Null,
+                    _ => throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, t.ToString())
+                };
+            }
+
             case ColumnType.Uuid:
             {
                 int t = Serializator.ReadType(data, ref pointer);
@@ -1387,6 +1406,16 @@ public static class RowEncoder
             {
                 int t = Serializator.ReadType(data, ref pointer);
                 if (t == SerializatorTypes.TypeBytes)
+                    Serializator.SkipLengthPrefixedPayload(data, ref pointer);
+                else if (t != SerializatorTypes.TypeNull)
+                    throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, t.ToString());
+                break;
+            }
+
+            case ColumnType.Jsonb:
+            {
+                int t = Serializator.ReadType(data, ref pointer);
+                if (t == SerializatorTypes.TypeJsonb)
                     Serializator.SkipLengthPrefixedPayload(data, ref pointer);
                 else if (t != SerializatorTypes.TypeNull)
                     throw new CamusDBException(CamusDBErrorCodes.SystemSpaceCorrupt, t.ToString());

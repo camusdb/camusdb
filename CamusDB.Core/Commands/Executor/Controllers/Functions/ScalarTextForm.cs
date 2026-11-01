@@ -31,6 +31,7 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Functions;
 ///   <item><description>Float64 and Float32 — the shortest text that parses back to the same value
 ///   at that precision.</description></item>
 ///   <item><description>Uuid — lowercase hyphenated; Numeric — the canonical decimal text.</description></item>
+///   <item><description>Jsonb — the PostgreSQL <c>jsonb_out</c> text (<c>{"a": 1}</c>).</description></item>
 /// </list>
 ///
 /// <para>An array has no text form. <see cref="TryFormat"/> returns false for it, and each caller
@@ -82,6 +83,10 @@ internal static class ScalarTextForm
 
             case ColumnType.Numeric:
                 text = value.NumericValue!;
+                return true;
+
+            case ColumnType.Jsonb:
+                text = value.JsonValue!;
                 return true;
 
             default:

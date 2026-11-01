@@ -39,6 +39,14 @@ public sealed class ColumnSchemaDto
     public ColumnType? ElementType { get; set; }
 
     /// <summary>
+    /// True on a jsonb column whose cells are JSON strings that hold the text form of each document,
+    /// because the request set <c>jsonbAsText</c>. Omitted otherwise, so a column keeps its exact
+    /// shape for a client that did not ask. Clients read this exact name, so it must not be renamed.
+    /// </summary>
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public bool? JsonbAsText { get; set; }
+
+    /// <summary>
     /// Builds the response column list for <paramref name="schema"/>, resolving the element type of
     /// each array column.
     ///
@@ -53,7 +61,8 @@ public sealed class ColumnSchemaDto
     /// first typed cell, so a result with no such column costs nothing extra.</para>
     /// </summary>
     /// <param name="rows">The rows the response carries, or the rows already pulled for a stream; may be empty.</param>
-    public static List<ColumnSchemaDto> FromSchema(IReadOnlyList<DerivedColumnSchema> schema, IReadOnlyList<QueryResultRow>? rows)
+    /// <param name="jsonbAsText">True when the rows carry jsonb cells in the text form; each jsonb column is then marked.</param>
+    public static List<ColumnSchemaDto> FromSchema(IReadOnlyList<DerivedColumnSchema> schema, IReadOnlyList<QueryResultRow>? rows, bool jsonbAsText = false)
     {
         List<ColumnSchemaDto> dtos = new(schema.Count);
 
@@ -63,6 +72,8 @@ public sealed class ColumnSchemaDto
 
             if (col.Type == ColumnType.Array)
                 dto.ElementType = KnownElementType(col.ElementType) ?? FirstCellElementType(col, rows);
+            else if (col.Type == ColumnType.Jsonb && jsonbAsText)
+                dto.JsonbAsText = true;
 
             dtos.Add(dto);
         }

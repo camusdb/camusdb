@@ -136,12 +136,12 @@ public sealed class ExecuteSQLController : CommandsController
     /// Leaves both fields null — and so out of the JSON — when the statement had no RETURNING list or
     /// the request asked for the count only.
     /// </summary>
-    private static ExecuteNonSQLQueryResponse WithReturning(ExecuteNonSQLQueryResponse response, ExecuteNonSQLResult result)
+    private static ExecuteNonSQLQueryResponse WithReturning(ExecuteNonSQLQueryResponse response, ExecuteNonSQLResult result, bool jsonbAsText)
     {
         if (result.ReturningColumns is { } columns && result.ReturningRows is { } rows)
         {
-            response.Columns = ColumnSchemaDto.FromSchema(columns, rows);
-            response.ReturningRows = new PositionalRowSet(rows, columns);
+            response.Columns = ColumnSchemaDto.FromSchema(columns, rows, jsonbAsText);
+            response.ReturningRows = new PositionalRowSet(rows, columns, jsonbAsText);
         }
 
         return response;
@@ -246,8 +246,8 @@ public sealed class ExecuteSQLController : CommandsController
                 );
                 (_, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(ticket, schemaOut: schemaHolder).ConfigureAwait(false);
                 List<QueryResultRow> rows = await BufferedResultCollector.CollectAsync(cursor, options).ConfigureAwait(false);
-                PositionalRowSet rowSet = new(rows, schemaHolder.Schema);
-                return new JsonResult(new ExecuteSQLQueryResponse("ok", rowSet.Count, ColumnSchemaDto.FromSchema(schemaHolder.Schema, rows), rowSet) { ServerTimeMs = stopwatch.Elapsed.TotalMilliseconds });
+                PositionalRowSet rowSet = new(rows, schemaHolder.Schema, request.JsonbAsText);
+                return new JsonResult(new ExecuteSQLQueryResponse("ok", rowSet.Count, ColumnSchemaDto.FromSchema(schemaHolder.Schema, rows, request.JsonbAsText), rowSet) { ServerTimeMs = stopwatch.Elapsed.TotalMilliseconds });
             }
 
             // Explicit (caller-supplied) transaction — client handles retry and lifecycle. Advice is
@@ -273,8 +273,8 @@ public sealed class ExecuteSQLController : CommandsController
                     );
                     (DatabaseDescriptor database, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(ticket, schemaOut: schemaHolder).ConfigureAwait(false);
                     List<QueryResultRow> rows = await BufferedResultCollector.CollectAsync(cursor, options).ConfigureAwait(false);
-                    PositionalRowSet rowSet = new(rows, schemaHolder.Schema);
-                    ExecuteSQLQueryResponse txnResponse = new("ok", rowSet.Count, ColumnSchemaDto.FromSchema(schemaHolder.Schema, rows), rowSet) { ServerTimeMs = stopwatch.Elapsed.TotalMilliseconds };
+                    PositionalRowSet rowSet = new(rows, schemaHolder.Schema, request.JsonbAsText);
+                    ExecuteSQLQueryResponse txnResponse = new("ok", rowSet.Count, ColumnSchemaDto.FromSchema(schemaHolder.Schema, rows, request.JsonbAsText), rowSet) { ServerTimeMs = stopwatch.Elapsed.TotalMilliseconds };
                     txnResponse.Routing = ResolveRoutingDto(database, txnCollector);
                     return new JsonResult(txnResponse);
                 }
@@ -328,7 +328,7 @@ public sealed class ExecuteSQLController : CommandsController
                     List<QueryResultRow> rows = await BufferedResultCollector.CollectAsync(cursor, options).ConfigureAwait(false);
                     causalToken = await transactions.CommitOrReleaseAsync(db, tx, ct).ConfigureAwait(false);
                     resultRows = rows;
-                    resultColumns = ColumnSchemaDto.FromSchema(schemaHolder.Schema, rows);
+                    resultColumns = ColumnSchemaDto.FromSchema(schemaHolder.Schema, rows, request.JsonbAsText);
                     resultSchema = schemaHolder.Schema;
                     routingDb = db;
                 }
@@ -345,7 +345,7 @@ public sealed class ExecuteSQLController : CommandsController
             else
                 await AutocommitBody(CancellationToken.None).ConfigureAwait(false);
 
-            PositionalRowSet resultSet = new(resultRows, resultSchema);
+            PositionalRowSet resultSet = new(resultRows, resultSchema, request.JsonbAsText);
             ExecuteSQLQueryResponse queryResponse = new("ok", resultSet.Count, resultColumns, resultSet)
             {
                 CausalToken = causalToken.IsNull() ? null : causalToken
@@ -442,7 +442,7 @@ public sealed class ExecuteSQLController : CommandsController
         }
 
         await using Utf8JsonWriter jsonWriter = new(Response.BodyWriter, new JsonWriterOptions { SkipValidation = true });
-        QueryStreamNdjsonWriter ndjson = new(jsonWriter, Response.BodyWriter);
+        QueryStreamNdjsonWriter ndjson = new(jsonWriter, Response.BodyWriter, request.JsonbAsText);
 
         int total = 0;
         Kommander.Time.HLCTimestamp causalToken = default;
@@ -791,7 +791,7 @@ public sealed class ExecuteSQLController : CommandsController
                         Warning = result.Warning,
                         ServerTimeMs = stopwatch.Elapsed.TotalMilliseconds,
                         Routing = ResolveRoutingDto(result.Database, txnCollector),
-                    }, result));
+                    }, result, request.JsonbAsText));
                 }
                 catch (Exception)
                 {
@@ -856,7 +856,7 @@ public sealed class ExecuteSQLController : CommandsController
                 CausalToken = causalToken2.IsNull() ? null : causalToken2,
                 Routing = ResolveRoutingDto(routingDb2, routingCollector2),
                 ServerTimeMs = stopwatch.Elapsed.TotalMilliseconds
-            }, committed));
+            }, committed, request.JsonbAsText));
         }
         catch (CamusDBException e)
         {

@@ -352,6 +352,7 @@ internal static class SchemaChangeEntryFactory
                 ConstraintType.PrimaryKey => IndexType.Unique,
                 ConstraintType.IndexUnique => IndexType.Unique,
                 ConstraintType.IndexMulti => IndexType.Multi,
+                ConstraintType.IndexInverted => IndexType.Inverted,
                 _ => throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Unknown constraint: " + constraint.Type)
             };
 

@@ -6,7 +6,7 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <ServerGarbageCollection>true</ServerGarbageCollection>
-    <Version>0.16.4</Version>
+    <Version>0.17.0</Version>
     <InvariantGlobalization>true</InvariantGlobalization>
     <NoWarn>$(NoWarn);NU1903</NoWarn>
   </PropertyGroup>
@@ -24,7 +24,7 @@
     <PackageOutputPath>$(MSBuildThisFileDirectory)..\artifacts\nupkg</PackageOutputPath>
 
     <Authors>CamusDB</Authors>
-    <Description>CamusDB — a NewSQL relational database server. Install it as a global tool and run `camusdb` to start a standalone node.</Description>
+    <Description>CamusDB — a SQL distributed database. Install it as a global tool and run `camusdb` to start a standalone node.</Description>
     <PackageTags>database;sql;newsql;server;kv</PackageTags>
     <PackageReadmeFile>README.md</PackageReadmeFile>
     <PackageLicenseFile>LICENSE.txt</PackageLicenseFile>

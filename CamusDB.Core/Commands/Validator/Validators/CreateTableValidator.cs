@@ -9,6 +9,7 @@
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
+using CamusDB.Core.Storage.Kv;
 
 namespace CamusDB.Core.CommandsValidator.Validators;
 
@@ -71,6 +72,25 @@ internal sealed class CreateTableValidator : ValidatorBase
 
             if (constraint.Type == ConstraintType.PrimaryKey)
                 havePrimaryKey = true;
+
+            bool inverted = constraint.Type == ConstraintType.IndexInverted;
+            if (inverted && (constraint.Columns.Length != 1 || constraint.IncludeColumns.Length > 0))
+                throw new CamusDBException(CamusDBErrorCodes.InvalidInput,
+                    $"GIN index '{constraint.Name}' must have exactly one jsonb column and no INCLUDE columns");
+
+            foreach (ColumnIndexInfo keyColumn in constraint.Columns)
+            {
+                ColumnInfo? declared = Array.Find(ticket.Columns, c => string.Equals(c.Name, keyColumn.Name, StringComparison.OrdinalIgnoreCase));
+                if (declared is null)
+                    continue;
+
+                if (inverted && declared.Type != ColumnType.Jsonb)
+                    throw new CamusDBException(CamusDBErrorCodes.InvalidInput,
+                        $"A GIN index needs a jsonb column; column '{declared.Name}' has type {declared.Type}");
+
+                if (!inverted && declared.Type == ColumnType.Jsonb)
+                    throw KeyEncoder.JsonbKeyColumn(keyColumn.Name);
+            }
         }
 
         if (!havePrimaryKey)

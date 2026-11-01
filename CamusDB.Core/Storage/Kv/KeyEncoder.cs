@@ -62,8 +62,9 @@ namespace CamusDB.Core.Storage.Kv;
 /// decoder knows their width from the column type. Variable-length fields (String/Bytes) are
 /// terminated so composite keys keep correct prefix ordering.
 ///
-/// Array is not indexable — encoding throws <see cref="CamusDBException"/> <c>InvalidInput</c>
-/// if an Array value is passed.
+/// Array and Jsonb are not indexable — encoding throws <see cref="CamusDBException"/>
+/// <c>InvalidInput</c> if such a value is passed. A jsonb document has no ordered key form; a GIN index
+/// encodes its path-and-value entries instead.
 ///
 /// Note: <see cref="ColumnValue.CompareTo"/> has a quirk where null.CompareTo(null) returns 1 rather
 /// than 0; this codec treats two NULLs as equal (the intended semantics). Property tests therefore
@@ -71,6 +72,19 @@ namespace CamusDB.Core.Storage.Kv;
 /// </summary>
 public static class KeyEncoder
 {
+    internal const string JsonbNotIndexable =
+        "jsonb columns have no ordered index; use CREATE INDEX ... USING GIN for containment and key lookups";
+
+    /// <summary>
+    /// A jsonb document has no ordered key form, so it cannot be a key of a primary key, a unique
+    /// constraint or an ordered index. Shared by the create-table validator and the add-index path so
+    /// both give the same answer.
+    /// </summary>
+    internal static CamusDBException JsonbKeyColumn(string columnName) =>
+        new(CamusDBErrorCodes.InvalidInput,
+            $"Column '{columnName}' has type jsonb, which cannot be a key of a primary key, a unique constraint " +
+            "or an ordered index; use CREATE INDEX ... USING GIN for containment and key lookups");
+
     // Field terminator = U+0000 U+0001. It uses the lowest code units so a terminated (shorter)
     // field sorts before a field that continues with more content ("ab" before "abc"). String/Id
     // bodies use only the ordered alphabet U+0002..U+007F (excluding '/'), so U+0000 never appears
@@ -261,6 +275,7 @@ public static class KeyEncoder
             ColumnType.Bytes => 1 + 2 * (value.BytesValue?.Length ?? 0) + 2,            // 2 hex/byte + terminator
             ColumnType.String => 1 + MeasureString(value.StrValue ?? "") + 2,
             ColumnType.Array => throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Array columns are not indexable"),
+            ColumnType.Jsonb => throw new CamusDBException(CamusDBErrorCodes.InvalidInput, JsonbNotIndexable),
             _ => throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Cannot encode column type: " + value.Type),
         };
     }
@@ -346,6 +361,9 @@ public static class KeyEncoder
 
             case ColumnType.Array:
                 throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Array columns are not indexable");
+
+            case ColumnType.Jsonb:
+                throw new CamusDBException(CamusDBErrorCodes.InvalidInput, JsonbNotIndexable);
 
             case ColumnType.String:
                 RejectDescendingTerminatedType(descending, value.Type);

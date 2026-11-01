@@ -46,7 +46,7 @@ strategy. So no change to a setting or a strategy can make an existing row unrea
 
 ## Choosing a storage strategy
 
-Each `string`, `bytes` and array column has a storage strategy. The names and the behaviour follow
+Each `string`, `bytes`, `jsonb` and array column has a storage strategy. The names and the behaviour follow
 PostgreSQL.
 
 | Strategy | Compresses | Moves out of the row | Use it for |
@@ -279,3 +279,58 @@ never moves out of line.
 - **Index key.** The `Int128` with its sign bit flipped, written as 19 fixed base-125 digits. The flip puts
   every negative value below every non-negative one, so ordinal key order equals numeric order. A
   descending index complements the 128 bits. The alphabet has no `/`.
+
+### jsonb cells
+
+A `jsonb` cell is a variable-length cell, so the compression and out-of-line rules on this page apply
+to it as to a `bytes` cell. See [json.md](json.md) for the SQL type.
+
+- **Serializer tag.** `TypeJsonb = 28`, followed by the `bytes` layout (a length, then the cell bytes).
+  A new tag needed no storage revision: a row without `jsonb` cells is unchanged.
+- **Cell bytes.** One format byte, `1`, then one CBOR data item (RFC 8949) in canonical form: definite
+  lengths, shortest encodings, map keys sorted by encoded length and then by bytes, no duplicate keys.
+  For text keys this is the PostgreSQL `jsonb` key order.
+- **Numbers.** An integer in the `int64` range is a CBOR integer. Any other number is a tag 4 decimal
+  fraction `[exponent, mantissa]`, whose mantissa is an integer or a bignum (tags 2 and 3). A CBOR
+  float is never written.
+- **Subtrees.** Each nested item is itself a canonical CBOR item, so `->` returns the slice of the
+  parent's bytes behind one new format byte, with no decode and no encode.
+- **Versioning.** A reader that finds another format byte, or bytes that do not decode, fails with
+  `JsonbValueCorrupt` (`CADB0559`). The byte leaves room for a later format, for example one with an
+  offset table for large objects, without a change to existing rows.
+- **No index key.** `KeyEncoder` refuses the type: a `jsonb` column cannot be an ordered index key.
+
+### GIN index entries
+
+A GIN index (`IndexType.Inverted`) stores its entries in the non-unique index shape, in the index's
+own key space:
+
+```text
+{dbId}:{tableId}|i:{indexId}/{encodedEntry}{rowIdHex24}  →  rowIdHex24
+```
+
+The key is the one a non-unique ordered index over one `string` column would write, with the entry
+text as the value. So DROP INDEX, DROP TABLE, TRUNCATE, branches, `SHOW RANGES` and key-range
+registration treat a GIN index as any index, the entries stay in the table's placement group, and no
+storage revision was needed. `JsonbGinIndexKeys` (`CamusDB.Core/Storage/Kv/`) builds every entry key.
+
+A document has one entry for each distinct leaf. The entry text is the path from the root, then `=`,
+then the leaf:
+
+| Part | Form |
+|---|---|
+| Object key step | `k<hex of the key's UTF-8 bytes>;` |
+| Array element step | `[` (no position) |
+| Leaf: `null`, `false`, `true` | `n`, `f`, `t` |
+| Leaf: number | `d<digits>`, with trailing zeros of the fraction removed, so `1.0` and `1` are one entry |
+| Leaf: string | `s<hex of the UTF-8 bytes>` |
+| Leaf: empty object, empty array | `o`, `a` |
+| Long key (over 64 bytes), long string or number (over 128 characters) | `K`, `S` or `D`, then the first 32 hex digits of the SHA-256 of the bytes |
+
+`{"a": {"b": 1}, "t": ["x"]}` has the entries `k61;k62;=d1` and `k74;[=s78`. The alphabet is ASCII
+with no `/`, and `U+007F` sorts after every character it uses, so a prefix scan reads
+`[prefix, prefix + U+007F)`.
+
+The entries lose array positions and structure. A query reads a superset of the matching rows, and
+the planner keeps the full predicate as a filter over the candidates. See
+[query-planner.md](query-planner.md#gin-index-scans).

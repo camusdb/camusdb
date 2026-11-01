@@ -65,7 +65,7 @@ internal sealed class CompiledRowCodec
         /// <summary>One bit in <c>boolBitmap</c>; no <c>fixedArea</c> or <c>variableArea</c> footprint.</summary>
         Bool,
 
-        /// <summary>Payload in <c>variableArea</c> located via the offset directory (String, Bytes, Array).</summary>
+        /// <summary>Payload in <c>variableArea</c> located via the offset directory (String, Bytes, Jsonb, Array).</summary>
         Variable,
     }
 
@@ -140,7 +140,7 @@ internal sealed class CompiledRowCodec
     /// <summary>
     /// Compiles a plan from one schema version's column list (in schema/ordinal order). Each column
     /// gets a null-bitmap bit; bool columns additionally get a bool-bitmap bit; fixed-width columns get
-    /// a dense <c>fixedArea</c> slot; variable columns (String/Bytes/Array) get an offset-directory
+    /// a dense <c>fixedArea</c> slot; variable columns (String/Bytes/Jsonb/Array) get an offset-directory
     /// ordinal. The column list must match the layout the rows of <paramref name="schemaVersion"/> were
     /// written under — pass the historical layout from <c>TableSchema.GetSchemaHistory</c> for old rows.
     /// </summary>
@@ -427,7 +427,7 @@ internal sealed class CompiledRowCodec
 
     private static byte[] MaterializeVariable(in ValueSlot slot, ColumnType type, ColumnType arrayElementType, int size)
     {
-        if (type == ColumnType.Bytes)
+        if (type is ColumnType.Bytes or ColumnType.Jsonb)
             return slot.AsBytes ?? [];
 
         byte[] raw = new byte[size];
@@ -722,7 +722,7 @@ internal sealed class CompiledRowCodec
     private static int VariablePayloadSize(in ValueSlot slot, ColumnType type, ColumnType arrayElementType) => type switch
     {
         ColumnType.String => Encoding.UTF8.GetByteCount(slot.AsString ?? ""),
-        ColumnType.Bytes => slot.AsBytes?.Length ?? 0,
+        ColumnType.Bytes or ColumnType.Jsonb => slot.AsBytes?.Length ?? 0,
         ColumnType.Array => ArrayBlobSize(arrayElementType, slot.ArrayElements),
         _ => throw new CamusDBException(CamusDBErrorCodes.UnknownType, "Not a variable-width type: " + type),
     };
@@ -735,6 +735,7 @@ internal sealed class CompiledRowCodec
             case ColumnType.String:
                 return Encoding.UTF8.GetBytes(slot.AsString ?? "", dest);
             case ColumnType.Bytes:
+            case ColumnType.Jsonb:
             {
                 byte[] bytes = slot.AsBytes ?? [];
                 bytes.CopyTo(dest);
@@ -835,6 +836,7 @@ internal sealed class CompiledRowCodec
             }
             case ColumnType.String: return ValueSlot.FromString(Encoding.UTF8.GetString(GetVariableSlice(payload, ordinal)));
             case ColumnType.Bytes: return ValueSlot.FromBytes(GetVariableSlice(payload, ordinal).ToArray());
+            case ColumnType.Jsonb: return ValueSlot.FromJsonb(GetVariableSlice(payload, ordinal).ToArray());
             case ColumnType.Array: return DecodeArrayBlob(GetVariableSlice(payload, ordinal), plan.ArrayElementType);
             default: throw new CamusDBException(CamusDBErrorCodes.UnknownType, "Unknown column type " + plan.Type);
         }
@@ -1083,7 +1085,7 @@ internal sealed class CompiledRowCodec
     private static StorageClass ClassOf(ColumnType type) => type switch
     {
         ColumnType.Bool => StorageClass.Bool,
-        ColumnType.String or ColumnType.Bytes or ColumnType.Array => StorageClass.Variable,
+        ColumnType.String or ColumnType.Bytes or ColumnType.Jsonb or ColumnType.Array => StorageClass.Variable,
         _ => StorageClass.Fixed,
     };
 

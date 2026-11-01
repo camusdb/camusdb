@@ -413,6 +413,9 @@ internal static class ExtensionValueMapping
         ColumnType.Bytes => value.BytesValue is { } bytes ? CopyBytes(bytes) : null,
         ColumnType.Date or ColumnType.DateTime => new DateTime(value.LongValue, DateTimeKind.Utc),
         ColumnType.Numeric => UnscaledToDecimal(value.NumericUnscaled),
+        // An extension sees a document as its PostgreSQL text; a string it writes back into a jsonb
+        // column is parsed by the write coercion.
+        ColumnType.Jsonb => value.JsonValue,
         ColumnType.Array => ToObjectList(value),
         _ => throw new CamusDBException(
             CamusDBErrorCodes.InvalidInput,

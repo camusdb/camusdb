@@ -46,26 +46,26 @@ internal sealed class TableIndexAdder
 
     private static void Validate(TableDescriptor table, AlterIndexTicket ticket, CamusDBOptions options)
     {
-        if (ticket.Operation == AlterIndexOperation.AddPrimaryKey && table.Indexes.ContainsKey(ticket.IndexName))
+        if (ticket.Operation == AlterIndexOperation.AddPrimaryKey && table.AllIndexes.ContainsKey(ticket.IndexName))
             throw new CamusDBException(
                 CamusDBErrorCodes.InvalidInput,
                 $"Primary key already exists on table '{table.Name}'"
             );
 
-        if (table.Indexes.ContainsKey(ticket.IndexName))
+        if (table.AllIndexes.ContainsKey(ticket.IndexName))
             throw new CamusDBException(
                 CamusDBErrorCodes.InvalidInput,
                 $"Index '{ticket.IndexName}' already exists on table '{table.Name}'"
             );
 
         // Index count cap — only for user-visible secondary indexes (not PK or ~-prefixed internals).
-        if (ticket.Operation == AlterIndexOperation.AddIndex || ticket.Operation == AlterIndexOperation.AddUniqueIndex)
+        if (ticket.Operation is AlterIndexOperation.AddIndex or AlterIndexOperation.AddUniqueIndex or AlterIndexOperation.AddInvertedIndex)
         {
             int maxIdx = options.MaxIndexesPerTable;
             if (maxIdx > 0)
             {
                 int userIndexCount = 0;
-                foreach (string key in table.Indexes.Keys)
+                foreach (string key in table.AllIndexes.Keys)
                 {
                     if (!key.StartsWith('~'))
                         userIndexCount++;
@@ -108,6 +108,7 @@ internal sealed class TableIndexAdder
                 );
         }
 
+        RejectUnorderedKeyColumns(table, ticket);
         ValidateIncludeColumns(table, ticket, options);
     }
 
@@ -138,6 +139,31 @@ internal sealed class TableIndexAdder
             throw new CamusDBException(
                 CamusDBErrorCodes.SchemaLimitExceeded,
                 $"Index '{indexName}' spans {total} columns ({keyColumnCount} key + {includeColumnCount} INCLUDE), exceeding the maximum of {max}");
+    }
+
+    /// <summary>
+    /// Checks the key column types against the index kind before anything is staged: an ordered index
+    /// refuses a jsonb column (no ordered key form; <see cref="KeyEncoder"/> would refuse it during
+    /// the backfill too, but by then the index is half-built), and a GIN index takes exactly one jsonb
+    /// column. Runs on both the standalone and the cluster add paths.
+    /// </summary>
+    internal static void RejectUnorderedKeyColumns(TableDescriptor table, AlterIndexTicket ticket)
+    {
+        bool inverted = ticket.Operation == AlterIndexOperation.AddInvertedIndex;
+
+        foreach (ColumnIndexInfo indexColumn in ticket.Columns)
+        {
+            TableColumnSchema? column = table.Schema.Columns!.Find(c => string.Equals(c.Name, indexColumn.Name, StringComparison.OrdinalIgnoreCase));
+            if (column is null)
+                continue;
+
+            if (inverted && column.Type != ColumnType.Jsonb)
+                throw new CamusDBException(CamusDBErrorCodes.InvalidInput,
+                    $"A GIN index needs a jsonb column; column '{column.Name}' has type {column.Type}");
+
+            if (!inverted && column.Type == ColumnType.Jsonb)
+                throw KeyEncoder.JsonbKeyColumn(column.Name);
+        }
     }
 
     internal static void ValidateIncludeColumns(TableDescriptor table, AlterIndexTicket ticket, CamusDBOptions options)
@@ -209,9 +235,12 @@ internal sealed class TableIndexAdder
         AlterIndexTicket ticket = state.Ticket;
         TableDescriptor table = state.Table;
         DatabaseDescriptor database = state.Database;
-        IndexType indexType = ticket.Operation is AlterIndexOperation.AddUniqueIndex or AlterIndexOperation.AddPrimaryKey
-            ? IndexType.Unique
-            : IndexType.Multi;
+        IndexType indexType = ticket.Operation switch
+        {
+            AlterIndexOperation.AddUniqueIndex or AlterIndexOperation.AddPrimaryKey => IndexType.Unique,
+            AlterIndexOperation.AddInvertedIndex => IndexType.Inverted,
+            _ => IndexType.Multi,
+        };
 
         string indexId = ObjectIdGenerator.Generate().ToString();
         string[] columnIds = GetColumnIds(table, ticket.Columns);
@@ -322,7 +351,8 @@ internal sealed class TableIndexAdder
             ticket.IndexName,
             unique,
             keyColumns,
-            ticket.IncludeColumns.Length > 0 ? ticket.IncludeColumns : null);
+            ticket.IncludeColumns.Length > 0 ? ticket.IncludeColumns : null,
+            Inverted: ticket.Operation == AlterIndexOperation.AddInvertedIndex);
 
         // Background priority: the backfill is bulk, deferrable work that already runs in resumable
         // batches, so on a saturated node it yields the door to user traffic. The backfill opens a

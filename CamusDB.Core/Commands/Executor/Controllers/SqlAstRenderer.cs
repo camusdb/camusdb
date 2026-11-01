@@ -381,6 +381,7 @@ internal class SqlAstRenderer
         NodeType.TypeBytes or NodeType.TypeBytesSized => "bytes",
         NodeType.TypeUuid      => "uuid",
         NodeType.TypeNumeric   => "numeric",
+        NodeType.TypeJsonb     => "jsonb",
         _ => throw Unsupported(typeNode),
     };
 

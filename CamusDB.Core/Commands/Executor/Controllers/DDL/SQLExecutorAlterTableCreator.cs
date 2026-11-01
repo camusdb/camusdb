@@ -165,6 +165,7 @@ internal sealed class SQLExecutorAlterTableCreator : SQLExecutorBaseCreator
             case NodeType.TypeBytes:     return (ColumnType.Bytes,     null, null);
             case NodeType.TypeUuid:      return (ColumnType.Uuid,      null, null);
             case NodeType.TypeNumeric:   return (ColumnType.Numeric,   null, null);
+            case NodeType.TypeJsonb:     return (ColumnType.Jsonb,     null, null);
             case NodeType.TypeString:    return (ColumnType.String,    null, null);
 
             case NodeType.TypeStringSized:

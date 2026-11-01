@@ -19,10 +19,20 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Functions;
 /// </summary>
 internal static class TableFunctionRegistry
 {
-    private static readonly Dictionary<string, TableFunction> Functions = new(StringComparer.OrdinalIgnoreCase)
+    private static readonly Dictionary<string, TableFunction> Functions = BuildBuiltIns();
+
+    private static Dictionary<string, TableFunction> BuildBuiltIns()
     {
-        [GenerateSeriesTableFunction.Instance.Name] = GenerateSeriesTableFunction.Instance,
-    };
+        Dictionary<string, TableFunction> functions = new(StringComparer.OrdinalIgnoreCase)
+        {
+            [GenerateSeriesTableFunction.Instance.Name] = GenerateSeriesTableFunction.Instance,
+        };
+
+        foreach (TableFunction function in JsonbTableFunction.All())
+            functions.Add(function.Name, function);
+
+        return functions;
+    }
 
     /// <summary>
     /// Set-returning functions PostgreSQL has but CamusDB does not support in <c>FROM</c> yet. Named so

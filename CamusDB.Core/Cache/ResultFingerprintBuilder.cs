@@ -226,6 +226,12 @@ public static class ResultFingerprintBuilder
                 if (v.BytesValue is { Length: > 0 })
                     sb.Append(Convert.ToHexStringLower(v.BytesValue));
                 break;
+            case ColumnType.Jsonb:
+                // The cell bytes: two results print the same text exactly when their canonical
+                // bytes are equal (1.0 and 1 print differently, so they must fingerprint differently).
+                sb.Append("js:");
+                sb.Append(Convert.ToHexStringLower(v.BytesValue ?? []));
+                break;
             case ColumnType.Uuid:
                 // Both halves must be hashed — the low half alone would collide two UUIDs that
                 // share their low 64 bits (e.g. adjacent v7 values), fingerprinting them equal.

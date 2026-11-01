@@ -128,7 +128,7 @@ internal static class QueryShapeComputer
                         sb.Append(',');
                     AppendExpr(tf.Arguments[i], sb);
                 }
-                sb.Append(") COLUMN ").Append(tf.ColumnName);
+                sb.Append(") COLUMN ").Append(string.Join(',', tf.ColumnNames));
                 break;
 
             case DerivedTableSource dt:

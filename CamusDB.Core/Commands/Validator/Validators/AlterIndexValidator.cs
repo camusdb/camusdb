@@ -36,7 +36,7 @@ internal sealed class AlterIndexValidator : ValidatorBase
             );
 
 
-        if (ticket.Operation == AlterIndexOperation.AddIndex || ticket.Operation == AlterIndexOperation.AddUniqueIndex || ticket.Operation == AlterIndexOperation.AddPrimaryKey)
+        if (ticket.Operation is AlterIndexOperation.AddIndex or AlterIndexOperation.AddUniqueIndex or AlterIndexOperation.AddPrimaryKey or AlterIndexOperation.AddInvertedIndex)
         {
             foreach (ColumnIndexInfo column in ticket.Columns)
             {
@@ -48,9 +48,24 @@ internal sealed class AlterIndexValidator : ValidatorBase
             }
         }
 
-        if (ticket.Operation == AlterIndexOperation.AddIndex || ticket.Operation == AlterIndexOperation.AddUniqueIndex)
+        if (ticket.Operation is AlterIndexOperation.AddIndex or AlterIndexOperation.AddUniqueIndex or AlterIndexOperation.AddInvertedIndex)
         {
             ValidateIdentifier(ticket.IndexName ?? "", "Index");
+        }
+
+        // A GIN index has one key column, a jsonb document, and no INCLUDE payload: its entries are
+        // paths and values, not a copy of the row. The column's type is checked where the table is known.
+        if (ticket.Operation == AlterIndexOperation.AddInvertedIndex)
+        {
+            if (ticket.Columns.Length != 1)
+                throw new CamusDBException(CamusDBErrorCodes.InvalidInput,
+                    $"A GIN index has exactly one column, got {ticket.Columns.Length}");
+
+            if (ticket.IncludeColumns.Length > 0)
+                throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "A GIN index cannot have INCLUDE columns");
+
+            if (ticket.Columns[0].Order == OrderType.Descending)
+                throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "A GIN index has no order; remove DESC");
         }
 
         if (ticket.Operation == AlterIndexOperation.RenameIndex)

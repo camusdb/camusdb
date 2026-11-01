@@ -101,4 +101,18 @@ public sealed class ExecuteSQLRequest
     /// request that sets it, because a query that asks for no rows is a client error.
     /// </summary>
     public bool DiscardReturningRows { get; set; }
+
+    /// <summary>
+    /// True to receive each jsonb cell as a JSON string that holds the text form of the document, and
+    /// not as the document itself. In the default form the token <c>null</c> is both SQL NULL and a
+    /// document that is JSON null, so a client cannot tell them apart. In the text form JSON null is
+    /// the string <c>"null"</c>, and SQL NULL stays <c>null</c>. Applies to the rows of
+    /// <c>/execute-sql-query</c>, its stream, and the RETURNING rows of <c>/execute-sql-non-query</c>.
+    ///
+    /// <para>The response marks each jsonb column it writes in the text form with
+    /// <c>jsonbAsText: true</c>. A client decodes a cell as text only when its column has that mark:
+    /// a server older than this field ignores it and sends native JSON, and a jsonb string document
+    /// such as <c>"abc"</c> looks the same in both forms.</para>
+    /// </summary>
+    public bool JsonbAsText { get; set; }
 }

@@ -187,5 +187,5 @@ internal static class RowMemoryEstimator
         value is null ? 0 : ArrayHeaderBytes + 2L * value.Length;
 
     private static bool HasVariablePayload(ColumnType type) =>
-        type is ColumnType.String or ColumnType.Id or ColumnType.Bytes or ColumnType.Array;
+        type is ColumnType.String or ColumnType.Id or ColumnType.Bytes or ColumnType.Jsonb or ColumnType.Array;
 }

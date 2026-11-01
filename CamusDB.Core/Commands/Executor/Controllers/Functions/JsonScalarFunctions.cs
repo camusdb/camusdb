@@ -13,8 +13,34 @@ using CamusDB.Core.CommandsExecutor.Models;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers.Functions;
 
+/// <summary>
+/// The MySQL/SQLite-style JSON functions over text: <c>json_valid</c>, <c>json_type</c>,
+/// <c>json_extract</c>, <c>json_value</c>, <c>json_contains</c> and <c>json_array_length</c>, with
+/// <c>$.a.b[0]</c> paths. A <c>jsonb</c> argument is read as its text, so each function keeps one
+/// behavior whatever the argument type; the PostgreSQL functions are in
+/// <see cref="JsonbScalarFunctions"/>.
+/// </summary>
 internal static class JsonScalarFunctions
 {
+    /// <summary>Wraps an evaluator so that a jsonb argument arrives as its PostgreSQL text.</summary>
+    private static ScalarFunctionEvaluatorDelegate AcceptDocuments(ScalarFunctionEvaluatorDelegate evaluator) =>
+        (calledName, arguments) =>
+        {
+            bool anyDocument = false;
+            for (int i = 0; i < arguments.Count; i++)
+                anyDocument |= arguments[i].Type == ColumnType.Jsonb;
+
+            if (!anyDocument)
+                return evaluator(calledName, arguments);
+
+            ColumnValue[] text = new ColumnValue[arguments.Count];
+            for (int i = 0; i < arguments.Count; i++)
+                text[i] = arguments[i].Type == ColumnType.Jsonb
+                    ? new ColumnValue(ColumnType.String, arguments[i].JsonValue!)
+                    : arguments[i];
+            return evaluator(calledName, text);
+        };
+
     public static void Register(ScalarFunctionRegistry registry)
     {
         RegisterUnary(registry, "json_valid", EvaluateJsonValid, _ => ColumnType.Bool);
@@ -28,7 +54,7 @@ internal static class JsonScalarFunctions
             Name = "json_array_length",
             MinArity = 1,
             MaxArity = 2,
-            Evaluator = EvaluateJsonArrayLength,
+            Evaluator = AcceptDocuments(EvaluateJsonArrayLength),
             InferReturnType = _ => ColumnType.Integer64,
         });
     }
@@ -44,7 +70,7 @@ internal static class JsonScalarFunctions
             Name = name,
             MinArity = 1,
             MaxArity = 1,
-            Evaluator = evaluator,
+            Evaluator = AcceptDocuments(evaluator),
             InferReturnType = inferReturnType,
         });
     }
@@ -60,7 +86,7 @@ internal static class JsonScalarFunctions
             Name = name,
             MinArity = 2,
             MaxArity = 2,
-            Evaluator = evaluator,
+            Evaluator = AcceptDocuments(evaluator),
             InferReturnType = inferReturnType,
         });
     }

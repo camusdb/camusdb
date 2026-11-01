@@ -169,7 +169,7 @@ internal sealed class RowDeleter
         // decode below is narrowed to the columns this method actually consumes — the index key
         // columns (for CollectIndexDeletes) plus the expiry column (for the re-check). Values for
         // those columns are identical to a full decode; other columns are simply never materialized.
-        List<TableIndexSchema> writableIndexes = SchemaElementStateRules.CollectWritableIndexes(table.Schema, table.Indexes);
+        List<TableIndexSchema> writableIndexes = SchemaElementStateRules.CollectWritableIndexes(table.Schema, table.AllIndexes);
         HashSet<string> requiredColumns = CollectIndexKeyColumns(writableIndexes);
         requiredColumns.Add(expirationColumn);
         RowEncoder.DictionaryDecodeState decodeState = new();
@@ -438,7 +438,7 @@ internal sealed class RowDeleter
         // to a full decode; other columns are simply never materialized. A predicate or RETURNING
         // column that cannot be named exactly decodes all.
         List<TableIndexSchema> writableIndexes = state.MaintainIndexes
-            ? SchemaElementStateRules.CollectWritableIndexes(table.Schema, table.Indexes)
+            ? SchemaElementStateRules.CollectWritableIndexes(table.Schema, table.AllIndexes)
             : [];
         HashSet<string>? requiredColumns = null;
         // A trigger reads all of OLD, so a table with delete triggers decodes the whole row (null).
@@ -603,6 +603,12 @@ internal sealed class RowDeleter
             {
                 CompositeColumnValue key = GetColumnValue(row, index.Columns, new(ColumnType.Id, rowId.ToString()));
                 (entries ??= []).Add(new(index.KvId, key, rowId, Unique: false));
+            }
+            else if (index.Type == IndexType.Inverted && JsonbGinIndexKeys.EntriesOf(index, row) is { } documentEntries)
+            {
+                ColumnValue rowIdValue = JsonbGinIndexKeys.RowIdValue(rowId);
+                foreach (string entry in documentEntries)
+                    (entries ??= []).Add(new(index.KvId, JsonbGinIndexKeys.Key(entry, rowIdValue), rowId, Unique: false));
             }
         }
 

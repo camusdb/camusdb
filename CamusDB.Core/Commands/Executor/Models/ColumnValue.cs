@@ -7,6 +7,7 @@
  */
 
 using CamusDB.Core.Catalogs.Models;
+using CamusDB.Core.CommandsExecutor.Models.Jsonb;
 using System.Buffers.Binary;
 using System.Globalization;
 using System.Text.Json.Serialization;
@@ -37,6 +38,11 @@ namespace CamusDB.Core.CommandsExecutor.Models;
 ///               signed, so ordering is a signed compare of <see cref="NumericUnscaled"/>. The fixed
 ///               scale gives every value one bit pattern, so equality is bit equality. See
 ///               <see cref="NumericMath"/>.
+///   Jsonb     — the jsonb cell in BytesValue: a format-version byte, then one canonical CBOR item
+///               (<see cref="JsonbEncoder"/>). Operators read the bytes in place
+///               (<see cref="JsonbDocument"/>); no tree is built. Equal bytes are equal documents, but
+///               two documents can be equal with different bytes when only a number's scale differs
+///               (1.0 and 1), so equality goes through <see cref="JsonbDocument.Compare"/>.
 /// </summary>
 public sealed class ColumnValue : IComparable<ColumnValue>
 {
@@ -103,6 +109,14 @@ public sealed class ColumnValue : IComparable<ColumnValue>
     /// The Int128 of a <see cref="ColumnType.Numeric"/> value: the value times 10⁹. Meaningless for
     /// all other types.
     /// </summary>
+    /// <summary>
+    /// The PostgreSQL text of a <see cref="ColumnType.Jsonb"/> value (<c>{"a": 1}</c>); null for all
+    /// other types. Written into JSON responses; ignored during deserialization (the cell bytes
+    /// round-trip).
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? JsonValue => Type == ColumnType.Jsonb ? JsonbText.ToText(JsonbDocument.Item(BytesValue)) : null;
+
     [JsonIgnore]
     public Int128 NumericUnscaled => ((Int128)UuidHigh << 64) | (Int128)(ulong)LongValue;
 
@@ -176,6 +190,15 @@ public sealed class ColumnValue : IComparable<ColumnValue>
         if (type == ColumnType.Bytes)
             BytesValue = bytesValue;
 
+        if (type == ColumnType.Jsonb)
+        {
+            // Text (an HTTP parameter) is parsed; otherwise the cell bytes round-trip a persisted
+            // schema default value, after a check of their format version.
+            BytesValue = strValue is not null
+                ? JsonbEncoder.FromText(strValue)
+                : CheckJsonbCell(bytesValue);
+        }
+
         if (type == ColumnType.Array)
         {
             ArrayValues = arrayValues ?? [];
@@ -232,6 +255,33 @@ public sealed class ColumnValue : IComparable<ColumnValue>
     {
         Type = ColumnType.Bytes;
         BytesValue = value;
+    }
+
+    private ColumnValue(byte[] jsonbCell, ColumnType type)
+    {
+        Type = type;
+        BytesValue = jsonbCell;
+    }
+
+    /// <summary>
+    /// A <see cref="ColumnType.Jsonb"/> value over cell bytes that a jsonb encoder wrote: a stored
+    /// cell, a slice wrapped by <see cref="JsonbEncoder.ToCell(ReadOnlySpan{byte})"/>, or a builder
+    /// result. The bytes are not copied and must not change afterwards.
+    /// </summary>
+    public static ColumnValue FromJsonbCell(byte[] cell) => new(CheckJsonbCell(cell), ColumnType.Jsonb);
+
+    /// <summary>
+    /// Parses JSON text into a <see cref="ColumnType.Jsonb"/> value. Throws
+    /// <see cref="CamusDBErrorCodes.InvalidJsonText"/> for text that is not a document the type can
+    /// store and <see cref="CamusDBErrorCodes.JsonNestingTooDeep"/> past the nesting limit.
+    /// </summary>
+    public static ColumnValue FromJsonText(string text) => new(JsonbEncoder.FromText(text), ColumnType.Jsonb);
+
+    private static byte[] CheckJsonbCell(byte[]? cell)
+    {
+        // Item() throws JsonbValueCorrupt for an empty cell or an unknown format version.
+        JsonbDocument.Item(cell);
+        return cell!;
     }
 
     /// <summary>
@@ -327,6 +377,11 @@ public sealed class ColumnValue : IComparable<ColumnValue>
     /// <summary>Factory for Array values. All elements must match elementType or be Null.</summary>
     public static ColumnValue FromArray(ColumnType elementType, IReadOnlyList<ColumnValue> elements)
     {
+        // An array of documents is a document (a jsonb array), not an array column.
+        if (elementType == ColumnType.Jsonb)
+            throw new CamusDBException(CamusDBErrorCodes.FeatureNotSupported,
+                "arrays of jsonb are not supported; use a jsonb array instead");
+
         for (int i = 0; i < elements.Count; i++)
         {
             ColumnValue el = elements[i];
@@ -401,6 +456,9 @@ public sealed class ColumnValue : IComparable<ColumnValue>
                 return a.SequenceCompareTo(b);
             }
 
+            case ColumnType.Jsonb:
+                return JsonbDocument.Compare(JsonbDocument.Item(BytesValue), JsonbDocument.Item(other.BytesValue));
+
             case ColumnType.Uuid:
             {
                 // Unsigned compare of the big-endian halves == big-endian byte order == canonical
@@ -453,6 +511,7 @@ public sealed class ColumnValue : IComparable<ColumnValue>
             ColumnType.Bytes     => $"ColumnValue({Type}:len={BytesValue?.Length ?? 0})",
             ColumnType.Uuid      => $"ColumnValue({Type}:{ToGuid():D})",
             ColumnType.Numeric   => $"ColumnValue({Type}:{NumericValue})",
+            ColumnType.Jsonb     => $"ColumnValue({Type}:len={BytesValue?.Length ?? 0})",
             ColumnType.Array     => $"ColumnValue({Type}<{ArrayElementType}>:count={ArrayValues?.Count ?? 0})",
             _                    => $"ColumnValue({Type}:{StrValue})",
         };

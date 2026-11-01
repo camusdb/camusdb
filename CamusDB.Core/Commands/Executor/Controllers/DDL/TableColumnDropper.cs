@@ -36,7 +36,7 @@ public sealed class TableColumnDropper
         // index key column) but with a message that hides the real dependency.
         Catalogs.Apply.ForeignKeyDependencyRules.RequireColumnNotInForeignKey(database.Schema, table.Schema, ticket.Column.Name);
 
-        foreach (KeyValuePair<string, TableIndexSchema> index in table.Indexes)
+        foreach (KeyValuePair<string, TableIndexSchema> index in table.AllIndexes)
         {
             if (index.Value.Columns.Contains(ticket.Column.Name))
                 throw new CamusDBException(

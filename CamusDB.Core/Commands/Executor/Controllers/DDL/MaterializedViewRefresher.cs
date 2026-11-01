@@ -742,7 +742,12 @@ internal sealed class MaterializedViewRefresher
 
             ConstraintType type = string.Equals(index.Name, CamusDBConstants.PrimaryKeyInternalName, StringComparison.Ordinal)
                 ? ConstraintType.PrimaryKey
-                : index.Type == IndexType.Unique ? ConstraintType.IndexUnique : ConstraintType.IndexMulti;
+                : index.Type switch
+                {
+                    IndexType.Unique => ConstraintType.IndexUnique,
+                    IndexType.Inverted => ConstraintType.IndexInverted,
+                    _ => ConstraintType.IndexMulti,
+                };
 
             ColumnIndexInfo[] indexColumns = new ColumnIndexInfo[columnNames.Length];
             for (int i = 0; i < columnNames.Length; i++)

@@ -29,8 +29,11 @@ namespace CamusDB.Core.CommandsExecutor.Models.Queries;
 /// The argument expressions, in call order. The query creator admits only expressions that read no
 /// column, so each one is evaluated once, with the statement's parameters, before the first row.
 /// </param>
-/// <param name="ColumnName">The name of the one output column, after the alias rule is applied.</param>
+/// <param name="ColumnNames">
+/// The names of the output columns, in order, after the alias rule is applied. One name for a
+/// one-column function such as <c>generate_series</c>.
+/// </param>
 public sealed record TableFunctionSource(
     string FunctionName,
     IReadOnlyList<NodeAst> Arguments,
-    string ColumnName) : QuerySource;
+    IReadOnlyList<string> ColumnNames) : QuerySource;

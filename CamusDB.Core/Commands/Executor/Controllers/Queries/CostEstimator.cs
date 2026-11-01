@@ -359,6 +359,21 @@ internal static class CostEstimator
                 });
             }
 
+            case GinIndexScanNode ginNode:
+            {
+                // No statistics describe GIN entries, so the candidates are priced at the fallback
+                // filter selectivity; the execution filter above the scan checks every candidate.
+                long rows = Math.Max(1, (long)(trc * FilterSelectivity));
+                TraceFixed(trace, EstimateRule.FilterFallback, trc, rows);
+                return (rows, new PlanCost
+                {
+                    EstimatedRows        = rows,
+                    KvRangeScanEntries   = rows * ginNode.RequirementCount,
+                    RowFetchesAfterIndex = rows,
+                    NetworkFactor        = ComputeNetworkFactor(node, rows, resolvedTable, database, options),
+                });
+            }
+
             case IndexRangeScanNode rangeNode:
             {
                 // In join plans primaryTable is null; resolvedTable carries the leaf's own table

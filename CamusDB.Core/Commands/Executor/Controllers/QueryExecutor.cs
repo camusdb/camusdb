@@ -12,6 +12,7 @@ using CamusDB.Core.Catalogs.Models;
 using Kahuna;
 using CamusDB.Core.Storage.Kv;
 using CamusDB.Core.CommandsExecutor.Models;
+using CamusDB.Core.CommandsExecutor.Models.Jsonb;
 using CamusDB.Core.CommandsExecutor.Models.Plans;
 using CamusDB.Core.CommandsExecutor.Models.Queries;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
@@ -603,6 +604,11 @@ internal sealed class QueryExecutor
             case IndexInListScanNode inListScan:
                 Trace(QueryPlanStepType.InListScanFromIndex);
                 cursor = QueryUsingInListIndex(plan, inListScan);
+                break;
+
+            case GinIndexScanNode ginScan:
+                Trace(QueryPlanStepType.GinScanFromIndex);
+                cursor = QueryUsingGinIndex(plan, ginScan);
                 break;
 
             case SortNode sortNode:
@@ -1618,6 +1624,126 @@ internal sealed class QueryExecutor
                         && await queryFilterer.MeetPlanFilterAsync(plan, row).ConfigureAwait(false))
                         yield return new(rowId, row);
                 }
+            }
+        }
+    }
+
+    /// <summary>
+    /// Executes a GIN scan (<see cref="GinIndexScanNode"/>). Each requirement is one entry scan: an
+    /// exact entry reads <c>[entry]</c> inclusive, a prefix reads <c>[prefix, prefix + U+007F)</c>. The row
+    /// ids of one group are united; the groups are intersected, so a later group keeps only the ids
+    /// the earlier ones kept, and an empty set ends the entry scans. The candidates are then fetched in
+    /// row-id order, in batches, and each one is checked against the plan's execution filter, which
+    /// holds the full predicate: the entries give a superset.
+    ///
+    /// <para>Every scanned entry range takes a range lock first (shared for a read, exclusive for a
+    /// write's locate phase), as the IN-list scan does. A row that starts to match the predicate later
+    /// writes an entry into each group's ranges, so the lock of the first group covers it, even when
+    /// the scan stops early on an empty set.</para>
+    /// </summary>
+    private async IAsyncEnumerable<QueryResultRow> QueryUsingGinIndex(QueryPlan plan, GinIndexScanNode ginNode)
+    {
+        TableDescriptor table = plan.Table;
+        QueryTicket ticket = plan.Ticket;
+        HLCTimestamp txId = ticket.TxnState.TransactionId;
+        TableIndexSchema index = ginNode.Index;
+        QueryDependencyCollector? deps = plan.DepCollector;
+        CancellationToken cancellationToken = ticket.CancellationToken;
+
+        deps?.RecordRange(table.Store.IndexKeySpace(index.KvId));
+        deps?.RecordSchema(table.Id, table.Schema.Version, table.Schema.ContentsGeneration);
+
+        PlanNodeStats? scanStats = plan.CollectRuntimeStats && plan.StepNodes.Count > 0 ? plan.StepNodes[0].Stats : null;
+        CamusDB.Core.Diagnostics.IndexUsageCounters? usage = table.Store.IndexUsage?.BeginRead(index.KvId);
+        CamusDB.Core.Diagnostics.StatementProbe? probe = plan.Ticket.Probe;
+
+        HashSet<ObjectIdValue>? candidates = null;
+
+        foreach (IReadOnlyList<JsonbGinEntries.Requirement> group in ginNode.Query.Groups)
+        {
+            HashSet<ObjectIdValue> groupRows = new();
+
+            foreach (JsonbGinEntries.Requirement requirement in group)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+
+                CompositeColumnValue fromBound = JsonbGinIndexKeys.Bound(requirement.Text);
+                (CompositeColumnValue toBound, bool toInclusive) = requirement.IsPrefix
+                    ? (JsonbGinIndexKeys.Bound(requirement.Text + JsonbGinEntries.PrefixUpperBound), false)
+                    : (fromBound, true);
+
+                await table.Store.AcquireBoundedIndexRangeLockAsync(
+                    ticket.TxnState, index.KvId,
+                    fromBound, true,
+                    toBound, toInclusive,
+                    unique: false, exclusive: ticket.ExclusivePredicateLocks,
+                    cancellationToken: cancellationToken).ConfigureAwait(false);
+
+                await foreach ((CompositeColumnValue _, ObjectIdValue rowId, ReadOnlyMemory<byte> _) in CamusDB.Core.Diagnostics.TableIndexUsage.CountInto(usage, table.Store.ScanIndex(
+                    ticket.TxnState, index.KvId, JsonbGinIndexKeys.KeyTypes,
+                    fromBound, toBound, unique: false,
+                    fromInclusive: true, toInclusive: toInclusive,
+                    maxRows: null, cancellationToken: cancellationToken)).ConfigureAwait(false))
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+
+                    if (scanStats is not null)
+                        scanStats.KvScanEntries++;
+
+                    if (candidates is null || candidates.Contains(rowId))
+                        groupRows.Add(rowId);
+                }
+            }
+
+            candidates = groupRows;
+            if (candidates.Count == 0)
+                yield break;
+        }
+
+        if (candidates is null)
+            yield break;
+
+        ObjectIdValue[] rowIds = [.. candidates];
+        Array.Sort(rowIds);
+
+        RowEncoder.RowDecodeState decodeState = new()
+        {
+            SlotBackedDecode = options.SlotBackedDecode || plan.ExecutionFilter is not null,
+            BorrowedDecode = QueryScanner.ShouldUseBorrowedDecode(plan),
+        };
+        IReadOnlySet<string>? requiredColumns = IndexEntryCheck.RequiredColumns(plan.ScanRequiredColumns, index);
+        LargeValueFetch? largeValues = LargeValueFetch.Columns(table.Schema, requiredColumns);
+        int batchSize = Math.Max(1, options.IndexScanFetchBatchSize);
+
+        for (int start = 0; start < rowIds.Length; start += batchSize)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            ArraySegment<ObjectIdValue> page = new(rowIds, start, Math.Min(batchSize, rowIds.Length - start));
+            ReadOnlyMemory<byte>?[] batchResult = await table.Store.GetRowsBatch(
+                ticket.TxnState, page, cancellationToken, largeValues).ConfigureAwait(false);
+
+            for (int i = 0; i < page.Count; i++)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+
+                ObjectIdValue rowId = page[i];
+                ReadOnlyMemory<byte>? data = batchResult[i];
+                if (data is null || data.Value.Length == 0)
+                    continue;
+
+                deps?.RecordPoint(table.Store.RowPointKey(rowId));
+                probe?.AddRowRead();
+                if (scanStats is not null)
+                    scanStats.RowsRead++;
+
+                QueryRow row = await RowEncoder.DecodeToQueryRowAsync(
+                    table.Schema, txId, rowId, data.Value,
+                    options,
+                    requiredColumns, plan.TableSchemaVersion, decodeState).ConfigureAwait(false);
+
+                if (await queryFilterer.MeetPlanFilterAsync(plan, row).ConfigureAwait(false))
+                    yield return new(rowId, row);
             }
         }
     }

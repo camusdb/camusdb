@@ -106,6 +106,27 @@ internal static class ColumnValueAstBuilder
                 extendedFour: null,
                 extendedFive: null,
                 yytext: null),
+            // A jsonb value is re-expressed as CAST('<text>' AS jsonb), the node JSONB '<text>' parses
+            // to. The text is the canonical document, so the value comes back unchanged.
+            ColumnType.Jsonb => new NodeAst(
+                NodeType.ExprCast,
+                leftAst: new NodeAst(
+                    NodeType.String,
+                    leftAst: null,
+                    rightAst: null,
+                    extendedOne: null,
+                    extendedTwo: null,
+                    extendedThree: null,
+                    extendedFour: null,
+                    extendedFive: null,
+                    yytext: SqlStringLiteral.Quote(value.JsonValue!)),
+                rightAst: NodeAst.TypeJsonb,
+                extendedOne: null,
+                extendedTwo: null,
+                extendedThree: null,
+                extendedFour: null,
+                extendedFive: null,
+                yytext: null),
             // A bytes value has a literal form, X'<hex>', and the comparison of two bytes values
             // orders them byte by byte. Without this arm a subquery that returns a bytes column
             // fails here, although the same comparison of two bytes literals succeeds.

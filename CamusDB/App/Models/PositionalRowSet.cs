@@ -48,10 +48,17 @@ public sealed class PositionalRowSet
     /// <summary>An empty set, used for error responses that carry no rows.</summary>
     public static readonly PositionalRowSet Empty = new([], []);
 
-    public PositionalRowSet(IReadOnlyList<QueryResultRow> rows, IReadOnlyList<DerivedColumnSchema> schema)
+    /// <summary>
+    /// True to write each jsonb cell as a JSON string that holds its text form (the request's
+    /// <c>jsonbAsText</c>). The column list of the same response must mark the jsonb columns to match.
+    /// </summary>
+    public bool JsonbAsText { get; }
+
+    public PositionalRowSet(IReadOnlyList<QueryResultRow> rows, IReadOnlyList<DerivedColumnSchema> schema, bool jsonbAsText = false)
     {
         Rows = rows;
         Schema = schema;
+        JsonbAsText = jsonbAsText;
     }
 }
 
@@ -73,7 +80,7 @@ internal sealed class PositionalRowSetConverter : JsonConverter<PositionalRowSet
         int[]? ordinals = null;
         IReadOnlyList<QueryResultRow> rows = value.Rows;
         for (int i = 0; i < rows.Count; i++)
-            CompactRowJsonWriter.WriteRow(writer, rows[i], value.Schema, ref boundLayout, ref ordinals);
+            CompactRowJsonWriter.WriteRow(writer, rows[i], value.Schema, ref boundLayout, ref ordinals, value.JsonbAsText);
 
         writer.WriteEndArray();
     }

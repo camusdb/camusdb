@@ -609,6 +609,7 @@ internal sealed class SchemaQuerier
             ColumnType.Bytes => new ColumnValue(ColumnType.String, SqlStringLiteral.QuoteBytes(column.DefaultValue.BytesValue ?? [])),
             ColumnType.Uuid => new ColumnValue(ColumnType.String, column.DefaultValue.UuidValue!),
             ColumnType.Numeric => new ColumnValue(ColumnType.String, column.DefaultValue.NumericValue!),
+            ColumnType.Jsonb => new ColumnValue(ColumnType.String, column.DefaultValue.JsonValue!),
             _ => throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Unknown default type :" + column.DefaultValue.Type),
         };
     }
@@ -668,7 +669,7 @@ internal sealed class SchemaQuerier
     {
         await Task.CompletedTask;
 
-        foreach (KeyValuePair<string, TableIndexSchema> index in table.Indexes)
+        foreach (KeyValuePair<string, TableIndexSchema> index in table.AllIndexes)
         {
             if (!SchemaElementStateRules.IsReadableIndex(table.Schema, index.Value))
                 continue;
@@ -680,7 +681,7 @@ internal sealed class SchemaQuerier
                 { "Key_name", new ColumnValue(ColumnType.String, index.Key) },
                 { "Columns", new ColumnValue(ColumnType.String, string.Join(",", index.Value.Columns)) },
                 { "Include", new ColumnValue(ColumnType.String, string.Join(",", index.Value.IncludeColumns)) },
-                { "Index_type", new ColumnValue(ColumnType.String, "ORDERED") },
+                { "Index_type", new ColumnValue(ColumnType.String, index.Value.Type == IndexType.Inverted ? "GIN" : "ORDERED") },
                 // Directions is a parallel list to Columns, not part of it: a consumer splits Columns
                 // on ',' and treats each element as an identifier, so folding "a DESC" into that field
                 // would hand it a name it cannot quote.
@@ -902,7 +903,7 @@ internal sealed class SchemaQuerier
             i++;
         }
 
-        foreach (KeyValuePair<string, TableIndexSchema> kv in table.Indexes)
+        foreach (KeyValuePair<string, TableIndexSchema> kv in table.AllIndexes)
         {
             if (!SchemaElementStateRules.IsReadableIndex(table.Schema, kv.Value))
                 continue;
@@ -930,6 +931,8 @@ internal sealed class SchemaQuerier
                 createTableSql.Append(" PRIMARY KEY (" + cols + "),");
             else if (kv.Value.Type == IndexType.Unique)
                 createTableSql.Append(" UNIQUE KEY `" + kv.Key + "` (" + cols + ")" + include + indexComment + ",");
+            else if (kv.Value.Type == IndexType.Inverted)
+                createTableSql.Append(" INVERTED INDEX `" + kv.Key + "` (" + cols + ")" + indexComment + ",");
             else
                 createTableSql.Append(" KEY `" + kv.Key + "` (" + cols + ")" + include + indexComment + ",");
         }
@@ -1940,6 +1943,7 @@ internal sealed class SchemaQuerier
             ColumnType.DateTime => "DATETIME",
             ColumnType.Uuid => "UUID",
             ColumnType.Numeric => "NUMERIC",
+            ColumnType.Jsonb => "JSONB",
             _ => throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Cannot render SQL type for: " + type),
         };
     }
@@ -2086,12 +2090,14 @@ internal sealed class SchemaQuerier
             ColumnType.Uuid => "'" + d.UuidValue! + "'",
             ColumnType.Bool => d.BoolValue ? "true" : "false",
             ColumnType.Integer64 => d.LongValue.ToString(CultureInfo.InvariantCulture),
-            ColumnType.Float64 => d.FloatValue.ToString(CultureInfo.InvariantCulture),
-            ColumnType.Float32 => ((float)d.FloatValue).ToString(CultureInfo.InvariantCulture),
+            ColumnType.Float64 => RenderFloatLiteral(d.FloatValue.ToString(CultureInfo.InvariantCulture)),
+            ColumnType.Float32 => RenderFloatLiteral(((float)d.FloatValue).ToString(CultureInfo.InvariantCulture)),
             ColumnType.Date or ColumnType.DateTime => "'" + d.IsoValue! + "'",
             ColumnType.Bytes => SqlStringLiteral.QuoteBytes(d.BytesValue ?? []),
             // The typed literal, so the rendered DDL reads the default back exactly, never through a float.
             ColumnType.Numeric => "NUMERIC '" + d.NumericValue! + "'",
+            // The typed literal, so the default parses back as a document, not as a string.
+            ColumnType.Jsonb => "JSONB " + SqlStringLiteral.Quote(d.JsonValue!),
             _ => throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Cannot render default for type: " + d.Type),
         };
         return $" DEFAULT({literal})";
@@ -2103,6 +2109,17 @@ internal sealed class SchemaQuerier
     /// control characters, a trailing backslash, or both quote characters.
     /// </summary>
     private static string RenderStringLiteral(string value) => SqlStringLiteral.Quote(value);
+
+    /// <summary>
+    /// Keeps a rendered float default a float literal. The shortest round-trip text drops the point
+    /// from a whole number (<c>5</c>, <c>-0</c>), and the parser reads that text as an INT64. For
+    /// <c>5</c> the column type converts it back without loss, but the integer <c>-0</c> is
+    /// <c>0</c>: a <c>FLOAT</c> default of <c>-0.0</c> came back as <c>0</c> when a dump replayed the
+    /// DDL. A text that already has a point or an exponent stays as it is, and so does a text that
+    /// does not end in a digit (<c>NaN</c>, <c>Infinity</c>).
+    /// </summary>
+    private static string RenderFloatLiteral(string text) =>
+        text.AsSpan().IndexOfAny(".Ee") >= 0 || !char.IsAsciiDigit(text[^1]) ? text : text + ".0";
 
     /// <summary>
     /// Renders <c>SHOW RANGES</c> / <c>SHOW RANGE</c> from spans the caller already resolved.

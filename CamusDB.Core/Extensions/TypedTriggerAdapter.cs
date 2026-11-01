@@ -174,7 +174,7 @@ internal abstract class TypedTriggerAdapter
         ColumnType.Float64 => typeof(double),
         ColumnType.Float32 => typeof(float),
         ColumnType.Bool => typeof(bool),
-        ColumnType.String or ColumnType.Id => typeof(string),
+        ColumnType.String or ColumnType.Id or ColumnType.Jsonb => typeof(string),
         ColumnType.Uuid => typeof(Guid),
         ColumnType.Bytes => typeof(byte[]),
         ColumnType.Date or ColumnType.DateTime => typeof(DateTime),

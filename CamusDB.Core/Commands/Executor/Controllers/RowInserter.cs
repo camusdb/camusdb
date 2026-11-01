@@ -345,7 +345,8 @@ internal sealed class RowInserter
 
         // Index writability is fixed for the statement (the transaction pins the schema version),
         // so filter once here instead of re-evaluating per index per row.
-        List<TableIndexSchema> writableIndexes = SchemaElementStateRules.CollectWritableIndexes(table.Schema, table.Indexes);
+        // AllIndexes: a GIN index is maintained like any other, through its own arm below.
+        List<TableIndexSchema> writableIndexes = SchemaElementStateRules.CollectWritableIndexes(table.Schema, table.AllIndexes);
 
         // Process rows in bounded chunks so a large VALUES list does not retain all serialized
         // row bytes on the heap before the first KV write. Chunk size is tied to
@@ -382,6 +383,13 @@ internal sealed class RowInserter
                 {
                     CompositeColumnValue multiKeyValue = GetColumnValue(values, index.Columns, new ColumnValue(ColumnType.Id, rowId.ToString()), absentIsNull: true);
                     (indexEntries ??= []).Add(new(index.KvId, multiKeyValue, Unique: false, IncludeTuple: BuildIncludeTuple(index, values, state.Database.Options)));
+                }
+                else if (index.Type == IndexType.Inverted && JsonbGinIndexKeys.EntriesOf(index, values) is { } entries)
+                {
+                    JsonbGinIndexKeys.CheckEntryWrites(index, entries.Count, tx.MutationLimit);
+                    ColumnValue rowIdValue = JsonbGinIndexKeys.RowIdValue(rowId);
+                    foreach (string entry in entries)
+                        (indexEntries ??= []).Add(new(index.KvId, JsonbGinIndexKeys.Key(entry, rowIdValue), Unique: false));
                 }
             }
 

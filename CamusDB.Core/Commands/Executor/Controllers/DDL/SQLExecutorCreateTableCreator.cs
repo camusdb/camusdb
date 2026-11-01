@@ -154,7 +154,9 @@ internal sealed class SQLExecutorCreateTableCreator : SQLExecutorBaseCreator
                 ?? throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Missing index name");
             List<ColumnIndexInfo> columnIndexInfos = [];
             GetIndexColumnList(constraintList.rightAst, columnIndexInfos);
-            constraintInfos.Add(new(ConstraintType.IndexMulti, indexName, [.. columnIndexInfos], GetIncludeColumnList(constraintList.extendedOne), GetInlineComment(constraintList.extendedTwo)));
+            constraintInfos.Add(new(
+                constraintList.yytext == SQLParser.sqlParser.GinIndexMethod ? ConstraintType.IndexInverted : ConstraintType.IndexMulti,
+                indexName, [.. columnIndexInfos], GetIncludeColumnList(constraintList.extendedOne), GetInlineComment(constraintList.extendedTwo)));
             return;
         }
 
@@ -386,6 +388,7 @@ internal sealed class SQLExecutorCreateTableCreator : SQLExecutorBaseCreator
             case NodeType.TypeBytes:     return (ColumnType.Bytes,     null, null);
             case NodeType.TypeUuid:      return (ColumnType.Uuid,      null, null);
             case NodeType.TypeNumeric:   return (ColumnType.Numeric,   null, null);
+            case NodeType.TypeJsonb:     return (ColumnType.Jsonb,     null, null);
             case NodeType.TypeString:    return (ColumnType.String,    null, null);
 
             case NodeType.TypeStringSized:
@@ -490,7 +493,9 @@ internal sealed class SQLExecutorCreateTableCreator : SQLExecutorBaseCreator
                 ?? throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Missing index name");
             List<ColumnIndexInfo> columnIndexInfos = [];
             GetIndexColumnList(fieldList.rightAst, columnIndexInfos);
-            constraintInfos.Add(new(ConstraintType.IndexMulti, indexName, [.. columnIndexInfos], GetIncludeColumnList(fieldList.extendedOne), GetInlineComment(fieldList.extendedTwo)));
+            constraintInfos.Add(new(
+                fieldList.yytext == SQLParser.sqlParser.GinIndexMethod ? ConstraintType.IndexInverted : ConstraintType.IndexMulti,
+                indexName, [.. columnIndexInfos], GetIncludeColumnList(fieldList.extendedOne), GetInlineComment(fieldList.extendedTwo)));
             return;
         }
 

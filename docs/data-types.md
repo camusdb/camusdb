@@ -26,6 +26,7 @@ and reserved keywords.
 | `datetime` | instant in time (UTC) | yes | Stored as UTC ticks. A `date` value written to a `datetime` column (INSERT, UPDATE, DEFAULT) becomes midnight UTC of that day. A `datetime` value written to a `date` column is refused, because it would lose the time of day. |
 | `bytes` | opaque byte string | yes | Length-bounded (default 10 MB). |
 | `array(T)` | ordered list of `T` | **no** | `T` is a scalar type; see [Arrays](#arrays). |
+| `jsonb` | JSON document, binary (canonical CBOR) | GIN only | PostgreSQL operators and functions. No ordered index, primary key, `UNIQUE` or foreign key. See [json.md](json.md). |
 
 ### Aliases
 
@@ -40,6 +41,7 @@ These spellings are accepted as synonyms:
 | `object_id` (SQL), `id` (HTTP) | `oid` |
 | `boolean` | `bool` |
 | `decimal` | `numeric` |
+| `json` | `jsonb` (the text is canonical; see [json.md](json.md#differences-from-postgresql)) |
 
 An alias is accepted everywhere a type is written: a column definition, `ALTER TABLE ... ADD COLUMN`,
 `CAST(x AS integer)`, `x::integer`, and an array element type such as `array(integer)`. The spelling
@@ -352,6 +354,7 @@ Every scalar type has one text form. `CAST(x AS string)`, `x::string`, `to_strin
 | `datetime` | ISO-8601 in UTC, seven fractional digits | `2026-03-15T08:30:00.1230000Z` |
 | `bytes` | `\x` and lowercase hex (PostgreSQL `bytea_output = hex`) | `\xdeadbeef` |
 | `array(T)` | none: the cast, `concat` and `\|\|` raise `InvalidInput` | |
+| `jsonb` | the PostgreSQL `jsonb_out` text; `\|\|` with a document merges documents instead (see [json.md](json.md#operators)) | `{"a": [1, 2]}` |
 
 The text form uses the invariant culture and depends on the value only, so it is safe in a column
 `DEFAULT` and a stored `CHECK`. `concat` skips a NULL argument and returns NULL when every argument is
@@ -382,6 +385,7 @@ The HTTP API exchanges values as JSON:
 | `date`, `datetime` | ISO-8601 string (responses include an `isoValue` field: `yyyy-MM-dd` for date, round-trip `o` format for datetime) |
 | `bytes` | **base64 string** |
 | `array(T)` | JSON array of the element type |
+| `jsonb` | the document itself as native JSON; numbers keep all their digits. With `"jsonbAsText": true` on the request, a JSON string that holds the text form, so JSON `null` differs from SQL `NULL` (see [json.md](json.md#json-null-over-rest)). A parameter is `{"type": 13, "strValue": "<json text>"}` |
 
 > **Bytes format differs by path:** SQL literals use `0x`-hex, JSON uses base64. A round-trip through
 > each path is lossless, but the encodings are not interchangeable.

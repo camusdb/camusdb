@@ -112,7 +112,7 @@ public sealed class TableColumnSchema
     /// <summary>
     /// How the writer may compress or move a large value of this column out of the row. Null means
     /// <see cref="ColumnStorageStrategy.Extended"/>, so a schema persisted before the strategy existed
-    /// loads unchanged. Meaningful only for <c>String</c>, <c>Bytes</c> and <c>Array</c> columns. A
+    /// loads unchanged. Meaningful only for <c>String</c>, <c>Bytes</c>, <c>Jsonb</c> and <c>Array</c> columns. A
     /// write-time decision only: a reader follows the per-cell marks in the stored row, never this
     /// value. Like <see cref="Comment"/>, every rebuild-copy of a column must pass it through or the
     /// strategy is silently reset to the default.
@@ -124,7 +124,7 @@ public sealed class TableColumnSchema
 
     /// <summary>True for the column types whose values have a variable-length payload that a storage strategy can act on.</summary>
     public static bool SupportsStorageStrategy(ColumnType type) =>
-        type is ColumnType.String or ColumnType.Bytes or ColumnType.Array;
+        type is ColumnType.String or ColumnType.Bytes or ColumnType.Jsonb or ColumnType.Array;
 
     public TableColumnSchema(
         string id,

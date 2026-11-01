@@ -179,6 +179,8 @@ SELECT id FROM items WHERE flags & 4 = 4;
   conversion to `int64`.
 - `#` is XOR, as in PostgreSQL. `^` is not an operator: it is power in PostgreSQL and XOR in MySQL,
   so each meaning is a surprise to some users. Use `#` for XOR and `power()` for a power.
+- `#-` with no space between the two characters is the jsonb delete-path operator, as in PostgreSQL
+  (see [json.md](json.md#lexer-notes)). `x #-1` is therefore not `x XOR -1`; write `x # -1`.
 
 ### Prefix `~` and regex match `~`
 
@@ -200,6 +202,7 @@ same precedence. A left-associative row groups from left to right: `a - b - c` i
 |-----------|---------------|
 | `::` (cast), `[ ]` (subscript) | left |
 | unary `-`, prefix `~` | right |
+| `->`, `->>`, `#>`, `#>>`, `@>`, `<@`, `?`, `?\|`, `?&`, `#-` (jsonb, see [json.md](json.md#precedence)) | left |
 | `IS`, `IN`, `.` (qualified name) | left |
 | `*`, `/`, `%` | left |
 | `+`, `-` | left |

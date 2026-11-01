@@ -97,8 +97,8 @@ public static class CamusDBErrorCodes
 
     /// <summary>
     /// A column storage strategy (<c>STORAGE PLAIN | MAIN | EXTERNAL | EXTENDED</c>) was given for a
-    /// column whose type has no variable-length payload. Only <c>string</c>, <c>bytes</c> and array
-    /// columns can be compressed or moved out of the row, so a strategy on any other type would be a
+    /// column whose type has no variable-length payload. Only <c>string</c>, <c>bytes</c>, <c>jsonb</c>
+    /// and array columns can be compressed or moved out of the row, so a strategy on any other type would be a
     /// setting with no effect. A permanent caller mistake — maps to HTTP 400.
     /// </summary>
     public const string ColumnStorageNotApplicable = "CADB0414";
@@ -125,6 +125,23 @@ public static class CamusDBErrorCodes
     /// <c>OUT_OF_RANGE</c>, the status Spanner gives for the same overflow.
     /// </summary>
     public const string NumericValueOutOfRange = "CADB0417";
+
+    /// <summary>
+    /// Text given for a <c>jsonb</c> value is not a JSON document that the type can store: invalid
+    /// JSON, a string with a <c>\u0000</c> escape or a lone surrogate (PostgreSQL refuses both), or a
+    /// number whose exponent or digit count is past the PostgreSQL <c>numeric</c> limits. Raised by a
+    /// cast, a typed literal, a write into a <c>jsonb</c> column and a <c>jsonb</c> parameter. A
+    /// permanent caller mistake — maps to HTTP 400.
+    /// </summary>
+    public const string InvalidJsonText = "CADB0418";
+
+    /// <summary>
+    /// A <c>jsonb</c> document nests objects and arrays deeper than
+    /// <c>JsonbLimits.MaxNestingDepth</c>. Refused when the document is parsed or built, before any
+    /// walk recurses over it, because a stack overflow cannot be caught and would end the server
+    /// process. A permanent caller mistake — maps to HTTP 400.
+    /// </summary>
+    public const string JsonNestingTooDeep = "CADB0419";
 
     public const string DuplicateUniqueKeyValue = "CADB0300";
     public const string NotNullViolation = "CADB0301";
@@ -673,6 +690,14 @@ public static class CamusDBErrorCodes
     /// </summary>
     public const string ConcurrencyLimitExceeded = "CADB0558";
 
+    /// <summary>
+    /// Stored <c>jsonb</c> bytes do not decode: an unknown format version, a truncated item or a CBOR
+    /// form the encoder never writes. The encoder validates every document, so this means damage or a
+    /// value written by a newer build. The statement fails; no partial document is returned. Maps to
+    /// HTTP 500.
+    /// </summary>
+    public const string JsonbValueCorrupt = "CADB0559";
+
     public const string InvalidConfig = "CADB0600";
 
     /// <summary>
@@ -1061,6 +1086,8 @@ public static class CamusDBErrorCodes
         InvalidForeignKeyDefinition => 400,
         ForeignKeyCycle => 400,
         NumericValueOutOfRange => 400,
+        InvalidJsonText => 400,
+        JsonNestingTooDeep => 400,
         MalformedVector => 400,
         VectorDimensionMismatch => 400,
         InvalidVectorValue => 400,

@@ -35,4 +35,12 @@ public enum ColumnType
     /// <see cref="CamusDB.Core.CommandsExecutor.Models.NumericMath"/> for every rule of the type.
     /// </summary>
     Numeric = 12,
+
+    /// <summary>
+    /// A JSON document with the semantics of PostgreSQL <c>jsonb</c>; <c>json</c> is an alias. Stored
+    /// as a format-version byte and one canonical CBOR item, so keys are unique and sorted and numbers
+    /// are exact. See <see cref="CamusDB.Core.CommandsExecutor.Models.Jsonb.JsonbEncoder"/>. Never an
+    /// ordered-index key, a primary key or an array element.
+    /// </summary>
+    Jsonb = 13,
 }

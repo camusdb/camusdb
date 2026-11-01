@@ -570,8 +570,8 @@ internal static class DerivedTableSchemaBuilder
         // A function that declares its element type (an extension function or aggregate returning
         // IReadOnlyList<long>) types its column without a value.
         if (target.nodeType == NodeType.ExprFuncCall && target.leftAst?.yytext is { } functionName)
-            return AggregateFunctionCatalog.IsExtensionAggregate(functionName)
-                ? AggregateFunctionCatalog.ResolveExtension(functionName).ReturnElementType
+            return AggregateFunctionCatalog.IsStateAggregate(functionName)
+                ? AggregateFunctionCatalog.ResolveStateAggregate(functionName).ReturnElementType
                 : ScalarFunctionEvaluator.InferArrayElementType(functionName);
 
         if (target.nodeType != NodeType.Identifier || target.yytext is null)
@@ -762,6 +762,10 @@ internal static class DerivedTableSchemaBuilder
         if (target.nodeType is NodeType.ExprAdd or NodeType.ExprSub or NodeType.ExprMult or NodeType.ExprDiv
             && target.leftAst is not null && target.rightAst is not null)
         {
+            // `jsonb - key` removes a key or an element and stays a document.
+            if (target.nodeType == NodeType.ExprSub && InferArgType(target.leftAst, innerBound, innerResolver) == ColumnType.Jsonb)
+                return ColumnType.Jsonb;
+
             return MixedNumericComparison.ArithmeticResultType(
                        InferArgType(target.leftAst, innerBound, innerResolver),
                        InferArgType(target.rightAst, innerBound, innerResolver))
@@ -1099,8 +1103,8 @@ internal static class DerivedTableSchemaBuilder
                 ? ColumnType.Numeric
                 : ColumnType.Float64,
             "min" or "max" => InferAggregateArgumentType(funcCall, innerBound, innerResolver, fallback: ColumnType.String),
-            // An extension aggregate declares its result: the return type of its Finish method.
-            _ when AggregateFunctionCatalog.IsExtensionAggregate(funcName) => AggregateFunctionCatalog.ResolveExtension(funcName).ReturnType,
+            // A state aggregate declares its result: the return type of its Finish method.
+            _ when AggregateFunctionCatalog.IsStateAggregate(funcName) => AggregateFunctionCatalog.ResolveStateAggregate(funcName).ReturnType,
             _ => ColumnType.String,
         };
     }

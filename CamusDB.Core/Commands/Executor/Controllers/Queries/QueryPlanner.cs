@@ -512,7 +512,9 @@ public sealed class QueryPlanner
         // scan step alone does not prove that: an IN-list index scan also has no step, and it applies
         // the IN conjunct it took out of the execution filter. Swapping it would leave nothing to
         // apply that conjunct, and the query would return rows outside the list.
+        // A GIN scan has no step either, and reads only candidate rows, so it is not a full read.
         bool scanIsUnfilteredFullRead = absorbedInListConjunct is null
+            && scanNode is not GinIndexScanNode
             && (scanStep is null || scanStep.Value.Type == QueryPlanStepType.FullScanFromTableIndex);
 
         // Streaming distinct detection.
@@ -780,10 +782,12 @@ public sealed class QueryPlanner
         // On a cache miss, store the access-path decision so the next identical-shape query
         // can skip the expensive cost enumeration.  In-list scans are excluded: they have no
         // QueryPlanStep (the step slot is null) and their choice is IN-list-value-count-dependent.
+        // GIN scans are excluded for the same reason: their entries come from the literal, which
+        // the shape abstracts away.
         if (!fromCache && planCacheEnabled
             && shapeId is not null
             && plan.Steps is [{ } s0, ..]
-            && s0.Type != QueryPlanStepType.InListScanFromIndex)
+            && s0.Type is not (QueryPlanStepType.InListScanFromIndex or QueryPlanStepType.GinScanFromIndex))
         {
             bool guarded = s0.Type != QueryPlanStepType.QueryFromIndex;
 
@@ -1235,6 +1239,17 @@ public sealed class QueryPlanner
         // or score, and the range-vs-full-scan veto does not apply, because the user asked for the
         // index. A hint whose index the predicate cannot bound goes through the automatic choice
         // below, and becomes an end-to-end scan of that index only when no automatic scan is chosen.
+        // A hint that names a GIN index: the GIN scan when the predicate can use that index, else
+        // the primary-row scan (a GIN index holds no row order to scan end to end).
+        if (!string.IsNullOrEmpty(ticket.IndexName) && GinScanSelector.IsInvertedIndexName(table, ticket.IndexName))
+        {
+            if (GinScanSelector.TryBuild(table, analysis, ticket.Parameters, onlyIndex: ticket.IndexName) is { } forcedGin)
+                return (WithDistribution(forcedGin, table), null, null);
+
+            QueryPlanStep primaryStep = new(QueryPlanStepType.FullScanFromTableIndex);
+            return (WithDistribution(new TableScanNode(TableScanSource.PrimaryRows), table), primaryStep, null);
+        }
+
         if (!string.IsNullOrEmpty(ticket.IndexName))
         {
             TableIndexSchema forcedIndex = ResolveForcedIndex(table, ticket.IndexName);
@@ -1304,6 +1319,10 @@ public sealed class QueryPlanner
                         return (WithDistribution(inListNode, table), null, absorbed);
                     }
                 }
+
+                if ((bestStep is null || bestStep.Value.Type == QueryPlanStepType.FullScanFromTableIndex)
+                    && GinScanSelector.TryBuild(table, analysis, ticket.Parameters) is { } costGin)
+                    return (WithDistribution(costGin, table), null, null);
 
                 return (bestNode, bestStep, null);
             }
@@ -1381,6 +1400,11 @@ public sealed class QueryPlanner
                 return (WithDistribution(inListNode, table), null, absorbed);
             }
         }
+
+        // No ordered index narrows the scan: a GIN index may, for the jsonb operators. It runs
+        // before the hinted end-to-end scan below, which reads every row.
+        if (GinScanSelector.TryBuild(table, analysis, ticket.Parameters) is { } ginNode)
+            return (WithDistribution(ginNode, table), null, null);
 
         if (!string.IsNullOrEmpty(ticket.IndexName))
         {
@@ -1921,7 +1945,7 @@ public sealed class QueryPlanner
 
         // IN-list scans have no covering path in QueryUsingInListIndexInternal; exclude them
         // explicitly so that if the step ever gains a non-null Index the flag stays honest.
-        if (stepType is QueryPlanStepType.InListScanFromIndex)
+        if (stepType is QueryPlanStepType.InListScanFromIndex or QueryPlanStepType.GinScanFromIndex)
             return;
 
         // Empty required set → only the row id is needed; always present in the index entry.

@@ -12,5 +12,8 @@ public enum ConstraintType
 {
     PrimaryKey,
     IndexMulti,
-    IndexUnique
+    IndexUnique,
+
+    /// <summary>A GIN index over one jsonb column (the inline <c>INVERTED INDEX name (col)</c>).</summary>
+    IndexInverted,
 }

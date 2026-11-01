@@ -191,6 +191,15 @@ TBitAnd         &
 TBitXor         #
 TShiftLeft      <<
 TShiftRight     >>
+TJsonFieldText  \-\>\>
+TJsonField      \-\>
+TJsonPathText   #\>\>
+TJsonPath       #\>
+TJsonDeletePath #\-
+TJsonContains   @\>
+TJsonExistsAny  \?\|
+TJsonExistsAll  \?&
+TJsonExists     \?
 TComma          ,
 TEquals         =
 TNotEquals      <>
@@ -496,6 +505,34 @@ TSequence       (S|s)(E|e)(Q|q)(U|u)(E|e)(N|n)(C|c)(E|e)
 {TMod} { return (int)Token.TMOD; }
 
 {TColonColon} { return (int)Token.TCOLONCOLON; }
+
+/* The jsonb operators of PostgreSQL. Longest match makes `->>` win over `->`, `#>>` over `#>`, and
+   `?|` / `?&` over `?`. `#-` (delete path) wins over `#` (XOR) followed by a negative number, as in
+   PostgreSQL: `x #-1` is the jsonb operator, and XOR with -1 needs a space, `x # -1`. `@>` cannot
+   collide with a placeholder, which needs a name character after `@`.
+
+   `<@` is the one that can: `x<@p` has always meant `x < @p`. So `<@` is a token only when the next
+   character cannot start a placeholder name; otherwise the input lexes as `<` and a placeholder, as
+   before. `x <@ y` and `x <@'{}'` are the operator. */
+{TJsonFieldText} { return (int)Token.TJSONFIELDTEXT; }
+
+{TJsonField} { return (int)Token.TJSONFIELD; }
+
+{TJsonPathText} { return (int)Token.TJSONPATHTEXT; }
+
+{TJsonPath} { return (int)Token.TJSONPATH; }
+
+{TJsonDeletePath} { return (int)Token.TJSONDELETEPATH; }
+
+{TJsonContains} { return (int)Token.TJSONCONTAINS; }
+
+"<@"/[^a-zA-Z0-9_] { return (int)Token.TJSONCONTAINEDBY; }
+
+{TJsonExistsAny} { return (int)Token.TJSONEXISTSANY; }
+
+{TJsonExistsAll} { return (int)Token.TJSONEXISTSALL; }
+
+{TJsonExists} { return (int)Token.TJSONEXISTS; }
 
 /* `||` and `|` are two tokens; longest match reads `||` as concatenation. `<<` and `>>` likewise
    win over `<`, `<=`, `<>`, `>` and `>=`. `#` is XOR, never a comment: the only comments are `--`

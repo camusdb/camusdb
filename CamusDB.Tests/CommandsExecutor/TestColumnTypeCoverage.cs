@@ -48,9 +48,13 @@ public sealed class TestColumnTypeCoverage
 
     private static IEnumerable<ColumnType> AllTypes() => Enum.GetValues<ColumnType>();
 
-    /// <summary>Every type that an array can hold: a scalar, so neither NULL nor an array.</summary>
+    /// <summary>
+    /// Every type that an array can hold: a scalar, so neither NULL nor an array. Jsonb is not an
+    /// element type either: <see cref="ColumnValue.FromArray"/> refuses an array of documents, because
+    /// a jsonb array is the way to hold several documents.
+    /// </summary>
     private static IEnumerable<ColumnType> ElementTypes() =>
-        Enum.GetValues<ColumnType>().Where(t => t is not ColumnType.Null and not ColumnType.Array);
+        Enum.GetValues<ColumnType>().Where(t => t is not ColumnType.Null and not ColumnType.Array and not ColumnType.Jsonb);
 
     private static IEnumerable<ColumnType> HashedTypes() =>
         Enum.GetValues<ColumnType>().Where(t => t is not ColumnType.Null);
@@ -110,6 +114,15 @@ public sealed class TestColumnTypeCoverage
             1 => NumericMath.MinUnscaled,
             _ => (i % 2 == 0 ? 1 : -1) * (((Int128)i << 64) + 5),
         }),
+        // Documents that differ in kind, nesting, key order of input, numbers past 64 bits and number scale.
+        ColumnType.Jsonb => ColumnValue.FromJsonText(i switch
+        {
+            0 => "null",
+            1 => "[]",
+            2 => "{\"a\": [1, 2.50, \"é\"], \"b\": {\"c\": null}}",
+            3 => "123456789012345678901234567890.123",
+            _ => $"{{\"k\": {i}, \"s\": \"v{i}\", \"f\": {i}.5}}",
+        }),
         _ => throw new AssertionException(
             $"ColumnType.{type} has no samples. Add samples here. Then give the type an arm in SpillRowCodec " +
             "(WriteScalar, ReadScalar, MeasureScalar), ColumnValueHash, ColumnValueWireCodec, GrpcValueCodec " +
@@ -133,7 +146,7 @@ public sealed class TestColumnTypeCoverage
         foreach (ColumnValue value in samples)
             yield return value;
 
-        if (type is ColumnType.Null or ColumnType.Array)
+        if (type is ColumnType.Null or ColumnType.Array or ColumnType.Jsonb)
             yield break;
 
         yield return ColumnValue.FromArray(type, []);
@@ -248,6 +261,8 @@ public sealed class TestColumnTypeCoverage
             .SetName("Numeric with a trailing zero");
         yield return new TestCaseData(new ColumnValue(Array.Empty<byte>()), new ColumnValue((byte[])null!))
             .SetName("Bytes empty and missing");
+        yield return new TestCaseData(ColumnValue.FromJsonText("{\"a\": 1.0, \"b\": [10.50]}"), ColumnValue.FromJsonText("{\"b\": [10.5], \"a\": 1}"))
+            .SetName("Jsonb numbers with different scales");
         yield return new TestCaseData(
                 ColumnValue.FromArray(ColumnType.Float32, [new ColumnValue(ColumnType.Float32, 0.1), ColumnValue.Null]),
                 ColumnValue.FromArray(ColumnType.Float32, [new ColumnValue(ColumnType.Float32, (double)0.1f), ColumnValue.Null]))

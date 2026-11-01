@@ -487,6 +487,7 @@ internal sealed class ShowRangesReader
             ColumnType.Bytes => SqlStringLiteral.QuoteBytes(value.BytesValue ?? []),
             ColumnType.Uuid => value.UuidValue ?? "",
             ColumnType.Numeric => value.NumericValue ?? "",
+            ColumnType.Jsonb => value.JsonValue ?? "",
             _ => value.ToString() ?? "",
         };
     }

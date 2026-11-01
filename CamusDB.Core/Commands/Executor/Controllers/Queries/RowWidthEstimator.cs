@@ -68,6 +68,7 @@ internal static class RowWidthEstimator
                 ColumnType.DateTime => DateTimeBytes,
                 ColumnType.String   => EstimateStringWidth(col.MaxLength),
                 ColumnType.Bytes    => EstimateBytesWidth(col.MaxLength),
+                ColumnType.Jsonb    => BytesAvgBytes,
                 ColumnType.Uuid     => UuidBytes,
                 ColumnType.Numeric  => UuidBytes,   // also a fixed 128-bit value
                 ColumnType.Array    => ArrayAvgBytes,

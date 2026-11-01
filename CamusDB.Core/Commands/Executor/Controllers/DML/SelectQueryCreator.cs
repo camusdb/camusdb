@@ -403,20 +403,33 @@ internal sealed class SelectQueryCreator
         List<NodeAst> columnAliases = new();
         CollectFunctionArguments(functionAst.extendedTwo, columnAliases, NodeType.IdentifierList);
 
-        if (columnAliases.Count > 1)
+        int outputCount = function.OutputColumns?.Count ?? 1;
+        if (columnAliases.Count > outputCount)
         {
             throw new CamusDBException(
                 CamusDBErrorCodes.InvalidInput,
-                $"{function.Name} returns 1 column, but the alias names {columnAliases.Count} columns");
+                $"{function.Name} returns {outputCount} column{(outputCount == 1 ? "" : "s")}, but the alias names {columnAliases.Count} columns");
         }
 
         string relationName = alias ?? function.Name;
-        string columnName = columnAliases.Count == 1 ? columnAliases[0].yytext! : function.DefaultColumnName ?? relationName;
 
-        TableFunctionSource call = new(function.Name, arguments, columnName);
-        NodeAst columnAst = new(NodeType.Identifier, null, null, null, null, null, null, null, columnName);
+        // A column alias list renames the output columns from the left, as in PostgreSQL. A
+        // one-column function with no column alias names its column after the relation.
+        string[] columnNames = new string[outputCount];
+        for (int i = 0; i < outputCount; i++)
+        {
+            columnNames[i] = i < columnAliases.Count
+                ? columnAliases[i].yytext!
+                : function.OutputColumns is { } columns ? columns[i].Name : function.DefaultColumnName ?? relationName;
+        }
 
-        SelectQuery shell = new(call, [new ProjectionItem(columnAst, columnName)]);
+        TableFunctionSource call = new(function.Name, arguments, columnNames);
+
+        List<ProjectionItem> projections = new(outputCount);
+        foreach (string columnName in columnNames)
+            projections.Add(new ProjectionItem(new NodeAst(NodeType.Identifier, null, null, null, null, null, null, null, columnName), columnName));
+
+        SelectQuery shell = new(call, projections);
         return new DerivedTableSource(shell, relationName);
     }
 

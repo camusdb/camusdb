@@ -24,5 +24,11 @@ public enum QueryPlanStepType
     InListScanFromIndex,
 
     /// <summary>The lock step of <c>SELECT … FOR UPDATE</c> (<see cref="Plans.LockRowsNode"/>).</summary>
-    LockRows
+    LockRows,
+
+    /// <summary>
+    /// The candidate rows of a jsonb predicate, read from a GIN index (<see cref="Plans.GinIndexScanNode"/>).
+    /// Like an IN-list scan it has no index step fields; the node carries the entries.
+    /// </summary>
+    GinScanFromIndex
 }

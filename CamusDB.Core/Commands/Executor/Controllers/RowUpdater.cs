@@ -873,7 +873,7 @@ public sealed class RowUpdater
 
         // Index writability is fixed for the statement (the transaction pins the schema version),
         // so filter once per chunk instead of re-evaluating per index per row.
-        List<TableIndexSchema> writableIndexes = SchemaElementStateRules.CollectWritableIndexes(table.Schema, table.Indexes);
+        List<TableIndexSchema> writableIndexes = SchemaElementStateRules.CollectWritableIndexes(table.Schema, table.AllIndexes);
 
         // With triggers, the evaluated columns are null, so a carried row still decodes every column. A
         // row whose BEFORE trigger changes a carried column stops carrying below.
@@ -1328,6 +1328,37 @@ public sealed class RowUpdater
 
                 (oldEntries ??= new()).Add(new KvTableStore.IndexDelete(index.KvId, GetColumnValue(oldRow, index.Columns, rowIdValue), rowId, Unique: false));
                 (newEntries ??= new()).Add(new KvTableStore.IndexWrite(index.KvId, GetColumnValue(newRow, index.Columns, rowIdValue), Unique: false, IncludeTuple: BuildIncludeTuple(index, newRow, options)));
+            }
+            else if (index.Type == IndexType.Inverted)
+            {
+                // Only the difference: an entry both documents have stays, so an update that leaves
+                // the document alone writes nothing, and one that changes a leaf writes two keys.
+                if (MultiKeyColumnsUnchanged(oldRow, newRow, index.Columns))
+                    continue;
+
+                HashSet<string>? before = JsonbGinIndexKeys.EntriesOf(index, oldRow);
+                HashSet<string>? after = JsonbGinIndexKeys.EntriesOf(index, newRow);
+                rowIdValue ??= new(ColumnType.Id, rowId.ToString());
+
+                if (before is not null)
+                    foreach (string entry in before)
+                        if (after is null || !after.Contains(entry))
+                            (oldEntries ??= new()).Add(new KvTableStore.IndexDelete(index.KvId, JsonbGinIndexKeys.Key(entry, rowIdValue), rowId, Unique: false));
+
+                if (after is not null)
+                {
+                    int added = 0;
+                    foreach (string entry in after)
+                    {
+                        if (before is null || !before.Contains(entry))
+                        {
+                            (newEntries ??= new()).Add(new KvTableStore.IndexWrite(index.KvId, JsonbGinIndexKeys.Key(entry, rowIdValue), Unique: false));
+                            added++;
+                        }
+                    }
+
+                    JsonbGinIndexKeys.CheckEntryWrites(index, added, options.MaxMutationsPerTransaction);
+                }
             }
         }
 
