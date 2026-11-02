@@ -228,7 +228,6 @@ public sealed class TestArrayScalarFunctions : SharedNodeBaseTest
     [TestCase("SELECT array_contains(ARRAY[1, 2], 2.0)", true)]
     [TestCase("SELECT array_contains(ARRAY[1.5, 2.5], 2.5)", true)]
     [TestCase("SELECT array_contains(ARRAY['a', NULL], 'a')", true)]
-    [TestCase("SELECT array_contains(ARRAY[1, 2], 'x')", false)]
     [TestCase("SELECT array_contains(ARRAY[], 'a')", false)]
     [TestCase("SELECT array_contains(ARRAY[], NULL)", false)]
     public async Task ArrayContains_ReturnsTrueOrFalse(string sql, bool expected)
@@ -270,6 +269,24 @@ public sealed class TestArrayScalarFunctions : SharedNodeBaseTest
         Assert.AreEqual(viaIn.Type, viaFunction.Type, $"{value} in [{elements}]");
         if (viaIn.Type == ColumnType.Bool)
             Assert.AreEqual(viaIn.BoolValue, viaFunction.BoolValue, $"{value} in [{elements}]");
+    }
+
+    /// <summary>
+    /// An element type with no comparison rule against the value is an error, the same as
+    /// <c>'x' IN (1, 2)</c>, not a silent FALSE.
+    /// </summary>
+    [Test]
+    public async Task ArrayContains_ValueWithNoComparisonRule_IsInvalidInput_LikeIn()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+
+        CamusDBException viaFunction = Assert.ThrowsAsync<CamusDBException>(async () =>
+            await ExecScalar(database, executor, dbname, "SELECT array_contains(ARRAY[1, 2], 'x')"))!;
+        Assert.AreEqual(CamusDBErrorCodes.InvalidInput, viaFunction.Code);
+
+        CamusDBException viaIn = Assert.ThrowsAsync<CamusDBException>(async () =>
+            await ExecScalar(database, executor, dbname, "SELECT 'x' IN (1, 2)"))!;
+        Assert.AreEqual(CamusDBErrorCodes.InvalidInput, viaIn.Code);
     }
 
     [Test]

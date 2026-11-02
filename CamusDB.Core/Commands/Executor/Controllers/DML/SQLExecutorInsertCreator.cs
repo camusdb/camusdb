@@ -293,9 +293,19 @@ internal sealed class SQLExecutorInsertCreator : SQLExecutorBaseCreator
                 $"Too many values in VALUES row (expected {slots.Length})"
             );
 
-        // ExprDefault leaves a null slot; the caller substitutes the schema default.
-        slots[filled++] = node.nodeType == NodeType.ExprDefault
-            ? null
-            : EvalExpr(node, EmptyRow, parameters);
+        if (node.nodeType == NodeType.ExprDefault)
+        {
+            // ExprDefault leaves a null slot; the caller substitutes the schema default.
+            slots[filled++] = null;
+            return;
+        }
+
+        // A CASE, COALESCE, IFNULL or IF whose literal inputs have no common type fails even when
+        // the input that would fail is not the one returned. A VALUES expression has no columns, so
+        // its literals are all the check can see.
+        if (node.leftAst is not null || node.rightAst is not null)
+            Queries.ConditionalResultTypes.Check(node, lookup: null, recorder: null);
+
+        slots[filled++] = EvalExpr(node, EmptyRow, parameters);
     }
 }

@@ -1677,6 +1677,10 @@ internal sealed class SelectStatementExecutor
                 .RewriteProjectionExpressionAsync(database, valueExpr, ticket)
                 .ConfigureAwait(false);
 
+            // No binding runs for a FROM-less SELECT, so its CASE, COALESCE, IFNULL and IF are checked
+            // here, over their literal inputs, before the expression is evaluated.
+            ConditionalResultTypes.Check(resolved, lookup: null, recorder: null);
+
             projected[rowKeys[i]] = SQLExecutorBaseCreator.EvalExpr(resolved, emptyRow, ticket.Parameters);
         }
 

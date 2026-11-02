@@ -117,16 +117,20 @@ public static class MixedNumericComparison
     /// a String against a Uuid or Id is equal when the
     /// string parses to that value (<see cref="StringOperandCoercion"/>, the rule <c>=</c> uses), a
     /// same-type pair uses <see cref="ColumnValue.CompareTo"/>, and any other cross-type pair
-    /// (<c>5 = 'foo'</c>) is a non-match rather than an error.
+    /// (<c>5 IN ('foo')</c>), or two arrays with different element types, is an <see cref="CamusDBErrorCodes.InvalidInput"/> error that names
+    /// <paramref name="op"/> (<see cref="ComparisonTypeRule"/>), never a silent non-match.
     ///
     /// <para><c>x IN (a, b)</c> is defined as <c>x = a OR x = b</c>, so this must agree with the WHERE
     /// comparison evaluator for every pair. The index IN-list seek converts its items the same way,
-    /// and a table scan that disagrees with it returns different rows for the same predicate.</para>
+    /// and a table scan that disagrees with it returns different rows for the same predicate. OR
+    /// evaluates both sides, so a caller must test every item, not stop at the first match.</para>
     /// </summary>
-    public static bool EqualsForMembership(ColumnValue left, ColumnValue right)
+    public static bool EqualsForMembership(ColumnValue left, ColumnValue right, string op = "IN")
     {
         if (left.Type == ColumnType.Null || right.Type == ColumnType.Null)
             return false;
+
+        ComparisonTypeRule.Require(op, left, right);
 
         if (TemporalComparison.TryCompare(left, right, out int temporalCmp))
             return temporalCmp == 0;

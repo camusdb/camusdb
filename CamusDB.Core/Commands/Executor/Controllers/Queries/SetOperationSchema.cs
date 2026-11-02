@@ -28,6 +28,21 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 /// <item>A date with a datetime gives datetime (<see cref="TemporalComparison.WidenDate"/>).</item>
 /// <item>Any other pair fails with <see cref="CamusDBErrorCodes.InvalidInput"/>.</item>
 /// </list>
+/// <para>Rules 1, 3 and 4 are <see cref="ResultTypeRule.Combine"/>, which CASE, COALESCE, IFNULL and
+/// IF use as well, so a set operation and a CASE over the same two types agree. As there, a quoted
+/// string literal in an operand's select list takes the date or datetime type of the other operand,
+/// and is parsed when the statement is bound: <c>SELECT d FROM t UNION SELECT '2026-01-01'</c> is a
+/// DATE column, and <see cref="Widen"/> converts the literal's cell, so DISTINCT, INTERSECT and EXCEPT
+/// compare dates.</para>
+///
+/// <para>Two array columns also need element types that agree
+/// (<see cref="ComparisonTypeRule.ArrayElementTypesAgree"/>). Both declare
+/// <see cref="ColumnType.Array"/>, so rule 1 alone accepts <c>ARRAY&lt;Integer64&gt;</c> with
+/// <c>ARRAY&lt;String&gt;</c>; the result column then holds arrays that no comparison can order, so a
+/// DISTINCT or INTERSECT calls every pair unequal and an ORDER BY or MIN over the column fails inside
+/// the sort. The check applies when both element types are known before the statement runs
+/// (<see cref="DerivedColumnSchema.ElementType"/>); an array expression whose element type only its
+/// value carries is not checked here.</para>
 ///
 /// <para>A different number of columns also fails, before any row is read. The result types are a
 /// promise the executor keeps: it widens every cell to its output type before rows are compared
@@ -50,6 +65,8 @@ internal static class SetOperationSchema
 
         IReadOnlyList<bool> leftUntyped = UntypedColumns(setOperation.Left, leftBound, leftColumns.Count);
         IReadOnlyList<bool> rightUntyped = UntypedColumns(setOperation.Right, rightBound, rightColumns.Count);
+        NodeAst?[] leftLiterals = StringLiteralColumns(setOperation.Left, leftBound, leftColumns.Count);
+        NodeAst?[] rightLiterals = StringLiteralColumns(setOperation.Right, rightBound, rightColumns.Count);
 
         DerivedColumnSchema[] columns = new DerivedColumnSchema[leftColumns.Count];
         bool[] untyped = new bool[leftColumns.Count];
@@ -59,13 +76,13 @@ internal static class SetOperationSchema
             DerivedColumnSchema left = leftColumns[i];
             DerivedColumnSchema right = rightColumns[i];
 
-            ColumnType type = ResultType(setOperation, i, left.Type, leftUntyped[i], right.Type, rightUntyped[i]);
+            ColumnType type = ResultType(setOperation, i, left.Type, leftUntyped[i], leftLiterals[i], right.Type, rightUntyped[i], rightLiterals[i]);
             untyped[i] = leftUntyped[i] && rightUntyped[i];
 
             columns[i] = new DerivedColumnSchema(left.Name, type)
             {
                 RowKey = left.RowKey,
-                ElementType = type == ColumnType.Array ? left.ElementType ?? right.ElementType : null,
+                ElementType = type == ColumnType.Array ? ArrayElementType(setOperation, i, left, right) : null,
             };
         }
 
@@ -78,15 +95,33 @@ internal static class SetOperationSchema
     /// type differs from its column's (an untyped placeholder bound to another type) simply never
     /// equals a cell of the column's type.
     /// </summary>
-    public static ColumnValue Widen(ColumnValue value, ColumnType resultType)
+    public static ColumnValue Widen(ColumnValue value, ColumnType resultType) =>
+        ResultTypeRule.Widen(value, resultType);
+
+    /// <summary>
+    /// The element type of an array output column: the known element type of either side, preferring
+    /// one that is not <see cref="ColumnType.Null"/> (the type of <c>ARRAY[]</c>). Two known element
+    /// types that do not agree fail, as two scalar types with no rule do (see the class summary).
+    /// </summary>
+    private static ColumnType? ArrayElementType(
+        SetOperationSource setOperation,
+        int position,
+        DerivedColumnSchema left,
+        DerivedColumnSchema right)
     {
-        if (value.Type == resultType || value.Type == ColumnType.Null)
-            return value;
+        if (left.Type != ColumnType.Array || right.Type != ColumnType.Array)
+            return left.ElementType ?? right.ElementType;
 
-        if (resultType == ColumnType.DateTime)
-            return TemporalComparison.WidenDate(value);
+        if (left.ElementType is not { } leftElement || leftElement == ColumnType.Null)
+            return right.ElementType ?? left.ElementType;
 
-        return NumericWidening.Widen(value, resultType);
+        if (right.ElementType is { } rightElement && !ComparisonTypeRule.ArrayElementTypesAgree(leftElement, rightElement))
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInput,
+                $"Column {position + 1} of {setOperation.OperatorText} has type ARRAY<{leftElement}> in the left operand " +
+                $"and ARRAY<{rightElement}> in the right operand, and the two cannot be combined");
+
+        return leftElement;
     }
 
     private static ColumnType ResultType(
@@ -94,8 +129,10 @@ internal static class SetOperationSchema
         int position,
         ColumnType left,
         bool leftUntyped,
+        NodeAst? leftLiteral,
         ColumnType right,
-        bool rightUntyped)
+        bool rightUntyped,
+        NodeAst? rightLiteral)
     {
         leftUntyped |= left == ColumnType.Null;
         rightUntyped |= right == ColumnType.Null;
@@ -106,19 +143,74 @@ internal static class SetOperationSchema
         if (leftUntyped)
             return right;
 
-        if (rightUntyped || left == right)
+        if (rightUntyped)
             return left;
 
-        if (MixedNumericComparison.ArithmeticResultType(left, right) is { } numeric)
-            return numeric;
+        // A quoted string literal takes the date or datetime type of the other operand, and is parsed
+        // now, so a malformed literal fails before any row is read (GoogleSQL literal coercion). The
+        // executor converts the literal's cell when it widens the row (see Widen).
+        if (leftLiteral is not null && TemporalComparison.IsTemporal(right))
+            return ParsedLiteralType(leftLiteral, right);
 
-        if (left is ColumnType.Date or ColumnType.DateTime && right is ColumnType.Date or ColumnType.DateTime)
-            return ColumnType.DateTime;
+        if (rightLiteral is not null && TemporalComparison.IsTemporal(left))
+            return ParsedLiteralType(rightLiteral, left);
+
+        // The rule CASE, COALESCE, IFNULL and IF use too: one type, two numbers, or a date with a datetime.
+        if (ResultTypeRule.Combine(left, right) is { } combined)
+            return combined;
 
         throw new CamusDBException(
             CamusDBErrorCodes.InvalidInput,
             $"Column {position + 1} of {setOperation.OperatorText} has type {left} in the left operand " +
             $"and {right} in the right operand, and the two cannot be combined");
+    }
+
+    private static ColumnType ParsedLiteralType(NodeAst literal, ColumnType target)
+    {
+        _ = ResultTypeRule.ParseTemporal(DML.SQLExecutorBaseCreator.UnquoteStringLiteral(literal.yytext ?? "''"), target);
+        return target;
+    }
+
+    /// <summary>
+    /// The quoted string literal at each output position of an operand, or null where the column is
+    /// anything else. Only a literal written in the operand's own select list counts: a column that a
+    /// nested set operation passes through has a type of its own, STRING for two literals, as in
+    /// GoogleSQL. The positions follow <see cref="UntypedColumns"/>.
+    /// </summary>
+    private static NodeAst?[] StringLiteralColumns(SelectQuery operand, BoundSelectQuery bound, int columnCount)
+    {
+        NodeAst?[] literals = new NodeAst?[columnCount];
+
+        if (BoundSetOperation.PassedThrough(bound) is not null)
+            return literals;
+
+        int stars = 0;
+        foreach (ProjectionItem projection in operand.Projections)
+        {
+            if (QueryExpressionClassifier.UnwrapAlias(projection.Expression).nodeType == NodeType.ExprAllFields)
+                stars++;
+        }
+
+        int perStar = stars == 0 ? 0 : (columnCount - (operand.Projections.Count - stars)) / stars;
+        int position = 0;
+
+        foreach (ProjectionItem projection in operand.Projections)
+        {
+            NodeAst target = QueryExpressionClassifier.UnwrapAlias(projection.Expression);
+
+            if (target.nodeType == NodeType.ExprAllFields)
+            {
+                position += perStar;
+                continue;
+            }
+
+            if (position < columnCount && target.nodeType == NodeType.String)
+                literals[position] = target;
+
+            position++;
+        }
+
+        return literals;
     }
 
     /// <summary>

@@ -13,6 +13,7 @@ using System.Threading.Tasks;
 
 using NUnit.Framework;
 
+using CamusDB.Core;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor;
 using CamusDB.Core.CommandsExecutor.Controllers.Queries;
@@ -337,19 +338,22 @@ public class TestPreparedInSet : SharedNodeBaseTest
     }
 
     [Test]
-    public void CrossType_MixedList_HomogeneousElementsStillMatch()
+    public void CrossType_MixedList_IsInvalidInput_OnBothPaths()
     {
-        // 5 IN (1, 2, 'foo') ≡ 5=1 OR 5=2 OR 5='foo'. The string element is a non-match, not an
-        // error; an int that IS present still matches. Verifies the AST path no longer throws and
-        // agrees with PreparedInSet.
+        // 5 IN (1, 2, 'foo') ≡ 5=1 OR 5=2 OR 5='foo'. An integer and a string have no comparison rule,
+        // so the string element is an error, on the AST path and in the prepared set alike, and a
+        // matching integer element does not hide it.
         ColumnValue[] values = [Int(1), Int(2), Str("foo")];
         PreparedInSet set = new(values);
 
-        Assert.IsFalse(set.Contains(Int(5)));
-        Assert.AreEqual(AstTruth(Int(5), values), Truth(set.Evaluate(Int(5))));
+        foreach (ColumnValue probe in new[] { Int(5), Int(2) })
+        {
+            CamusDBException prepared = Assert.Throws<CamusDBException>(() => set.Evaluate(probe))!;
+            Assert.AreEqual(CamusDBErrorCodes.InvalidInput, prepared.Code);
 
-        Assert.IsTrue(set.Contains(Int(2)));
-        Assert.AreEqual(AstTruth(Int(2), values), Truth(set.Evaluate(Int(2))));
+            CamusDBException ast = Assert.Throws<CamusDBException>(() => AstTruth(probe, values))!;
+            Assert.AreEqual(prepared.Message, ast.Message);
+        }
     }
 
     // ── large list uses HashSet ───────────────────────────────────────────────

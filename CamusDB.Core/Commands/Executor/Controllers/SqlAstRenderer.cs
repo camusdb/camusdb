@@ -287,6 +287,18 @@ internal class SqlAstRenderer
             // ── CASE … WHEN … THEN … [ELSE …] END ───────────────────────────────
             // Self-delimiting: the WHEN/THEN/ELSE/END keywords bound each sub-expression, so no
             // operand needs wrapping parens for a faithful re-parse.
+            case NodeType.ExprCase when ConditionalResultTypesIsIf(expr):
+                // IF(cond, a, b): the parser builds it as a searched CASE with one WHEN, marked "IF".
+                // The commas bound each argument, as in a function call.
+                sb.Append("IF(");
+                RenderNode(sb, expr.rightAst!.leftAst!);
+                sb.Append(", ");
+                RenderNode(sb, expr.rightAst.rightAst!);
+                sb.Append(", ");
+                RenderNode(sb, expr.extendedOne!);
+                sb.Append(')');
+                return;
+
             case NodeType.ExprCase:
                 sb.Append("CASE");
                 if (expr.leftAst is not null) // simple-CASE operand
@@ -473,4 +485,9 @@ internal class SqlAstRenderer
 
         sb.Append(bound.yytext!.ToUpperInvariant());
     }
+
+    private static bool ConditionalResultTypesIsIf(NodeAst expr) =>
+        CamusDB.Core.CommandsExecutor.Controllers.Queries.ConditionalResultTypes.IsIf(expr)
+        && expr.rightAst?.nodeType == NodeType.ExprCaseWhen
+        && expr.extendedOne is not null;
 }

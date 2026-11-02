@@ -567,6 +567,9 @@ internal static class DerivedTableSchemaBuilder
         if (target.nodeType == NodeType.ArrayLiteral)
             return InferArrayLiteralElementType(target, innerBound, innerResolver);
 
+        if (innerBound.RowNames.TryGetConditionalResultType(target, out ExpressionType conditional))
+            return conditional is { Type: ColumnType.Array, ElementType: not ColumnType.Null } ? conditional.ElementType : null;
+
         // A function that declares its element type (an extension function or aggregate returning
         // IReadOnlyList<long>) types its column without a value.
         if (target.nodeType == NodeType.ExprFuncCall && target.leftAst?.yytext is { } functionName)
@@ -743,6 +746,13 @@ internal static class DerivedTableSchemaBuilder
             return ResolveColumnType(innerBound, lookupKey, target.yytext);
         }
 
+        // A CASE, COALESCE, IFNULL or IF whose result type the binding recorded has that type; the
+        // evaluator widens every value to it (see ConditionalResultTypes). The record is on the
+        // binding's own resolver, not on the fresh one Build makes for name lookups.
+        if (innerBound.RowNames.TryGetConditionalResultType(target, out ExpressionType conditional)
+            && conditional.Type != ColumnType.Null)
+            return conditional.Type;
+
         if (target.nodeType == NodeType.ExprFuncCall)
         {
             if (QueryExpressionClassifier.IsAggregateProjection(target))
@@ -826,7 +836,7 @@ internal static class DerivedTableSchemaBuilder
     /// item in a RETURNING list) declared a String column that carried Bool cells, and a client that
     /// reads values by the declared type got the wrong type, even for a result with no rows.
     /// </summary>
-    private static bool IsBooleanResult(NodeType nodeType) => nodeType is
+    internal static bool IsBooleanResult(NodeType nodeType) => nodeType is
         NodeType.Bool or
         NodeType.ExprEquals or NodeType.ExprNotEquals or
         NodeType.ExprLessThan or NodeType.ExprGreaterThan or
@@ -1000,7 +1010,10 @@ internal static class DerivedTableSchemaBuilder
     ///
     /// <para>Otherwise the type is that of a representative branch: the ELSE result, else the first
     /// WHEN's result, falling back to <see cref="ColumnType.String"/> when neither yields a known type.
-    /// Such a type is only a declaration hint; each value still carries its own type.</para>
+    /// Such a type is only a declaration hint. A CASE in a bound statement does not get here: the
+    /// binding records its result type (<see cref="ConditionalResultTypes"/>), and
+    /// <see cref="InferType"/> returns that first. This path types a CASE the binding could not type,
+    /// such as one whose branches are all function calls.</para>
     /// </summary>
     private static ColumnType InferCaseType(
         NodeAst caseNode,

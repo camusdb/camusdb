@@ -703,6 +703,10 @@ public static class PlanRenderer
     /// <summary>Renders a CASE for EXPLAIN: <c>CASE [op] WHEN c THEN r … [ELSE e] END</c> (human-readable).</summary>
     private static string RenderCase(NodeAst expr)
     {
+        // IF(cond, a, b) is a searched CASE with one WHEN that the parser marked "IF".
+        if (ConditionalResultTypes.IsIf(expr) && expr.rightAst?.nodeType == NodeType.ExprCaseWhen && expr.extendedOne is not null)
+            return $"IF({RenderExpr(expr.rightAst.leftAst!)}, {RenderExpr(expr.rightAst.rightAst!)}, {RenderExpr(expr.extendedOne)})";
+
         StringBuilder sb = new("CASE");
 
         if (expr.leftAst is not null)

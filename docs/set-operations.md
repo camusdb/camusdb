@@ -57,10 +57,23 @@ a UNION b EXCEPT c         -- (a UNION b) EXCEPT c
 | A `NULL` literal or a placeholder on one side | the type of the other side |
 | Two numeric types | the type that `+` gives for them, for example `int64` with `float64` gives `float64`, and `int64` with `numeric` gives `numeric` |
 | `date` with `datetime` | `datetime` |
+| A quoted string literal with `date` or `datetime` | that temporal type; the literal is parsed when the statement is bound |
+| Two arrays | an array, when the element types are the same or one side is `ARRAY[]`; otherwise error `InvalidInput`, which names both element types (`ARRAY<Integer64>` and `ARRAY<String>`) |
 | Any other pair | error `InvalidInput`, which names the column position and both types |
+
+The array check needs both element types before the statement runs. A table column, a derived
+column and an `ARRAY[…]` literal give the element type. An array expression whose element type only
+its value carries is not checked.
 
 Each value is converted to its output type before rows are compared. So `SELECT 1 UNION SELECT 1.0`
 returns one row, `1.0`, and a `date` equals the `datetime` at its midnight.
+
+A quoted string literal in one operand takes the `date` or `datetime` type of the other operand, as
+in GoogleSQL. `SELECT d FROM t UNION SELECT '2026-01-01'` is a `date` column, and the literal
+equals the date it spells, so `UNION`, `INTERSECT` and `EXCEPT` compare it as a date. A literal that
+does not parse fails with `InvalidInput` before any row is read. Only a literal written in the
+operand's own select list counts: a `string` column fails, and so does the column of a nested set
+operation of two literals, which is a `string`.
 
 A column that is `NULL` in both operands has the declared type `string`, but it stays untyped for a
 set operation that uses it: in `SELECT 1 UNION ALL (SELECT NULL UNION ALL SELECT NULL)` the column

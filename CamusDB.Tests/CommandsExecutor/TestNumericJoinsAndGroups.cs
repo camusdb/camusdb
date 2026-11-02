@@ -321,15 +321,20 @@ internal sealed class TestNumericJoinsAndGroups : BaseTest
     public async Task NumericColumn_ComparedWithAString_HasNoComparisonRule()
     {
         // Spanner has no NUMERIC = STRING signature, and the engine does not parse the string either.
-        // The pair follows the engine's rule for a pair with no comparison rule: never equal, and an
-        // ordering operator is an error. A typed literal (NUMERIC '1.5') is the way to write the value.
+        // The pair follows the engine's rule for a pair with no comparison rule: every comparison,
+        // equality included, is an error. A typed literal (NUMERIC '1.5') is the way to write the value.
         (string db, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
         await ExecDDL(executor, database, "CREATE TABLE s (id int64 PRIMARY KEY, p numeric)");
         await Exec(executor, database, "INSERT INTO s (id, p) VALUES (1, 1.5), (2, 3)");
 
         Assert.AreEqual(1, (await Run(database, executor, db, "SELECT id FROM s WHERE p = NUMERIC '1.5'")).Count);
-        Assert.AreEqual(0, (await Run(database, executor, db, "SELECT id FROM s WHERE p = '1.5'")).Count, "never equal");
-        Assert.AreEqual(2, (await Run(database, executor, db, "SELECT id FROM s WHERE p <> '1.5'")).Count);
+
+        foreach (string where in new[] { "p = '1.5'", "p <> '1.5'" })
+        {
+            CamusDBException equality = Assert.ThrowsAsync<CamusDBException>(async () =>
+                await Run(database, executor, db, $"SELECT id FROM s WHERE {where}"))!;
+            Assert.AreEqual(CamusDBErrorCodes.InvalidInput, equality.Code, where);
+        }
 
         CamusDBException ordering = Assert.ThrowsAsync<CamusDBException>(async () =>
             await Run(database, executor, db, "SELECT id FROM s WHERE p < '2'"))!;

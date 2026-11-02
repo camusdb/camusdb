@@ -170,12 +170,13 @@ internal static class QueryAggregateExtractor
             // CASE: rewrite the operand (simple CASE), the WHEN/THEN chain, and the ELSE result so an
             // aggregate anywhere inside — e.g. CASE WHEN COUNT(*) > 0 THEN … — is extracted to a
             // placeholder while the CASE structure around it is preserved.
+            // yytext carries the "IF" marker of an IF(cond, a, b), which errors and rendering use.
             NodeType.ExprCase => new NodeAst(
                 NodeType.ExprCase,
                 node.leftAst is null ? null : Rewrite(node.leftAst, aggregates),
                 node.rightAst is null ? null : Rewrite(node.rightAst, aggregates),
                 node.extendedOne is null ? null : Rewrite(node.extendedOne, aggregates),
-                null, null, null, null, null),
+                null, null, null, null, node.yytext),
 
             NodeType.ExprCaseWhen or NodeType.ExprCaseWhenList => new NodeAst(
                 node.nodeType,

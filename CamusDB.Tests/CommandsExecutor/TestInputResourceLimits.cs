@@ -517,19 +517,27 @@ internal sealed class TestInputResourceLimits : BaseTest
     }
 
     /// <summary>
-    /// The scan stops at the first match and never evaluates a later item that throws. A list whose
-    /// set cannot be built keeps that behavior instead of failing the row.
+    /// <c>x IN (a, b)</c> is <c>x = a OR x = b</c>, and OR evaluates both sides, so the scan evaluates
+    /// every item, even after a match: an item whose type has no comparison rule with <c>x</c> must
+    /// fail the statement whatever the other items hold. A later item that throws therefore fails the
+    /// row too, as it does in the OR form. A list whose set cannot be built keeps the scan, and the
+    /// scan gives that same answer.
     /// </summary>
     [Test]
-    public async Task InList_ItemThatThrows_KeepsScanBehavior()
+    public async Task InList_ItemThatThrows_FailsTheStatement_AsTheOrFormDoes()
     {
         (string dbname, _, CommandExecutor executor) = await CreateDatabase();
 
-        // Only @p1 is bound: the set cannot be built, and the scan matches @p1 before it reaches @p2.
+        // Only @p1 is bound: the set cannot be built, and the scan reaches @p2 after it matches @p1.
         string list = string.Join(", ", Enumerable.Range(1, 12).Select(i => $"@p{i}"));
         Dictionary<string, ColumnValue> parameters = new() { ["@p1"] = new ColumnValue(ColumnType.Integer64, 1L) };
 
-        List<QueryResultRow> rows = await Query(executor, dbname, $"SELECT CASE WHEN 1 IN ({list}) THEN 'in' ELSE 'out' END AS r", parameters);
-        Assert.AreEqual("in", rows[0].Row["r"].StrValue);
+        CamusDBException inForm = Assert.ThrowsAsync<CamusDBException>(() =>
+            Query(executor, dbname, $"SELECT CASE WHEN 1 IN ({list}) THEN 'in' ELSE 'out' END AS r", parameters))!;
+        StringAssert.Contains("@p2", inForm.Message);
+
+        CamusDBException orForm = Assert.ThrowsAsync<CamusDBException>(() =>
+            Query(executor, dbname, "SELECT CASE WHEN 1 = @p1 OR 1 = @p2 THEN 'in' ELSE 'out' END AS r", parameters))!;
+        Assert.AreEqual(orForm.Message, inForm.Message);
     }
 }

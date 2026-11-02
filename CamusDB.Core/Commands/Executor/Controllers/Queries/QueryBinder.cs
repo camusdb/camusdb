@@ -75,7 +75,13 @@ internal sealed class QueryBinder
         QueryRowNameResolver rowNames = new(sources, derivedSources);
         ValidateQuery(query, rowNames);
 
-        return new BoundSelectQuery(query, sources, rowNames, derivedSources);
+        BoundSelectQuery bound = new(query, sources, rowNames, derivedSources);
+
+        // CASE, COALESCE, IFNULL and IF get one result type here, before any row is read; a pair of
+        // inputs with no common type fails the statement even over an empty table.
+        ConditionalResultTypes.CheckQuery(bound);
+
+        return bound;
     }
 
     /// <summary>
@@ -112,7 +118,10 @@ internal sealed class QueryBinder
         ValidateOrderBy(query, rowNames);
         ValidateProjectionAndGrouping(query);
 
-        return new BoundSelectQuery(query, sources, rowNames, derivedSources);
+        BoundSelectQuery bound = new(query, sources, rowNames, derivedSources);
+        ConditionalResultTypes.CheckQuery(bound);
+
+        return bound;
     }
 
     private async Task CollectBoundSourcesAsync(

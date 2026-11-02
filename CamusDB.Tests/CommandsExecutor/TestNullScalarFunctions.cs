@@ -240,7 +240,7 @@ public class TestNullScalarFunctions : SharedNodeBaseTest
                 "SELECT COALESCE(score, 'fallback') FROM items WHERE name = 'alpha'"))!;
 
         Assert.AreEqual(CamusDBErrorCodes.InvalidInput, exception.Code);
-        StringAssert.Contains("incompatible", exception.Message);
+        StringAssert.Contains("No common type for the results of COALESCE", exception.Message);
     }
 
     [Test]
@@ -254,7 +254,7 @@ public class TestNullScalarFunctions : SharedNodeBaseTest
                 "SELECT COALESCE(id, 'fallback') FROM items WHERE name = 'alpha'"))!;
 
         Assert.AreEqual(CamusDBErrorCodes.InvalidInput, exception.Code);
-        StringAssert.Contains("incompatible", exception.Message);
+        StringAssert.Contains("No common type for the results of COALESCE", exception.Message);
     }
 
     [Test]
@@ -270,7 +270,7 @@ public class TestNullScalarFunctions : SharedNodeBaseTest
                 "SELECT c FROM (SELECT COALESCE(score, 'fallback') AS c FROM items) sub"))!;
 
         Assert.AreEqual(CamusDBErrorCodes.InvalidInput, exception.Code);
-        StringAssert.Contains("incompatible", exception.Message);
+        StringAssert.Contains("No common type for the results of COALESCE", exception.Message);
     }
 
     [Test]

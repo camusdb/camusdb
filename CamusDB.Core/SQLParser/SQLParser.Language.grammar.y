@@ -2272,6 +2272,11 @@ case_expr : TCASE case_when_list case_else_opt TEND
               { $$.n = new(NodeType.ExprCase, null, $2.n, $3.n, null, null, null, null, null); }
           | TCASE condition case_when_list case_else_opt TEND
               { $$.n = new(NodeType.ExprCase, $2.n, $3.n, $4.n, null, null, null, null, null); }
+          /* IF(cond, a, b) is the searched CASE WHEN cond THEN a ELSE b END, marked "IF" in yytext so
+           * errors and rendering name IF. IF is a reserved word (IF EXISTS, IF NOT EXISTS), and no
+           * expression starts with it, so this adds no conflict. */
+          | TIF LPAREN condition TCOMMA condition TCOMMA condition RPAREN
+              { $$.n = new(NodeType.ExprCase, null, new(NodeType.ExprCaseWhen, $3.n, $5.n, null, null, null, null, null, null), $7.n, null, null, null, null, "IF"); }
           ;
 
 case_when_list : case_when_list case_when_clause

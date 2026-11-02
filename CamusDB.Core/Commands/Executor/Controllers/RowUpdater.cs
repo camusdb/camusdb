@@ -163,6 +163,16 @@ public sealed class RowUpdater
 
         if (ticket.ExprValues is not null)
             ValidateExprValues(columns, indexes, ticket.ExprValues, checkNotNull);
+
+        // CASE, COALESCE, IFNULL and IF in the SET values and the WHERE get one result type from the
+        // table's column types; a pair of inputs with no common type fails before any row is read.
+        ConditionalResultTypes.ColumnTypeLookup lookup = ConditionalResultTypes.LookupFor(table.Schema);
+
+        if (ticket.ExprValues is not null)
+            foreach (NodeAst value in ticket.ExprValues.Values)
+                ConditionalResultTypes.Check(value, lookup, recorder: null);
+
+        ConditionalResultTypes.Check(ticket.Where, lookup, recorder: null);
     }
 
     /// <summary>

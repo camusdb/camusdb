@@ -362,12 +362,15 @@ public static class PredicateAnalyzer
     /// </list>
     /// A comparison with no exact rewrite (a fractional equality on an integer column, NaN, a value
     /// outside the <c>long</c> range, a float constant on a NUMERIC column, a Uuid or Id constant on a
-    /// String column, a Uuid or Id constant
-    /// the column's type cannot hold) stops driving index
+    /// String column, a constant whose type has no comparison rule with the column's type, such as a
+    /// string on an integer column) stops driving index
     /// selection: it leaves
     /// <see cref="PredicateAnalysis.IndexableComparisons"/> and its conjunct joins
     /// <see cref="PredicateAnalysis.ResidualConjuncts"/>, so the evaluator decides. The planner must
-    /// never round such a literal; that would return wrong rows through the index.
+    /// never round such a literal; that would return wrong rows through the index. A constant with no
+    /// comparison rule (<see cref="ComparisonTypeRule"/>) must reach the evaluator, which raises the
+    /// type error: a seek with it would build a key in the constant's encoding, find nothing, and
+    /// return no rows where the table scan reports the error.
     /// <para>Every planner entry that feeds a <see cref="TableDescriptor"/>'s predicates to
     /// <see cref="IndexScanSelector"/> must call this first — the single-table planner, the join-leaf
     /// builders and the cost estimator alike — or an index can disagree with the table scan.</para>
@@ -384,7 +387,7 @@ public static class PredicateAnalyzer
 
             TableColumnSchema? column = FindColumn(mapped.ColumnName, table);
             if (column is not null
-                && (IsUuidOrIdOnStringColumn(mapped.Constant, column.Type) || IsUnmatchableIdentityConstant(mapped.Constant, column.Type)))
+                && (IsUuidOrIdOnStringColumn(mapped.Constant, column.Type) || !ComparisonTypeRule.HasRule(mapped.Constant.Type, column.Type)))
             {
                 (demotedConjuncts ??= new()).Add(mapped.Conjunct);
                 mapped = null;
@@ -477,11 +480,12 @@ public static class PredicateAnalyzer
     /// <see cref="CoerceConstantsForColumns"/> does for a single comparison. Returns null when the
     /// list must not drive an index seek: a NUMERIC column with a float item, which the evaluator
     /// compares as a double and so may match several stored values (see
-    /// <see cref="NumericBoundNormalizer"/>), or a String column with a Uuid or Id item. The evaluator
+    /// <see cref="NumericBoundNormalizer"/>), a String column with a Uuid or Id item, or an item whose
+    /// type has no comparison rule with the column's type (<see cref="ComparisonTypeRule"/>; the filter
+    /// raises the type error). For a String column with a Uuid or Id item, the evaluator
     /// parses the column's string into that type (<see cref="StringOperandCoercion"/>), so every
-    /// spelling of the value matches, while a seek finds only one spelling of it. An item that can
-    /// equal no value of the column's type is dropped (<see cref="IsUnmatchableIdentityConstant"/>,
-    /// and numeric items such as <c>1.5</c> on an integer column).
+    /// spelling of the value matches, while a seek finds only one spelling of it. A numeric item that
+    /// can equal no value of the column's type (<c>1.5</c> on an integer column) is dropped.
     /// </summary>
     private static AnalyzedInList? CoerceInListConstants(AnalyzedInList inList, TableDescriptor table)
     {
@@ -491,14 +495,15 @@ public static class PredicateAnalyzer
 
         for (int i = 0; i < inList.Values.Count; i++)
         {
-            if (IsUuidOrIdOnStringColumn(inList.Values[i], column.Type))
+            if (IsUuidOrIdOnStringColumn(inList.Values[i], column.Type)
+                || !ComparisonTypeRule.HasRule(inList.Values[i].Type, column.Type))
                 return null;
         }
 
         ColumnType? stringTarget = column.Type is ColumnType.Uuid or ColumnType.Id ? column.Type : null;
         bool numericColumn = NumericBoundNormalizer.IsNumeric(column.Type);
         bool temporalColumn = TemporalComparison.IsTemporal(column.Type);
-        if (stringTarget is null && !numericColumn && !temporalColumn && !HasUnmatchableIdentityItem(inList.Values, column.Type))
+        if (stringTarget is null && !numericColumn && !temporalColumn)
         {
             // A date or datetime item on a String column parses each stored string, so a seek, which
             // finds one spelling, cannot answer it.
@@ -520,13 +525,7 @@ public static class PredicateAnalyzer
                 && NumericBoundNormalizer.NormalizeInListItem(original, column.Type, out _) == NumericBoundNormalizer.ItemOutcome.LeaveToEvaluator)
                 return null;
 
-            if (IsUnmatchableIdentityConstant(original, column.Type))
-            {
-                // A Uuid or Id item the column cannot hold equals no row (the evaluator's rule for a
-                // pair with no comparison rule), and as a seek key it addresses the wrong encoding.
-                replacement = null;
-            }
-            else if (stringTarget is not null)
+            if (stringTarget is not null)
             {
                 if (original.Type == ColumnType.String)
                 {
@@ -589,33 +588,6 @@ public static class PredicateAnalyzer
     /// </summary>
     private static bool IsUuidOrIdOnStringColumn(ColumnValue constant, ColumnType columnType) =>
         columnType == ColumnType.String && StringOperandCoercion.IsTarget(constant.Type);
-
-    /// <summary>
-    /// True for a constant that has no comparison rule with the column's type, where one of the two is
-    /// a Uuid or an Id: an Id parameter against a <c>uuid</c> column, a Uuid against an object-id
-    /// column, an integer against a <c>uuid</c> column. The evaluator says such a pair is never equal
-    /// and has no order (<c>SQLExecutorBaseCreator.CompareValues</c>). An index key built from the
-    /// constant uses the constant's encoding, not the column's, so a seek could not give that answer:
-    /// a comparison leaves index selection, and an IN item is dropped. A String constant is not
-    /// included: it is parsed into the column's type before this check, and a Uuid or Id constant on a
-    /// String column has its own rule (<see cref="IsUuidOrIdOnStringColumn"/>).
-    /// </summary>
-    private static bool IsUnmatchableIdentityConstant(ColumnValue constant, ColumnType columnType) =>
-        constant.Type != columnType
-        && constant.Type is not (ColumnType.Null or ColumnType.String)
-        && columnType != ColumnType.String
-        && (StringOperandCoercion.IsTarget(constant.Type) || StringOperandCoercion.IsTarget(columnType));
-
-    private static bool HasUnmatchableIdentityItem(IReadOnlyList<ColumnValue> values, ColumnType columnType)
-    {
-        for (int i = 0; i < values.Count; i++)
-        {
-            if (IsUnmatchableIdentityConstant(values[i], columnType))
-                return true;
-        }
-
-        return false;
-    }
 
     private static bool HasTemporalItem(IReadOnlyList<ColumnValue> values)
     {

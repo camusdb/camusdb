@@ -127,18 +127,29 @@ public sealed class TestCaseExpression : SharedNodeBaseTest
         (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
         // The THEN of a non-matching WHEN (1/0) must not be evaluated.
         List<QueryResultRow> rows = await ExecQuery(executor, database, dbname,
-            "SELECT CASE WHEN 1 = 2 THEN (1 / 0) ELSE 'safe' END");
-        Assert.AreEqual("safe", rows[0].Row["0"].StrValue);
+            "SELECT CASE WHEN 1 = 2 THEN (1 / 0) ELSE 7 END");
+        Assert.AreEqual(7L, rows[0].Row["0"].LongValue);
     }
 
     [Test]
-    public async Task ResultType_IsChosenBranchRuntimeType()
+    public async Task ResultType_BranchesWithNoCommonType_AreInvalidInput()
+    {
+        // Before, the result had the type of the branch that ran (42 as Integer64 here). The
+        // branches must now have a common type, as in GoogleSQL; see TestConditionalResultTypes.
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+        CamusDBException ex = Assert.ThrowsAsync<CamusDBException>(async () => await ExecQuery(executor, database, dbname,
+            "SELECT CASE WHEN 1 = 1 THEN 42 ELSE 'text' END"))!;
+        Assert.AreEqual(CamusDBErrorCodes.InvalidInput, ex.Code);
+    }
+
+    [Test]
+    public async Task ResultType_IsTheCommonTypeOfTheBranches()
     {
         (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
         List<QueryResultRow> rows = await ExecQuery(executor, database, dbname,
-            "SELECT CASE WHEN 1 = 1 THEN 42 ELSE 'text' END");
-        Assert.AreEqual(ColumnType.Integer64, rows[0].Row["0"].Type);
-        Assert.AreEqual(42L, rows[0].Row["0"].LongValue);
+            "SELECT CASE WHEN 1 = 1 THEN 42 ELSE 1.5 END");
+        Assert.AreEqual(ColumnType.Float64, rows[0].Row["0"].Type);
+        Assert.AreEqual(42.0, rows[0].Row["0"].FloatValue);
     }
 
     // ── Table-backed: projection, WHERE, aggregates, derived table ──────────────

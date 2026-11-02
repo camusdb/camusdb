@@ -354,13 +354,26 @@ internal static class JoinEquiJoinAnalyzer
     /// <summary>
     /// True unless both key columns have a known declared type and the two types differ. See the
     /// class summary for why a mixed pair must not become a hash, merge or index key.
+    ///
+    /// <para>An array on either side is never a key. Two array columns share
+    /// <see cref="ColumnType.Array"/> even when their element types differ, and only the evaluator
+    /// refuses that pair (see <see cref="ComparisonTypeRule"/>); a hash table would call the two
+    /// arrays unequal and return no rows with no error. <see cref="IsArrayColumn"/> covers a table
+    /// column on the build side; this check also covers a derived column and the probe side.</para>
     /// </summary>
     private static bool KeyTypesAgree(string leftLookupColumn, ColumnType? rightType, BoundSelectQuery bound)
     {
+        if (rightType == ColumnType.Array)
+            return false;
+
+        ColumnType? leftType = LeftColumnType(leftLookupColumn, bound);
+        if (leftType == ColumnType.Array)
+            return false;
+
         if (rightType is not { } right || right == ColumnType.Null)
             return true;
 
-        if (LeftColumnType(leftLookupColumn, bound) is not { } left || left == ColumnType.Null)
+        if (leftType is not { } left || left == ColumnType.Null)
             return true;
 
         return left == right;

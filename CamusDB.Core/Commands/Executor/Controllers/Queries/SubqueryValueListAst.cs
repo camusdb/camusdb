@@ -199,7 +199,11 @@ internal static class SubqueryValueListAst
         }
 
         bool sawNull = ReadBool(expr.extendedOne);
+        bool matched = false;
 
+        // Every item is tested, even after a match: `x IN (a, b)` is `x = a OR x = b`, OR evaluates
+        // both sides, and an item whose type has no comparison rule with x is an error whatever the
+        // other items hold (ComparisonTypeRule). The prepared set gives the same answer.
         foreach (ColumnValue candidate in Enumerate(expr.rightAst, parameters))
         {
             if (candidate.Type == ColumnType.Null)
@@ -209,8 +213,11 @@ internal static class SubqueryValueListAst
             }
 
             if (MixedNumericComparison.EqualsForMembership(lhs, candidate))
-                return ColumnValue.FromBool(!negated);
+                matched = true;
         }
+
+        if (matched)
+            return ColumnValue.FromBool(!negated);
 
         return sawNull ? ColumnValue.Null : ColumnValue.FromBool(negated);
     }

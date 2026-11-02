@@ -234,9 +234,10 @@ Division by zero fails. An overflow anywhere fails with `CADB0417`.
 - In a cluster, a `SUM` or `AVG` that can see a NUMERIC value is not split into a partial aggregate for
   each range. The node that runs the query adds the rows exactly, so a range total past the limit does
   not fail a query whose final result is in range.
-- A derived table (a subquery in `FROM`) widens each NUMERIC column's cells to `numeric`, so that
-  `COALESCE(p, 0)` gives NUMERIC `0` for a NULL `p` there. A top-level `SELECT` does not widen: for a
-  NULL `p`, `SELECT COALESCE(p, 0)` returns the `int64` `0`, while the column metadata says `numeric`.
+- `COALESCE(p, 0)` gives NUMERIC `0` for a NULL `p`, at the top level and in a derived table: the
+  result type of a `CASE`, `COALESCE`, `IFNULL` or `IF` comes from the declared column types, and
+  every value is converted to it (see
+  [Result types of CASE, COALESCE, IFNULL and IF](#result-types-of-case-coalesce-ifnull-and-if)).
 
 ### Comparing NUMERIC values
 
@@ -245,7 +246,7 @@ Division by zero fails. An overflow anywhere fails with `CADB0417`.
 - `numeric` against `float64` or `float32` compares as doubles. This rule is not transitive:
   `NUMERIC '9007199254740992'` and `NUMERIC '9007199254740993'` differ, but both equal
   `9007199254740992.0`. An `IN` list keeps every item, so `x IN (a, b, …)` is always `x = a OR x = b OR …`.
-- `numeric` against `string` has no comparison rule (see
+- `numeric` against `string` has no comparison rule, so `p = '1.5'` fails with `CADB0400` (see
   [Comparing values of different types](#comparing-values-of-different-types)). Write the value as
   `NUMERIC '1.5'`.
 - An index on a NUMERIC column is used for an `int64` or `NUMERIC '…'` constant. A float constant
@@ -337,8 +338,10 @@ the elements of `a`:
 - An empty array gives `false`, even when `v` is `NULL`.
 - A `NULL` value gives `NULL`.
 - No match gives `NULL` when the array holds a `NULL` element, and `false` otherwise.
-- Numbers compare by value, so `array_contains(ARRAY[1, 2], 2.0)` is `true`. A value of another type is
-  a non-match, not an error.
+- Numbers compare by value, so `array_contains(ARRAY[1, 2], 2.0)` is `true`. A value whose type has no
+  comparison rule with the element type fails with `CADB0400`, as `'x' IN (1, 2)` does:
+  `array_contains(ARRAY[1, 2], 'x')` is an error (see
+  [Comparing values of different types](#comparing-values-of-different-types)).
 
 PostgreSQL writes the same test as `v = ANY (a)`, and CamusDB accepts that form too: `v = ANY (a)`,
 `v = SOME (a)` and `v <> ALL (a)` work, with the same rules. See
@@ -536,13 +539,123 @@ an object id has 12, so a GUID can never be an object id: send it as a `uuid` pa
 
 ### Comparing values of different types
 
-Some pairs of types have a conversion rule: two numbers of different types (`int64` against `numeric`
-exactly, any float as a double), and a `string` against a `uuid` or an `id` (the string is parsed).
-Other pairs have no rule, for example a `uuid` against an `id`, an `int64` against a `uuid`, or a
-`numeric` against a `string`. For such a pair:
+CamusDB follows GoogleSQL: two values can be compared only when their types have a comparison rule.
+These pairs have a rule:
 
-- `=`, `IN` and a simple `CASE` find no match. `<>` and `NOT IN` find a match.
-- `<`, `<=`, `>`, `>=` and `BETWEEN` fail with `CADB0400`, because the two types have no order.
+- Two values of the same type.
+- Two numbers of different types: `int64` against `numeric` compares exactly, and a float compares
+  with any other number as a double.
+- A `date` against a `datetime`, or a `string` against either. The string is parsed. A string that
+  does not parse fails with `CADB0400` (see
+  [Comparing dates, datetimes and strings](#comparing-dates-datetimes-and-strings)).
+- A `string` against a `uuid`, an `id` or a `jsonb`. The string is parsed. A string that does not
+  parse equals no value of that type. It is not an error.
+- Two arrays with the same element type, or two arrays where one is `ARRAY[]` or holds only `NULL`
+  elements. The elements compare with the rule for one type, so the element types must be the same:
+  `ARRAY[1] = ARRAY['a']` and `ARRAY[1] = ARRAY[1.0]` fail with `CADB0400`. The message names both
+  element types: `… argument types: ARRAY<Integer64>, ARRAY<String>`.
+
+Every other pair has no rule. Examples are `int64` against `string` (`5 = '5'`), `float64` against
+`string` (`0.0 = '0.0'`), `bool` against `int64`, `bytes` against `string`, `uuid` against `id`, and
+`numeric` against `string`. **Any comparison of such a pair fails with `CADB0400`**, and the message
+names the operator and both types:
+
+```
+No matching signature for operator = for argument types: Integer64, String
+```
+
+This applies to `=`, `<>`, `<`, `<=`, `>`, `>=`, `BETWEEN`, `IN` and `NOT IN`, the simple `CASE`,
+`NULLIF`, `= ANY (…)`, `array_contains`, `JOIN … ON` and `HAVING`. It applies to a column, a literal
+and a typed parameter alike. A CHECK constraint that compares such a pair rejects the row at write time
+with `CADB0303` instead (see [CHECK constraints](check-constraints.md)). To compare the values, write a CAST:
+`CAST(s AS INT64) = a`.
+
+The error is deliberate. Before, such an equality was silently FALSE, so a statement such as
+`DELETE FROM t WHERE text_col = int_col` reported success and deleted nothing.
+
+Notes:
+
+- `x IN (a, b)` means `x = a OR x = b`, and `OR` evaluates both sides. So an item with no rule fails
+  the statement even when another item matches: `1 IN (1, 'a')` fails.
+- A simple `CASE` stops at the first `WHEN` that matches. A later `WHEN` is not compared, so
+  `CASE 5 WHEN 5 THEN 1 WHEN 'a' THEN 2 END` returns 1.
+- A NULL operand makes the comparison UNKNOWN before any type check, so `NULL = 'a'` is NULL, not an
+  error.
+- The check runs when values are compared, not when the statement is parsed. A predicate over an
+  empty table compares no values and raises no error.
+- An index is never used to answer a comparison that has no rule. The filter evaluates it and raises
+  the error, so an index seek and a table scan give the same result.
+- A `UNION`, `INTERSECT` or `EXCEPT` refuses two array columns whose element types are known and are
+  not the same, as it refuses two scalar types that cannot be combined. When an array expression's
+  element type is known only from its value, this check does not apply.
+
+### Result types of CASE, COALESCE, IFNULL and IF
+
+A `CASE`, `COALESCE`, `IFNULL` (and its alias `NVL`) and `IF` return one of several inputs: the
+`THEN` and `ELSE` results of a `CASE`, the arguments of `COALESCE` and `IFNULL`, and the two result
+arguments of `IF`. CamusDB follows GoogleSQL: the inputs must have a common type, and every value is
+converted to it. Two types combine like this:
+
+| Inputs | Result type |
+|---|---|
+| A `NULL` input, or an omitted `ELSE` | the type of the other inputs |
+| One type | that type |
+| Two numbers | the type that `+` gives for them: `int64` with `float64` gives `float64`, `int64` with `numeric` gives `numeric` |
+| A `date` with a `datetime` | `datetime`; the date becomes its midnight |
+| A quoted string literal with a `date` or a `datetime` | that temporal type; the literal is parsed |
+| Two arrays | an array, when the element types are the same or one array is `ARRAY[]` |
+| Any other pair | error `CADB0400` |
+
+The error names the construct and both types:
+
+```
+No common type for the results of CASE: Integer64 and String; write a CAST to make the types agree
+```
+
+Examples:
+
+- `CASE WHEN c THEN 1 ELSE 1.5 END` is `float64` in every row, also in a row that returns `1`.
+- `COALESCE(int_col, float_col)` is `float64`, also in a row where `float_col` is `NULL`.
+- `CASE WHEN c THEN 1 ELSE 'a' END` and `COALESCE(1, 'a')` fail. `IFNULL(true, 1)` fails.
+- `CASE WHEN c THEN 1 ELSE '2' END` fails. A quoted literal is a `string`, so it does not become a
+  number. PostgreSQL reads `'2'` as an integer here; GoogleSQL does not. Write `CAST('2' AS INT64)`.
+- `COALESCE(date_col, '2026-01-01')` is a `date`: a quoted literal does become a `date` or a
+  `datetime`, as in GoogleSQL. The literal is parsed when the statement is bound, so
+  `COALESCE(date_col, 'soon')` fails with `CADB0400` before any row is read.
+
+**Only a literal becomes a date.** A `string` column with a `date` column fails:
+`CASE WHEN c THEN date_col ELSE text_col END` is an error. A `CASE`, `COALESCE`, `IFNULL` or `IF`
+whose inputs are all literals is not a literal itself, so
+`COALESCE(date_col, CASE WHEN c THEN '2026-01-01' ELSE '2026-01-02' END)` fails, as in GoogleSQL. A
+`string` value whose type only its value shows, such as a parameter, is parsed when it is returned:
+a `string` parameter that holds `'2026-01-01'` becomes that date, and one that holds other text fails.
+
+**When the check runs.** The check runs when the statement is bound, before any row is read, for
+every input whose type the statement shows: a literal, a `CAST`, a column, arithmetic over those, and
+a nested `CASE`, `COALESCE`, `IFNULL` or `IF`. So a branch that never runs, and a statement over an
+empty table, still fail. The check covers the select list, `WHERE`, `GROUP BY`, `HAVING`,
+`ORDER BY`, `JOIN … ON`, and the `SET` values and `WHERE` of an `UPDATE` and a `DELETE`.
+
+An input whose type only its value shows, such as a parameter or a function call, is checked when
+the value is returned. A branch that does not run is not checked then:
+`CASE WHEN false THEN @p ELSE 1 END` with a `string` `@p` returns `1`.
+
+**Evaluation order does not change.** A `CASE` stops at the first `WHEN` that matches, and an `IF`
+evaluates only the result that its condition selects. `COALESCE` and `IFNULL` evaluate every
+argument.
+
+#### IF
+
+`IF(condition, true_result, else_result)` returns `true_result` when `condition` is `TRUE`, and
+`else_result` when it is `FALSE` or `NULL`. It is the same as
+`CASE WHEN condition THEN true_result ELSE else_result END`:
+
+- A `condition` that is not a boolean fails with `CADB0400`.
+- Only the selected result is evaluated, so `IF(true, 1, 1 / 0)` returns `1`.
+- The two results follow the rule above.
+
+`IF` is a reserved word, so `IF NOT EXISTS` and `IF EXISTS` in DDL do not change. `EXPLAIN` shows
+`IF(…)`.
 
 To declare `string(N)` / `array(T)` over HTTP, the create-table column carries `maxLength` and
 `arrayElementType` fields alongside `type`.

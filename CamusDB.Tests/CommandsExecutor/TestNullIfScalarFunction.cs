@@ -122,17 +122,16 @@ public sealed class TestNullIfScalarFunction : SharedNodeBaseTest
     }
 
     [Test]
-    public async Task NullIf_PairWithNoComparisonRule_IsNotEqual_LikeTheEqualsOperator()
+    public async Task NullIf_PairWithNoComparisonRule_IsInvalidInput_LikeTheEqualsOperator()
     {
         (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
 
-        ColumnValue equals = await ExecScalar(database, executor, dbname, "SELECT 1 = 'a'");
-        Assert.AreEqual(ColumnType.Bool, equals.Type);
-        Assert.IsFalse(equals.BoolValue);
+        CamusDBException equals = Assert.ThrowsAsync<CamusDBException>(() => ExecScalar(database, executor, dbname, "SELECT 1 = 'a'"))!;
+        Assert.AreEqual(CamusDBErrorCodes.InvalidInput, equals.Code);
 
-        ColumnValue value = await ExecScalar(database, executor, dbname, "SELECT NULLIF(1, 'a')");
-        Assert.AreEqual(ColumnType.Integer64, value.Type);
-        Assert.AreEqual(1L, value.LongValue);
+        CamusDBException nullIf = Assert.ThrowsAsync<CamusDBException>(() => ExecScalar(database, executor, dbname, "SELECT NULLIF(1, 'a')"))!;
+        Assert.AreEqual(CamusDBErrorCodes.InvalidInput, nullIf.Code);
+        Assert.AreEqual(equals.Message, nullIf.Message);
     }
 
     [Test]

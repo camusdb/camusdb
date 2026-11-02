@@ -38,10 +38,9 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 /// dictionary), and a subquery list, which is a new node for each execution, leaves nothing behind.</para>
 ///
 /// <para><b>Same result as the scan.</b> <see cref="PreparedInSet"/> uses the equality of the scan
-/// (<see cref="MixedNumericComparison.EqualsForMembership"/>) and the same NULL rules. One difference
-/// is not allowed: the scan stops at the first match and never evaluates the items after it, so an
-/// item that throws (a bad cast) fails only some rows. A build that throws therefore marks the node
-/// ineligible, and the node keeps the scan with its exact behavior.</para>
+/// (<see cref="MixedNumericComparison.EqualsForMembership"/>) and the same NULL rules, and it raises
+/// the same error for an item whose type has no comparison rule with the probe. A build that throws
+/// (a bad cast) marks the node ineligible, and the node keeps the scan with its exact behavior.</para>
 ///
 /// <para>Thread safety: a parallel scan evaluates one node on many threads.
 /// <see cref="ConditionalWeakTable{TKey,TValue}.GetValue"/> can run the factory more than once under a

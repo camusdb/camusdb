@@ -109,8 +109,10 @@ internal static class ArrayScalarFunctions
     ///     the value), and FALSE otherwise.</item>
     /// </list>
     /// Equality is <see cref="MixedNumericComparison.EqualsForMembership"/>, the rule <c>IN</c> uses,
-    /// so the two spellings cannot disagree: mixed numerics compare by value and a cross-type pair is
-    /// a non-match, not an error.
+    /// so the two spellings cannot disagree: mixed numerics compare by value, and a value whose type
+    /// has no comparison rule with the array's element type is an
+    /// <see cref="CamusDBErrorCodes.InvalidInput"/> error (<see cref="ComparisonTypeRule"/>), checked
+    /// once against the element type before any element, never a silent FALSE.
     /// </summary>
     private static ColumnValue EvaluateArrayContains(string calledName, IReadOnlyList<ColumnValue> arguments)
     {
@@ -130,6 +132,9 @@ internal static class ArrayScalarFunctions
         if (value.Type == ColumnType.Null)
             return ColumnValue.Null;
 
+        // Every element has the element type or is NULL, so one check covers the whole array.
+        ComparisonTypeRule.Require(calledName, array.ArrayElementType, value.Type);
+
         bool sawNull = false;
 
         for (int i = 0; i < elements.Count; i++)
@@ -142,7 +147,7 @@ internal static class ArrayScalarFunctions
                 continue;
             }
 
-            if (MixedNumericComparison.EqualsForMembership(element, value))
+            if (MixedNumericComparison.EqualsForMembership(element, value, calledName))
                 return ColumnValue.FromBool(true);
         }
 

@@ -90,21 +90,19 @@ internal abstract class SQLExecutorBaseCreator
     /// <c>WHERE b &lt; 10</c> returned the NULL rows. The WHERE filter treats UNKNOWN as "row
     /// excluded"; <c>NOT</c>, <c>AND</c>, <c>OR</c> and <c>CASE</c> propagate it. CHECK constraints
     /// (<see cref="CheckEvaluator"/>) apply the same rule on their own path.
+    /// <para>Two non-NULL values with no comparison rule (<see cref="ComparisonTypeRule"/>) are an
+    /// <see cref="CamusDBErrorCodes.InvalidInput"/> error for every operator, <c>=</c> and
+    /// <c>&lt;&gt;</c> included. NULLIF and <c>= ANY</c> compare through here and inherit it.</para>
     /// </summary>
     internal static ColumnValue EvalComparison(NodeType op, ColumnValue left, ColumnValue right)
     {
         if (left.Type == ColumnType.Null || right.Type == ColumnType.Null)
             return ColumnValue.Null;
 
-        // A pair with no comparison rule is never equal, as in IN membership, and it has no order;
-        // see CompareValues.
+        // A pair with no comparison rule is an error for equality too (ComparisonTypeRule): a silent
+        // FALSE made `DELETE ... WHERE text_col = int_col` succeed and delete nothing.
         if (!TryCompareValues(left, right, out int cmp))
-        {
-            if (op is NodeType.ExprEquals or NodeType.ExprNotEquals)
-                return ColumnValue.FromBool(op == NodeType.ExprNotEquals);
-
             throw NoComparisonRule(op, left, right);
-        }
 
         return op switch
         {
@@ -175,12 +173,11 @@ internal abstract class SQLExecutorBaseCreator
     /// <see cref="TemporalComparison"/>, where a string that does not parse is an error.
     ///
     /// <para>A pair of different types with no conversion rule (a Uuid and an Id, an integer and a
-    /// string) has no order, so an ordering operator (<c>&lt;</c>, <c>BETWEEN</c>) on it is a
-    /// <see cref="CamusDBErrorCodes.InvalidInput"/> error that names both types. Equality does not come
-    /// here for such a pair: <see cref="EvalComparison"/> and the simple CASE answer "not equal"
-    /// through <see cref="TryCompareValues"/>, the rule IN membership applies
-    /// (<see cref="MixedNumericComparison.EqualsForMembership"/>), so <c>x IN (a)</c> and
-    /// <c>x = a</c> always agree. <see cref="ColumnValue.CompareTo"/> throws a raw
+    /// string) cannot be compared, so any comparison on it, equality included, is a
+    /// <see cref="CamusDBErrorCodes.InvalidInput"/> error that names both types
+    /// (<see cref="ComparisonTypeRule"/>). <see cref="EvalComparison"/>, the simple CASE and IN
+    /// membership (<see cref="MixedNumericComparison.EqualsForMembership"/>) all raise it, so
+    /// <c>x IN (a)</c> and <c>x = a</c> always agree. <see cref="ColumnValue.CompareTo"/> throws a raw
     /// <see cref="ArgumentException"/> for such a pair, and it must never reach a caller.</para>
     /// </summary>
     private static int CompareValues(ColumnValue left, ColumnValue right, NodeType op)
@@ -192,13 +189,14 @@ internal abstract class SQLExecutorBaseCreator
     }
 
     private static CamusDBException NoComparisonRule(NodeType op, ColumnValue left, ColumnValue right) =>
-        new(CamusDBErrorCodes.InvalidInput,
-            $"No matching signature for operator {ComparisonSymbol(op)} for argument types: {left.Type}, {right.Type}");
+        ComparisonTypeRule.NoRule(ComparisonSymbol(op), left, right);
 
     /// <summary>
     /// Orders two values as <see cref="CompareValues"/> does, and returns false instead of throwing
-    /// when the two types have no comparison rule. A String operand that is not a valid Uuid or Id is
-    /// not such a case: it can equal no value of that type, so it gets a fixed non-zero order.
+    /// when the two types have no comparison rule (<see cref="ComparisonTypeRule.HasRule"/> is false
+    /// exactly then); the caller raises the error with its own operator name. A String operand that
+    /// is not a valid Uuid or Id is not such a case: it can equal no value of that type, so it gets a
+    /// fixed non-zero order.
     /// </summary>
     private static bool TryCompareValues(ColumnValue left, ColumnValue right, out int cmp)
     {
@@ -224,7 +222,10 @@ internal abstract class SQLExecutorBaseCreator
             return true;
         }
 
-        if (left.Type != right.Type)
+        // Two arrays share ColumnType.Array, but their elements compare with one same-type
+        // CompareTo, so different element types have no rule (see ComparisonTypeRule).
+        if (left.Type != right.Type
+            || (left.Type == ColumnType.Array && !ComparisonTypeRule.ArrayElementTypesAgree(left.ArrayElementType, right.ArrayElementType)))
         {
             cmp = 0;
             return false;
@@ -634,8 +635,23 @@ internal abstract class SQLExecutorBaseCreator
                 // list and the delegate each add a frame), so it checks its stack headroom: a call is
                 // already expensive, and the check turns an overflow into a statement error.
                 StatementDepthGuard.EnsureStackHeadroom();
-                return ScalarFunctionEvaluator.Evaluate(expr, row, parameters, rowNameResolver,
+                ColumnValue called = ScalarFunctionEvaluator.Evaluate(expr, row, parameters, rowNameResolver,
                     static (e, r, p, rnr) => EvalExpr(e, r, p, rnr));
+
+                // COALESCE, IFNULL and NVL check the types of their argument values themselves. A NULL
+                // argument hides the declared type of its column, so a type the binding recorded (from
+                // the column types) widens the result too: COALESCE(int_col, float_col) is FLOAT64 also
+                // in a row where float_col is NULL.
+                if (rowNameResolver is not null && rowNameResolver.TryGetConditionalResultType(expr, out ExpressionType recorded)
+                    && called.Type != ColumnType.Null)
+                {
+                    if (!ResultTypeRule.TryCombine(recorded, ExpressionType.Of(called), out ExpressionType combined))
+                        throw ResultTypeRule.NoCommonType(ConditionalResultTypes.ConstructName(expr), recorded, ExpressionType.Of(called));
+
+                    return ResultTypeRule.Widen(called, combined.Type);
+                }
+
+                return called;
 
             case NodeType.ExprCast:
                 return EvalCastNode(expr, row, parameters, rowNameResolver, queryRow);
@@ -966,7 +982,9 @@ internal abstract class SQLExecutorBaseCreator
                     matched = false;
                 else if (cond.Type != ColumnType.Bool)
                     throw new CamusDBException(CamusDBErrorCodes.InvalidInput,
-                        $"No matching signature for CASE WHEN condition; expected Bool, got: {cond.Type}");
+                        ConditionalResultTypes.IsIf(expr)
+                            ? $"No matching signature for IF condition; expected Bool, got: {cond.Type}"
+                            : $"No matching signature for CASE WHEN condition; expected Bool, got: {cond.Type}");
                 else
                     matched = cond.BoolValue;
             }
@@ -974,22 +992,24 @@ internal abstract class SQLExecutorBaseCreator
             {
                 ColumnValue value = EvalExpr(clause.leftAst!, row, parameters, rowNameResolver, queryRow);
 
-                // operand = value with normal equality; a NULL on either side is UNKNOWN → no match,
-                // and so is a pair of types with no comparison rule, as for `=`.
-                matched = operand.Type != ColumnType.Null
-                       && value.Type != ColumnType.Null
-                       && TryCompareValues(operand, value, out int cmp)
-                       && cmp == 0;
+                // operand = value with normal equality; a NULL on either side is UNKNOWN → no match.
+                // A pair of types with no comparison rule is an error, as for `=`.
+                if (operand.Type == ColumnType.Null || value.Type == ColumnType.Null)
+                    matched = false;
+                else if (TryCompareValues(operand, value, out int cmp))
+                    matched = cmp == 0;
+                else
+                    throw ComparisonTypeRule.NoRule("CASE", operand, value);
             }
 
             if (matched)
-                return EvalExpr(clause.rightAst!, row, parameters, rowNameResolver, queryRow);
+                return ConditionalResultTypes.Apply(expr, EvalExpr(clause.rightAst!, row, parameters, rowNameResolver, queryRow), rowNameResolver);
         }
 
         // No WHEN matched: the ELSE result, or typed NULL when ELSE is omitted.
         return expr.extendedOne is null
             ? ColumnValue.Null
-            : EvalExpr(expr.extendedOne, row, parameters, rowNameResolver, queryRow);
+            : ConditionalResultTypes.Apply(expr, EvalExpr(expr.extendedOne, row, parameters, rowNameResolver, queryRow), rowNameResolver);
     }
 
     private static ColumnValue EvalTruthTestNode(

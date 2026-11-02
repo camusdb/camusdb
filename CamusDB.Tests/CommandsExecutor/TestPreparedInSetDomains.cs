@@ -12,6 +12,7 @@ using System.Linq;
 
 using NUnit.Framework;
 
+using CamusDB.Core;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Controllers.Queries;
 using CamusDB.Core.CommandsExecutor.Models;
@@ -34,8 +35,9 @@ public sealed class TestPreparedInSetDomains
     private static ColumnValue F64(double value) => new(ColumnType.Float64, value);
     private static ColumnValue F32(float value) => new(ColumnType.Float32, value);
 
-    /// <summary>Strings that equal no numeric probe, to push a list past the hash threshold.</summary>
-    private static readonly ColumnValue[] Padding = Enumerable.Range(0, 9).Select(i => new ColumnValue(ColumnType.String, "pad" + i)).ToArray();
+    /// <summary>Integers far from every probe, to push a list past the hash threshold. They must be
+    /// numeric: a string item has no comparison rule with a numeric probe, and that is an error.</summary>
+    private static readonly ColumnValue[] Padding = Enumerable.Range(0, 9).Select(i => Int(-1_000_000 - i)).ToArray();
 
     private static bool Reference(ColumnValue probe, IEnumerable<ColumnValue> items) =>
         items.Any(item => MixedNumericComparison.EqualsForMembership(probe, item));
@@ -59,7 +61,6 @@ public sealed class TestPreparedInSetDomains
         yield return new TestCaseData(F64(-0.0), new[] { F64(0.0) }).SetName("negative zero equals zero");
         yield return new TestCaseData(F32(0.1f), new[] { new ColumnValue(ColumnType.Float32, 0.1) }).SetName("FLOAT32 at single precision");
         yield return new TestCaseData(F64(0.1), new[] { F32(0.1f) }).SetName("FLOAT64 probe against a FLOAT32 item widens the item");
-        yield return new TestCaseData(new ColumnValue(ColumnType.String, "2"), new[] { Int(2), Num("2") }).SetName("a string never equals a number");
     }
 
     [TestCaseSource(nameof(Cases))]
@@ -80,17 +81,37 @@ public sealed class TestPreparedInSetDomains
     }
 
     [Test]
-    public void Contains_StillMatchesTheNonNumericItems_OfAMixedList()
+    public void Contains_StringProbe_AgainstNumericItems_IsInvalidInput_AtAnyLength()
     {
-        ColumnValue[] items = [.. Padding, Int(1), F64(2.5), Num("3.5")];
-        PreparedInSet set = new(items);
+        ColumnValue probe = new(ColumnType.String, "2");
+        ColumnValue[] items = [Int(2), Num("2")];
 
-        Assert.IsTrue(set.Contains(new ColumnValue(ColumnType.String, "pad3")));
-        Assert.IsFalse(set.Contains(new ColumnValue(ColumnType.String, "pad9")));
-        Assert.IsTrue(set.Contains(Num("1")));
-        Assert.IsFalse(set.Contains(Int(3)));
-        Assert.IsTrue(set.Contains(F64(3.5)));
-        Assert.IsTrue(set.Contains(Num("2.5")));
+        foreach (ColumnValue[] list in new[] { items, [.. items, .. Padding], [.. Padding, .. items] })
+        {
+            CamusDBException ex = Assert.Throws<CamusDBException>(() => new PreparedInSet(list).Contains(probe))!;
+            Assert.AreEqual(CamusDBErrorCodes.InvalidInput, ex.Code);
+            Assert.Throws<CamusDBException>(() => Reference(probe, list));
+        }
+    }
+
+    [Test]
+    public void Contains_MixedStringAndNumericList_IsInvalidInput_EvenForAProbeThatMatches()
+    {
+        // `x IN (a, b)` is `x = a OR x = b`, and OR evaluates both sides, so an item with no comparison
+        // rule fails the probe whatever the other items hold. The hashed set must not answer from the
+        // matching item before it checks the others.
+        ColumnValue[] strings = Enumerable.Range(0, 9).Select(i => new ColumnValue(ColumnType.String, "pad" + i)).ToArray();
+        PreparedInSet set = new([.. strings, Int(1), F64(2.5), Num("3.5")]);
+
+        foreach (ColumnValue probe in new[] { new ColumnValue(ColumnType.String, "pad3"), Num("1"), F64(3.5), Int(3) })
+        {
+            CamusDBException ex = Assert.Throws<CamusDBException>(() => set.Contains(probe), probe.ToString())!;
+            Assert.AreEqual(CamusDBErrorCodes.InvalidInput, ex.Code, probe.ToString());
+            StringAssert.Contains("No matching signature for operator IN", ex.Message);
+        }
+
+        // A NULL probe compares nothing: it is UNKNOWN, not an error.
+        Assert.AreEqual(ColumnType.Null, set.Evaluate(ColumnValue.Null).Type);
     }
 
     /// <summary>

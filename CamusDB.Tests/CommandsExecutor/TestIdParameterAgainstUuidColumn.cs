@@ -47,8 +47,8 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// <see cref="CamusDBErrorCodes.InvalidInput"/> before it parses the statement, on every transport.</para>
 ///
 /// <para>A valid object id against a uuid column is a different case: the pair has no comparison rule.
-/// It is never equal under <c>=</c>, <c>IN</c>, <c>NOT IN</c> and <c>CASE</c>, and an ordering operator
-/// on it is an <see cref="CamusDBErrorCodes.InvalidInput"/> error. The planner seeks an index for a
+/// Every comparison on it, <c>=</c>, <c>IN</c>, <c>NOT IN</c>, <c>CASE</c> and the ordering operators,
+/// is an <see cref="CamusDBErrorCodes.InvalidInput"/> error. The planner seeks an index for a
 /// short list and scans for a long one, so each test walks the list size across that switch.</para>
 /// </summary>
 [TestFixture]
@@ -161,8 +161,12 @@ internal sealed class TestIdParameterAgainstUuidColumn : BaseTest
 
     // ─── Valid object ids against a uuid column ───────────────────────────────
 
+    // A Uuid and an Id have no comparison rule, so every comparison of the two is an error, as in
+    // GoogleSQL (see ComparisonTypeRule). The planner seeks an index for a short list and scans for a
+    // long one, so the tests walk the list size across that switch: both paths must raise it.
+
     [Test]
-    public async Task UuidKey_ValidObjectIdParameters_AreNeverEqual_OnSeekAndScan()
+    public async Task UuidKey_ValidObjectIdParameters_AreInvalidInput_OnSeekAndScan()
     {
         (string db, CommandExecutor executor, _) = await Seed(100, "uuid", UuidKey);
 
@@ -171,18 +175,18 @@ internal sealed class TestIdParameterAgainstUuidColumn : BaseTest
             Dictionary<string, ColumnValue> parameters = ObjectIdParameters(count);
             string list = List(parameters);
 
-            Assert.AreEqual(0, await Count(executor, db, $"WHERE id IN {list}", parameters), $"IN, {count}");
-            Assert.AreEqual(100, await Count(executor, db, $"WHERE id NOT IN {list}", parameters), $"NOT IN, {count}");
+            AssertNoComparisonRule(() => Count(executor, db, $"WHERE id IN {list}", parameters), $"IN, {count}");
+            AssertNoComparisonRule(() => Count(executor, db, $"WHERE id NOT IN {list}", parameters), $"NOT IN, {count}");
         }
 
         Dictionary<string, ColumnValue> one = ObjectIdParameters(1);
-        Assert.AreEqual(0, await Count(executor, db, "WHERE id = @p0", one), "=");
-        Assert.AreEqual(100, await Count(executor, db, "WHERE id <> @p0", one), "<>");
-        Assert.AreEqual(0, await Count(executor, db, "WHERE @p0 = id", one), "= with the operands swapped");
+        AssertNoComparisonRule(() => Count(executor, db, "WHERE id = @p0", one), "=");
+        AssertNoComparisonRule(() => Count(executor, db, "WHERE id <> @p0", one), "<>");
+        AssertNoComparisonRule(() => Count(executor, db, "WHERE @p0 = id", one), "= with the operands swapped");
     }
 
     [Test]
-    public async Task UuidKey_MixedList_MatchesOnlyTheUuidItems_OnSeekAndScan()
+    public async Task UuidKey_MixedList_IsInvalidInput_OnSeekAndScan()
     {
         (string db, CommandExecutor executor, List<string> ids) = await Seed(100, "uuid", UuidKey);
 
@@ -193,14 +197,14 @@ internal sealed class TestIdParameterAgainstUuidColumn : BaseTest
             foreach (string id in ids.Take(count))
                 parameters[$"@p{i++}"] = ColumnValue.FromUuid(Guid.Parse(id));
 
-            // The object id item can match no uuid row: the seek drops it, and the scan's filter
-            // finds it equal to nothing.
+            // The uuid items match rows, but the object id item has no comparison rule with the
+            // column, and a match on another item does not hide that error.
             parameters["@oid"] = new ColumnValue(ColumnType.Id, "0123456789abcdef01234567");
             string list = List(parameters);
 
-            Assert.AreEqual(count, await Count(executor, db, $"WHERE id IN {list}", parameters), $"IN, {count}");
-            Assert.AreEqual(100 - count, await Count(executor, db, $"WHERE id NOT IN {list}", parameters), $"NOT IN, {count}");
-            Assert.AreEqual(count, (await Query(executor, db, $"SELECT id FROM users WHERE id IN {list}", parameters)).Count, $"rows, {count}");
+            AssertNoComparisonRule(() => Count(executor, db, $"WHERE id IN {list}", parameters), $"IN, {count}");
+            AssertNoComparisonRule(() => Count(executor, db, $"WHERE id NOT IN {list}", parameters), $"NOT IN, {count}");
+            AssertNoComparisonRule(() => Query(executor, db, $"SELECT id FROM users WHERE id IN {list}", parameters), $"rows, {count}");
         }
     }
 
@@ -220,19 +224,17 @@ internal sealed class TestIdParameterAgainstUuidColumn : BaseTest
     }
 
     [Test]
-    public async Task UuidKey_SimpleCaseAgainstObjectId_IsNotAMatch()
+    public async Task UuidKey_SimpleCaseAgainstObjectId_IsInvalidInput()
     {
         (string db, CommandExecutor executor, _) = await Seed(20, "uuid", UuidKey);
 
-        List<IReadOnlyDictionary<string, ColumnValue>> rows = await Query(
-            executor, db, "SELECT CASE id WHEN @p0 THEN 1 ELSE 0 END AS m FROM users", ObjectIdParameters(1));
-
-        Assert.AreEqual(20, rows.Count);
-        Assert.IsTrue(rows.All(r => r["m"].LongValue == 0));
+        AssertNoComparisonRule(
+            () => Query(executor, db, "SELECT CASE id WHEN @p0 THEN 1 ELSE 0 END AS m FROM users", ObjectIdParameters(1)),
+            "CASE");
     }
 
     [Test]
-    public async Task ObjectIdKey_UuidParameters_AreNeverEqual_OnSeekAndScan()
+    public async Task ObjectIdKey_UuidParameters_AreInvalidInput_OnSeekAndScan()
     {
         (string db, CommandExecutor executor, _) = await Seed(100, "object_id", ObjectIdKey);
 
@@ -243,28 +245,30 @@ internal sealed class TestIdParameterAgainstUuidColumn : BaseTest
                 parameters[$"@p{i}"] = ColumnValue.FromUuid(Guid.NewGuid());
             string list = List(parameters);
 
-            Assert.AreEqual(0, await Count(executor, db, $"WHERE id IN {list}", parameters), $"IN, {count}");
-            Assert.AreEqual(100, await Count(executor, db, $"WHERE id NOT IN {list}", parameters), $"NOT IN, {count}");
+            AssertNoComparisonRule(() => Count(executor, db, $"WHERE id IN {list}", parameters), $"IN, {count}");
+            AssertNoComparisonRule(() => Count(executor, db, $"WHERE id NOT IN {list}", parameters), $"NOT IN, {count}");
         }
 
         Dictionary<string, ColumnValue> one = new() { ["@p0"] = ColumnValue.FromUuid(Guid.NewGuid()) };
-        Assert.AreEqual(0, await Count(executor, db, "WHERE id = @p0", one), "=");
-        Assert.AreEqual(100, await Count(executor, db, "WHERE id <> @p0", one), "<>");
+        AssertNoComparisonRule(() => Count(executor, db, "WHERE id = @p0", one), "=");
+        AssertNoComparisonRule(() => Count(executor, db, "WHERE id <> @p0", one), "<>");
     }
 
     [Test]
-    public async Task IntegerKey_UuidParameter_IsNotEqualAndDoesNotThrow()
+    public async Task IntegerKey_UuidParameter_IsInvalidInput()
     {
         (string db, CommandExecutor executor, _) = await Seed(20, "int64", i => (i + 1).ToString());
 
         Dictionary<string, ColumnValue> one = new() { ["@p0"] = ColumnValue.FromUuid(Guid.NewGuid()) };
-        Assert.AreEqual(0, await Count(executor, db, "WHERE id = @p0", one), "=");
-        Assert.AreEqual(0, await Count(executor, db, "WHERE id IN (@p0)", one), "IN");
-        Assert.AreEqual(20, await Count(executor, db, "WHERE id NOT IN (@p0)", one), "NOT IN");
+        AssertNoComparisonRule(() => Count(executor, db, "WHERE id = @p0", one), "=");
+        AssertNoComparisonRule(() => Count(executor, db, "WHERE id IN (@p0)", one), "IN");
+        AssertNoComparisonRule(() => Count(executor, db, "WHERE id NOT IN (@p0)", one), "NOT IN");
+        AssertNoComparisonRule(() => NonQuery(executor, db, "DELETE FROM users WHERE id = @p0", one), "DELETE");
+        Assert.AreEqual(20, await Count(executor, db, "", null), "a refused statement changes no row");
     }
 
     [Test]
-    public async Task UuidKey_MixedList_SeeksOnlyTheUuidItems()
+    public async Task UuidKey_MixedList_IsNotSeek()
     {
         (string db, CommandExecutor executor, List<string> ids) = await Seed(100, "uuid", UuidKey);
 
@@ -275,17 +279,18 @@ internal sealed class TestIdParameterAgainstUuidColumn : BaseTest
             ["@oid"] = new ColumnValue(ColumnType.Id, "0123456789abcdef01234567"),
         };
 
-        // An index key uses the constant's encoding. An object id key on a uuid index addresses no
-        // uuid entry by value, and on a non-unique index its prefix match could reach unrelated keys,
-        // so the planner drops the item and seeks the uuid items only.
+        // An index key uses the constant's encoding, so a seek with the object id item would find
+        // nothing and could not raise the type error. The planner leaves the whole list to the filter.
         List<IReadOnlyDictionary<string, ColumnValue>> plan = await Query(
             executor, db, "EXPLAIN SELECT id FROM users WHERE id IN (@p0, @p1, @oid)", parameters);
+        Assert.IsFalse(plan.Any(r => r["node"].StrValue == "index-in-list"), "a list with an incomparable item must not seek");
 
-        IReadOnlyDictionary<string, ColumnValue>? seek = plan.FirstOrDefault(r => r["node"].StrValue == "index-in-list");
-        Assert.IsNotNull(seek, "the uuid items still drive the index seek");
-        StringAssert.Contains("values=2", seek!["detail"].StrValue);
+        List<IReadOnlyDictionary<string, ColumnValue>> uuidOnly = await Query(
+            executor, db, "EXPLAIN SELECT id FROM users WHERE id IN (@p0, @p1)",
+            new() { ["@p0"] = parameters["@p0"], ["@p1"] = parameters["@p1"] });
+        Assert.IsTrue(uuidOnly.Any(r => r["node"].StrValue == "index-in-list"), "the uuid items alone still seek");
 
-        Assert.AreEqual(2, (await Query(executor, db, "SELECT id FROM users WHERE id IN (@p0, @p1, @oid)", parameters)).Count);
+        AssertNoComparisonRule(() => Query(executor, db, "SELECT id FROM users WHERE id IN (@p0, @p1, @oid)", parameters), "IN");
     }
 
     // ─── Transports ───────────────────────────────────────────────────────────
@@ -395,6 +400,13 @@ internal sealed class TestIdParameterAgainstUuidColumn : BaseTest
     }
 
     // ─── Harness ──────────────────────────────────────────────────────────────
+
+    private static void AssertNoComparisonRule(Func<Task> statement, string label)
+    {
+        CamusDBException ex = Assert.ThrowsAsync<CamusDBException>(async () => await statement(), label)!;
+        Assert.AreEqual(CamusDBErrorCodes.InvalidInput, ex.Code, $"{label}: {ex.Message}");
+        StringAssert.Contains("No matching signature for operator", ex.Message, label);
+    }
 
     private static void AssertGuidTextRejected(Func<Task> statement, string label)
     {

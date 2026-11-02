@@ -32,11 +32,13 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 /// element uses the equality <c>=</c> uses (<see cref="MixedNumericComparison.EqualsForMembership"/>):
 /// a mixed numeric pair widens to double, so <c>1 IN (1.0)</c> is true; a String and a Uuid or Id
 /// are equal when the string parses to that value (<see cref="StringOperandCoercion"/>); and any
-/// other cross-type element (e.g. <c>5 IN (1, 'foo')</c>) is a non-match rather than a hard error.
-/// This matches the AST reference path (<see cref="SubqueryValueListAst.EvaluateMembership"/>), so
-/// prepared and reference paths stay identical — and it matches the index IN-list seek, which
-/// rewrites list items into the column's type. IN lists are not type-checked at bind time, so
-/// mixed-type lists are reachable and must not throw.
+/// other cross-type element (e.g. <c>5 IN (1, 'foo')</c>) is an
+/// <see cref="CamusDBErrorCodes.InvalidInput"/> error (<see cref="ComparisonTypeRule"/>), whether or
+/// not another item matches, because <c>OR</c> evaluates every side. This matches the AST reference
+/// path (<see cref="SubqueryValueListAst.EvaluateMembership"/>), so prepared and reference paths stay
+/// identical. The planner never seeks an index with such a list: it leaves the list to the
+/// filter, which raises the error. IN lists are not type-checked at bind time, so the check runs for
+/// each probe type, once, against the distinct item types.
 ///
 /// <para>The String-to-Uuid/Id rule is the trap. The set is built before the planner knows the
 /// column's type, so a uuid column filtered by string parameters gives a set of strings and a probe
@@ -84,6 +86,13 @@ public sealed class PreparedInSet
     private readonly ColumnValue[] _values;
     private readonly bool _containsNull;
 
+    // The distinct types of the non-NULL items, the distinct element types of the array items, and
+    // the last probe checked against all of them (see ProbeKey; -1 before the first probe). A race
+    // between workers checks one probe twice; the check is pure.
+    private readonly ColumnType[] _itemTypes;
+    private readonly ColumnType[] _arrayItemElementTypes;
+    private int _comparableProbe = -1;
+
     // Built only for a list longer than HashThreshold; null otherwise. See "Numeric domains".
     private readonly HashSet<ColumnValue>? _set;        // items that are not numeric
     private readonly HashSet<Int128>? _exactItems;      // INT64 and NUMERIC items, NUMERIC unscaled
@@ -126,8 +135,21 @@ public sealed class PreparedInSet
                 _values[idx++] = values[i];
         }
 
+        List<ColumnType> itemTypes = new(2);
+        List<ColumnType>? arrayItemElementTypes = null;
+
         foreach (ColumnValue value in _values)
         {
+            if (!itemTypes.Contains(value.Type))
+                itemTypes.Add(value.Type);
+
+            if (value.Type == ColumnType.Array)
+            {
+                arrayItemElementTypes ??= new(1);
+                if (!arrayItemElementTypes.Contains(value.ArrayElementType))
+                    arrayItemElementTypes.Add(value.ArrayElementType);
+            }
+
             switch (value.Type)
             {
                 case ColumnType.String: _hasStringItems = true; break;
@@ -137,6 +159,9 @@ public sealed class PreparedInSet
                 case ColumnType.DateTime: _hasDateTimeItems = true; break;
             }
         }
+
+        _itemTypes = itemTypes.ToArray();
+        _arrayItemElementTypes = arrayItemElementTypes?.ToArray() ?? [];
 
         if (_values.Length > HashThreshold)
         {
@@ -219,6 +244,8 @@ public sealed class PreparedInSet
         if (lhs.Type == ColumnType.Null)
             return false;
 
+        RequireComparable(lhs);
+
         if (_set is null)
         {
             foreach (ColumnValue v in _values)
@@ -273,6 +300,38 @@ public sealed class PreparedInSet
                 return false;
         }
     }
+
+    /// <summary>
+    /// Throws when an item has no comparison rule with <paramref name="probe"/>, before any lookup, so
+    /// a match on another item cannot hide the error (see the class summary). An array probe is also
+    /// checked against the element type of every array item: two arrays with different element types
+    /// have no rule, and the hash comparer alone would call them unequal. The last probe that passed
+    /// is remembered by its type and element type, so a scan of one column pays for the check once.
+    /// </summary>
+    private void RequireComparable(ColumnValue probe)
+    {
+        int key = ProbeKey(probe);
+        if (Volatile.Read(ref _comparableProbe) == key)
+            return;
+
+        foreach (ColumnType itemType in _itemTypes)
+            ComparisonTypeRule.Require("IN", probe.Type, itemType);
+
+        if (probe.Type == ColumnType.Array)
+        {
+            foreach (ColumnType elementType in _arrayItemElementTypes)
+            {
+                if (!ComparisonTypeRule.ArrayElementTypesAgree(probe.ArrayElementType, elementType))
+                    throw ComparisonTypeRule.NoRule("IN", probe, ColumnValue.FromArray(elementType, []));
+            }
+        }
+
+        Volatile.Write(ref _comparableProbe, key);
+    }
+
+    // The type, plus the element type for an array; both enums are small and non-negative.
+    private static int ProbeKey(ColumnValue probe) =>
+        probe.Type == ColumnType.Array ? (int)probe.Type | ((int)probe.ArrayElementType + 1) << 16 : (int)probe.Type;
 
     private bool ContainsCoerced(ColumnValue lhs, ColumnType target) =>
         StringOperandCoercion.TryCoerce(lhs, target, out ColumnValue coerced) && _set!.Contains(coerced);

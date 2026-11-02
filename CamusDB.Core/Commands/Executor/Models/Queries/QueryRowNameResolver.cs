@@ -49,6 +49,17 @@ public sealed class QueryRowNameResolver
     /// </summary>
     private bool frozen;
 
+    /// <summary>
+    /// The result type of each CASE, COALESCE, IFNULL and IF node of the bound statement, recorded by
+    /// <see cref="Controllers.Queries.ConditionalResultTypes.CheckQuery"/> while the statement binds.
+    /// It lives here, on the binding, and not on the node: the parse cache shares one tree between
+    /// executions on other schemas, where a column in the expression can have another type. Keyed by
+    /// node identity. Null until the first record, so a statement without such an expression pays one
+    /// null check per evaluation. Written only before <see cref="FreezeForSharedReuse"/>, as the memo
+    /// above is, so concurrent executions read it lock-free.
+    /// </summary>
+    private Dictionary<SQLParser.NodeAst, ExpressionType>? conditionalResultTypes;
+
     public QueryRowNameResolver(
         IReadOnlyList<BoundTableSource> sources,
         IReadOnlyList<BoundDerivedTableSource>? derivedSources = null)
@@ -129,6 +140,28 @@ public sealed class QueryRowNameResolver
     /// memo contents visible to every later reader.
     /// </summary>
     internal void FreezeForSharedReuse() => frozen = true;
+
+    /// <summary>
+    /// Records the result type of a conditional node while the statement binds. Ignored once the
+    /// resolver is frozen, since a frozen resolver is shared and must not be written.
+    /// </summary>
+    internal void RecordConditionalResultType(SQLParser.NodeAst node, ExpressionType resultType)
+    {
+        if (frozen)
+            return;
+
+        (conditionalResultTypes ??= new(ReferenceEqualityComparer.Instance))[node] = resultType;
+    }
+
+    /// <summary>The result type the binding recorded for <paramref name="node"/>, if any.</summary>
+    internal bool TryGetConditionalResultType(SQLParser.NodeAst node, out ExpressionType resultType)
+    {
+        if (conditionalResultTypes is { } recorded && recorded.TryGetValue(node, out resultType))
+            return true;
+
+        resultType = default;
+        return false;
+    }
 
     public static string FormatQualifiedKey(string alias, string columnName) =>
         $"{alias}.{columnName}";
