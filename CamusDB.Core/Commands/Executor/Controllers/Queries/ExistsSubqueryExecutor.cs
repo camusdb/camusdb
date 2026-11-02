@@ -98,9 +98,12 @@ internal sealed class ExistsSubqueryExecutor(SubqueryQueryExecutor? queryExecuto
         // so every inner row is decoded and tested. Cost is O(total inner rows) per outer row.
         //
         // The inner scan does not fold its reads (no query ticket reaches here, so an
-        // UPDATE/DELETE that contains this subquery cannot mark it as write-driving), and takes no
-        // range lock, so a Serializable transaction is not fenced against inner-table phantoms on
-        // this path — unlike the seek path above, which locks the range it reads.
+        // UPDATE/DELETE that contains this subquery cannot mark it as write-driving). Under
+        // Serializable read-write it takes the shared lock over the whole inner row range that a
+        // single-table scan takes, so the existence answer is fenced against inner-table phantoms
+        // exactly as the seek path above fences the range it reads.
+        await innerTable.Store.AcquireRowRangeLockAsync(txnState, cancellationToken: cancellationToken).ConfigureAwait(false);
+
         await foreach ((ObjectIdValue rowId, ReadOnlyMemory<byte> data) in innerTable.Store.ScanRows(
             txnState, cancellationToken: cancellationToken).ConfigureAwait(false))
         {

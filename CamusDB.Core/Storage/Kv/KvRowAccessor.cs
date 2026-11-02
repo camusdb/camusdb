@@ -268,9 +268,9 @@ internal sealed class KvRowAccessor
     /// </para>
     ///
     /// <para>
-    /// A read-only caller that has no range lock to fall back on uses this method too, for the same
-    /// reason: a join leaf scan holds no range lock at all, so the per-row shared point locks are its
-    /// only Serializable protection and batching the reads must not drop them. The name records where
+    /// A read-only caller uses this method too, for the same reason: a join leaf fetches the rows its
+    /// index walk found, and the per-row shared point lock is the lock a per-row <see cref="GetRow"/>
+    /// would have left on each of them, so batching the reads must not drop it. The name records where
     /// the requirement first arose, not an exclusive caller.
     /// </para>
     /// </summary>

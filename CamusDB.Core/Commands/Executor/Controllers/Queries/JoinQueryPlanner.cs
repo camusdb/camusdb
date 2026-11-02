@@ -112,10 +112,16 @@ internal sealed class JoinQueryPlanner
         // unconditional — EXPLAIN renders both on every plan.
         IReadOnlyList<PlanCacheDep>? cacheDeps = planCacheEnabled ? CollectCacheDeps(database, bound) : null;
 
-        // The leaf analysis below resolves no user parameter, but a clock call (now()) must resolve to
-        // the statement's time: an index bound taken from the wall clock at plan time would be later
-        // than the time the row filter reads, and the scan would miss rows the filter accepts.
-        Dictionary<string, ColumnValue>? clockValues = ClockScalarFunctions.ClockValuesOnly(ticket.Parameters);
+        // The leaf analysis below resolves the statement's parameters, as the single-table planner does:
+        // a placeholder in a pushed leaf filter (j.k = @k) becomes an index bound and the leaf an index
+        // leaf, where an unresolved placeholder left a table scan with a residual filter (and, under
+        // Serializable read-write, a shared lock over the whole table instead of over one key). The
+        // same dictionary carries the statement's clock values, so a clock call (now()) resolves to the
+        // statement's time: an index bound taken from the wall clock at plan time would be later than
+        // the time the row filter reads, and the scan would miss rows the filter accepts. The plan cache
+        // keys on the query's shape and rebuilds the tree over the current query on a hit, so a resolved
+        // value is never frozen into a cached leaf.
+        Dictionary<string, ColumnValue>? leafParameters = ticket.Parameters;
 
         JoinOrderChoice? choice = null;
         // Read once, before the lookup, and used again for the store: a plan built while an
@@ -130,7 +136,7 @@ internal sealed class JoinQueryPlanner
         {
             // Re-apply the cached ordering to the CURRENT bound.Query.Source so that ON-predicate
             // literals from this query are used (not frozen from the first query of this shape).
-            choice = ReplayCachedOrder(database, bound, pushdown, cachedAliasOrder, cached.JoinBuild, cached.JoinKeyRowsBounds, clockValues, leafKeys);
+            choice = ReplayCachedOrder(database, bound, pushdown, cachedAliasOrder, cached.JoinBuild, cached.JoinKeyRowsBounds, leafParameters, leafKeys);
 
             if (choice is not null)
                 fromCache = true;
@@ -141,7 +147,7 @@ internal sealed class JoinQueryPlanner
         // A miss, or a hit whose order cannot be rebuilt over the current query: plan from the start.
         choice ??= _options.CostBasedJoinOrderEnabled && _stats is not null
                 && AllBaseTableEstimatesLoaded(database, bound)
-            ? JoinEnumerator.Enumerate(bound.Query.Source, bound, pushdown, database, _stats, _options, clockValues, leafKeys, _traceEstimates)
+            ? JoinEnumerator.Enumerate(bound.Query.Source, bound, pushdown, database, _stats, _options, leafParameters, leafKeys, _traceEstimates)
             : JoinOrderOptimizer.Choose(bound.Query.Source, bound, pushdown);
 
         QuerySource orderedSource = choice.Source;
@@ -156,7 +162,7 @@ internal sealed class JoinQueryPlanner
         // The filter that goes with the tree: a conjunct-mode tree already evaluates the WHERE
         // conjuncts it moved into its joins.
         plan.ExecutionFilter = choice.PostJoinFilter;
-        plan.Root = BuildJoinTree(orderedSource, bound, pushdown, database, _stats, choice.StepEstimates, clockValues);
+        plan.Root = BuildJoinTree(orderedSource, bound, pushdown, database, _stats, choice.StepEstimates, leafParameters);
 
         plan.JoinOrderSearch = new JoinOrderSearchSummary(
             fromCache ? "cached" : choice.Mode != JoinBuildMode.CostBased ? "heuristic" : choice.Greedy ? "greedy" : "cost-based",
@@ -207,7 +213,7 @@ internal sealed class JoinQueryPlanner
         IReadOnlyList<string> cachedAliasOrder,
         JoinBuildMode mode,
         IReadOnlyList<double>? keyRowsBounds,
-        Dictionary<string, ColumnValue>? clockValues,
+        Dictionary<string, ColumnValue>? leafParameters,
         IReadOnlyDictionary<string, PlanTimeLeafKeys>? leafKeys)
     {
         if (mode == JoinBuildMode.WholePredicate)
@@ -234,7 +240,7 @@ internal sealed class JoinQueryPlanner
 
         // A replay runs no search, so it costs no step.
         return JoinOrderChoice.CostBased(tree, graph,
-            JoinEnumerator.EstimateSteps(graph, order, tree, bound, pushdown, database, _stats, _options, clockValues, leafKeys, keyRowsBounds, _traceEstimates),
+            JoinEnumerator.EstimateSteps(graph, order, tree, bound, pushdown, database, _stats, _options, leafParameters, leafKeys, keyRowsBounds, _traceEstimates),
             costedJoinSteps: 0);
     }
 
@@ -347,7 +353,7 @@ internal sealed class JoinQueryPlanner
         DatabaseDescriptor database,
         StatisticsManager? stats,
         IReadOnlyDictionary<JoinSource, JoinStepEstimate>? steps = null,
-        Dictionary<string, ColumnValue>? clockValues = null)
+        Dictionary<string, ColumnValue>? leafParameters = null)
     {
         switch (source)
         {
@@ -362,7 +368,7 @@ internal sealed class JoinQueryPlanner
                     && scanFilter is not null)
                 {
                     PhysicalPlanNode? indexLeaf = TryBuildIndexLeaf(
-                        scanFilter, boundSource, database, stats, clockValues);
+                        scanFilter, boundSource, database, stats, leafParameters);
                     if (indexLeaf is not null)
                         return indexLeaf;
                 }
@@ -389,13 +395,13 @@ internal sealed class JoinQueryPlanner
 
             case JoinSource joinSource:
             {
-                PhysicalPlanNode left = BuildJoinTree(joinSource.Left, bound, pushdown, database, stats, steps, clockValues);
+                PhysicalPlanNode left = BuildJoinTree(joinSource.Left, bound, pushdown, database, stats, steps, leafParameters);
                 JoinStepEstimate? step = steps is not null && steps.TryGetValue(joinSource, out JoinStepEstimate found)
                     ? found
                     : null;
 
                 PhysicalPlanNode joinNode = BuildJoinNode(joinSource, left, step, bound, pushdown, database, stats);
-                AttachRightAccessPath(joinNode, database, stats, clockValues);
+                AttachRightAccessPath(joinNode, database, stats, leafParameters);
 
                 // Kept beside the annotated estimate, not in place of it: EXPLAIN (ANALYZE) prints both,
                 // so a reader can see which of the two models was closer to the rows the join produced.
@@ -428,7 +434,7 @@ internal sealed class JoinQueryPlanner
         PhysicalPlanNode joinNode,
         DatabaseDescriptor database,
         StatisticsManager? stats,
-        Dictionary<string, ColumnValue>? clockValues)
+        Dictionary<string, ColumnValue>? leafParameters)
     {
         if (!_options.CostBasedAccessPathEnabled || stats is null)
             return;
@@ -436,11 +442,11 @@ internal sealed class JoinQueryPlanner
         switch (joinNode)
         {
             case HashJoinNode { BuildSource.Table: { } table, BuildExecutionFilter: { } filter } hash:
-                hash.RightPhysicalNode = TryBuildIndexLeaf(filter, table, database, stats, clockValues);
+                hash.RightPhysicalNode = TryBuildIndexLeaf(filter, table, database, stats, leafParameters);
                 break;
 
             case NestedLoopJoinNode { RightSource.Table: { } table, RightExecutionFilter: { } filter } nestedLoop:
-                nestedLoop.RightPhysicalNode = TryBuildIndexLeaf(filter, table, database, stats, clockValues);
+                nestedLoop.RightPhysicalNode = TryBuildIndexLeaf(filter, table, database, stats, leafParameters);
                 break;
         }
     }
@@ -1131,11 +1137,11 @@ internal sealed class JoinQueryPlanner
         BoundTableSource boundSource,
         DatabaseDescriptor database,
         StatisticsManager stats,
-        Dictionary<string, ColumnValue>? clockValues)
+        Dictionary<string, ColumnValue>? leafParameters)
     {
-        // Clock values only: a clock call becomes a bound at the statement's time, which equals what
-        // the residual filter reads; a placeholder stays unresolved, as it always has here.
-        PredicateAnalysis raw = PredicateAnalyzer.Analyze(scanFilter, clockValues);
+        // The statement's parameters, clock values included: a placeholder or a clock call becomes a
+        // bound at its value, which equals what the residual filter reads.
+        PredicateAnalysis raw = PredicateAnalyzer.Analyze(scanFilter, leafParameters);
 
         // Strip "alias." prefix so bare index column names match (e.g. "o.status" → "status").
         PredicateAnalysis analysis = JoinEnumerator.StripAliasPrefix(raw, boundSource.Alias);
@@ -1182,7 +1188,25 @@ internal sealed class JoinQueryPlanner
                     }
                 }
             }
-            // Unique point-lookup (QueryFromIndex): unusual join-leaf shape; skip.
+            else if (step.Value.Type == QueryPlanStepType.QueryFromIndex
+                && step.Value.Index is { } uniqueIndex
+                && (step.Value.LookupKey ?? (step.Value.ColumnValue is { } lookupValue ? new CompositeColumnValue(new[] { lookupValue }) : null)) is { } lookupKey)
+            {
+                // A full-key equality on a unique index: at most one entry, so no breakeven test. The
+                // leaf runs as the one-key range [key, key] through the index range scan the join
+                // executor already serves. Under Serializable read-write that scan locks the one index
+                // key, present or absent, and the row it finds, exactly as the single-table lookup does.
+                NodeAst? residual = PredicateAnalyzer.BuildExecutionFilter(
+                    analysis, step, boundSource.Table, null);
+
+                return new IndexRangeScanNode(uniqueIndex, lookupKey, true, lookupKey, true)
+                {
+                    EqualityPrefixLength = uniqueIndex.Columns.Length,
+                    BoundSource = boundSource,
+                    ExecutionFilter = residual,
+                    Distribution = PlacementReader.Instance.GetIndexScanDistribution(uniqueIndex, _options)
+                };
+            }
         }
 
         // ── IN-list path ──────────────────────────────────────────────────────

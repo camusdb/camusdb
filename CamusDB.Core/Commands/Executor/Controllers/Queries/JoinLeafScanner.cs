@@ -49,6 +49,16 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 /// EXPLAIN (ANALYZE). The statement's slow-query-log probe (<c>plan.Ticket.Probe</c>) is counted at
 /// the same sites, so a join reports the rows it read exactly as a single-table scan does.</para>
 ///
+/// <para><b>Locks:</b> every leaf takes the predicate lock a single-table scan of the same shape takes,
+/// before it reads (see <c>docs/transactions-locking-and-isolation.md</c> §6.2): a shared lock over the
+/// whole row range for a table scan, over the whole index range for an index walk, over the bounded
+/// range for an index range scan, and over the value span for an IN-list scan. The lock fires only for
+/// a Serializable read-write transaction, where it is the phantom fence of strict two-phase locking:
+/// without it a key the join read as absent could be inserted by another transaction before this one
+/// ends, and a second read of the same join in the same transaction would see it. The rows a leaf
+/// then fetches are point-locked by <see cref="JoinLeafRowPage"/>, so the lock set a join leaves is
+/// the one the equivalent single-table scan leaves.</para>
+///
 /// <para>Nothing in this class is thread-safe. A scan builds its layouts and its decode state
 /// lazily and reuses them across rows, so one scan belongs to one consumer.</para>
 /// </summary>
@@ -102,6 +112,13 @@ internal sealed class JoinLeafScanner
         CamusDB.Core.Diagnostics.StatementProbe? probe = plan.Ticket.Probe;
         RowEncoder.RowDecodeState rowDecodeState = new();
         RowLayout? qualifiedLayout = null;
+
+        // The phantom fence of a Serializable read-write transaction: a shared lock over the whole row
+        // range, taken before the scan exactly as the single-table scan takes it. A row of this table
+        // another transaction inserts, changes or deletes is then held back until this one ends. Every
+        // other isolation level and mode takes nothing here.
+        await table.Store.AcquireRowRangeLockAsync(plan.Ticket.TxnState,
+            exclusive: plan.Ticket.ExclusivePredicateLocks, cancellationToken: plan.Ticket.CancellationToken).ConfigureAwait(false);
 
         deps?.RecordRange(table.Store.RowKeySpace);
         deps?.RecordRange(table.Store.LargeValueKeySpace);
@@ -173,6 +190,10 @@ internal sealed class JoinLeafScanner
         using CancellationTokenSource? linked = JoinCancellation.Link(plan, cancellationToken);
         CancellationToken scanToken = linked?.Token ?? plan.Ticket.CancellationToken;
 
+        // Phantom fence over the whole index range, as the single-table full index scan takes it.
+        await table.Store.AcquireIndexRangeLockAsync(plan.Ticket.TxnState, index.KvId,
+            exclusive: plan.Ticket.ExclusivePredicateLocks, cancellationToken: scanToken).ConfigureAwait(false);
+
         JoinLeafRowPage page = new(services, plan, source, executionFilter, stats: stats, index: index);
 
         await foreach ((CompositeColumnValue entryKey, ObjectIdValue rowId, ReadOnlyMemory<byte> _) in Diagnostics.TableIndexUsage.Count(table.Store.IndexUsage, index.KvId, table.Store.ScanIndex(
@@ -231,6 +252,16 @@ internal sealed class JoinLeafScanner
 
         using CancellationTokenSource? linked = JoinCancellation.Link(plan, cancellationToken);
         CancellationToken scanToken = linked?.Token ?? plan.Ticket.CancellationToken;
+
+        // Phantom fence over exactly the scanned sub-range, as the single-table range scan takes it;
+        // a prefix bound spans every row of the prefix (keyColumnCount).
+        await table.Store.AcquireBoundedIndexRangeLockAsync(
+            plan.Ticket.TxnState, rangeNode.Index.KvId,
+            rangeNode.FromBound, rangeNode.FromInclusive,
+            rangeNode.ToBound, rangeNode.ToInclusive,
+            unique, exclusive: plan.Ticket.ExclusivePredicateLocks,
+            cancellationToken: scanToken,
+            keyColumnCount: rangeNode.Index.Columns.Length).ConfigureAwait(false);
 
         JoinLeafRowPage page = new(services, plan, source, rangeNode.ExecutionFilter, stats: stats, index: rangeNode.Index);
 
@@ -295,6 +326,28 @@ internal sealed class JoinLeafScanner
 
         using CancellationTokenSource? linked = JoinCancellation.Link(plan, cancellationToken);
         CancellationToken scanToken = linked?.Token ?? plan.Ticket.CancellationToken;
+
+        // Phantom fence, as the single-table IN-list scan takes it: a unique index is probed with
+        // LookupUnique, whose point lock covers each value, present or absent; a non-unique index is
+        // covered by one shared lock over [min, max] of the values, encoded in the index's own key
+        // order, so on a descending leading column the largest value is the start bound.
+        if (!isUnique)
+        {
+            CompositeColumnValue? minVal = null, maxVal = null;
+            foreach (ColumnValue v in inListNode.Values)
+            {
+                CompositeColumnValue cv = new(v);
+                if (minVal is null || cv.CompareTo(minVal) < 0) minVal = cv;
+                if (maxVal is null || cv.CompareTo(maxVal) > 0) maxVal = cv;
+            }
+            bool leadingDescending = inListNode.Index.DirectionAt(0) == OrderType.Descending;
+            await table.Store.AcquireBoundedIndexRangeLockAsync(
+                plan.Ticket.TxnState, inListNode.Index.KvId,
+                leadingDescending ? maxVal : minVal, true,
+                leadingDescending ? minVal : maxVal, true,
+                unique: false, exclusive: plan.Ticket.ExclusivePredicateLocks,
+                cancellationToken: scanToken).ConfigureAwait(false);
+        }
 
         // One page spans the whole IN list: ids are appended in list order (and, per value, in index
         // order), so a page can hold the tail of one value's matches and the head of the next. Order

@@ -121,3 +121,9 @@ remote probe span returns matched rows only and cannot pad.
 - A `WHERE` conjunct on the null-extended side runs after the join, even when it is
   null-rejecting and the join could have been simplified to an inner join.
 - A `RIGHT JOIN` after another join is not supported (see above).
+- A join leaf whose pushed filter no index serves is a table scan with a residual filter. Under
+  Serializable read-write that leaf holds a shared lock over the whole table until the transaction
+  ends, so every writer into that table is held back meanwhile; an index leaf (a literal or a
+  parameter on an indexed column, a full-key equality on a unique index included) locks only the
+  keys it reads. See `transactions-locking-and-isolation.md` §6.2 and §6.3 for the locks every join
+  leaf and probe takes.

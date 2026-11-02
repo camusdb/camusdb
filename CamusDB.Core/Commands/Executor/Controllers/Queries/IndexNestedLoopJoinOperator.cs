@@ -366,6 +366,17 @@ internal sealed class IndexNestedLoopJoinOperator
         deps?.RecordRange(table.Store.IndexKeySpace(joinNode.Index.KvId));
         deps?.RecordSchema(table.Id, JoinAliasMetadata.GetTableSchemaVersionForAlias(plan, source.Alias), table.Schema.ContentsGeneration);
 
+        // The predicate lock of every probed key, taken before the index is read: under Serializable
+        // read-write an entry another transaction inserts for one of these keys is held back until
+        // this one ends, as the point lock of the unique probe holds back an insert of its key. The
+        // helper escalates to the whole index bucket past the escalation threshold.
+        for (int slot = 0; slot < count; slot++)
+        {
+            await table.Store.AcquireIndexEqualityLockAsync(
+                plan.Ticket.TxnState, joinNode.Index.KvId, batch.Keys[slot],
+                unique: false, joinNode.Index.Columns.Length, plan.Ticket.CancellationToken).ConfigureAwait(false);
+        }
+
         KvIndexAccessor.IndexEqualityProbe[] probes = await table.Store.ScanIndexEqualityManyAsync(
             plan.Ticket.TxnState, joinNode.Index.KvId, keyTypes, batch.Keys, probePageSize, plan.Ticket.CancellationToken).ConfigureAwait(false);
 
@@ -577,6 +588,11 @@ internal sealed class IndexNestedLoopJoinOperator
         // this key. Per-row point deps are recorded below as each row id is buffered.
         deps?.RecordRange(table.Store.IndexKeySpace(joinNode.Index.KvId));
         deps?.RecordSchema(table.Id, JoinAliasMetadata.GetTableSchemaVersionForAlias(plan, source.Alias), table.Schema.ContentsGeneration);
+
+        // The predicate lock of this key (see ProbeNonUniqueKeys); free when the batch already took it.
+        await table.Store.AcquireIndexEqualityLockAsync(
+            plan.Ticket.TxnState, joinNode.Index.KvId, lookupKey,
+            unique: false, joinNode.Index.Columns.Length, cancellationToken).ConfigureAwait(false);
 
         await foreach ((ObjectIdValue rowId, ReadOnlyMemory<byte> _) in Diagnostics.TableIndexUsage.Count(table.Store.IndexUsage, joinNode.Index.KvId, table.Store.ScanIndexEquality(
             plan.Ticket.TxnState,

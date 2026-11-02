@@ -266,10 +266,9 @@ internal static class JoinEnumerator
     /// <see cref="JoinOrderOptimizer"/> when the graph refuses the tree, when it has more than
     /// <see cref="MaxTablesForEnumeration"/> tables, or when no order avoids a cross product.
     /// </summary>
-    /// <param name="clockValues">
-    /// The statement's transaction and statement times alone
-    /// (<see cref="Functions.ClockScalarFunctions.ClockValuesOnly"/>), or null. A leaf filter on
-    /// <c>now()</c> is costed as the index range the builder will make from the same values.
+    /// <param name="leafParameters">
+    /// The statement's parameters, clock values included, or null. A leaf filter on a placeholder or
+    /// on <c>now()</c> is costed as the index leaf the builder will make from the same values.
     /// </param>
     /// <param name="leafKeys">
     /// The rows that the filters of small dimension leaves keep, read at plan time
@@ -288,7 +287,7 @@ internal static class JoinEnumerator
         DatabaseDescriptor database,
         StatisticsManager stats,
         CamusDBOptions options,
-        Dictionary<string, ColumnValue>? clockValues = null,
+        Dictionary<string, ColumnValue>? leafParameters = null,
         IReadOnlyDictionary<string, PlanTimeLeafKeys>? leafKeys = null,
         bool traceEstimates = false)
     {
@@ -303,7 +302,7 @@ internal static class JoinEnumerator
         if (graph.LeafCount > MaxTablesForEnumeration)
             return JoinOrderOptimizer.ChooseWithGraph(root, bound, pushdown, graph);
 
-        CostInputs inputs = ComputeCostInputs(graph, bound, pushdown, database, stats, options, clockValues,
+        CostInputs inputs = ComputeCostInputs(graph, bound, pushdown, database, stats, options, leafParameters,
             denseSubsets: graph.LeafCount <= MaxTablesForDenseEstimates, leafKeys: leafKeys, traceEstimates: traceEstimates);
         long budget = stats.JoinSearchStepBudgetForTesting ?? MaxCostedStepsForEnumeration;
         int[]? order = FindCheapestOrder(graph, inputs, budget, out long costedSteps, out bool overBudget);
@@ -349,12 +348,12 @@ internal static class JoinEnumerator
         DatabaseDescriptor database,
         StatisticsManager stats,
         CamusDBOptions options,
-        Dictionary<string, ColumnValue>? clockValues = null,
+        Dictionary<string, ColumnValue>? leafParameters = null,
         IReadOnlyDictionary<string, PlanTimeLeafKeys>? leafKeys = null,
         IReadOnlyList<double>? keyRowsBounds = null,
         bool traceEstimates = false) =>
         EstimateSteps(graph, order, tree,
-            ComputeCostInputs(graph, bound, pushdown, database, stats, options, clockValues, denseSubsets: false, leafKeys: leafKeys, traceEstimates: traceEstimates),
+            ComputeCostInputs(graph, bound, pushdown, database, stats, options, leafParameters, denseSubsets: false, leafKeys: leafKeys, traceEstimates: traceEstimates),
             keyRowsBounds);
 
     /// <param name="keyRowsBounds">
@@ -544,7 +543,7 @@ internal static class JoinEnumerator
         DatabaseDescriptor database,
         StatisticsManager stats,
         CamusDBOptions options,
-        Dictionary<string, ColumnValue>? clockValues = null,
+        Dictionary<string, ColumnValue>? leafParameters = null,
         bool denseSubsets = true,
         IReadOnlyDictionary<string, PlanTimeLeafKeys>? leafKeys = null,
         bool traceEstimates = false)
@@ -560,7 +559,7 @@ internal static class JoinEnumerator
         {
             string alias = graph.Leaves[i].Alias;
             EstimateTrace? leafTrace = traceEstimates ? new EstimateTrace() : null;
-            EstimateLeaf(alias, pushdown, bound, database, stats, out firstLeafCost[i], out long rows, options, clockValues, leafTrace);
+            EstimateLeaf(alias, pushdown, bound, database, stats, out firstLeafCost[i], out long rows, options, leafParameters, leafTrace);
 
             // The rows a plan-time lookup counted are the rows; the scan still costs its read.
             if (leafKeys is not null && leafKeys.TryGetValue(alias, out PlanTimeLeafKeys? known))
@@ -1445,7 +1444,7 @@ internal static class JoinEnumerator
         out double cost,
         out long card,
         CamusDBOptions options,
-        Dictionary<string, ColumnValue>? clockValues,
+        Dictionary<string, ColumnValue>? leafParameters,
         EstimateTrace? trace = null)
     {
         TableDescriptor? table = FindTableDescriptor(alias, bound);
@@ -1473,9 +1472,9 @@ internal static class JoinEnumerator
         // instead of a TableScanNode. Mirror that decision here so the DP costs what is actually built.
         if (options.CostBasedAccessPathEnabled)
         {
-            // Clock values only, the same input the builder's leaf analysis gets: a placeholder stays
-            // unresolved here as it does there.
-            PredicateAnalysis raw = PredicateAnalyzer.Analyze(filter, clockValues);
+            // The same parameters the builder's leaf analysis gets, so a placeholder is costed as the
+            // index leaf the builder will make from it.
+            PredicateAnalysis raw = PredicateAnalyzer.Analyze(filter, leafParameters);
             PredicateAnalysis analysis = JoinEnumerator.StripAliasPrefix(raw, alias);
             // Cost the leaf over the same coerced constants the builder will select with, so the
             // DP never costs an index shape the builder then refuses.
@@ -1499,6 +1498,15 @@ internal static class JoinEnumerator
                         card = rangeRows;
                         return;
                     }
+                }
+
+                // A full-key equality on a unique index, which the builder runs as the one-key range
+                // [key, key]: one index entry and one row.
+                if (step is { Type: QueryPlanStepType.QueryFromIndex })
+                {
+                    cost = 2.0;
+                    card = 1;
+                    return;
                 }
 
                 // IN-list leaf: same costing as TryBuildIndexLeaf uses.

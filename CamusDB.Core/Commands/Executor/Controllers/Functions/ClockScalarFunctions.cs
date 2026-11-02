@@ -199,31 +199,6 @@ internal static class ClockScalarFunctions
     }
 
     /// <summary>
-    /// The transaction and statement times of <paramref name="parameters"/>, in a new dictionary
-    /// without the statement's other parameters; or null when the statement carries no times.
-    ///
-    /// <para>For a planner path that takes index bounds from a filter but must not resolve a
-    /// <c>@name</c> placeholder, such as a join leaf. With these values a clock call becomes a bound
-    /// at the statement's time, the time the row filter reads. Without them the call refuses to
-    /// evaluate, the bound is dropped, and the leaf scans the whole table. A bound read from the wall
-    /// clock instead would be later than the filter's time, and the scan would miss rows that the
-    /// filter accepts.</para>
-    /// </summary>
-    internal static Dictionary<string, ColumnValue>? ClockValuesOnly(IReadOnlyDictionary<string, ColumnValue>? parameters)
-    {
-        if (parameters is null
-            || !parameters.TryGetValue(TransactionTimestampKey, out ColumnValue? transactionTime)
-            || !parameters.TryGetValue(StatementTimestampKey, out ColumnValue? statementTime))
-            return null;
-
-        return new Dictionary<string, ColumnValue>(2)
-        {
-            [TransactionTimestampKey] = transactionTime,
-            [StatementTimestampKey] = statementTime,
-        };
-    }
-
-    /// <summary>
     /// The transaction start the statement carries. Also read by the no-argument
     /// <c>unix_timestamp()</c>.
     /// </summary>

@@ -85,6 +85,13 @@ internal sealed class BroadcastHashProbeExecutor
         // The session must exist before workers read tx.TransactionId concurrently.
         await plan.Ticket.TxnState.EnsureSessionStartedAsync(CancellationToken.None, table.Store.PlacementGroup).ConfigureAwait(false);
 
+        // The phantom fence of a Serializable read-write transaction over the probe table, taken once
+        // before any span is read, local or shipped. A shipped span reads under a snapshot transaction
+        // that owns no lock, so this coordinator-side lock is what fences the whole table, as the
+        // gather of a single-table scan locks before its spans.
+        await table.Store.AcquireRowRangeLockAsync(plan.Ticket.TxnState,
+            exclusive: ticket.ExclusivePredicateLocks, cancellationToken: plan.Ticket.CancellationToken).ConfigureAwait(false);
+
         // Linked to the request: every probe worker reads and writes through this token, so the
         // link stops the local scans and the remote fragments together on a client disconnect.
         using CancellationTokenSource cts =

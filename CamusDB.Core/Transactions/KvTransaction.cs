@@ -1207,6 +1207,49 @@ public sealed class KvTransaction
         }
     }
 
+    /// <summary>
+    /// Counts every tracked range lock held for <paramref name="prefix"/>, singleton point locks and
+    /// bounded ranges alike. A read path that takes one bounded lock per probed key (the equality probe
+    /// of an index nested-loop join) uses it to decide when to escalate to a whole-bucket lock, the way
+    /// <see cref="CountPointLocksForBucket"/> drives the escalation of per-key point locks.
+    /// </summary>
+    public int CountRangeLocksForBucket(string prefix)
+    {
+        lock (trackSync)
+        {
+            if (acquiredRangeLocks is null)
+                return 0;
+
+            int count = 0;
+            foreach (RangeLockBounds b in acquiredRangeLocks)
+            {
+                if (b.Prefix == prefix)
+                    count++;
+            }
+            return count;
+        }
+    }
+
+    /// <summary>
+    /// Returns <c>true</c> if the transaction already holds a range lock with exactly these bounds on
+    /// <paramref name="prefix"/>, in either mode. A read path asks before it re-acquires a shared lock:
+    /// an Exclusive lock over the same bounds covers a shared read of them, and a Shared one is held to
+    /// commit under strict two-phase locking, so a second acquire would only spend a round trip.
+    /// </summary>
+    public bool HasRangeLock(string prefix, string? startKey, bool startInclusive, string? endKey, bool endInclusive)
+    {
+        lock (trackSync)
+        {
+            if (acquiredRangeLocks is null)
+                return false;
+
+            return acquiredRangeLocks.Contains(
+                       new RangeLockBounds(prefix, startKey, startInclusive, endKey, endInclusive, KeyValueDurability.Persistent, RangeLockMode.Shared))
+                || acquiredRangeLocks.Contains(
+                       new RangeLockBounds(prefix, startKey, startInclusive, endKey, endInclusive, KeyValueDurability.Persistent, RangeLockMode.Exclusive));
+        }
+    }
+
     /// <summary>Snapshot of the key-range locks acquired by this transaction.</summary>
     public IReadOnlyList<RangeLockBounds> GetAcquiredRangeLocks()
     {

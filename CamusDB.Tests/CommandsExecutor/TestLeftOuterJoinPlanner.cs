@@ -124,7 +124,11 @@ public sealed class TestLeftOuterJoinPlanner : BaseTest
         return rows;
     }
 
-    private static TableScanNode? FindScan(PhysicalPlanNode? node, string alias)
+    /// <summary>
+    /// The leaf that reads <paramref name="alias"/> on the left spine of the tree: a table scan, or the
+    /// one-key index scan the planner builds for a full-key equality on a unique index.
+    /// </summary>
+    private static PhysicalPlanNode? FindLeaf(PhysicalPlanNode? node, string alias)
     {
         switch (node)
         {
@@ -132,12 +136,32 @@ public sealed class TestLeftOuterJoinPlanner : BaseTest
                 return null;
             case TableScanNode { BoundSource: not null } scan when scan.BoundSource.Alias == alias:
                 return scan;
-            case TableScanNode:
+            case IndexRangeScanNode { BoundSource: not null } range when range.BoundSource.Alias == alias:
+                return range;
+            case TableScanNode or IndexRangeScanNode:
                 return null;
             default:
-                return FindScan(node.Input, alias);
+                return FindLeaf(node.Input, alias);
         }
     }
+
+    /// <summary>
+    /// True when the leaf carries the conjunct pushed to it: as the scan filter of a table scan, or as
+    /// the bound of an index scan, which consumed the equality and needs no filter for it.
+    /// </summary>
+    private static bool LeafTakesPushedFilter(PhysicalPlanNode leaf) => leaf switch
+    {
+        TableScanNode scan => scan.ExecutionFilter is not null,
+        IndexRangeScanNode range => range.FromBound is not null || range.ToBound is not null,
+        _ => false,
+    };
+
+    private static string LeafAlias(PhysicalPlanNode leaf) => leaf switch
+    {
+        TableScanNode scan => scan.BoundSource!.Alias,
+        IndexRangeScanNode range => range.BoundSource!.Alias,
+        _ => throw new AssertionException($"not a leaf: {leaf.GetType().Name}"),
+    };
 
     /// <summary>The filter pushed into the right source of a join node, whichever operator the planner chose.</summary>
     private static NodeAst? RightFilterOf(PhysicalPlanNode node) => node switch
@@ -169,8 +193,8 @@ public sealed class TestLeftOuterJoinPlanner : BaseTest
         // games.id is the primary key, so the planner probes it: the root is an index nested loop.
         QueryPlan pushed = await PlanAsync(f, Motivating + " WHERE e.id = 3");
         Assert.AreEqual(JoinKind.LeftOuter, KindOf(pushed.Root));
-        TableScanNode eScan = FindScan(pushed.Root, "e") ?? throw new AssertionException("no scan for e");
-        Assert.IsNotNull(eScan.ExecutionFilter, "the preserved-side conjunct runs on the e scan");
+        PhysicalPlanNode eLeaf = FindLeaf(pushed.Root, "e") ?? throw new AssertionException("no leaf for e");
+        Assert.IsTrue(LeafTakesPushedFilter(eLeaf), "the preserved-side conjunct runs on the e leaf");
         Assert.IsNull(pushed.ExecutionFilter, "nothing is left for the post-join filter");
         Assert.IsNull(RightFilterOf(pushed.Root));
 
@@ -203,7 +227,7 @@ public sealed class TestLeftOuterJoinPlanner : BaseTest
 
         QueryPlan plan = await PlanAsync(f, sql);
 
-        Assert.IsNotNull(FindScan(plan.Root, "a")!.ExecutionFilter, "a.id = 1 is pushed");
+        Assert.IsTrue(LeafTakesPushedFilter(FindLeaf(plan.Root, "a")!), "a.id = 1 is pushed");
         Assert.IsNotNull(plan.ExecutionFilter, "c.name = 'x' stays post-join");
 
         // d is the right source of the top join; its filter rides on that node.
@@ -284,7 +308,7 @@ public sealed class TestLeftOuterJoinPlanner : BaseTest
             QueryPlan plan = await PlanAsync(f, Motivating + " WHERE e.id = 1");
             HashJoinNode join = (HashJoinNode)plan.Root;
             Assert.AreEqual("g", join.BuildSource.Alias, $"costBased={costBased}: the right source stays games");
-            Assert.AreEqual("e", FindScan(join.Input, "e")!.BoundSource!.Alias);
+            Assert.AreEqual("e", LeafAlias(FindLeaf(join.Input, "e")!));
         }
     }
 

@@ -151,6 +151,12 @@ internal sealed class SemiJoinExecutor
         ColumnType keyType = GetColumnType(inner, index.Columns[0]);
         (CompositeColumnValue upperBound, bool toInclusive) = IndexScanSelector.EqualitySeekUpperBound(inner, index, key);
 
+        // The predicate lock of the probed value under Serializable read-write: an entry another
+        // transaction inserts for it is held back until this one ends, so the existence answer holds
+        // for the whole transaction. The unique probe above gets the same from LookupUnique's point lock.
+        await inner.Store.AcquireIndexEqualityLockAsync(
+            outerTicket.TxnState, index.KvId, key, unique: false, index.Columns.Length, outerTicket.CancellationToken).ConfigureAwait(false);
+
         await foreach ((CompositeColumnValue _, ObjectIdValue rowId, ReadOnlyMemory<byte> _) in Diagnostics.TableIndexUsage.Count(inner.Store.IndexUsage, index.KvId, inner.Store.ScanIndex(
             outerTicket.TxnState, index.KvId, new[] { keyType },
             key, upperBound,
@@ -185,6 +191,10 @@ internal sealed class SemiJoinExecutor
         TableDescriptor inner = node.InnerTable;
         HLCTimestamp txId = outerTicket.TxnState.TransactionId;
         IReadOnlySet<string> required = BuildRequiredColumns(node.InnerColumn, node.InnerFilter);
+
+        // Phantom fence over the whole inner table under Serializable read-write, as a single-table
+        // scan takes it. The probe runs once per outer row; the lock is taken once and held to commit.
+        await AcquireInnerRowRangeLockAsync(inner, outerTicket).ConfigureAwait(false);
 
         await foreach ((ObjectIdValue rowId, ReadOnlyMemory<byte> data) in inner.Store.ScanRows(
             outerTicket.TxnState, maxRows: null, cancellationToken: outerTicket.CancellationToken))
@@ -226,6 +236,8 @@ internal sealed class SemiJoinExecutor
         // is not part of the subquery result set and must not poison the anti-join.
         IReadOnlySet<string> required = BuildRequiredColumns(node.InnerColumn, node.InnerFilter);
 
+        await AcquireInnerRowRangeLockAsync(inner, outerTicket).ConfigureAwait(false);
+
         await foreach ((ObjectIdValue rowId, ReadOnlyMemory<byte> data) in inner.Store.ScanRows(
             outerTicket.TxnState, maxRows: null, cancellationToken: outerTicket.CancellationToken))
         {
@@ -258,6 +270,8 @@ internal sealed class SemiJoinExecutor
         TableDescriptor inner = node.InnerTable;
         HLCTimestamp txId = outerTicket.TxnState.TransactionId;
 
+        await AcquireInnerRowRangeLockAsync(inner, outerTicket).ConfigureAwait(false);
+
         await foreach ((ObjectIdValue _, ReadOnlyMemory<byte> data) in inner.Store.ScanRows(
             outerTicket.TxnState, maxRows: 1, cancellationToken: outerTicket.CancellationToken))
         {
@@ -267,6 +281,17 @@ internal sealed class SemiJoinExecutor
 
         return false;
     }
+
+    /// <summary>
+    /// The phantom fence of a scan of the inner table: a shared lock over its whole row range, taken
+    /// only by a Serializable read-write transaction, exactly as a single-table scan takes it. Every
+    /// inner scan of this executor calls it; a lock the transaction already holds costs no round trip.
+    /// </summary>
+    private static Task AcquireInnerRowRangeLockAsync(TableDescriptor inner, QueryTicket outerTicket)
+        => inner.Store.AcquireRowRangeLockAsync(
+            outerTicket.TxnState,
+            exclusive: outerTicket.ExclusivePredicateLocks,
+            cancellationToken: outerTicket.CancellationToken);
 
     private static bool EvalFilter(
         NodeAst filter,

@@ -31,10 +31,11 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 /// </para>
 /// <para>
 /// The fetch goes through <see cref="KvTableStore.GetRowsBatchLockedForMutation"/> and not the
-/// plain batch read. A join leaf takes no range lock, so under Serializable read-write the shared
-/// point lock the per-entry read acquired on every row key is the only protection the join has,
-/// and that lock set must stay exactly what it was. Under every other isolation level and mode
-/// that helper acquires nothing, so a page costs one round trip.
+/// plain batch read. Under Serializable read-write the shared point lock the per-entry read acquired
+/// on every row key is the row half of the join's protection (the leaf's predicate lock, taken
+/// before the index walk, is the other half; see <see cref="JoinLeafScanner"/>), and that lock set
+/// must stay exactly what it was. Under every other isolation level and mode that helper acquires
+/// nothing, so a page costs one round trip.
 /// </para>
 /// <para>
 /// Lock timing under Serializable read-write: the per-entry read locked a row the moment the

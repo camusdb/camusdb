@@ -306,6 +306,51 @@ internal sealed class KvRangeLockManager
     }
 
     /// <summary>
+    /// Locks the entries of one index key: every stored entry equal to <paramref name="key"/> on the
+    /// index's leading columns, and the place a new entry for that key would be inserted. It is the
+    /// predicate lock of an equality probe of a non-unique index, the read an index nested-loop join
+    /// runs once per outer key and a semi-join runs once per outer row: the bounded lock
+    /// <c>[key, key]</c> of <see cref="AcquireBoundedIndexRangeLockAsync"/>, which for a non-unique
+    /// index spans every row-id suffix of the value. A unique index is probed with a point lock by
+    /// <see cref="KvIndexAccessor.LookupUnique"/> instead.
+    ///
+    /// <para><b>Escalation:</b> a join probes a page of outer keys at a time and a semi-join one key
+    /// per outer row, so a large outer side would take one lock per distinct key. Once the transaction
+    /// holds <see cref="CamusDBOptions.LockEscalationThreshold"/> locks on the index bucket, a single
+    /// whole-bucket Shared lock is taken instead and every later key is covered by it, exactly as
+    /// <see cref="AcquireSharedPointLockAsync"/> escalates per-key point locks. A key whose lock the
+    /// transaction already holds costs nothing (see <see cref="AcquireRangeLockAsync"/>).</para>
+    ///
+    /// <para>Fires under the same conditions as <see cref="AcquireIndexRangeLockAsync"/>: only a
+    /// Serializable read-write transaction takes it.</para>
+    /// </summary>
+    internal Task AcquireIndexEqualityLockAsync(
+        KvTransaction tx,
+        string indexId,
+        CompositeColumnValue key,
+        bool unique,
+        int keyColumnCount,
+        CancellationToken cancellationToken)
+    {
+        if (!ScanTakesPredicateLock(tx))
+            return Task.CompletedTask;
+
+        string bucketPrefix = keys.BuildIndexBucketPrefix(indexId);
+
+        if (tx.HasWholeBucketLock(bucketPrefix))
+            return Task.CompletedTask;
+
+        if (tx.CountRangeLocksForBucket(bucketPrefix) >= options.LockEscalationThreshold)
+            return AcquireRangeLockAsync(tx, bucketPrefix, null, true, null, true, cancellationToken);
+
+        return AcquireBoundedIndexRangeLockAsync(
+            tx, indexId,
+            key, true, key, true,
+            unique, exclusive: false,
+            cancellationToken, keyColumnCount);
+    }
+
+    /// <summary>
     /// Core range-lock implementation used by both the whole-bucket and bounded variants.
     /// Acquires a range lock of the given <paramref name="mode"/> (default <c>Shared</c>),
     /// retrying on <c>MustRetry</c>; tracks the acquired lock on the transaction for release
@@ -352,6 +397,17 @@ internal sealed class KvRangeLockManager
                 CamusDBErrorCodes.TransactionLifetimeExceeded,
                 $"Serializable transaction {tx.UniqueId} exceeded the maximum lifetime " +
                 $"({options.MaxSerializableTransactionLifetimeMs} ms); roll back and retry from BeginAsync");
+
+        // A Shared lock the transaction already holds, or that a whole-bucket lock of its own already
+        // covers, needs no second acquire: every range lock is held to commit under strict two-phase
+        // locking and renewed by the coordinator, so re-asserting it only spends a round trip. A read
+        // path that runs once per outer row (a semi-join probe, a correlated scan) relies on this to
+        // lock its table once. The lifetime check above still runs, so an over-deadline transaction
+        // is refused on its next acquire whether or not it holds the lock. An Exclusive request is
+        // never skipped: it may be the S→X promotion of these same bounds.
+        if (mode == RangeLockMode.Shared
+            && (tx.HasWholeBucketLock(bucketPrefix) || tx.HasRangeLock(bucketPrefix, startKey, startInclusive, endKey, endInclusive)))
+            return;
 
         long deadline = retry.LockWaitDeadlineTicks();
         long replicationDeadline = retry.ReplicationWaitDeadlineTicks();

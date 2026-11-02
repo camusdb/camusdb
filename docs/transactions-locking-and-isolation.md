@@ -215,8 +215,15 @@ Two things make range locks useful rather than a bottleneck:
   locked, that write is held back (it retries). This is what actually stops a phantom row from
   appearing mid-scan — including a *brand-new* key that didn't exist when the scan started.
 
-Range locks are acquired by the scan paths in the query executor (full-table scans, index scans,
-bounded index range scans, and `IN`-list scans). They fire in two situations:
+Range locks are acquired by every scan path in the query executor: the full-table scan, the index
+scan, the bounded index range scan and the `IN`-list scan of a single-table `SELECT`, and the same four
+shapes when they are the leaves of a `JOIN`. The sub-reads of a predicate take them too: the inner scan
+of a semi-join (`IN (SELECT …)`), the inner scan of a correlated `EXISTS`, and the equality probe of a
+non-unique index inside an index nested-loop join (one lock per probed key, collapsed into one
+whole-index lock past the escalation threshold of §6.3). A join leaf resolves the statement's
+parameters as a single-table scan does, so `JOIN … WHERE j.k = @k` reads `j` through its index and
+locks that one key, present or absent; only a leaf filter no index serves reads the whole table and
+locks its whole row range. They fire in two situations:
 
 - **For a Serializable read-write transaction** (see §9), on *any* configuration including the default
   single-node hash setup — a serializable scan needs phantom protection to be correct, so the lock is
@@ -239,6 +246,14 @@ makes "read a row, then act on it" safe: no other transaction can change that ex
   the reader finishes.
 - If the *same* transaction later **writes** a key it read, its shared lock is **promoted to exclusive**
   in place, so from that point no one else can even read that key until it commits.
+
+**Which read paths take them.** Every path that reads a row by its id or an index entry by its key:
+the point read of `SELECT … WHERE pk = …`, the row fetch behind an index scan, the unique probe of an
+index nested-loop join (the index entry and then the row), the rows a join leaf fetches after its index
+walk, and the inner lookup of a semi-join or a correlated `EXISTS`. A key read as **absent** is locked
+as well (the lock sits on the key the entry would have), which is what keeps a repeated read of an
+absent key stable. A read through a `JOIN` therefore leaves exactly the locks the same read by primary
+key leaves: the predicate lock of each leaf (§6.2) plus the point locks of every row and entry it read.
 
 These point locks are taken **only** by Serializable read-write transactions. Read Committed reads and
 Serializable read-only (snapshot) reads take none.
