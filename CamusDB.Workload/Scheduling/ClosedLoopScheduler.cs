@@ -29,29 +29,37 @@ public sealed class ClosedLoopScheduler
         _writesPerTransaction = writesPerTransaction;
     }
 
+    /// <summary>
+    /// Runs warm-up and then the measured window. <paramref name="stopAfterCompleted"/> ends the window
+    /// early once that many operations completed successfully (0 = never); the metrics then carry the
+    /// seconds actually measured, so the rates stay honest for a run defined by a count.
+    /// </summary>
     public async Task<(RunMetrics Metrics, IReadOnlyList<IntervalRow> Intervals)> RunAsync(
-        WorkerState[] workers, TimeSpan warmup, TimeSpan measure, CancellationToken ct)
+        WorkerState[] workers, TimeSpan warmup, TimeSpan measure, CancellationToken ct, long stopAfterCompleted = 0)
     {
         long freq = Stopwatch.Frequency;
         long warmupEnd = Stopwatch.GetTimestamp() + (long)(warmup.TotalSeconds * freq);
 
         // Warm-up: same loop, no recording.
-        await Task.WhenAll(workers.Select(w => WorkerLoopAsync(w, null, warmupEnd, ct))).ConfigureAwait(false);
+        await Task.WhenAll(workers.Select(w => WorkerLoopAsync(w, null, warmupEnd, 0, ct))).ConfigureAwait(false);
 
         RunMetrics metrics = new(_writesPerTransaction);
         IntervalRecorder recorder = new(metrics);
-        long measureEnd = Stopwatch.GetTimestamp() + (long)(measure.TotalSeconds * freq);
+        long measureStart = Stopwatch.GetTimestamp();
+        long measureEnd = measureStart + (long)(measure.TotalSeconds * freq);
 
         recorder.Start();
-        await Task.WhenAll(workers.Select(w => WorkerLoopAsync(w, metrics, measureEnd, ct))).ConfigureAwait(false);
+        await Task.WhenAll(workers.Select(w => WorkerLoopAsync(w, metrics, measureEnd, stopAfterCompleted, ct))).ConfigureAwait(false);
+        metrics.MeasuredSeconds = Math.Min(measure.TotalSeconds, Stopwatch.GetElapsedTime(measureStart).TotalSeconds);
         await recorder.StopAsync().ConfigureAwait(false);
 
         return (metrics, recorder.Rows);
     }
 
-    private async Task WorkerLoopAsync(WorkerState worker, RunMetrics? metrics, long endTs, CancellationToken ct)
+    private async Task WorkerLoopAsync(WorkerState worker, RunMetrics? metrics, long endTs, long stopAfterCompleted, CancellationToken ct)
     {
-        while (!ct.IsCancellationRequested && Stopwatch.GetTimestamp() < endTs)
+        while (!ct.IsCancellationRequested && Stopwatch.GetTimestamp() < endTs
+               && (stopAfterCompleted <= 0 || metrics is null || metrics.Completed < stopAfterCompleted))
         {
             (Workload.OperationKind kind, long rowIndex) = worker.Selector.Next();
 

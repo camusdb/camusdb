@@ -33,9 +33,19 @@ namespace CamusDB.Workload.Operations;
 /// fresh BEGIN like a lock conflict (<see cref="ClassifyFailure"/>). Keys carry a per-run tag, so
 /// lists left by an earlier run in the same database are never read as this run's.</para>
 ///
+/// <para>Three wire shapes carry the same transaction (<see cref="ElleTxnMode"/>). The pipelined shape
+/// sends <c>BEGIN</c> and every append UPDATE in one frame, then the INSERTs for the UPDATEs that
+/// matched nothing, every read and the commit in a second. A pipelined transaction is therefore
+/// recorded with its appends before its reads: a read queued in the first frame beside the UPDATE of a
+/// list that did not exist yet would run before the INSERT that starts the list, and the history would
+/// show a transaction that did not see its own append. The autocommit shape runs one statement per
+/// transaction with no BEGIN at all.</para>
+///
 /// <para>Outcomes map onto Jepsen's: a commit that returns is <c>:ok</c>, any definite abort is
 /// <c>:fail</c>, and a commit that was sent with no verdict back is <c>:info</c>. A read-only
-/// transaction has no effects to be unsure about, so it is never <c>:info</c>.</para>
+/// transaction has no effects to be unsure about, so it is never <c>:info</c>. Every append is also
+/// recorded in an <see cref="ElleWriteLedger"/>, which checks the lists once the writers stop: an
+/// acknowledged append that is missing from its list was lost for good.</para>
 ///
 /// <para>The seeded dataset is not touched: <see cref="CommittedRows"/> stays 0, and the dataset
 /// reconciliation still runs and still proves the seeded rows were left alone.</para>
@@ -51,7 +61,9 @@ public sealed class AppendOperation : IWriteOperation, IReadOperation
     private readonly ConnectionSet _connections;
     private readonly AppendKeySpace _keys;
     private readonly ElleHistory _history;
+    private readonly ElleWriteLedger? _ledger;
     private readonly string _runTag;
+    private readonly ElleTxnMode _mode;
     private readonly int _maxRetries;
     private readonly CamusTransactionOptions _readWrite;
     private readonly CamusTransactionOptions _readOnly;
@@ -62,24 +74,29 @@ public sealed class AppendOperation : IWriteOperation, IReadOperation
 
     public AppendOperation(
         ConnectionSet connections, AppendKeySpace keys, ElleHistory history, string runTag,
-        CamusLocking locking, CamusIsolationLevel isolationLevel, int maxRetries = 10)
+        CamusLocking locking, CamusIsolationLevel isolationLevel, int maxRetries = 10,
+        ElleWriteLedger? ledger = null, ElleTxnMode mode = ElleTxnMode.Explicit)
     {
         _connections = connections;
         _keys = keys;
         _history = history;
+        _ledger = ledger;
         _runTag = runTag;
+        _mode = mode;
         _maxRetries = Math.Max(1, maxRetries);
         _readWrite = new CamusTransactionOptions
         {
             IsolationLevel = isolationLevel,
             Mode = CamusTransactionMode.ReadWrite,
             Locking = locking,
+            DeferBegin = mode == ElleTxnMode.Pipeline,
         };
         _readOnly = new CamusTransactionOptions
         {
             IsolationLevel = isolationLevel,
             Mode = CamusTransactionMode.ReadOnly,
             Locking = locking,
+            DeferBegin = mode == ElleTxnMode.Pipeline,
         };
     }
 
@@ -179,40 +196,125 @@ public sealed class AppendOperation : IWriteOperation, IReadOperation
     {
         OperationKind kind = readOnly ? OperationKind.Read : OperationKind.Write;
         ElleMicroOp[] txn = _keys.NextTxn(readOnly);
+        if (_mode == ElleTxnMode.Pipeline)
+            txn = AppendsFirst(txn);
         ElleMicroOp[] observed = (ElleMicroOp[])txn.Clone();
+        long invokeTicks = Stopwatch.GetTimestamp();
         ElleInvocation invocation = _history.Invoke(txn);
 
         CamusConnection conn = readOnly ? _connections.NextRead() : _connections.NextWrite();
         long ts = Stopwatch.GetTimestamp();
         double beginMs = 0, readMs = 0, updateMs = 0, commitMs = 0;
+        int exchanges = 0;
         bool commitSubmitted = false;
         CamusTransaction? tx = null;
 
         try
         {
-            tx = await conn.BeginTransactionAsync(readOnly ? _readOnly : _readWrite, ct).ConfigureAwait(false);
-            beginMs = Lap(ref ts);
-
-            for (int i = 0; i < txn.Length; i++)
+            switch (_mode)
             {
-                if (txn[i].IsAppend)
+                case ElleTxnMode.Autocommit:
+                    for (int i = 0; i < txn.Length; i++)
+                    {
+                        if (txn[i].IsAppend)
+                        {
+                            // Each statement commits on its own; once sent, a lost reply is a lost verdict.
+                            commitSubmitted = true;
+                            await AppendAsync(conn, null, txn[i], ct).ConfigureAwait(false);
+                            updateMs += Lap(ref ts);
+                        }
+                        else
+                        {
+                            observed[i] = txn[i].WithRead(await ReadListAsync(conn, null, txn[i].Key, ct).ConfigureAwait(false));
+                            readMs += Lap(ref ts);
+                        }
+                    }
+                    break;
+
+                case ElleTxnMode.Pipeline:
                 {
-                    await AppendAsync(conn, tx, txn[i], ct).ConfigureAwait(false);
-                    updateMs += Lap(ref ts);
+                    tx = await conn.BeginTransactionAsync(readOnly ? _readOnly : _readWrite, ct).ConfigureAwait(false);
+                    CamusPipeline pipeline = tx.CreatePipeline();
+
+                    // The first frame: BEGIN and every append's UPDATE. The reads wait for the second frame,
+                    // after the INSERTs that start the lists the UPDATEs did not find, so every read of the
+                    // transaction sees every one of its appends, in the order the history records them.
+                    Task<int>?[] updates = new Task<int>?[txn.Length];
+                    for (int i = 0; i < txn.Length; i++)
+                    {
+                        if (txn[i].IsAppend)
+                            updates[i] = pipeline.QueueNonQuery(UpdateCommand(conn, tx, txn[i]));
+                    }
+
+                    if (!readOnly)
+                    {
+                        await pipeline.SendAsync(ct).ConfigureAwait(false);
+                        updateMs = Lap(ref ts);
+                    }
+
+                    List<Task<int>> inserts = [];
+                    for (int i = 0; i < txn.Length; i++)
+                    {
+                        if (updates[i] is not Task<int> update)
+                            continue;
+                        int modified = await update.ConfigureAwait(false);
+                        if (modified == 1)
+                            continue;
+                        if (modified != 0)
+                            throw new InvalidOperationException($"append UPDATE matched {modified} rows for key {SqlKey(txn[i].Key)}");
+                        inserts.Add(pipeline.QueueNonQuery(InsertCommand(conn, tx, txn[i])));
+                    }
+
+                    Task<CamusDataReader>?[] readers = new Task<CamusDataReader>?[txn.Length];
+                    for (int i = 0; i < txn.Length; i++)
+                    {
+                        if (!txn[i].IsAppend)
+                            readers[i] = pipeline.QueueReader(ReadCommand(conn, tx, txn[i].Key));
+                    }
+
+                    commitSubmitted = true;
+                    await pipeline.CommitAsync(ct).ConfigureAwait(false);
+                    commitMs = Lap(ref ts);
+                    exchanges = pipeline.Exchanges;
+
+                    foreach (Task<int> insert in inserts)
+                        await insert.ConfigureAwait(false);
+                    for (int i = 0; i < txn.Length; i++)
+                    {
+                        if (readers[i] is Task<CamusDataReader> pending)
+                            observed[i] = txn[i].WithRead(await ListOfAsync(pending, txn[i].Key, ct).ConfigureAwait(false));
+                    }
+                    break;
                 }
-                else
-                {
-                    observed[i] = txn[i].WithRead(await ReadListAsync(conn, tx, txn[i].Key, ct).ConfigureAwait(false));
-                    readMs += Lap(ref ts);
-                }
+
+                default:
+                    tx = await conn.BeginTransactionAsync(readOnly ? _readOnly : _readWrite, ct).ConfigureAwait(false);
+                    beginMs = Lap(ref ts);
+
+                    for (int i = 0; i < txn.Length; i++)
+                    {
+                        if (txn[i].IsAppend)
+                        {
+                            await AppendAsync(conn, tx, txn[i], ct).ConfigureAwait(false);
+                            updateMs += Lap(ref ts);
+                        }
+                        else
+                        {
+                            observed[i] = txn[i].WithRead(await ReadListAsync(conn, tx, txn[i].Key, ct).ConfigureAwait(false));
+                            readMs += Lap(ref ts);
+                        }
+                    }
+
+                    commitSubmitted = true;
+                    await tx.CommitAsync(ct).ConfigureAwait(false);
+                    commitMs = Lap(ref ts);
+                    break;
             }
 
-            commitSubmitted = true;
-            await tx.CommitAsync(ct).ConfigureAwait(false);
-            commitMs = Lap(ref ts);
-
+            long completeTicks = Stopwatch.GetTimestamp();
             _history.Complete(invocation, ElleOutcome.Ok, observed);
-            return (true, new OperationResult(kind, OperationStatus.Ok, null, beginMs, readMs, updateMs, commitMs));
+            _ledger?.RecordOk(txn, invokeTicks, completeTicks);
+            return (true, new OperationResult(kind, OperationStatus.Ok, null, beginMs, readMs, updateMs, commitMs, Exchanges: exchanges));
         }
         catch (Exception ex)
         {
@@ -223,6 +325,7 @@ public sealed class AppendOperation : IWriteOperation, IReadOperation
             {
                 Interlocked.Increment(ref _indeterminateTxns);
                 _history.Complete(invocation, ElleOutcome.Info);
+                _ledger?.RecordInfo(txn);
                 return (true, OperationResult.Failure(kind, status, code, message));
             }
 
@@ -233,8 +336,26 @@ public sealed class AppendOperation : IWriteOperation, IReadOperation
             }
 
             _history.Complete(invocation, ElleOutcome.Fail);
+            _ledger?.RecordFail(txn);
+            if (status == OperationStatus.Transient)
+                await TransientBackoff.PauseAsync(ct).ConfigureAwait(false);
             return (!retry, OperationResult.Failure(kind, status, code, message));
         }
+    }
+
+    /// <summary>The transaction with its appends before its reads, each group in its original order:
+    /// the order the pipelined shape executes and records.</summary>
+    public static ElleMicroOp[] AppendsFirst(ElleMicroOp[] txn)
+    {
+        ElleMicroOp[] ordered = new ElleMicroOp[txn.Length];
+        int at = 0;
+        foreach (ElleMicroOp op in txn)
+            if (op.IsAppend)
+                ordered[at++] = op;
+        foreach (ElleMicroOp op in txn)
+            if (!op.IsAppend)
+                ordered[at++] = op;
+        return ordered;
     }
 
     /// <summary>
@@ -267,16 +388,10 @@ public sealed class AppendOperation : IWriteOperation, IReadOperation
         return (status, code, false);
     }
 
-    private async Task AppendAsync(CamusConnection conn, CamusTransaction tx, ElleMicroOp step, CancellationToken ct)
+    private async Task AppendAsync(CamusConnection conn, CamusTransaction? tx, ElleMicroOp step, CancellationToken ct)
     {
-        string key = SqlKey(step.Key);
-        string value = step.Value.ToString(CultureInfo.InvariantCulture);
-
-        using (CamusCommand update = conn.CreateCamusCommand(UpdateSql))
+        using (CamusCommand update = UpdateCommand(conn, tx, step))
         {
-            update.Transaction = tx;
-            update.Parameters.Add("@x", ColumnType.String, "," + value);
-            update.Parameters.Add("@k", ColumnType.String, key);
             int modified = await update.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
             if (modified == 1)
                 return;
@@ -284,23 +399,49 @@ public sealed class AppendOperation : IWriteOperation, IReadOperation
             // A primary-key UPDATE cannot match two rows. Refuse to commit rather than let a broken
             // statement put a value into the history that the table does not hold.
             if (modified != 0)
-                throw new InvalidOperationException($"append UPDATE matched {modified} rows for key {key}");
+                throw new InvalidOperationException($"append UPDATE matched {modified} rows for key {SqlKey(step.Key)}");
         }
 
-        using CamusCommand insert = conn.CreateCamusCommand(InsertSql);
-        insert.Transaction = tx;
-        insert.Parameters.Add("@k", ColumnType.String, key);
-        insert.Parameters.Add("@x", ColumnType.String, value);
+        using CamusCommand insert = InsertCommand(conn, tx, step);
         await insert.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
     }
 
-    private async Task<IReadOnlyList<long>?> ReadListAsync(
-        CamusConnection conn, CamusTransaction tx, long key, CancellationToken ct)
+    private CamusCommand UpdateCommand(CamusConnection conn, CamusTransaction? tx, ElleMicroOp step)
     {
-        using CamusCommand read = conn.CreateSelectCommand(ReadSql);
+        CamusCommand update = conn.CreateCamusCommand(UpdateSql);
+        update.Transaction = tx;
+        update.Parameters.Add("@x", ColumnType.String, "," + step.Value.ToString(CultureInfo.InvariantCulture));
+        update.Parameters.Add("@k", ColumnType.String, SqlKey(step.Key));
+        return update;
+    }
+
+    private CamusCommand InsertCommand(CamusConnection conn, CamusTransaction? tx, ElleMicroOp step)
+    {
+        CamusCommand insert = conn.CreateCamusCommand(InsertSql);
+        insert.Transaction = tx;
+        insert.Parameters.Add("@k", ColumnType.String, SqlKey(step.Key));
+        insert.Parameters.Add("@x", ColumnType.String, step.Value.ToString(CultureInfo.InvariantCulture));
+        return insert;
+    }
+
+    private CamusCommand ReadCommand(CamusConnection conn, CamusTransaction? tx, long key)
+    {
+        CamusCommand read = conn.CreateSelectCommand(ReadSql);
         read.Transaction = tx;
         read.Parameters.Add("@k", ColumnType.String, SqlKey(key));
-        using CamusDataReader reader = await read.ExecuteReaderAsync(ct).ConfigureAwait(false);
+        return read;
+    }
+
+    private async Task<IReadOnlyList<long>?> ReadListAsync(
+        CamusConnection conn, CamusTransaction? tx, long key, CancellationToken ct)
+    {
+        using CamusCommand read = ReadCommand(conn, tx, key);
+        return await ListOfAsync(read.ExecuteReaderAsync(ct), key, ct).ConfigureAwait(false);
+    }
+
+    private static async Task<IReadOnlyList<long>?> ListOfAsync(Task<CamusDataReader> pending, long key, CancellationToken ct)
+    {
+        using CamusDataReader reader = await pending.ConfigureAwait(false);
         if (!await reader.ReadAsync(ct).ConfigureAwait(false))
             return null;
 
@@ -325,6 +466,43 @@ public sealed class AppendOperation : IWriteOperation, IReadOperation
                 throw new InvalidOperationException($"list for key {key} is not a list of integers: '{Truncate(stored)}'");
         }
         return values;
+    }
+
+    /// <summary>
+    /// Reads every list the ledger knows and judges it: every acknowledged append present once, no
+    /// refused value, no element this run did not append.
+    /// </summary>
+    public async Task<QuiescentResult> ReadFinalAsync(TimeSpan budget, CancellationToken ct)
+    {
+        if (_ledger is null)
+            throw new InvalidOperationException("the append operation has no ledger to judge the final lists against");
+
+        long[] keys = _ledger.TouchedKeys();
+        Array.Sort(keys);
+        try
+        {
+            IReadOnlyList<FinalList> finals = await FinalReader.ReadAllAsync(
+                _connections, keys, async (conn, key, token) =>
+                {
+                    using CamusCommand read = ReadCommand(conn, null, key);
+                    using CamusDataReader reader = await read.ExecuteReaderAsync(token).ConfigureAwait(false);
+                    IReadOnlyList<long>? list = null;
+                    int rows = 0;
+                    while (await reader.ReadAsync(token).ConfigureAwait(false))
+                    {
+                        if (rows == 0)
+                            list = ParseList(reader.GetString(0), key);
+                        rows++;
+                    }
+                    return new FinalList(key, list, rows);
+                }, budget, ct).ConfigureAwait(false);
+
+            return _ledger.JudgeLists(finals);
+        }
+        catch (Exception ex) when (!ct.IsCancellationRequested)
+        {
+            return QuiescentResult.Unavailable($"{ex.GetType().Name}: {ex.Message}", ElleModel.ListAppend, _ledger);
+        }
     }
 
     private string SqlKey(long key) => _runTag + ":" + key.ToString(CultureInfo.InvariantCulture);

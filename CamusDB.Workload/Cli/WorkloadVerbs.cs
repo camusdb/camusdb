@@ -161,8 +161,47 @@ public sealed class RunOptions : CommonOptions
     [Option("pipeline", Default = false, HelpText = "Send each write transaction as pipelined frames instead of one round trip per statement: [BEGIN, reads] then [updates, conditional COMMIT] — two exchanges per transaction instead of six on the bank shape. Applies to the accounts, bank and fanout shapes over gRPC against a server that reads the pipeline contract; elsewhere the client falls back to one exchange per step and summary.json's exchangesPerWriteTxn shows it. Recorded in manifest.json; runs that differ here are different clients.")]
     public bool Pipeline { get; set; }
 
-    [Option("workload", Default = "accounts", HelpText = "Write shape: accounts (shard-disjoint read-modify-write, conflict-free), bank (contended transfers within the dataset with a conserved SUM(balance) invariant), fanout (bank transfers whose two legs always land in different tables; needs --tables >= 2), append (Elle list-append transactions on a separate table, recorded to history.edn for an Elle check; reads become read-only list-append transactions), or tokens (each write deletes a token row and inserts its successor in one transaction on a separate table of --tokens rows, checked per slot after the run; reads look a slot up in a read-only transaction and must find exactly one row).")]
+    [Option("workload", Default = "accounts", HelpText = "Write shape: accounts (shard-disjoint read-modify-write, conflict-free), bank (contended transfers within the dataset with a conserved SUM(balance) invariant), fanout (bank transfers whose two legs always land in different tables; needs --tables >= 2), append (Elle list-append transactions on a separate table, recorded to history.edn for an Elle check; reads become read-only list-append transactions), rw (Elle rw-register transactions: blind writes and point reads of single rows, recorded to history.edn for the rw-register checker), predicate (group reads by predicate and single-row writes, recorded as register reads of every key the predicate can match, for the rw-register checker), or tokens (each write deletes a token row and inserts its successor in one transaction on a separate table of --tokens rows, checked per slot after the run; reads look a slot up in a read-only transaction and must find exactly one row).")]
     public string Workload { get; set; } = "accounts";
+
+    [Option("txn-mode", Default = "explicit", HelpText = "Elle shapes (append, rw, predicate): how a transaction reaches the server. explicit = BEGIN, one round trip per statement, COMMIT; autocommit = no BEGIN, every statement its own transaction (so every Elle transaction is one step long); pipeline = the statements of a transaction as pipelined frames with BEGIN in the first and the commit in the last.")]
+    public string TxnMode { get; set; } = "explicit";
+
+    [Option("elle-key-distribution", Default = "", HelpText = "Elle shapes: how a step picks among the active keys (or groups). uniform = every active key equally likely; exponential = the first active slot takes about half the steps, the next a quarter, and so on (Jepsen's default, which makes a rare anomaly show on a hot key in a bounded run). Empty = uniform for append, exponential for rw and predicate.")]
+    public string ElleKeyDistribution { get; set; } = "";
+
+    [Option("rw-keys", Default = 10, HelpText = "Register workload: registers active at one time.")]
+    public int RwKeys { get; set; }
+
+    [Option("rw-max-writes-per-key", Default = 32, HelpText = "Register workload: writes a register takes before its slot moves to a new key.")]
+    public int RwMaxWritesPerKey { get; set; }
+
+    [Option("rw-max-txn-length", Default = 4, HelpText = "Register workload: most read/write steps in one transaction (each transaction has 1 to this many). Forced to 1 by --txn-mode autocommit.")]
+    public int RwMaxTxnLength { get; set; }
+
+    [Option("rw-key-type", Default = "int64", HelpText = "Register workload: SQL type of the key column, each on a table of its own: int64, string or numeric.")]
+    public string RwKeyType { get; set; } = "int64";
+
+    [Option("rw-access", Default = "pk", HelpText = "Register workload: the access path of reads and writes. pk = by primary key (blind UPSERT writes); secondary = by an unindexed copy of the key (UPDATE located by a scan, INSERT when it matched nothing); index = by an indexed copy of the key; join = the row is reached through a reference table (blind UPSERT writes of both rows). pipeline mode needs pk or join.")]
+    public string RwAccess { get; set; } = "pk";
+
+    [Option("predicate-groups", Default = 8, HelpText = "Predicate workload: groups active at one time.")]
+    public int PredicateGroups { get; set; }
+
+    [Option("predicate-group-size", Default = 8, HelpText = "Predicate workload: keys in a group's universe; a group read is recorded as this many register reads.")]
+    public int PredicateGroupSize { get; set; }
+
+    [Option("predicate-max-writes-per-group", Default = 12, HelpText = "Predicate workload: writes a group takes before its slot moves to a new group. Fewer than the group size leaves absent keys for phantoms to appear in.")]
+    public int PredicateMaxWritesPerGroup { get; set; }
+
+    [Option("predicate-max-txn-length", Default = 3, HelpText = "Predicate workload: most steps (group reads or single-row writes) in one transaction. Forced to 1 by --txn-mode autocommit.")]
+    public int PredicateMaxTxnLength { get; set; }
+
+    [Option("predicate-read", Default = "index", HelpText = "Predicate workload: the predicate a group read uses. index = WHERE grp = g on an indexed column; scan = WHERE grp2 = g on an unindexed column (a table scan); range = WHERE k BETWEEN lo AND hi on the primary key.")]
+    public string PredicateRead { get; set; } = "index";
+
+    [Option("stop-after-completed", Default = 0L, HelpText = "End the measured window early once this many operations completed successfully, or at --duration, whichever comes first. 0 = run for the whole duration. Lets a run be defined by a transaction count (a million committed transactions) rather than by a guess at the throughput; the rates are computed over the time actually measured.")]
+    public long StopAfterCompleted { get; set; }
 
     [Option("append-keys", Default = 10, HelpText = "Append workload: lists active at one time. Fewer keys means more contention, and more dependency edges for Elle.")]
     public int AppendKeys { get; set; }

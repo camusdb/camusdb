@@ -35,9 +35,14 @@ public sealed class OpenLoopScheduler
         _seed = seed;
     }
 
+    /// <summary>
+    /// Runs warm-up, the measured window and the drain. <paramref name="stopAfterCompleted"/> ends the
+    /// window early once that many operations completed successfully (0 = never); the metrics then
+    /// carry the seconds actually measured, so the rates stay honest for a run defined by a count.
+    /// </summary>
     public async Task<(RunMetrics Metrics, IReadOnlyList<IntervalRow> Intervals)> RunAsync(
         WorkerState[] workers, int targetOps, int maxInFlight,
-        TimeSpan warmup, TimeSpan measure, TimeSpan drain, CancellationToken ct)
+        TimeSpan warmup, TimeSpan measure, TimeSpan drain, CancellationToken ct, long stopAfterCompleted = 0)
     {
         RunMetrics metrics = new(_writesPerTransaction);
         IntervalRecorder recorder = new(metrics);
@@ -59,9 +64,11 @@ public sealed class OpenLoopScheduler
 
         Task[] pacers = new Task[workers.Length];
         for (int w = 0; w < workers.Length; w++)
-            pacers[w] = PaceWorkerAsync(workers[w], w, intervalTicks, maxInFlight, measureStart, measureEnd, metrics, ct);
+            pacers[w] = PaceWorkerAsync(workers[w], w, intervalTicks, maxInFlight, measureStart, measureEnd, stopAfterCompleted, metrics, ct);
 
         await Task.WhenAll(pacers).ConfigureAwait(false);
+        metrics.MeasuredSeconds = Math.Clamp(
+            Stopwatch.GetElapsedTime(measureStart).TotalSeconds, 0, measure.TotalSeconds);
 
         // Drain in-flight operations up to the drain budget.
         long drainDeadline = Stopwatch.GetTimestamp() + (long)(drain.TotalSeconds * freq);
@@ -81,13 +88,14 @@ public sealed class OpenLoopScheduler
 
     private async Task PaceWorkerAsync(
         WorkerState worker, int workerIndex, long intervalTicks, int maxInFlight,
-        long measureStart, long measureEnd, RunMetrics metrics, CancellationToken ct)
+        long measureStart, long measureEnd, long stopAfterCompleted, RunMetrics metrics, CancellationToken ct)
     {
         DeterministicRandom jitter = DeterministicRandom.ForWorker(_seed ^ 0xA5A5A5A5A5A5A5A5UL, workerIndex);
         // Stagger worker starts across one interval so they do not all fire on the same tick.
         long intended = Stopwatch.GetTimestamp() + (long)(jitter.NextDouble() * intervalTicks);
 
-        while (!ct.IsCancellationRequested && intended < measureEnd)
+        while (!ct.IsCancellationRequested && intended < measureEnd
+               && (stopAfterCompleted <= 0 || metrics.Completed < stopAfterCompleted))
         {
             if (Stopwatch.GetTimestamp() < intended)
                 await DelayUntilAsync(intended, ct).ConfigureAwait(false);

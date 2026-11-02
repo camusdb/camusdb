@@ -79,4 +79,5 @@ public sealed record RunManifest(
     /// instead of one round trip per statement. Recorded because the two are different clients: the
     /// write latency of one is not comparable to the other's, and the summary's
     /// <c>ExchangesPerWriteTxn</c> says what the mode actually achieved against the server it met.</summary>
-    bool Pipeline = false);
+    bool Pipeline = false,
+    string TxnMode = "explicit");

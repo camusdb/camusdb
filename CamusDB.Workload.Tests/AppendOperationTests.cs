@@ -6,6 +6,7 @@
  */
 
 using CamusDB.Client;
+using CamusDB.Workload.Elle;
 using CamusDB.Workload.Operations;
 using NUnit.Framework;
 
@@ -108,6 +109,25 @@ public sealed class AppendOperationTests
 
         Assert.That(status, Is.EqualTo(OperationStatus.Conflict));
         Assert.That(retry, Is.False);
+    }
+
+    /// <summary>The pipelined shape runs every append before every read, so the recorded transaction
+    /// must carry that order, or the checker sees a read that did not observe its own append.</summary>
+    [Test]
+    public void PipelinedTransactionsRecordAppendsBeforeReads()
+    {
+        ElleMicroOp[] txn =
+        [
+            ElleMicroOp.ReadOf(1), ElleMicroOp.Append(2, 10), ElleMicroOp.ReadOf(2), ElleMicroOp.Append(1, 11),
+        ];
+
+        ElleMicroOp[] ordered = AppendOperation.AppendsFirst(txn);
+
+        Assert.That(ordered, Is.EqualTo(new[]
+        {
+            ElleMicroOp.Append(2, 10), ElleMicroOp.Append(1, 11), ElleMicroOp.ReadOf(1), ElleMicroOp.ReadOf(2),
+        }));
+        Assert.That(AppendOperation.AppendsFirst([]), Is.Empty);
     }
 
     [Test]

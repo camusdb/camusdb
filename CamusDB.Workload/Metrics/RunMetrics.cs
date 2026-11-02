@@ -66,6 +66,14 @@ public sealed class RunMetrics
     /// </summary>
     public long UnfinishedAtDrain { get; set; }
 
+    /// <summary>
+    /// Seconds the measured window actually lasted. Equal to the requested duration unless the
+    /// scheduler ended the window early because the run reached its completed-operation target, in
+    /// which case every rate must be computed over this and not over the request. 0 until the window
+    /// closes.
+    /// </summary>
+    public double MeasuredSeconds { get; set; }
+
     private readonly int _writesPerTransaction;
 
     public RunMetrics(int writesPerTransaction)

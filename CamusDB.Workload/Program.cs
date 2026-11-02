@@ -227,9 +227,79 @@ public static class Program
             Console.Error.WriteLine($"--isolation must be read_committed or serializable (got '{o.Isolation}').");
             return RunOutcome.Rejected;
         }
-        if (o.Workload is not ("accounts" or "bank" or "fanout" or "append" or "tokens"))
+        if (o.Workload is not ("accounts" or "bank" or "fanout" or "append" or "rw" or "predicate" or "tokens"))
         {
-            Console.Error.WriteLine($"--workload must be accounts, bank, fanout, append or tokens (got '{o.Workload}').");
+            Console.Error.WriteLine($"--workload must be accounts, bank, fanout, append, rw, predicate or tokens (got '{o.Workload}').");
+            return RunOutcome.Rejected;
+        }
+        bool elleShape = o.Workload is "append" or "rw" or "predicate";
+        if (!ElleTxnModes.TryParse(o.TxnMode, out ElleTxnMode txnMode))
+        {
+            Console.Error.WriteLine($"--txn-mode must be explicit, autocommit or pipeline (got '{o.TxnMode}').");
+            return RunOutcome.Rejected;
+        }
+        if (txnMode != ElleTxnMode.Explicit && !elleShape)
+        {
+            Console.Error.WriteLine($"--txn-mode applies to the append, rw and predicate shapes only (got --workload {o.Workload}).");
+            return RunOutcome.Rejected;
+        }
+        KeyDistribution? keyDistribution = null;
+        if (!string.IsNullOrWhiteSpace(o.ElleKeyDistribution))
+        {
+            switch (o.ElleKeyDistribution.Trim().ToLowerInvariant())
+            {
+                case "uniform": keyDistribution = KeyDistribution.Uniform; break;
+                case "exponential": keyDistribution = KeyDistribution.Exponential; break;
+                default:
+                    Console.Error.WriteLine($"--elle-key-distribution must be uniform or exponential (got '{o.ElleKeyDistribution}').");
+                    return RunOutcome.Rejected;
+            }
+            if (!elleShape)
+            {
+                Console.Error.WriteLine($"--elle-key-distribution applies to the append, rw and predicate shapes only (got --workload {o.Workload}).");
+                return RunOutcome.Rejected;
+            }
+        }
+        if (o.Workload == "rw" && (o.RwKeys < 1 || o.RwMaxWritesPerKey < 1 || o.RwMaxTxnLength < 1))
+        {
+            Console.Error.WriteLine(
+                $"--rw-keys, --rw-max-writes-per-key and --rw-max-txn-length must each be >= 1 " +
+                $"(got {o.RwKeys}, {o.RwMaxWritesPerKey}, {o.RwMaxTxnLength}).");
+            return RunOutcome.Rejected;
+        }
+        if (!RegisterOperation.TryParseKeyType(o.RwKeyType, out RegisterKeyType rwKeyType))
+        {
+            Console.Error.WriteLine($"--rw-key-type must be int64, string or numeric (got '{o.RwKeyType}').");
+            return RunOutcome.Rejected;
+        }
+        if (!RegisterOperation.TryParseAccess(o.RwAccess, out RegisterAccess rwAccess))
+        {
+            Console.Error.WriteLine($"--rw-access must be pk, secondary, index or join (got '{o.RwAccess}').");
+            return RunOutcome.Rejected;
+        }
+        if (o.Workload == "rw" && txnMode == ElleTxnMode.Pipeline && rwAccess is RegisterAccess.Secondary or RegisterAccess.Index)
+        {
+            Console.Error.WriteLine(
+                "--txn-mode pipeline sends every statement before any answer returns, so a write located by a secondary " +
+                $"column cannot be pipelined; use --rw-access pk or join (got {o.RwAccess}).");
+            return RunOutcome.Rejected;
+        }
+        if (o.Workload == "predicate"
+            && (o.PredicateGroups < 1 || o.PredicateGroupSize < 2 || o.PredicateMaxWritesPerGroup < 1 || o.PredicateMaxTxnLength < 1))
+        {
+            Console.Error.WriteLine(
+                $"--predicate-groups, --predicate-max-writes-per-group and --predicate-max-txn-length must each be >= 1 and " +
+                $"--predicate-group-size >= 2 (got {o.PredicateGroups}, {o.PredicateMaxWritesPerGroup}, {o.PredicateMaxTxnLength}, {o.PredicateGroupSize}).");
+            return RunOutcome.Rejected;
+        }
+        if (!PredicateOperation.TryParseRead(o.PredicateRead, out PredicateRead predicateRead))
+        {
+            Console.Error.WriteLine($"--predicate-read must be index, scan or range (got '{o.PredicateRead}').");
+            return RunOutcome.Rejected;
+        }
+        if (o.StopAfterCompleted < 0)
+        {
+            Console.Error.WriteLine($"--stop-after-completed must be >= 0 (got {o.StopAfterCompleted}).");
             return RunOutcome.Rejected;
         }
         if (o.Workload == "tokens" && o.Tokens < 1)
@@ -421,37 +491,81 @@ public static class Program
         }
         await using ScanProbe? scanProbeLifetime = scanProbe;
 
-        // The append shape records every attempt, reads included, to history.edn for Elle. Its table is
-        // created here rather than by init, because it is part of this run's setup and a dataset seeded
-        // by an older init must still be usable. The run tag keeps an earlier run's lists out of this
-        // run's history when the database is reused.
+        // The Elle shapes record every attempt, reads included, to history.edn for Elle, and every write
+        // to a ledger for the end-of-run check of their own table. Their tables are created here rather
+        // than by init, because they are part of this run's setup and a dataset seeded by an older init
+        // must still be usable. The run tag (string keys) and the run key base (integer keys) keep an
+        // earlier run's rows out of this run's history when the database is reused.
         bool append = o.Workload == "append";
+        bool rw = o.Workload == "rw";
+        bool predicate = o.Workload == "predicate";
         ElleHistory? elleHistory = null;
+        ElleWriteLedger? elleLedger = null;
         AppendKeySpace? appendKeys = null;
-        string appendRunTag = "";
-        if (append)
+        RegisterKeySpace? registerKeys = null;
+        PredicateKeySpace? predicateKeys = null;
+        AppendOperation? appendOperation = null;
+        RegisterOperation? registerOperation = null;
+        PredicateOperation? predicateOperation = null;
+        string elleRunTag = "";
+        long elleKeyBase = 0;
+        if (elleShape)
         {
-            await using (CamusConnection appendSetup = await OpenSingleAsync(o, ct, o.ReconcileRequestTimeout).ConfigureAwait(false))
-            {
-                await AppendOperation.EnsureTableAsync(appendSetup, connections, TimeSpan.FromSeconds(120), ct).ConfigureAwait(false);
-            }
-
             Directory.CreateDirectory(o.Output);
             elleHistory = new ElleHistory(Path.Combine(o.Output, "history.edn"));
-            appendKeys = new AppendKeySpace(o.Seed, o.AppendKeys, o.AppendMaxWritesPerKey, o.AppendMaxTxnLength);
-            appendRunTag = $"{DateTime.UtcNow:yyyyMMddHHmmss}-{Guid.NewGuid().ToString("N")[..12]}";
+            elleLedger = new ElleWriteLedger(append ? ElleModel.ListAppend : ElleModel.RwRegister);
+            DateTimeOffset startedAt = DateTimeOffset.UtcNow;
+            elleRunTag = $"{startedAt:yyyyMMddHHmmss}-{Guid.NewGuid().ToString("N")[..12]}";
+            elleKeyBase = RegisterOperation.KeyBaseFor(startedAt);
+
+            // Without a BEGIN every statement is its own transaction, so an autocommit Elle transaction
+            // is one step long whatever the shape's own length setting says.
+            int txnLengthCap = txnMode == ElleTxnMode.Autocommit ? 1 : int.MaxValue;
+
+            await using (CamusConnection elleSetup = await OpenSingleAsync(o, ct, o.ReconcileRequestTimeout).ConfigureAwait(false))
+            {
+                if (append)
+                {
+                    await AppendOperation.EnsureTableAsync(elleSetup, connections, TimeSpan.FromSeconds(120), ct).ConfigureAwait(false);
+                    appendKeys = new AppendKeySpace(
+                        o.Seed, o.AppendKeys, o.AppendMaxWritesPerKey, Math.Min(o.AppendMaxTxnLength, txnLengthCap),
+                        keyDistribution ?? KeyDistribution.Uniform);
+                    appendOperation = new AppendOperation(
+                        connections, appendKeys, elleHistory, elleRunTag, locking, isolation, ledger: elleLedger, mode: txnMode);
+                }
+                else if (rw)
+                {
+                    registerKeys = new RegisterKeySpace(
+                        o.Seed, o.RwKeys, o.RwMaxWritesPerKey, Math.Min(o.RwMaxTxnLength, txnLengthCap),
+                        keyDistribution ?? KeyDistribution.Exponential);
+                    registerOperation = new RegisterOperation(
+                        connections, registerKeys, elleHistory, elleLedger, rwKeyType, rwAccess, txnMode, elleKeyBase, elleRunTag,
+                        locking, isolation);
+                    await registerOperation.EnsureTablesAsync(elleSetup, TimeSpan.FromSeconds(120), ct).ConfigureAwait(false);
+                }
+                else
+                {
+                    predicateKeys = new PredicateKeySpace(
+                        o.Seed, o.PredicateGroups, o.PredicateGroupSize, o.PredicateMaxWritesPerGroup,
+                        Math.Min(o.PredicateMaxTxnLength, txnLengthCap), keyDistribution ?? KeyDistribution.Exponential);
+                    predicateOperation = new PredicateOperation(
+                        connections, predicateKeys, elleHistory, elleLedger, predicateRead, txnMode, elleKeyBase, locking, isolation);
+                    await predicateOperation.EnsureTableAsync(elleSetup, TimeSpan.FromSeconds(120), ct).ConfigureAwait(false);
+                }
+            }
         }
         using ElleHistory? elleHistoryLifetime = elleHistory;
 
-        AppendOperation? appendOperation = append
-            ? new AppendOperation(connections, appendKeys!, elleHistory!, appendRunTag, locking, isolation)
-            : null;
         TokenOperation? tokenOperation = tokens
             ? new TokenOperation(connections, tokenLedger!, locking, isolation)
             : null;
         IWriteOperation writeOperation;
         if (appendOperation is not null)
             writeOperation = appendOperation;
+        else if (registerOperation is not null)
+            writeOperation = registerOperation;
+        else if (predicateOperation is not null)
+            writeOperation = predicateOperation;
         else if (tokenOperation is not null)
             writeOperation = tokenOperation;
         else if (transfers)
@@ -460,11 +574,11 @@ public static class Program
         else
             writeOperation = new WriteOperation(connections, dataset, o.WritesPerTransaction, locking, isolation, pipeline: o.Pipeline);
 
-        IReadOperation readOperation = appendOperation is not null
-            ? appendOperation
-            : tokenOperation is not null
-                ? tokenOperation
-                : new ReadOperation(connections, dataset);
+        IReadOperation readOperation = appendOperation as IReadOperation
+            ?? registerOperation as IReadOperation
+            ?? predicateOperation as IReadOperation
+            ?? tokenOperation as IReadOperation
+            ?? new ReadOperation(connections, dataset);
         OperationDispatcher dispatcher = new(readOperation, writeOperation);
 
         TimeSpan warmup = DurationParser.Parse(o.Warmup);
@@ -474,6 +588,8 @@ public static class Program
         Console.WriteLine($"Running {o.Mode}-loop {o.Workload} workload: {o.ReadPercent}/{o.WritePercent} read/write, " +
                           $"{o.Workers} workers over {o.Connections} connections, {o.Rows} rows over " +
                           $"{dataset.Tables} table(s), warmup {warmup}, measure {measure}" +
+                          (o.StopAfterCompleted > 0 ? $" or until {o.StopAfterCompleted:N0} operations completed" : "") +
+                          (elleShape ? $", {ElleTxnModes.Name(txnMode)} transactions" : "") +
                           (o.Pipeline ? ", pipelined writes." : "."));
 
         RunMetrics metrics;
@@ -507,14 +623,14 @@ public static class Program
             {
                 ClosedLoopScheduler scheduler = new(dispatcher, o.WritesPerTransaction);
                 WorkerState[] workers = WorkerState.Build(o.Seed, o.Workers, o.ReadPercent, o.Rows);
-                (metrics, intervals) = await scheduler.RunAsync(workers, warmup, measure, ct).ConfigureAwait(false);
+                (metrics, intervals) = await scheduler.RunAsync(workers, warmup, measure, ct, o.StopAfterCompleted).ConfigureAwait(false);
             }
             else
             {
                 OpenLoopScheduler scheduler = new(dispatcher, o.WritesPerTransaction, o.Seed);
                 WorkerState[] workers = WorkerState.Build(o.Seed, o.Workers, o.ReadPercent, o.Rows);
                 (metrics, intervals) = await scheduler
-                    .RunAsync(workers, o.TargetOps, o.MaxInFlight, warmup, measure, drain, ct).ConfigureAwait(false);
+                    .RunAsync(workers, o.TargetOps, o.MaxInFlight, warmup, measure, drain, ct, o.StopAfterCompleted).ConfigureAwait(false);
             }
         }
         finally
@@ -526,39 +642,84 @@ public static class Program
                 probeSamples = await scanProbe.StopAsync().ConfigureAwait(false);
         }
 
+        // The window the scheduler actually measured: the requested duration, or less when the run
+        // reached its completed-operation target first. Every rate below is over this.
+        double measuredSeconds = metrics.MeasuredSeconds > 0 ? metrics.MeasuredSeconds : measure.TotalSeconds;
+        TimeSpan measured = TimeSpan.FromSeconds(measuredSeconds);
+
         // Closed after the scheduler has drained, so the only attempts still open are the ones the drain
         // gave up on. They end as :info, which admits both outcomes. elle.json describes the history for
         // the checker; it does not judge it — the Elle check runs outside this process.
         if (elleHistory is not null)
         {
             ElleHistoryStats stats = elleHistory.Close();
+            Dictionary<string, object?> elleFacts = new()
+            {
+                ["model"] = append ? "list-append" : "rw-register",
+                ["shape"] = o.Workload,
+                ["history"] = "history.edn",
+                ["isolation"] = isolation.ToString(),
+                ["locking"] = locking.ToString(),
+                ["txnMode"] = ElleTxnModes.Name(txnMode),
+                ["runTag"] = elleRunTag,
+                ["keyBase"] = elleKeyBase,
+                ["measuredSeconds"] = measuredSeconds,
+                ["invocations"] = stats.Invocations,
+                ["ok"] = stats.Ok,
+                ["fail"] = stats.Fail,
+                ["info"] = stats.Info,
+                ["openAtClose"] = stats.OpenAtClose,
+                ["processes"] = stats.Processes,
+                ["okPerSecond"] = measuredSeconds > 0 ? stats.Ok / measuredSeconds : 0,
+                ["acknowledgedWrites"] = elleLedger!.OkWrites,
+                ["unresolvedWrites"] = elleLedger.InfoWrites,
+                ["failedWrites"] = elleLedger.FailWrites,
+            };
+            long objectsUsed;
+            if (appendKeys is not null)
+            {
+                objectsUsed = appendKeys.KeysUsed;
+                elleFacts["keyDistribution"] = appendKeys.Distribution.ToString().ToLowerInvariant();
+                elleFacts["activeKeys"] = appendKeys.ActiveKeys;
+                elleFacts["maxWritesPerKey"] = appendKeys.MaxWritesPerKey;
+                elleFacts["maxTxnLength"] = appendKeys.MaxTxnLength;
+                elleFacts["keysUsed"] = objectsUsed;
+            }
+            else if (registerKeys is not null)
+            {
+                objectsUsed = registerKeys.KeysUsed;
+                elleFacts["keyDistribution"] = registerKeys.Distribution.ToString().ToLowerInvariant();
+                elleFacts["keyType"] = o.RwKeyType.ToLowerInvariant();
+                elleFacts["access"] = o.RwAccess.ToLowerInvariant();
+                elleFacts["activeKeys"] = registerKeys.ActiveKeys;
+                elleFacts["maxWritesPerKey"] = registerKeys.MaxWritesPerKey;
+                elleFacts["maxTxnLength"] = registerKeys.MaxTxnLength;
+                elleFacts["keysUsed"] = objectsUsed;
+            }
+            else
+            {
+                objectsUsed = predicateKeys!.GroupsUsed;
+                elleFacts["keyDistribution"] = predicateKeys.Distribution.ToString().ToLowerInvariant();
+                elleFacts["predicateRead"] = o.PredicateRead.ToLowerInvariant();
+                elleFacts["activeGroups"] = predicateKeys.ActiveGroups;
+                elleFacts["groupSize"] = predicateKeys.GroupSize;
+                elleFacts["maxWritesPerGroup"] = predicateKeys.MaxWritesPerGroup;
+                elleFacts["maxTxnLength"] = predicateKeys.MaxTxnLength;
+                elleFacts["groupsUsed"] = objectsUsed;
+                elleFacts["keysUsed"] = objectsUsed * predicateKeys.GroupSize;
+                elleFacts["groupReadsWithCount"] = predicateOperation!.GroupReadsWithCount;
+                elleFacts["countMismatches"] = predicateOperation.CountMismatches;
+            }
+
             await File.WriteAllTextAsync(
                 Path.Combine(o.Output, "elle.json"),
-                System.Text.Json.JsonSerializer.Serialize(
-                    new
-                    {
-                        model = "list-append",
-                        history = "history.edn",
-                        isolation = isolation.ToString(),
-                        locking = locking.ToString(),
-                        activeKeys = appendKeys!.ActiveKeys,
-                        maxWritesPerKey = appendKeys.MaxWritesPerKey,
-                        maxTxnLength = appendKeys.MaxTxnLength,
-                        keysUsed = appendKeys.KeysUsed,
-                        runTag = appendRunTag,
-                        invocations = stats.Invocations,
-                        ok = stats.Ok,
-                        fail = stats.Fail,
-                        info = stats.Info,
-                        openAtClose = stats.OpenAtClose,
-                        processes = stats.Processes,
-                    },
-                    new System.Text.Json.JsonSerializerOptions { WriteIndented = true }),
+                System.Text.Json.JsonSerializer.Serialize(elleFacts, new System.Text.Json.JsonSerializerOptions { WriteIndented = true }),
                 ct).ConfigureAwait(false);
 
             Console.WriteLine(
-                $"Elle history: {stats.Invocations:N0} attempts ({stats.Ok:N0} ok, {stats.Fail:N0} fail, " +
-                $"{stats.Info:N0} info, {stats.OpenAtClose:N0} open at close) over {appendKeys.KeysUsed:N0} keys, " +
+                $"Elle history ({elleFacts["model"]}, {ElleTxnModes.Name(txnMode)}): {stats.Invocations:N0} attempts " +
+                $"({stats.Ok:N0} ok, {stats.Fail:N0} fail, {stats.Info:N0} info, {stats.OpenAtClose:N0} open at close) " +
+                $"over {objectsUsed:N0} {(predicateKeys is not null ? "groups" : "keys")} in {measuredSeconds:N0}s, " +
                 $"{stats.Processes:N0} processes -> history.edn");
         }
 
@@ -566,7 +727,7 @@ public static class Program
         ScanProbeResult? scanProbeResult = scanProbe is null
             ? null
             : ScanProbe.Summarize(
-                probeSamples, metrics.MeasureStartUtc, measure.TotalSeconds, probeGateways.Count,
+                probeSamples, metrics.MeasureStartUtc, measuredSeconds, probeGateways.Count,
                 scanProbe.Interval, o.ExpectFaults, scanProbe.LoopFailure);
 
         // Write the measured artifacts FIRST, before reconciliation. The summary/intervals/errors are
@@ -575,7 +736,7 @@ public static class Program
         // first means a reconciliation that cannot complete downgrades the verdict to "could not
         // verify" — it never discards a run that produced perfectly good data.
         RunSummary summary = RunSummary.Build(
-            metrics, o.Mode, o.TargetOps, measure.TotalSeconds, o.ExpectFaults,
+            metrics, o.Mode, o.TargetOps, measuredSeconds, o.ExpectFaults,
             writeOperation.RetryAttempts, writeOperation.RetriedTxns, writeOperation.MaxAttemptsUsed);
         RunManifest manifest = BuildManifest(o, dataset, locking, isolation);
 
@@ -595,7 +756,9 @@ public static class Program
                 {
                     measureStartUtc = metrics.MeasureStartUtc.ToString("O"),
                     warmupSeconds = warmup.TotalSeconds,
-                    measureSeconds = measure.TotalSeconds,
+                    measureSeconds = measuredSeconds,
+                    requestedMeasureSeconds = measure.TotalSeconds,
+                    stopAfterCompleted = o.StopAfterCompleted,
                     drainSeconds = drain.TotalSeconds,
                 },
                 new System.Text.Json.JsonSerializerOptions { WriteIndented = true }),
@@ -670,16 +833,16 @@ public static class Program
             }
 
             await WriteBottleneckReportAsync(
-                o.Output, manifest, summary, sampler, metrics, measure, clientResourceSummary, clusterFacts, ct)
+                o.Output, manifest, summary, sampler, metrics, measured, clientResourceSummary, clusterFacts, ct)
                 .ConfigureAwait(false);
         }
 
         // Reconciliation (outside the measured window). Never crashes the run: neither a query that
         // cannot complete nor a connection that cannot even open discards the artifacts above — both
         // downgrade the verdict to "could not verify".
-        // The append shape's unknown commits wrote only to its own table, so they cannot widen the band
+        // An Elle shape's unknown commits wrote only to its own table, so they cannot widen the band
         // for the seeded rows. The seeded rows must be exactly as they were.
-        long datasetIndeterminate = append || tokens ? 0 : writeOperation.IndeterminateTxns;
+        long datasetIndeterminate = elleShape || tokens ? 0 : writeOperation.IndeterminateTxns;
 
         ReconciliationResult reconciliation;
         try
@@ -733,6 +896,32 @@ public static class Program
                 $"Tokens: {(tokenResult.Passed ? "PASS" : "FAIL")} — {tokenResult.Rows:N0} row(s) for {tokenResult.Tokens:N0} token(s), " +
                 $"{tokenResult.Committed:N0} move(s) committed, {tokenResult.Indeterminate:N0} indeterminate, " +
                 $"{tokenResult.Reads:N0} lookup(s) with {tokenResult.ReadViolations:N0} violation(s) -> token-ledger.csv");
+        }
+
+        // The Elle shapes' final-state verdict joins reconciliation the same way: the run's own reads of
+        // its own table, judged against the ledger of every write it attempted. Read after the drain, so
+        // the only writes that may still land are the unresolved ones, which the judge admits either way.
+        if (elleLedger is not null)
+        {
+            TimeSpan finalBudget = TimeSpan.FromSeconds(Math.Max(1, o.ReconcileTimeout));
+            Elle.QuiescentResult quiescent = appendOperation is not null
+                ? await appendOperation.ReadFinalAsync(finalBudget, ct).ConfigureAwait(false)
+                : registerOperation is not null
+                    ? await registerOperation.ReadFinalAsync(finalBudget, ct).ConfigureAwait(false)
+                    : await predicateOperation!.ReadFinalAsync(finalBudget, ct).ConfigureAwait(false);
+
+            reconciliation = reconciliation with
+            {
+                Elle = quiescent,
+                Failures = reconciliation.Failures.Concat(quiescent.Failures).ToList(),
+            };
+            Console.WriteLine(
+                $"Elle final state: {(quiescent.Passed ? "PASS" : "FAIL")} — {quiescent.KeysRead:N0} key(s) read back ({quiescent.Keys:N0} with writes), " +
+                $"{quiescent.RowsPresent:N0} present, {quiescent.OkWrites:N0} acknowledged / {quiescent.InfoWrites:N0} unresolved / " +
+                $"{quiescent.FailWrites:N0} refused write(s); {quiescent.LostWrites:N0} lost, {quiescent.AbortedVisible:N0} refused-but-visible, " +
+                $"{quiescent.GarbageValues:N0} garbage, {quiescent.DuplicateRows:N0} duplicate row(s), {quiescent.PathMismatches:N0} path mismatch(es), " +
+                $"{quiescent.RealtimeStaleFinals:N0} real-time stale final(s)" +
+                (quiescent.Status == "verified" ? "" : $" — {quiescent.Status}"));
         }
 
         if (reconciliation.RowAttribution is RowAttributionResult rowResult)
@@ -1034,6 +1223,7 @@ public static class Program
         RoutingNodes: o.RoutingNodes,
         ConnectionOptions: o.ConnectionOptions,
         Pipeline: o.Pipeline,
+        TxnMode: o.TxnMode.Trim().ToLowerInvariant(),
         ExpectFaults: o.ExpectFaults,
         SchemaFingerprint: dataset.Fingerprint(),
         StartedAtUtc: DateTime.UtcNow.ToString("O"),

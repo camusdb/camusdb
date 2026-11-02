@@ -75,6 +75,10 @@ ENV CAMUS_INITIAL_CLUSTER_PARTITIONS="$CAMUS_INITIAL_CLUSTER_PARTITIONS"
 
 RUN mkdir -p /data
 
+# A node with no peers (a one-node cluster at replication factor 1) gets no --initial-cluster flag at
+# all: the option parser refuses a flag with no value, and static discovery of nobody is the same as
+# omitting the flag.
+#
 # Extra CLI flags appended verbatim (word-split) at the end of the command line, so a container
 # can opt into flags the fixed list doesn't cover without rebuilding the image — e.g.
 # CAMUS_EXTRA_ARGS="--join-existing true" boots the node as a runtime joiner of the cluster
@@ -91,5 +95,5 @@ ENTRYPOINT ["sh", "-c", "exec dotnet CamusDB.dll \
   --https-certificate=/app/certificate.pfx \
   --raft-certificate=/app/certificate.pfx \
   --initial-cluster-partitions=${CAMUS_INITIAL_CLUSTER_PARTITIONS:-3} \
-  --initial-cluster ${CAMUS_INITIAL_CLUSTER} \
+  ${CAMUS_INITIAL_CLUSTER:+--initial-cluster ${CAMUS_INITIAL_CLUSTER}} \
   ${CAMUS_EXTRA_ARGS}"]
