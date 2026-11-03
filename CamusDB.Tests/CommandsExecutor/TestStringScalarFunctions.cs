@@ -210,6 +210,28 @@ public class TestStringScalarFunctions : SharedNodeBaseTest
         Assert.AreEqual("zbz", result[0].Row["0"].StrValue);
     }
 
+    /// <summary>
+    /// An empty search string matches nothing, so the input comes back unchanged, as in PostgreSQL. The
+    /// SQL fuzzer found that the call threw a raw <see cref="System.ArgumentException"/> from string.Replace
+    /// instead, for an empty literal and for a column that holds an empty string.
+    /// </summary>
+    [Test]
+    [NonParallelizable]
+    public async Task Replace_EmptySearchStringReturnsTheInput()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupBasicTable();
+
+        List<QueryResultRow> literal = await ExecuteSelect(
+            executor,
+            database,
+            dbname,
+            "SELECT replace('abc', '', 'x'), replace('', '', 'x'), replace('abc', substring('a', 2, 1), 'x') FROM robots LIMIT 1");
+
+        Assert.AreEqual("abc", literal[0].Row["0"].StrValue);
+        Assert.AreEqual("", literal[0].Row["1"].StrValue);
+        Assert.AreEqual("abc", literal[0].Row["2"].StrValue);
+    }
+
     [Test]
     [NonParallelizable]
     public async Task Concat_IsVariadicAndCoercesScalars()

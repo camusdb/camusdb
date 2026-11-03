@@ -1,0 +1,45 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Metamorphic SQL fuzzer. A seeded generator makes a random schema, random data and random
+    statements; oracles (TLP, NoREC, plan equivalence, error classification, DML integrity) run them
+    in-process against CommandExecutor and compare results that must agree. Split out of
+    CamusDB.Tests so it stays out of the long main suite and runs as its own CI job.
+    See docs/sql-fuzzer.md.
+  -->
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <ServerGarbageCollection>false</ServerGarbageCollection>
+    <IsPackable>false</IsPackable>
+    <LangVersion>latest</LangVersion>
+    <NoWarn>$(NoWarn);NU1903</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Extensions.Logging.Console" Version="10.0.12" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.14" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.11.0" />
+    <PackageReference Include="NUnit" Version="3.14.0" />
+    <PackageReference Include="NUnit3TestAdapter" Version="4.6.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\CamusDB.Core\CamusDB.Core.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- The single-node test timings are shared with the main suite, so both boot nodes the same way. -->
+    <Compile Include="..\CamusDB.Tests\TestNodeDefaults.cs" Link="Engine\TestNodeDefaults.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- One copy of the value rules, the integrity checker and the replay helper serves the fuzzer and
+         the regression tests it prints into CamusDB.Tests, so a printed test checks exactly what the
+         oracle checked. -->
+    <Compile Include="..\CamusDB.Tests\SqlFuzz\*.cs" LinkBase="Shared" />
+  </ItemGroup>
+
+</Project>

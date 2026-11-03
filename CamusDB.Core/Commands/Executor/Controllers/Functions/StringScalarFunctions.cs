@@ -295,6 +295,11 @@ internal static class StringScalarFunctions
         RequireString(calledName, 1, arguments[1]);
         RequireString(calledName, 2, arguments[2]);
 
+        // An empty search string matches nothing, so the input comes back as it is, as in PostgreSQL.
+        // string.Replace throws for an empty old value, which the caller would see as a raw exception.
+        if (arguments[1].StrValue!.Length == 0)
+            return arguments[0];
+
         string result = arguments[0].StrValue!.Replace(
             arguments[1].StrValue!,
             arguments[2].StrValue!,

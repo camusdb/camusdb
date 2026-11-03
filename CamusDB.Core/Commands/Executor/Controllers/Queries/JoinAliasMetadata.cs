@@ -85,6 +85,12 @@ internal static class JoinAliasMetadata
             return entry.Key[..dotIndex];
         }
 
+        // A nested join whose columns the query never reads yields rows with no cells: projection
+        // pushdown keeps none of them. Such a row has no key to qualify, so any alias is correct. Without
+        // this case `a CROSS JOIN b CROSS JOIN c` that reads only c's columns failed here.
+        if (leftRow.Row.Count == 0)
+            return string.Empty;
+
         throw new CamusDBException(
             CamusDBErrorCodes.InvalidInternalOperation,
             "Could not resolve alias for nested join left row");

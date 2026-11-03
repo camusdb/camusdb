@@ -330,6 +330,13 @@ internal sealed class SemiJoinExecutor
         if (node.extendedSix   is not null) CollectIdentifiers(node.extendedSix,   cols);
     }
 
+    /// <summary>
+    /// SQL equality of an inner value read through the index and the outer probe value, the second
+    /// guard of <see cref="ProbeViaIndexAsync"/>. Every indexable type must have an arm: a type that
+    /// falls through to "not equal" makes every probe of an index on that type miss, so an IN
+    /// subquery loses its matches and a NOT IN subquery keeps rows it must remove. The types without a
+    /// rule of their own use <see cref="ColumnValue.CompareTo"/>, the order of the index itself.
+    /// </summary>
     private static bool ColumnValuesEqual(ColumnValue? a, ColumnValue b)
     {
         if (a is null) return false;
@@ -344,7 +351,7 @@ internal sealed class SemiJoinExecutor
             ColumnType.Float64 => FloatMath.SqlEquals(a.FloatValue, b.FloatValue),
             ColumnType.Bool => a.BoolValue == b.BoolValue,
             ColumnType.Null => false,
-            _ => false,
+            _ => a.CompareTo(b) == 0,
         };
     }
 

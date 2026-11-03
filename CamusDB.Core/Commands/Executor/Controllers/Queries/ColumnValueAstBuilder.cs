@@ -151,6 +151,11 @@ internal static class ColumnValueAstBuilder
                 extendedFour: null,
                 extendedFive: null,
                 yytext: SqlStringLiteral.QuoteBytes(value.BytesValue ?? [])),
+            // A date or a datetime has no literal token either: CAST('<ISO text>' AS date|datetime), the
+            // form a SQL text writes, parses back to the same ticks. Without these arms an IN or NOT IN
+            // subquery over a date column failed with the internal-error code.
+            ColumnType.Date => TypedCast(value.IsoValue!, NodeAst.TypeDate),
+            ColumnType.DateTime => TypedCast(value.IsoValue!, NodeAst.TypeDateTime),
             ColumnType.Null => NodeAst.Null,
             _ => throw new CamusDBException(
                 CamusDBErrorCodes.InvalidInternalOperation,
