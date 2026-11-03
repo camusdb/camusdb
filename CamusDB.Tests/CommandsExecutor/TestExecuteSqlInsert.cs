@@ -1136,8 +1136,8 @@ public sealed class TestExecuteSqlInsert : SharedNodeBaseTest
 
     /// <summary>
     /// An INSERT that names the same column twice in the explicit target list must be rejected
-    /// before any row is written. Using StringComparer.Ordinal: (name, name) is a duplicate,
-    /// but (name, NAME) is not — they are distinct column references.
+    /// before any row is written. A name resolves to its column case-insensitively, so
+    /// (name, NAME) is a duplicate too; TestRepeatedAssignmentTarget covers that form.
     /// </summary>
     [Test]
     [NonParallelizable]
@@ -1156,8 +1156,8 @@ public sealed class TestExecuteSqlInsert : SharedNodeBaseTest
             await executor.ExecuteNonSQLQuery(new(txIns, dbname,
                 "INSERT INTO items (id, name, name) VALUES (gen_id(), \"foo\", \"bar\")", null)));
 
-        Assert.AreEqual(CamusDBErrorCodes.InvalidInput, ex!.Code,
-            "A duplicate target column must throw InvalidInput");
+        Assert.AreEqual(CamusDBErrorCodes.DuplicateColumn, ex!.Code,
+            "A duplicate target column must throw DuplicateColumn");
         Assert.IsTrue(ex.Message.Contains("name"), "Error message should identify the repeated column");
 
         await database.Transactions.RollbackAsync(txIns);

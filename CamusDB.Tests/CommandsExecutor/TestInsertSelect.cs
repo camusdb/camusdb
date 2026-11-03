@@ -287,7 +287,7 @@ public sealed class TestInsertSelect : SharedNodeBaseTest
         CamusDBException? ex = Assert.ThrowsAsync<CamusDBException>(async () =>
             await ExecuteNonQuery(executor, dbname, txn, "INSERT INTO dest (id, id) SELECT id, id FROM src"));
 
-        Assert.AreEqual(CamusDBErrorCodes.InvalidInput, ex!.Code);
+        Assert.AreEqual(CamusDBErrorCodes.DuplicateColumn, ex!.Code);
         StringAssert.Contains("more than once", ex.Message);
 
         await database.Transactions.RollbackAsync(txn);

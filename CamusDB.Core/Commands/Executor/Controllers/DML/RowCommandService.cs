@@ -171,9 +171,7 @@ internal sealed class RowCommandService
                 string name = schemaNames.TryGetValue(cell.Key, out string? schemaName) ? schemaName : cell.Key;
 
                 if (!row.TryAdd(name, cell.Value))
-                    throw new CamusDBException(
-                        CamusDBErrorCodes.InvalidInput,
-                        $"Column '{name}' specified more than once in the inserted row");
+                    throw AssignmentTargets.RepeatedInsertColumn(name, "the inserted row");
 
                 fields.Add(name);
             }

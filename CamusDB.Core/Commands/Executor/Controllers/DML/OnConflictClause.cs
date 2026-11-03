@@ -126,9 +126,7 @@ internal sealed class OnConflictClause
                     List<(string, NodeAst)> items = new();
                     SQLExecutorUpdateCreator.GetUpdateItemList(node.rightAst!, items);
 
-                    Dictionary<string, NodeAst> setValues = new(items.Count, StringComparer.OrdinalIgnoreCase);
-                    foreach ((string column, NodeAst value) in items)
-                        setValues[column] = value;
+                    Dictionary<string, NodeAst> setValues = AssignmentTargets.ToSetList(items);
 
                     return new(OnConflictAction.DoUpdate, targetColumns, constraintName, setValues, node.extendedOne, null);
                 }

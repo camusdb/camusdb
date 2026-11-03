@@ -1103,6 +1103,7 @@ public static class CamusDBErrorCodes
     public static int GetHttpStatus(string code) => code switch
     {
         InvalidInput => 400,
+        DuplicateColumn => 400,
         DatabaseDoesntExist => 404,
         BackupNotConfigured => 503,
         BackupChainInvalid => 422,

@@ -8,6 +8,7 @@
 
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.SQLParser;
+using CamusDB.Core.CommandsExecutor.Controllers.DML;
 
 namespace CamusDB.Core.CommandsValidator.Validators;
 
@@ -37,18 +38,16 @@ internal sealed class InsertSelectValidator : ValidatorBase
         if (ticket.TargetColumns.Count == 0)
             throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "The column list of an INSERT is empty");
 
-        // Case sensitivity mirrors the schema dictionary (StringComparer.Ordinal), so (a, A) are
-        // treated as distinct here exactly as they are in the VALUES form.
-        HashSet<string> seen = new(ticket.TargetColumns.Count, StringComparer.Ordinal);
+        // A name resolves to its column case-insensitively, and two columns of one table never
+        // differ only in case, so (a, A) name one column twice, as in the VALUES form.
+        HashSet<string> seen = new(ticket.TargetColumns.Count, StringComparer.OrdinalIgnoreCase);
         foreach (string column in ticket.TargetColumns)
         {
             if (string.IsNullOrWhiteSpace(column))
                 throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Column name is required");
 
             if (!seen.Add(column))
-                throw new CamusDBException(
-                    CamusDBErrorCodes.InvalidInput,
-                    $"Column '{column}' specified more than once in INSERT column list");
+                throw AssignmentTargets.RepeatedInsertColumn(column, "INSERT column list");
         }
     }
 }

@@ -64,15 +64,14 @@ internal sealed class SQLExecutorInsertCreator : SQLExecutorBaseCreator
         {
             GetIdentifierList(ast.rightAst, fields);
 
-            // Reject a repeated column name in the explicit target list. Case sensitivity mirrors
-            // the schema dictionary (StringComparer.Ordinal) so (a, A) are treated as distinct.
-            HashSet<string> seen = new(fields.Count, StringComparer.Ordinal);
+            // Reject a repeated column name in the explicit target list. A name resolves to its
+            // column case-insensitively, and two columns of one table never differ only in case,
+            // so (a, A) name one column twice and are refused like (a, a).
+            HashSet<string> seen = new(fields.Count, StringComparer.OrdinalIgnoreCase);
             foreach (string field in fields)
             {
                 if (!seen.Add(field))
-                    throw new CamusDBException(
-                        CamusDBErrorCodes.InvalidInput,
-                        $"Column '{field}' specified more than once in INSERT column list");
+                    throw AssignmentTargets.RepeatedInsertColumn(field, "INSERT column list");
             }
         }
 

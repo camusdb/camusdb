@@ -10,6 +10,7 @@ using CamusDB.Core.SQLParser;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
+using CamusDB.Core.CommandsExecutor.Controllers.DML;
 
 namespace CamusDB.Core.CommandsValidator.Validators;
 
@@ -36,6 +37,10 @@ internal sealed class UpdateValidator : ValidatorBase
                 CamusDBErrorCodes.InvalidInput,
                 "Values are required"
             );
+
+        // A typed row update (HTTP /update, gRPC) arrives as a map that can hold "a" and "A" as two
+        // keys. Both resolve to column a, so the map gives that column two values.
+        AssignmentTargets.RequireUniqueIgnoreCase(ticket.PlainValues, ticket.PlainValues.Count);
 
         foreach (KeyValuePair<string, ColumnValue> columnValue in ticket.PlainValues)
         {

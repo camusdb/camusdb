@@ -21,6 +21,7 @@ public sealed class UpdateRequest
 
     public string? TableName { get; set; }
 
+    [System.Text.Json.Serialization.JsonConverter(typeof(ColumnValueMapConverter))]
     public Dictionary<string, ColumnValue>? Values { get; set; }
 
     public List<QueryFilter>? Filters { get; set; }

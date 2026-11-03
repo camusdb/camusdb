@@ -21,6 +21,7 @@ public sealed class InsertRequest
 
     public string? TableName { get; set; }
 
+    [System.Text.Json.Serialization.JsonConverter(typeof(ColumnValueMapConverter))]
     public Dictionary<string, ColumnValue>? Values { get; set; }
 
     public HLCTimestamp? CausalToken { get; set; }
