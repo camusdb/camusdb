@@ -1,0 +1,106 @@
+name: sql-fuzz-nightly
+
+# Nightly + manual dispatch: the metamorphic SQL fuzzer (docs/sql-fuzzer.md).
+#
+# Five oracles run in-process against CommandExecutor: error classification (with the hang oracle and
+# the HTTP JSON wire check), TLP, NoREC, plan equivalence and DML integrity. Each oracle runs for a
+# fixed time budget. The scheduled run takes its seed from the run number, so every night tests other
+# statements; the report names the seed, so a finding replays.
+#
+# A red run means a new finding. Download the artifact: for each finding it holds a report (seed,
+# disagreement, plans, shrunk statements) and a ready-to-paste NUnit test for CamusDB.Tests.
+#
+# Long mode: dispatch with budget_seconds (for example 720, which is one hour for the five oracles).
+# Replay of a CI finding: dispatch with its seed, oracle and round.
+on:
+  schedule:
+    # 07:30 UTC nightly, after the plan-quality run.
+    - cron: '30 7 * * *'
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Git ref to test'
+        default: 'main'
+      budget_seconds:
+        description: 'Time budget of each oracle, in seconds (60 = short mode, 720 = one hour in total)'
+        default: '60'
+      seed:
+        description: 'Base seed (empty = the run number)'
+        default: ''
+      oracle:
+        description: 'Run one oracle only: tlp, norec, plan, error or dml (empty = all)'
+        default: ''
+      round:
+        description: 'Replay one round of the seed (empty = run for the budget)'
+        default: ''
+
+concurrency:
+  group: sql-fuzz-nightly-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Check out repository code
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+
+      - name: Install .NET
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Cache NuGet packages
+        uses: actions/cache@v5
+        with:
+          path: ~/.nuget/packages
+          key: ${{ runner.os }}-nuget-${{ hashFiles('**/*.csproj') }}
+          restore-keys: |
+            ${{ runner.os }}-nuget-
+
+      - name: Build
+        run: dotnet build CamusDB.SqlFuzz.Tests/CamusDB.SqlFuzz.Tests.csproj --configuration Debug
+
+      # The oracle unit tests prove that each oracle reports a planted disagreement, and the generator
+      # tests prove the seed contract and the 90 % acceptance rate. A campaign is only worth running
+      # when they pass.
+      - name: Run the fuzzer's own tests
+        timeout-minutes: 15
+        run: |
+          dotnet test CamusDB.SqlFuzz.Tests/CamusDB.SqlFuzz.Tests.csproj \
+            --no-build \
+            --configuration Debug \
+            --filter "FullyQualifiedName~CamusDB.SqlFuzz.Tests.Unit." \
+            --logger "trx;LogFileName=unit.trx" \
+            --logger "console;verbosity=normal"
+
+      - name: Run the campaigns
+        timeout-minutes: 100
+        env:
+          SQLFUZZ_BUDGET_SECONDS: ${{ inputs.budget_seconds || '60' }}
+          SQLFUZZ_SEED: ${{ inputs.seed }}
+          SQLFUZZ_ORACLE: ${{ inputs.oracle }}
+          SQLFUZZ_ROUND: ${{ inputs.round }}
+          SQLFUZZ_SHRINK_SECONDS: '90'
+          SQLFUZZ_OUTPUT_DIR: ${{ github.workspace }}/artifacts/sql-fuzz
+        run: |
+          dotnet test CamusDB.SqlFuzz.Tests/CamusDB.SqlFuzz.Tests.csproj \
+            --no-build \
+            --configuration Debug \
+            --filter "FullyQualifiedName~CamusDB.SqlFuzz.Tests.FuzzCampaignTests." \
+            --logger "trx;LogFileName=campaigns.trx" \
+            --logger "console;verbosity=normal"
+
+      - name: Upload the findings and the reports
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: sql-fuzz-${{ github.run_number }}-${{ github.run_attempt }}
+          path: |
+            artifacts/sql-fuzz/
+            CamusDB.SqlFuzz.Tests/TestResults/*.trx
+          retention-days: 30
+          if-no-files-found: warn
