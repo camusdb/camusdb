@@ -59,6 +59,125 @@ internal sealed class TestGenerator
     }
 
     [Test]
+    public void SubqueriesGoInEveryPositionAndAreCorrelatedOnlyInTheWhereOfASelect()
+    {
+        // CamusDB folds an uncorrelated subquery in every expression position, and evaluates a
+        // correlated EXISTS per row in the WHERE of a SELECT only. The generator must write the first
+        // kind everywhere it can, and the second kind nowhere else: a correlated EXISTS in a select
+        // list, an ON clause or a DML WHERE is refused, and a stream of refusals hides findings.
+        int inSelectList = 0, inOn = 0, inDmlWhere = 0, correlatedInSelectWhere = 0, belowAnotherNode = 0;
+
+        for (ulong seed = 1; seed <= 40; seed++)
+        {
+            StatementGenerator generator = new(new FuzzRandom(seed), GeneratorProfile.CamusDB);
+            generator.GenerateSchema();
+            generator.GenerateData();
+
+            for (int i = 0; i < 250; i++)
+            {
+                Statement statement = generator.GenerateStatement();
+
+                foreach (object node in ExprWalker.Nodes(statement))
+                {
+                    if (node is not SelectStmt select)
+                        continue;
+
+                    foreach (SelectItem item in select.Items)
+                    {
+                        foreach (ExistsExpr exists in DirectSubqueries(item.Expr))
+                        {
+                            inSelectList++;
+                            Assert.That(IsCorrelated(exists), Is.False, "a correlated EXISTS in a select list: " + CamusSqlPrinter.Instance.Print(statement));
+                        }
+                    }
+
+                    foreach (Expr on in ExprWalker.JoinPredicates(select.From))
+                    {
+                        foreach (ExistsExpr exists in DirectSubqueries(on))
+                        {
+                            inOn++;
+                            Assert.That(IsCorrelated(exists), Is.False, "a correlated EXISTS in an ON clause: " + CamusSqlPrinter.Instance.Print(statement));
+                        }
+                    }
+
+                    if (select.Where is not null)
+                    {
+                        foreach (ExistsExpr exists in DirectSubqueries(select.Where))
+                        {
+                            if (IsCorrelated(exists))
+                                correlatedInSelectWhere++;
+                        }
+
+                        // A subquery below a node other than AND, OR or NOT: a CASE branch, a comparison operand, an IS NULL test.
+                        if (select.Where is not (ExistsExpr or InSubqueryExpr or BinaryExpr { Op: BinaryOp.And or BinaryOp.Or } or UnaryExpr { Op: UnaryOp.Not })
+                            && DirectSubqueries(select.Where).Any())
+                            belowAnotherNode++;
+                    }
+                }
+
+                Expr? dmlWhere = statement switch { UpdateStmt u => u.Where, DeleteStmt d => d.Where, _ => null };
+                if (dmlWhere is not null)
+                {
+                    foreach (ExistsExpr exists in DirectSubqueries(dmlWhere))
+                    {
+                        inDmlWhere++;
+                        Assert.That(IsCorrelated(exists), Is.False, "a correlated EXISTS in a DML WHERE: " + CamusSqlPrinter.Instance.Print(statement));
+                    }
+                }
+            }
+        }
+
+        Assert.That(inSelectList, Is.GreaterThan(0), "no subquery in a select list");
+        Assert.That(inOn, Is.GreaterThan(0), "no subquery in an ON clause");
+        Assert.That(inDmlWhere, Is.GreaterThan(0), "no subquery in a DML WHERE");
+        Assert.That(correlatedInSelectWhere, Is.GreaterThan(0), "no correlated EXISTS in a SELECT WHERE");
+        Assert.That(belowAnotherNode, Is.GreaterThan(0), "no subquery below a node other than AND, OR or NOT");
+    }
+
+    /// <summary>The EXISTS subqueries of an expression, without entering the subqueries themselves.</summary>
+    private static IEnumerable<ExistsExpr> DirectSubqueries(Expr expression)
+    {
+        Stack<object> pending = new();
+        pending.Push(expression);
+        while (pending.Count > 0)
+        {
+            object node = pending.Pop();
+            if (node is ExistsExpr exists)
+            {
+                yield return exists;
+                continue;
+            }
+            if (node is SelectStmt)
+                continue;
+            foreach (object child in ExprWalker.Children(node))
+                pending.Push(child);
+        }
+    }
+
+    /// <summary>True when the subquery's WHERE reads a column of the enclosing query (one not qualified by the subquery's own alias).</summary>
+    private static bool IsCorrelated(ExistsExpr exists)
+    {
+        string alias = ((TableRef)exists.Subquery.From).Alias;
+        if (exists.Subquery.Where is null)
+            return false;
+
+        Stack<object> pending = new();
+        pending.Push(exists.Subquery.Where);
+        while (pending.Count > 0)
+        {
+            object node = pending.Pop();
+            if (node is ColumnExpr column && column.Source != alias)
+                return true;
+            if (node is SelectStmt)
+                continue;
+            foreach (object child in ExprWalker.Children(node))
+                pending.Push(child);
+        }
+
+        return false;
+    }
+
+    [Test]
     public void AProfileThatRemovesAFormStopsTheGeneratorFromSelectingIt()
     {
         GeneratorProfile profile = GeneratorProfile.CamusDB

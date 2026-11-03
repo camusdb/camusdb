@@ -127,18 +127,8 @@ internal static class RequiredColumnAnalyzer
         return required;
     }
 
-    /// <summary>Returns true if <paramref name="expr"/> or any descendant is a subquery node.</summary>
-    internal static bool ContainsSubqueryNode(NodeAst expr)
-    {
-        return expr.nodeType is NodeType.ExprExistsSubquery
-            or NodeType.ExprExistsCorrelated
-            or NodeType.ExprInSubquery
-            or NodeType.ExprNotInSubquery
-            || (expr.leftAst is not null && ContainsSubqueryNode(expr.leftAst))
-            || (expr.rightAst is not null && ContainsSubqueryNode(expr.rightAst))
-            || (expr.extendedOne is not null && ContainsSubqueryNode(expr.extendedOne))
-            || (expr.extendedTwo is not null && ContainsSubqueryNode(expr.extendedTwo));
-    }
+    /// <summary>Returns true if <paramref name="expr"/> or any descendant is a subquery node of any kind.</summary>
+    internal static bool ContainsSubqueryNode(NodeAst expr) => SubqueryNodeScan.Contains(expr, SubqueryNodeKinds.All);
 
     public static Dictionary<string, IReadOnlySet<string>?> ComputeJoinPlan(
         BoundSelectQuery bound,
@@ -404,11 +394,26 @@ internal static class RequiredColumnAnalyzer
                 CollectOuterCorrelationColumnsForAlias(prepared, rowNames!, alias, required);
         }
 
-        if (expression.leftAst is not null)
-            CollectCorrelatedExistsOuterColumns(expression.leftAst, ticket, rowNames, required, alias);
+        // Every child slot: a correlated EXISTS can sit in a CASE's ELSE result (extendedOne) or a
+        // BETWEEN bound, not only under a boolean connective.
+        CollectCorrelatedExistsOuterColumnsOf(expression.leftAst, ticket, rowNames, required, alias);
+        CollectCorrelatedExistsOuterColumnsOf(expression.rightAst, ticket, rowNames, required, alias);
+        CollectCorrelatedExistsOuterColumnsOf(expression.extendedOne, ticket, rowNames, required, alias);
+        CollectCorrelatedExistsOuterColumnsOf(expression.extendedTwo, ticket, rowNames, required, alias);
+        CollectCorrelatedExistsOuterColumnsOf(expression.extendedThree, ticket, rowNames, required, alias);
+        CollectCorrelatedExistsOuterColumnsOf(expression.extendedFour, ticket, rowNames, required, alias);
+        CollectCorrelatedExistsOuterColumnsOf(expression.extendedFive, ticket, rowNames, required, alias);
+    }
 
-        if (expression.rightAst is not null)
-            CollectCorrelatedExistsOuterColumns(expression.rightAst, ticket, rowNames, required, alias);
+    private static void CollectCorrelatedExistsOuterColumnsOf(
+        NodeAst? child,
+        QueryTicket ticket,
+        QueryRowNameResolver? rowNames,
+        HashSet<string> required,
+        string? alias)
+    {
+        if (child is not null)
+            CollectCorrelatedExistsOuterColumns(child, ticket, rowNames, required, alias);
     }
 
     private static void CollectOuterCorrelationColumns(

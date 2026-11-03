@@ -20,10 +20,12 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 /// into semi/anti-join specs. It must run first, because the next stage would otherwise
 /// materialize those subqueries into value lists.</item>
 /// <item><see cref="SubqueryRewriter"/> executes the remaining uncorrelated scalar / <c>IN</c> /
-/// <c>NOT IN</c> subqueries and folds their results into the WHERE as literals.</item>
+/// <c>NOT IN</c> subqueries of the WHERE and folds their results in as literals. It does the same for
+/// every subquery of the select list, the HAVING and the JOIN ON predicates, <c>EXISTS</c> included,
+/// because those positions have no per-row stage: a correlated <c>EXISTS</c> there is refused.</item>
 /// <item><see cref="QueryBinder"/> opens the sources and resolves names.</item>
-/// <item><see cref="ExistsSubqueryPreparer"/> prepares EXISTS subqueries. It runs last because a
-/// correlated EXISTS binds against the outer sources the previous stage produced.</item>
+/// <item><see cref="ExistsSubqueryPreparer"/> prepares the EXISTS subqueries of the WHERE. It runs
+/// last because a correlated EXISTS binds against the outer sources the previous stage produced.</item>
 /// </list>
 ///
 /// <para>

@@ -43,8 +43,10 @@ into a literal before the projection is evaluated:
 - `IN (…)` / `NOT IN (…)` → membership against the materialized list.
 
 Because a FROM-less `SELECT` has no outer row, **every** such subquery is uncorrelated by
-construction, so no correlation handling is needed. (Projection subqueries in a `SELECT` that
-*does* have a `FROM` are a separate, not-yet-supported case.)
+construction, so no correlation handling is needed. A `SELECT` that *does* have a `FROM` folds an
+uncorrelated projection subquery the same way; see
+[Subqueries in expressions](./sql-expression-syntax.md#subqueries-in-expressions) for the
+positions a subquery can take and the rule for correlated ones.
 
 ## Rejected shapes
 

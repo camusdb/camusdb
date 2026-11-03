@@ -363,13 +363,16 @@ internal sealed class TlpOracle : IOracle
             {
                 (FromItem joinFrom, ExprScope joinScope) = generator.GenerateFrom(SelectOptions.Comparable with { MaxTables = 3 });
                 if (joinFrom is JoinFrom { Kind: JoinKind.Inner, On: not null })
-                    return new TlpCheck(kind, joinFrom, generator.GenerateProjection(joinScope), generator.Expressions.Predicate(joinScope));
+                    // The predicate joins the ON clause, which has no per-row EXISTS stage.
+                    return new TlpCheck(kind, joinFrom, generator.GenerateProjection(joinScope), generator.Expressions.Predicate(joinScope.ForUncorrelatedSubqueries()));
             }
             kind = TlpVariant.Where;
         }
 
         (FromItem from, ExprScope scope) = generator.GenerateFrom(SelectOptions.Comparable);
-        Expr predicate = generator.Expressions.Predicate(scope);
+        // The predicate and its partitions (NOT p, p IS NULL) all sit in a WHERE, so a correlated
+        // EXISTS is allowed; the HAVING variant replaces it below.
+        Expr predicate = generator.Expressions.Predicate(scope.ForSelectWhere());
 
         switch (kind)
         {

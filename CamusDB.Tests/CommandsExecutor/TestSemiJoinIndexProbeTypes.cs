@@ -61,7 +61,7 @@ internal sealed class TestSemiJoinIndexProbeTypes : BaseTest
         // The same table on both sides, with the index, is the shape the fuzzer found.
         await db.Ddl("CREATE INDEX outer_rows_v ON outer_rows (v)");
         Assert.That(await db.Rows("SELECT id FROM outer_rows WHERE v IN (SELECT o.v FROM outer_rows AS o)"),
-            Is.EqualTo(new List<string> { "i:1", "i:2" }), "IN over the table itself");
+            Is.EqualTo(new List<string> { "3:i:1", "3:i:2" }), "IN over the table itself");
         Assert.That(await db.Rows("SELECT id FROM outer_rows WHERE v NOT IN (SELECT o.v FROM outer_rows AS o)"),
             Is.Empty, "NOT IN over the table itself, whose subquery holds a NULL");
     }
@@ -69,9 +69,9 @@ internal sealed class TestSemiJoinIndexProbeTypes : BaseTest
     private static async Task AssertRows(SqlFuzzReplay db)
     {
         Assert.That(await db.Rows("SELECT id FROM outer_rows WHERE v IN (SELECT i.v FROM inner_rows AS i)"),
-            Is.EqualTo(new List<string> { "i:1" }), "IN");
+            Is.EqualTo(new List<string> { "3:i:1" }), "IN");
         // Row 3 has a NULL, so NOT IN is UNKNOWN for it and the row is not returned.
         Assert.That(await db.Rows("SELECT id FROM outer_rows WHERE v NOT IN (SELECT i.v FROM inner_rows AS i)"),
-            Is.EqualTo(new List<string> { "i:2" }), "NOT IN");
+            Is.EqualTo(new List<string> { "3:i:2" }), "NOT IN");
     }
 }

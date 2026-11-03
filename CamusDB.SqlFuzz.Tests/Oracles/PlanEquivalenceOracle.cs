@@ -259,7 +259,7 @@ internal sealed class PlanEquivalenceOracle : IOracle
         for (int i = 0; i < round.CheckCount && !round.ShouldStop; i++)
         {
             (FromItem from, ExprScope scope) = generator.GenerateFrom(SelectOptions.Comparable with { AllowHints = false });
-            SelectStmt query = new(generator.GenerateProjection(scope), from, generator.Random.Chance(0.9) ? generator.Expressions.Predicate(scope.ForWhere()) : null);
+            SelectStmt query = new(generator.GenerateProjection(scope), from, generator.Random.Chance(0.9) ? generator.Expressions.Predicate(scope.ForSelectWhere()) : null);
 
             List<PlanEquivalenceCheck> checks = new();
             foreach (ArmSpec arm in Arms)

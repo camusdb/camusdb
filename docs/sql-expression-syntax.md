@@ -329,10 +329,47 @@ Two rules differ from PostgreSQL:
 
 - All non-`NULL` elements must have the same type. PostgreSQL finds a common type, so it accepts
   `ARRAY[1, 2.5]` and `ARRAY[1, '2']`. CamusDB rejects both. Cast the elements to one type.
-- A scalar subquery in an element works in `WHERE`, but not in the select list of a query with a
-  `FROM`. This limit applies to every scalar subquery in a select list, not only to arrays.
+- A scalar subquery in an element must be uncorrelated, as every subquery outside a `WHERE` must
+  be. See [Subqueries in expressions](#subqueries-in-expressions).
 
 See also [Data types → Arrays](data-types.md#arrays).
+
+## Subqueries in expressions
+
+A subquery can stand anywhere an expression can: a `WHERE`, a select list, a `HAVING`, a `JOIN ON`
+predicate, the `WHERE` and `SET` values of `UPDATE` and `DELETE`, the `VALUES` of an `INSERT`, and
+`ON CONFLICT DO UPDATE`. Inside an expression it can sit at any depth: a `CASE` branch, a
+comparison operand, an `IS NULL` test, a `BETWEEN` bound, a function argument.
+
+```sql
+SELECT id, EXISTS (SELECT 1 FROM audit WHERE level = 'error') AS flagged FROM users;
+SELECT id, (SELECT MAX(score) FROM scores) - score AS gap FROM players;
+SELECT u.id FROM users u JOIN roles r ON u.role = r.id AND r.name IN (SELECT name FROM admins);
+UPDATE orders SET total = (SELECT SUM(amount) FROM lines WHERE lines.order_id = 7) WHERE id = 7;
+DELETE FROM sessions WHERE NOT EXISTS (SELECT 1 FROM users WHERE active);
+INSERT INTO counters (name, value) VALUES ('users', (SELECT COUNT(*) FROM users));
+SELECT * FROM t WHERE CASE WHEN kind = 1 THEN x IN (SELECT x FROM allowed) ELSE x > 0 END;
+```
+
+The rule that decides what runs where is **correlation**: a subquery is correlated when its `WHERE`
+reads a column of the enclosing query through a qualifier that is not one of its own sources
+(`outer.id` in `EXISTS (SELECT 1 FROM inner WHERE inner.id = outer.id)`).
+
+- An **uncorrelated** subquery runs once, before the statement reads its first row, and its result
+  takes its place: a scalar subquery becomes its value, `EXISTS` becomes `true` or `false`, and
+  `IN`, `NOT IN` and a quantified comparison become a membership test over the rows it returned.
+  This holds in every position listed above.
+- A **correlated `EXISTS`** is evaluated once per row. CamusDB supports it in the `WHERE` of a
+  `SELECT` only, at any depth of the predicate. In every other position it is refused with
+  `CADB0533` (`FeatureNotSupported`), because the position has no row to evaluate it against.
+- A **correlated `IN`**, `NOT IN` or quantified comparison is refused everywhere, as the
+  [quantified comparison](#quantified-comparisons-any-some-and-all) rule below says. A correlated
+  scalar subquery is refused as an unknown alias.
+
+Two positions do not take a subquery at all: `ORDER BY` and `GROUP BY` refuse one with `CADB0400`.
+
+`EXPLAIN` runs the uncorrelated subqueries of a statement, because folding them is part of
+preparing the plan; see [EXPLAIN](./explain.md).
 
 ## Quantified comparisons: `ANY`, `SOME` and `ALL`
 

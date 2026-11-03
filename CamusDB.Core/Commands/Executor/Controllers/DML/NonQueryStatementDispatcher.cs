@@ -42,8 +42,8 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.DML;
 /// multi-statement transaction surfaces them to the caller, which owns the retry loop. Retrying a
 /// serialization failure in place would reuse a transaction that is already doomed.</para>
 ///
-/// <para>Note where the DELETE subquery rewrite sits: <b>outside</b> the fence-retry loop, so a
-/// retry does not re-execute the inner query.</para>
+/// <para>Note where the subquery rewrites of INSERT VALUES, UPDATE and DELETE sit: <b>outside</b>
+/// the fence-retry loop, so a retry does not re-execute the inner query.</para>
 /// </summary>
 internal sealed class NonQueryStatementDispatcher
 {
@@ -172,9 +172,9 @@ internal sealed class NonQueryStatementDispatcher
     /// <summary>
     /// The ON CONFLICT clause of an INSERT (or the implied one of an UPSERT), or null for a plain
     /// INSERT. A scalar, IN or EXISTS subquery in the DO UPDATE SET list or WHERE is replaced by its
-    /// value here, at one statement timestamp, as UPDATE replaces one. A subquery that is still left
-    /// reads the conflicting rows (a correlated one), which the per-row evaluation cannot run, so it
-    /// is refused before anything is written.
+    /// value here, at one statement timestamp, as UPDATE replaces one. A correlated EXISTS is refused
+    /// by the rewrite, and a subquery that is still left afterwards would read the conflicting rows,
+    /// which the per-row evaluation cannot run, so it is refused before anything is written.
     /// </summary>
     private async Task<OnConflictClause?> PrepareOnConflictAsync(DatabaseDescriptor database, NodeAst ast, ExecuteSQLTicket ticket)
     {
@@ -189,7 +189,7 @@ internal sealed class NonQueryStatementDispatcher
 
         HLCTimestamp? statementTimestamp = MintStatementTimestamp(database, ticket.TxnState);
         using (StatementSnapshotScope.Open(ticket.TxnState, statementTimestamp))
-            assignments = await RewriteUpdateSubqueriesAsync(database, assignments, ticket).ConfigureAwait(false);
+            assignments = await RewriteUpdateSubqueriesAsync(database, assignments, ticket, "ON CONFLICT DO UPDATE").ConfigureAwait(false);
 
         bool subqueryLeft = assignments.Where is not null && RequiredColumnAnalyzer.ContainsSubqueryNode(assignments.Where);
         foreach (NodeAst expression in assignments.ExprValues!.Values)
@@ -370,6 +370,10 @@ internal sealed class NonQueryStatementDispatcher
                     // so a retry does not run an inner query again.
                     OnConflictClause? onConflict = await PrepareOnConflictAsync(database, ast, ticket).ConfigureAwait(false);
 
+                    // A subquery in a VALUES row is replaced by its value the same way, before the rows
+                    // are shaped: the shaper evaluates each value synchronously and cannot run a query.
+                    ast = await RewriteInsertValuesSubqueriesAsync(database, ast, ticket).ConfigureAwait(false);
+
                     InsertTicket insertTicket = await sqlExecutor.CreateInsertTicket(executor, database, ticket, ast).ConfigureAwait(false);
 
                     for (int fenceAttempt = 0; ; fenceAttempt++)
@@ -504,7 +508,7 @@ internal sealed class NonQueryStatementDispatcher
                     // The subqueries and the locate scan read at one timestamp; see MintStatementTimestamp.
                     HLCTimestamp? statementTimestamp = MintStatementTimestamp(database, ticket.TxnState);
                     using (StatementSnapshotScope.Open(ticket.TxnState, statementTimestamp))
-                        updateTicket = await RewriteUpdateSubqueriesAsync(database, updateTicket, ticket).ConfigureAwait(false);
+                        updateTicket = await RewriteUpdateSubqueriesAsync(database, updateTicket, ticket, "an UPDATE").ConfigureAwait(false);
 
                     for (int fenceAttempt = 0; ; fenceAttempt++)
                     {
@@ -566,16 +570,16 @@ internal sealed class NonQueryStatementDispatcher
                     // The subqueries and the locate scan read at one timestamp; see MintStatementTimestamp.
                     HLCTimestamp? statementTimestamp = MintStatementTimestamp(database, ticket.TxnState);
 
-                    // Resolve any scalar / IN / NOT IN subquery in the WHERE clause to a literal
-                    // before evaluation (DELETE has no subquery rewrite of its own, unlike SELECT).
-                    // Done once here, outside the fence-retry loop, so the inner query is not
-                    // re-executed on each SchemaCatchingUp retry.
+                    // Resolve any scalar / IN / NOT IN / EXISTS subquery in the WHERE clause to a
+                    // literal before evaluation (DELETE has no per-row EXISTS stage, unlike SELECT, so a
+                    // correlated EXISTS is refused). Done once here, outside the fence-retry loop, so
+                    // the inner query is not re-executed on each SchemaCatchingUp retry.
                     if (deleteTicket.Where is not null)
                     {
                         NodeAst rewrittenWhere;
                         using (StatementSnapshotScope.Open(ticket.TxnState, statementTimestamp))
                             rewrittenWhere = await subqueryRewriter
-                                .RewriteWhereExpressionAsync(database, deleteTicket.Where, ticket)
+                                .RewriteExpressionAsync(database, deleteTicket.Where, ticket, "the WHERE of a DELETE")
                                 .ConfigureAwait(false);
 
                         if (!ReferenceEquals(rewrittenWhere, deleteTicket.Where))
@@ -756,16 +760,99 @@ internal sealed class NonQueryStatementDispatcher
     }
 
     /// <summary>
-    /// Pre-materializes uncorrelated scalar / <c>IN</c> / <c>NOT IN</c> subqueries in an
-    /// <c>UPDATE</c>'s <c>WHERE</c> clause and each <c>SET</c> value into literals, mirroring the
+    /// Replaces every subquery of an INSERT's VALUES rows with its value, at one statement timestamp,
+    /// and returns the INSERT node with the rewritten rows in the same slot (its other slots, the
+    /// ON CONFLICT and RETURNING clauses among them, are carried over). A VALUES row has no outer row,
+    /// so every subquery there is uncorrelated by construction; one that names a column anyway fails
+    /// inside the inner query. Returns the same node when the rows hold no subquery, which is the
+    /// common INSERT, so the statement pays only the scan.
+    ///
+    /// <para>The row spine (<see cref="NodeType.InsertBatchList"/>, left-deep, one node per row) is
+    /// walked with a loop, never by recursion: the parser admits a statement of ten thousand rows
+    /// on the promise that every walker on that path is iterative (<see cref="StatementDepthGuard"/>),
+    /// and a recursive walk ended the process with a stack overflow. Each row is an expression tree
+    /// of bounded depth, so the row itself goes through the ordinary rewrite.</para>
+    /// </summary>
+    private async Task<NodeAst> RewriteInsertValuesSubqueriesAsync(
+        DatabaseDescriptor database, NodeAst ast, ExecuteSQLTicket ticket)
+    {
+        if (ast.extendedOne is null)
+            return ast;
+
+        // The list nodes from the root down; the node below the last one is the first row.
+        List<NodeAst> spine = new();
+        NodeAst firstRow = ast.extendedOne;
+        while (firstRow.nodeType == NodeType.InsertBatchList && firstRow.leftAst is not null)
+        {
+            spine.Add(firstRow);
+            firstRow = firstRow.leftAst;
+        }
+
+        Stack<NodeAst> scratch = new();
+        bool anySubquery = SubqueryNodeScan.Contains(firstRow, SubqueryNodeKinds.All, scratch);
+        for (int i = 0; i < spine.Count && !anySubquery; i++)
+            anySubquery = SubqueryNodeScan.Contains(spine[i].rightAst, SubqueryNodeKinds.All, scratch);
+
+        if (!anySubquery)
+            return ast;
+
+        HLCTimestamp? statementTimestamp = MintStatementTimestamp(database, ticket.TxnState);
+        using StatementSnapshotScope _ = StatementSnapshotScope.Open(ticket.TxnState, statementTimestamp);
+
+        // Rebuilt bottom-up. A list node above an unchanged prefix is reused as it is; from the first
+        // changed row upward every node is new, because its left child is.
+        NodeAst current = await subqueryRewriter.RewriteExpressionAsync(database, firstRow, ticket, "INSERT VALUES").ConfigureAwait(false);
+        bool changed = !ReferenceEquals(current, firstRow);
+
+        for (int i = spine.Count - 1; i >= 0; i--)
+        {
+            NodeAst listNode = spine[i];
+            NodeAst row = listNode.rightAst!;
+            NodeAst rewrittenRow = await subqueryRewriter.RewriteExpressionAsync(database, row, ticket, "INSERT VALUES").ConfigureAwait(false);
+
+            if (!changed && ReferenceEquals(rewrittenRow, row))
+            {
+                current = listNode;
+                continue;
+            }
+
+            changed = true;
+            current = new NodeAst(
+                NodeType.InsertBatchList, current, rewrittenRow,
+                listNode.extendedOne, listNode.extendedTwo, listNode.extendedThree,
+                listNode.extendedFour, listNode.extendedFive, listNode.yytext,
+                listNode.extendedSix, listNode.extendedSeven);
+        }
+
+        if (!changed)
+            return ast;
+
+        return new NodeAst(
+            ast.nodeType,
+            ast.leftAst,
+            ast.rightAst,
+            current,
+            ast.extendedTwo,
+            ast.extendedThree,
+            ast.extendedFour,
+            ast.extendedFive,
+            ast.yytext,
+            ast.extendedSix,
+            ast.extendedSeven);
+    }
+
+    /// <summary>
+    /// Pre-materializes uncorrelated scalar / <c>IN</c> / <c>NOT IN</c> / <c>EXISTS</c> subqueries in
+    /// an <c>UPDATE</c>'s <c>WHERE</c> clause and each <c>SET</c> value into literals, mirroring the
     /// subquery rewrite that <c>SELECT</c> already performs, so the synchronous evaluator in
-    /// <see cref="RowUpdater"/> never sees an unresolved subquery node. Runs once before the
-    /// fence-retry loop so inner queries are not re-executed per retry. Rebuilds the ticket only
-    /// when something actually changed; <c>EXISTS</c> is left intact (see
-    /// <see cref="SubqueryRewriter.RewriteWhereExpressionAsync"/>).
+    /// <see cref="RowUpdater"/> never sees an unresolved subquery node. A correlated <c>EXISTS</c>
+    /// is refused, because an UPDATE has no per-row EXISTS stage (see
+    /// <see cref="SubqueryRewriter.RewriteExpressionAsync"/>); <paramref name="statementKind"/>
+    /// names the statement in that refusal. Runs once before the fence-retry loop so inner queries
+    /// are not re-executed per retry. Rebuilds the ticket only when something actually changed.
     /// </summary>
     internal async Task<UpdateTicket> RewriteUpdateSubqueriesAsync(
-        DatabaseDescriptor database, UpdateTicket ticket, ExecuteSQLTicket sqlTicket)
+        DatabaseDescriptor database, UpdateTicket ticket, ExecuteSQLTicket sqlTicket, string statementKind)
     {
         bool changed = false;
 
@@ -773,7 +860,7 @@ internal sealed class NonQueryStatementDispatcher
         if (newWhere is not null)
         {
             newWhere = await subqueryRewriter
-                .RewriteWhereExpressionAsync(database, newWhere, sqlTicket)
+                .RewriteExpressionAsync(database, newWhere, sqlTicket, $"the WHERE of {statementKind}")
                 .ConfigureAwait(false);
             changed |= !ReferenceEquals(newWhere, ticket.Where);
         }
@@ -788,7 +875,7 @@ internal sealed class NonQueryStatementDispatcher
             foreach (KeyValuePair<string, NodeAst> entry in ticket.ExprValues)
             {
                 NodeAst resolved = await subqueryRewriter
-                    .RewriteWhereExpressionAsync(database, entry.Value, sqlTicket)
+                    .RewriteExpressionAsync(database, entry.Value, sqlTicket, $"a SET value of {statementKind}")
                     .ConfigureAwait(false);
 
                 if (rewritten is not null)

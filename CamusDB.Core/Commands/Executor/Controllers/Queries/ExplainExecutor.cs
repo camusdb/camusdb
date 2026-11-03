@@ -25,11 +25,12 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 /// returning one result row per physical plan node.
 ///
 /// KNOWN LIMITATION — subquery materialization during EXPLAIN:
-/// The prepare pipeline calls SubqueryRewriter.RewriteSelectQueryAsync (which executes
-/// scalar and IN/NOT-IN subqueries against storage to fold them into literals) and
-/// ExistsSubqueryPreparer.PrepareAsync (which may run uncorrelated EXISTS checks).
-/// As a result, EXPLAIN SELECT ... WHERE x IN (SELECT ...) performs real storage reads
-/// for the inner subquery, even though the outer table is never scanned.
+/// The prepare pipeline calls SubqueryRewriter.RewriteSelectQueryAsync (which executes the
+/// uncorrelated subqueries of the WHERE, the select list, the HAVING and the JOIN ON predicates
+/// against storage to fold them into literals) and ExistsSubqueryPreparer.PrepareAsync (which
+/// may run uncorrelated EXISTS checks of the WHERE). As a result, EXPLAIN SELECT ... WHERE x IN
+/// (SELECT ...) performs real storage reads for the inner subquery, even though the outer table
+/// is never scanned.
 ///
 /// This is reads-only (no mutation) and affects only queries that contain subqueries.
 /// A plan-only mode that leaves subquery nodes symbolic is deferred until the subquery

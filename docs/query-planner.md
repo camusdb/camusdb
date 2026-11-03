@@ -225,7 +225,12 @@ operators.
 predicate and, for **uncorrelated** scalar / `IN` / `NOT IN` subqueries, *executes the inner query once*,
 materializes its result, and replaces the subquery AST with a constant or a `SubqueryValueListAst`
 membership node. This lets the downstream filterer treat `IN` as a plain value-list check.
-`NOT IN` carries three-valued (NULL-aware) semantics. `EXISTS` is left in place for stage 3b.
+`NOT IN` carries three-valued (NULL-aware) semantics. In the `WHERE`, `EXISTS` is left in place for
+stage 3b. The select list, the `HAVING` and every `JOIN ON` predicate are rewritten the same way,
+`EXISTS` included, because those positions have no per-row stage; a correlated `EXISTS` there is
+refused with `FeatureNotSupported`. The walk visits every child slot of a node (a `CASE` keeps its
+`ELSE` in one, a `BETWEEN` its bounds), so a subquery at any depth is folded. The same rewriter
+serves `UPDATE`, `DELETE`, `INSERT VALUES` and `ON CONFLICT DO UPDATE`, which have no bind pipeline.
 *Note:* because this stage executes inner subqueries, a query with a subquery does touch storage during
 planning — relevant to `EXPLAIN` (see Part III).
 
@@ -260,10 +265,15 @@ Binding, in order:
    in `GROUP BY`.
 6. **Validate JOIN `ON` predicates** — column references must resolve to the joined sources.
 
-**Stage 3b — EXISTS preparation (`ExistsSubqueryPreparer`).** Walks `WHERE`/`HAVING` for `EXISTS(...)`
-nodes and registers an executor per subquery in an `ExistsSubqueryRegistry` threaded into `QueryTicket`.
-Uncorrelated `EXISTS` is evaluated once; correlated `EXISTS` is evaluated per outer row by
-`QueryFilterer`, with the outer row's qualified columns injected into the subquery scope.
+**Stage 3b — EXISTS preparation (`ExistsSubqueryPreparer`).** Walks the `WHERE` for `EXISTS(...)`
+nodes, at any depth, and registers an executor per correlated subquery in an `ExistsSubqueryRegistry`
+threaded into `QueryTicket`. Uncorrelated `EXISTS` is evaluated once; correlated `EXISTS` is evaluated
+per outer row by `QueryFilterer`, with the outer row's qualified columns injected into the subquery
+scope. Under `AND`, `OR` and `NOT` the filterer evaluates it in place; under any other node (a `CASE`
+branch, a comparison operand, an `IS NULL` test) it answers each correlated `EXISTS` for the row first
+and evaluates a copy of the subtree with the answers in place. A `WHERE` conjunct that holds a
+correlated `EXISTS` is never pushed to one table's scan in a join: the outer columns it reads are not
+visible in the predicate, so it is evaluated after the join, where every column is present.
 
 ## Stage 4 — Physical Planning
 

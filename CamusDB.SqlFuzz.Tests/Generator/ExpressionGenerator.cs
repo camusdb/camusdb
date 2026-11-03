@@ -14,20 +14,20 @@ internal sealed record ScopeColumn(string? Source, string Column, FuzzType Type)
 /// The columns an expression may read, and the tables a subquery may read. <see cref="Outer"/> holds
 /// the columns of the enclosing query, for a correlated subquery.
 ///
-/// <para><see cref="AllowSubqueries"/> is true only for a WHERE predicate, and only above the first
-/// node that is not AND, OR or NOT. CamusDB resolves an EXISTS or IN subquery only as a WHERE
-/// conjunct; inside a CASE, a comparison operand, an IS NULL test, an ON clause or a projection it
-/// refuses the statement with an internal-error code. That refusal is a known issue
-/// (<see cref="Runner.ErrorClassifier.KnownIssues"/>), and a generator that hits it on every statement
-/// would hide everything else.</para>
+/// <para><see cref="AllowSubqueries"/> is true for the positions where CamusDB evaluates a subquery:
+/// a WHERE, an ON clause, a select list and an oracle predicate, at any depth of the expression (a
+/// CASE branch, a comparison operand, an IS NULL test). <see cref="AllowCorrelation"/> is true only
+/// for the WHERE of a SELECT: that is the one position where CamusDB evaluates a correlated EXISTS
+/// per row. In every other position a correlated EXISTS is refused with CADB0533, and a correlated
+/// IN is refused everywhere, so the generator writes only uncorrelated subqueries there.</para>
 /// </summary>
-internal sealed record ExprScope(IReadOnlyList<ScopeColumn> Columns, IReadOnlyList<TableDef> Tables, ExprScope? Outer = null, int SubqueryDepth = 0, bool AllowSubqueries = false)
+internal sealed record ExprScope(IReadOnlyList<ScopeColumn> Columns, IReadOnlyList<TableDef> Tables, ExprScope? Outer = null, int SubqueryDepth = 0, bool AllowSubqueries = false, bool AllowCorrelation = false)
 {
-    /// <summary>This scope for a WHERE predicate: subqueries allowed.</summary>
-    public ExprScope ForWhere() => AllowSubqueries ? this : this with { AllowSubqueries = true };
+    /// <summary>This scope for the WHERE of a SELECT: subqueries allowed, a correlated EXISTS among them.</summary>
+    public ExprScope ForSelectWhere() => this with { AllowSubqueries = true, AllowCorrelation = true };
 
-    /// <summary>This scope below a node that is not AND, OR or NOT: no subqueries.</summary>
-    public ExprScope Nested() => AllowSubqueries ? this with { AllowSubqueries = false } : this;
+    /// <summary>This scope for an ON clause, a select list, a DML WHERE or an oracle predicate: uncorrelated subqueries only.</summary>
+    public ExprScope ForUncorrelatedSubqueries() => this with { AllowSubqueries = true, AllowCorrelation = false };
 
     public IEnumerable<ScopeColumn> OfType(FuzzType type) => Columns.Where(c => c.Type == type);
 
@@ -70,9 +70,6 @@ internal sealed class ExpressionGenerator
     /// <summary>An expression of exactly <paramref name="type"/>.</summary>
     public Expr Generate(FuzzType type, ExprScope scope, int depth)
     {
-        if (type != FuzzType.Bool)
-            scope = scope.Nested();
-
         if (depth >= profile.MaxExpressionDepth || random.Chance(0.25 + 0.15 * depth))
             return Leaf(type, scope);
 
@@ -135,26 +132,25 @@ internal sealed class ExpressionGenerator
 
     private Expr BoolExpr(ExprScope scope, int depth)
     {
-        ExprScope nested = scope.Nested();
         for (int attempt = 0; attempt < 8; attempt++)
         {
             int roll = random.Next(100);
             Expr? result = roll switch
             {
-                < 34 => Comparison(nested, depth),
+                < 34 => Comparison(scope, depth),
                 < 46 => Logical(scope, depth),
                 < 52 => profile.Allows(UnaryOp.Not) ? new UnaryExpr(UnaryOp.Not, Generate(FuzzType.Bool, scope, depth + 1)) : null,
-                < 59 => NullTest(nested, depth),
-                < 62 => TruthTest(nested, depth),
-                < 68 => InList(nested, depth),
-                < 73 => Between(nested, depth),
-                < 78 => Like(nested, depth),
-                < 81 => StringPredicate(nested, depth),
+                < 59 => NullTest(scope, depth),
+                < 62 => TruthTest(scope, depth),
+                < 68 => InList(scope, depth),
+                < 73 => Between(scope, depth),
+                < 78 => Like(scope, depth),
+                < 81 => StringPredicate(scope, depth),
                 < 85 => Exists(scope),
                 < 88 => InSubquery(scope, depth),
-                < 91 => JsonContains(nested, depth),
-                < 94 => Conditional(FuzzType.Bool, nested, depth),
-                _ => Leaf(FuzzType.Bool, nested),
+                < 91 => JsonContains(scope, depth),
+                < 94 => Conditional(FuzzType.Bool, scope, depth),
+                _ => Leaf(FuzzType.Bool, scope),
             };
             if (result is not null)
                 return result;
@@ -284,7 +280,8 @@ internal sealed class ExpressionGenerator
 
     /// <summary>
     /// A one-table subquery with a WHERE. Its alias is unique in the statement. It may read the outer
-    /// columns when the profile allows correlation.
+    /// columns when the position allows correlation (<see cref="ExprScope.AllowCorrelation"/>) and
+    /// the profile allows it.
     /// </summary>
     private (SelectStmt Query, bool Ok) Subquery(ExprScope scope, Func<ExprScope, IReadOnlyList<SelectItem>?> items, bool correlated = true)
     {
@@ -293,7 +290,7 @@ internal sealed class ExpressionGenerator
         ExprScope inner = new(
             table.Columns.Select(c => new ScopeColumn(alias, c.Name, c.Type)).ToList(),
             scope.Tables,
-            correlated && profile.Allows(ExprFeature.CorrelatedSubquery) ? scope.Nested() : null,
+            correlated && scope.AllowCorrelation && profile.Allows(ExprFeature.CorrelatedSubquery) ? scope : null,
             scope.SubqueryDepth + 1);
 
         IReadOnlyList<SelectItem>? list = items(inner);

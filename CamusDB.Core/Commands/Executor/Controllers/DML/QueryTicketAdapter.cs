@@ -324,28 +324,8 @@ internal static class QueryTicketAdapter
     /// with the bound-query cache's shape check: a WHERE that carries a subquery is rewritten with
     /// materialized data values, so its bound form must never be reused across executions.
     /// </summary>
-    internal static bool ContainsSubquery(NodeAst? expression)
-    {
-        if (expression is null)
-            return false;
-
-        if (expression.nodeType is NodeType.ExprScalarSubquery
-            or NodeType.ExprInSubquery
-            or NodeType.ExprNotInSubquery
-            or NodeType.ExprExistsSubquery
-            or NodeType.ExprExistsCorrelated)
-        {
-            return true;
-        }
-
-        return ContainsSubquery(expression.leftAst)
-            || ContainsSubquery(expression.rightAst)
-            || ContainsSubquery(expression.extendedOne)
-            || ContainsSubquery(expression.extendedTwo)
-            || ContainsSubquery(expression.extendedThree)
-            || ContainsSubquery(expression.extendedFour)
-            || ContainsSubquery(expression.extendedFive);
-    }
+    internal static bool ContainsSubquery(NodeAst? expression) =>
+        SubqueryNodeScan.Contains(expression, SubqueryNodeKinds.All);
 
     /// <summary>
     /// Short label for an expression key. It exists for error messages only — an expression clause is

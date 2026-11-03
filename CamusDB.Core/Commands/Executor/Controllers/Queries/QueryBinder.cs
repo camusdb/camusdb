@@ -6,6 +6,7 @@
  * file that was distributed with this source code.
  */
 
+using CamusDB.Core.CommandsExecutor.Controllers.DML;
 using CamusDB.Core.CommandsExecutor.Controllers.Functions;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Queries;
@@ -110,6 +111,11 @@ internal sealed class QueryBinder
         {
             foreach (NodeAst groupExpr in query.GroupBy)
             {
+                // A group key is matched to the select list by its shape, and the subquery rewrite
+                // does not visit it, so a subquery there would reach the evaluator unresolved.
+                if (QueryTicketAdapter.ContainsSubquery(groupExpr))
+                    throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "GROUP BY does not support subqueries");
+
                 ValidateNoAggregateInPreAggregateScope(groupExpr, "GROUP BY");
                 ValidateExpression(groupExpr, rowNames);
             }
@@ -497,6 +503,11 @@ internal sealed class QueryBinder
         {
             foreach (NodeAst groupExpr in query.GroupBy)
             {
+                // A group key is matched to the select list by its shape, and the subquery rewrite
+                // does not visit it, so a subquery there would reach the evaluator unresolved.
+                if (QueryTicketAdapter.ContainsSubquery(groupExpr))
+                    throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "GROUP BY does not support subqueries");
+
                 ValidateNoAggregateInPreAggregateScope(groupExpr, "GROUP BY");
                 ValidateExpression(groupExpr, rowNames);
             }

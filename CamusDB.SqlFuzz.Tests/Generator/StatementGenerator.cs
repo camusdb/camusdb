@@ -346,7 +346,7 @@ internal sealed class StatementGenerator
             Expr? on = null;
             if (kind != JoinKind.Cross)
             {
-                ExprScope onScope = new(joined, State.Tables);
+                ExprScope onScope = new ExprScope(joined, State.Tables).ForUncorrelatedSubqueries();
                 on = EquiJoin(columns, rightColumns, force: needsEquality || tableCount == 3) ?? expressions.Predicate(onScope);
                 if (random.Chance(0.25))
                     on = new BinaryExpr(BinaryOp.And, on, expressions.Predicate(onScope), FuzzType.Bool);
@@ -402,7 +402,7 @@ internal sealed class StatementGenerator
             else
             {
                 FuzzType type = random.Pick(profile.Types.ToList());
-                items.Add(new SelectItem(expressions.Generate(type, scope, 1), "o" + i));
+                items.Add(new SelectItem(expressions.Generate(type, scope.ForUncorrelatedSubqueries(), 1), "o" + i));
             }
         }
         return items;
@@ -412,7 +412,7 @@ internal sealed class StatementGenerator
     public SelectStmt GenerateSelect(SelectOptions options)
     {
         (FromItem from, ExprScope scope) = GenerateFrom(options);
-        Expr? where = random.Chance(0.75) ? expressions.Predicate(scope.ForWhere()) : null;
+        Expr? where = random.Chance(0.75) ? expressions.Predicate(scope.ForSelectWhere()) : null;
 
         if (options.AllowAggregates && profile.Allows(StatementFeature.GroupBy) && random.Chance(0.2))
             return GroupedSelect(from, scope, where);
@@ -682,7 +682,7 @@ internal sealed class StatementGenerator
 
         // At most a few rows per copy: repeated copies of a whole table double it each time, and a later
         // join of three such tables reads millions of rows and passes the statement time limit.
-        Expr where = expressions.Predicate(scope.ForWhere());
+        Expr where = expressions.Predicate(scope.ForSelectWhere());
         return new InsertSelectStmt(table.Name, table.Columns.Select(c => c.Name).ToList(), new SelectStmt(items, new TableRef(table.Name, "s"), where,
             OrderBy: [new OrderItem(new ColumnExpr("s", table.PrimaryKey.Name, table.PrimaryKey.Type), false)], Limit: random.Between(1, 5)));
     }
@@ -691,9 +691,12 @@ internal sealed class StatementGenerator
     public ExprScope DmlScope(TableDef table) =>
         new(table.Columns.Select(c => new ScopeColumn(null, c.Name, c.Type)).ToList(), State.Tables);
 
-    /// <summary>A WHERE for UPDATE or DELETE. About one in twenty is <c>WHERE TRUE</c>, the full-table form.</summary>
+    /// <summary>
+    /// A WHERE for UPDATE or DELETE. About one in twenty is <c>WHERE TRUE</c>, the full-table form. Its
+    /// subqueries are uncorrelated: an UPDATE or DELETE has no per-row EXISTS stage.
+    /// </summary>
     public Expr DmlWhere(ExprScope scope) =>
-        random.Chance(0.05) ? new LiteralExpr(FuzzValue.Of(true)) : expressions.Predicate(scope.ForWhere());
+        random.Chance(0.05) ? new LiteralExpr(FuzzValue.Of(true)) : expressions.Predicate(scope.ForUncorrelatedSubqueries());
 
     /// <summary>
     /// A new value for <paramref name="column"/> of exactly its type. A generated value for a NOT NULL

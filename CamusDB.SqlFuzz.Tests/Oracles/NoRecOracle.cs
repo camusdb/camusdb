@@ -186,6 +186,7 @@ internal sealed class NoRecOracle : IOracle
     {
         (FromItem from, ExprScope scope) = generator.GenerateFrom(SelectOptions.Comparable);
         bool rows = generator.Random.Chance(0.4);
-        return new NoRecCheck(rows, from, rows ? generator.GenerateProjection(scope) : [], generator.Expressions.Predicate(scope));
+        // The unoptimized form puts the predicate in a projection, where only an uncorrelated subquery runs.
+        return new NoRecCheck(rows, from, rows ? generator.GenerateProjection(scope) : [], generator.Expressions.Predicate(scope.ForUncorrelatedSubqueries()));
     }
 }

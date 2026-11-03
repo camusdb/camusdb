@@ -37,9 +37,9 @@ internal sealed class TestNestedJoinWithNoReadColumns : BaseTest
         await db.Write("INSERT INTO t0 (c0) VALUES (1), (2)");
 
         Assert.That(await db.Rows("SELECT a2.c0 FROM t0 AS a0 CROSS JOIN t0 AS a1 CROSS JOIN t0 AS a2"),
-            Is.EqualTo(new List<string> { "i:1", "i:1", "i:1", "i:1", "i:2", "i:2", "i:2", "i:2" }));
+            Is.EqualTo(new List<string> { "3:i:1", "3:i:1", "3:i:1", "3:i:1", "3:i:2", "3:i:2", "3:i:2", "3:i:2" }));
         Assert.That(await db.Rows("SELECT COUNT(*) FROM t0 AS a0 CROSS JOIN t0 AS a1 CROSS JOIN t0 AS a2"),
-            Is.EqualTo(new List<string> { "i:8" }));
+            Is.EqualTo(new List<string> { "3:i:8" }));
     }
 
     [Test]
@@ -56,6 +56,6 @@ internal sealed class TestNestedJoinWithNoReadColumns : BaseTest
 
         // t0 RIGHT JOIN t0 ON FALSE gives one padded row, so each t1 row appears once.
         Assert.That(await db.Rows("SELECT a2.c4 AS g0, SUM(a2.c4) AS x0 FROM t0 AS a0 RIGHT JOIN t0 AS a1 ON FALSE CROSS JOIN t1 AS a2 GROUP BY a2.c4"),
-            Is.EqualTo(new List<string> { "NULL␟NULL", "i:5␟i:10" }));
+            Is.EqualTo(new List<string> { "3:i:5 4:i:10", "4:NULL 4:NULL" }));
     }
 }

@@ -44,25 +44,20 @@ internal sealed class ExistsSubqueryPreparer
     {
         // No EXISTS anywhere in the WHERE (or no WHERE): the rewrite walk would traverse every node
         // — allocating a Task and a state-machine box per node per statement execution — only to
-        // return the same references. The scan mirrors the walk's own left/right traversal, so an
-        // expression it clears is one the walk would have left untouched.
+        // return the same references. The scan mirrors the walk's own traversal of every child slot,
+        // so an expression it clears is one the walk would have left untouched.
         if (query.Where is null || !ContainsExistsSubquery(query.Where.Expression))
             return new ValueTask<(SelectQuery, ExistsSubqueryRegistry?)>((query, null));
 
         return PrepareCoreAsync(database, query, outerTableSources, outerDerivedSources, ticket, nested);
     }
 
-    /// <summary>Returns true when <paramref name="expr"/> or a left/right descendant is an EXISTS subquery.</summary>
-    private static bool ContainsExistsSubquery(NodeAst expr)
-    {
-        if (expr.nodeType == NodeType.ExprExistsSubquery)
-            return true;
-
-        if (expr.leftAst is not null && ContainsExistsSubquery(expr.leftAst))
-            return true;
-
-        return expr.rightAst is not null && ContainsExistsSubquery(expr.rightAst);
-    }
+    /// <summary>
+    /// Returns true when <paramref name="expr"/> or any descendant is an EXISTS subquery. Every child
+    /// slot is visited: a CASE keeps its ELSE result in <c>extendedOne</c>, and an EXISTS there must
+    /// be prepared like one under a comparison.
+    /// </summary>
+    private static bool ContainsExistsSubquery(NodeAst expr) => SubqueryNodeScan.Contains(expr, SubqueryNodeKinds.Exists);
 
     private async ValueTask<(SelectQuery Query, ExistsSubqueryRegistry? Registry)> PrepareCoreAsync(
         DatabaseDescriptor database,
@@ -159,30 +154,55 @@ internal sealed class ExistsSubqueryPreparer
             return correlatedNode;
         }
 
-        NodeAst? left = expr.leftAst is not null
-            ? await RewriteExpressionAsync(database, expr.leftAst, outerTableSources, outerDerivedSources, ticket, context)
-                .ConfigureAwait(false)
-            : null;
+        NodeAst? left = await RewriteChildAsync(database, expr.leftAst, outerTableSources, outerDerivedSources, ticket, context).ConfigureAwait(false);
+        NodeAst? right = await RewriteChildAsync(database, expr.rightAst, outerTableSources, outerDerivedSources, ticket, context).ConfigureAwait(false);
+        NodeAst? one = await RewriteChildAsync(database, expr.extendedOne, outerTableSources, outerDerivedSources, ticket, context).ConfigureAwait(false);
+        NodeAst? two = await RewriteChildAsync(database, expr.extendedTwo, outerTableSources, outerDerivedSources, ticket, context).ConfigureAwait(false);
+        NodeAst? three = await RewriteChildAsync(database, expr.extendedThree, outerTableSources, outerDerivedSources, ticket, context).ConfigureAwait(false);
+        NodeAst? four = await RewriteChildAsync(database, expr.extendedFour, outerTableSources, outerDerivedSources, ticket, context).ConfigureAwait(false);
+        NodeAst? five = await RewriteChildAsync(database, expr.extendedFive, outerTableSources, outerDerivedSources, ticket, context).ConfigureAwait(false);
+        NodeAst? six = await RewriteChildAsync(database, expr.extendedSix, outerTableSources, outerDerivedSources, ticket, context).ConfigureAwait(false);
+        NodeAst? seven = await RewriteChildAsync(database, expr.extendedSeven, outerTableSources, outerDerivedSources, ticket, context).ConfigureAwait(false);
 
-        NodeAst? right = expr.rightAst is not null
-            ? await RewriteExpressionAsync(database, expr.rightAst, outerTableSources, outerDerivedSources, ticket, context)
-                .ConfigureAwait(false)
-            : null;
-
-        if (ReferenceEquals(left, expr.leftAst) && ReferenceEquals(right, expr.rightAst))
+        if (ReferenceEquals(left, expr.leftAst)
+            && ReferenceEquals(right, expr.rightAst)
+            && ReferenceEquals(one, expr.extendedOne)
+            && ReferenceEquals(two, expr.extendedTwo)
+            && ReferenceEquals(three, expr.extendedThree)
+            && ReferenceEquals(four, expr.extendedFour)
+            && ReferenceEquals(five, expr.extendedFive)
+            && ReferenceEquals(six, expr.extendedSix)
+            && ReferenceEquals(seven, expr.extendedSeven))
+        {
             return expr;
+        }
 
-        return new NodeAst(
-            expr.nodeType,
-            left,
-            right,
-            expr.extendedOne,
-            expr.extendedTwo,
-            expr.extendedThree,
-            expr.extendedFour,
-            expr.extendedFive,
-            expr.yytext);
+        return new NodeAst(expr.nodeType, left, right, one, two, three, four, five, expr.yytext, six, seven);
     }
+
+    /// <summary>Rewrites one child slot; a null slot stays null without a walk.</summary>
+    private ValueTask<NodeAst?> RewriteChildAsync(
+        DatabaseDescriptor database,
+        NodeAst? child,
+        IReadOnlyList<BoundTableSource> outerTableSources,
+        IReadOnlyList<BoundDerivedTableSource> outerDerivedSources,
+        ExecuteSQLTicket ticket,
+        ExistsRewriteContext context)
+    {
+        if (child is null)
+            return new ValueTask<NodeAst?>((NodeAst?)null);
+
+        return RewriteChildCoreAsync(database, child, outerTableSources, outerDerivedSources, ticket, context);
+    }
+
+    private async ValueTask<NodeAst?> RewriteChildCoreAsync(
+        DatabaseDescriptor database,
+        NodeAst child,
+        IReadOnlyList<BoundTableSource> outerTableSources,
+        IReadOnlyList<BoundDerivedTableSource> outerDerivedSources,
+        ExecuteSQLTicket ticket,
+        ExistsRewriteContext context)
+        => await RewriteExpressionAsync(database, child, outerTableSources, outerDerivedSources, ticket, context).ConfigureAwait(false);
 
     private async Task<PreparedExistsSubquery> PrepareCorrelatedAsync(
         DatabaseDescriptor database,

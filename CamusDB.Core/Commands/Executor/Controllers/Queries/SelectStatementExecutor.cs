@@ -1283,13 +1283,16 @@ internal sealed class SelectStatementExecutor
 
         // Shape eligibility, decided from the AST alone so the decision is stable across
         // executions. Excluded here: AS OF SYSTEM TIME (per-execution snapshot), cache hints
-        // (result-cache path), non-table sources, subqueries in the WHERE, and session-scoped
-        // functions (conservatively excluded until their reuse is proven safe).
+        // (result-cache path), non-table sources, subqueries in the WHERE, the select list or the
+        // HAVING (each is folded into per-execution data), and session-scoped functions
+        // (conservatively excluded until their reuse is proven safe).
         bool cacheCandidate = attemptCache
             && ast.extendedSeven is null
             && selectQuery.CacheHint is null
             && selectQuery.Source is TableSource
             && (selectQuery.Where is null || !QueryTicketAdapter.ContainsSubquery(selectQuery.Where.Expression))
+            && (selectQuery.Having is null || !QueryTicketAdapter.ContainsSubquery(selectQuery.Having.Expression))
+            && !ProjectionsContainSubquery(selectQuery.Projections)
             && !ScalarFunctionEvaluator.ContainsSessionScopedFunction(ast);
 
         // Schema stamp, read before the bind pipeline runs and re-checked at store time. Version
@@ -1674,7 +1677,7 @@ internal sealed class SelectStatementExecutor
             // Pre-materialize any uncorrelated projection subquery (EXISTS / scalar / IN) into a
             // literal so the synchronous evaluator only ever sees literals.
             NodeAst resolved = await subqueryRewriter
-                .RewriteProjectionExpressionAsync(database, valueExpr, ticket)
+                .RewriteExpressionAsync(database, valueExpr, ticket, "the select list")
                 .ConfigureAwait(false);
 
             // No binding runs for a FROM-less SELECT, so its CASE, COALESCE, IFNULL and IF are checked
@@ -1978,6 +1981,18 @@ internal sealed class SelectStatementExecutor
     /// the common case and the one the surfacing contract currently covers; extend this walk
     /// if inner hints in those other positions need to be surfaced too.</para>
     /// </summary>
+    /// <summary>True when one select-list expression holds a subquery of any kind.</summary>
+    private static bool ProjectionsContainSubquery(IReadOnlyList<ProjectionItem> projections)
+    {
+        for (int i = 0; i < projections.Count; i++)
+        {
+            if (QueryTicketAdapter.ContainsSubquery(projections[i].Expression))
+                return true;
+        }
+
+        return false;
+    }
+
     internal static CacheHintOptions? FindInnerSubqueryCacheHint(NodeAst? node)
     {
         if (node is null)
