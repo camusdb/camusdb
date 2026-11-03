@@ -193,11 +193,15 @@ public sealed class ElleWriteLedger
     /// <summary>
     /// Judges the final registers. <paramref name="countMismatches"/> is the predicate shape's count of
     /// group reads whose <c>COUNT(*)</c> disagreed with the rows the same transaction selected; the
-    /// other shapes pass 0. <paramref name="extraFailures"/> are findings the reader made itself, such
-    /// as a group whose access paths disagreed as sets.
+    /// other shapes pass 0. It fails the state only when <paramref name="countMismatchesFail"/> is set:
+    /// one snapshot per transaction (serializable) must answer both statements alike, one snapshot per
+    /// statement (read committed) need not, and the count is then a measurement carried in the result.
+    /// <paramref name="extraFailures"/> are findings the reader made itself, such as a group whose
+    /// access paths disagreed as sets.
     /// </summary>
     public QuiescentResult JudgeRegisters(
-        IReadOnlyList<FinalRegister> finals, long countMismatches = 0, IReadOnlyList<string>? extraFailures = null)
+        IReadOnlyList<FinalRegister> finals, long countMismatches = 0, IReadOnlyList<string>? extraFailures = null,
+        bool countMismatchesFail = true)
     {
         List<string> failures = extraFailures is null ? [] : [.. extraFailures];
         long present = 0, lost = 0, aborted = 0, garbage = 0, duplicates = 0, mismatches = 0, stale = 0;
@@ -274,7 +278,7 @@ public sealed class ElleWriteLedger
                     Note(failures, $"key {key}: was written but never read back");
             }
 
-            if (countMismatches > 0)
+            if (countMismatches > 0 && countMismatchesFail)
                 failures.Add($"{countMismatches:N0} group read(s) whose COUNT(*) disagreed with the rows the same transaction selected");
 
             return new QuiescentResult(

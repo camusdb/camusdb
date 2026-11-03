@@ -921,6 +921,7 @@ public static class Program
                 $"{quiescent.FailWrites:N0} refused write(s); {quiescent.LostWrites:N0} lost, {quiescent.AbortedVisible:N0} refused-but-visible, " +
                 $"{quiescent.GarbageValues:N0} garbage, {quiescent.DuplicateRows:N0} duplicate row(s), {quiescent.PathMismatches:N0} path mismatch(es), " +
                 $"{quiescent.RealtimeStaleFinals:N0} real-time stale final(s)" +
+                (quiescent.CountMismatches > 0 ? $", {quiescent.CountMismatches:N0} COUNT(*) disagreement(s)" : "") +
                 (quiescent.Status == "verified" ? "" : $" — {quiescent.Status}"));
         }
 

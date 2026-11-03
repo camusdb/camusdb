@@ -240,6 +240,23 @@ public sealed class ElleRegisterTests
         Assert.That(extra.Failures, Has.Some.Contains("the table holds 3 rows"));
     }
 
+    /// <summary>A group read's COUNT(*) must match its SELECT under one snapshot per transaction; under
+    /// one snapshot per statement the disagreement is a measurement, carried but not graded.</summary>
+    [Test]
+    public void RegisterJudgeFailsCountMismatchesOnlyWhenTheTransactionHasOneSnapshot()
+    {
+        ElleWriteLedger ledger = LedgerWith((1, 10, ElleOutcome.Ok, 0, 5));
+
+        QuiescentResult graded = ledger.JudgeRegisters([Final(1, 10)], countMismatches: 7);
+        Assert.That(graded.Passed, Is.False);
+        Assert.That(graded.CountMismatches, Is.EqualTo(7));
+        Assert.That(graded.Failures, Has.Some.Contains("COUNT(*)"));
+
+        QuiescentResult measured = ledger.JudgeRegisters([Final(1, 10)], countMismatches: 7, countMismatchesFail: false);
+        Assert.That(measured.Passed, Is.True, string.Join("; ", measured.Failures));
+        Assert.That(measured.CountMismatches, Is.EqualTo(7));
+    }
+
     [Test]
     public void ListJudgeRequiresEveryAcknowledgedAppendOnce()
     {

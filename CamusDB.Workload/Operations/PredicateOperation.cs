@@ -495,7 +495,11 @@ public sealed class PredicateOperation : IWriteOperation, IReadOperation
                     $"the table holds {rowsInRange:N0} row(s) in this run's key range, but {present:N0} of the run's keys are present; " +
                     (rowsInRange > present ? "an extra row exists that no group read reaches" : "a counted row is missing"));
 
-            return _ledger.JudgeRegisters(all, CountMismatches, extra);
+            // COUNT(*) beside the SELECT must agree under one snapshot per transaction. Read committed
+            // gives each statement its own snapshot, so a disagreement there is a measurement, not a
+            // defect; it still travels in the result for the report.
+            bool oneSnapshot = _readWrite.IsolationLevel == CamusIsolationLevel.Serializable;
+            return _ledger.JudgeRegisters(all, CountMismatches, extra, countMismatchesFail: oneSnapshot);
         }
         catch (Exception ex) when (!ct.IsCancellationRequested)
         {
