@@ -374,4 +374,58 @@ public sealed class TestSpillByteThreshold : SharedNodeBaseTest
             Enumerable.Range(0, 10).Select(i => Wide("v" + i)),
             (await list.EnumerateAsync().ToListAsync()).Select(v => v.StrValue));
     }
+
+    /// <summary>
+    /// A <c>jsonb_agg</c> state grows with its group, and the growth is charged to the byte cap. Groups
+    /// 0..8 arrive first with four wide rows each: the group keys and fixed state hints stay far under
+    /// the 32 KiB cap, but the 36 collected strings pass it. When group 9 arrives, the GROUP BY must
+    /// spill. Before the growth was charged, it admitted group 9 and held every collected value in
+    /// memory. The result must equal the spill-off result.
+    /// </summary>
+    [Test]
+    public async Task GroupBy_JsonbAggStateGrowth_ChargesTheByteCap()
+    {
+        async Task<Fixture> SetupGroups(CamusDBOptions options)
+        {
+            (string dbname, DatabaseDescriptor db, CommandExecutor executor) = await CreateDatabase(options);
+
+            KvTransaction ddl = await db.Transactions.BeginAsync();
+            await executor.ExecuteDDLSQL(new ExecuteSQLTicket(ddl, db.Name,
+                "CREATE TABLE agg_docs (id OID NOT NULL, g int64, payload string, PRIMARY KEY (id))", null));
+
+            for (int i = 0; i < RowCount; i++)
+            {
+                KvTransaction tx = await db.Transactions.BeginAsync();
+                await executor.ExecuteNonSQLQuery(new ExecuteSQLTicket(tx, db.Name,
+                    "INSERT INTO agg_docs (id, g, payload) VALUES (@id, @g, @payload)",
+                    new()
+                    {
+                        { "@id", new(ColumnType.Id, ObjectIdGenerator.Generate().ToString()) },
+                        { "@g", new(ColumnType.Integer64, (long)(i / 4)) },
+                        { "@payload", new(ColumnType.String, Wide("p" + i)) },
+                    }));
+                await db.Transactions.CommitAsync(tx);
+            }
+
+            return new Fixture(dbname, db, executor);
+        }
+
+        const string sql = "SELECT g, jsonb_agg(payload) AS docs FROM agg_docs GROUP BY g";
+
+        Fixture spilling = await SetupGroups(SpillOnBytes);
+        (List<QueryResultRow> rows, bool spilled) = await RunProbed(spilling, sql);
+        Assert.IsTrue(spilled, "the collected values of groups 0..8 pass the 32 KiB cap before group 9 arrives");
+
+        Fixture reference = await SetupGroups(SpillOff);
+        (List<QueryResultRow> expected, bool referenceSpilled) = await RunProbed(reference, sql);
+        Assert.IsFalse(referenceSpilled);
+
+        static List<string> Canonical(List<QueryResultRow> result) => result
+            .Select(r => r.Row["g"].LongValue + "=" + r.Row["docs"].JsonValue)
+            .OrderBy(x => x, StringComparer.Ordinal)
+            .ToList();
+
+        Assert.AreEqual(GroupCount, rows.Count);
+        Assert.AreEqual(Canonical(expected), Canonical(rows));
+    }
 }

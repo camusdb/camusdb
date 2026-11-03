@@ -26,19 +26,92 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Functions;
 /// NULL key of <c>jsonb_object_agg</c> is an error; a repeated key keeps its last value. The order of
 /// <c>jsonb_agg</c> is the order the rows reach the aggregate; <c>ORDER BY</c> inside the call is not
 /// supported.</para>
+///
+/// <para><b>Memory.</b> A state grows with its group, and one group's state cannot spill. Each state
+/// reports its size (<see cref="IMeasuredAggregateState"/>), so a spilling GROUP BY counts the growth
+/// of many groups, and refuses a group whose elements pass <see cref="JsonbLimits.MaxDocumentBytes"/>
+/// with <see cref="CamusDBErrorCodes.JsonbValueTooLarge"/>.</para>
 /// </summary>
 internal static class JsonbAggregates
 {
     private const int StateSizeBytes = 256;
 
-    private sealed class ArrayState
+    /// <summary>Estimated heap overhead of one retained item: its array object and its list slot.</summary>
+    private const int ItemOverheadBytes = 40;
+
+    /// <summary>Estimated heap overhead of one dictionary entry and its key string object.</summary>
+    private const int EntryOverheadBytes = 64;
+
+    /// <summary>
+    /// The items of one <c>jsonb_agg</c> group, in arrival order. They must all be kept until the group
+    /// finishes, so the state counts their bytes and refuses a group whose elements pass
+    /// <see cref="JsonbLimits.MaxDocumentBytes"/>.
+    /// </summary>
+    private sealed class ArrayState : IMeasuredAggregateState
     {
         public readonly List<byte[]> Items = [];
+
+        private long elementBytes;
+
+        public long RetainedBytes => elementBytes + (long)Items.Count * ItemOverheadBytes;
+
+        public void Add(string calledName, byte[] item)
+        {
+            elementBytes += item.Length;
+            CheckSize(calledName, elementBytes);
+            Items.Add(item);
+        }
     }
 
-    private sealed class ObjectState
+    /// <summary>
+    /// The pairs of one <c>jsonb_object_agg</c> group. A repeated key replaces its value as the row
+    /// arrives, because only the last value is in the result: the state is bounded by the distinct
+    /// keys, not by the rows. Its size is counted and checked as <see cref="ArrayState"/> does.
+    /// </summary>
+    private sealed class ObjectState : IMeasuredAggregateState
     {
-        public readonly List<KeyValuePair<string, byte[]>> Pairs = [];
+        public readonly Dictionary<string, byte[]> Pairs = new(StringComparer.Ordinal);
+
+        private long elementBytes;
+
+        private long keyChars;
+
+        public long RetainedBytes => elementBytes + keyChars * sizeof(char) + (long)Pairs.Count * EntryOverheadBytes;
+
+        public void Add(string calledName, string key, byte[] item)
+        {
+            if (Pairs.TryGetValue(key, out byte[]? previous))
+            {
+                elementBytes += item.Length - previous.Length;
+            }
+            else
+            {
+                elementBytes += key.Length + item.Length;
+                keyChars += key.Length;
+            }
+
+            CheckSize(calledName, elementBytes);
+            Pairs[key] = item;
+        }
+
+        public ColumnValue Finish()
+        {
+            if (Pairs.Count == 0)
+                return ColumnValue.Null;
+
+            List<KeyValuePair<string, byte[]>> pairs = new(Pairs.Count);
+            foreach (KeyValuePair<string, byte[]> pair in Pairs)
+                pairs.Add(pair);
+
+            return ColumnValue.FromJsonbCell(JsonbBuilder.Object(pairs));
+        }
+    }
+
+    private static void CheckSize(string calledName, long elementBytes)
+    {
+        if (elementBytes > JsonbLimits.MaxDocumentBytes)
+            throw new CamusDBException(CamusDBErrorCodes.JsonbValueTooLarge,
+                $"{calledName}: total size of jsonb elements exceeds the maximum of {JsonbLimits.MaxDocumentBytes} bytes");
     }
 
     public static IEnumerable<ExtensionAggregate> All()
@@ -50,8 +123,8 @@ internal static class JsonbAggregates
                 signature: prefix + "_agg(any) RETURNS jsonb",
                 factory: static () => new object(),
                 create: static (_, _) => new ArrayState(),
-                accumulate: static (_, state, _, arguments) =>
-                    ((ArrayState)state).Items.Add(JsonbScalarFunctions.ToItem(arguments[0])),
+                accumulate: static (_, state, calledName, arguments) =>
+                    ((ArrayState)state).Add(calledName, JsonbScalarFunctions.ToItem(arguments[0])),
                 finish: static (_, state, _) =>
                     ((ArrayState)state).Items is { Count: > 0 } items
                         ? ColumnValue.FromJsonbCell(JsonbBuilder.Array(items))
@@ -63,11 +136,8 @@ internal static class JsonbAggregates
                 factory: static () => new object(),
                 create: static (_, _) => new ObjectState(),
                 accumulate: static (_, state, calledName, arguments) =>
-                    ((ObjectState)state).Pairs.Add(new(Key(calledName, arguments[0]), JsonbScalarFunctions.ToItem(arguments[1]))),
-                finish: static (_, state, _) =>
-                    ((ObjectState)state).Pairs is { Count: > 0 } pairs
-                        ? ColumnValue.FromJsonbCell(JsonbBuilder.Object(pairs))
-                        : ColumnValue.Null);
+                    ((ObjectState)state).Add(calledName, Key(calledName, arguments[0]), JsonbScalarFunctions.ToItem(arguments[1])),
+                finish: static (_, state, _) => ((ObjectState)state).Finish());
         }
     }
 

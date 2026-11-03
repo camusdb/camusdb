@@ -369,6 +369,19 @@ public sealed partial class KvTableStore
     }
 
     /// <summary>
+    /// Batch point-read of the rows an index scan found, with the shared row locks a Serializable
+    /// read-write transaction must hold. See <see cref="KvRowAccessor.GetRowsBatchForRead"/>. A query
+    /// that fetches index matches in batches uses this, not <see cref="GetRowsBatch"/>, so a batched
+    /// read keeps the locks a per-row <see cref="GetRow"/> would take.
+    /// </summary>
+    public async Task<ReadOnlyMemory<byte>?[]> GetRowsBatchForRead(KvTransaction tx, IReadOnlyList<ObjectIdValue> rowIds, CancellationToken cancellationToken = default, LargeValueFetch? largeValues = null)
+    {
+        ReadOnlyMemory<byte>?[] result = await rows.GetRowsBatchForRead(tx, rowIds, cancellationToken).ConfigureAwait(false);
+        await this.largeValues.ResolveAsync(tx, rowIds, result, largeValues, cancellationToken).ConfigureAwait(false);
+        return result;
+    }
+
+    /// <summary>
     /// Lock-acquiring batch point-read for a mutation write phase. See
     /// <see cref="KvRowAccessor.GetRowsBatchLockedForMutation"/>. With <paramref name="aborts"/>, a
     /// retryable abort is recorded there instead of thrown and the rows answered are all null.

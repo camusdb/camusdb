@@ -192,11 +192,14 @@ public sealed class ColumnValue : IComparable<ColumnValue>
 
         if (type == ColumnType.Jsonb)
         {
-            // Text (an HTTP parameter) is parsed; otherwise the cell bytes round-trip a persisted
-            // schema default value, after a check of their format version.
+            // Text (an HTTP parameter) is parsed. Otherwise the cell bytes round-trip a persisted
+            // schema default value, or come from a client that sent the binary form. This
+            // constructor is reachable from HTTP request bodies, so the bytes get the full canonical
+            // check: the readers trust sorted keys and the nesting limit, and a cell that breaks
+            // them reads back wrong or can overflow the stack.
             BytesValue = strValue is not null
                 ? JsonbEncoder.FromText(strValue)
-                : CheckJsonbCell(bytesValue);
+                : JsonbValidator.ValidateCell(bytesValue, CamusDBErrorCodes.InvalidJsonText);
         }
 
         if (type == ColumnType.Array)
@@ -266,7 +269,9 @@ public sealed class ColumnValue : IComparable<ColumnValue>
     /// <summary>
     /// A <see cref="ColumnType.Jsonb"/> value over cell bytes that a jsonb encoder wrote: a stored
     /// cell, a slice wrapped by <see cref="JsonbEncoder.ToCell(ReadOnlySpan{byte})"/>, or a builder
-    /// result. The bytes are not copied and must not change afterwards.
+    /// result. The bytes are not copied and must not change afterwards. Only the format version is
+    /// checked, so this is for trusted bytes only. Bytes from a client or a peer go through
+    /// <see cref="JsonbValidator.ValidateCell"/> first.
     /// </summary>
     public static ColumnValue FromJsonbCell(byte[] cell) => new(CheckJsonbCell(cell), ColumnType.Jsonb);
 

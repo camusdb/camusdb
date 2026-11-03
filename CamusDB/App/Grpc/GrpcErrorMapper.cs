@@ -66,6 +66,7 @@ public static class GrpcErrorMapper
         CamusDBErrorCodes.StatementTooDeeplyNested => StatusCode.InvalidArgument,
         CamusDBErrorCodes.InvalidJsonText => StatusCode.InvalidArgument,
         CamusDBErrorCodes.JsonNestingTooDeep => StatusCode.InvalidArgument,
+        CamusDBErrorCodes.JsonbValueTooLarge => StatusCode.InvalidArgument,
         CamusDBErrorCodes.ColumnStorageNotApplicable => StatusCode.InvalidArgument,
         CamusDBErrorCodes.NotNullViolation => StatusCode.InvalidArgument,
         CamusDBErrorCodes.CheckConstraintViolation => StatusCode.InvalidArgument,

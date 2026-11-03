@@ -10,6 +10,7 @@ using System.Globalization;
 using System.Text.Json;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
+using CamusDB.Core.CommandsExecutor.Models.Jsonb;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers.Functions;
 
@@ -22,23 +23,36 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Functions;
 /// </summary>
 internal static class JsonScalarFunctions
 {
-    /// <summary>Wraps an evaluator so that a jsonb argument arrives as its PostgreSQL text.</summary>
-    private static ScalarFunctionEvaluatorDelegate AcceptDocuments(ScalarFunctionEvaluatorDelegate evaluator) =>
+    /// <summary>
+    /// The evaluator shape of these functions. <paramref name="documentMask"/> has bit <c>i</c> set
+    /// when argument <c>i</c> was a <c>jsonb</c> value that arrives here as its text.
+    /// </summary>
+    private delegate ColumnValue JsonEvaluatorDelegate(string calledName, IReadOnlyList<ColumnValue> arguments, int documentMask);
+
+    /// <summary>
+    /// Wraps an evaluator so that a jsonb argument arrives as its PostgreSQL text. The evaluator gets
+    /// a mask of the arguments that were documents: their text is parsed with the jsonb nesting limit
+    /// (<see cref="JsonbLimits.MaxNestingDepth"/>), because a stored document can nest deeper than the
+    /// default text limit of 64 levels. A STRING argument keeps that default limit, so its behavior
+    /// does not change.
+    /// </summary>
+    private static ScalarFunctionEvaluatorDelegate AcceptDocuments(JsonEvaluatorDelegate evaluator) =>
         (calledName, arguments) =>
         {
-            bool anyDocument = false;
+            int documentMask = 0;
             for (int i = 0; i < arguments.Count; i++)
-                anyDocument |= arguments[i].Type == ColumnType.Jsonb;
+                if (arguments[i].Type == ColumnType.Jsonb)
+                    documentMask |= 1 << i;
 
-            if (!anyDocument)
-                return evaluator(calledName, arguments);
+            if (documentMask == 0)
+                return evaluator(calledName, arguments, 0);
 
             ColumnValue[] text = new ColumnValue[arguments.Count];
             for (int i = 0; i < arguments.Count; i++)
                 text[i] = arguments[i].Type == ColumnType.Jsonb
                     ? new ColumnValue(ColumnType.String, arguments[i].JsonValue!)
                     : arguments[i];
-            return evaluator(calledName, text);
+            return evaluator(calledName, text, documentMask);
         };
 
     public static void Register(ScalarFunctionRegistry registry)
@@ -62,7 +76,7 @@ internal static class JsonScalarFunctions
     private static void RegisterUnary(
         ScalarFunctionRegistry registry,
         string name,
-        ScalarFunctionEvaluatorDelegate evaluator,
+        JsonEvaluatorDelegate evaluator,
         ScalarReturnTypeInferenceDelegate inferReturnType)
     {
         registry.Register(new ScalarFunctionDescriptor
@@ -78,7 +92,7 @@ internal static class JsonScalarFunctions
     private static void RegisterBinary(
         ScalarFunctionRegistry registry,
         string name,
-        ScalarFunctionEvaluatorDelegate evaluator,
+        JsonEvaluatorDelegate evaluator,
         ScalarReturnTypeInferenceDelegate inferReturnType)
     {
         registry.Register(new ScalarFunctionDescriptor
@@ -91,24 +105,24 @@ internal static class JsonScalarFunctions
         });
     }
 
-    private static ColumnValue EvaluateJsonValid(string calledName, IReadOnlyList<ColumnValue> arguments)
+    private static ColumnValue EvaluateJsonValid(string calledName, IReadOnlyList<ColumnValue> arguments, int documentMask)
     {
         if (arguments[0].Type == ColumnType.Null)
             return ColumnValue.False;
 
         RequireString(calledName, 0, arguments[0]);
 
-        return ColumnValue.FromBool(TryParseJson(arguments[0].StrValue!, out _, out _));
+        return ColumnValue.FromBool(TryParseJson(arguments[0].StrValue!, IsDocument(documentMask, 0), out _, out _));
     }
 
-    private static ColumnValue EvaluateJsonType(string calledName, IReadOnlyList<ColumnValue> arguments)
+    private static ColumnValue EvaluateJsonType(string calledName, IReadOnlyList<ColumnValue> arguments, int documentMask)
     {
         if (PropagateNull(arguments) is ColumnValue nullResult)
             return nullResult;
 
         RequireString(calledName, 0, arguments[0]);
 
-        if (!TryParseJson(arguments[0].StrValue!, out JsonDocument? document, out JsonElement root))
+        if (!TryParseJson(arguments[0].StrValue!, IsDocument(documentMask, 0), out JsonDocument? document, out JsonElement root))
             return ColumnValue.Null;
 
         using (document)
@@ -131,7 +145,7 @@ internal static class JsonScalarFunctions
         }
     }
 
-    private static ColumnValue EvaluateJsonExtract(string calledName, IReadOnlyList<ColumnValue> arguments)
+    private static ColumnValue EvaluateJsonExtract(string calledName, IReadOnlyList<ColumnValue> arguments, int documentMask)
     {
         if (PropagateNull(arguments) is ColumnValue nullResult)
             return nullResult;
@@ -139,7 +153,7 @@ internal static class JsonScalarFunctions
         RequireString(calledName, 0, arguments[0]);
         RequireString(calledName, 1, arguments[1]);
 
-        if (!TryParseJson(arguments[0].StrValue!, out JsonDocument? document, out JsonElement root))
+        if (!TryParseJson(arguments[0].StrValue!, IsDocument(documentMask, 0), out JsonDocument? document, out JsonElement root))
             return ColumnValue.Null;
 
         using (document)
@@ -154,7 +168,7 @@ internal static class JsonScalarFunctions
         }
     }
 
-    private static ColumnValue EvaluateJsonValue(string calledName, IReadOnlyList<ColumnValue> arguments)
+    private static ColumnValue EvaluateJsonValue(string calledName, IReadOnlyList<ColumnValue> arguments, int documentMask)
     {
         if (PropagateNull(arguments) is ColumnValue nullResult)
             return nullResult;
@@ -162,7 +176,7 @@ internal static class JsonScalarFunctions
         RequireString(calledName, 0, arguments[0]);
         RequireString(calledName, 1, arguments[1]);
 
-        if (!TryParseJson(arguments[0].StrValue!, out JsonDocument? document, out JsonElement root))
+        if (!TryParseJson(arguments[0].StrValue!, IsDocument(documentMask, 0), out JsonDocument? document, out JsonElement root))
             return ColumnValue.Null;
 
         using (document)
@@ -177,7 +191,7 @@ internal static class JsonScalarFunctions
         }
     }
 
-    private static ColumnValue EvaluateJsonArrayLength(string calledName, IReadOnlyList<ColumnValue> arguments)
+    private static ColumnValue EvaluateJsonArrayLength(string calledName, IReadOnlyList<ColumnValue> arguments, int documentMask)
     {
         if (PropagateNull(arguments) is ColumnValue nullResult)
             return nullResult;
@@ -187,7 +201,7 @@ internal static class JsonScalarFunctions
         if (arguments.Count == 2)
             RequireString(calledName, 1, arguments[1]);
 
-        if (!TryParseJson(arguments[0].StrValue!, out JsonDocument? document, out JsonElement root))
+        if (!TryParseJson(arguments[0].StrValue!, IsDocument(documentMask, 0), out JsonDocument? document, out JsonElement root))
             return ColumnValue.Null;
 
         using (document)
@@ -210,7 +224,7 @@ internal static class JsonScalarFunctions
         }
     }
 
-    private static ColumnValue EvaluateJsonContains(string calledName, IReadOnlyList<ColumnValue> arguments)
+    private static ColumnValue EvaluateJsonContains(string calledName, IReadOnlyList<ColumnValue> arguments, int documentMask)
     {
         if (PropagateNull(arguments) is ColumnValue nullResult)
             return nullResult;
@@ -218,10 +232,10 @@ internal static class JsonScalarFunctions
         RequireString(calledName, 0, arguments[0]);
         RequireString(calledName, 1, arguments[1]);
 
-        if (!TryParseJson(arguments[0].StrValue!, out JsonDocument? valueDocument, out JsonElement valueRoot))
+        if (!TryParseJson(arguments[0].StrValue!, IsDocument(documentMask, 0), out JsonDocument? valueDocument, out JsonElement valueRoot))
             return ColumnValue.Null;
 
-        if (!TryParseJson(arguments[1].StrValue!, out JsonDocument? candidateDocument, out JsonElement candidateRoot))
+        if (!TryParseJson(arguments[1].StrValue!, IsDocument(documentMask, 1), out JsonDocument? candidateDocument, out JsonElement candidateRoot))
             return ColumnValue.Null;
 
         using (valueDocument)
@@ -232,11 +246,19 @@ internal static class JsonScalarFunctions
         }
     }
 
-    private static bool TryParseJson(string json, out JsonDocument? document, out JsonElement root)
+    private static readonly JsonDocumentOptions DocumentParseOptions = new() { MaxDepth = JsonbLimits.MaxNestingDepth };
+
+    private static bool IsDocument(int documentMask, int index) => (documentMask & (1 << index)) != 0;
+
+    /// <summary>
+    /// Parses one argument. The text of a jsonb argument uses the jsonb nesting limit: the document
+    /// was already checked against it, so it is always valid here. Other text uses the default limit.
+    /// </summary>
+    private static bool TryParseJson(string json, bool isDocument, out JsonDocument? document, out JsonElement root)
     {
         try
         {
-            document = JsonDocument.Parse(json);
+            document = isDocument ? JsonDocument.Parse(json, DocumentParseOptions) : JsonDocument.Parse(json);
             root = document.RootElement;
             return true;
         }

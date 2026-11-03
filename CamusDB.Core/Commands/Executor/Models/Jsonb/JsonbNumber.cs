@@ -250,6 +250,27 @@ internal readonly struct JsonbNumber
         return builder.ToString();
     }
 
+    /// <summary>
+    /// The value rounded to an integer, half away from zero, from the exact mantissa and scale. A cast
+    /// to an integer type must round once from this exact value: a detour through a fixed-scale type
+    /// rounds the fraction first, and that first rounding can move a value such as 0.4999999999 onto
+    /// the half-way point and change the integer result.
+    /// </summary>
+    public BigInteger RoundToInteger()
+    {
+        if (Scale == 0)
+            return Mantissa;
+
+        BigInteger divisor = BigInteger.Pow(10, Scale);
+        BigInteger quotient = BigInteger.DivRem(Mantissa, divisor, out BigInteger remainder);
+
+        // DivRem truncates toward zero, and the remainder has the sign of the mantissa.
+        if (BigInteger.Abs(remainder) * 2 >= divisor)
+            quotient += Mantissa.Sign;
+
+        return quotient;
+    }
+
     /// <summary>The value as a double, for a cast of a JSON number to FLOAT64.</summary>
     public double ToDouble() =>
         double.Parse(ToString(), NumberStyles.Float, CultureInfo.InvariantCulture);

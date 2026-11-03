@@ -170,6 +170,16 @@ public static class CamusDBErrorCodes
     /// </summary>
     public const string FloatValueOutOfRange = "CADB0421";
 
+    /// <summary>
+    /// A <c>jsonb</c> value that a statement builds would be larger than
+    /// <c>JsonbLimits.MaxDocumentBytes</c>, the PostgreSQL limit for one document. Today the
+    /// aggregates <c>jsonb_agg</c> and <c>jsonb_object_agg</c> raise it, when the values that one
+    /// group collects pass the limit. The check runs as the rows arrive, so one large group fails its
+    /// statement before it can fill the managed heap. PostgreSQL reports <c>total size of jsonb array
+    /// elements exceeds the maximum</c> (SQLSTATE 54000). A permanent caller mistake — maps to HTTP 400.
+    /// </summary>
+    public const string JsonbValueTooLarge = "CADB0422";
+
     public const string DuplicateUniqueKeyValue = "CADB0300";
     public const string NotNullViolation = "CADB0301";
     public const string ValueTooLong = "CADB0302";
@@ -1122,6 +1132,7 @@ public static class CamusDBErrorCodes
         FloatValueOutOfRange => 400,
         InvalidJsonText => 400,
         JsonNestingTooDeep => 400,
+        JsonbValueTooLarge => 400,
         MalformedVector => 400,
         VectorDimensionMismatch => 400,
         InvalidVectorValue => 400,

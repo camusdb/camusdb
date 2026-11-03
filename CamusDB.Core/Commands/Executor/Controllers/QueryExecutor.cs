@@ -1455,7 +1455,7 @@ internal sealed class QueryExecutor
 
         async IAsyncEnumerable<QueryResultRow> flushPageAsync(List<ObjectIdValue> page, List<CompositeColumnValue> keys)
         {
-            ReadOnlyMemory<byte>?[] batchResult = await table.Store.GetRowsBatch(
+            ReadOnlyMemory<byte>?[] batchResult = await table.Store.GetRowsBatchForRead(
                 ticket.TxnState, page, cancellationToken, largeValues).ConfigureAwait(false);
             for (int i = 0; i < page.Count; i++)
             {
@@ -1672,8 +1672,26 @@ internal sealed class QueryExecutor
     /// <para>Every scanned entry range takes a range lock first (shared for a read, exclusive for a
     /// write's locate phase), as the IN-list scan does. A row that starts to match the predicate later
     /// writes an entry into each group's ranges, so the lock of the first group covers it, even when
-    /// the scan stops early on an empty set.</para>
+    /// the scan stops early on an empty set. The range lock does not cover a change to a row that
+    /// keeps its entries, so the candidate rows are fetched with
+    /// <see cref="KvTableStore.GetRowsBatchForRead"/>: a Serializable read-write transaction holds a
+    /// shared lock on every row it examined, also on a row the recheck drops.</para>
+    ///
+    /// <para><b>Memory bound.</b> The candidates must all be known before the first row is fetched,
+    /// because they are deduplicated and fetched in row-id order. Their count and estimated bytes are
+    /// checked against the operator caps (<see cref="CamusDBOptions.SpillEffectiveThreshold"/> and
+    /// <see cref="CamusDBOptions.SpillEffectiveThresholdBytes"/>). When a predicate matches more rows
+    /// than that, the GIN index does not help it, and the read continues as a table scan instead.
+    /// The plan's execution filter holds the full predicate, so the table scan returns the same rows,
+    /// and it holds one row in memory at a time. The bound applies also when spill is off, because
+    /// this fallback needs no disk.</para>
     /// </summary>
+    /// <summary>
+    /// The estimated heap bytes of one GIN candidate: the row id and its hash-set entry. The final
+    /// sorted array adds a few more bytes per candidate, which this estimate also covers.
+    /// </summary>
+    private const int GinCandidateBytes = 48;
+
     private async IAsyncEnumerable<QueryResultRow> QueryUsingGinIndex(QueryPlan plan, GinIndexScanNode ginNode)
     {
         TableDescriptor table = plan.Table;
@@ -1689,6 +1707,11 @@ internal sealed class QueryExecutor
         PlanNodeStats? scanStats = plan.CollectRuntimeStats && plan.StepNodes.Count > 0 ? plan.StepNodes[0].Stats : null;
         CamusDB.Core.Diagnostics.IndexUsageCounters? usage = table.Store.IndexUsage?.BeginRead(index.KvId);
         CamusDB.Core.Diagnostics.StatementProbe? probe = plan.Ticket.Probe;
+
+        CamusDBOptions statementOptions = QueryExecutionContext.For(plan.Database, ticket).Options;
+        long candidateCap = statementOptions.SpillEffectiveThreshold;
+        long candidateByteCap = statementOptions.SpillEffectiveThresholdBytes;
+        bool overBudget = false;
 
         HashSet<ObjectIdValue>? candidates = null;
 
@@ -1723,14 +1746,41 @@ internal sealed class QueryExecutor
                     if (scanStats is not null)
                         scanStats.KvScanEntries++;
 
-                    if (candidates is null || candidates.Contains(rowId))
-                        groupRows.Add(rowId);
+                    if ((candidates is null || candidates.Contains(rowId)) && groupRows.Add(rowId))
+                    {
+                        // The previous group's set and this one are both alive here.
+                        long held = groupRows.Count + (candidates?.Count ?? 0L);
+                        if (held > candidateCap || held * GinCandidateBytes > candidateByteCap)
+                        {
+                            overBudget = true;
+                            break;
+                        }
+                    }
                 }
+
+                if (overBudget)
+                    break;
             }
+
+            if (overBudget)
+                break;
 
             candidates = groupRows;
             if (candidates.Count == 0)
                 yield break;
+        }
+
+        if (overBudget)
+        {
+            if (logger.IsEnabled(LogLevel.Debug))
+                logger.LogDebug(
+                    "GIN scan of index {IndexName} on {TableName} passed the candidate cap; continuing as a table scan",
+                    index.Name, table.Name);
+
+            await foreach (QueryResultRow row in queryScanner.ScanUsingTableIndex(plan, queryFilterer).ConfigureAwait(false))
+                yield return row;
+
+            yield break;
         }
 
         if (candidates is null)
@@ -1753,7 +1803,7 @@ internal sealed class QueryExecutor
             cancellationToken.ThrowIfCancellationRequested();
 
             ArraySegment<ObjectIdValue> page = new(rowIds, start, Math.Min(batchSize, rowIds.Length - start));
-            ReadOnlyMemory<byte>?[] batchResult = await table.Store.GetRowsBatch(
+            ReadOnlyMemory<byte>?[] batchResult = await table.Store.GetRowsBatchForRead(
                 ticket.TxnState, page, cancellationToken, largeValues).ConfigureAwait(false);
 
             for (int i = 0; i < page.Count; i++)

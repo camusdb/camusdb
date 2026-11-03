@@ -8,6 +8,7 @@
 
 using System.Text.Json;
 using CamusDB.Core.Catalogs.Models;
+using CamusDB.Core.CommandsExecutor.Models.Jsonb;
 
 namespace CamusDB.Core.CommandsExecutor.Models;
 
@@ -109,7 +110,8 @@ public static class ColumnValueWireCodec
             ColumnType.Bytes =>
                 new ColumnValue(element.GetProperty("y").GetBytesFromBase64()),
             ColumnType.Jsonb =>
-                ColumnValue.FromJsonbCell(element.GetProperty("j").GetBytesFromBase64()),
+                ColumnValue.FromJsonbCell(JsonbValidator.ValidateCell(
+                    element.GetProperty("j").GetBytesFromBase64(), CamusDBErrorCodes.JsonbValueCorrupt)),
             ColumnType.Uuid or ColumnType.Numeric =>
                 new ColumnValue(type, element.GetProperty("u").GetInt64(), element.GetProperty("l").GetInt64()),
             ColumnType.Array => ReadArray(element),

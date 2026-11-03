@@ -415,37 +415,91 @@ internal static class JsonbDocument
         };
     }
 
+    /// <summary>
+    /// Object containment as one merge walk over the two key lists. Both objects are canonical, so
+    /// their keys are unique and sorted in <see cref="CompareKeyOrder"/>. The walk reads each key of
+    /// each side at most once, so the cost is linear in the two objects, not one search of the left
+    /// object per key of the right object.
+    /// </summary>
     private static bool ObjectContains(ReadOnlySpan<byte> a, int posA, ReadOnlySpan<byte> b, int posB, int depth)
     {
-        int startA = posA;
-        int endA = JsonbCbor.SkipItem(a, posA);
-        ReadOnlySpan<byte> objectA = a[startA..endA];
-
+        int remainingA = JsonbCbor.ReadContainerHeader(a, ref posA, out _);
         int countB = JsonbCbor.ReadContainerHeader(b, ref posB, out _);
+
+        // Keys are unique, so a right side with more keys always has a key the left side lacks.
+        if (countB > remainingA)
+            return false;
+
         for (int i = 0; i < countB; i++)
         {
             ReadOnlySpan<byte> key = JsonbCbor.ReadText(b, ref posB);
-            if (!TryGetField(objectA, key, out Range valueA))
+
+            // Move the left cursor to the first key that does not sort before this key.
+            while (true)
+            {
+                if (remainingA == 0)
+                    return false;
+
+                ReadOnlySpan<byte> keyA = JsonbCbor.ReadText(a, ref posA);
+                remainingA--;
+
+                int order = CompareKeyOrder(keyA, key);
+                if (order == 0)
+                    break;
+
+                if (order > 0)
+                    return false;
+
+                posA = JsonbCbor.SkipItem(a, posA);
+            }
+
+            if (!ValueContains(a, posA, b, posB, depth + 1))
                 return false;
 
-            if (!ValueContains(objectA, valueA.Start.Value, b, posB, depth + 1))
-                return false;
-
+            posA = JsonbCbor.SkipItem(a, posA);
             posB = JsonbCbor.SkipItem(b, posB);
         }
 
         return true;
     }
 
+    /// <summary>
+    /// When both arrays are at least this wide, a scalar element of the right side is found through a
+    /// hash index of the left side's scalar elements instead of one scan of the left side each.
+    /// </summary>
+    private const int ScalarIndexThreshold = 16;
+
     private static bool ArrayContains(ReadOnlySpan<byte> a, int posA, ReadOnlySpan<byte> b, int posB, int depth)
     {
+        int countPos = posA;
+        int countA = JsonbCbor.ReadContainerHeader(a, ref countPos, out _);
+
         int countB = JsonbCbor.ReadContainerHeader(b, ref posB, out _);
+        Dictionary<int, List<int>>? scalarIndex = null;
+        bool indexBuilt = false;
+
         for (int i = 0; i < countB; i++)
         {
             JsonbKind kindB = JsonbCbor.KindAt(b, posB);
-            bool found = kindB is JsonbKind.Array or JsonbKind.Object
-                ? ArrayHasContainer(a, posA, b, posB, depth)
-                : ArrayHasScalar(a, posA, b, posB);
+            bool found;
+            if (kindB is JsonbKind.Array or JsonbKind.Object)
+            {
+                found = ArrayHasContainer(a, posA, b, posB, depth);
+            }
+            else if (countA >= ScalarIndexThreshold && countB >= ScalarIndexThreshold)
+            {
+                if (!indexBuilt)
+                {
+                    scalarIndex = IndexScalars(a, posA);
+                    indexBuilt = true;
+                }
+
+                found = IndexHasScalar(scalarIndex!, a, b, posB);
+            }
+            else
+            {
+                found = ArrayHasScalar(a, posA, b, posB);
+            }
 
             if (!found)
                 return false;
@@ -454,6 +508,51 @@ internal static class JsonbDocument
         }
 
         return true;
+    }
+
+    /// <summary>
+    /// The positions of the scalar elements of the array at <paramref name="posA"/>, grouped by a hash
+    /// that agrees with <see cref="ValueEquals"/> (so <c>1.0</c> and <c>1</c> fall in one group).
+    /// </summary>
+    private static Dictionary<int, List<int>> IndexScalars(ReadOnlySpan<byte> a, int posA)
+    {
+        int countA = JsonbCbor.ReadContainerHeader(a, ref posA, out _);
+        Dictionary<int, List<int>> index = new(countA);
+        for (int i = 0; i < countA; i++)
+        {
+            int end = JsonbCbor.SkipItem(a, posA);
+            if (JsonbCbor.KindAt(a, posA) is not (JsonbKind.Array or JsonbKind.Object))
+            {
+                int hash = ScalarHash(a[posA..end]);
+                if (!index.TryGetValue(hash, out List<int>? positions))
+                    index[hash] = positions = new List<int>(1);
+                positions.Add(posA);
+            }
+
+            posA = end;
+        }
+
+        return index;
+    }
+
+    private static bool IndexHasScalar(Dictionary<int, List<int>> index, ReadOnlySpan<byte> a, ReadOnlySpan<byte> b, int posB)
+    {
+        int endB = JsonbCbor.SkipItem(b, posB);
+        if (!index.TryGetValue(ScalarHash(b[posB..endB]), out List<int>? positions))
+            return false;
+
+        foreach (int position in positions)
+            if (ScalarEquals(a, position, b, posB))
+                return true;
+
+        return false;
+    }
+
+    private static int ScalarHash(ReadOnlySpan<byte> scalar)
+    {
+        HashCode hash = new();
+        AddHash(ref hash, scalar);
+        return hash.ToHashCode();
     }
 
     private static bool ArrayHasScalar(ReadOnlySpan<byte> a, int posA, ReadOnlySpan<byte> b, int posB)

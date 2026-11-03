@@ -1170,7 +1170,7 @@ internal sealed class QueryScanner
         // Fetch and decode one buffered page; yields rows in the order they appear in the page.
         async IAsyncEnumerable<QueryResultRow> flushPageAsync(List<ObjectIdValue> page, List<CompositeColumnValue> keys)
         {
-            ReadOnlyMemory<byte>?[] batchResult = await table.Store.GetRowsBatch(
+            ReadOnlyMemory<byte>?[] batchResult = await table.Store.GetRowsBatchForRead(
                 ticket.TxnState, page, cancellationToken, largeValues).ConfigureAwait(false);
             for (int i = 0; i < page.Count; i++)
             {

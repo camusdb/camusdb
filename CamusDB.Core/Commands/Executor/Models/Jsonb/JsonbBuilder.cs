@@ -277,6 +277,11 @@ internal static class JsonbBuilder
     /// <summary>The rebuilt item, or null when the path leads nowhere (nothing changes).</summary>
     private static byte[]? DeleteAt(ReadOnlySpan<byte> item, IReadOnlyList<string> path, int level)
     {
+        // One frame per path step into the document. A valid document nests no deeper than the
+        // limit, but the guard does not rely on that: a damaged cell must not overflow the stack.
+        if (level > JsonbLimits.MaxNestingDepth)
+            throw JsonbEncoder.TooDeep();
+
         List<Child> children = Children(item, out bool isObject);
         int found = FindStep(item, children, isObject, path[level], level, out _);
         if (found < 0)
@@ -339,6 +344,10 @@ internal static class JsonbBuilder
 
     private static byte[]? SetAt(ReadOnlySpan<byte> item, IReadOnlyList<string> path, int level, ReadOnlySpan<byte> value, Mode mode)
     {
+        // The same independent recursion bound as DeleteAt.
+        if (level > JsonbLimits.MaxNestingDepth)
+            throw JsonbEncoder.TooDeep();
+
         List<Child> children = Children(item, out bool isObject);
         bool last = level == path.Count - 1;
         int found = FindStep(item, children, isObject, path[level], level, out long index);

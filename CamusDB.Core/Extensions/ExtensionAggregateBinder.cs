@@ -270,3 +270,17 @@ internal sealed class ExtensionAggregate
     internal static CamusDBException Failed(string aggregate, Exception inner) =>
         new(CamusDBErrorCodes.ExtensionFunctionFailed, $"Aggregate '{aggregate}' failed: {inner.Message}", inner);
 }
+
+/// <summary>
+/// A state of an aggregate that grows with its rows and can tell its size. The engine cannot measure
+/// an arbitrary state object, so a spilling GROUP BY charges an <see cref="ExtensionAggregate"/> state
+/// at its fixed <see cref="ExtensionAggregate.StateSizeBytes"/> hint when it admits the group. A state
+/// that implements this interface is also charged for its growth after each row, so many large groups
+/// make the aggregation spill instead of filling the heap. One group's state cannot spill; a state
+/// that can grow without bound must also refuse rows past its own limit.
+/// </summary>
+internal interface IMeasuredAggregateState
+{
+    /// <summary>The estimated heap bytes the state holds now, in addition to its fixed hint.</summary>
+    long RetainedBytes { get; }
+}

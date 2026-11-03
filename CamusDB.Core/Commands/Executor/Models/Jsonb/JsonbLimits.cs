@@ -32,4 +32,12 @@ internal static class JsonbLimits
     public const int MaxIntegerDigits = 131072;
 
     public const int MaxScale = 16383;
+
+    /// <summary>
+    /// The largest document, in bytes of its elements, that a statement may build: 2^28 - 1, the
+    /// PostgreSQL <c>jsonb</c> limit. An aggregate that collects values for one group checks it as
+    /// the rows arrive (<see cref="CamusDBErrorCodes.JsonbValueTooLarge"/>), because one group's state
+    /// cannot spill: without the bound, one large group could fill the managed heap.
+    /// </summary>
+    public const long MaxDocumentBytes = (1L << 28) - 1;
 }

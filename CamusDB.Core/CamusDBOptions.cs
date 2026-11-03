@@ -1529,9 +1529,13 @@ public sealed record CamusDBOptions
     /// <para>It covers the external sort, the bounded top-k retention (which moves to a spilling
     /// selection that keeps about k rows on disk when its retained rows pass the cap), GROUP BY group state, DISTINCT, the hash-join
     /// build and its Grace partitions, and the spill-capable row and value buffers. Group state is
-    /// charged when a group is admitted; an aggregate whose state grows inside one group is not
-    /// charged for that growth. Ignored when <see cref="SpillEnabled"/> is <c>false</c>: without
-    /// spill an operator has nowhere to put the rows, so the spill-off behavior does not change.
+    /// charged when a group is admitted. A built-in aggregate whose state grows inside one group (a
+    /// MIN or MAX over strings) is not charged for that growth; the <c>jsonb_agg</c> and
+    /// <c>jsonb_object_agg</c> states are, row by row. Ignored when <see cref="SpillEnabled"/> is
+    /// <c>false</c>: without spill an operator has nowhere to put the rows, so the spill-off behavior
+    /// does not change. One reader applies it with spill off too: a GIN index scan whose candidate
+    /// row ids pass this cap or <see cref="SpillThresholdRows"/> continues as a table scan with the
+    /// same filter, which needs no disk.
     /// <c>&lt;= 0</c> removes the byte cap and leaves only the row cap. Runtime-mutable and
     /// node-scoped for the same reasons as <see cref="SpillThresholdRows"/>.</para>
     ///

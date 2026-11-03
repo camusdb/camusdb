@@ -738,21 +738,22 @@ internal static class CastScalarFunctions
     }
 
     /// <summary>
-    /// A <c>jsonb</c> number to int64, rounded half away from zero as a NUMERIC is. A number past the
-    /// int64 range is <see cref="CamusDBErrorCodes.IntegerValueOutOfRange"/>, also when it is past the
-    /// NUMERIC range: the target is int64, so the int64 error is the one that describes the refusal,
-    /// as PostgreSQL reports <c>bigint out of range</c> for both.
+    /// A <c>jsonb</c> number to int64, rounded half away from zero as a NUMERIC is. The rounding is
+    /// done one time, on the exact JSON number (<see cref="JsonbNumber.RoundToInteger"/>), as
+    /// PostgreSQL does. A detour through NUMERIC would first round the fraction to nine digits, and
+    /// that first rounding can cross the half-way point (<c>0.4999999999</c> would give 1). A number
+    /// past the int64 range is <see cref="CamusDBErrorCodes.IntegerValueOutOfRange"/>, as PostgreSQL
+    /// reports <c>bigint out of range</c>.
     /// </summary>
     private static ColumnValue FromJsonbToInt64(string castName, ColumnValue value)
     {
-        string text = JsonbScalarNumber(castName, value, "bigint").ToString();
+        JsonbNumber number = JsonbScalarNumber(castName, value, "bigint");
+        System.Numerics.BigInteger rounded = number.RoundToInteger();
 
-        NumericConversionStatus status = NumericMath.TryParse(text, out Int128 parsed);
+        if (rounded < long.MinValue || rounded > long.MaxValue)
+            throw Int64Math.OutOfRange($"Function '{castName}' integer overflow for value {Truncate(number.ToString())}");
 
-        if (status == NumericConversionStatus.Overflow)
-            throw Int64Math.OutOfRange($"Function '{castName}' integer overflow for value {Truncate(text)}");
-
-        return FromNumericToInt64(castName, ToNumeric(castName, text, status, parsed));
+        return new ColumnValue(ColumnType.Integer64, (long)rounded);
     }
 
     private static ColumnValue JsonbScalarToBool(string castName, ColumnValue value)

@@ -15,6 +15,7 @@ using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Queries;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.CommandsExecutor.Controllers.Queries.Spill;
+using CamusDB.Core.Extensions;
 using CamusDB.Core.SQLParser;
 using CamusDB.Core.Statistics;
 using CamusDB.Core.Util.ObjectIds;
@@ -228,7 +229,9 @@ internal sealed class QueryAggregator
 
                 if (lookup.TryGetValue(key, out GroupAccumulator? accumulator))
                 {
-                    accumulator.AddRow(row.Row, ticket);
+                    // A state that grows with its rows is charged as it grows, so groups that are
+                    // admitted small but grow large still bring the next new group to the byte cap.
+                    groupBytes += accumulator.AddRow(row.Row, ticket);
                     continue;
                 }
 
@@ -240,7 +243,7 @@ internal sealed class QueryAggregator
                     groupBytes += layout.GroupBytes(key);
                     accumulator = new GroupAccumulator(layout);
                     lookup[key] = accumulator;
-                    accumulator.AddRow(row.Row, ticket);
+                    groupBytes += accumulator.AddRow(row.Row, ticket);
                     continue;
                 }
 
@@ -416,7 +419,7 @@ internal sealed class QueryAggregator
         for (int i = 0; i < carriedGroups.Count; i++)
         {
             groups[carriedGroups[i].Key] = carriedGroups[i].Value;
-            groupBytes += layout.GroupBytes(carriedGroups[i].Key.Values);
+            groupBytes += layout.GroupBytes(carriedGroups[i].Key.Values) + carriedGroups[i].Value.GrownBytes;
         }
 
         SpillRunReader? reader = await SpillRunReader.OpenAsync(path, context.Options.SpillMaxFrameBytes, ct: ct).ConfigureAwait(false);
@@ -457,7 +460,7 @@ internal sealed class QueryAggregator
 
                 if (partitionLookup.TryGetValue(key, out GroupAccumulator? accumulator))
                 {
-                    accumulator.AddRow(row.Row, ticket);
+                    groupBytes += accumulator.AddRow(row.Row, ticket);
                     continue;
                 }
 
@@ -466,7 +469,7 @@ internal sealed class QueryAggregator
                     groupBytes += layout.GroupBytes(key);
                     accumulator = new GroupAccumulator(layout);
                     partitionLookup[key] = accumulator;
-                    accumulator.AddRow(row.Row, ticket);
+                    groupBytes += accumulator.AddRow(row.Row, ticket);
                     continue;
                 }
 
@@ -1027,8 +1030,9 @@ internal sealed class QueryAggregator
         /// Estimated heap bytes of one group's state, without its key: the group-table entry, the
         /// accumulator with its captured-value dictionary, and one state per distinct aggregate. A
         /// spilling GROUP BY charges this plus the key (<see cref="GroupBytes"/>) when it admits a
-        /// group. A state that grows with its rows (a MIN or MAX over strings) is charged at its
-        /// starting size only.
+        /// group. A built-in state that grows with its rows (a MIN or MAX over strings) is charged at
+        /// its starting size only. An <see cref="IMeasuredAggregateState"/> is also charged for its
+        /// growth, row by row (<see cref="GroupAccumulator.GrownBytes"/>).
         /// </summary>
         public required long GroupStateBytes { get; init; }
 
@@ -1162,7 +1166,15 @@ internal sealed class QueryAggregator
                 states[i] = new AggregateMetricState(layout.Aggregates[i]);
         }
 
-        public void AddRow(IReadOnlyDictionary<string, ColumnValue> row, QueryTicket ticket)
+        /// <summary>
+        /// The bytes the group's states grew by since it was created: the sum of the
+        /// <see cref="IMeasuredAggregateState"/> growth. A spilling GROUP BY charges it on top of
+        /// <see cref="AggregateLayout.GroupBytes"/>, also when it carries the group to a partition.
+        /// </summary>
+        public long GrownBytes { get; private set; }
+
+        /// <summary>Folds one row into the group and returns how many bytes its states grew by.</summary>
+        public long AddRow(IReadOnlyDictionary<string, ColumnValue> row, QueryTicket ticket)
         {
             if (!capturedGroupValues)
             {
@@ -1200,8 +1212,12 @@ internal sealed class QueryAggregator
             }
 
             // Each distinct aggregate is fed exactly once, even when several projections read it.
+            long grown = 0;
             foreach (AggregateMetricState state in states)
-                state.AddRow(row, ticket);
+                grown += state.AddRow(row, ticket);
+
+            GrownBytes += grown;
+            return grown;
         }
 
         /// <summary>
@@ -1524,7 +1540,11 @@ internal sealed class QueryAggregator
             }
         }
 
-        public void AddRow(IReadOnlyDictionary<string, ColumnValue> row, QueryTicket ticket)
+        /// <summary>
+        /// Folds one row into the state. Returns how many bytes the state grew by: always 0 for the
+        /// built-in fixed-size states, and the growth of an <see cref="IMeasuredAggregateState"/>.
+        /// </summary>
+        public long AddRow(IReadOnlyDictionary<string, ColumnValue> row, QueryTicket ticket)
         {
             switch (aggregationType)
             {
@@ -1532,7 +1552,7 @@ internal sealed class QueryAggregator
                     if (isCountAll)
                     {
                         countAll++;
-                        return;
+                        return 0;
                     }
 
                     if (TryGetAggregationValue(funcCall, row, ticket, out ColumnValue? countValue)
@@ -1541,35 +1561,35 @@ internal sealed class QueryAggregator
                         countNonNull++;
                     }
 
-                    return;
+                    return 0;
 
                 case QueryAggregationType.Sum:
                     if (!TryGetAggregationValue(funcCall, row, ticket, out ColumnValue? sumValue) || sumValue!.Type == ColumnType.Null)
-                        return;
+                        return 0;
 
                     sum.Add(sumValue);
-                    return;
+                    return 0;
 
                 case QueryAggregationType.Average:
                     if (!TryGetAggregationValue(funcCall, row, ticket, out ColumnValue? avgValue) || avgValue!.Type == ColumnType.Null)
-                        return;
+                        return 0;
 
                     average.Add(avgValue);
-                    return;
+                    return 0;
 
                 case QueryAggregationType.Min:
                     if (!TryGetAggregationValue(funcCall, row, ticket, out ColumnValue? minValue) || minValue!.Type == ColumnType.Null)
-                        return;
+                        return 0;
 
                     min = min is null || minValue.CompareTo(min) < 0 ? minValue : min;
-                    return;
+                    return 0;
 
                 case QueryAggregationType.Max:
                     if (!TryGetAggregationValue(funcCall, row, ticket, out ColumnValue? maxValue) || maxValue!.Type == ColumnType.Null)
-                        return;
+                        return 0;
 
                     max = max is null || maxValue.CompareTo(max) > 0 ? maxValue : max;
-                    return;
+                    return 0;
 
                 case QueryAggregationType.Extension:
                 {
@@ -1582,8 +1602,15 @@ internal sealed class QueryAggregator
                             ? SqlExecutor.EvalExpr(arguments[i], qr, ticket.Parameters, ticket.RowNameResolver)
                             : SqlExecutor.EvalExpr(arguments[i], row, ticket.Parameters, ticket.RowNameResolver);
 
+                    if (extensionState is IMeasuredAggregateState measured)
+                    {
+                        long before = measured.RetainedBytes;
+                        extension.Aggregate.Accumulate(extensionState, extension.CalledName, values);
+                        return measured.RetainedBytes - before;
+                    }
+
                     extension.Aggregate.Accumulate(extensionState!, extension.CalledName, values);
-                    return;
+                    return 0;
                 }
 
                 default:

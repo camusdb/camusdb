@@ -111,7 +111,10 @@ internal static class JsonbJsonWriter
         using (Utf8JsonWriter writer = new(buffer))
             Write(writer, item);
 
-        using JsonDocument document = JsonDocument.Parse(buffer.WrittenMemory);
+        // The document nests at most JsonbLimits.MaxNestingDepth levels, which is deeper than the
+        // default parse limit of 64.
+        using JsonDocument document = JsonDocument.Parse(buffer.WrittenMemory,
+            new JsonDocumentOptions { MaxDepth = JsonbLimits.MaxNestingDepth });
         return document.RootElement.Clone();
     }
 }

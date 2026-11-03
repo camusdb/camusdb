@@ -161,7 +161,8 @@ internal sealed class KvRowAccessor
     ///
     /// <para>This is a read-only operation: no locks are acquired and no keys are tracked as
     /// modified. Serializable read-write callers that need shared point locks must use
-    /// <see cref="GetRow"/> per entry, or <see cref="GetRowsBatchLockedForMutation"/>.</para>
+    /// <see cref="GetRow"/> per entry, <see cref="GetRowsBatchForRead"/> for a query, or
+    /// <see cref="GetRowsBatchLockedForMutation"/> for a write phase.</para>
     /// </summary>
     internal async Task<ReadOnlyMemory<byte>?[]> GetRowsBatch(
         KvTransaction tx,
@@ -238,6 +239,42 @@ internal sealed class KvRowAccessor
             await branch.ResolveRowsFromAncestorsAsync(rowIds, unresolved, output, cancellationToken).ConfigureAwait(false);
 
         return output;
+    }
+
+    /// <summary>
+    /// Batch point-read for a query that found its row ids through an index: the batch form of a
+    /// sequence of <see cref="GetRow"/> calls. For a Serializable read-write transaction it first takes
+    /// the shared point lock on every row key, held to commit, exactly as <see cref="GetRow"/> does;
+    /// then it reads every row at <see cref="KvTransaction.QueryReadView"/>, as
+    /// <see cref="GetRowsBatch"/> does. Every other transaction takes no lock.
+    ///
+    /// <para><b>Why the lock is needed.</b> The index scan that produced the ids holds a range lock on
+    /// the index entries only. An UPDATE that does not change the indexed value writes no index entry,
+    /// so it never meets that range lock, and a plain <see cref="GetRowsBatch"/> leaves nothing on the
+    /// row itself. Two Serializable transactions could then each read a row through an index, change
+    /// the row the other one read by primary key, and both commit: a write skew. The shared point lock
+    /// makes the second writer wait or be refused, as it is after a read by primary key.</para>
+    ///
+    /// <para>Every id is locked, also a row that the caller's filter will drop after the read: the
+    /// read examined it, and a change to it could change the result.</para>
+    /// </summary>
+    internal async Task<ReadOnlyMemory<byte>?[]> GetRowsBatchForRead(
+        KvTransaction tx,
+        IReadOnlyList<ObjectIdValue> rowIds,
+        CancellationToken cancellationToken = default)
+    {
+        if (rowIds.Count == 0)
+            return [];
+
+        if (KvRangeLockManager.IsSerializableReadWrite(tx))
+        {
+            await tx.EnsureSessionStartedAsync(cancellationToken, keys.TableKeyPrefix).ConfigureAwait(false);
+
+            for (int i = 0; i < rowIds.Count; i++)
+                await locks.AcquireSharedPointLockAsync(tx, keys.RowBucketPrefix, keys.BuildRowKey(rowIds[i]), cancellationToken).ConfigureAwait(false);
+        }
+
+        return await GetRowsBatch(tx, rowIds, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>
