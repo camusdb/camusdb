@@ -107,9 +107,7 @@ internal sealed class JoinLeafRowPage
 
         // Pinned once for the whole scan, like every other reader of the published options record.
         options = services.Options;
-        required = JoinAliasMetadata.GetRequiredColumnsForAlias(plan, source.Alias);
-        if (index is not null)
-            required = IndexEntryCheck.RequiredColumns(required, index);
+        required = JoinAliasMetadata.GetDecodedColumnsForAlias(plan, source.Alias, index);
         schemaVersion = JoinAliasMetadata.GetTableSchemaVersionForAlias(plan, source.Alias);
         txId = plan.Ticket.TxnState.TransactionId;
 

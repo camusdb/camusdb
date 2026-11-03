@@ -105,11 +105,7 @@ internal static class ErrorClassifier
     ];
 
     /// <summary>Defects the fuzzer found that wait for a fix. See <see cref="KnownIssue"/>.</summary>
-    public static IReadOnlyList<KnownIssue> KnownIssues { get; } =
-    [
-        new(CamusDBErrorCodes.InvalidInternalOperation, "Join row shape diverged from join layout",
-            "A self-join under a LEFT JOIN that reads one column of the inner self-join, for example SELECT a1.c1 FROM t0 AS a0 INNER JOIN t0 AS a1 ON a0.c1 = a1.c1 LEFT JOIN t1 AS a2 ON a0.c1 = a2.c2, fails because the join row layout disagrees with the pair map."),
-    ];
+    public static IReadOnlyList<KnownIssue> KnownIssues { get; } = [];
 
     /// <summary>Codes that report a defect of the engine, not a refusal of the statement. The printed regression tests use the same list (<see cref="SqlFuzzErrorRules.InternalCodes"/>).</summary>
     public static IReadOnlySet<string> InternalCodes => SqlFuzzErrorRules.InternalCodes;

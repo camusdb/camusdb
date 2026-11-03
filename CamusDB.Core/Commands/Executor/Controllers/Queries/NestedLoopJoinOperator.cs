@@ -58,7 +58,7 @@ internal sealed class NestedLoopJoinOperator
         Dictionary<string, int>? rightOrdinalMap = null;
         JoinRowPairer pairer = new();
         OuterJoinPadding? padding = joinNode.Kind == JoinKind.LeftOuter
-            ? await OuterJoinPadding.CreateAsync(joinNode.RightSource, plan).ConfigureAwait(false)
+            ? await OuterJoinPadding.CreateAsync(joinNode.RightSource, plan, joinNode.RightPhysicalNode).ConfigureAwait(false)
             : null;
 
         await using NestedLoopInnerSpool? spool = TryCreateSpool(joinNode, plan);

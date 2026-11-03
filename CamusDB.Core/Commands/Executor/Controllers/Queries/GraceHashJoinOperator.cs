@@ -231,7 +231,7 @@ internal sealed class GraceHashJoinOperator
         }
 
         OuterJoinPadding? padding = leftOuter
-            ? await OuterJoinPadding.CreateAsync(joinNode.BuildSource, plan).ConfigureAwait(false)
+            ? await OuterJoinPadding.CreateAsync(joinNode.BuildSource, plan, joinNode.RightPhysicalNode).ConfigureAwait(false)
             : null;
 
         IAsyncEnumerable<QueryResultRow> buildStream;

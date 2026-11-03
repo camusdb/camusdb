@@ -265,7 +265,7 @@ internal sealed class HashJoinOperator
         Dictionary<string, int>? rightOrdinalMap = null;
         JoinRowPairer pairer = new();
         OuterJoinPadding? padding = joinNode.Kind == JoinKind.LeftOuter
-            ? await OuterJoinPadding.CreateAsync(joinNode.BuildSource, plan).ConfigureAwait(false)
+            ? await OuterJoinPadding.CreateAsync(joinNode.BuildSource, plan, joinNode.RightPhysicalNode).ConfigureAwait(false)
             : null;
 
         if (buildSide == HashJoinBuildSide.Right)

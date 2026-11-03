@@ -14,8 +14,9 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 
 /// <summary>
 /// Answers the per-alias questions a join leaf asks before it reads a row: which columns this
-/// alias must decode, which schema version its rows were written under, what the key columns of
-/// an index decode to, and which alias a left-side row belongs to.
+/// alias must decode, which columns a row fetched through an index carries, which schema version
+/// its rows were written under, what the key columns of an index decode to, and which alias a
+/// left-side row belongs to.
 ///
 /// <para>The plan carries per-alias answers only for the aliases the binder resolved; each
 /// lookup falls back to the plan-wide value, so a leaf never has to know whether its alias was
@@ -29,6 +30,55 @@ internal static class JoinAliasMetadata
             return required;
 
         return plan.ScanRequiredColumns;
+    }
+
+    /// <summary>
+    /// The columns a row of <paramref name="alias"/> carries once a leaf decoded it: the alias's
+    /// required set, plus the key columns of <paramref name="index"/> when the row was fetched through
+    /// an index entry, because the entry check (<see cref="IndexEntryCheck"/>) compares those columns
+    /// with the row. This is the one rule for a right row's key set. The page that decodes a right row
+    /// (<see cref="JoinLeafRowPage"/>) and the padding of a left outer join, which builds the right half
+    /// of its layout from metadata before any right row exists (<see cref="OuterJoinPadding"/>), must
+    /// agree key for key; a key the padding did not list made the merge of a real right row throw
+    /// "shape diverged" whenever the index had a key column the query did not read.
+    /// </summary>
+    internal static IReadOnlySet<string>? GetDecodedColumnsForAlias(QueryPlan plan, string alias, TableIndexSchema? index)
+    {
+        IReadOnlySet<string>? required = GetRequiredColumnsForAlias(plan, alias);
+        return index is null ? required : IndexEntryCheck.RequiredColumns(required, index);
+    }
+
+    /// <summary>
+    /// The index a right-side leaf fetches its rows through, or null for a primary-row scan, a derived
+    /// table or no access path of its own: an index-ordered scan (<see cref="TableScanSource.ForcedIndex"/>),
+    /// an index range leaf or an IN-list leaf, each possibly under the sort a merge join adds. A row
+    /// read through an index decodes the index's key columns as well (<see cref="GetDecodedColumnsForAlias"/>).
+    /// </summary>
+    internal static TableIndexSchema? IndexOfRightLeaf(PhysicalPlanNode? node)
+    {
+        while (node is not null)
+        {
+            switch (node)
+            {
+                case TableScanNode { Source: TableScanSource.ForcedIndex, Index: { } forced }:
+                    return forced;
+
+                case IndexRangeScanNode range:
+                    return range.Index;
+
+                case IndexInListScanNode inList:
+                    return inList.Index;
+
+                case SortNode sort:
+                    node = sort.Input;
+                    continue;
+
+                default:
+                    return null;
+            }
+        }
+
+        return null;
     }
 
     internal static int GetTableSchemaVersionForAlias(QueryPlan plan, string alias)

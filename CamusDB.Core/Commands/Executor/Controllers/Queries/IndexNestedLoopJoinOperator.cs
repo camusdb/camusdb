@@ -183,7 +183,7 @@ internal sealed class IndexNestedLoopJoinOperator
         PairState pairing = new();
         RightDecodeState rightDecodeState = new();
         OuterJoinPadding? padding = joinNode.Kind == JoinKind.LeftOuter
-            ? await OuterJoinPadding.CreateAsync(BoundJoinRightSource.FromTable(joinNode.RightSource), plan).ConfigureAwait(false)
+            ? await OuterJoinPadding.CreateAsync(BoundJoinRightSource.FromTable(joinNode.RightSource), plan, rightLeaf: null).ConfigureAwait(false)
             : null;
 
         // Both probe shapes fetch their primary rows through one page that lives for the whole join, not

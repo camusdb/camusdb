@@ -7,6 +7,7 @@
 
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
+using CamusDB.Core.CommandsExecutor.Models.Plans;
 using CamusDB.Core.CommandsExecutor.Models.Queries;
 using CamusDB.Core.Util.ObjectIds;
 
@@ -23,11 +24,16 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 /// key set whichever kind of row it reads.</para>
 ///
 /// <para><b>Why the key set must equal the scanner's.</b> The right key list is derived from the same
-/// inputs the leaf scanner decodes a right row from: the required-column set for the alias (null
-/// means every readable column), the schema version the alias reads under, and for a derived table
-/// its output row keys. A real right row therefore carries exactly these keys. If it did not, the
-/// merge would throw "shape diverged" on the first matched row; that guard is kept on purpose, so a
-/// drift between this list and the scanner is loud rather than a silent half-NULL row.</para>
+/// inputs the leaf scanner decodes a right row from: the column set the alias decodes (null means
+/// every readable column), the schema version the alias reads under, and for a derived table its
+/// output row keys. A row fetched through an index entry (an index-ordered scan, an index range or an
+/// IN-list leaf) decodes the index's key columns as well, so the entry can be checked against the row;
+/// the list follows the same rule (<see cref="JoinAliasMetadata.GetDecodedColumnsForAlias"/>) through
+/// the leaf the operator reads the right side with. A real right row therefore carries exactly these
+/// keys. If it did not, the merge would throw "shape diverged" on the first matched row; that guard is
+/// kept on purpose, so a drift between this list and the scanner is loud rather than a silent half-NULL
+/// row. It fired for a merge join whose right side was read in index order over an index with a key
+/// column the query did not read.</para>
 ///
 /// <para>Not thread-safe; one instance belongs to one operator execution.</para>
 /// </summary>
@@ -54,16 +60,20 @@ internal sealed class OuterJoinPadding
     /// <summary>
     /// Computes the right key list for <paramref name="right"/> under <paramref name="plan"/>. A base
     /// table contributes every readable column of the schema version the alias reads under, kept to
-    /// the alias's required-column set when the plan has one; a derived table contributes its output
-    /// row keys. Awaits only when the alias reads under a schema version that is not the current one.
+    /// the column set the alias decodes when the plan has one: its required columns, plus the key
+    /// columns of the index that <paramref name="rightLeaf"/> fetches rows through, if any (the
+    /// operator's own access path for the right side, null when it reads the primary rows). A derived
+    /// table contributes its output row keys. Awaits only when the alias reads under a schema version
+    /// that is not the current one.
     /// </summary>
-    internal static async ValueTask<OuterJoinPadding> CreateAsync(BoundJoinRightSource right, QueryPlan plan)
+    internal static async ValueTask<OuterJoinPadding> CreateAsync(BoundJoinRightSource right, QueryPlan plan, PhysicalPlanNode? rightLeaf)
     {
         List<string> keys = new();
 
         if (right.Table is { } table)
         {
-            IReadOnlySet<string>? required = JoinAliasMetadata.GetRequiredColumnsForAlias(plan, table.Alias);
+            IReadOnlySet<string>? required = JoinAliasMetadata.GetDecodedColumnsForAlias(
+                plan, table.Alias, JoinAliasMetadata.IndexOfRightLeaf(rightLeaf));
             int version = JoinAliasMetadata.GetTableSchemaVersionForAlias(plan, table.Alias);
             TableSchemaHistory history = await table.Table.Schema
                 .GetSchemaHistoryAsync(plan.Ticket.TxnState.TransactionId, version)

@@ -76,7 +76,7 @@ internal sealed class MergeJoinOperator
         QueryTicket ticket = plan.Ticket;
         string rightAlias = joinNode.RightSource.Alias;
         OuterJoinPadding? padding = joinNode.Kind == JoinKind.LeftOuter
-            ? await OuterJoinPadding.CreateAsync(joinNode.RightSource, plan).ConfigureAwait(false)
+            ? await OuterJoinPadding.CreateAsync(joinNode.RightSource, plan, joinNode.RightPhysicalNode).ConfigureAwait(false)
             : null;
 
         // Once both sides are buffered no scan observes the token any more, so the merge loop
@@ -244,7 +244,7 @@ internal sealed class MergeJoinOperator
         Dictionary<string, int>? rightOrdinalMap = null;
         JoinRowPairer pairer = new();
         OuterJoinPadding? padding = joinNode.Kind == JoinKind.LeftOuter
-            ? await OuterJoinPadding.CreateAsync(joinNode.RightSource, plan).ConfigureAwait(false)
+            ? await OuterJoinPadding.CreateAsync(joinNode.RightSource, plan, joinNode.RightPhysicalNode).ConfigureAwait(false)
             : null;
 
         await using IAsyncEnumerator<QueryResultRow> leftEnum  =
