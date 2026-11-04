@@ -454,6 +454,33 @@ column's declared element type the same way scalars do, so `ARRAY[1, 2]` is acce
 `CAST('0xFF00' AS bytes)`. The PostgreSQL shorthand `x::type` is the same as `CAST(x AS type)`; see
 [PostgreSQL expression syntax](sql-expression-syntax.md#the--cast).
 
+#### Cast to `int64`
+
+`CAST(x AS int64)`, `x::int64` and `to_int64(x)` use one rule. A number with a fraction rounds half
+away from zero, for every numeric type:
+
+| Value | `float64`, `float32`, `numeric`, `jsonb` number |
+|-------|-------------------------------------------------|
+| `0.4` | `0` |
+| `0.5` | `1` |
+| `-0.5` | `-1` |
+| `1.5` | `2` |
+| `2.5` | `3` |
+| `-2.5` | `-3` |
+
+- This is the GoogleSQL rule, and `round(x)` gives the same integer. PostgreSQL uses it for `numeric`
+  and `jsonb`, but rounds `float8::bigint` half to even, so `2.5::float8::bigint` is `2` in PostgreSQL.
+- The cast reads the exact binary value of a float, so `0.49999999999999994` gives `0`. A value that
+  the float type cannot hold is already rounded when it is stored: `9007199254740993.0` is the `float64`
+  value `9007199254740992`.
+- `NaN`, `Infinity`, `-Infinity` and a result past the `int64` range fail with `CADB0420`
+  (`IntegerValueOutOfRange`): HTTP 400, gRPC `OUT_OF_RANGE`.
+- A string must spell an integer. `CAST('2.5' AS int64)` fails with `CADB0400`, and it does not round.
+  `doc ->> 'a'` gives a string, so cast `doc -> 'a'` to round a `jsonb` number.
+- There is no implicit conversion. An `int64` column, an integer function argument, an array subscript,
+  a bitwise operator and a `LIMIT` or `OFFSET` parameter refuse a float. Write the `CAST` where you want
+  the rounded value.
+
 #### Text form of each type
 
 Every scalar type has one text form. `CAST(x AS string)`, `x::string`, `to_string(x)`,
