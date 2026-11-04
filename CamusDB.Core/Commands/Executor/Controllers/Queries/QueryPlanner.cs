@@ -654,7 +654,8 @@ public sealed class QueryPlanner
             foreach (SemiJoinSpec spec in ticket.SemiJoinSpecs)
             {
                 root = new SemiJoinNode(root, spec.Mode, spec.InnerTable,
-                    spec.OuterColumn, spec.InnerColumn, spec.InnerIndex, spec.InnerFilter);
+                    spec.OuterColumn, spec.InnerColumn, spec.InnerIndex, spec.InnerFilter,
+                    spec.InnerResolver, spec.InnerRequiredColumns);
             }
         }
 

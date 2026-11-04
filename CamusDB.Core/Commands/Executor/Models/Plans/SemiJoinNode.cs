@@ -8,6 +8,7 @@
 
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Controllers.Queries;
+using CamusDB.Core.CommandsExecutor.Models.Queries;
 using CamusDB.Core.SQLParser;
 
 namespace CamusDB.Core.CommandsExecutor.Models.Plans;
@@ -23,6 +24,9 @@ namespace CamusDB.Core.CommandsExecutor.Models.Plans;
 ///   <item><see cref="SemiJoinMode.NullAwareAnti"/> — same as Anti but pre-checks for inner NULLs;
 ///     if any exist, discards all outer rows (SQL three-valued UNKNOWN semantics).</item>
 /// </list>
+/// The inner WHERE (<see cref="InnerFilter"/>) is evaluated per probe with <see cref="InnerResolver"/>,
+/// the name scope of the inner SELECT, so a reference the subquery qualifies with its own alias
+/// reads the decoded inner row, which is keyed by bare column names.
 /// </summary>
 public sealed class SemiJoinNode : PhysicalPlanNode
 {
@@ -38,6 +42,12 @@ public sealed class SemiJoinNode : PhysicalPlanNode
 
     public NodeAst? InnerFilter { get; }
 
+    /// <summary>The name scope of the inner SELECT; see <see cref="SemiJoinSpec.InnerResolver"/>.</summary>
+    public QueryRowNameResolver InnerResolver { get; }
+
+    /// <summary>The inner columns a probe decodes; see <see cref="SemiJoinSpec.InnerRequiredColumns"/>.</summary>
+    public IReadOnlySet<string> InnerRequiredColumns { get; }
+
     public SemiJoinNode(
         PhysicalPlanNode outerInput,
         SemiJoinMode mode,
@@ -45,7 +55,9 @@ public sealed class SemiJoinNode : PhysicalPlanNode
         string outerColumn,
         string innerColumn,
         TableIndexSchema? innerIndex,
-        NodeAst? innerFilter)
+        NodeAst? innerFilter,
+        QueryRowNameResolver innerResolver,
+        IReadOnlySet<string> innerRequiredColumns)
     {
         Input = outerInput;
         Mode = mode;
@@ -54,5 +66,7 @@ public sealed class SemiJoinNode : PhysicalPlanNode
         InnerColumn = innerColumn;
         InnerIndex = innerIndex;
         InnerFilter = innerFilter;
+        InnerResolver = innerResolver;
+        InnerRequiredColumns = innerRequiredColumns;
     }
 }

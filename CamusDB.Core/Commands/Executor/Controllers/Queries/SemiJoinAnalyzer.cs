@@ -16,7 +16,7 @@ using CamusDB.Core.SQLParser;
 namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 
 /// <summary>
-/// R11 semi/anti-join rewrite: detects eligible IN / NOT IN subquery predicates in a
+/// Semi/anti-join rewrite: detects eligible IN / NOT IN subquery predicates in a
 /// single-table SELECT WHERE clause and converts them to <see cref="SemiJoinSpec"/> descriptors
 /// before <see cref="SubqueryRewriter"/> materialises them.
 ///
@@ -32,6 +32,12 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 ///     index directly without re-running the inner query.</item>
 ///   <item>RHS subquery is uncorrelated (<see cref="ExistsSubqueryAnalyzer.IsCorrelated"/> returns false).</item>
 ///   <item>RHS subquery WHERE (if any) contains no nested subqueries.</item>
+///   <item>RHS subquery WHERE (if any) reads only names its own scope resolves: a bare column, or
+///     one qualified with the inner alias (the table name when there is no alias). The spec carries
+///     that scope as a <see cref="QueryRowNameResolver"/>, because the executor evaluates the filter
+///     against the decoded inner row, which is keyed by bare names. A name the scope cannot resolve
+///     leaves the predicate to the general path, which binds the subquery and reports the error with
+///     its own message, so both paths refuse the same statement the same way.</item>
 /// </list>
 /// </summary>
 internal sealed class SemiJoinAnalyzer
@@ -213,7 +219,41 @@ internal sealed class SemiJoinAnalyzer
 
         NodeAst? innerFilter = innerQuery.Where?.Expression;
 
-        return new SemiJoinSpec(outerColumn, innerTable, innerColumn, innerIndex, innerFilter, mode);
+        // The inner SELECT is its own name scope. The executor evaluates its filter per probe against
+        // the decoded inner row, which is keyed by bare column names, so a reference the subquery
+        // qualifies with its own alias (s.c, or t.c when there is no alias) must map to the bare
+        // name. The resolver of that one-table scope does the mapping, and it validates every name
+        // once here instead of once per row. The same pass yields the columns a probe must decode.
+        string innerAlias = innerTableSource.Alias ?? innerTableSource.TableName;
+        QueryRowNameResolver innerResolver = new([new BoundTableSource(innerTableSource, innerTable, innerAlias)]);
+        HashSet<string> innerRequired = new(StringComparer.OrdinalIgnoreCase) { innerColumn };
+
+        if (innerFilter is not null)
+        {
+            HashSet<string> references = new(StringComparer.Ordinal);
+            QueryExpressionWalker.CollectColumnReferences(innerFilter, references);
+
+            foreach (string reference in references)
+            {
+                string lookupKey;
+                try
+                {
+                    lookupKey = innerResolver.ResolveRowLookupKey(reference);
+                }
+                catch (CamusDBException)
+                {
+                    // An unknown column or alias: the general path binds the subquery and reports it
+                    // with its own message, so both paths refuse the statement the same way.
+                    return null;
+                }
+
+                innerRequired.Add(lookupKey);
+            }
+        }
+
+        innerResolver.FreezeForSharedReuse();
+
+        return new SemiJoinSpec(outerColumn, innerTable, innerColumn, innerIndex, innerFilter, innerResolver, innerRequired, mode);
     }
 
     /// <summary>
