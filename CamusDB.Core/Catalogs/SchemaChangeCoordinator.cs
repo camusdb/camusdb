@@ -1057,6 +1057,7 @@ public sealed class SchemaChangeCoordinator
         ColumnNotNull = columnDefinition?.NotNull ?? false,
         ColumnDefault = columnDefinition?.Default,
         ColumnMaxLength = columnDefinition?.MaxLength,
+        ColumnIntegerBits = columnDefinition?.IntegerBits,
         ColumnArrayElementType = columnDefinition?.ArrayElementType,
         ColumnDefaultFunction = columnDefinition?.DefaultFunction,
         ColumnDefaultSequenceId = columnDefinition?.DefaultSequenceId,
@@ -1325,7 +1326,8 @@ public sealed class SchemaChangeCoordinator
                     comment: persisted.ColumnComment,
                     storage: persisted.ColumnStorage,
                     defaultSequenceId: persisted.ColumnDefaultSequenceId,
-                    identityAlways: persisted.ColumnIdentityAlways)
+                    identityAlways: persisted.ColumnIdentityAlways,
+                    integerBits: persisted.ColumnIntegerBits)
                 : null;
 
             IndexBuildInfo? indexBuildInfo = null;

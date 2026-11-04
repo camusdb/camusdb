@@ -59,7 +59,8 @@ internal static class PrimaryKeyNotNullRule
                         column.Storage,
                         column.DefaultSequenceId,
                         column.IdentityAlways,
-                        column.Identity);
+                        column.Identity,
+                        integerBits: column.IntegerBits);
                 }
             }
         }

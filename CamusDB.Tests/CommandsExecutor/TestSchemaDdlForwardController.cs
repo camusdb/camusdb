@@ -391,6 +391,43 @@ public sealed class TestSchemaDdlForwardController
     }
 
     /// <summary>
+    /// A CREATE TABLE with narrow integer columns, forwarded the real way: the follower's forwarder
+    /// serializes the ticket, and the leader's controller rebuilds it from that exact body. A width lost
+    /// on this path creates the table on the leader with no range check and no error.
+    /// </summary>
+    [Test]
+    public async Task ForwardCreateTable_AsLeader_KeepsTheIntegerWidth()
+    {
+        string db = await CreateTestDatabaseAsync();
+        try
+        {
+            const string sql = "CREATE TABLE narrow (id int64 PRIMARY KEY NOT NULL, s smallint, a array(int))";
+
+            CreateTableTicket ticket = new CamusDB.Core.CommandsExecutor.Controllers.DDL.SQLExecutorCreateTableCreator().CreateCreateTableTicket(
+                new ExecuteSQLTicket(txnState: null!, database: db, sql: sql, parameters: null),
+                CamusDB.Core.SQLParser.SQLParserProcessor.Parse(sql));
+
+            CapturingHandler handler = new();
+            HttpSchemaDdlForwarder forwarder = new(new System.Net.Http.HttpClient(handler), _ => new Uri("http://leader:5095"), nodeSecret: "", NullLogger<ICamusDB>.Instance);
+            await forwarder.ForwardCreateTableAsync("leader:7070", ticket, Guid.NewGuid().ToString("N"), CancellationToken.None);
+
+            SchemaDdlForwardController ctrl = BuildController(handler.Body!, clusterNode: node);
+            SchemaDdlForwardResponse? resp = ExtractResponse(await ctrl.ForwardCreateTable());
+            Assert.AreEqual("ok", resp!.Status, resp.Message);
+
+            DatabaseDescriptor descriptor = await executor!.OpenDatabase(db);
+            TableDescriptor table = await executor.OpenTable(new OpenTableTicket(db, "narrow"));
+            Assert.AreEqual(16, table.Schema.Columns!.Find(c => c.Name == "s")!.IntegerBits);
+            Assert.AreEqual(32, table.Schema.Columns!.Find(c => c.Name == "a")!.IntegerBits);
+            Assert.IsNotNull(descriptor);
+        }
+        finally
+        {
+            await DropTestDatabaseAsync(db);
+        }
+    }
+
+    /// <summary>
     /// A CREATE TABLE with a foreign key, forwarded the real way: the follower's forwarder serializes the
     /// ticket, and the leader's controller rebuilds it from that exact body. The in-process forwarder the
     /// cluster tests use bypasses the DTOs, so only this path shows a field lost on the wire.

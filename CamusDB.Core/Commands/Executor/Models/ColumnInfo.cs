@@ -62,6 +62,12 @@ public sealed class ColumnInfo
     public int? MaxLength { get; }
 
     /// <summary>
+    /// The declared width of an integer column in bits, or of each element of an integer array column:
+    /// 16 or 32. Null means int64. See <see cref="CamusDB.Core.Catalogs.Models.TableColumnSchema.IntegerBits"/>.
+    /// </summary>
+    public int? IntegerBits { get; }
+
+    /// <summary>
     /// Element type for Array columns. Null for all non-Array types.
     /// </summary>
     public ColumnType? ArrayElementType { get; }
@@ -101,7 +107,8 @@ public sealed class ColumnInfo
         string? defaultSequenceId = null,
         bool identityAlways = false,
         ColumnIdentityKind? identity = null,
-        string? defaultSequenceName = null
+        string? defaultSequenceName = null,
+        int? integerBits = null
     )
     {
         Name = name;
@@ -118,5 +125,6 @@ public sealed class ColumnInfo
         IdentityAlways = identityAlways;
         Identity = identity;
         DefaultSequenceName = defaultSequenceName;
+        IntegerBits = integerBits;
     }
 }

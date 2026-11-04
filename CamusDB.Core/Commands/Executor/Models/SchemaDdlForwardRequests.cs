@@ -22,6 +22,10 @@ public sealed class ColumnInfoRequest
     public bool NotNull { get; set; }
     public ColumnValue? Default { get; set; }
     public int? MaxLength { get; set; }
+
+    /// <summary>The declared integer width in bits, or null for int64. Without it a forwarded CREATE TABLE would lose the range check.</summary>
+    public int? IntegerBits { get; set; }
+
     public ColumnType? ArrayElementType { get; set; }
 
     /// <summary>Name of a nullary volatile function default (e.g. <c>gen_uuid_v7</c>); null when absent.</summary>

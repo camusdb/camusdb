@@ -1184,4 +1184,18 @@ public enum NodeType
     /// belongs. Appended at the end for the reason given on <see cref="TypeBytesSized"/>.
     /// </summary>
     TypeJsonb,
+
+    /// <summary>
+    /// The <c>SMALLINT</c> type: 16 bits, stored as int64 with a declared range (see
+    /// <see cref="CamusDB.Core.CommandsExecutor.Models.IntegerWidth"/>). Appended at the end for the
+    /// reason given on <see cref="TypeBytesSized"/>.
+    /// </summary>
+    TypeInteger16,
+
+    /// <summary>
+    /// The <c>INT</c> and <c>INTEGER</c> type: 32 bits, stored as int64 with a declared range (see
+    /// <see cref="CamusDB.Core.CommandsExecutor.Models.IntegerWidth"/>). Appended at the end for the
+    /// reason given on <see cref="TypeBytesSized"/>.
+    /// </summary>
+    TypeInteger32,
 }

@@ -111,6 +111,7 @@ TEnd            (E|e)(N|n)(D|d)
 TInteger        (I|i)(N|n)(T|t)(E|e)(G|g)(E|e)(R|r)
 TInclude        (I|i)(N|n)(C|c)(L|l)(U|u)(D|d)(E|e)
 TDouble         (D|d)(O|o)(U|u)(B|b)(L|l)(E|e)
+TDoublePrecision (D|d)(O|o)(U|u)(B|b)(L|l)(E|e)[ \t\r\n]+(P|p)(R|r)(E|e)(C|c)(I|i)(S|s)(I|i)(O|o)(N|n)
 TConstraint     (C|c)(O|o)(N|n)(S|s)(T|t)(R|r)(A|a)(I|i)(N|n)(T|t)
 TCheck          (C|c)(H|h)(E|e)(C|c)(K|k)
 TReferences     (R|r)(E|e)(F|f)(E|e)(R|r)(E|e)(N|n)(C|c)(E|e)(S|s)
@@ -420,9 +421,9 @@ TSequence       (S|s)(E|e)(Q|q)(U|u)(E|e)(N|n)(C|c)(E|e)
 
 {TTypeInt64} { return (int)Token.TTYPE_INT64; }
 
-{TTypeInt} { return (int)Token.TTYPE_INT64; }
+{TTypeInt} { return (int)Token.TTYPE_INT32; }
 
-{TTypeSmallInt} { return (int)Token.TTYPE_INT64; }
+{TTypeSmallInt} { return (int)Token.TTYPE_INT16; }
 
 {TTypeFloat64} { return (int)Token.TTYPE_FLOAT64; }
 
@@ -469,6 +470,10 @@ TSequence       (S|s)(E|e)(Q|q)(U|u)(E|e)(N|n)(C|c)(E|e)
 {TEnd} { return (int)Token.TEND; }
 
 {TInteger} { return (int)Token.TINTEGER; }
+
+/* One token, so PRECISION stays a plain identifier and stays usable as a table or column name. The
+   longest match gives this rule the two words, and a DOUBLE alone stays TDOUBLE. */
+{TDoublePrecision} { return (int)Token.TTYPE_FLOAT64; }
 
 {TDouble} { return (int)Token.TDOUBLE; }
 

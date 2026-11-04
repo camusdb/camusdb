@@ -569,7 +569,8 @@ internal sealed partial class SchemaDdlService
             defaultSequenceId: sequenceId,
             identityAlways: column.IdentityAlways,
             identity: column.Identity,
-            defaultSequenceName: column.DefaultSequenceName);
+            defaultSequenceName: column.DefaultSequenceName,
+            integerBits: column.IntegerBits);
     }
 
     /// <summary>

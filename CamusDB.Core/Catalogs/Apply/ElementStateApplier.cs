@@ -71,6 +71,7 @@ internal static class ElementStateApplier
                 current.DefaultValue,
                 payload.State,
                 maxLength: current.MaxLength,
+                integerBits: current.IntegerBits,
                 arrayElementType: current.ArrayElementType,
                 defaultFunction: current.DefaultFunction,
                 notNullConstraintName: current.NotNullConstraintName,

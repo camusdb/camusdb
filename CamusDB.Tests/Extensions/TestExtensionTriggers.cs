@@ -192,6 +192,24 @@ public sealed class TestExtensionTriggers : ExtensionTestBase
         Assert.AreEqual("HELLO", (await Scalar(executor, db, "SELECT name FROM t")).StrValue);
     }
 
+    /// <summary>A trigger runs before the checks, so a value it writes past a declared integer width is refused.</summary>
+    [Test]
+    public async Task BeforeTrigger_OutputMustFitADeclaredIntegerWidth()
+    {
+        (string db, _, CommandExecutor executor) = await CreateDatabaseWithGoodFixture();
+        await ExecDdl(executor, db, "CREATE TABLE narrow (id INT64 PRIMARY KEY, name STRING, small SMALLINT)");
+        await ExecNonQuery(executor, db, "INSERT INTO narrow (id, name) VALUES (1, 'a')");
+        await ExecDdl(executor, db, $"CREATE TRIGGER wide ON narrow BEFORE INSERT, UPDATE EXTERNAL NAME '{Fixture}SetSmallPastItsRangeTrigger'");
+
+        CamusDBException onInsert = Assert.ThrowsAsync<CamusDBException>(
+            async () => await ExecNonQuery(executor, db, "INSERT INTO narrow (id, name) VALUES (2, 'b')"))!;
+        Assert.AreEqual(CamusDBErrorCodes.IntegerValueOutOfRange, onInsert.Code, onInsert.Message);
+
+        CamusDBException onUpdate = Assert.ThrowsAsync<CamusDBException>(
+            async () => await ExecNonQuery(executor, db, "UPDATE narrow SET name = 'c' WHERE id = 1"))!;
+        Assert.AreEqual(CamusDBErrorCodes.IntegerValueOutOfRange, onUpdate.Code, onUpdate.Message);
+    }
+
     [Test]
     public async Task BeforeInsert_OutputMustStillValidate()
     {

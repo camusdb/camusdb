@@ -56,7 +56,7 @@
 %token TEQUALS TNOTEQUALS TLESSTHAN TGREATERTHAN TLESSTHANEQUALS TGREATERTHANEQUALS TAND TOR TORDER TBY TASC TDESC
 %token TTRUE TFALSE TUPDATE TSET TDELETE TINSERT TINTO TVALUES TCREATE TTABLE TNOT TNULL
 %token TTYPE_STRING TTYPE_INT64 TTYPE_FLOAT64 TTYPE_OBJECT_ID TTYPE_BOOL TCAST TINTEGER TDOUBLE
-%token TTYPE_FLOAT32 TTYPE_BYTES TTYPE_DATE TTYPE_DATETIME TTYPE_UUID TTYPE_ARRAY TTYPE_NUMERIC
+%token TTYPE_INT16 TTYPE_INT32 TTYPE_FLOAT32 TTYPE_BYTES TTYPE_DATE TTYPE_DATETIME TTYPE_UUID TTYPE_ARRAY TTYPE_NUMERIC
 %token TPRIMARY TKEY TUNIQUE TINDEX TALTER TWADD TDROP TCOLUMN TESCAPED_IDENTIFIER TLIMIT TOFFSET TAS TGROUP TSHOW TCONSTRAINT TCHECK
 %token TCOLUMNS TTABLES TDESCRIBE TDATABASES TDATABASE TAT LBRACE RBRACE TINDEXES TLIKE TILIKE TDEFAULT TIF TEXISTS TON TIN TIS
 %token TREGEXMATCH TREGEXIMATCH TREGEXNOTMATCH TREGEXNOTIMATCH
@@ -963,8 +963,8 @@ alter_table_stmt : TALTER TTABLE any_identifier TWADD any_identifier field_type 
                  | TALTER TTABLE any_identifier TWADD any_identifier field_type create_table_field_constraint_list { $$.n = new(NodeType.AlterTableAddColumn, $3.n, $5.n, $6.n, $7.n, null, null, null, null); }
                  | TALTER TTABLE any_identifier TWADD TCOLUMN any_identifier field_type { $$.n = new(NodeType.AlterTableAddColumn, $3.n, $6.n, $7.n, null, null, null, null, null); }
                  | TALTER TTABLE any_identifier TWADD TCOLUMN any_identifier field_type create_table_field_constraint_list { $$.n = new(NodeType.AlterTableAddColumn, $3.n, $6.n, $7.n, $8.n, null, null, null, null); }
-                 /* ADD COLUMN with a type written as an identifier: only JSONB / JSON (SERIAL needs a new
-                    identity, which ADD COLUMN does not create). */
+                 /* ADD COLUMN with a type written as an identifier: JSONB / JSON and BIGINT (SERIAL needs a
+                    new identity, which ADD COLUMN does not create). */
                  | TALTER TTABLE any_identifier TWADD any_identifier TIDENTIFIER { $$.n = new(NodeType.AlterTableAddColumn, $3.n, $5.n, TypeFromWord($6.s), null, null, null, null, null); }
                  | TALTER TTABLE any_identifier TWADD any_identifier TIDENTIFIER create_table_field_constraint_list { $$.n = new(NodeType.AlterTableAddColumn, $3.n, $5.n, TypeFromWord($6.s), $7.n, null, null, null, null); }
                  | TALTER TTABLE any_identifier TWADD TCOLUMN any_identifier TIDENTIFIER { $$.n = new(NodeType.AlterTableAddColumn, $3.n, $6.n, TypeFromWord($7.s), null, null, null, null, null); }
@@ -1724,12 +1724,12 @@ fk_action : TIDENTIFIER { $$.s = ForeignKeyActionWord($1.s); }
 
 create_table_item : any_identifier field_type { $$.n = new(NodeType.CreateTableItem, $1.n, $2.n, null, null, null, null, null, null); }
                   | any_identifier field_type create_table_field_constraint_list { $$.n = new(NodeType.CreateTableItem, $1.n, $2.n, $3.n, null, null, null, null, null); }
-                  /* A type written as a plain identifier: SERIAL / BIGSERIAL, and JSONB / JSON.
+                  /* A type written as a plain identifier: SERIAL / BIGSERIAL, JSONB / JSON and BIGINT.
                      SERIAL is a declaration shorthand, not a storage type: it resolves to int64 plus
                      an identity constraint, so no ColumnType member is spent on spelling a default.
-                     JSONB is a real type whose words stay identifiers. No field_type alternative
-                     begins with an identifier, so all four words stay usable as table and column
-                     names. */
+                     JSONB is a real type whose words stay identifiers, and BIGINT is another spelling
+                     of INT64. No field_type alternative begins with an identifier, so all five words
+                     stay usable as table and column names. */
                   | any_identifier TIDENTIFIER
                     {
                       $$.n = ColumnFromTypeWord($1.n, $2.s, null);
@@ -1829,10 +1829,11 @@ field_type : TTYPE_OBJECT_ID { $$.n = NodeAst.TypeObjectId; }
            | TTYPE_STRING { $$.n = NodeAst.TypeString; }
            | TTYPE_STRING LPAREN TDIGIT RPAREN { $$.n = new(NodeType.TypeStringSized, null, null, null, null, null, null, null, $3.s); }
            | TTYPE_INT64 { $$.n = NodeAst.TypeInteger64; }
-           /* INTEGER has its own token rather than sharing TTYPE_INT64 with INT and SMALLINT, but it
-              names the same type everywhere a type is written: a column, ADD COLUMN, CAST, :: and an
-              ARRAY element. */
-           | TINTEGER { $$.n = NodeAst.TypeInteger64; }
+           | TTYPE_INT16 { $$.n = NodeAst.TypeInteger16; }
+           | TTYPE_INT32 { $$.n = NodeAst.TypeInteger32; }
+           /* INTEGER has its own token rather than sharing TTYPE_INT32 with INT, but it names the same
+              type everywhere a type is written: a column, ADD COLUMN, CAST, :: and an ARRAY element. */
+           | TINTEGER { $$.n = NodeAst.TypeInteger32; }
            | TTYPE_FLOAT64 { $$.n = NodeAst.TypeFloat64; }
            | TTYPE_BOOL { $$.n = NodeAst.TypeBool; }
            | TTYPE_FLOAT32 { $$.n = NodeAst.TypeFloat32; }
@@ -1845,6 +1846,8 @@ field_type : TTYPE_OBJECT_ID { $$.n = NodeAst.TypeObjectId; }
            | TTYPE_NUMERIC LPAREN TDIGIT RPAREN { $$.n = NodeAst.RejectParameterizedNumeric(); }
            | TTYPE_NUMERIC LPAREN TDIGIT TCOMMA TDIGIT RPAREN { $$.n = NodeAst.RejectParameterizedNumeric(); }
            | TTYPE_ARRAY LPAREN field_type RPAREN { $$.n = new(NodeType.TypeArray, $3.n, null, null, null, null, null, null, null); }
+           /* BIGINT is a plain identifier, so it reaches an element type by this rule. */
+           | TTYPE_ARRAY LPAREN TIDENTIFIER RPAREN { $$.n = new(NodeType.TypeArray, ArrayElementTypeFromWord($3.s), null, null, null, null, null, null, null); }
            ;
 
 cast_target_type : field_type { $$.n = $1.n; $$.s = $1.s; }

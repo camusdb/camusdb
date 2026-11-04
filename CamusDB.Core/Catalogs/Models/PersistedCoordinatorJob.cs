@@ -51,6 +51,8 @@ public sealed class PersistedCoordinatorJob
 
     public int? ColumnMaxLength { get; set; }
 
+    public int? ColumnIntegerBits { get; set; }
+
     public ColumnType? ColumnArrayElementType { get; set; }
 
     public string? ColumnDefaultFunction { get; set; }

@@ -124,6 +124,7 @@ public sealed class TestCoordinatorJobPersistence : SharedNodeBaseTest
         written.ColumnType = ColumnType.Integer64;
         written.ColumnNotNull = true;
         written.ColumnMaxLength = 40;
+        written.ColumnIntegerBits = 16;
         written.ColumnArrayElementType = ColumnType.String;
         written.ColumnDefaultFunction = "gen_uuid_v7";
         written.ColumnDefaultSequenceId = "seq-1";
@@ -138,6 +139,7 @@ public sealed class TestCoordinatorJobPersistence : SharedNodeBaseTest
         Assert.AreEqual(ColumnType.Integer64, read.ColumnType);
         Assert.IsTrue(read.ColumnNotNull);
         Assert.AreEqual(40, read.ColumnMaxLength);
+        Assert.AreEqual(16, read.ColumnIntegerBits);
         Assert.AreEqual(ColumnType.String, read.ColumnArrayElementType);
         Assert.AreEqual("gen_uuid_v7", read.ColumnDefaultFunction);
         Assert.AreEqual("seq-1", read.ColumnDefaultSequenceId);

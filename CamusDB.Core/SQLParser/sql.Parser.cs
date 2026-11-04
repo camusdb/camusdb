@@ -353,8 +353,9 @@ internal partial class sqlParser
     }
 
     /// <summary>
-    /// The type node for a type name written as a plain identifier: <c>jsonb</c> or its alias
-    /// <c>json</c>. Used by column definitions, ADD COLUMN and the <c>JSONB '…'</c> typed literal.
+    /// The type node for a type name written as a plain identifier: <c>jsonb</c>, its alias
+    /// <c>json</c>, or <c>bigint</c>. Used by column definitions, ADD COLUMN and the
+    /// <c>JSONB '…'</c> typed literal.
     /// </summary>
     private static NodeAst TypeFromWord(string? word)
     {
@@ -362,10 +363,25 @@ internal partial class sqlParser
             string.Equals(word, "json", StringComparison.OrdinalIgnoreCase))
             return NodeAst.TypeJsonb;
 
+        if (string.Equals(word, "bigint", StringComparison.OrdinalIgnoreCase))
+            return NodeAst.TypeInteger64;
+
         throw new CamusDBException(
             CamusDBErrorCodes.InvalidInput,
             $"'{word}' is not a column type. Use one of the declared types, JSONB for a JSON document, " +
             "or SERIAL for an auto-numbered int64 column.");
+    }
+
+    /// <summary>
+    /// The element type of <c>ARRAY(word)</c> for a type written as a plain identifier. Only
+    /// <c>bigint</c>: a jsonb value is never an array element, so the JSON words stay refused here.
+    /// </summary>
+    private static NodeAst ArrayElementTypeFromWord(string? word)
+    {
+        if (string.Equals(word, "bigint", StringComparison.OrdinalIgnoreCase))
+            return NodeAst.TypeInteger64;
+
+        throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"'{word}' is not an array element type.");
     }
 
     /// <summary>

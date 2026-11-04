@@ -93,9 +93,9 @@ internal sealed class TestIntegerTypeAlias : BaseTest
         Assert.AreEqual(43L, rows[0].Row["c"].LongValue);
     }
 
-    /// <summary>The alias is spelling only: the column renders, and round-trips, as INT64.</summary>
+    /// <summary><c>INTEGER</c> and <c>INT</c> are one type: the column renders, and round-trips, as INT.</summary>
     [Test]
-    public async Task Integer_RendersAsInt64()
+    public async Task Integer_RendersAsInt()
     {
         (string dbname, _, CommandExecutor executor) = await CreateDatabase();
 
@@ -103,7 +103,7 @@ internal sealed class TestIntegerTypeAlias : BaseTest
 
         string ddl = (await QueryAsync(executor, dbname, "SHOW CREATE TABLE t"))[0].Row["Create Table"].StrValue!;
 
-        StringAssert.Contains("`x` INT64 NULL", ddl);
-        StringAssert.Contains("`xs` ARRAY(INT64) NULL", ddl);
+        StringAssert.Contains("`x` INT NULL", ddl);
+        StringAssert.Contains("`xs` ARRAY(INT) NULL", ddl);
     }
 }

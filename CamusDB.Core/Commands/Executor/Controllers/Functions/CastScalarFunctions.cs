@@ -77,7 +77,14 @@ internal static class CastScalarFunctions
     public static ColumnValue CastExpression(string castName, ColumnValue input, NodeAst targetTypeAst)
     {
         ColumnType targetType = ResolveTargetType(castName, targetTypeAst);
-        return CastValue(castName, input, targetType);
+        ColumnValue result = CastValue(castName, input, targetType);
+
+        return targetTypeAst.nodeType switch
+        {
+            NodeType.TypeInteger16 => IntegerWidth.EnforceOnCast(IntegerWidth.SmallIntBits, result),
+            NodeType.TypeInteger32 => IntegerWidth.EnforceOnCast(IntegerWidth.IntBits, result),
+            _ => result,
+        };
     }
 
     public static ColumnType InferCastReturnType(NodeAst targetTypeAst)
@@ -220,6 +227,8 @@ internal static class CastScalarFunctions
         {
             NodeType.TypeString    => ColumnType.String,
             NodeType.TypeInteger64 => ColumnType.Integer64,
+            NodeType.TypeInteger16 => ColumnType.Integer64,
+            NodeType.TypeInteger32 => ColumnType.Integer64,
             NodeType.TypeFloat64   => ColumnType.Float64,
             NodeType.TypeFloat32   => ColumnType.Float32,
             NodeType.TypeBool      => ColumnType.Bool,
@@ -242,7 +251,7 @@ internal static class CastScalarFunctions
         return identifier.ToLowerInvariant() switch
         {
             "id" or "object_id" => ColumnType.Id,
-            "integer" => ColumnType.Integer64,
+            "bigint" => ColumnType.Integer64,
             "char" or "varchar" or "text" => ColumnType.String,
             "double" => ColumnType.Float64,
             "uuid" or "guid" => ColumnType.Uuid,

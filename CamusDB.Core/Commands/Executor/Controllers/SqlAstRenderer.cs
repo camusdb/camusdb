@@ -384,6 +384,8 @@ internal class SqlAstRenderer
         NodeType.Identifier    => typeNode.yytext ?? throw Unsupported(typeNode),
         NodeType.TypeString or NodeType.TypeStringSized => "string",
         NodeType.TypeInteger64 => "int64",
+        NodeType.TypeInteger16 => "smallint",
+        NodeType.TypeInteger32 => "int",
         NodeType.TypeFloat64   => "float64",
         NodeType.TypeFloat32   => "float32",
         NodeType.TypeBool      => "bool",

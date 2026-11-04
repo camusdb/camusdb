@@ -68,14 +68,14 @@ internal sealed class SQLExecutorAlterTableCreator : SQLExecutorBaseCreator
     private static AlterTableTicket CreateAddColumnTicket(ExecuteSQLTicket ticket, string tableName, NodeAst ast)
     {
         string columnName = ast.rightAst!.yytext!;
-        (ColumnType colType, int? maxLen, ColumnType? elemType) = GetColumnMeta(ast.extendedOne!);
+        (ColumnType colType, int? maxLen, ColumnType? elemType, int? integerBits) = GetColumnMeta(ast.extendedOne!);
 
         if (ast.extendedTwo is null)
             return new(
                 ticket.DatabaseName,
                 tableName,
                 AlterTableOperation.AddColumn,
-                new ColumnInfo(columnName, colType, maxLength: maxLen, arrayElementType: elemType));
+                new ColumnInfo(columnName, colType, maxLength: maxLen, arrayElementType: elemType, integerBits: integerBits));
 
         List<(ColumnConstraintType type, ColumnValue? value)> constraintTypes = new();
         GetColumnConstraintList(ast.extendedTwo, constraintTypes);
@@ -115,7 +115,8 @@ internal sealed class SQLExecutorAlterTableCreator : SQLExecutorBaseCreator
                 storage: GetStorageFromConstraints(constraintTypes, colType, columnName),
                 identityAlways: identity == ColumnIdentityKind.Always,
                 identity: identity,
-                defaultSequenceName: defaultSequenceName));
+                defaultSequenceName: defaultSequenceName,
+                integerBits: integerBits));
     }
 
     /// <summary>
@@ -150,35 +151,37 @@ internal sealed class SQLExecutorAlterTableCreator : SQLExecutorBaseCreator
         }
     }
 
-    // Returns (ColumnType, MaxLength, ArrayElementType) from a field_type AST node.
-    private static (ColumnType type, int? maxLength, ColumnType? arrayElementType) GetColumnMeta(NodeAst nodeAst)
+    // Returns (ColumnType, MaxLength, ArrayElementType, IntegerBits) from a field_type AST node.
+    private static (ColumnType type, int? maxLength, ColumnType? arrayElementType, int? integerBits) GetColumnMeta(NodeAst nodeAst)
     {
         switch (nodeAst.nodeType)
         {
-            case NodeType.TypeInteger64: return (ColumnType.Integer64, null, null);
-            case NodeType.TypeFloat64:   return (ColumnType.Float64,   null, null);
-            case NodeType.TypeFloat32:   return (ColumnType.Float32,   null, null);
-            case NodeType.TypeObjectId:  return (ColumnType.Id,        null, null);
-            case NodeType.TypeBool:      return (ColumnType.Bool,      null, null);
-            case NodeType.TypeDate:      return (ColumnType.Date,      null, null);
-            case NodeType.TypeDateTime:  return (ColumnType.DateTime,  null, null);
-            case NodeType.TypeBytes:     return (ColumnType.Bytes,     null, null);
-            case NodeType.TypeUuid:      return (ColumnType.Uuid,      null, null);
-            case NodeType.TypeNumeric:   return (ColumnType.Numeric,   null, null);
-            case NodeType.TypeJsonb:     return (ColumnType.Jsonb,     null, null);
-            case NodeType.TypeString:    return (ColumnType.String,    null, null);
+            case NodeType.TypeInteger64: return (ColumnType.Integer64, null, null, null);
+            case NodeType.TypeInteger16: return (ColumnType.Integer64, null, null, IntegerWidth.SmallIntBits);
+            case NodeType.TypeInteger32: return (ColumnType.Integer64, null, null, IntegerWidth.IntBits);
+            case NodeType.TypeFloat64:   return (ColumnType.Float64,   null, null, null);
+            case NodeType.TypeFloat32:   return (ColumnType.Float32,   null, null, null);
+            case NodeType.TypeObjectId:  return (ColumnType.Id,        null, null, null);
+            case NodeType.TypeBool:      return (ColumnType.Bool,      null, null, null);
+            case NodeType.TypeDate:      return (ColumnType.Date,      null, null, null);
+            case NodeType.TypeDateTime:  return (ColumnType.DateTime,  null, null, null);
+            case NodeType.TypeBytes:     return (ColumnType.Bytes,     null, null, null);
+            case NodeType.TypeUuid:      return (ColumnType.Uuid,      null, null, null);
+            case NodeType.TypeNumeric:   return (ColumnType.Numeric,   null, null, null);
+            case NodeType.TypeJsonb:     return (ColumnType.Jsonb,     null, null, null);
+            case NodeType.TypeString:    return (ColumnType.String,    null, null, null);
 
             case NodeType.TypeStringSized:
                 if (!int.TryParse(nodeAst.yytext, out int n) || n <= 0)
                     throw new CamusDBException(CamusDBErrorCodes.InvalidInput,
                         $"Invalid string size '{nodeAst.yytext}': must be a positive integer");
-                return (ColumnType.String, n, null);
+                return (ColumnType.String, n, null, null);
 
             case NodeType.TypeBytesSized:
                 if (!int.TryParse(nodeAst.yytext, out int b) || b <= 0)
                     throw new CamusDBException(CamusDBErrorCodes.InvalidInput,
                         $"Invalid bytes size '{nodeAst.yytext}': must be a positive integer");
-                return (ColumnType.Bytes, b, null);
+                return (ColumnType.Bytes, b, null, null);
 
             case NodeType.TypeArray:
             {
@@ -187,12 +190,12 @@ internal sealed class SQLExecutorAlterTableCreator : SQLExecutorBaseCreator
                 if (elemNode.nodeType == NodeType.TypeArray)
                     throw new CamusDBException(CamusDBErrorCodes.InvalidInput,
                         "Nested arrays are not supported: array(array(...)) is invalid");
-                (ColumnType elemType, _, _) = GetColumnMeta(elemNode);
+                (ColumnType elemType, _, _, int? elemBits) = GetColumnMeta(elemNode);
                 // The array row and key codecs have no NUMERIC element form yet.
                 if (elemType == ColumnType.Numeric)
                     throw new CamusDBException(CamusDBErrorCodes.FeatureNotSupported,
                         "array(numeric) is not supported");
-                return (ColumnType.Array, null, elemType);
+                return (ColumnType.Array, null, elemType, elemBits);
             }
 
             default:
