@@ -13,7 +13,13 @@ using CamusDB.Core.SQLParser;
 namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 
 /// <summary>
-/// Collects hidden aggregate-workspace columns required to evaluate HAVING predicates.
+/// Collects the hidden aggregate-workspace columns a HAVING predicate needs. The evaluator
+/// (<see cref="QueryHavingEvaluator"/>, and the general expression evaluator below it) reads a name
+/// by its own text, so every name the predicate holds outside an aggregate must be a key of the
+/// workspace row. A name that is already a select item's row key costs nothing. Any other resolvable
+/// name (a group key that is not projected; a qualified <c>a0.c1</c> whose item is keyed <c>g0</c> or
+/// <c>c1</c>) becomes a hidden column keyed by that text, evaluated per group from the expression it
+/// resolves to. The binder has already refused a name that resolves to nothing.
 /// </summary>
 internal static class QueryHavingWorkspace
 {
@@ -132,6 +138,8 @@ internal static class QueryHavingWorkspace
             case NodeType.ExprRegexNotMatch:
             case NodeType.ExprRegexNotMatchCi:
             case NodeType.ExprQuantifiedComparison:
+            case NodeType.ExprInMembership:
+            case NodeType.ExprNotInMembership:
                 return (expression.leftAst is not null
                         && ContainsHiddenExpression(expression.leftAst, ticket, outputNames, insideAggregate))
                     || (expression.rightAst is not null
@@ -309,6 +317,8 @@ internal static class QueryHavingWorkspace
             case NodeType.ExprRegexNotMatch:
             case NodeType.ExprRegexNotMatchCi:
             case NodeType.ExprQuantifiedComparison:
+            case NodeType.ExprInMembership:
+            case NodeType.ExprNotInMembership:
                 if (expression.leftAst is not null)
                     CollectHiddenExpressions(expression.leftAst, ticket, projections, outputNames, insideAggregate);
 
@@ -390,19 +400,41 @@ internal static class QueryHavingWorkspace
             return false;
         }
 
-        if (outputNames.Contains(columnName))
-            return false;
-
+        // The cell is keyed by the reference's own text, because that is the key the evaluator reads.
+        // The resolved column may already have a cell under another key (the item's alias, or the bare
+        // name of a qualified reference); the hidden column then repeats its value under this text.
         NodeAst resolvedExpression = ResolveHiddenExpressionAst(expression, ticket, columnName);
-        bool isAggregate = QueryExpressionClassifier.IsAggregateProjection(resolvedExpression);
-
-        hiddenProjection = new QueryAggregator.AnalyzedProjection(
-            resolvedExpression,
-            columnName,
-            isAggregate,
-            isAggregate ? QueryAggregator.GetAggregateFuncCall(resolvedExpression) : null);
-
+        hiddenProjection = AnalyzeHidden(resolvedExpression, expression.yytext!);
         return true;
+    }
+
+    /// <summary>
+    /// The hidden column for a resolved expression under <paramref name="key"/>: a bare aggregate
+    /// feeds its accumulator, a compound aggregate is evaluated as a unit over its finalized parts,
+    /// and anything else is read from the first row of the group.
+    /// </summary>
+    private static QueryAggregator.AnalyzedProjection AnalyzeHidden(NodeAst expression, string key)
+    {
+        expression = QueryExpressionClassifier.UnwrapAlias(expression);
+
+        if (QueryExpressionClassifier.IsAggregateProjection(expression))
+            return new QueryAggregator.AnalyzedProjection(expression, key, isAggregate: true, funcCall: QueryAggregator.GetAggregateFuncCall(expression));
+
+        if (QueryExpressionClassifier.IsCompoundAggregateProjection(expression))
+        {
+            var (aggregates, rewritten) = QueryAggregateExtractor.Extract(expression);
+
+            return new QueryAggregator.AnalyzedProjection(
+                expression,
+                key,
+                IsAggregate: false,
+                FuncCall: null,
+                IsCompound: true,
+                CompoundAggregates: aggregates,
+                RewrittenExpression: rewritten);
+        }
+
+        return new QueryAggregator.AnalyzedProjection(expression, key, isAggregate: false, funcCall: null);
     }
 
     private static NodeAst ResolveHiddenExpressionAst(

@@ -153,6 +153,13 @@ internal static class QueryAggregateExtractor
                 node.leftAst is null ? null : Rewrite(node.leftAst, aggregates),
                 node.rightAst is null ? null : Rewrite(node.rightAst, aggregates)),
 
+            // An IN list keeps two flags in extendedOne and extendedTwo (the removed NULLs and the
+            // emptiness of a subquery list), so With() rebuilds it. The tested value may be an
+            // aggregate (HAVING COUNT(*) IN (1, 2)); the items are rewritten as the ExprList above.
+            NodeType.ExprInMembership or NodeType.ExprNotInMembership => With(node,
+                node.leftAst is null ? null : Rewrite(node.leftAst, aggregates),
+                node.rightAst is null ? null : Rewrite(node.rightAst, aggregates)),
+
             NodeType.ExprNot or NodeType.ExprNegate or NodeType.ExprBitNot or NodeType.ExprIsNull or NodeType.ExprIsNotNull
                 or NodeType.ExprIsTrue or NodeType.ExprIsNotTrue
                 or NodeType.ExprIsFalse or NodeType.ExprIsNotFalse => With(node,

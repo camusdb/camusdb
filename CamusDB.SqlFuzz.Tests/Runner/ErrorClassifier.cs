@@ -96,10 +96,7 @@ internal static class ErrorClassifier
         new("SELECT a.* (a qualified star)", "CADB0406: syntax error"),
         new("FULL [OUTER] JOIN, NATURAL JOIN, JOIN … USING", "CADB0533 or a syntax error"),
         new("a RIGHT JOIN after another join", "CADB0533"),
-        new("an IN-list item other than a literal or a name (a CAST, an expression)", "CADB0406: syntax error; the item is a simple_expr"),
-        new("an IN-list item that names a column, such as a0.c1 IN (a0.c0)", "CADB0404: Unknown column"),
-        new("HAVING that names a group key with its qualifier, such as HAVING a0.c1 > 1", "CADB0404: Unknown column; the unqualified name works"),
-        new("IN or NOT IN inside HAVING", "CADB0407: Unsupported HAVING expression node"),
+        new("an IN-list item other than a literal, a parameter or a name (a CAST, an expression)", "CADB0406: syntax error; the item is a simple_expr"),
         new("a correlated IN or NOT IN subquery", "CADB0400"),
         new("an integer literal in ORDER BY", "a column position, not a value"),
     ];

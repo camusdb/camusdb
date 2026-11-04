@@ -114,7 +114,7 @@ internal static class InListMemo
         List<NodeAst> items = [];
         bool readsParameters = false;
 
-        foreach (NodeAst item in Items(node.rightAst))
+        foreach (NodeAst item in SubqueryValueListAst.Items(node.rightAst))
         {
             if (!IsConstant(item, ref readsParameters))
                 return Ineligible;
@@ -181,33 +181,5 @@ internal static class InListMemo
         }
 
         return false;
-    }
-
-    /// <summary>The items of an <c>ExprList</c> tree in source order, without recursion.</summary>
-    private static IEnumerable<NodeAst> Items(NodeAst? list)
-    {
-        if (list is null)
-            yield break;
-
-        Stack<NodeAst> pending = new();
-        pending.Push(list);
-
-        while (pending.Count > 0)
-        {
-            NodeAst node = pending.Pop();
-
-            if (node.nodeType == NodeType.ExprList)
-            {
-                if (node.rightAst is not null)
-                    pending.Push(node.rightAst);
-
-                if (node.leftAst is not null)
-                    pending.Push(node.leftAst);
-
-                continue;
-            }
-
-            yield return node;
-        }
     }
 }

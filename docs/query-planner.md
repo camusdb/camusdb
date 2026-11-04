@@ -606,7 +606,8 @@ holds the check.
 - **`Aggregate`** → `QueryAggregator` — groups by the GROUP BY key (or one global group), accumulates
   `COUNT`/`SUM`/`AVG`/`MIN`/`MAX`, emits one row per group.
 - **`HavingFilter`** → `QueryFilterer.FilterHavingResultset` — evaluates HAVING against aggregated rows
-  in the `QueryHavingWorkspace` scope (so `HAVING x > 0` resolves an aggregate alias `x`).
+  in the `QueryHavingWorkspace` scope (so `HAVING x > 0` resolves an aggregate alias `x`, and
+  `HAVING a.k > 0` the group key `a.k` under the qualified text the predicate uses).
 - **`ReduceToProjections`** → `QueryProjector`.
 - **`Distinct`** → `QueryDistincter` — dedups output tuples; NULLs compare equal.
 - **`Limit`** → `QueryLimiter` — skips OFFSET, stops after LIMIT.

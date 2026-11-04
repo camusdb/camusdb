@@ -15,7 +15,12 @@ using CamusDB.Core.SQLParser;
 namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 
 /// <summary>
-/// Evaluates <c>HAVING</c> predicates against post-aggregation workspace rows.
+/// Evaluates <c>HAVING</c> predicates against post-aggregation workspace rows. A bare aggregate and a
+/// compound aggregate are read from the cell the workspace computed for them; every other name is
+/// read by its own text, which <see cref="QueryHavingWorkspace"/> guarantees is a key of the row (a
+/// hidden column repeats a group key under the qualified text the predicate uses). An IN list
+/// evaluates its tested value here, so an aggregate on that side reads its cell, and its items
+/// against the same row.
 /// </summary>
 internal static class QueryHavingEvaluator
 {
@@ -120,6 +125,15 @@ internal static class QueryHavingEvaluator
                 return ColumnValue.FromBool(BooleanTruthTest.Evaluate(
                     expression.nodeType,
                     Evaluate(expression.leftAst!, row, ticket, parameters)));
+
+            case NodeType.ExprInMembership:
+            case NodeType.ExprNotInMembership:
+            {
+                // The tested value goes through this evaluator, so COUNT(*) IN (…) reads the aggregate's
+                // cell; the items read the workspace row, where a group key sits under its own text.
+                ColumnValue tested = Evaluate(expression.leftAst!, row, ticket, parameters);
+                return SubqueryValueListAst.EvaluateMembership(tested, expression, row, parameters, rowNameResolver: null, queryRow: null);
+            }
 
             default:
                 return SqlExecutor.EvalExpr(expression, row, parameters, rowNameResolver: null);

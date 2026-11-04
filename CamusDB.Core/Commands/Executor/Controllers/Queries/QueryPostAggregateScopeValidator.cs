@@ -12,7 +12,11 @@ using CamusDB.Core.SQLParser;
 namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 
 /// <summary>
-/// Validates and resolves identifiers in post-aggregate scopes (ORDER BY, HAVING).
+/// Validates and resolves identifiers in post-aggregate scopes (ORDER BY, HAVING). A name outside an
+/// aggregate must be a select item (by its alias, or by the shape of its expression, so the qualified
+/// <c>a0.c1</c> matches <c>a0.c1 AS g0</c>) or a GROUP BY expression; anything else is refused here,
+/// before execution. An IN list is a predicate like any other: its tested value and its items follow
+/// the same rule.
 /// </summary>
 internal static class QueryPostAggregateScopeValidator
 {
@@ -127,6 +131,8 @@ internal static class QueryPostAggregateScopeValidator
             case NodeType.ExprRegexNotMatch:
             case NodeType.ExprRegexNotMatchCi:
             case NodeType.ExprQuantifiedComparison:
+            case NodeType.ExprInMembership:
+            case NodeType.ExprNotInMembership:
                 if (expression.leftAst is not null)
                     ValidatePostAggregateExpression(expression.leftAst, query, rowNames, insideAggregate);
 

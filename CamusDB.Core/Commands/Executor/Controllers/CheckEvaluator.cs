@@ -9,7 +9,9 @@
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Controllers.DML;
 using CamusDB.Core.CommandsExecutor.Controllers.Functions;
+using CamusDB.Core.CommandsExecutor.Controllers.Queries;
 using CamusDB.Core.CommandsExecutor.Models;
+using CamusDB.Core.CommandsExecutor.Models.Queries;
 using CamusDB.Core.SQLParser;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
@@ -174,23 +176,14 @@ internal static class CheckEvaluator
                 }
             }
 
-            // ── IN membership: unknown if subject is NULL ────────────────────────────
+            // ── IN membership: unknown if the subject is NULL; an item may name a column ─────
             case NodeType.ExprInMembership:
-            {
-                ColumnValue subject = EvalLeaf(condition.leftAst!, row);
-                if (subject.Type == ColumnType.Null) return null;
-
-                ColumnValue result = SQLExecutorBaseCreator.EvalExpr(condition, row, null);
-                return result.Type == ColumnType.Bool ? result.BoolValue : (bool?)null;
-            }
-
             case NodeType.ExprNotInMembership:
             {
                 ColumnValue subject = EvalLeaf(condition.leftAst!, row);
                 if (subject.Type == ColumnType.Null) return null;
 
-                ColumnValue result = SQLExecutorBaseCreator.EvalExpr(condition, row, null);
-                return result.Type == ColumnType.Bool ? result.BoolValue : (bool?)null;
+                return EvaluateMembership(condition, subject, row);
             }
 
             // ── ordered quantified comparison: x < ANY (a), x = ALL (a), … ──────────
@@ -218,6 +211,40 @@ internal static class CheckEvaluator
                 return null;
             }
         }
+    }
+
+    /// <summary>
+    /// <c>x IN (a, b)</c> is <c>x = a OR x = b</c>: a match is TRUE whatever else the list holds, no
+    /// match next to a NULL item is UNKNOWN, and no match otherwise is FALSE; NOT IN negates the
+    /// definite answers. Each item goes through <see cref="EvalLeaf"/>, so an item that names a
+    /// column the INSERT left out reads as NULL, as the subject does, instead of raising "unknown
+    /// column". The same rule as <see cref="SubqueryValueListAst.EvaluateMembership(ColumnValue, NodeAst, IReadOnlyDictionary{string, ColumnValue}, Dictionary{string, ColumnValue}?, QueryRowNameResolver?, QueryRow?)"/>,
+    /// with the CHECK evaluator's leaf rule.
+    /// </summary>
+    private static bool? EvaluateMembership(NodeAst condition, ColumnValue subject, IReadOnlyDictionary<string, ColumnValue> row)
+    {
+        bool negated = condition.nodeType == NodeType.ExprNotInMembership;
+        bool sawNull = false;
+        bool matched = false;
+
+        foreach (NodeAst item in SubqueryValueListAst.Items(condition.rightAst))
+        {
+            ColumnValue candidate = EvalLeaf(item, row);
+
+            if (candidate.Type == ColumnType.Null)
+            {
+                sawNull = true;
+                continue;
+            }
+
+            if (MixedNumericComparison.EqualsForMembership(subject, candidate))
+                matched = true;
+        }
+
+        if (matched)
+            return !negated;
+
+        return sawNull ? null : negated;
     }
 
     /// <summary>

@@ -198,14 +198,28 @@ internal sealed class ExpressionGenerator
     {
         if (!profile.Allows(ExprFeature.InList))
             return null;
-        // CamusDB accepts only a literal or a name as an IN-list item (a simple_expr), so the items are
-        // literals in the forms that rule accepts: no CAST, no NaN or infinity.
+        // CamusDB accepts a literal, a parameter or a name as an IN-list item (a simple_expr), so an
+        // item is a column of the scope or a literal in the forms that rule accepts: no CAST, no NaN
+        // or infinity.
         FuzzType type = PickComparableType(scope);
         int count = random.Between(1, 4);
         List<Expr> items = new(count);
         for (int i = 0; i < count; i++)
-            items.Add(InListLiteral(Partner(type)));
+            items.Add(InListItem(Partner(type), scope));
         return new InListExpr(Generate(type, scope, depth + 1), items, random.Chance(0.3));
+    }
+
+    /// <summary>An IN-list item: a column of <paramref name="scope"/> with the item's type one time in four, otherwise a literal.</summary>
+    private Expr InListItem(FuzzType type, ExprScope scope)
+    {
+        List<ScopeColumn> columns = scope.OfType(type).ToList();
+        if (columns.Count > 0 && random.Chance(0.25))
+        {
+            ScopeColumn column = random.Pick(columns);
+            return new ColumnExpr(column.Source, column.Column, column.Type);
+        }
+
+        return InListLiteral(type);
     }
 
     private Expr InListLiteral(FuzzType type)

@@ -334,6 +334,16 @@ Two rules differ from PostgreSQL:
 
 See also [Data types → Arrays](data-types.md#arrays).
 
+## IN lists
+
+An item of `x IN (…)` or `x NOT IN (…)` is a literal, a parameter or a column name. A column item is
+read from the same row as `x`, so `WHERE a.x IN (a.y, 5)` is `a.x = a.y OR a.x = 5` with the usual
+three-valued rules: a match is TRUE, no match next to a NULL item is UNKNOWN, and `NOT IN` negates the
+definite answers. A column item has a value per row, so the planner cannot turn the list into index
+seeks; a list of literals or parameters on an indexed column still can. An item that is an expression
+(`CAST(…)`, `y + 1`) is a syntax error; write it as a comparison instead. In a `HAVING`, the tested
+value and the items follow the HAVING scope rule: a group key, a select item or an aggregate.
+
 ## Subqueries in expressions
 
 A subquery can stand anywhere an expression can: a `WHERE`, a select list, a `HAVING`, a `JOIN ON`

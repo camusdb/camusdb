@@ -45,6 +45,53 @@ internal sealed class TestGenerator
     }
 
     [Test]
+    public void InListItemsAreColumnsOfTheScopeOrLiterals()
+    {
+        // CamusDB reads a column item of an IN list from the row, so the generator writes some; the
+        // grammar takes nothing but a literal, a parameter or a name as an item, so it writes no other
+        // form. Literals stay the common case: a list of columns rarely matches, and the planner seeks
+        // only a list of constants.
+        int columnItems = 0, literalItems = 0;
+
+        for (ulong seed = 1; seed <= 40; seed++)
+        {
+            StatementGenerator generator = new(new FuzzRandom(seed), GeneratorProfile.CamusDB);
+            generator.GenerateSchema();
+            generator.GenerateData();
+
+            for (int i = 0; i < 250; i++)
+            {
+                Statement statement = generator.GenerateStatement();
+
+                foreach (object node in ExprWalker.Nodes(statement))
+                {
+                    if (node is not InListExpr list)
+                        continue;
+
+                    foreach (Expr item in list.Items)
+                    {
+                        switch (item)
+                        {
+                            case ColumnExpr:
+                                columnItems++;
+                                break;
+                            case LiteralExpr:
+                                literalItems++;
+                                break;
+                            default:
+                                Assert.Fail("an IN-list item that is neither a column nor a literal: " + CamusSqlPrinter.Instance.Print(statement));
+                                break;
+                        }
+                    }
+                }
+            }
+        }
+
+        Assert.That(columnItems, Is.GreaterThan(0), "no column item in 10,000 statements");
+        Assert.That(literalItems, Is.GreaterThan(columnItems), "literal items must stay the common case");
+    }
+
+    [Test]
     public void TheRandomSourceIsFixed()
     {
         // The sequence is part of the replay contract: a CI seed must give the same statements on every

@@ -1088,7 +1088,8 @@ internal abstract class SQLExecutorBaseCreator
         ColumnValue leftValue = EvalExpr(expr.leftAst!, row, parameters, rowNameResolver, queryRow);
 
         // UNKNOWN comes back as a NULL value, never as FALSE: NOT (x IN (…)) and a CHECK must see it.
-        return SubqueryValueListAst.EvaluateMembership(leftValue, expr, parameters);
+        // The items read the same row as the tested value, because an item may name a column.
+        return SubqueryValueListAst.EvaluateMembership(leftValue, expr, row, parameters, rowNameResolver, queryRow);
     }
 
     /// <summary>

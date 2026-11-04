@@ -10,6 +10,7 @@ using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Controllers.DML;
 using CamusDB.Core.CommandsExecutor.Controllers.Queries.Spill;
 using CamusDB.Core.CommandsExecutor.Models;
+using CamusDB.Core.CommandsExecutor.Models.Queries;
 using CamusDB.Core.SQLParser;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
@@ -17,8 +18,10 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 internal static class SubqueryValueListAst
 {
     /// <summary>
-    /// The row every list item is evaluated against. A list item is a literal, so it reads no
-    /// column; one shared instance avoids an allocation for each item of each row.
+    /// The row a list item is evaluated against when the caller has none: the value set of a
+    /// quantified comparison, whose items a subquery materialized as literals. A list in a WHERE, a
+    /// projection or a CHECK is evaluated against the current row instead, because an item may name
+    /// a column. One shared instance avoids an allocation for each item of each row.
     /// </summary>
     private static readonly Dictionary<string, ColumnValue> EmptyRow = new();
 
@@ -161,7 +164,7 @@ internal static class SubqueryValueListAst
     /// (…)</c> is <c>NOT (x IN (…))</c>. It follows that:</para>
     /// <list type="bullet">
     ///   <item>An empty list gives FALSE for IN and TRUE for NOT IN, whatever <c>x</c> is. Only a
-    ///   subquery list can be empty; the grammar requires at least one literal item.</item>
+    ///   subquery list can be empty; the grammar requires at least one item.</item>
     ///   <item>Otherwise a NULL <c>x</c> gives UNKNOWN, because every <c>x = item</c> is UNKNOWN.</item>
     ///   <item>A match gives TRUE for IN and FALSE for NOT IN, even when the list also holds a NULL.</item>
     ///   <item>No match plus a NULL item gives UNKNOWN for both, because that item's equality is
@@ -176,7 +179,23 @@ internal static class SubqueryValueListAst
     /// <c>extendedOne</c> and its emptiness in <c>extendedTwo</c>. A literal list keeps its NULL
     /// items and has neither flag. <see cref="PreparedInSet.Evaluate"/> must return the same result.</para>
     /// </summary>
-    public static ColumnValue EvaluateMembership(ColumnValue lhs, NodeAst expr, Dictionary<string, ColumnValue>? parameters = null)
+    public static ColumnValue EvaluateMembership(ColumnValue lhs, NodeAst expr, Dictionary<string, ColumnValue>? parameters = null) =>
+        EvaluateMembership(lhs, expr, EmptyRow, parameters, rowNameResolver: null, queryRow: null);
+
+    /// <summary>
+    /// The same evaluation with the row the list items read. An item may name a column
+    /// (<c>a.x IN (a.y, 5)</c>), so it is evaluated against <paramref name="row"/> exactly as the
+    /// tested value was, with the same name resolver and the same ordinal fast path. The prepared-set
+    /// shortcut is taken only for a list of constants (see <see cref="InListMemo"/>), so a column item
+    /// always reads the current row.
+    /// </summary>
+    public static ColumnValue EvaluateMembership(
+        ColumnValue lhs,
+        NodeAst expr,
+        IReadOnlyDictionary<string, ColumnValue> row,
+        Dictionary<string, ColumnValue>? parameters,
+        QueryRowNameResolver? rowNameResolver,
+        QueryRow? queryRow)
     {
         bool negated = expr.nodeType == NodeType.ExprNotInMembership;
 
@@ -204,7 +223,7 @@ internal static class SubqueryValueListAst
         // Every item is tested, even after a match: `x IN (a, b)` is `x = a OR x = b`, OR evaluates
         // both sides, and an item whose type has no comparison rule with x is an error whatever the
         // other items hold (ComparisonTypeRule). The prepared set gives the same answer.
-        foreach (ColumnValue candidate in Enumerate(expr.rightAst, parameters))
+        foreach (ColumnValue candidate in Enumerate(expr.rightAst, row, parameters, rowNameResolver, queryRow))
         {
             if (candidate.Type == ColumnType.Null)
             {
@@ -249,11 +268,25 @@ internal static class SubqueryValueListAst
     private static NodeAst BoolAst(bool value) => value ? NodeAst.True : NodeAst.False;
 
     /// <summary>
-    /// Yields the values of an <c>ExprList</c> tree in source order. Iterative, so neither the depth
-    /// of a list nor its shape can overflow the stack; the previous nested-iterator form also cost
-    /// time proportional to depth for every value it yielded.
+    /// Yields the values of an <c>ExprList</c> tree of constants in source order: the items of a
+    /// value set, which read no row.
     /// </summary>
-    internal static IEnumerable<ColumnValue> Enumerate(NodeAst? ast, Dictionary<string, ColumnValue>? parameters = null)
+    internal static IEnumerable<ColumnValue> Enumerate(NodeAst? ast, Dictionary<string, ColumnValue>? parameters = null) =>
+        Enumerate(ast, EmptyRow, parameters, rowNameResolver: null, queryRow: null);
+
+    /// <summary>
+    /// Yields the values of an <c>ExprList</c> tree in source order, each item evaluated against
+    /// <paramref name="row"/>. Iterative, so neither the depth of a list nor its shape can overflow
+    /// the stack; the previous nested-iterator form also cost time proportional to depth for every
+    /// value it yielded. The walk is the one <see cref="Items"/> does, repeated here so that the
+    /// per-row path allocates one enumerator, not two.
+    /// </summary>
+    internal static IEnumerable<ColumnValue> Enumerate(
+        NodeAst? ast,
+        IReadOnlyDictionary<string, ColumnValue> row,
+        Dictionary<string, ColumnValue>? parameters,
+        QueryRowNameResolver? rowNameResolver,
+        QueryRow? queryRow)
     {
         if (ast is null)
             yield break;
@@ -277,7 +310,35 @@ internal static class SubqueryValueListAst
                 continue;
             }
 
-            yield return SQLExecutorBaseCreator.EvalExpr(node, EmptyRow, parameters);
+            yield return SQLExecutorBaseCreator.EvalExpr(node, row, parameters, rowNameResolver, queryRow);
+        }
+    }
+
+    /// <summary>The items of an <c>ExprList</c> tree in source order, without recursion and without evaluation.</summary>
+    internal static IEnumerable<NodeAst> Items(NodeAst? list)
+    {
+        if (list is null)
+            yield break;
+
+        Stack<NodeAst> pending = new();
+        pending.Push(list);
+
+        while (pending.Count > 0)
+        {
+            NodeAst node = pending.Pop();
+
+            if (node.nodeType == NodeType.ExprList)
+            {
+                if (node.rightAst is not null)
+                    pending.Push(node.rightAst);
+
+                if (node.leftAst is not null)
+                    pending.Push(node.leftAst);
+
+                continue;
+            }
+
+            yield return node;
         }
     }
 }

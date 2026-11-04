@@ -139,9 +139,13 @@ internal static class QueryExpressionClassifier
                 case NodeType.ExprIsNotTrue:
                 case NodeType.ExprIsFalse:
                 case NodeType.ExprIsNotFalse:
+                    return node.leftAst is not null && Walk(node.leftAst);
+
+                // An IN-list item may name a column, so the list is walked too.
                 case NodeType.ExprInMembership:
                 case NodeType.ExprNotInMembership:
-                    return node.leftAst is not null && Walk(node.leftAst);
+                    return (node.leftAst is not null && Walk(node.leftAst))
+                        || (node.rightAst is not null && Walk(node.rightAst));
 
                 case NodeType.ExprBetween:
                     return (node.leftAst is not null && Walk(node.leftAst))
@@ -274,9 +278,14 @@ internal static class QueryExpressionClassifier
                 case NodeType.ExprIsNotTrue:
                 case NodeType.ExprIsFalse:
                 case NodeType.ExprIsNotFalse:
+                    if (node.leftAst is not null) Walk(node.leftAst);
+                    return;
+
+                // An IN-list item may name a column, so the list is walked too.
                 case NodeType.ExprInMembership:
                 case NodeType.ExprNotInMembership:
                     if (node.leftAst is not null) Walk(node.leftAst);
+                    if (node.rightAst is not null) Walk(node.rightAst);
                     return;
 
                 case NodeType.ExprBetween:
@@ -386,9 +395,13 @@ internal static class QueryExpressionClassifier
                 case NodeType.ExprIsNotTrue:
                 case NodeType.ExprIsFalse:
                 case NodeType.ExprIsNotFalse:
+                    if (node.leftAst is not null) ValidateNode(node.leftAst, insideAggregate);
+                    return;
+
                 case NodeType.ExprInMembership:
                 case NodeType.ExprNotInMembership:
                     if (node.leftAst is not null) ValidateNode(node.leftAst, insideAggregate);
+                    if (node.rightAst is not null) ValidateNode(node.rightAst, insideAggregate);
                     return;
 
                 case NodeType.ExprBetween:

@@ -77,10 +77,21 @@ internal static class QueryExpressionWalker
             case NodeType.ExprIsNotTrue:
             case NodeType.ExprIsFalse:
             case NodeType.ExprIsNotFalse:
+                if (expr.leftAst is not null)
+                    CollectColumnReferences(expr.leftAst, identifiers);
+
+                return;
+
+            // An IN-list item may name a column (`a.x IN (a.y, 5)`), so the list is walked as well as
+            // the tested value: the column must be decoded, and a join must count it when it decides
+            // which side a conjunct belongs to.
             case NodeType.ExprInMembership:
             case NodeType.ExprNotInMembership:
                 if (expr.leftAst is not null)
                     CollectColumnReferences(expr.leftAst, identifiers);
+
+                if (expr.rightAst is not null)
+                    CollectColumnReferences(expr.rightAst, identifiers);
 
                 return;
 
