@@ -165,6 +165,10 @@ public static class GrpcErrorMapper
         CamusDBErrorCodes.ConcurrencyLimitExceeded          => StatusCode.ResourceExhausted,
         CamusDBErrorCodes.StatementTooLarge                 => StatusCode.InvalidArgument,
 
+        // The node's store is damaged. Not retryable, and not an ordinary internal error: a client must
+        // not read it as an empty result or as a transient failure.
+        CamusDBErrorCodes.StorageCorrupted => StatusCode.DataLoss,
+
         // Authentication / authorization
         CamusDBErrorCodes.AuthenticationFailed   => StatusCode.Unauthenticated,
         CamusDBErrorCodes.InsufficientPrivilege  => StatusCode.PermissionDenied,

@@ -165,7 +165,7 @@ internal sealed class TestClusterAndAdminRouteAccess : BaseTest
 
         JsonResult result = await Cluster(ex, bearer: null).GetHealth();
         ClusterHealthResponse health = (ClusterHealthResponse)result.Value!;
-        ClusterHealthResponse full = ClusterController.BuildHealth(TestNode!.Raft);
+        ClusterHealthResponse full = ClusterController.BuildHealth(TestNode!.Raft, TestNode!.Kahuna);
 
         Assert.AreEqual(full.Ready, health.Ready, "a probe must still learn whether the node serves");
         Assert.AreEqual(full.Ready ? 200 : 503, result.StatusCode);
@@ -181,7 +181,7 @@ internal sealed class TestClusterAndAdminRouteAccess : BaseTest
         (CommandExecutor ex, string root, _) = await SetupAsync();
 
         ClusterHealthResponse health = (ClusterHealthResponse)(await Cluster(ex, root).GetHealth()).Value!;
-        ClusterHealthResponse full = ClusterController.BuildHealth(TestNode!.Raft);
+        ClusterHealthResponse full = ClusterController.BuildHealth(TestNode!.Raft, TestNode!.Kahuna);
 
         Assert.AreEqual(full.LocalRole, health.LocalRole);
         Assert.AreEqual(full.HostedPartitions, health.HostedPartitions);

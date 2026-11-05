@@ -72,6 +72,7 @@ public sealed class KahunaOptionsConfig
         "storage_compaction_rate_mbps",
         "storage_max_background_compactions",
         "solarium_environment",
+        "raft_lost_acknowledged_entries_policy",
         "key_value_write_max_in_flight_batches_per_partition",
         "key_value_write_linger_ms",
         "key_value_write_post_completion_hold_ms",
@@ -146,6 +147,16 @@ public sealed class KahunaOptionsConfig
     /// engine can differ from <see cref="Storage"/>. Every node of a cluster must run the same pair.
     /// </summary>
     public string? WalStorage { get; set; }
+
+    /// <summary>
+    /// What a Raft partition does when it restarts and finds that its log lost entries it had
+    /// acknowledged: <c>quarantine</c> or <c>accept_and_log</c>. Null keeps Kommander's default,
+    /// <c>quarantine</c>: the replica neither votes nor campaigns until its leader repairs it, so it
+    /// cannot elect a candidate that lacks committed entries. <c>accept_and_log</c> disables that fence
+    /// and accepts the loss. It exists for a single-replica partition, which has no peer to repair from
+    /// and otherwise stays leaderless. Read once at start, so a change needs a restart.
+    /// </summary>
+    public string? RaftLostAcknowledgedEntriesPolicy { get; set; }
 
     public string? WalRevision { get; set; }
 
@@ -1084,6 +1095,9 @@ public sealed class KahunaOptionsConfig
     {
         ValidateStorage(Storage, "kahuna.storage");
         ValidateStorage(WalStorage, "kahuna.wal_storage");
+
+        if (RaftLostAcknowledgedEntriesPolicy is not (null or "quarantine" or "accept_and_log"))
+            throw InvalidConfig($"'kahuna.raft_lost_acknowledged_entries_policy' must be 'quarantine' or 'accept_and_log', got '{RaftLostAcknowledgedEntriesPolicy}'");
 
         if (StorageCompactionRateMbps is < 0)
             throw InvalidConfig($"'kahuna.storage_compaction_rate_mbps' must be >= 0, got {StorageCompactionRateMbps}");

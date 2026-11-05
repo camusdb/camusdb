@@ -326,6 +326,11 @@ public static class EmbeddedKahunaOptionsBuilder
         if (kahuna.WalRevision is not null)
             baseline.WalRevision = kahuna.WalRevision;
 
+        if (kahuna.RaftLostAcknowledgedEntriesPolicy is { } lostEntriesPolicy)
+            baseline.RaftLostAcknowledgedEntriesPolicy = lostEntriesPolicy == "accept_and_log"
+                ? Kommander.LostAcknowledgedEntriesPolicy.AcceptAndLog
+                : Kommander.LostAcknowledgedEntriesPolicy.Quarantine;
+
         RegisterStorageExtensions(baseline, kahuna);
 
         if (kahuna.WalSyncWrites is bool walSync)

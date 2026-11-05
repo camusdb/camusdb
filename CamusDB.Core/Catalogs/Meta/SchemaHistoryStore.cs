@@ -13,6 +13,7 @@ using Kahuna;
 using Kahuna.Server.KeyValues;
 using Kahuna.Shared.KeyValue;
 using Kommander.Time;
+using CamusDB.Core.Storage.Kv;
 
 namespace CamusDB.Core.Catalogs.Meta;
 
@@ -56,6 +57,7 @@ internal static class SchemaHistoryStore
                 KeyValueDurability.Persistent,
                 CancellationToken.None
             ).ConfigureAwait(false);
+        KahunaRetryPolicy.ThrowIfStorageCorrupt(type);
 
         if (type != KeyValueResponseType.Get || entry?.Value is null)
             return null;

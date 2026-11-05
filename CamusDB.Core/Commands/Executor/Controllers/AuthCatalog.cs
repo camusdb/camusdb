@@ -1098,6 +1098,7 @@ public sealed class AuthCatalog
             KeyValueDurability.Persistent, 
             CancellationToken.None
         ).ConfigureAwait(false);
+        KahunaRetryPolicy.ThrowIfStorageCorrupt(type);
 
         return type == KeyValueResponseType.Get && entry?.Value is not null ? entry.Value : null;
     }
@@ -1117,6 +1118,7 @@ public sealed class AuthCatalog
             KeyValueDurability.Persistent,
             CancellationToken.None
         ).ConfigureAwait(false);
+        KahunaRetryPolicy.ThrowIfStorageCorrupt(type);
 
         return type switch
         {
@@ -1208,6 +1210,7 @@ public sealed class AuthCatalog
             KeyValueDurability.Persistent, 
             CancellationToken.None
         ).ConfigureAwait(false);
+        KahunaRetryPolicy.ThrowIfStorageCorrupt(getType);
 
         return getType == KeyValueResponseType.Get && entry?.Value is not null ? entry.Value : null;
     }

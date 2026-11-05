@@ -9,6 +9,7 @@ using CamusDB.Core.CommandsExecutor.Models;
 using Kahuna.Server.KeyValues;
 using Kahuna.Shared.KeyValue;
 using Kommander.Time;
+using CamusDB.Core.Storage.Kv;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers;
 
@@ -107,6 +108,7 @@ public sealed class RegistryPendingBranches
             HLCTimestamp.Zero, PendingKey(branchId), -1,
             HLCTimestamp.Zero, KeyValueDurability.Persistent, CancellationToken.None
         ).ConfigureAwait(false);
+        KahunaRetryPolicy.ThrowIfStorageCorrupt(type);
         return type == KeyValueResponseType.Get;
     }
 

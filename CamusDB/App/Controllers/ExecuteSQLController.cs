@@ -22,6 +22,7 @@ using CamusDB.Core.CommandsExecutor.Models.Queries;
 using CamusDB.Core.Transactions;
 using CamusDB.Core.CommandsExecutor.Models.Results;
 using CamusDB.Core.Routing;
+using CamusDB.Core.Storage.Kv;
 using CamusDB.Core.SQLParser;
 using CamusDB.App.Services;
 using Kahuna.Shared.KeyValue;
@@ -371,6 +372,15 @@ public sealed class ExecuteSQLController : CommandsController
             LogCommandFailure(e);
 
             return new JsonResult(new ExecuteSQLQueryResponse("failed", e.Code, e.Message) { ServerTimeMs = stopwatch.Elapsed.TotalMilliseconds }) { StatusCode = CamusDBErrorCodes.GetHttpStatus(e.Code) };
+        }
+        catch (Kahuna.KahunaServerException e) when (e.ResponseType == Kahuna.Shared.KeyValue.KeyValueResponseType.StorageCorrupt)
+        {
+            // A damaged store is not a read that can soon succeed, so it takes no retryable translation,
+            // and this holds for a write as much as for a read.
+            CamusDBException corrupted = KvScanFailure.Describe(e, "scan");
+            LogCommandFailure(corrupted);
+
+            return new JsonResult(new ExecuteSQLQueryResponse("failed", corrupted.Code, corrupted.Message) { ServerTimeMs = stopwatch.Elapsed.TotalMilliseconds }) { StatusCode = CamusDBErrorCodes.GetHttpStatus(corrupted.Code) };
         }
         catch (Kahuna.KahunaServerException e) when (!writesRows)
         {

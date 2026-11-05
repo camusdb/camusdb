@@ -13,6 +13,7 @@ using Kahuna;
 using Kahuna.Server.KeyValues;
 using Kahuna.Shared.KeyValue;
 using Kommander.Time;
+using CamusDB.Core.Storage.Kv;
 
 namespace CamusDB.Core.Catalogs.Meta;
 
@@ -163,6 +164,7 @@ internal static class CoordinatorJobStore
         (KeyValueResponseType getType, ReadOnlyKeyValueEntry? entry) = await kahuna.LocateAndTryGetValue(
             HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero,
             KeyValueDurability.Persistent, CancellationToken.None).ConfigureAwait(false);
+        KahunaRetryPolicy.ThrowIfStorageCorrupt(getType);
 
         if (getType != KeyValueResponseType.Get || entry?.Value is not { Length: > 0 } bytes)
             return null;

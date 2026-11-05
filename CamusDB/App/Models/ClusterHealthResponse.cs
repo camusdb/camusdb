@@ -36,4 +36,21 @@ public sealed class ClusterHealthResponse
     public bool CommitStalled { get; set; }
 
     public List<ClusterStalledPartitionModel> StalledPartitions { get; set; } = new();
+
+    /// <summary>
+    /// The storage engine's message when this node's key-value store is fail-stopped on damage, or the
+    /// notice that the store was found empty at start while the Raft log holds history. Null while the
+    /// store is intact as far as the node can tell. Unlike <see cref="CommitStalled"/>, this clears
+    /// <see cref="Ready"/>: the node does not serve from that store. The text names files and paths, so
+    /// only a superuser sees it when authentication is on.
+    /// </summary>
+    public string? StorageFault { get; set; }
+
+    /// <summary>
+    /// One line for each hosted partition whose Raft storage verdict is not healthy: lost acknowledged
+    /// entries, an application floor below the compaction floor, a fail-stopped log engine, or a failed
+    /// restore. Null when there is none. Any entry clears <see cref="Ready"/>. A replica with a repairable
+    /// verdict clears this by itself when its leader repairs it.
+    /// </summary>
+    public List<string>? PartitionStorageFaults { get; set; }
 }

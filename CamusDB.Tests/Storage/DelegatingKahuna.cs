@@ -44,6 +44,7 @@ internal abstract class DelegatingKahuna : IKahuna
 
     protected DelegatingKahuna(IKahuna inner) => this.inner = inner;
 
+        public virtual Kahuna.Server.Persistence.KahunaStorageHealth GetStorageHealth() => inner.GetStorageHealth();
         public virtual Task<(LockResponseType, long)> LocateAndTryLock(string resource, byte[] owner, int expiresMs, LockDurability durability, CancellationToken cancellationToken) => inner.LocateAndTryLock(resource, owner, expiresMs, durability, cancellationToken);
         public virtual Task<(LockResponseType, long)> LocateAndTryExtendLock(string resource, byte[] owner, int expiresMs, LockDurability durability, CancellationToken cancellationToken) => inner.LocateAndTryExtendLock(resource, owner, expiresMs, durability, cancellationToken);
         public virtual Task<LockResponseType> LocateAndTryUnlock(string resource, byte[] owner, LockDurability durability, CancellationToken cancellationToken) => inner.LocateAndTryUnlock(resource, owner, durability, cancellationToken);

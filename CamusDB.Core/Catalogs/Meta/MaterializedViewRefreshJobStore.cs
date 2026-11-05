@@ -13,6 +13,7 @@ using Kahuna;
 using Kahuna.Server.KeyValues;
 using Kahuna.Shared.KeyValue;
 using Kommander.Time;
+using CamusDB.Core.Storage.Kv;
 
 namespace CamusDB.Core.Catalogs.Meta;
 
@@ -73,6 +74,7 @@ internal static class MaterializedViewRefreshJobStore
         (KeyValueResponseType type, ReadOnlyKeyValueEntry? entry) = await database.Kahuna.Kahuna.LocateAndTryGetValue(
             HLCTimestamp.Zero, MetaKeys.RefreshJobKey(database.Id, viewTableId), -1,
             HLCTimestamp.Zero, KeyValueDurability.Persistent, CancellationToken.None).ConfigureAwait(false);
+        KahunaRetryPolicy.ThrowIfStorageCorrupt(type);
 
         if (type != KeyValueResponseType.Get || entry?.Value is not { Length: > 0 })
             return null;

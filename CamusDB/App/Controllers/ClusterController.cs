@@ -11,6 +11,7 @@ using Microsoft.AspNetCore.Mvc;
 using Kommander;
 using Kommander.Data;
 using Kommander.System;
+using Kahuna;
 using Kahuna.Communication.External;
 using CamusDB.Core;
 using CamusDB.Core.CommandsExecutor;
@@ -60,8 +61,9 @@ public sealed class ClusterController : CommandsController
     /// <c>/ping</c> alone cannot distinguish "up" from "able to serve".
     ///
     /// <para>Exempt from authentication, because a probe has no credential. With authentication on,
-    /// only a superuser sees <c>LocalRole</c>, <c>HostedPartitions</c> and <c>StalledPartitions</c>;
-    /// everyone else gets the status code, <c>Ready</c>, <c>Initialized</c> and <c>CommitStalled</c>.
+    /// only a superuser sees <c>LocalRole</c>, <c>HostedPartitions</c>, <c>StalledPartitions</c>
+    /// and the storage fault texts; everyone else gets the status code, <c>Ready</c>, <c>Initialized</c>
+    /// and <c>CommitStalled</c>.
     /// The stalled bit stays public on purpose: it is the one signal a monitor alarms on, and it names
     /// no partition, peer or endpoint.</para>
     /// </summary>
@@ -69,7 +71,7 @@ public sealed class ClusterController : CommandsController
     [Route("/v1/cluster/health")]
     public async Task<JsonResult> GetHealth()
     {
-        ClusterHealthResponse health = BuildHealth(kahuna.Raft);
+        ClusterHealthResponse health = BuildHealth(kahuna.Raft, kahuna.Kahuna);
 
         if (!await CanReadTopologyQuietlyAsync().ConfigureAwait(false))
             health = new ClusterHealthResponse
@@ -496,11 +498,12 @@ public sealed class ClusterController : CommandsController
     /// "which roles serve" and "what counts as stalled" rules would drift from this one, and the
     /// dashboard would then disagree with the probe an orchestrator trusts.
     /// </summary>
-    internal static ClusterHealthResponse BuildHealth(IRaft raft)
+    internal static ClusterHealthResponse BuildHealth(IRaft raft, IKahuna kahuna)
     {
         bool initialized;
         string localRole;
         int hostedPartitions = 0;
+        List<string>? partitionStorageFaults = null;
 
         try
         {
@@ -527,13 +530,37 @@ public sealed class ClusterController : CommandsController
             try
             {
                 foreach (RaftPartitionRange range in raft.GetPartitionMap())
-                    if (range.State != RaftPartitionState.Removed && raft.HostsPartition(range.PartitionId))
-                        hostedPartitions++;
+                {
+                    if (range.State == RaftPartitionState.Removed || !raft.HostsPartition(range.PartitionId))
+                        continue;
+
+                    hostedPartitions++;
+
+                    // A partition with a storage verdict is not served from this node: its log lost
+                    // acknowledged entries, its store lacks a prefix the log no longer holds, its log
+                    // engine fail-stopped, or its restore failed. A restore in progress is not a fault.
+                    RaftPartitionStorageHealth? storage = raft.GetPartitionStorageHealth(range.PartitionId);
+                    if (storage is not null && storage.State is not (RaftPartitionStorageState.Healthy or RaftPartitionStorageState.Restoring))
+                        (partitionStorageFaults ??= []).Add($"#{range.PartitionId} {storage}");
+                }
             }
             catch (Exception)
             {
                 hostedPartitions = 0;
             }
+        }
+
+        // The node's own store: fail-stopped on damage, or found empty at start while the log holds
+        // history. Each is terminal for the process, so this one fails closed. A node that cannot read
+        // its own storage health must not report ready.
+        string? storageFault;
+        try
+        {
+            storageFault = kahuna.GetStorageHealth().Fault;
+        }
+        catch (Exception)
+        {
+            storageFault = "The storage health of this node could not be read.";
         }
 
         // Neither NotMember (evicted while down) nor Leaving (decommissioned, on its way out) is a
@@ -543,10 +570,14 @@ public sealed class ClusterController : CommandsController
         {
             Ready = initialized
                 && localRole != nameof(ClusterMemberRole.NotMember)
-                && localRole != nameof(ClusterMemberRole.Leaving),
+                && localRole != nameof(ClusterMemberRole.Leaving)
+                && storageFault is null
+                && partitionStorageFaults is null,
             Initialized = initialized,
             LocalRole = localRole,
             HostedPartitions = hostedPartitions,
+            StorageFault = storageFault,
+            PartitionStorageFaults = partitionStorageFaults,
         };
 
         // Replication liveness, joined into health so a stalled partition is externally

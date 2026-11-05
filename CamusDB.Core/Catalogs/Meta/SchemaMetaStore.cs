@@ -13,6 +13,7 @@ using Kahuna;
 using Kahuna.Server.KeyValues;
 using Kahuna.Shared.KeyValue;
 using Kommander.Time;
+using CamusDB.Core.Storage.Kv;
 
 namespace CamusDB.Core.Catalogs.Meta;
 
@@ -254,6 +255,7 @@ internal static class SchemaMetaStore
             (KeyValueResponseType getType, ReadOnlyKeyValueEntry? tableEntry) = await kahuna.LocateAndTryGetValue(
                 HLCTimestamp.Zero, MetaKeys.TableKey(database.Id, tableId), -1, HLCTimestamp.Zero,
                 KeyValueDurability.Persistent, CancellationToken.None).ConfigureAwait(false);
+            KahunaRetryPolicy.ThrowIfStorageCorrupt(getType);
 
             if (getType == KeyValueResponseType.Get && tableEntry?.Value is { Length: > 0 })
             {
@@ -307,6 +309,7 @@ internal static class SchemaMetaStore
                 HLCTimestamp.Zero, catalogKey, -1, HLCTimestamp.Zero,
                 KeyValueDurability.Persistent, CancellationToken.None
             ).ConfigureAwait(false);
+        KahunaRetryPolicy.ThrowIfStorageCorrupt(readType);
 
         if (readType == KeyValueResponseType.Get && existingEntry?.Value is { Length: > 0 } existingBytes)
         {
@@ -324,6 +327,7 @@ internal static class SchemaMetaStore
                     HLCTimestamp.Zero, MetaKeys.KeyspaceCatalogKey(dbId, tableSchema.Id), -1, HLCTimestamp.Zero,
                     KeyValueDurability.Persistent, CancellationToken.None
                 ).ConfigureAwait(false);
+            KahunaRetryPolicy.ThrowIfStorageCorrupt(legacyType);
 
             if (legacyType == KeyValueResponseType.Get && legacyEntry?.Value is { Length: > 0 } legacyBytes)
             {

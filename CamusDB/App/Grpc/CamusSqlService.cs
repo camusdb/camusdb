@@ -329,6 +329,12 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
 
             return db;
         }
+        catch (Kahuna.KahunaServerException ex) when (ex.ResponseType == Kahuna.Shared.KeyValue.KeyValueResponseType.StorageCorrupt)
+        {
+            // A damaged store is not a read that can soon succeed, so it takes no retryable translation,
+            // and this holds for a write as much as for a read.
+            throw KvScanFailure.Describe(ex, "scan");
+        }
         catch (Kahuna.KahunaServerException ex) when (!writesRows)
         {
             // A Kahuna read that cannot currently be served — a scan page whose retry budget expired

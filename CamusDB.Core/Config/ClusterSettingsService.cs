@@ -609,6 +609,7 @@ public sealed class ClusterSettingsService : IAsyncDisposable
         (KeyValueResponseType type, ReadOnlyKeyValueEntry? entry) = await Kahuna.LocateAndTryGetValue(
             HLCTimestamp.Zero, GenerationKey, -1,
             HLCTimestamp.Zero, KeyValueDurability.Persistent, cancellationToken).ConfigureAwait(false);
+        KahunaRetryPolicy.ThrowIfStorageCorrupt(type);
 
         return GenerationFromResponse(type, entry);
     }

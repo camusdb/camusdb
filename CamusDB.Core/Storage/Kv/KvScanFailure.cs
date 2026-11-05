@@ -34,6 +34,9 @@ namespace CamusDB.Core.Storage.Kv;
 /// reached the client as a generic internal error, some ten thousand times per surviving node in the
 /// seconds before the new leader was elected. It is translated the same way: nothing was applied and
 /// the scan is idempotent.</para>
+///
+/// <para>The one exception is a page answered <c>StorageCorrupt</c>. The store is damaged, so a retry
+/// fails again: it maps to <see cref="CamusDBErrorCodes.StorageCorrupted"/>, not to a retry.</para>
 /// </summary>
 internal static class KvScanFailure
 {
@@ -78,11 +81,15 @@ internal static class KvScanFailure
     }
 
     /// <summary>
-    /// The retryable failure for a scan Kahuna gave up on: <see cref="CamusDBErrorCodes.TransactionMustRetry"/>,
-    /// worded for a read, carrying Kahuna's response type and its own message.
+    /// The failure for a scan Kahuna gave up on: <see cref="CamusDBErrorCodes.TransactionMustRetry"/>,
+    /// worded for a read, carrying Kahuna's response type and its own message. A damaged store gives
+    /// <see cref="CamusDBErrorCodes.StorageCorrupted"/> instead, which is not retryable.
     /// </summary>
     internal static CamusDBException Describe(KahunaServerException ex, string what)
     {
+        if (ex.ResponseType == KeyValueResponseType.StorageCorrupt)
+            return KahunaRetryPolicy.StorageCorrupted(what, ex.Message);
+
         string verdict = ex.ResponseType is KeyValueResponseType type ? type.ToString() : "no response type";
         return new CamusDBException(
             CamusDBErrorCodes.TransactionMustRetry,

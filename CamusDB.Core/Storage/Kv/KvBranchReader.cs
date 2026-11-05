@@ -431,6 +431,9 @@ internal sealed class KvBranchReader
                                 ServerDiagnostics.Tags.AbortSite.ReadMany);
                             return false;
 
+                        case KeyValueResponseType.StorageCorrupt:
+                            throw KahunaRetryPolicy.StorageCorrupted($"batch read of key {keys[slot]}");
+
                         case KeyValueResponseType.InvalidInput:
                             // The batch was malformed (too many keys, or keys of several key spaces): a
                             // caller bug that a retry cannot fix.

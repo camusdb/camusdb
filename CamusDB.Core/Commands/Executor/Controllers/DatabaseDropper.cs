@@ -690,6 +690,7 @@ internal sealed class DatabaseDropper
             (KeyValueResponseType catType, ReadOnlyKeyValueEntry? catEntry) = await kahuna.LocateAndTryGetValue(
                 HLCTimestamp.Zero, catalogKey, -1, HLCTimestamp.Zero,
                 KeyValueDurability.Persistent, ct).ConfigureAwait(false);
+            KahunaRetryPolicy.ThrowIfStorageCorrupt(catType);
 
             if (catType == KeyValueResponseType.Get && catEntry?.Value is { Length: > 0 })
                 indexIds = [.. MetaJsonSerializer.Deserialize(catEntry.Value, MetaJsonContext.Default.StringArray)];
@@ -704,6 +705,7 @@ internal sealed class DatabaseDropper
                 (KeyValueResponseType legacyType, ReadOnlyKeyValueEntry? legacyEntry) = await kahuna.LocateAndTryGetValue(
                     HLCTimestamp.Zero, $"{dbId}/meta/keyspace:{tableId}", -1, HLCTimestamp.Zero,
                     KeyValueDurability.Persistent, ct).ConfigureAwait(false);
+                KahunaRetryPolicy.ThrowIfStorageCorrupt(legacyType);
 
                 if (legacyType == KeyValueResponseType.Get && legacyEntry?.Value is { Length: > 0 })
                     indexIds = [.. MetaJsonSerializer.Deserialize(legacyEntry.Value, MetaJsonContext.Default.StringArray)];
@@ -775,6 +777,7 @@ internal sealed class DatabaseDropper
             (KeyValueResponseType catType, ReadOnlyKeyValueEntry? catEntry) = await kahuna.LocateAndTryGetValue(
                 HLCTimestamp.Zero, catalogKey, -1, HLCTimestamp.Zero,
                 KeyValueDurability.Persistent, ct).ConfigureAwait(false);
+            KahunaRetryPolicy.ThrowIfStorageCorrupt(catType);
 
             if (catType == KeyValueResponseType.Get && catEntry?.Value is { Length: > 0 })
                 indexIds = [.. MetaJsonSerializer.Deserialize(catEntry.Value, MetaJsonContext.Default.StringArray)];

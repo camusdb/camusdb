@@ -193,8 +193,13 @@ public sealed class ClusterProbe
 
         try
         {
-            using JsonDocument doc = JsonDocument.Parse(
-                await http.GetStringAsync(new Uri(node.MetricsUrl, "/v1/cluster/health"), ct).ConfigureAwait(false));
+            // A node that is not ready answers 503 with the same body, and that answer is the fact to
+            // record: an injected fault would otherwise read as a node that could not answer.
+            using HttpResponseMessage response = await http.GetAsync(new Uri(node.MetricsUrl, "/v1/cluster/health"), ct).ConfigureAwait(false);
+            if (response.StatusCode != System.Net.HttpStatusCode.ServiceUnavailable)
+                response.EnsureSuccessStatusCode();
+
+            using JsonDocument doc = JsonDocument.Parse(await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false));
             if (doc.RootElement.TryGetProperty("ready", out JsonElement readyElement))
                 ready = readyElement.GetBoolean();
         }

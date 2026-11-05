@@ -1087,6 +1087,16 @@ public static class CamusDBErrorCodes
     public const string TriggerRowMappingInvalid = "CADB0836";
 
     /// <summary>
+    /// A node refused an operation because its key-value store is damaged: a checksum did not match, or
+    /// a file is not what the manifest records. Kahuna answers <c>StorageCorrupt</c> and the node stops
+    /// serving from that store. It is not retryable, unlike <see cref="TransactionMustRetry"/>: the same
+    /// node gives the same answer until an operator repairs or replaces the store. A statement that got
+    /// this error did not read a complete result, so it must not be treated as "no rows". Maps to HTTP 500
+    /// and gRPC <c>DataLoss</c>.
+    /// </summary>
+    public const string StorageCorrupted = "CADB0837";
+
+    /// <summary>
     /// Returns the HTTP status code that should be used when surfacing <paramref name="code"/>
     /// to an API caller. Client errors (permanent, non-retryable caller mistakes) map to 400;
     /// all other codes map to 500.

@@ -15,6 +15,7 @@ using Kahuna;
 using Kahuna.Server.KeyValues;
 using Kahuna.Shared.KeyValue;
 using Kommander.Time;
+using CamusDB.Core.Storage.Kv;
 
 namespace CamusDB.Core.Catalogs.Meta;
 
@@ -120,6 +121,7 @@ internal static class ContentsRetirementStore
             (KeyValueResponseType type, ReadOnlyKeyValueEntry? entry) = await database.Kahuna.Kahuna.LocateAndTryGetValue(
                 HLCTimestamp.Zero, candidateKey, -1, HLCTimestamp.Zero,
                 KeyValueDurability.Persistent, CancellationToken.None).ConfigureAwait(false);
+            KahunaRetryPolicy.ThrowIfStorageCorrupt(type);
 
             if (type == KeyValueResponseType.Get && entry?.Value is { Length: > 0 } bytes)
             {
@@ -170,6 +172,7 @@ internal static class ContentsRetirementStore
         (KeyValueResponseType getType, ReadOnlyKeyValueEntry? stored) = await kahuna.LocateAndTryGetValue(
             HLCTimestamp.Zero, MetaKeys.TableKey(database.Id, view.Id!), -1, HLCTimestamp.Zero,
             KeyValueDurability.Persistent, CancellationToken.None).ConfigureAwait(false);
+        KahunaRetryPolicy.ThrowIfStorageCorrupt(getType);
 
         if (getType == KeyValueResponseType.Get && stored?.Value is { Length: > 0 })
         {

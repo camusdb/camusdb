@@ -164,7 +164,7 @@ public sealed class DashboardController : CommandsController
         {
             Principal? principal = await ResolveRequestPrincipalAsync().ConfigureAwait(false);
 
-            ClusterHealthResponse health = ClusterController.BuildHealth(kahuna.Raft);
+            ClusterHealthResponse health = ClusterController.BuildHealth(kahuna.Raft, kahuna.Kahuna);
 
             return new JsonResult(new DashboardSummaryResponse
             {

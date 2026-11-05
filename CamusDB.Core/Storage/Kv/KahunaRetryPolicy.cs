@@ -40,6 +40,12 @@ namespace CamusDB.Core.Storage.Kv;
 /// lost response replays the coordinator's cached effect instead of applying the mutation twice.
 /// That is the idempotent-retry guarantee. Each logical operation gets its own id, because a
 /// distinct key or digest under one id is rejected as a duplicate.</para>
+///
+/// <para><c>StorageCorrupt</c> is the opposite of transient: the answering node's store is damaged. It
+/// is never retried here, and every overload raises it as <see cref="CamusDBErrorCodes.StorageCorrupted"/>
+/// instead of returning it. Callers decode a response that is not <c>Get</c> as "the key is absent", so a
+/// damaged key that reached them would read as a missing row. A point read that does not go through
+/// these overloads calls <see cref="ThrowIfStorageCorrupt"/> itself.</para>
 /// </summary>
 internal sealed class KahunaRetryPolicy
 {
@@ -67,6 +73,34 @@ internal sealed class KahunaRetryPolicy
     /// this value.</para>
     /// </summary>
     internal const int TransientRetryWindowMs = 15_000;
+
+    /// <summary>
+    /// Raises <see cref="CamusDBErrorCodes.StorageCorrupted"/> for a <c>StorageCorrupt</c> answer. Call it
+    /// on every Kahuna response that does not pass through a retry overload of this class, before the
+    /// response is decoded: code that treats anything but <c>Get</c> as an absent key would otherwise
+    /// report damaged data as missing data. A source test holds every point read to this rule.
+    /// </summary>
+    internal static void ThrowIfStorageCorrupt(KeyValueResponseType type)
+    {
+        if (type == KeyValueResponseType.StorageCorrupt)
+            throw StorageCorrupted(null);
+    }
+
+    /// <summary>
+    /// The failure for an operation that a node refused because its store is damaged. It is not
+    /// retryable, because the same node gives the same answer. The node logs the damaged file, so the
+    /// message names only the operation when the caller knows it.
+    /// </summary>
+    internal static CamusDBException StorageCorrupted(string? what, string? detail = null)
+    {
+        string operation = what is null ? "A read" : $"The {what}";
+        string suffix = detail is null ? "" : $" {detail}";
+
+        return new CamusDBException(
+            CamusDBErrorCodes.StorageCorrupted,
+            $"{operation} was refused because a node's key-value store is damaged. The result is unknown, " +
+            $"and a retry on that node fails again. Read the node's log and /v1/cluster/health.{suffix}");
+    }
 
     /// <summary>
     /// The <see cref="Stopwatch"/> timestamp past which a fixed-budget retry loop starts no new
@@ -239,6 +273,8 @@ internal sealed class KahunaRetryPolicy
         }
         while (type is KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication && MayRetryTransient(ref retries, deadline));
 
+        ThrowIfStorageCorrupt(type);
+
         return type;
     }
 
@@ -269,6 +305,8 @@ internal sealed class KahunaRetryPolicy
             }
         }
         while (type is KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication && MayRetryTransient(ref retries, deadline));
+
+        ThrowIfStorageCorrupt(type);
 
         return (type, entry);
     }
@@ -312,6 +350,8 @@ internal sealed class KahunaRetryPolicy
         }
         while (type is KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication && MayRetryTransient(ref retries, deadline));
 
+        ThrowIfStorageCorrupt(type);
+
         return (type, entry);
     }
 
@@ -339,6 +379,8 @@ internal sealed class KahunaRetryPolicy
         }
         while (type is KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication && MayRetryTransient(ref retries, deadline));
 
+        ThrowIfStorageCorrupt(type);
+
         return (type, revision, ts);
     }
 
@@ -365,6 +407,8 @@ internal sealed class KahunaRetryPolicy
             }
         }
         while (type is KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication && MayRetryTransient(ref retries, deadline));
+
+        ThrowIfStorageCorrupt(type);
 
         return (type, endpoint, durability);
     }
@@ -406,6 +450,8 @@ internal sealed class KahunaRetryPolicy
         // deadline alone, and the backoff keeps growing on its own round counter up to the cap.
         while (type is KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication
                && (type == KeyValueResponseType.WaitingForReplication || ++retries < MaxKahunaRetries));
+
+        ThrowIfStorageCorrupt(type);
 
         return (type, revision, ts);
     }
@@ -462,6 +508,8 @@ internal sealed class KahunaRetryPolicy
         }
         while (type is KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication
                && (type == KeyValueResponseType.WaitingForReplication || ++retries < MaxKahunaRetries));
+
+        ThrowIfStorageCorrupt(type);
 
         return (type, endpoint, durability, holder);
     }

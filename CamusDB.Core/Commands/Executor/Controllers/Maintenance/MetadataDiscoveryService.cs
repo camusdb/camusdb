@@ -15,6 +15,7 @@ using Kahuna.Server.KeyValues;
 using Kahuna.Shared.KeyValue;
 using Kommander.Time;
 using Microsoft.Extensions.Logging;
+using CamusDB.Core.Storage.Kv;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers.Maintenance;
 
@@ -216,6 +217,7 @@ internal sealed class MetadataDiscoveryService
                     KeyValueDurability.Persistent,
                     ct
                 ).ConfigureAwait(false);
+            KahunaRetryPolicy.ThrowIfStorageCorrupt(type);
 
             if (type != KeyValueResponseType.Get || entry?.Value is null)
                 return null;

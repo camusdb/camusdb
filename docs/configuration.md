@@ -227,6 +227,39 @@ cadence therefore decides only how often a pass runs, not how much it may reclai
 
 Storage backends: `memory`, `sqlite`, `rocksdb`, `solarium`.
 
+### SQLite is outside the durability contract
+
+`sqlite` as `storage` or `wal_storage` carries no guarantee against storage corruption. SQLite has no
+page checksums, so a flipped bit inside a value reads back as data, and a misplaced page goes
+unnoticed. Its `-wal` replay stops at the first bad frame without an error. The SQLite Raft log also
+keeps its metadata at `synchronous=NORMAL`, whatever `wal_sync_writes` says. The server defaults to
+`rocksdb` in standalone and cluster mode, so SQLite runs only when you configure it.
+
+### Storage damage
+
+On `rocksdb`, a node stops serving from a store it finds damaged:
+
+- The statement that reached the damage fails with `CADB0837` (HTTP 500, gRPC `DataLoss`). This error
+  is not retryable. It never means "no rows".
+- `/v1/cluster/health` answers 503 with `ready: false`. With authentication on, only a superuser sees
+  `storageFault` (the engine's message, which names the file) and `partitionStorageFaults` (one line
+  for each hosted partition with a storage verdict).
+- The node withholds its candidacy and steps down where it leads. It never closes, reopens or rewrites
+  the damaged files.
+
+`kahuna.raft_lost_acknowledged_entries_policy` decides what a partition does after a restart that
+finds its log lost entries it had acknowledged:
+
+| Value | Effect |
+|---|---|
+| `quarantine` (default) | The replica neither votes nor campaigns until its leader repairs it. A single-replica partition has no peer, so it stays leaderless with a Critical log line. |
+| `accept_and_log` | The node accepts the loss and logs the range. **This disables a safety fence.** The entries are gone for good on this node, and with one replica they are gone for good. |
+
+A change to this key needs a restart.
+
+These protections do not yet cover `solarium`: a Solarium node has block and record checksums, but it
+does not fail-stop on damage, and it reports no storage fault in the health response.
+
 ### Solarium storage engine
 
 `solarium` selects [Solarium](https://solariumdb.github.io/docs/integrations/kahuna/), a managed
@@ -627,6 +660,7 @@ combination silently.
 | Unknown `kahuna` key | `InvalidConfig` |
 | Unknown `kahuna.storage` / `kahuna.wal_storage` | `InvalidConfig` |
 | `kahuna.solarium_environment` other than `default` / `io_uring` | `InvalidConfig` |
+| `kahuna.raft_lost_acknowledged_entries_policy` other than `quarantine` / `accept_and_log` | `InvalidConfig` |
 | Negative `kahuna.storage_compaction_rate_mbps` / `kahuna.storage_max_background_compactions` | `InvalidConfig` |
 | `kahuna.start_election_timeout_ms` ≥ `kahuna.end_election_timeout_ms` | `InvalidConfig` |
 | `kahuna.staged_base_fence_retention_ms` ≤ 0 | `InvalidConfig` |

@@ -16,6 +16,7 @@ using Kahuna.Shared.KeyValue;
 using Kommander.Time;
 using System.Text.Json;
 using Microsoft.Extensions.Logging;
+using CamusDB.Core.Storage.Kv;
 
 namespace CamusDB.Core.Catalogs.Meta;
 
@@ -120,6 +121,7 @@ internal static class SchemaLoader
                     HLCTimestamp.Zero,
                     KeyValueDurability.Persistent, CancellationToken.None
                 ).ConfigureAwait(false);
+            KahunaRetryPolicy.ThrowIfStorageCorrupt(type);
 
             if (type != KeyValueResponseType.Get || entry?.Value is null)
                 return null;
@@ -155,11 +157,7 @@ internal static class SchemaLoader
             SchemaSnapshot snapshot = new();
 
             (KeyValueResponseType schemaType, ReadOnlyKeyValueEntry? schemaEntry) =
-                await kahuna.LocateAndTryGetValue(
-                    tx.TransactionId, MetaKeys.VersionKey(database.Id), -1,
-                    HLCTimestamp.Zero,
-                    KeyValueDurability.Persistent, CancellationToken.None
-                ).ConfigureAwait(false);
+                await ReadSnapshotKeyAsync(kahuna, tx, MetaKeys.VersionKey(database.Id), database.Name).ConfigureAwait(false);
 
             // A database with persisted schema has a version key. Absent ⟹ a fresh database with an
             // empty schema (version 0, no tables) — there is no legacy single-blob fallback to read
@@ -181,17 +179,39 @@ internal static class SchemaLoader
             }
 
             (KeyValueResponseType systemType, ReadOnlyKeyValueEntry? systemEntry) =
-                await kahuna.LocateAndTryGetValue(
-                    tx.TransactionId, MetaKeys.SystemKey(database.Id), -1,
-                    HLCTimestamp.Zero,
-                    KeyValueDurability.Persistent, CancellationToken.None
-                ).ConfigureAwait(false);
+                await ReadSnapshotKeyAsync(kahuna, tx, MetaKeys.SystemKey(database.Id), database.Name).ConfigureAwait(false);
 
             if (systemType == KeyValueResponseType.Get && systemEntry?.Value is not null)
                 snapshot.System = MetaJsonSerializer.DeserializeCompat(systemEntry.Value, MetaJsonContext.Default.SystemSchema);
 
             return snapshot;
         }
+    }
+
+    /// <summary>
+    /// Reads one key of the schema snapshot and refuses every answer that is not a verdict on the key.
+    /// A partition with no leader answers <c>MustRetry</c>, and a load that read that answer as an absent
+    /// version key would publish an empty schema for a database that has tables: every statement then
+    /// fails with "table doesn't exist" while the rows are intact, and a later CREATE TABLE would see no
+    /// conflict. Only <c>DoesNotExist</c> means a fresh database. Anything else is the retryable code, so
+    /// the open fails and a later statement loads the schema again.
+    /// </summary>
+    private static async Task<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> ReadSnapshotKeyAsync(
+        IKahuna kahuna, KvTransaction tx, string key, string databaseName)
+    {
+        (KeyValueResponseType type, ReadOnlyKeyValueEntry? entry) = await KahunaRetryPolicy.RetryOnMustRetry(
+            () => kahuna.LocateAndTryGetValue(
+                tx.TransactionId, key, -1,
+                HLCTimestamp.Zero,
+                KeyValueDurability.Persistent, CancellationToken.None),
+            CancellationToken.None).ConfigureAwait(false);
+
+        if (type is KeyValueResponseType.Get or KeyValueResponseType.DoesNotExist)
+            return (type, entry);
+
+        throw new CamusDBException(
+            CamusDBErrorCodes.TransactionMustRetry,
+            $"The schema of database '{databaseName}' could not be read from Kahuna ({type}) — retry the statement from BeginAsync.");
     }
 
     private static async Task<Dictionary<string, TableSchema>> LoadTablesAsync(DatabaseDescriptor database, KvTransaction tx)

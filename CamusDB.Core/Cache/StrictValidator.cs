@@ -13,6 +13,7 @@ using Kommander.Time;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.Config;
+using CamusDB.Core.Storage.Kv;
 
 namespace CamusDB.Core.Cache;
 
@@ -96,6 +97,7 @@ internal static class StrictValidator
                     HLCTimestamp.Zero, pointKey, -1,
                     HLCTimestamp.Zero, KeyValueDurability.Persistent, ct)
                 .ConfigureAwait(false);
+            KahunaRetryPolicy.ThrowIfStorageCorrupt(type);
 
             if (type == KeyValueResponseType.DoesNotExist || entry is null)
                 return false;  // row deleted since T_cache

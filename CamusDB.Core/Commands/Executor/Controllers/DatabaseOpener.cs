@@ -159,8 +159,10 @@ internal sealed class DatabaseOpener
 
         string id = entry.Id;
 
+        // A failed load must not stay cached: it fails while a partition has no leader, and the database
+        // has to open once a leader returns, with no restart of the node.
         AsyncLazy<DatabaseDescriptor> lazy = databaseDescriptors.Descriptors.GetOrAdd(
-            id, _ => new(() => LoadDatabase(registry, entry, name)));
+            id, _ => new(() => LoadDatabase(registry, entry, name), AsyncLazyFlags.RetryOnFailure));
 
         DatabaseDescriptor descriptor = await lazy;
 
