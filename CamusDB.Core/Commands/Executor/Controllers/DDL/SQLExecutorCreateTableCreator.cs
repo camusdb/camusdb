@@ -534,14 +534,16 @@ internal sealed class SQLExecutorCreateTableCreator : SQLExecutorBaseCreator
         List<CheckConstraintInfo> checkConstraints)
     {
         HashSet<string> columnNames = columns.Select(c => c.Name).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        Queries.ConditionalResultTypes.ColumnTypeLookup columnTypes = Queries.ConditionalResultTypes.LookupFor(columns);
         int autoIndex = 0;
-        CollectCheckConstraintsRecursive(fieldList, tableName, columnNames, checkConstraints, ref autoIndex);
+        CollectCheckConstraintsRecursive(fieldList, tableName, columnNames, columnTypes, checkConstraints, ref autoIndex);
     }
 
     private static void CollectCheckConstraintsRecursive(
         NodeAst fieldList,
         string tableName,
         HashSet<string> columnNames,
+        Queries.ConditionalResultTypes.ColumnTypeLookup columnTypes,
         List<CheckConstraintInfo> checkConstraints,
         ref int autoIndex)
     {
@@ -553,7 +555,7 @@ internal sealed class SQLExecutorCreateTableCreator : SQLExecutorBaseCreator
             {
                 // A column-level ConstraintCheck may be buried in a CreateTableFieldConstraintList
                 // or be the single constraint node directly.
-                CollectColumnLevelCheck(fieldList.extendedOne, tableName, columnName, columnNames, checkConstraints, ref autoIndex);
+                CollectColumnLevelCheck(fieldList.extendedOne, tableName, columnName, columnNames, columnTypes, checkConstraints, ref autoIndex);
             }
             return;
         }
@@ -561,10 +563,10 @@ internal sealed class SQLExecutorCreateTableCreator : SQLExecutorBaseCreator
         if (fieldList.nodeType == NodeType.CreateTableItemList)
         {
             if (fieldList.leftAst != null)
-                CollectCheckConstraintsRecursive(fieldList.leftAst, tableName, columnNames, checkConstraints, ref autoIndex);
+                CollectCheckConstraintsRecursive(fieldList.leftAst, tableName, columnNames, columnTypes, checkConstraints, ref autoIndex);
 
             if (fieldList.rightAst != null)
-                CollectCheckConstraintsRecursive(fieldList.rightAst, tableName, columnNames, checkConstraints, ref autoIndex);
+                CollectCheckConstraintsRecursive(fieldList.rightAst, tableName, columnNames, columnTypes, checkConstraints, ref autoIndex);
 
             return;
         }
@@ -577,7 +579,7 @@ internal sealed class SQLExecutorCreateTableCreator : SQLExecutorBaseCreator
                 ? n
                 : GenerateAutoCheckName(tableName, checkConstraints, ref autoIndex);
 
-            AddValidatedCheck(name, condition, columnNames, checkConstraints);
+            AddValidatedCheck(name, condition, columnNames, columnTypes, checkConstraints);
             return;
         }
 
@@ -589,6 +591,7 @@ internal sealed class SQLExecutorCreateTableCreator : SQLExecutorBaseCreator
         string tableName,
         string columnName,
         HashSet<string> columnNames,
+        Queries.ConditionalResultTypes.ColumnTypeLookup columnTypes,
         List<CheckConstraintInfo> checkConstraints,
         ref int autoIndex)
     {
@@ -599,17 +602,17 @@ internal sealed class SQLExecutorCreateTableCreator : SQLExecutorBaseCreator
             if (checkConstraints.Any(c => string.Equals(c.Name, name, StringComparison.OrdinalIgnoreCase)))
                 name = GenerateAutoCheckName(tableName, checkConstraints, ref autoIndex);
 
-            AddValidatedCheck(name, constraintNode.leftAst!, columnNames, checkConstraints);
+            AddValidatedCheck(name, constraintNode.leftAst!, columnNames, columnTypes, checkConstraints);
             return;
         }
 
         if (constraintNode.nodeType == NodeType.CreateTableFieldConstraintList)
         {
             if (constraintNode.leftAst != null)
-                CollectColumnLevelCheck(constraintNode.leftAst, tableName, columnName, columnNames, checkConstraints, ref autoIndex);
+                CollectColumnLevelCheck(constraintNode.leftAst, tableName, columnName, columnNames, columnTypes, checkConstraints, ref autoIndex);
 
             if (constraintNode.rightAst != null)
-                CollectColumnLevelCheck(constraintNode.rightAst, tableName, columnName, columnNames, checkConstraints, ref autoIndex);
+                CollectColumnLevelCheck(constraintNode.rightAst, tableName, columnName, columnNames, columnTypes, checkConstraints, ref autoIndex);
         }
     }
 
@@ -617,9 +620,10 @@ internal sealed class SQLExecutorCreateTableCreator : SQLExecutorBaseCreator
         string name,
         NodeAst condition,
         HashSet<string> columnNames,
+        Queries.ConditionalResultTypes.ColumnTypeLookup columnTypes,
         List<CheckConstraintInfo> checkConstraints)
     {
-        ValidateCheckConditionAst(condition, columnNames);
+        ValidateCheckCondition(condition, columnNames, columnTypes);
 
         string expression = CheckConditionRenderer.Render(condition);
         HashSet<string> referenced = [];
@@ -641,14 +645,35 @@ internal sealed class SQLExecutorCreateTableCreator : SQLExecutorBaseCreator
         }
     }
 
+    /// <summary>Exposes CHECK condition validation for ALTER TABLE ADD CONSTRAINT CHECK.</summary>
+    internal static void ValidateCheckConditionForAlter(
+        NodeAst condition,
+        HashSet<string> columnNames,
+        Queries.ConditionalResultTypes.ColumnTypeLookup columnTypes)
+        => ValidateCheckCondition(condition, columnNames, columnTypes);
+
+    /// <summary>
+    /// Validates a CHECK condition when a constraint is declared, and never when a stored constraint
+    /// is loaded. After the rules of <see cref="ValidateCheckConditionAst"/>, the statement checks of a
+    /// query run, because a mistake here does more harm than in a query: an unknown function would fail
+    /// each later write, a type error would refuse each row, and a condition that is not boolean would
+    /// never reject a row (<see cref="CheckEvaluator"/> reads it as unknown).
+    /// </summary>
+    private static void ValidateCheckCondition(
+        NodeAst condition,
+        HashSet<string> columnNames,
+        Queries.ConditionalResultTypes.ColumnTypeLookup columnTypes)
+    {
+        ValidateCheckConditionAst(condition, columnNames);
+
+        Queries.ConditionalResultTypes.CheckCondition(condition, columnTypes, recorder: null, "CHECK", allowAggregates: false);
+    }
+
     /// <summary>
     /// Validates a CHECK condition AST at DDL time. Rejects subqueries, aggregate functions,
     /// and volatile/non-deterministic functions, all of which would make the constraint
     /// non-deterministic per row or dependent on external state.
     /// </summary>
-    /// <summary>Exposes CHECK condition validation for ALTER TABLE ADD CONSTRAINT CHECK.</summary>
-    internal static void ValidateCheckConditionForAlter(NodeAst condition, HashSet<string> columnNames)
-        => ValidateCheckConditionAst(condition, columnNames);
 
     /// <summary>Exposes column-reference extraction for ALTER TABLE ADD CONSTRAINT CHECK.</summary>
     internal static void ExtractReferencedColumnsPublic(NodeAst condition, HashSet<string> identifiers)

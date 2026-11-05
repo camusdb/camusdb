@@ -477,7 +477,9 @@ internal sealed class NonQueryStatementDispatcher
                                     rowInserter, context.Statistics, sequenceBinder, database, table,
                                     insertSelectTicket, ticket, source.Columns, source.Cursor, insertedRows,
                                     sourceTimestamp: statementTimestamp,
-                                    upsert: onConflict is null ? null : (rowUpserter, onConflict))
+                                    upsert: onConflict is null ? null : (rowUpserter, onConflict),
+                                    sourceTypes: source.StaticTypes,
+                                    sourceProjections: source.Projections)
                                 .ConfigureAwait(false);
 
                             string? insertWarning = ctasExecutor.WarnIfTimeTravelCopyReadNothing(

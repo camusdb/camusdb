@@ -138,8 +138,8 @@ internal sealed class TestIncomparableTypeComparison : BaseTest
 
         AssertNoRule(() => NonQuery(executor, db, "DELETE FROM mixed WHERE s = a", null), "DELETE s = a");
         AssertNoRule(() => NonQuery(executor, db, "DELETE FROM mixed WHERE a = s", null), "DELETE a = s");
-        AssertNoRule(() => NonQuery(executor, db, "UPDATE mixed SET b = 1 WHERE s = a", null), "UPDATE s = a");
-        AssertNoRule(() => NonQuery(executor, db, "UPDATE mixed SET b = 1 WHERE a <> s", null), "UPDATE a <> s");
+        AssertNoRule(() => NonQuery(executor, db, "UPDATE mixed SET b = true WHERE s = a", null), "UPDATE s = a");
+        AssertNoRule(() => NonQuery(executor, db, "UPDATE mixed SET b = true WHERE a <> s", null), "UPDATE a <> s");
         AssertNoRule(() => NonQuery(executor, db, "DELETE FROM mixed WHERE b = 1", null), "DELETE bool = int");
 
         Assert.AreEqual(10, await Count(executor, db, "mixed", ""), "a refused statement deletes no row");
@@ -152,14 +152,16 @@ internal sealed class TestIncomparableTypeComparison : BaseTest
     }
 
     [Test]
-    public async Task APredicateOverAnEmptyTable_ComparesNothing_AndRaisesNoError()
+    public async Task APredicateOverAnEmptyTable_IsChecked_WhenTheStatementShowsBothTypes()
     {
-        // The rule is checked when values are compared, not when the statement is bound. This
-        // records that scope: a predicate over no rows compares no pair.
         (string db, CommandExecutor executor) = await SeedMixed(0, indexed: false);
 
-        await NonQuery(executor, db, "DELETE FROM mixed WHERE s = a", null);
-        Assert.AreEqual(0, await Count(executor, db, "mixed", "WHERE s = a"));
+        AssertNoRule(() => NonQuery(executor, db, "DELETE FROM mixed WHERE s = a", null), "DELETE");
+        AssertNoRule(() => Count(executor, db, "mixed", "WHERE s = a"), "SELECT");
+
+        // A parameter has a type that only its value shows, and a predicate over no rows reads no value.
+        Dictionary<string, ColumnValue> stringParameter = new() { ["@p"] = new ColumnValue(ColumnType.String, "3") };
+        Assert.AreEqual(0, await Count(executor, db, "mixed", "WHERE a = @p", stringParameter));
     }
 
     [Test]
@@ -200,11 +202,17 @@ internal sealed class TestIncomparableTypeComparison : BaseTest
     [Test]
     public async Task SimpleCase_StopsAtTheFirstMatch_AsBefore()
     {
-        // The first matching WHEN wins and later WHENs are not evaluated, so a later incomparable
-        // WHEN cannot fail a row that an earlier WHEN matched. A row that reaches it fails.
+        // The first matching WHEN wins and later WHENs are not evaluated, so a later WHEN whose type
+        // only its value shows cannot fail a row that an earlier WHEN matched. A later WHEN whose type
+        // the statement shows fails before any row is read, as in PostgreSQL.
         (string db, _, CommandExecutor executor) = await CreateDatabase();
 
-        Assert.AreEqual(1L, (await Scalar(executor, db, "SELECT CASE 5 WHEN 5 THEN 1 WHEN 'a' THEN 2 END")).LongValue);
+        Dictionary<string, ColumnValue> stringParameter = new() { ["@p"] = new ColumnValue(ColumnType.String, "a") };
+        List<IReadOnlyDictionary<string, ColumnValue>> rows =
+            await Query(executor, db, "SELECT CASE 5 WHEN 5 THEN 1 WHEN @p THEN 2 END AS c", stringParameter);
+        Assert.AreEqual(1L, rows[0]["c"].LongValue);
+
+        AssertNoRule(() => Query(executor, db, "SELECT CASE 5 WHEN 5 THEN 1 WHEN 'a' THEN 2 END", null), "literal WHEN");
     }
 
     [Test]
@@ -271,10 +279,16 @@ internal sealed class TestIncomparableTypeComparison : BaseTest
             "WHERE a = true", "WHERE s = 7", "WHERE s IN (7, 8)",
         })
         {
-            Assert.IsFalse(await UsesIndex(executor, db, $"SELECT id FROM mixed {where}"), $"{where} must not seek");
+            // EXPLAIN binds the statement, so it is refused before a plan exists.
+            AssertNoRule(() => UsesIndex(executor, db, $"SELECT id FROM mixed {where}"), $"EXPLAIN {where}");
             AssertNoRule(() => Count(executor, db, "mixed", where), where);
             AssertNoRule(() => NonQuery(executor, db, $"DELETE FROM mixed {where}", null), $"DELETE {where}");
         }
+
+        // A parameter reaches the planner with its value, so the planner must not seek on it.
+        Dictionary<string, ColumnValue> stringParameter = new() { ["@p"] = new ColumnValue(ColumnType.String, "7") };
+        AssertNoRule(() => Count(executor, db, "mixed", "WHERE a = @p", stringParameter), "a = @p");
+        AssertNoRule(() => Count(executor, db, "mixed", "WHERE a IN (7, @p)", stringParameter), "a IN (7, @p)");
 
         Assert.AreEqual(200, await Count(executor, db, "mixed", ""));
     }

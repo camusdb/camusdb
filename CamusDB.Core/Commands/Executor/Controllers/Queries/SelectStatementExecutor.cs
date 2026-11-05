@@ -1516,6 +1516,7 @@ internal sealed class SelectStatementExecutor
                 bound.Query.Projections.Select(projection => projection.Expression).ToList(),
                 lease)
             {
+                StaticTypes = ConditionalResultTypes.OutputTypes(bound, columns),
                 SetOperation = bound.Query.Source is DerivedTableSource { SetOperation: not null } && bound.DerivedSources.Count == 1
                     ? bound.DerivedSources[0].SetOperation
                     : null,
@@ -1684,8 +1685,8 @@ internal sealed class SelectStatementExecutor
                 .RewriteExpressionAsync(database, valueExpr, ticket, "the select list")
                 .ConfigureAwait(false);
 
-            // No binding runs for a FROM-less SELECT, so its CASE, COALESCE, IFNULL and IF are checked
-            // here, over their literal inputs, before the expression is evaluated.
+            // No binding runs for a FROM-less SELECT, so the statement checks run here, over its
+            // literal inputs, before the expression is evaluated.
             ConditionalResultTypes.Check(resolved, lookup: null, recorder: null);
 
             projected[rowKeys[i]] = SQLExecutorBaseCreator.EvalExpr(resolved, emptyRow, ticket.Parameters);

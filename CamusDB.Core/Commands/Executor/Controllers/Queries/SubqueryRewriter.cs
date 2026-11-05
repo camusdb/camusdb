@@ -209,10 +209,14 @@ internal sealed class SubqueryRewriter
                 if (expr.leftAst is null)
                     throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Invalid scalar subquery expression");
 
-                ColumnValue value = await scalarExecutor.ExecuteAsync(
-                    database, expr.leftAst, ticket.TxnState, ticket.Parameters).ConfigureAwait(false);
+                SubqueryOutputType outputType = new();
 
-                return ColumnValueAstBuilder.FromColumnValue(value);
+                ColumnValue value = await scalarExecutor.ExecuteAsync(
+                    database, expr.leftAst, ticket.TxnState, ticket.Parameters, outputType).ConfigureAwait(false);
+
+                return value.Type == ColumnType.Null
+                    ? SubqueryResultTypes.NullOf(outputType.Type)
+                    : ColumnValueAstBuilder.FromColumnValue(value);
             }
 
             case NodeType.ExprInSubquery:
@@ -336,9 +340,11 @@ internal sealed class SubqueryRewriter
             ticket.Parameters,
             ticket.CancellationToken).ConfigureAwait(false);
 
-        return negated
+        NodeAst membership = negated
             ? await SubqueryValueListAst.BuildNotInMembershipAsync(lhs, materialization).ConfigureAwait(false)
             : await SubqueryValueListAst.BuildInMembershipAsync(lhs, materialization).ConfigureAwait(false);
+
+        return SubqueryResultTypes.Remember(membership, materialization.OutputType);
     }
 
     /// <summary>
@@ -377,9 +383,9 @@ internal sealed class SubqueryRewriter
             ticket.Parameters,
             ticket.CancellationToken).ConfigureAwait(false);
 
-        NodeAst elements = await SubqueryValueListAst.BuildValueSetAsync(
-            materialization,
-            ticket.CancellationToken).ConfigureAwait(false);
+        NodeAst elements = SubqueryResultTypes.Remember(
+            await SubqueryValueListAst.BuildValueSetAsync(materialization, ticket.CancellationToken).ConfigureAwait(false),
+            materialization.OutputType);
 
         return new NodeAst(
             expr.nodeType,

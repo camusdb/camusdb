@@ -310,7 +310,7 @@ internal sealed class SemiJoinExecutor
         QueryRowNameResolver innerResolver)
     {
         ColumnValue result = SqlExecutor.EvalExpr(filter, row, parameters, innerResolver);
-        return result.Type == ColumnType.Bool && result.BoolValue;
+        return QueryFilterer.ToPredicateResult(result, "WHERE");
     }
 
     /// <summary>

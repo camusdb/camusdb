@@ -71,13 +71,18 @@ internal sealed class SubqueryQueryExecutor
     /// Executes a single-column subquery and returns a streaming cursor over the result rows.
     /// The caller is responsible for consuming the cursor entirely when needed.
     /// </summary>
+    /// <param name="outputType">
+    /// Receives the static type of the subquery's column when the bind of the first read completes,
+    /// also for a subquery that returns no row. See <see cref="SubqueryResultTypes"/>.
+    /// </param>
     public IAsyncEnumerable<QueryResultRow> ExecuteSelectAsync(
         DatabaseDescriptor database,
         NodeAst selectAst,
         KvTransaction txnState,
         Dictionary<string, ColumnValue>? parameters,
-        CancellationToken cancellationToken = default) =>
-        ExecuteSelectInternalAsync(database, selectAst, txnState, parameters, requireSingleColumn: true, cancellationToken);
+        CancellationToken cancellationToken = default,
+        SubqueryOutputType? outputType = null) =>
+        ExecuteSelectInternalAsync(database, selectAst, txnState, parameters, requireSingleColumn: true, outputType, cancellationToken);
 
     /// <summary>
     /// Executes a subquery for EXISTS semantics and returns a streaming cursor.
@@ -89,7 +94,7 @@ internal sealed class SubqueryQueryExecutor
         KvTransaction txnState,
         Dictionary<string, ColumnValue>? parameters,
         CancellationToken cancellationToken = default) =>
-        ExecuteSelectInternalAsync(database, selectAst, txnState, parameters, requireSingleColumn: false, cancellationToken);
+        ExecuteSelectInternalAsync(database, selectAst, txnState, parameters, requireSingleColumn: false, outputType: null, cancellationToken);
 
     private async IAsyncEnumerable<QueryResultRow> ExecuteSelectInternalAsync(
         DatabaseDescriptor database,
@@ -97,6 +102,7 @@ internal sealed class SubqueryQueryExecutor
         KvTransaction txnState,
         Dictionary<string, ColumnValue>? parameters,
         bool requireSingleColumn,
+        SubqueryOutputType? outputType,
         [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct = default)
     {
         if (selectAst.nodeType != NodeType.Select)
@@ -137,6 +143,9 @@ internal sealed class SubqueryQueryExecutor
             throw new CamusDBException(
                 CamusDBErrorCodes.InvalidInput,
                 "Subquery must return exactly one column");
+
+        if (outputType is not null)
+            outputType.Type = SubqueryResultTypes.OutputTypeOf(bound.Bound);
 
         QueryTicket queryTicket = QueryTicketAdapter.ToQueryTicket(
             bound.Bound, executeTicket, bound.ExistsRegistry, bound.SemiJoinSpecsOrNull);

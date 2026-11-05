@@ -235,7 +235,7 @@ internal abstract class SQLExecutorBaseCreator
         return true;
     }
 
-    private static string ComparisonSymbol(NodeType op) => op switch
+    internal static string ComparisonSymbol(NodeType op) => op switch
     {
         NodeType.ExprEquals => "=",
         NodeType.ExprNotEquals => "<>",
@@ -415,7 +415,7 @@ internal abstract class SQLExecutorBaseCreator
         }
     }
 
-    private static string ArithmeticSymbol(NodeType op) => op switch
+    internal static string ArithmeticSymbol(NodeType op) => op switch
     {
         NodeType.ExprAdd => "+",
         NodeType.ExprSub => "-",
@@ -1125,7 +1125,7 @@ internal abstract class SQLExecutorBaseCreator
     /// step must have replaced first, or an unknown node type. Returned rather than thrown so the
     /// dispatcher's frame carries no message formatting.
     /// </summary>
-    private static CamusDBException UnevaluableExpression(NodeType nodeType) => nodeType switch
+    internal static CamusDBException UnevaluableExpression(NodeType nodeType) => nodeType switch
     {
         // A window call is replaced by its result column when a SELECT is created. One that reaches a
         // per-row evaluator sits where SQL allows none: UPDATE SET, INSERT VALUES, a CHECK, an index

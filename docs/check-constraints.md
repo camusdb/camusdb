@@ -77,7 +77,15 @@ A check must be a **deterministic, single-row** predicate. Rejected at DDL-valid
 - **subqueries** (scalar, `IN (SELECT …)`, `EXISTS`),
 - **aggregate functions** (`count`, `sum`, `avg`, …),
 - **volatile / non-deterministic functions** (`now`, `gen_uuid_v4`/`v7`, `gen_id`, …),
-- references to **columns that don't exist** on the table.
+- references to **columns that don't exist** on the table,
+- **functions that don't exist**, and a wrong argument count,
+- a mistake in types that the statement shows, such as `CHECK (name > 5)` on a `string` column,
+- a condition that is **not a `bool`**, such as `CHECK (a)` on an `int64` column or `CHECK (1)`. Such a
+  condition could never reject a row, because its value would read as unknown.
+
+These are the checks that any statement gets. See
+[Errors that do not depend on the rows](data-types.md#errors-that-do-not-depend-on-the-rows). A constraint
+stored before these checks existed keeps working, because a stored condition is not validated when it loads.
 
 Everything the WHERE grammar supports otherwise is allowed: comparisons, `AND`/`OR`/`NOT`,
 arithmetic, `BETWEEN`, `LIKE`/`ILIKE`, the regex operators `~` / `~*` / `!~` / `!~*` (see below),
@@ -185,9 +193,10 @@ Two coercions make the natural SQL work without explicit `CAST`, exactly as the 
   CREATE TABLE people (id object_id PRIMARY KEY, birth_date date CHECK (birth_date > '1900-01-01'));
   ```
 
-A comparison between genuinely incompatible types with no such coercion (e.g. a `string` column vs a
-numeric literal) rejects the row at write time as a check violation (`CADB0303`, "compares
-incompatible types", HTTP 400) — not a raw crash / 500.
+A comparison between incompatible types with no such coercion (e.g. a `string` column vs a numeric
+literal) is refused with `CADB0400` when the constraint is declared. When only a value shows the type, as
+for a function result (`CHECK (name > length(name))`), the write rejects the row as a check violation
+(`CADB0303`, "compares incompatible types", HTTP 400) — not a raw crash / 500.
 
 ### ALTER adds validate existing data
 

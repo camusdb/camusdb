@@ -199,9 +199,10 @@ public static class PredicateAnalyzer
     /// emit this shape routinely for boolean columns, so the degradation is easy to hit and
     /// invisible in the SQL text.</para>
     ///
-    /// <para>Only <see cref="ColumnType.Bool"/> columns are rewritten. A bare non-boolean column is
-    /// evaluated with numeric truthiness (non-zero is true) by the execution filter, which
-    /// <c>= true</c> would not preserve, so those conjuncts are deliberately left residual.</para>
+    /// <para>Only <see cref="ColumnType.Bool"/> columns are rewritten. A bare non-boolean column is not
+    /// a condition: the binding refuses it, and a plan built without a binding leaves it residual, so
+    /// the execution filter refuses it (<see cref="QueryFilterer.ToPredicateResult"/>). A seek on
+    /// <c>= true</c> would return rows instead of that error.</para>
     ///
     /// <para>The promoted comparison keeps the <em>original</em> conjunct node, so whenever the
     /// chosen scan does not absorb the bound the execution filter re-evaluates exactly the
@@ -256,7 +257,7 @@ public static class PredicateAnalyzer
     /// <c>NOT enabled</c>, or an <c>IS [NOT] TRUE/FALSE</c> truth test — and expresses it as an
     /// equality against the corresponding boolean constant. Returns false for every other shape,
     /// including a bare reference to a non-boolean column (see
-    /// <see cref="NormalizeBooleanColumnPredicates"/> for why those must keep truthiness semantics).
+    /// <see cref="NormalizeBooleanColumnPredicates"/> for why those stay residual).
     ///
     /// <para>The negated truth tests need care: <c>x IS NOT TRUE</c> matches FALSE <em>and NULL</em>,
     /// so it is only equivalent to <c>x = FALSE</c> when the column cannot be NULL. On a nullable

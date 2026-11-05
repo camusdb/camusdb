@@ -342,9 +342,8 @@ internal sealed class SelectQueryCreator
     /// boolean, a condition that decides whether the projections run at all, and a declared column type
     /// when no row exists to read it from. The bound path has all of them.</para>
     ///
-    /// <para><b>The condition must be boolean.</b> It runs as <c>cond IS TRUE</c>, so TRUE keeps the row,
-    /// FALSE and NULL drop it, and any other type is an error, as in PostgreSQL. The WHERE of a table
-    /// reads a nonzero number as true, and that rule must not spread to a form that never had it.</para>
+    /// <para><b>The condition must be boolean,</b> as for the WHERE of a table: TRUE keeps the row, FALSE
+    /// and NULL drop it, and any other type is an error, as in PostgreSQL.</para>
     ///
     /// <para><b>A sequence call is refused in this form,</b> as it is in the projection of any relation:
     /// a statement must know how many values it draws before the condition decides. The AST stays
@@ -373,9 +372,7 @@ internal sealed class SelectQueryCreator
                 }
             }
 
-            NodeAst isTrue = new(NodeType.ExprIsTrue, fromless.extendedOne, null, null, null, null, null, null, null);
-
-            return WithSingleRowSource(fromless, isTrue);
+            return WithSingleRowSource(fromless, fromless.extendedOne);
         });
     }
 

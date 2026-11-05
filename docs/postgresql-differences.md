@@ -52,6 +52,26 @@ linguistic locale gives different ones. Use `LOWER(v)` for a comparison that ign
 
 See [FROM-less SELECT](fromless-select.md).
 
+## Statement checks
+
+CamusDB refuses a statement mistake before it reads a row, as PostgreSQL does. See
+[Errors that do not depend on the rows](data-types.md#errors-that-do-not-depend-on-the-rows). These are the
+differences that stay. `em` is an empty table.
+
+| Statement | CamusDB | PostgreSQL | Why |
+|---|---|---|---|
+| `SELECT id FROM d WHERE 'true'` | `CADB0400` | Every row | A literal has its own type, and no implicit conversion from string to boolean exists. |
+| `SELECT id FROM em WHERE length(s)` | No rows, and `CADB0400` when a row reaches it | `argument of WHERE must be type boolean, not type integer` | A function has no static result type in the bind-time check, so only its value shows the type. |
+| `SELECT id FROM em WHERE s = length(s)` | No rows, and `CADB0400` when a row reaches it | `operator does not exist: text = integer` | A function has no static result type in the bind-time check, so only its value shows the type. |
+| `SELECT id FROM em WHERE id = (SELECT upper(s) FROM em)` | No rows, and `CADB0400` when a row reaches it | `operator does not exist: bigint = text` | A subquery column has the static type of its expression, and a function has none. |
+| `SELECT d.id FROM (SELECT id, s FROM em) AS d WHERE d.id = d.s` | No rows, and `CADB0400` when a row reaches it | `operator does not exist: bigint = text` | A derived table declares `string` also for a column whose type it does not know, so the check reads every derived `string` column as unknown. |
+| `SELECT 1 / 0 FROM em` | No rows, and `CADB0400` when a row reaches it | `division by zero` | A value error is not a statement mistake, and the engine does not evaluate a constant at bind time. |
+| `SELECT id FROM em WHERE id = 1 / 0` | No rows, and `CADB0400` when a row reaches it | `division by zero` | The same reason. |
+| `SELECT 9223372036854775807 + 1 FROM em` | No rows, and `CADB0420` when a row reaches it | `bigint out of range` | The same reason. |
+| `SELECT CAST(70000 AS SMALLINT) FROM em` | No rows | `smallint out of range` | The same reason. |
+| `UPDATE em SET small = 70000 WHERE FALSE` | No row written | `smallint out of range` | The declared range is a write rule, so it applies to a row that the statement writes. |
+| `SELECT length(v) FROM em` | No rows, and `CADB0400` when a row reaches it | `function length(bigint) does not exist` | Functions have no signature table. The name and the argument count are checked at bind time, and each function checks its argument types when it runs. |
+
 ## Aggregates
 
 | Statement | CamusDB | PostgreSQL | Why |

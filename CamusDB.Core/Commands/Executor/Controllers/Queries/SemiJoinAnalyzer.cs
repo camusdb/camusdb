@@ -249,6 +249,15 @@ internal sealed class SemiJoinAnalyzer
 
                 innerRequired.Add(lookupKey);
             }
+
+            // An aggregate has no place in a WHERE, and the general path reports it with its own message.
+            if (QueryExpressionClassifier.ContainsAggregate(innerFilter))
+                return null;
+
+            // The filter runs per probe, so a probe that finds no row never evaluates it. This spec
+            // skips the binder, so the statement checks of a bound SELECT run here.
+            ConditionalResultTypes.CheckCondition(
+                innerFilter, ConditionalResultTypes.LookupFor(innerTable.Schema), innerResolver, "WHERE", allowAggregates: false);
         }
 
         innerResolver.FreezeForSharedReuse();

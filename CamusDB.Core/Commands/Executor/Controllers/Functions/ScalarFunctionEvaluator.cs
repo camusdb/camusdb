@@ -27,17 +27,7 @@ internal static class ScalarFunctionEvaluator
         string functionName = funcCallExpr.leftAst!.yytext!.ToLowerInvariant();
 
         if (!TryResolve(functionName, out ScalarFunctionDescriptor? descriptor))
-        {
-            // SELECT generate_series(1, 3): a set-returning function in the select list.
-            if (TableFunctionRegistry.IsTableFunction(functionName))
-                throw new CamusDBException(
-                    CamusDBErrorCodes.FeatureNotSupported,
-                    $"The set-returning function '{functionName}' is supported only in FROM, as in SELECT ... FROM {functionName}(...)");
-
-            throw new CamusDBException(
-                CamusDBErrorCodes.InvalidAstStmt,
-                "Function not found '" + functionName + "'");
-        }
+            throw NotCallable(functionName);
 
         IReadOnlyList<ColumnValue> arguments = ScalarFunctionArguments.EvaluateArgumentList(
             funcCallExpr.rightAst,
@@ -61,6 +51,44 @@ internal static class ScalarFunctionEvaluator
             return descriptor.StatementEvaluator(functionName, arguments, parameters);
 
         return descriptor.Evaluator(functionName, arguments);
+    }
+
+    /// <summary>
+    /// Refuses a call that no row can run: a name that no function has, or a wrong argument count. The
+    /// statement checks call this when they bind, so the error does not depend on the rows or on a
+    /// LIMIT, and it has the code and the text of <see cref="Evaluate"/>. A name resolves through the
+    /// extension scope of the flow, as it does when the call runs.
+    /// </summary>
+    /// <param name="allowAggregates">True where a query computes aggregates. An aggregate name is then
+    /// not a scalar call, and the aggregate path checks it.</param>
+    internal static void RequireCallable(NodeAst funcCallExpr, bool allowAggregates)
+    {
+        string functionName = funcCallExpr.leftAst!.yytext!.ToLowerInvariant();
+
+        if (allowAggregates && Queries.QueryExpressionClassifier.IsAggregateName(functionName))
+            return;
+
+        if (!TryResolve(functionName, out ScalarFunctionDescriptor? descriptor))
+            throw NotCallable(functionName);
+
+        ScalarFunctionArguments.ValidateArity(
+            functionName,
+            descriptor.MinArity,
+            descriptor.MaxArity,
+            Queries.ConditionalResultTypes.Arguments(funcCallExpr.rightAst).Count);
+    }
+
+    private static CamusDBException NotCallable(string functionName)
+    {
+        // SELECT generate_series(1, 3): a set-returning function in the select list.
+        if (TableFunctionRegistry.IsTableFunction(functionName))
+            return new CamusDBException(
+                CamusDBErrorCodes.FeatureNotSupported,
+                $"The set-returning function '{functionName}' is supported only in FROM, as in SELECT ... FROM {functionName}(...)");
+
+        return new CamusDBException(
+            CamusDBErrorCodes.InvalidAstStmt,
+            "Function not found '" + functionName + "'");
     }
 
     public static bool IsRegisteredScalarFunction(string functionName)
@@ -207,8 +235,8 @@ internal static class ScalarFunctionEvaluator
 
     /// <summary>
     /// Resolves the descriptor of the scalar function <paramref name="node"/> calls, or answers
-    /// false when the node is not a call at all. An unregistered name also answers false here; it
-    /// throws later, at execution, which is where an unknown function belongs.
+    /// false when the node is not a call at all. An unregistered name also answers false here, because
+    /// this method only classifies a call; <see cref="RequireCallable"/> refuses the name.
     /// </summary>
     private static bool TryGetCalledDescriptor(NodeAst node, out ScalarFunctionDescriptor? descriptor)
     {

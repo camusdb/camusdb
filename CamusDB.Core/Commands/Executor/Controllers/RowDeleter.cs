@@ -286,9 +286,9 @@ internal sealed class RowDeleter
     {
         DeleteTicket ticket = state.Ticket;
 
-        // A CASE, COALESCE, IFNULL or IF in the WHERE whose inputs have no common type fails before
-        // any row is read, as in a SELECT.
-        ConditionalResultTypes.Check(ticket.Where, ConditionalResultTypes.LookupFor(state.Table.Schema), recorder: null);
+        // The statement checks of a SELECT run on the WHERE too, before any row is read, so an error
+        // does not depend on which rows match.
+        ConditionalResultTypes.CheckCondition(ticket.Where, ConditionalResultTypes.LookupFor(state.Table.Schema), recorder: null, "WHERE", allowAggregates: false);
 
         // Decode only the columns the WHERE/filter needs during the locate scan.
         // The write phase calls LoadWritableRow which does a full decode per matched row.
