@@ -270,6 +270,11 @@ public sealed class TableColumnAdder
             if (column.NotNull && value.Type == ColumnType.Null)
                 throw ContainsNullValues(table.Name, column.Name);
 
+            // A sequence or function default can give a value past the declared width, and no INSERT
+            // judges the fill. The failure stops the fill, and the coordinator removes the column.
+            if (column.IntegerBits is int bits)
+                IntegerWidth.EnforceOnColumn(bits, value, column.Name);
+
             // The decoded row is this batch's own copy, so it is written in place.
             ((Dictionary<string, ColumnValue>)pending[i].Values)[column.Name] = value;
         }

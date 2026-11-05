@@ -166,6 +166,7 @@ internal static class TableCommentWriter
                         defaultValue: old.DefaultValue,
                         state: old.State,
                         maxLength: old.MaxLength,
+                        integerBits: old.IntegerBits,
                         arrayElementType: old.ArrayElementType,
                         defaultFunction: old.DefaultFunction,
                         notNullConstraintName: old.NotNullConstraintName,

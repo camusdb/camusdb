@@ -411,6 +411,7 @@ public sealed class HttpSchemaDdlForwarder : ISchemaDdlForwarder, ISchemaAckSend
         NotNull = col.NotNull,
         Default = col.Default,
         MaxLength = col.MaxLength,
+        IntegerBits = col.IntegerBits,
         ArrayElementType = col.ArrayElementType,
         DefaultFunction = col.DefaultFunction,
         DefaultSequenceId = col.DefaultSequenceId,

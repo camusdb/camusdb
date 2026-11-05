@@ -274,6 +274,62 @@ internal abstract class SchemaChangeHandoverScenarios : SharedNodeBaseTest
     }
 
     /// <summary>
+    /// The job record must hold the declared integer width, and a successor that finds the column still
+    /// Absent must create the column with it. Otherwise a leader change during the first step publishes
+    /// the column with no range check and no error.
+    /// </summary>
+    [Test]
+    public async Task AddColumn_TheJobRecordKeepsTheIntegerWidth()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupTable();
+        string tableId = TableId(database);
+
+        int? recorded = null;
+        executor.TestInterceptBeforeFillBatchLock = async () =>
+        {
+            PersistedCoordinatorJob? record = await executor.Catalogs.TryLoadCoordinatorJobAsync(database, tableId, "qty");
+            recorded = record!.ColumnIntegerBits;
+        };
+
+        try
+        {
+            await ExecuteDdl(executor, dbname, "ALTER TABLE items ADD COLUMN qty SMALLINT NOT NULL DEFAULT (7)");
+        }
+        finally
+        {
+            executor.TestInterceptBeforeFillBatchLock = null;
+        }
+
+        Assert.That(recorded, Is.EqualTo(16), "the driver records the width before its first step");
+        Assert.That(Column(database, "qty")!.IntegerBits, Is.EqualTo(16));
+    }
+
+    [Test]
+    public async Task Resume_CreatesTheColumnWithItsIntegerWidth()
+    {
+        (_, DatabaseDescriptor database, CommandExecutor executor) = await SetupTable();
+
+        await executor.Catalogs.PersistCoordinatorJobAsync(database, new PersistedCoordinatorJob
+        {
+            TableName = "items",
+            TableId = TableId(database),
+            ElementName = "qty",
+            TargetState = SchemaElementState.Public,
+            ElementKind = SchemaElementKind.Column,
+            ColumnType = ColumnType.Integer64,
+            ColumnIntegerBits = 16,
+            ColumnDefault = new ColumnValue(ColumnType.Integer64, 7L),
+        });
+
+        await Successor(executor, database.Kahuna.SchemaLeaderTerm(database.Id)).ResumeJobsAsync(database);
+
+        TableColumnSchema? qty = Column(database, "qty");
+        Assert.That(qty, Is.Not.Null, "the successor published the column");
+        Assert.That(qty!.State, Is.EqualTo(SchemaElementState.Public));
+        Assert.That(qty.IntegerBits, Is.EqualTo(16));
+    }
+
+    /// <summary>
     /// The successor takes the job over and takes the column back, recording why. The driver's statement
     /// must fail with the successor's error, not with "nothing was committed", and must not retry: the
     /// column is gone, and a retry would start the change again.

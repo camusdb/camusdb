@@ -16,6 +16,8 @@ and reserved keywords.
 |------|--------|-----------|-------|
 | `oid` | 12-byte ObjectId | yes | CamusDB's native identifier type; shares its key encoding with `string`. Spelled `oid`/`object_id` in SQL, `id` over HTTP (see [aliases](#aliases)). |
 | `int64` | 64-bit signed integer | yes | Range `-9223372036854775808` to `9223372036854775807`. A result outside it is an error, never a wrapped value. See [INT64 overflow](#int64-overflow). |
+| `smallint` | `int64` with a 16-bit range | yes | Range `-32768` to `32767`. A value outside it is an error on a write and on `CAST`. See [Integer type names](#integer-type-names). |
+| `int`, `integer` | `int64` with a 32-bit range | yes | Range `-2147483648` to `2147483647`. A value outside it is an error on a write and on `CAST`. See [Integer type names](#integer-type-names). |
 | `float64` | IEEE-754 double | yes | `'Infinity'`, `'-Infinity'` and `'NaN'` are values. An overflow or an underflow is an error. See [Float values](#float-values-infinity-nan-and-overflow). |
 | `float32` | IEEE-754 single | yes | Stored at single precision; comparisons and storage narrow to `float`. A value past the `float32` range is an error, never infinity. |
 | `numeric` | exact decimal: 38 digits, 9 after the point | yes | Fixed precision and scale, as Spanner's NUMERIC. See [NUMERIC](#numeric). |
@@ -34,8 +36,9 @@ These spellings are accepted as synonyms:
 
 | Alias | Canonical type |
 |-------|----------------|
-| `int`, `integer` | `int64` |
+| `bigint` | `int64` |
 | `real` | `float32` |
+| `double precision` | `float64` |
 | `timestamp` | `datetime` |
 | `blob` | `bytes` |
 | `object_id` (SQL), `id` (HTTP) | `oid` |
@@ -44,8 +47,9 @@ These spellings are accepted as synonyms:
 | `json` | `jsonb` (the text is canonical; see [json.md](json.md#differences-from-postgresql)) |
 
 An alias is accepted everywhere a type is written: a column definition, `ALTER TABLE ... ADD COLUMN`,
-`CAST(x AS integer)`, `x::integer`, and an array element type such as `array(integer)`. The spelling
-is not kept: `SHOW CREATE TABLE` renders the canonical type.
+`CAST(x AS bigint)`, `x::bigint`, and an array element type such as `array(bigint)`. The spelling
+is not kept: `SHOW CREATE TABLE` renders the canonical type. `bigint` and the word `precision` stay
+usable as table and column names.
 
 > The ObjectId type is spelled `oid` or `object_id` in SQL and `id` in HTTP create-table requests. The
 > two paths do not currently accept each other's spelling.
@@ -66,6 +70,51 @@ CREATE TABLE events (
 ```
 
 (Here the column is *named* `id` — a plain identifier — and its *type* is `oid`.)
+
+---
+
+## Integer type names
+
+Each integer type name promises a range, and the engine enforces it. These are the PostgreSQL ranges.
+
+| Name | Range | `SHOW CREATE TABLE` and `SHOW COLUMNS` |
+|------|-------|----------------------------------------|
+| `smallint` | `-32768` to `32767` | `SMALLINT` |
+| `int`, `integer` | `-2147483648` to `2147483647` | `INT` |
+| `int64`, `bigint` | `-9223372036854775808` to `9223372036854775807` | `INT64` |
+
+A value outside the range fails with `CADB0420` (`IntegerValueOutOfRange`): HTTP 400, gRPC
+`OUT_OF_RANGE`. The statement stores nothing. The rule applies to:
+
+- `INSERT`, `INSERT … SELECT`, `UPDATE`, both arms of `ON CONFLICT`, and the HTTP and gRPC row
+  endpoints. This includes a value that a sequence default or a trigger gives.
+- A constant `DEFAULT`, when the statement that declares it runs.
+- `ALTER TABLE … ADD COLUMN`. A sequence or function default that passes the range while it fills the
+  existing rows stops the fill, and the column is removed.
+- Each element of an array column, such as `array(smallint)`.
+- `CAST(x AS smallint)`, `x::int` and the other narrow spellings. The result is an `int64` value. A float
+  rounds first, so `CAST(32767.5 AS smallint)` fails.
+
+The range is a write rule, and every name stores as `int64`:
+
+- Arithmetic is `int64`. If `s` is a `smallint` that holds `32767`, then `SELECT s + 1` gives `32768`.
+  `UPDATE … SET s = s + 1` fails, because it writes that result to the column.
+- A query result and a wire value are `int64`, and a comparison reads an `int64`. `WHERE s = 40000`
+  finds no row, and it is not an error.
+- An `int64` column and a `smallint` column have the same row bytes and index keys, so no storage
+  revision is involved.
+
+Differences and limits:
+
+- **A column created before this rule keeps no limit.** The catalog did not record the name, so an old
+  column declared `int` or `smallint` can hold any `int64`, and it renders as `INT64`.
+- A stored `CHECK` or view body from before this rule keeps no limit. The engine stored its
+  `CAST(x AS int)` as `CAST(x AS int64)`.
+- `serial` and `bigserial` are `int64`. PostgreSQL makes `serial` 32 bits.
+- A sequence on a narrow column keeps its own bounds. PostgreSQL limits the sequence to the column type.
+  Here the sequence goes on, and the write of a value past the range fails with `CADB0420`.
+- `CREATE TABLE … AS SELECT` makes `int64` columns, whatever the source column declares. PostgreSQL keeps
+  the type of the source column.
 
 ---
 
@@ -453,6 +502,33 @@ column's declared element type the same way scalars do, so `ARRAY[1, 2]` is acce
 `CAST` works for all scalar types, e.g. `CAST('2026-01-01' AS date)`, `CAST(x AS float32)`,
 `CAST('0xFF00' AS bytes)`. The PostgreSQL shorthand `x::type` is the same as `CAST(x AS type)`; see
 [PostgreSQL expression syntax](sql-expression-syntax.md#the--cast).
+
+#### Cast to `int64`
+
+`CAST(x AS int64)`, `x::int64` and `to_int64(x)` use one rule. A number with a fraction rounds half
+away from zero, for every numeric type:
+
+| Value | `float64`, `float32`, `numeric`, `jsonb` number |
+|-------|-------------------------------------------------|
+| `0.4` | `0` |
+| `0.5` | `1` |
+| `-0.5` | `-1` |
+| `1.5` | `2` |
+| `2.5` | `3` |
+| `-2.5` | `-3` |
+
+- This is the GoogleSQL rule, and `round(x)` gives the same integer. PostgreSQL uses it for `numeric`
+  and `jsonb`, but rounds `float8::bigint` half to even, so `2.5::float8::bigint` is `2` in PostgreSQL.
+- The cast reads the exact binary value of a float, so `0.49999999999999994` gives `0`. A value that
+  the float type cannot hold is already rounded when it is stored: `9007199254740993.0` is the `float64`
+  value `9007199254740992`.
+- `NaN`, `Infinity`, `-Infinity` and a result past the `int64` range fail with `CADB0420`
+  (`IntegerValueOutOfRange`): HTTP 400, gRPC `OUT_OF_RANGE`.
+- A string must spell an integer. `CAST('2.5' AS int64)` fails with `CADB0400`, and it does not round.
+  `doc ->> 'a'` gives a string, so cast `doc -> 'a'` to round a `jsonb` number.
+- There is no implicit conversion. An `int64` column, an integer function argument, an array subscript,
+  a bitwise operator and a `LIMIT` or `OFFSET` parameter refuse a float. Write the `CAST` where you want
+  the rounded value.
 
 #### Text form of each type
 
@@ -867,12 +943,12 @@ The type keywords (and their aliases) are **reserved words** and cannot be used 
 in SQL. The reserved type words are:
 
 ```
-oid  object_id  int  int64  integer  string  bool  boolean  float32  float64  real
+oid  object_id  smallint  int  int64  integer  string  bool  boolean  float32  float64  real
 date  datetime  timestamp  bytes  blob  array  numeric  decimal
 ```
 
 Note that `id` is **not** a SQL type keyword and remains usable as an identifier (column/table name) —
-the ObjectId type is spelled `oid`/`object_id` in SQL.
+the ObjectId type is spelled `oid`/`object_id` in SQL. `bigint` and `precision` are also usable as names.
 
 Only the exact keyword is reserved — identifiers that merely *start with* a keyword (e.g. `internal`,
 `interval`, `dates`) are fine. Tables created through the HTTP / programmatic API are unaffected by SQL

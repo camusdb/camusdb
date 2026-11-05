@@ -39,12 +39,15 @@ public sealed class CreateTableController : CommandsController
             "int64"     => ColumnType.Integer64,
             "int"       => ColumnType.Integer64,
             "integer"   => ColumnType.Integer64,
+            "smallint"  => ColumnType.Integer64,
+            "bigint"    => ColumnType.Integer64,
             "string"    => ColumnType.String,
             "char"      => ColumnType.String,
             "varchar"   => ColumnType.String,
             "text"      => ColumnType.String,
             "bool"      => ColumnType.Bool,
             "float64"   => ColumnType.Float64,
+            "double precision" => ColumnType.Float64,
             "float32"   => ColumnType.Float32,
             "real"      => ColumnType.Float32,
             "date"      => ColumnType.Date,
@@ -62,6 +65,17 @@ public sealed class CreateTableController : CommandsController
             _           => throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Unknown type: " + name),
         };
     }
+
+    /// <summary>
+    /// The declared width of an integer type name, the same rule as the SQL path: SMALLINT is 16 bits,
+    /// INT and INTEGER are 32 bits. Null for every other name.
+    /// </summary>
+    private static int? GetIntegerBits(string? name) => name?.ToLowerInvariant() switch
+    {
+        "smallint" => 16,
+        "int" or "integer" => 32,
+        _ => null,
+    };
 
     private static IndexType GetIndexType(string? type)
     {
@@ -98,7 +112,8 @@ public sealed class CreateTableController : CommandsController
                 notNull: column.NotNull,
                 defaultValue: column.DefaultValue,
                 maxLength: column.MaxLength,
-                arrayElementType: arrayElementType
+                arrayElementType: arrayElementType,
+                integerBits: GetIntegerBits(arrayElementType is null ? column.Type : column.ArrayElementType)
             );
         }
 

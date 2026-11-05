@@ -325,6 +325,12 @@ public sealed class SchemaColumnPayload
     public int? MaxLength { get; set; }
 
     /// <summary>
+    /// The declared integer width in bits: 16 or 32. Null means int64, which is also what an entry
+    /// written before the width existed decodes to.
+    /// </summary>
+    public int? IntegerBits { get; set; }
+
+    /// <summary>
     /// Element type for Array columns. Null for non-Array types.
     /// </summary>
     public ColumnType? ArrayElementType { get; set; }
@@ -357,6 +363,7 @@ public sealed class SchemaColumnPayload
             DefaultSequenceId = column.DefaultSequenceId,
             IdentityAlways = column.IdentityAlways,
             MaxLength = column.MaxLength,
+            IntegerBits = column.IntegerBits,
             ArrayElementType = column.ArrayElementType,
             NotNullConstraintName = column.NotNullConstraintName,
             Comment = column.Comment,

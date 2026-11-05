@@ -207,6 +207,7 @@ internal static class SchemaChangeEntryFactory
             IdentityAlways = c.IdentityAlways,
             State = c.State,
             MaxLength = c.MaxLength,
+            IntegerBits = c.IntegerBits,
             ArrayElementType = c.ArrayElementType,
             NotNullConstraintName = c.NotNullConstraintName,
             Comment = c.Comment,

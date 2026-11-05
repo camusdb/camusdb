@@ -204,6 +204,16 @@ public sealed class SetWideTrigger : ICamusTrigger
     }
 }
 
+/// <summary>Test-only BEFORE trigger: writes 40000 to the <c>small</c> column, which is past the range of a SMALLINT.</summary>
+public sealed class SetSmallPastItsRangeTrigger : ICamusTrigger
+{
+    public Task FireAsync(ITriggerContext context)
+    {
+        context.New?.Set("small", 40000L);
+        return Task.CompletedTask;
+    }
+}
+
 /// <summary>Test-only BEFORE trigger: replaces a NULL <c>name</c> with "repaired".</summary>
 public sealed class RepairNullTrigger : ICamusTrigger
 {

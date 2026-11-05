@@ -66,7 +66,7 @@ internal sealed class RowInserter
 
     /// <summary>
     /// Refuses a row that names a column the table cannot take, leaves a NOT NULL column empty, passes
-    /// a length bound, or fails a CHECK constraint. Runs after the BEFORE INSERT triggers, so what a
+    /// a length bound or a declared integer width, or fails a CHECK constraint. Runs after the BEFORE INSERT triggers, so what a
     /// trigger writes is judged too.
     /// </summary>
     internal static void Validate(TableDescriptor table, InsertTicket ticket)
@@ -86,7 +86,7 @@ internal sealed class RowInserter
             
             writableNames.Add(col.Name);
             
-            if (col.NotNull || col.Type == ColumnType.String || col.Type == ColumnType.Bytes)
+            if (col.NotNull || col.Type == ColumnType.String || col.Type == ColumnType.Bytes || col.IntegerBits is not null)
                 validationRules.Add(col);
         }
 
@@ -121,6 +121,9 @@ internal sealed class RowInserter
                 {
                     EnforceLengthBound(col, val);
                 }
+
+                if (present && col.IntegerBits is int bits)
+                    IntegerWidth.EnforceOnColumn(bits, val!, col.Name);
             }
 
             // Step 4: CHECK constraints — evaluated after all values (including defaults) are present.

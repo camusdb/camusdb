@@ -87,6 +87,20 @@ public sealed class TableColumnSchema
     public int? MaxLength { get; }
 
     /// <summary>
+    /// The declared width of an integer column in bits: 16 for <c>SMALLINT</c>, 32 for <c>INT</c> and
+    /// <c>INTEGER</c>, and null for <c>INT64</c> and <c>BIGINT</c>. For an Array column it applies to each
+    /// element. Null on any other type. Persisted in schema JSON.
+    ///
+    /// <para>The width is a write rule only: the type stays <see cref="ColumnType.Integer64"/>, so row
+    /// bytes, index keys and arithmetic are the same at every width, and a query result is an int64.
+    /// <see cref="CamusDB.Core.CommandsExecutor.Models.IntegerWidth"/> holds the rule. A column created
+    /// before the width existed loads as null, because it was stored with no limit and can hold any
+    /// int64. Like <see cref="Comment"/>, every rebuild-copy of a column must pass it through, or the
+    /// range check silently stops.</para>
+    /// </summary>
+    public int? IntegerBits { get; }
+
+    /// <summary>
     /// Element type for Array columns. Null for all non-Array types. Persisted in schema JSON.
     /// </summary>
     public ColumnType? ArrayElementType { get; }
@@ -140,7 +154,8 @@ public sealed class TableColumnSchema
         string? comment = null,
         ColumnStorageStrategy? storage = null,
         string? defaultSequenceId = null,
-        bool identityAlways = false
+        bool identityAlways = false,
+        int? integerBits = null
     )
     {
         Id = id;
@@ -157,10 +172,11 @@ public sealed class TableColumnSchema
         Storage = storage;
         DefaultSequenceId = defaultSequenceId;
         IdentityAlways = identityAlways;
+        IntegerBits = integerBits;
     }
 
     /// <summary>The same column under another name: every other property, the id included, is kept.</summary>
     internal TableColumnSchema WithName(string name) => new(
         Id, name, Type, NotNull, DefaultValue, State, MaxLength, ArrayElementType, DefaultFunction,
-        NotNullConstraintName, Comment, Storage, DefaultSequenceId, IdentityAlways);
+        NotNullConstraintName, Comment, Storage, DefaultSequenceId, IdentityAlways, IntegerBits);
 }

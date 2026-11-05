@@ -168,6 +168,8 @@ public sealed class NodeAst
     public static readonly NodeAst TypeObjectId = Leaf(NodeType.TypeObjectId);
     public static readonly NodeAst TypeString = Leaf(NodeType.TypeString);
     public static readonly NodeAst TypeInteger64 = Leaf(NodeType.TypeInteger64);
+    public static readonly NodeAst TypeInteger16 = Leaf(NodeType.TypeInteger16);
+    public static readonly NodeAst TypeInteger32 = Leaf(NodeType.TypeInteger32);
     public static readonly NodeAst TypeFloat64 = Leaf(NodeType.TypeFloat64);
     public static readonly NodeAst TypeBool = Leaf(NodeType.TypeBool);
     public static readonly NodeAst TypeFloat32 = Leaf(NodeType.TypeFloat32);

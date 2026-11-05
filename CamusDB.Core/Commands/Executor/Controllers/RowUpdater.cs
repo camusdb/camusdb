@@ -514,7 +514,7 @@ public sealed class RowUpdater
             if (!SchemaElementStateRules.IsWritable(columnSchema))
                 continue;
 
-            if (columnSchema.Type != ColumnType.String && columnSchema.Type != ColumnType.Bytes)
+            if (columnSchema.Type != ColumnType.String && columnSchema.Type != ColumnType.Bytes && columnSchema.IntegerBits is null)
                 continue;
 
             if (!rowValues.TryGetValue(columnSchema.Name, out ColumnValue? columnValue))
@@ -523,7 +523,10 @@ public sealed class RowUpdater
             if (columnValue.Type == ColumnType.Null)
                 continue;
 
-            EnforceLengthBound(columnSchema, columnValue);
+            if (columnSchema.IntegerBits is int bits)
+                IntegerWidth.EnforceOnColumn(bits, columnValue, columnSchema.Name);
+            else
+                EnforceLengthBound(columnSchema, columnValue);
         }
     }
 

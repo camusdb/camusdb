@@ -172,7 +172,7 @@ public sealed class QueryPlanner
 
         ColumnValue limit = SqlExecutor.EvalExpr(ticket.Limit, new Dictionary<string, ColumnValue>(), ticket.Parameters);
         if (limit.Type != ColumnType.Integer64)
-            throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Limit is not Integer64");
+            throw QueryLimiter.NotAnInteger("LIMIT", limit);
 
         long cap = limit.LongValue;
 
@@ -180,7 +180,7 @@ public sealed class QueryPlanner
         {
             ColumnValue offset = SqlExecutor.EvalExpr(ticket.Offset, new Dictionary<string, ColumnValue>(), ticket.Parameters);
             if (offset.Type != ColumnType.Integer64)
-                throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Offset is not Integer64");
+                throw QueryLimiter.NotAnInteger("OFFSET", offset);
 
             try
             {
@@ -654,7 +654,8 @@ public sealed class QueryPlanner
             foreach (SemiJoinSpec spec in ticket.SemiJoinSpecs)
             {
                 root = new SemiJoinNode(root, spec.Mode, spec.InnerTable,
-                    spec.OuterColumn, spec.InnerColumn, spec.InnerIndex, spec.InnerFilter);
+                    spec.OuterColumn, spec.InnerColumn, spec.InnerIndex, spec.InnerFilter,
+                    spec.InnerResolver, spec.InnerRequiredColumns);
             }
         }
 
@@ -900,7 +901,7 @@ public sealed class QueryPlanner
 
         ColumnValue limit = SqlExecutor.EvalExpr(ticket.Limit, new Dictionary<string, ColumnValue>(), ticket.Parameters);
         if (limit.Type != ColumnType.Integer64)
-            throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Limit is not Integer64");
+            throw QueryLimiter.NotAnInteger("LIMIT", limit);
 
         long scanLimit = limit.LongValue;
 
@@ -908,7 +909,7 @@ public sealed class QueryPlanner
         {
             ColumnValue offset = SqlExecutor.EvalExpr(ticket.Offset, new Dictionary<string, ColumnValue>(), ticket.Parameters);
             if (offset.Type != ColumnType.Integer64)
-                throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Offset is not Integer64");
+                throw QueryLimiter.NotAnInteger("OFFSET", offset);
 
             try
             {

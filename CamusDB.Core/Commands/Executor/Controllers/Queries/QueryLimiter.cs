@@ -15,6 +15,15 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 internal sealed class QueryLimiter
 {
     /// <summary>
+    /// The error for a LIMIT or OFFSET parameter that is not an integer. The grammar takes only an
+    /// integer literal or a placeholder here, so the value is what the client bound, and this is client
+    /// input, not an engine fault. A float is refused, not rounded: GoogleSQL requires an integer here,
+    /// and the row count must not depend on a conversion the statement did not ask for.
+    /// </summary>
+    internal static CamusDBException NotAnInteger(string clause, ColumnValue value) =>
+        new(CamusDBErrorCodes.InvalidInput, $"{clause} must be an integer, got {value.Type}");
+
+    /// <summary>
     /// Applies LIMIT and/or OFFSET to the cursor. Either clause may be present alone:
     /// a missing OFFSET skips nothing and a missing LIMIT streams every remaining row
     /// (offset-only queries like <c>SELECT … OFFSET 20</c> are valid SQL).
@@ -36,7 +45,7 @@ internal sealed class QueryLimiter
         {
             ColumnValue limitValue = SqlExecutor.EvalExpr(ticket.Limit, new Dictionary<string, ColumnValue>(), ticket.Parameters);
             if (limitValue.Type != ColumnType.Integer64)
-                throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Limit is not Integer64");
+                throw NotAnInteger("LIMIT", limitValue);
 
             limit = limitValue.LongValue;
         }
@@ -45,7 +54,7 @@ internal sealed class QueryLimiter
         {
             ColumnValue offsetValue = SqlExecutor.EvalExpr(ticket.Offset, new Dictionary<string, ColumnValue>(), ticket.Parameters);
             if (offsetValue.Type != ColumnType.Integer64)
-                throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "Offset is not Integer64");
+                throw NotAnInteger("OFFSET", offsetValue);
 
             offset = offsetValue.LongValue;
         }

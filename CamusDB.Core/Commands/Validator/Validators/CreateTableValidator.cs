@@ -58,6 +58,7 @@ internal sealed class CreateTableValidator : ValidatorBase
 
             ValidateCommentLength(columnInfo.Comment, $"Column '{columnInfo.Name}'");
             ValidateColumnMaxLength(columnInfo, $"Column '{columnInfo.Name}'");
+            ValidateColumnIntegerBits(columnInfo, $"Column '{columnInfo.Name}'");
             ValidateColumnDefault(columnInfo, $"Column '{columnInfo.Name}'");
         }
 

@@ -1912,6 +1912,9 @@ internal sealed class SchemaQuerier
     /// <c>SHOW CREATE TABLE</c> — a logical dump, a schema comparison — re-create the column with a
     /// different limit. <c>MaxLength</c> on any other type is ignored by enforcement, so it is not
     /// rendered.</para>
+    ///
+    /// <para>A declared integer width renders for the same reason: <c>SMALLINT</c> and <c>INT</c>
+    /// re-create the range check, and a column with no width stays <c>INT64</c>.</para>
     /// </summary>
     private static string GetSQLType(TableColumnSchema column)
     {
@@ -1919,10 +1922,15 @@ internal sealed class SchemaQuerier
         {
             ColumnType.String or ColumnType.Bytes when column.MaxLength is int n
                 => $"{ScalarSQLType(column.Type)}({n.ToString(CultureInfo.InvariantCulture)})",
+            ColumnType.Array when column.IntegerBits is int bits => $"ARRAY({IntegerSQLType(bits)})",
             ColumnType.Array => $"ARRAY({ScalarSQLType(column.ArrayElementType ?? ColumnType.Null)})",
+            ColumnType.Integer64 when column.IntegerBits is int bits => IntegerSQLType(bits),
             _ => ScalarSQLType(column.Type),
         };
     }
+
+    /// <summary>SQL keyword for a declared integer width.</summary>
+    private static string IntegerSQLType(int bits) => bits == IntegerWidth.SmallIntBits ? "SMALLINT" : "INT";
 
     /// <summary>
     /// SQL keyword for a scalar (non-sized, non-array) type. Used directly for scalar columns and

@@ -77,7 +77,14 @@ internal static class CastScalarFunctions
     public static ColumnValue CastExpression(string castName, ColumnValue input, NodeAst targetTypeAst)
     {
         ColumnType targetType = ResolveTargetType(castName, targetTypeAst);
-        return CastValue(castName, input, targetType);
+        ColumnValue result = CastValue(castName, input, targetType);
+
+        return targetTypeAst.nodeType switch
+        {
+            NodeType.TypeInteger16 => IntegerWidth.EnforceOnCast(IntegerWidth.SmallIntBits, result),
+            NodeType.TypeInteger32 => IntegerWidth.EnforceOnCast(IntegerWidth.IntBits, result),
+            _ => result,
+        };
     }
 
     public static ColumnType InferCastReturnType(NodeAst targetTypeAst)
@@ -220,6 +227,8 @@ internal static class CastScalarFunctions
         {
             NodeType.TypeString    => ColumnType.String,
             NodeType.TypeInteger64 => ColumnType.Integer64,
+            NodeType.TypeInteger16 => ColumnType.Integer64,
+            NodeType.TypeInteger32 => ColumnType.Integer64,
             NodeType.TypeFloat64   => ColumnType.Float64,
             NodeType.TypeFloat32   => ColumnType.Float32,
             NodeType.TypeBool      => ColumnType.Bool,
@@ -242,7 +251,7 @@ internal static class CastScalarFunctions
         return identifier.ToLowerInvariant() switch
         {
             "id" or "object_id" => ColumnType.Id,
-            "integer" => ColumnType.Integer64,
+            "bigint" => ColumnType.Integer64,
             "char" or "varchar" or "text" => ColumnType.String,
             "double" => ColumnType.Float64,
             "uuid" or "guid" => ColumnType.Uuid,
@@ -262,12 +271,21 @@ internal static class CastScalarFunctions
         return new ColumnValue(ColumnType.String, text);
     }
 
+    /// <summary>
+    /// The cast to <c>int64</c>. Every number with a fraction rounds half away from zero, the GoogleSQL
+    /// rule, so <c>2.5</c> gives 3 and <c>-2.5</c> gives -3 for a float, a NUMERIC and a jsonb number
+    /// alike, and <c>round</c> agrees with them. A number with no integer in the int64 range is
+    /// <see cref="CamusDBErrorCodes.IntegerValueOutOfRange"/>. Text does not round: a string must spell
+    /// an integer, so <c>'2.5'</c> is refused. A place that takes an integer without naming a cast
+    /// (an INT64 column, a function argument, LIMIT) refuses a float, so this is the only conversion.
+    /// </summary>
     private static ColumnValue CastToInt64(string castName, ColumnValue value)
     {
         return value.Type switch
         {
             ColumnType.Integer64 => value,
             ColumnType.Float64 => FromDoubleToInt64(castName, value.FloatValue),
+            ColumnType.Float32 => FromDoubleToInt64(castName, (float)value.FloatValue),
             ColumnType.Bool => new ColumnValue(ColumnType.Integer64, value.BoolValue ? 1 : 0),
             ColumnType.String => FromStringToInt64(castName, value.StrValue!),
             ColumnType.Numeric => FromNumericToInt64(castName, value),
@@ -669,19 +687,25 @@ internal static class CastScalarFunctions
     private const double MinInt64InclusiveLowerBound = -9223372036854775808.0;
 
     /// <summary>
-    /// A float to Integer64. ±infinity and NaN have no integer value, so they are out of range like
-    /// a value past the int64 bounds, as PostgreSQL reports <c>bigint out of range</c> for
-    /// <c>'NaN'::float8::bigint</c>. The comparisons are false for NaN, so it is tested first.
+    /// A float to Integer64, rounded half away from zero (see <see cref="CastToInt64"/>).
+    /// <see cref="Math.Round(double, MidpointRounding)"/> reads the exact binary value, so the largest
+    /// double below one half gives 0; adding 0.5 and taking the floor would give 1. Rounding cannot
+    /// cross a bound, because a double near ±2^63 has no fraction. ±infinity and NaN have no integer
+    /// value, so they are out of range like a value past the int64 bounds, as PostgreSQL reports
+    /// <c>bigint out of range</c> for <c>'NaN'::float8::bigint</c>. The comparisons are false for NaN,
+    /// so it is tested first.
     /// </summary>
     private static ColumnValue FromDoubleToInt64(string castName, double value)
     {
-        if (!double.IsFinite(value) || value >= MaxInt64ExclusiveUpperBound || value < MinInt64InclusiveLowerBound)
+        double rounded = Math.Round(value, MidpointRounding.AwayFromZero);
+
+        if (!double.IsFinite(rounded) || rounded >= MaxInt64ExclusiveUpperBound || rounded < MinInt64InclusiveLowerBound)
         {
             throw Int64Math.OutOfRange(
                 $"Function '{castName}' integer overflow for value {value.ToString(CultureInfo.InvariantCulture)}");
         }
 
-        return new ColumnValue(ColumnType.Integer64, (long)value);
+        return new ColumnValue(ColumnType.Integer64, (long)rounded);
     }
 
     internal static bool IsValidLowerHexObjectId(string value)

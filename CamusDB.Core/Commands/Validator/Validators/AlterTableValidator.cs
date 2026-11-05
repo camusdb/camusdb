@@ -34,6 +34,7 @@ internal sealed class AlterTableValidator : ValidatorBase
         if (ticket.Operation is AlterTableOperation.AddColumn)
         {
             ValidateColumnMaxLength(ticket.Column, $"Column '{ticket.Column.Name}'");
+            ValidateColumnIntegerBits(ticket.Column, $"Column '{ticket.Column.Name}'");
             ValidateColumnDefault(ticket.Column, $"Column '{ticket.Column.Name}'");
         }
 

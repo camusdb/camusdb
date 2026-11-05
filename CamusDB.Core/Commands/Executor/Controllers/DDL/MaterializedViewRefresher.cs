@@ -720,6 +720,7 @@ internal sealed class MaterializedViewRefresher
             notNull: column.NotNull,
             defaultValue: column.DefaultValue,
             maxLength: column.MaxLength,
+            integerBits: column.IntegerBits,
             arrayElementType: column.ArrayElementType,
             defaultFunction: column.DefaultFunction,
             notNullConstraintName: column.NotNullConstraintName,

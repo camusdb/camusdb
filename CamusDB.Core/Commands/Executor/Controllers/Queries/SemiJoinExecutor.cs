@@ -22,6 +22,12 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 /// Executes a <see cref="SemiJoinNode"/> at runtime: for each outer row from
 /// <paramref name="outerCursor"/> probes the inner table and emits or discards
 /// the row based on <see cref="SemiJoinMode"/>.
+///
+/// The inner WHERE is evaluated against the decoded inner row, which is keyed by bare column
+/// names, with <see cref="SemiJoinNode.InnerResolver"/> as the name scope: a reference the subquery
+/// qualifies with its own alias maps to the bare name. Without that scope the alias-qualified form
+/// was an unknown column on this path only, while the general path accepted it. The columns a probe
+/// decodes come from <see cref="SemiJoinNode.InnerRequiredColumns"/>, built once by the analyzer.
 /// </summary>
 internal sealed class SemiJoinExecutor
 {
@@ -121,7 +127,7 @@ internal sealed class SemiJoinExecutor
         HLCTimestamp txId = outerTicket.TxnState.TransactionId;
         Dictionary<string, ColumnValue>? parameters = outerTicket.Parameters;
         CompositeColumnValue key = new(new[] { probeValue });
-        IReadOnlySet<string> required = BuildRequiredColumns(node.InnerColumn, node.InnerFilter);
+        IReadOnlySet<string> required = node.InnerRequiredColumns;
 
         if (index.Type == IndexType.Unique)
         {
@@ -143,7 +149,7 @@ internal sealed class SemiJoinExecutor
             Dictionary<string, ColumnValue> innerRow = await RowEncoder.DecodeAsync(
                 inner.Schema, txId, rowId.Value, data.Value, required, inner.Schema.Version).ConfigureAwait(false);
 
-            return EvalFilter(node.InnerFilter, innerRow, parameters);
+            return EvalFilter(node.InnerFilter, innerRow, parameters, node.InnerResolver);
         }
 
         // Non-unique: equality range scan over the probe value, with the same direction-aware
@@ -176,7 +182,7 @@ internal sealed class SemiJoinExecutor
             if (!ColumnValuesEqual(innerVal, probeValue))
                 continue;
 
-            if (node.InnerFilter is null || EvalFilter(node.InnerFilter, innerRow, parameters))
+            if (node.InnerFilter is null || EvalFilter(node.InnerFilter, innerRow, parameters, node.InnerResolver))
                 return true;
         }
 
@@ -190,7 +196,7 @@ internal sealed class SemiJoinExecutor
     {
         TableDescriptor inner = node.InnerTable;
         HLCTimestamp txId = outerTicket.TxnState.TransactionId;
-        IReadOnlySet<string> required = BuildRequiredColumns(node.InnerColumn, node.InnerFilter);
+        IReadOnlySet<string> required = node.InnerRequiredColumns;
 
         // Phantom fence over the whole inner table under Serializable read-write, as a single-table
         // scan takes it. The probe runs once per outer row; the lock is taken once and held to commit.
@@ -212,7 +218,7 @@ internal sealed class SemiJoinExecutor
             if (!ColumnValuesEqual(innerVal, probeValue))
                 continue;
 
-            if (node.InnerFilter is not null && !EvalFilter(node.InnerFilter, innerRow, outerTicket.Parameters))
+            if (node.InnerFilter is not null && !EvalFilter(node.InnerFilter, innerRow, outerTicket.Parameters, node.InnerResolver))
                 continue;
 
             return true;
@@ -234,7 +240,7 @@ internal sealed class SemiJoinExecutor
 
         // Must include filter columns: a NULL in a row excluded by the inner WHERE
         // is not part of the subquery result set and must not poison the anti-join.
-        IReadOnlySet<string> required = BuildRequiredColumns(node.InnerColumn, node.InnerFilter);
+        IReadOnlySet<string> required = node.InnerRequiredColumns;
 
         await AcquireInnerRowRangeLockAsync(inner, outerTicket).ConfigureAwait(false);
 
@@ -248,7 +254,7 @@ internal sealed class SemiJoinExecutor
                 inner.Schema, txId, rowId, data, required, inner.Schema.Version).ConfigureAwait(false);
 
             // Only rows that pass the inner filter belong to the subquery result set.
-            if (node.InnerFilter is not null && !EvalFilter(node.InnerFilter, innerRow, outerTicket.Parameters))
+            if (node.InnerFilter is not null && !EvalFilter(node.InnerFilter, innerRow, outerTicket.Parameters, node.InnerResolver))
                 continue;
 
             sawAnyRow = true;
@@ -293,41 +299,18 @@ internal sealed class SemiJoinExecutor
             exclusive: outerTicket.ExclusivePredicateLocks,
             cancellationToken: outerTicket.CancellationToken);
 
+    /// <summary>
+    /// The inner WHERE for one decoded inner row. <paramref name="innerResolver"/> is the scope of the
+    /// inner SELECT, so <c>s.c</c> and <c>c</c> both read the bare key <c>c</c> of the row.
+    /// </summary>
     private static bool EvalFilter(
         NodeAst filter,
         IReadOnlyDictionary<string, ColumnValue> row,
-        Dictionary<string, ColumnValue>? parameters)
+        Dictionary<string, ColumnValue>? parameters,
+        QueryRowNameResolver innerResolver)
     {
-        ColumnValue result = SqlExecutor.EvalExpr(filter, row, parameters);
+        ColumnValue result = SqlExecutor.EvalExpr(filter, row, parameters, innerResolver);
         return result.Type == ColumnType.Bool && result.BoolValue;
-    }
-
-    /// <summary>
-    /// Builds the minimal set of inner-table columns needed to probe a row:
-    /// the probe column itself plus every bare identifier referenced by the inner filter.
-    /// Passing this to DecodeAsync avoids deserialising unneeded columns.
-    /// </summary>
-    private static IReadOnlySet<string> BuildRequiredColumns(string innerColumn, NodeAst? filter)
-    {
-        HashSet<string> cols = new(StringComparer.OrdinalIgnoreCase) { innerColumn };
-        if (filter is not null)
-            CollectIdentifiers(filter, cols);
-        return cols;
-    }
-
-    private static void CollectIdentifiers(NodeAst node, HashSet<string> cols)
-    {
-        if (node.nodeType == NodeType.Identifier && node.yytext is not null)
-            cols.Add(node.yytext);
-
-        if (node.leftAst     is not null) CollectIdentifiers(node.leftAst,     cols);
-        if (node.rightAst    is not null) CollectIdentifiers(node.rightAst,    cols);
-        if (node.extendedOne is not null) CollectIdentifiers(node.extendedOne, cols);
-        if (node.extendedTwo is not null) CollectIdentifiers(node.extendedTwo, cols);
-        if (node.extendedThree is not null) CollectIdentifiers(node.extendedThree, cols);
-        if (node.extendedFour  is not null) CollectIdentifiers(node.extendedFour,  cols);
-        if (node.extendedFive  is not null) CollectIdentifiers(node.extendedFive,  cols);
-        if (node.extendedSix   is not null) CollectIdentifiers(node.extendedSix,   cols);
     }
 
     /// <summary>

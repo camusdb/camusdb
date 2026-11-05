@@ -518,7 +518,7 @@ public class TestSQLParser
     [Test]
     public void TestSmallIntAndFloatTypeAliases()
     {
-        // `smallint` is an alias for INT64 and `float` is an alias for FLOAT64.
+        // `smallint` is its own node, stored as int64 with a 16-bit range, and `float` is an alias for FLOAT64.
         NodeAst ast = SQLParserProcessor.Parse(
             "CREATE TABLE t (`a` SMALLINT, `b` FLOAT)");
 
@@ -530,7 +530,7 @@ public class TestSQLParser
         NodeAst firstItem = itemList.leftAst!;
         NodeAst secondItem = itemList.rightAst!;
 
-        Assert.AreEqual(NodeType.TypeInteger64, firstItem.rightAst!.nodeType);
+        Assert.AreEqual(NodeType.TypeInteger16, firstItem.rightAst!.nodeType);
         Assert.AreEqual(NodeType.TypeFloat64, secondItem.rightAst!.nodeType);
     }
 
@@ -2362,23 +2362,23 @@ public class TestSQLParser
     }
 
     [Test]
-    public void CreateTable_Int_AliasForInt64_ParsesCorrectly()
+    public void CreateTable_Int_Is32Bits_ParsesCorrectly()
     {
         NodeAst ast = SQLParserProcessor.Parse("CREATE TABLE t (v int)");
         Assert.AreEqual(NodeType.CreateTable, ast.nodeType);
         var cols = CollectColumnTypes(ast.rightAst!);
-        Assert.AreEqual(NodeType.TypeInteger64, cols["v"].nodeType);
+        Assert.AreEqual(NodeType.TypeInteger32, cols["v"].nodeType);
     }
 
     [Test]
     public void CreateTable_Int64_StillParsesAfterIntAlias()
     {
-        // Longest-match must keep `int64` distinct from the new `int` alias,
+        // Longest-match must keep `int64` distinct from `int`,
         // and an int-prefixed identifier must remain an identifier.
         NodeAst ast = SQLParserProcessor.Parse("CREATE TABLE t (a int64, internal int)");
         var cols = CollectColumnTypes(ast.rightAst!);
         Assert.AreEqual(NodeType.TypeInteger64, cols["a"].nodeType);
-        Assert.AreEqual(NodeType.TypeInteger64, cols["internal"].nodeType);
+        Assert.AreEqual(NodeType.TypeInteger32, cols["internal"].nodeType);
     }
 
     [Test]

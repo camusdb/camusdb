@@ -130,6 +130,26 @@ internal abstract class ValidatorBase
                 $"{subject} has an invalid maximum length {maxLength}: it must be a positive integer");
     }
 
+    /// <summary>
+    /// Rejects a declared integer width that the schema cannot hold, or one on a column that holds no
+    /// integers. The SQL grammar and the HTTP type names give only the valid widths, but the ticket is
+    /// also built from a forwarded request, and a bad width in the replicated schema would make every
+    /// write to the column fail or render as DDL that the parser refuses.
+    /// </summary>
+    protected static void ValidateColumnIntegerBits(ColumnInfo column, string subject)
+    {
+        if (column.IntegerBits is not int bits)
+            return;
+
+        bool holdsIntegers = column.Type == ColumnType.Integer64
+            || (column.Type == ColumnType.Array && column.ArrayElementType == ColumnType.Integer64);
+
+        if (!holdsIntegers || !IntegerWidth.IsValid(bits))
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInput,
+                $"{subject} has an invalid integer width {bits}: it must be 16 or 32, on an integer column");
+    }
+
 
     /// <summary>
     /// Validates a column's constant <c>DEFAULT</c> against the column it belongs to: the value must
@@ -145,7 +165,7 @@ internal abstract class ValidatorBase
     ///
     /// <para>The length bound deliberately matches <c>RowInserter.EnforceLengthBound</c> — a default
     /// that a plain <c>INSERT</c> of the same value would reject must not become storable by being
-    /// declared as a default instead.</para>
+    /// declared as a default instead. The same applies to a declared integer width.</para>
     /// </summary>
     protected static void ValidateColumnDefault(ColumnInfo column, string subject)
     {
@@ -166,6 +186,9 @@ internal abstract class ValidatorBase
                 CamusDBErrorCodes.InvalidInput,
                 $"{subject} has a DEFAULT of type {defaultValue.Type}, which cannot be converted to the column type {column.Type}");
         }
+
+        if (column.IntegerBits is int bits && IntegerWidth.IsValid(bits))
+            IntegerWidth.EnforceOnColumn(bits, coerced, column.Name);
 
         if (column.Type == ColumnType.String)
         {
