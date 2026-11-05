@@ -15,6 +15,7 @@ often:
 | Negated predicates | `year NOT BETWEEN 2020 AND 2021` | The same as `NOT (year BETWEEN 2020 AND 2021)` |
 | Concatenation | `first_name \|\| ' ' \|\| last_name` | The two strings joined; `NULL` if one side is `NULL` |
 | Bitwise operators | `flags & 4`, `a \| b`, `a # b`, `~a`, `1 << n`, `a >> n` | AND, OR, XOR, NOT and shifts on `int64` and `bytes` |
+| Power | `2 ^ 10` | The same as `pow(2, 10)`; a `float64` |
 | Window functions | `row_number() OVER (PARTITION BY g ORDER BY t)` | A value per row computed from related rows; see [window-functions.md](./window-functions.md) |
 
 Together they run a statement such as:
@@ -24,6 +25,26 @@ INSERT INTO orders
   SELECT i, 1 + (i % 200_000), (ARRAY['paid', 'shipped', 'delivered'])[1 + i % 3]
   FROM series;
 ```
+
+## Characters outside a token
+
+A statement can hold only the characters that the SQL grammar uses. Inside a string, a comment or a
+quoted identifier, any character can appear, with the limits below. Anywhere else, an unknown
+character is a syntax error that names the character and its position (`CADB0406`):
+
+```text
+(line 2, col 3) Syntax error, unexpected character '$'
+(line 1, col 10) Syntax error, unexpected character U+00A0
+```
+
+- Whitespace is the space, the tab, the line break, the form feed and the vertical tab. A no-break
+  space (U+00A0) and a byte order mark (U+FEFF) are not whitespace. Text that you copy from a web page
+  can hold the first one.
+- A `;` can close a statement, and it can repeat. It cannot appear anywhere else, and a second
+  statement cannot follow it, because the server takes one statement per request.
+- A string literal or a quoted identifier cannot hold a raw line break or a raw tab. Use an `E'…'`
+  string with `\n` or `\t`.
+- An identifier without quotes holds only ASCII letters, digits and `_`.
 
 ## Digit separators
 
@@ -209,10 +230,33 @@ SELECT id FROM items WHERE flags & 4 = 4;
 - Two `bytes` operands of different lengths are an error, as for PostgreSQL `bit` strings.
 - A `float64`, `float32`, `numeric`, `bool` or `string` operand is an error. There is no implicit
   conversion to `int64`.
-- `#` is XOR, as in PostgreSQL. `^` is not an operator: it is power in PostgreSQL and XOR in MySQL,
-  so each meaning is a surprise to some users. Use `#` for XOR and `power()` for a power.
+- `#` is XOR, as in PostgreSQL. `^` is [power](#power-), also as in PostgreSQL, and not XOR as in
+  MySQL and GoogleSQL.
 - `#-` with no space between the two characters is the jsonb delete-path operator, as in PostgreSQL
   (see [json.md](json.md#lexer-notes)). `x #-1` is therefore not `x XOR -1`; write `x # -1`.
+
+### Power `^`
+
+`a ^ b` is the same call as `pow(a, b)`, so the two cannot differ on an error, on overflow or on a
+special value. The result is a `float64`, for every numeric operand type.
+
+```sql
+SELECT 2 ^ 10;             -- 1024
+SELECT id FROM points WHERE x ^ 2 + y ^ 2 < 100;
+```
+
+The precedence and the grouping are those of PostgreSQL, and they are not those of mathematics:
+
+| Expression | Value | Why |
+|------------|-------|-----|
+| `2 * 3 ^ 2` | `18` | `^` binds tighter than `*`, `/` and `%` |
+| `-2 ^ 2` | `4` | Unary minus binds tighter than `^`, so this is `(-2) ^ 2` |
+| `2 ^ 3 ^ 2` | `64` | `^` groups to the left, so this is `(2 ^ 3) ^ 2` |
+
+Write `-(2 ^ 2)` for `-4`, and `2 ^ (3 ^ 2)` for `512`.
+
+A `NULL` operand gives `NULL`. For the errors and the special values, see
+[Non-finite and out-of-range floats](data-types.md).
 
 ### Prefix `~` and regex match `~`
 

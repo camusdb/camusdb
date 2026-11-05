@@ -80,7 +80,7 @@ public sealed class RowUpdater
         if (indexes.TryGetValue(CamusDBConstants.PrimaryKeyInternalName, out TableIndexSchema? indexSchema))
         {
             if (indexSchema.Columns.Contains(columnName, StringComparer.OrdinalIgnoreCase))
-                throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Cannot update primary key field");
+                throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Cannot update primary key column '{columnName}': delete the row and insert it with the new key");
         }
     }
 

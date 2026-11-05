@@ -1083,9 +1083,11 @@ internal sealed class SelectStatementExecutor
             RowLockingRules.RequireLockableStatement(ast, ticket.TxnState, lockPolicy.Value);
         }
 
+        ast = SelectQueryCreator.BindFromlessWhere(ast);
+
         // FROM-less SELECT (no table node): project scalar expressions against a single
-        // synthetic row. The grammar only admits a projection list plus optional
-        // LIMIT/OFFSET here, so there is no scan, join, filter, or grouping to plan.
+        // synthetic row. With its WHERE already moved to the bound path, only a projection list plus
+        // optional LIMIT/OFFSET reaches here, so there is no scan, join, filter, or grouping to plan.
         if (ast.rightAst is null)
             return (database, await ExecuteFromlessSelectAsync(database, ast, ticket, schemaOut).ConfigureAwait(false));
 
@@ -1466,6 +1468,8 @@ internal sealed class SelectStatementExecutor
         // The source AST is a view/CTAS/INSERT…SELECT body that reached here already expanded, so it
         // may call a session or clock function the outer statement never named.
         ticket = StatementScopedValues.Attach(ticket, sourceAst);
+
+        sourceAst = SelectQueryCreator.BindFromlessWhere(sourceAst);
 
         // A time-travel source reads through its OWN read-only snapshot transaction while the writes
         // keep using the caller's; see PrepareTimeTravelSourceAsync for why that is both possible and

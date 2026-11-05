@@ -22,6 +22,17 @@ internal static class MathScalarFunctions
         RegisterRound(registry, "trunc", EvaluateTrunc);
         RegisterUnary(registry, "sqrt", EvaluateSqrt, _ => ColumnType.Float64);
         RegisterBinary(registry, "pow", EvaluatePow, _ => ColumnType.Float64, aliases: ["power"]);
+        RegisterUnary(registry, "ln", EvaluateLn, _ => ColumnType.Float64);
+        RegisterUnary(registry, "log10", EvaluateLog10, _ => ColumnType.Float64);
+        RegisterUnary(registry, "exp", EvaluateExp, _ => ColumnType.Float64);
+        registry.Register(new ScalarFunctionDescriptor
+        {
+            Name = "log",
+            MinArity = 1,
+            MaxArity = 2,
+            Evaluator = EvaluateLog,
+            InferReturnType = _ => ColumnType.Float64,
+        });
         RegisterBinary(registry, "mod", EvaluateMod, InferModReturnType);
         RegisterUnary(registry, "sign", EvaluateSign, InferSignReturnType);
 
@@ -288,6 +299,108 @@ internal static class MathScalarFunctions
 
         return new ColumnValue(ColumnType.Float64, FloatMath.CheckFunctionResult(
             calledName, result, finiteInputs: double.IsFinite(left) && double.IsFinite(right), nonzeroInput: left != 0));
+    }
+
+    /// <summary><c>ln(x)</c>, the natural logarithm. See <see cref="LogarithmArgument"/> for its domain.</summary>
+    private static ColumnValue EvaluateLn(string calledName, IReadOnlyList<ColumnValue> arguments)
+    {
+        if (PropagateNull(arguments) is ColumnValue nullResult)
+            return nullResult;
+
+        return new ColumnValue(ColumnType.Float64, Math.Log(LogarithmArgument(calledName, 0, arguments[0])));
+    }
+
+    /// <summary><c>log10(x)</c>. See <see cref="LogarithmArgument"/> for its domain.</summary>
+    private static ColumnValue EvaluateLog10(string calledName, IReadOnlyList<ColumnValue> arguments)
+    {
+        if (PropagateNull(arguments) is ColumnValue nullResult)
+            return nullResult;
+
+        return new ColumnValue(ColumnType.Float64, Math.Log10(LogarithmArgument(calledName, 0, arguments[0])));
+    }
+
+    /// <summary>
+    /// <c>log(x)</c> is base 10 and <c>log(b, x)</c> takes the base first, the PostgreSQL forms.
+    /// GoogleSQL reads both differently (<c>LOG(x)</c> is natural, <c>LOG(x, b)</c> takes the base
+    /// second), and CamusDB follows PostgreSQL because that is the engine its results are compared with.
+    /// A base of 2 or 10 uses the exact library function, because the quotient of two natural logarithms
+    /// misses exact powers: <c>ln(1000) / ln(10)</c> is 2.9999999999999996. A base of 1 has a logarithm
+    /// of zero to divide by, so it is a division by zero, as in PostgreSQL.
+    /// </summary>
+    private static ColumnValue EvaluateLog(string calledName, IReadOnlyList<ColumnValue> arguments)
+    {
+        if (PropagateNull(arguments) is ColumnValue nullResult)
+            return nullResult;
+
+        if (arguments.Count == 1)
+            return new ColumnValue(ColumnType.Float64, Math.Log10(LogarithmArgument(calledName, 0, arguments[0])));
+
+        double logBase = LogarithmArgument(calledName, 0, arguments[0]);
+        double value = LogarithmArgument(calledName, 1, arguments[1]);
+
+        if (logBase == 1)
+        {
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInput,
+                $"Function '{calledName}' division by zero: a logarithm of base 1 is undefined");
+        }
+
+        double result = logBase switch
+        {
+            2 => Math.Log2(value),
+            10 => Math.Log10(value),
+            _ => Math.Log(value) / Math.Log(logBase),
+        };
+
+        return new ColumnValue(ColumnType.Float64, result);
+    }
+
+    /// <summary>
+    /// The numeric value of a logarithm's argument. Zero and a negative number have no real logarithm,
+    /// so they are <see cref="CamusDBErrorCodes.InvalidInput"/>, where IEEE would give negative infinity
+    /// and NaN. NaN and positive infinity pass through and give the IEEE result.
+    /// </summary>
+    private static double LogarithmArgument(string calledName, int index, ColumnValue argument)
+    {
+        ScalarFunctionArguments.RequireNumeric(calledName, index, argument);
+
+        double value = ScalarFunctionArguments.ToDouble(argument);
+
+        if (value == 0)
+        {
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInput,
+                $"Function '{calledName}' domain error: the logarithm of zero is undefined");
+        }
+
+        if (value < 0)
+        {
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInput,
+                $"Function '{calledName}' domain error: the logarithm of a negative number is undefined");
+        }
+
+        return value;
+    }
+
+    /// <summary>
+    /// <c>exp(x)</c>. A result past the range from a finite argument (<c>exp(1000)</c>) is an overflow,
+    /// and a zero result from a finite argument (<c>exp(-1000)</c>) is an underflow: both are
+    /// <see cref="CamusDBErrorCodes.FloatValueOutOfRange"/>. The argument is reported as nonzero because
+    /// no finite power of e is zero, so a zero result always lost the value. Infinite and NaN arguments
+    /// give the IEEE result: <c>exp('-Infinity')</c> is 0.
+    /// </summary>
+    private static ColumnValue EvaluateExp(string calledName, IReadOnlyList<ColumnValue> arguments)
+    {
+        if (PropagateNull(arguments) is ColumnValue nullResult)
+            return nullResult;
+
+        ScalarFunctionArguments.RequireNumeric(calledName, 0, arguments[0]);
+
+        double value = ScalarFunctionArguments.ToDouble(arguments[0]);
+
+        return new ColumnValue(ColumnType.Float64, FloatMath.CheckFunctionResult(
+            calledName, Math.Exp(value), finiteInputs: double.IsFinite(value), nonzeroInput: true));
     }
 
     private static ColumnValue EvaluateMod(string calledName, IReadOnlyList<ColumnValue> arguments)

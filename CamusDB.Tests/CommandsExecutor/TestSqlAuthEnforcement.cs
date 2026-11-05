@@ -284,6 +284,26 @@ internal sealed class TestSqlAuthEnforcement : BaseTest
     }
 
     /// <summary>
+    /// A SELECT with no FROM opens no table of its own, so the privilege check of a table it reads must
+    /// still run when the only mention of that table is a subquery in the WHERE.
+    /// </summary>
+    [Test]
+    public async Task FromlessSelect_WhereSubquery_NeedsSelectOnTheTable()
+    {
+        (string dbname, CommandExecutor executor, Principal root) = await SetupWithSuperuser();
+
+        await RunDdl(executor, "", "CREATE USER where_writer IDENTIFIED BY 'where-pw'", root);
+        await RunDdl(executor, "", $"GRANT INSERT ON {dbname}.* TO where_writer", root);
+        Principal writer = await LoginAsync(executor, "where_writer", "where-pw");
+
+        CamusDBException refused = Assert.ThrowsAsync<CamusDBException>(async () =>
+            await RunQuery(executor, dbname, "SELECT 5 WHERE EXISTS (SELECT 1 FROM items)", writer))!;
+        Assert.AreEqual(CamusDBErrorCodes.InsufficientPrivilege, refused.Code);
+
+        await RunQuery(executor, dbname, "SELECT 5 WHERE EXISTS (SELECT 1 FROM items)", root);
+    }
+
+    /// <summary>
     /// CALL runs extension code that issues SQL as its caller, and there is no grant model for
     /// procedures yet, so it is superuser-only. The gate runs before the procedure is looked up.
     /// </summary>

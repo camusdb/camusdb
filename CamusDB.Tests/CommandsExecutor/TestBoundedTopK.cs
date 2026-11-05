@@ -246,7 +246,7 @@ internal sealed class TestBoundedTopK : SharedNodeBaseTest
         // of the count — a wrong answer that looks entirely plausible.
         (DatabaseDescriptor db, CommandExecutor executor) = await Setup();
 
-        const string sql = "SELECT count(n) AS c FROM t ORDER BY n LIMIT 1";
+        const string sql = "SELECT count(n) AS c FROM t ORDER BY c LIMIT 1";
 
         List<string> nodes = await PlanNodes(executor, db, sql);
         CollectionAssert.DoesNotContain(nodes, "topk");

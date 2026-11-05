@@ -191,8 +191,30 @@ public sealed class TestSQLParserConcatAndBitwise
     }
 
     [Test]
-    public void Caret_IsNotAnOperator()
+    public void Caret_IsACallOfPow()
     {
-        Assert.Throws(Is.InstanceOf<System.Exception>(), () => Condition("a ^ b"));
+        NodeAst power = Condition("a ^ b");
+
+        Assert.AreEqual(NodeType.ExprFuncCall, power.nodeType);
+        Assert.AreEqual("pow", power.leftAst!.yytext);
+    }
+
+    [Test]
+    public void Caret_GroupsToTheLeft_BelowUnaryMinusAndAboveMultiply()
+    {
+        // (a ^ b) ^ c: the outer call has the inner one as its first argument.
+        NodeAst chain = Condition("a ^ b ^ c");
+        Assert.AreEqual(NodeType.ExprFuncCall, chain.rightAst!.leftAst!.nodeType);
+
+        // (-a) ^ b.
+        Assert.AreEqual(NodeType.ExprFuncCall, Condition("-a ^ b").nodeType);
+
+        // a * (b ^ c).
+        NodeAst multiply = Condition("a * b ^ c");
+        Assert.AreEqual(NodeType.ExprMult, multiply.nodeType);
+        Assert.AreEqual(NodeType.ExprFuncCall, multiply.rightAst!.nodeType);
+
+        // (a ^ b) % c.
+        Assert.AreEqual("mod", Condition("a ^ b % c").leftAst!.yytext);
     }
 }

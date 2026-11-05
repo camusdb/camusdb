@@ -106,6 +106,8 @@ internal sealed class ExplainExecutor
         if (lockingClause is not null)
             RowLockingRules.RequireLockableSelect(selectAst);
 
+        selectAst = SelectQueryCreator.BindFromlessWhere(selectAst);
+
         // A FROM-less SELECT (null table node) never reaches the planner: it projects a single
         // synthetic row directly, so there is no scan/join/plan tree to walk. Render a fixed
         // constant-source → project shape instead. Projection subqueries are left symbolic here
@@ -264,6 +266,8 @@ internal sealed class ExplainExecutor
     {
         if (lockingClause is not null)
             RowLockingRules.RequireLockableStatement(selectAst, ticket.TxnState, RowLockingRules.PolicyOf(lockingClause));
+
+        selectAst = SelectQueryCreator.BindFromlessWhere(selectAst);
 
         // A FROM-less SELECT has no plan tree to instrument (see ExplainQuery). There are no
         // storage reads to measure, so ANALYZE would add nothing over plain EXPLAIN; reject it

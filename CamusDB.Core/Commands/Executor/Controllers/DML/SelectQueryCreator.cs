@@ -6,6 +6,8 @@
  * file that was distributed with this source code.
  */
 
+using System.Runtime.CompilerServices;
+
 using CamusDB.Core;
 using CamusDB.Core.Cache;
 using CamusDB.Core.CommandsExecutor.Controllers.Functions;
@@ -299,25 +301,82 @@ internal sealed class SelectQueryCreator
                 throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "SELECT * requires a FROM clause");
         }
 
+        return new SelectQueryCreator().CreateSelectQuery(WithSingleRowSource(operandAst, operandAst.extendedOne));
+    }
+
+    /// <summary>The same FROM-less SELECT with <see cref="SingleRowTableFunction"/> as its FROM and the given WHERE.</summary>
+    private static NodeAst WithSingleRowSource(NodeAst fromless, NodeAst? where)
+    {
         NodeAst singleRow = new(
             NodeType.TableFunctionReference,
             new NodeAst(NodeType.Identifier, null, null, null, null, null, null, null, SingleRowTableFunction.InternalName),
             null, null, null, null, null, null, null);
 
-        NodeAst withSource = new(
+        return new NodeAst(
             NodeType.Select,
-            operandAst.leftAst,
+            fromless.leftAst,
             singleRow,
-            operandAst.extendedOne,
-            operandAst.extendedTwo,
-            operandAst.extendedThree,
-            operandAst.extendedFour,
-            operandAst.extendedFive,
-            operandAst.yytext,
-            operandAst.extendedSix,
+            where,
+            fromless.extendedTwo,
+            fromless.extendedThree,
+            fromless.extendedFour,
+            fromless.extendedFive,
+            fromless.yytext,
+            fromless.extendedSix,
             null);
+    }
 
-        return new SelectQueryCreator().CreateSelectQuery(withSource);
+    /// <summary>
+    /// The planned form of each <c>SELECT … WHERE</c> with no FROM, per parse tree. The tree comes from
+    /// the parser cache, and the bound-query cache keys on the planned tree, so a repeat of the statement
+    /// must get the same planned tree or it never hits that cache.
+    /// </summary>
+    private static readonly ConditionalWeakTable<NodeAst, NodeAst> FromlessWhereSources = new();
+
+    /// <summary>
+    /// Gives a <c>SELECT … WHERE</c> with no FROM the one-row source that the set-operation operands use,
+    /// and returns every other SELECT as it is.
+    ///
+    /// <para><b>Why the bound-query path.</b> A plain FROM-less SELECT evaluates its projections once,
+    /// with no binding. A WHERE needs what that path does not have: a check that the condition is
+    /// boolean, a condition that decides whether the projections run at all, and a declared column type
+    /// when no row exists to read it from. The bound path has all of them.</para>
+    ///
+    /// <para><b>The condition must be boolean.</b> It runs as <c>cond IS TRUE</c>, so TRUE keeps the row,
+    /// FALSE and NULL drop it, and any other type is an error, as in PostgreSQL. The WHERE of a table
+    /// reads a nonzero number as true, and that rule must not spread to a form that never had it.</para>
+    ///
+    /// <para><b>A sequence call is refused in this form,</b> as it is in the projection of any relation:
+    /// a statement must know how many values it draws before the condition decides. The AST stays
+    /// FROM-less for everything that reads the statement as written, such as a stored view body, because
+    /// the one-row source has no SQL spelling.</para>
+    /// </summary>
+    internal static NodeAst BindFromlessWhere(NodeAst select)
+    {
+        if (select.nodeType != NodeType.Select || select.rightAst is not null || select.extendedOne is null)
+            return select;
+
+        return FromlessWhereSources.GetValue(select, static fromless =>
+        {
+            List<ProjectionItem> projections = [];
+            CollectProjectionItems(fromless.leftAst!, projections);
+
+            foreach (ProjectionItem projection in projections)
+            {
+                if (QueryExpressionClassifier.UnwrapAlias(projection.Expression).nodeType == NodeType.ExprAllFields)
+                    throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "SELECT * requires a FROM clause");
+
+                if (QueryExpressionClassifier.IsAggregateProjection(projection.Expression)
+                    || QueryExpressionClassifier.IsCompoundAggregateProjection(projection.Expression))
+                {
+                    throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Aggregate functions require a FROM clause");
+                }
+            }
+
+            NodeAst isTrue = new(NodeType.ExprIsTrue, fromless.extendedOne, null, null, null, null, null, null, null);
+
+            return WithSingleRowSource(fromless, isTrue);
+        });
     }
 
     /// <summary>

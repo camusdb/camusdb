@@ -143,7 +143,7 @@ LBrace          \{
 RBrace          \}
 Eol             (\r\n?|\n)
 NotWh           [^ \t\r\n]
-Space           [ \t]
+Space           [ \t\r\n\f\v]
 /* A digit run may carry single underscores between digits for grouping, as in 200_000 or
    1_000.000_5. The underscores are stripped before the text reaches the parser (see StripDigitSeparators).
    Hex integers keep the plain form. */
@@ -190,6 +190,7 @@ TConcat         \|\|
 TBitOr          \|
 TBitAnd         &
 TBitXor         #
+TCaret          \^
 TShiftLeft      <<
 TShiftRight     >>
 TJsonFieldText  \-\>\>
@@ -550,6 +551,10 @@ TSequence       (S|s)(E|e)(Q|q)(U|u)(E|e)(N|n)(C|c)(E|e)
 
 {TBitXor} { return (int)Token.TBITXOR; }
 
+";" { return (int)Token.TSEMICOLON; }
+
+{TCaret} { return (int)Token.TCARET; }
+
 {TShiftLeft} { return (int)Token.TSHIFTLEFT; }
 
 {TShiftRight} { return (int)Token.TSHIFTRIGHT; }
@@ -636,5 +641,10 @@ TSequence       (S|s)(E|e)(Q|q)(U|u)(E|e)(N|n)(C|c)(E|e)
 {EscIdentifier} { yylval.s = yytext; return (int)Token.TESCAPED_IDENTIFIER; }
 
 {Placeholder} { yylval.s = yytext; return (int)Token.TPLACEHOLDER; }
+
+/* Every other character is an error. This rule must stay last, and it must stay: the scanner's default
+   for a character no rule matches is to drop it and go on, so `a \\ - b` ran as `a - b`, and a stray
+   character in an UPDATE still wrote the row. */
+. { throw UnexpectedCharacter(yytext); }
 
 %%

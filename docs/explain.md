@@ -44,6 +44,8 @@ timestamp, as the `SELECT` does.
 > costed plan, and `EXPLAIN (ANALYZE)` is rejected (there is no table access to measure — use
 > plain `EXPLAIN`). Unlike a real query, `EXPLAIN` of a FROM-less `SELECT` does **not**
 > pre-materialize its projection subqueries; they appear only as their output column names.
+> A FROM-less `SELECT` with a `WHERE` is different: it runs as a query over one row, so it has a real
+> plan, a `function-scan` of `*single_row*`, and `EXPLAIN (ANALYZE)` works on it.
 
 ---
 

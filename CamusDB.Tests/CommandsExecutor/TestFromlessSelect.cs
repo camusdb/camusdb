@@ -41,6 +41,13 @@ public sealed class TestFromlessSelect : SharedNodeBaseTest
         return rows;
     }
 
+    private static async Task ExecNonQuery(CommandExecutor executor, DatabaseDescriptor database, string dbname, string sql)
+    {
+        KvTransaction tx = await database.Transactions.BeginAsync();
+        _ = await executor.ExecuteNonSQLQuery(new(txnState: tx, database: dbname, sql: sql, parameters: null));
+        await database.Transactions.CommitAsync(tx);
+    }
+
     private static async Task<CamusDBException> AssertThrows(
         CommandExecutor executor, DatabaseDescriptor database, string dbname, string sql)
     {
@@ -162,16 +169,175 @@ public sealed class TestFromlessSelect : SharedNodeBaseTest
         Assert.That(ex.Message, Does.Contain("FROM"));
     }
 
-    // ── WHERE/GROUP/HAVING/ORDER are not admitted by the FROM-less grammar rule ─────
-    // (they only exist on the FROM-carrying alternative), so each is rejected at parse time.
+    // ── WHERE decides whether the one row exists ─────
 
-    [Test]
-    public async Task WhereClause_Rejected()
+    [TestCase("SELECT 5 WHERE TRUE", 1, TestName = "Where_True_KeepsTheRow")]
+    [TestCase("SELECT 5 WHERE 1 = 1", 1, TestName = "Where_TrueComparison_KeepsTheRow")]
+    [TestCase("SELECT 5 WHERE FALSE", 0, TestName = "Where_False_DropsTheRow")]
+    [TestCase("SELECT 5 WHERE 4 = 5", 0, TestName = "Where_FalseComparison_DropsTheRow")]
+    [TestCase("SELECT 5 WHERE NULL", 0, TestName = "Where_Null_DropsTheRow")]
+    [TestCase("SELECT 5 WHERE NULL = 1", 0, TestName = "Where_UnknownComparison_DropsTheRow")]
+    [TestCase("SELECT 5 WHERE NOT FALSE", 1, TestName = "Where_Not_KeepsTheRow")]
+    [TestCase("SELECT DISTINCT 5 WHERE TRUE", 1, TestName = "Where_WithDistinct_KeepsTheRow")]
+    [TestCase("SELECT 5 WHERE TRUE LIMIT 0", 0, TestName = "Where_True_LimitZero_DropsTheRow")]
+    [TestCase("SELECT 5 WHERE TRUE OFFSET 1", 0, TestName = "Where_True_OffsetOne_DropsTheRow")]
+    [TestCase("SELECT 1 / 0 AS x WHERE FALSE", 0, TestName = "Where_False_DoesNotRunTheProjection")]
+    public async Task Where_DecidesTheRow(string sql, int expectedRows)
     {
         (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
-        // Parser-level rejection: the FROM-less select_stmt admits only a field list + LIMIT/OFFSET.
-        Assert.ThrowsAsync<CamusDBException>(() => ExecQuery(executor, database, dbname, "SELECT 1 WHERE 1 = 1"));
+        Assert.AreEqual(expectedRows, (await ExecQuery(executor, database, dbname, sql)).Count);
     }
+
+    [Test]
+    public async Task Where_KeptRow_HasThePlainProjection()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+
+        List<QueryResultRow> rows = await ExecQuery(executor, database, dbname, "SELECT 41 + 1 AS answer, 'x' AS name WHERE TRUE");
+
+        Assert.AreEqual(42L, rows.Single().Row["answer"].LongValue);
+        Assert.AreEqual("x", rows.Single().Row["name"].StrValue);
+    }
+
+    [TestCase("SELECT 5 WHERE 1", CamusDBErrorCodes.InvalidInput, TestName = "Where_Integer_IsRefused")]
+    [TestCase("SELECT 5 WHERE 1 + 1", CamusDBErrorCodes.InvalidInput, TestName = "Where_IntegerExpression_IsRefused")]
+    [TestCase("SELECT 5 WHERE 1.5", CamusDBErrorCodes.InvalidInput, TestName = "Where_Float_IsRefused")]
+    [TestCase("SELECT 5 WHERE 'x'", CamusDBErrorCodes.InvalidInput, TestName = "Where_String_IsRefused")]
+    [TestCase("SELECT 5 WHERE 'true'", CamusDBErrorCodes.InvalidInput, TestName = "Where_BooleanWordInAString_IsRefused")]
+    [TestCase("SELECT 5 WHERE nope = 1", CamusDBErrorCodes.UnknownColumn, TestName = "Where_UnknownColumn_IsRefused")]
+    [TestCase("SELECT 5 WHERE 1 / 0 = 1", CamusDBErrorCodes.InvalidInput, TestName = "Where_DivisionByZero_IsRefused")]
+    [TestCase("SELECT 5 WHERE COUNT(*) > 0", CamusDBErrorCodes.InvalidInput, TestName = "Where_Aggregate_IsRefused")]
+    [TestCase("SELECT * WHERE TRUE", CamusDBErrorCodes.InvalidInput, TestName = "Where_Star_IsRefused")]
+    [TestCase("SELECT COUNT(*) WHERE TRUE", CamusDBErrorCodes.InvalidInput, TestName = "Where_AggregateProjection_IsRefused")]
+    [TestCase("SELECT 5 WHERE TRUE FOR UPDATE", CamusDBErrorCodes.InvalidInput, TestName = "Where_ForUpdate_IsRefused")]
+    public async Task Where_InvalidStatement_IsRefused(string sql, string code)
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+        Assert.AreEqual(code, (await AssertThrows(executor, database, dbname, sql)).Code);
+    }
+
+    [Test]
+    public async Task Where_RepeatedStatement_ReadsItsParametersEachTime()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+
+        foreach ((bool value, int rows) in new[] { (true, 1), (false, 0), (true, 1) })
+        {
+            Dictionary<string, ColumnValue> parameters = new() { ["@p"] = ColumnValue.FromBool(value) };
+            Assert.AreEqual(rows, (await ExecQuery(executor, database, dbname, "SELECT 5 WHERE @p", parameters)).Count);
+        }
+
+        Dictionary<string, ColumnValue> number = new() { ["@p"] = new ColumnValue(ColumnType.Integer64, 1L) };
+        Assert.ThrowsAsync<CamusDBException>(() => ExecQuery(executor, database, dbname, "SELECT 5 WHERE @p", number));
+    }
+
+    [TestCase("SELECT 5 WHERE EXISTS (SELECT 1 FROM accounts WHERE email = 'alice@example.com')", 1, TestName = "Where_Exists_KeepsTheRow")]
+    [TestCase("SELECT 5 WHERE EXISTS (SELECT 1 FROM accounts WHERE email = 'nobody@example.com')", 0, TestName = "Where_Exists_DropsTheRow")]
+    [TestCase("SELECT 5 WHERE NOT EXISTS (SELECT 1 FROM accounts WHERE email = 'nobody@example.com')", 1, TestName = "Where_NotExists_KeepsTheRow")]
+    [TestCase("SELECT 5 WHERE (SELECT COUNT(*) FROM accounts WHERE email = 'nobody@example.com') = 0", 1, TestName = "Where_ScalarSubquery_KeepsTheRow")]
+    [TestCase("SELECT 5 WHERE 'alice@example.com' IN (SELECT email FROM accounts)", 1, TestName = "Where_InSubquery_KeepsTheRow")]
+    public async Task Where_Subquery_DecidesTheRow(string sql, int expectedRows)
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupAccounts();
+        Assert.AreEqual(expectedRows, (await ExecQuery(executor, database, dbname, sql)).Count);
+    }
+
+    [Test]
+    public async Task Where_InASetOperation_FiltersOneOperand()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+
+        List<QueryResultRow> rows = await ExecQuery(executor, database, dbname, "SELECT 1 AS x WHERE FALSE UNION ALL SELECT 2 WHERE TRUE");
+
+        Assert.AreEqual(2L, rows.Single().Row["x"].LongValue);
+    }
+
+    [Test]
+    public async Task Where_AsAnInsertSource_WritesOnlyAKeptRow()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupAccounts();
+
+        long before = (await ExecQuery(executor, database, dbname, "SELECT COUNT(*) AS c FROM accounts")).Single().Row["c"].LongValue;
+
+        await ExecNonQuery(executor, database, dbname, "INSERT INTO accounts (id, email) SELECT 'a0a0a0a0a0a0a0a0a0a0a0a0', 'dropped@example.com' WHERE FALSE");
+        Assert.AreEqual(before, (await ExecQuery(executor, database, dbname, "SELECT COUNT(*) AS c FROM accounts")).Single().Row["c"].LongValue);
+
+        await ExecNonQuery(executor, database, dbname, "INSERT INTO accounts (id, email) SELECT 'b0b0b0b0b0b0b0b0b0b0b0b0', 'kept@example.com' WHERE TRUE");
+        Assert.AreEqual(before + 1, (await ExecQuery(executor, database, dbname, "SELECT COUNT(*) AS c FROM accounts")).Single().Row["c"].LongValue);
+    }
+
+    [Test]
+    public async Task Where_DroppedRow_StillDeclaresColumnTypesToCreateTableAs()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+
+        KvTransaction tx = await database.Transactions.BeginAsync();
+        await executor.ExecuteDDLSQL(new(txnState: tx, database: dbname, sql: "CREATE TABLE ct AS SELECT 5 AS x, 1.5 AS y WHERE FALSE", parameters: null));
+        await database.Transactions.CommitAsync(tx);
+
+        List<QueryResultRow> columns = await ExecQuery(executor, database, dbname, "SHOW COLUMNS FROM ct");
+        Assert.AreEqual("INT64", columns.Single(c => c.Row["Field"].StrValue == "x").Row["Type"].StrValue);
+        Assert.AreEqual("FLOAT64", columns.Single(c => c.Row["Field"].StrValue == "y").Row["Type"].StrValue);
+        Assert.AreEqual(0, (await ExecQuery(executor, database, dbname, "SELECT x FROM ct")).Count);
+    }
+
+    [TestCase("SELECT nextval('sq') WHERE TRUE", TestName = "Where_SequenceInProjection_IsRefused")]
+    [TestCase("SELECT 1 WHERE nextval('sq') > 0", TestName = "Where_SequenceInCondition_IsRefused")]
+    public async Task Where_SequenceCall_IsRefusedAndDrawsNothing(string sql)
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+
+        KvTransaction tx = await database.Transactions.BeginAsync();
+        await executor.ExecuteDDLSQL(new(txnState: tx, database: dbname, sql: "CREATE SEQUENCE sq", parameters: null));
+        await database.Transactions.CommitAsync(tx);
+
+        Assert.AreEqual(CamusDBErrorCodes.SequenceCallNotAllowedHere, (await AssertThrows(executor, database, dbname, sql)).Code);
+        Assert.AreEqual(1L, (await ExecQuery(executor, database, dbname, "SELECT nextval('sq') AS n")).Single().Row["n"].LongValue);
+    }
+
+    [Test]
+    public async Task Where_DroppedRow_DrawsNoSequenceValue()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+
+        KvTransaction tx = await database.Transactions.BeginAsync();
+        await executor.ExecuteDDLSQL(new(txnState: tx, database: dbname, sql: "CREATE SEQUENCE sq", parameters: null));
+        await database.Transactions.CommitAsync(tx);
+
+        Assert.AreEqual(0, (await ExecQuery(executor, database, dbname, "SELECT nextval('sq') WHERE FALSE")).Count);
+        Assert.AreEqual(1L, (await ExecQuery(executor, database, dbname, "SELECT nextval('sq') AS n")).Single().Row["n"].LongValue);
+    }
+
+    [Test]
+    public async Task Where_ExplainAndAnalyze_ShowTheOneRowSource()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+
+        foreach (string sql in new[] { "EXPLAIN SELECT 5 WHERE 1 = 1", "EXPLAIN (ANALYZE) SELECT 5 WHERE 1 = 1" })
+        {
+            List<QueryResultRow> rows = await ExecQuery(executor, database, dbname, sql);
+            Assert.AreEqual(1, rows.Count(row => row.Row["node"].StrValue == "function-scan"), sql);
+        }
+    }
+
+    [Test]
+    public async Task Where_ViewBody_KeepsTheStatementAsWritten()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+
+        KvTransaction tx = await database.Transactions.BeginAsync();
+        await executor.ExecuteDDLSQL(new(txnState: tx, database: dbname, sql: "CREATE VIEW vw AS SELECT 5 AS x WHERE TRUE", parameters: null));
+        await database.Transactions.CommitAsync(tx);
+
+        List<QueryResultRow> rows = await ExecQuery(executor, database, dbname, "SHOW CREATE VIEW vw");
+        string body = rows.Single().Row["create view"].StrValue!;
+
+        StringAssert.Contains("SELECT 5 AS x WHERE", body);
+        StringAssert.DoesNotContain("single_row", body);
+    }
+
+    // ── GROUP/HAVING/ORDER are not admitted by the FROM-less grammar rule ─────
+    // (they only exist on the FROM-carrying alternative), so each is rejected at parse time.
 
     [Test]
     public async Task GroupBy_Rejected()

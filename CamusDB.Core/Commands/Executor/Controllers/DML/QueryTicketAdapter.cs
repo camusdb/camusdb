@@ -88,11 +88,13 @@ internal static class QueryTicketAdapter
             where: where,
             orderBy: setOperationColumns is not null
                 ? ToSetOperationOrderBy(query.OrderBy, setOperationColumns)
-                : ToQueryOrderBy(
-                    query.OrderBy,
-                    query.Projections,
-                    query.GroupBy,
-                    SortAfterProjection(query)),
+                : IsUngroupedAggregate(query)
+                    ? null
+                    : ToQueryOrderBy(
+                        query.OrderBy,
+                        query.Projections,
+                        query.GroupBy,
+                        SortAfterProjection(query)),
             limit: query.Limit,
             offset: query.Offset,
             parameters: ticket.Parameters,
@@ -338,6 +340,27 @@ internal static class QueryTicketAdapter
             return $"{functionName}(…)";
 
         return expression.nodeType.ToString();
+    }
+
+    /// <summary>
+    /// True for an aggregate select list with no GROUP BY. Such a query has exactly one output row, so
+    /// its ORDER BY has nothing to order: the binder checks each key
+    /// (<c>QueryBinder.ValidateUngroupedAggregateOrderKey</c>) and the ticket then carries no sort. Without
+    /// that, <c>SELECT COUNT(*) FROM t ORDER BY a</c> sorted the whole table only to count it.
+    /// </summary>
+    internal static bool IsUngroupedAggregate(SelectQuery query)
+    {
+        if (query.GroupBy is { Count: > 0 })
+            return false;
+
+        foreach (ProjectionItem projection in query.Projections)
+        {
+            if (QueryExpressionClassifier.IsAggregateProjection(projection.Expression)
+                || QueryExpressionClassifier.IsCompoundAggregateProjection(projection.Expression))
+                return true;
+        }
+
+        return false;
     }
 
     private static bool SortAfterProjection(SelectQuery query) =>

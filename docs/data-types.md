@@ -199,9 +199,9 @@ SELECT * FROM readings WHERE v = CAST('Infinity' AS float64);
 A result from finite values that a float cannot hold fails with `CADB0421`
 (`FloatValueOutOfRange`): HTTP 400, gRPC `OUT_OF_RANGE`. It never becomes an infinity or a zero.
 
-- An *overflow* is a result too large for the type: `1e308 * 10`, `pow(10, 400)`, the literal `1e400`,
+- An *overflow* is a result too large for the type: `1e308 * 10`, `pow(10, 400)`, `exp(1000)`, the literal `1e400`,
   `CAST('1e400' AS float64)`, or a `SUM` or `AVG` total past the range.
-- An *underflow* is a nonzero result too small for the type: `1e-300 * 1e-300`, `pow(10, -400)`, or
+- An *underflow* is a nonzero result too small for the type: `1e-300 * 1e-300`, `pow(10, -400)`, `exp(-1000)`, or
   the literal `1E-400`. A literal or a text with a zero mantissa, such as `0e-400`, is zero.
 - A subnormal result is a value, not an underflow: `4e-320` is stored as it is.
 - A `float64` value written to a `float32` column, or cast to `float32`, fails when it is past the
@@ -214,7 +214,7 @@ A result from finite values that a float cannot hold fails with `CADB0421`
 
 These operations have no real result and fail with `CADB0400`: `x / 0` for every `x`, `pow(0, y)` for
 a negative `y`, `pow(x, y)` for a negative `x` and a finite non-integer `y`, `sqrt` of a negative
-number, and `sign(NaN)`. `round(x, n)` and `trunc(x, n)` accept any scale and never turn a finite
+number, `ln`, `log` and `log10` of zero or of a negative number, `log(1, x)`, and `sign(NaN)`. `round(x, n)` and `trunc(x, n)` accept any scale and never turn a finite
 value into a NaN or an infinity.
 
 ### Over the wire
@@ -274,7 +274,7 @@ fixed, as in Spanner. `array(numeric)` is refused too.
 | `SUM(numeric)` | `numeric`, exact; only the final total is range-checked |
 | `AVG(numeric)` | `numeric`, the exact total divided by the count, rounded half away from zero |
 | `MIN`, `MAX`, `abs`, `ceil`, `floor`, `round(x[, n])`, `trunc(x[, n])`, `mod`, `sign` | `numeric` |
-| `sqrt`, `pow` | `float64` (Spanner returns NUMERIC here) |
+| `sqrt`, `pow` and `^`, `ln`, `log`, `log10`, `exp` | `float64` (Spanner returns NUMERIC for `sqrt`, `pow`, `ln`, `log` and `log10`) |
 | `COALESCE`, `CASE` with `numeric` and `int64` branches | `numeric`; with a `float64` or `float32` branch, `float64` |
 
 Division by zero fails. An overflow anywhere fails with `CADB0417`.

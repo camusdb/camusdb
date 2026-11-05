@@ -303,5 +303,5 @@ internal static class SequenceScalarFunctions
             CamusDBErrorCodes.SequenceCallNotAllowedHere,
             $"'{calledName}' cannot be used here. It is only available where the engine can bound how many " +
             "values the statement will draw before it runs: an INSERT ... VALUES list, a column DEFAULT, " +
-            "or a SELECT with no FROM clause.");
+            "or a SELECT with no FROM and no WHERE clause.");
 }

@@ -23,6 +23,12 @@ SELECT 1, 'a', 2 + 3;                   -- ordinal names "0", "1", "2"
 SELECT 1 LIMIT 0;                       -- returns no rows
 SELECT 1 LIMIT 1 OFFSET 1;              -- OFFSET past the only row → no rows
 
+-- Row gating with WHERE
+SELECT 5 WHERE TRUE;                    -- one row
+SELECT 5 WHERE FALSE;                   -- no rows
+SELECT 5 WHERE NULL;                    -- no rows
+SELECT 'seed' WHERE NOT EXISTS (SELECT 1 FROM accounts);
+
 -- Existence checks via uncorrelated projection subqueries
 SELECT EXISTS (SELECT 1 FROM accounts WHERE email = @email);
 SELECT (SELECT COUNT(*) FROM (
@@ -48,13 +54,34 @@ uncorrelated projection subquery the same way; see
 [Subqueries in expressions](./sql-expression-syntax.md#subqueries-in-expressions) for the
 positions a subquery can take and the rule for correlated ones.
 
+## WHERE
+
+A `WHERE` decides whether the one row exists, and it follows the PostgreSQL rule. `TRUE` keeps the
+row. `FALSE` and `NULL` drop it. Any other type is `InvalidInput` (`CADB0400`): `SELECT 5 WHERE 1` fails,
+and so does `SELECT 5 WHERE 'true'`. The error reads `No matching signature for operator IS TRUE`,
+because that is the test the condition runs under. The `WHERE` of a table is different, and it reads a
+nonzero number as true.
+
+The condition can hold a subquery. When it drops the row, the projections do not run, so
+`SELECT 1 / 0 WHERE FALSE` returns no rows and no error. PostgreSQL reports the division by zero there.
+
+This form runs as a query over one row, so its plan is a `function-scan` of `*single_row*`, and
+`EXPLAIN (ANALYZE)` works on it. It works as an `INSERT ... SELECT` or a `CREATE TABLE AS` source, and
+as an operand of a set operation.
+
+A sequence call that runs in this form is refused (`CADB0547`), because a statement must know how many
+values it draws before it runs. `SELECT nextval('s') WHERE FALSE` returns no rows and draws nothing.
+
 ## Rejected shapes
 
 | Query | Result |
 |-------|--------|
 | `SELECT *` | `InvalidInput` — `*` requires a `FROM` clause |
 | `SELECT COUNT(*)` (or any aggregate) | `InvalidInput` — aggregates require a `FROM` clause |
-| `SELECT 1 WHERE …` / `GROUP BY` / `HAVING` / `ORDER BY` | Rejected at parse time — the FROM-less grammar admits only a projection list plus optional `LIMIT`/`OFFSET` |
+| `SELECT COUNT(*) WHERE …` and `SELECT * WHERE …` | `InvalidInput`, the same refusals as without `WHERE` |
+| `SELECT 1 GROUP BY …` / `HAVING` | Rejected at parse time — the FROM-less grammar admits only a projection list plus optional `WHERE`, `LIMIT` and `OFFSET` |
+| `SELECT 1 ORDER BY …` | `InvalidInput` — `ORDER BY` requires a `FROM` clause |
+| A FROM-less `SELECT` as a subquery, a derived table or a view body that is read | `InvalidInput` — `Invalid SELECT statement`, with or without `WHERE` |
 | `SELECT foo` (unresolved bare identifier) | Parses, then errors at execution with `UnknownColumn` (PostgreSQL-like) |
 
 ## EXPLAIN

@@ -556,9 +556,17 @@ internal sealed class QueryBinder
         bool sortAfterProjection = query.GroupBy is { Count: > 0 }
             || (query.IsDistinct && !IsFullProjection(query.Projections));
 
+        bool ungroupedAggregate = QueryTicketAdapter.IsUngroupedAggregate(query);
+
         foreach (OrderByItem orderBy in query.OrderBy)
         {
             QueryExpressionClassifier.ValidateNoNestedAggregate(orderBy.Expression);
+
+            if (ungroupedAggregate)
+            {
+                ValidateUngroupedAggregateOrderKey(orderBy.Expression, query, rowNames);
+                continue;
+            }
 
             if (sortAfterProjection
                 && QueryProjectionResolver.TryResolvePostAggregateOrderColumn(
@@ -588,6 +596,35 @@ internal sealed class QueryBinder
                     : orderBy.Expression;
 
             ValidateExpression(validated, rowNames);
+        }
+    }
+
+    /// <summary>
+    /// Checks one ORDER BY key of an aggregate query with no GROUP BY, by the PostgreSQL rule. The query
+    /// has one output row, so the key orders nothing and the sort never runs
+    /// (<see cref="QueryTicketAdapter.IsUngroupedAggregate"/>), but the statement must still make sense.
+    /// An output alias, an aggregate and a constant are valid keys. A column outside an aggregate is not,
+    /// because that row has no one value for the column. The error does not depend on LIMIT or on the
+    /// table contents, because this runs at bind time.
+    /// </summary>
+    private static void ValidateUngroupedAggregateOrderKey(NodeAst key, SelectQuery query, QueryRowNameResolver rowNames)
+    {
+        if (QueryTicketAdapter.ContainsSubquery(key))
+            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "ORDER BY does not support subqueries");
+
+        if (QueryProjectionResolver.TryResolvePostAggregateOrderColumn(key, query.Projections, null, out _))
+            return;
+
+        ValidateExpression(key, rowNames);
+
+        List<NodeAst> columns = [];
+        QueryExpressionClassifier.CollectNonAggregateColumnRefs(key, columns);
+
+        if (columns.Count > 0)
+        {
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInput,
+                $"Column '{columns[0].yytext}' must appear in the GROUP BY clause or be used in an aggregate function");
         }
     }
 

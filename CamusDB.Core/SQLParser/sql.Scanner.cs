@@ -50,6 +50,29 @@ internal partial class sqlScanner
 			$"(line {yyline}, col {yycol + 1}) Invalid numeric literal '{text}': an underscore must sit between two digits");
 
 	/// <summary>
+	/// The error for a character that no token starts with. Without it the scanner drops the character
+	/// and reads on, so the statement runs as if the character were not there: <c>a \ - b</c> computes
+	/// <c>a - b</c>, and <c>$1</c> reads as the literal <c>1</c>. A quote reaches this rule when its
+	/// literal does not close, or when the literal holds a raw control character, which the string rules
+	/// do not admit. A character outside printable ASCII is named by its code point, because it may not
+	/// be visible in the statement or in the error.
+	/// </summary>
+	private CamusDBException UnexpectedCharacter(string text)
+	{
+		string where = $"(line {yyline}, col {yycol + 1}) Syntax error";
+
+		if (text is "'" or "\"" or "`")
+			return new(CamusDBErrorCodes.SqlSyntaxError,
+				$"{where}, quoted text starting with {text} does not close, or holds a raw control character such as a tab or a line break");
+
+		string shown = text.Length == 1 && text[0] >= ' ' && text[0] <= '~'
+			? $"'{text}'"
+			: $"U+{char.ConvertToUtf32(text, 0):X4}";
+
+		return new(CamusDBErrorCodes.SqlSyntaxError, $"{where}, unexpected character {shown}");
+	}
+
+	/// <summary>
 	/// Called by the scanner on EOF. Raises an error if EOF arrives inside a block comment
 	/// (i.e. the scanner is still in BLOCKCOMMENT state), which means the opening <c>/*</c>
 	/// was never closed. Always returns true to signal end-of-input.

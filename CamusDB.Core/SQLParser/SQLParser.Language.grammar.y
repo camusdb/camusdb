@@ -31,6 +31,9 @@
 %left TCONCAT TBITAND TBITOR TBITXOR TSHIFTLEFT TSHIFTRIGHT
 %left TADD TMINUS
 %left TMULT TDIV TMOD
+/* Power binds tighter than the multiplying operators and below unary minus, and it groups to the left,
+   as in PostgreSQL and not as in mathematics: `2 * 3 ^ 2` is 18, `-2 ^ 2` is 4, `2 ^ 3 ^ 2` is 64. */
+%left TCARET
 /* IS (IS NULL / IS NOT NULL), IN, and the qualified-name dot bind tighter than any binary operator.
    Without a precedence they produced shift/reduce warnings that gppg resolved by its default shift —
    which is already the intended parse (a AND b IS NULL -> a AND (b IS NULL); a.b as one name). Declaring
@@ -60,7 +63,7 @@
 %token TPRIMARY TKEY TUNIQUE TINDEX TALTER TWADD TDROP TCOLUMN TESCAPED_IDENTIFIER TLIMIT TOFFSET TAS TGROUP TSHOW TCONSTRAINT TCHECK
 %token TCOLUMNS TTABLES TDESCRIBE TDATABASES TDATABASE TAT LBRACE RBRACE TINDEXES TLIKE TILIKE TDEFAULT TIF TEXISTS TON TIN TIS
 %token TREGEXMATCH TREGEXIMATCH TREGEXNOTMATCH TREGEXNOTIMATCH
-%token TCONCAT TBITAND TBITOR TBITXOR TSHIFTLEFT TSHIFTRIGHT
+%token TCONCAT TBITAND TBITOR TBITXOR TCARET TSHIFTLEFT TSHIFTRIGHT TSEMICOLON
 %token TJSONFIELD TJSONFIELDTEXT TJSONPATH TJSONPATHTEXT TJSONCONTAINS TJSONCONTAINEDBY
 %token TJSONEXISTS TJSONEXISTSANY TJSONEXISTSALL TJSONDELETEPATH
 %token TBEGIN TSTART TTRANSACTION TROLLBACK TCOMMIT TJOIN TINNER TDOT THAVING TDISTINCT TBETWEEN TEXPLAIN
@@ -114,8 +117,15 @@
 
 %%
 
+/* The parser takes one statement per call, so `;` can only close it. SqlScriptSplitter cuts a script
+   into statements before this point, and a second statement after the `;` is a syntax error. */
 list    : stat { $$.n = $1.n; }
+        | stat semicolons { $$.n = $1.n; }
         ;
+
+semicolons : TSEMICOLON
+           | semicolons TSEMICOLON
+           ;
 
 stat    : select_stmt { $$.n = $1.n; }
         | select_stmt locking_clause { $$.n = RowLockingAst.Wrap($1.n, $2.n); }
@@ -244,6 +254,8 @@ select_core : TSELECT opt_distinct select_field_list TFROM select_table opt_as_o
             { $$.n = new(NodeType.Select, $3.n, $5.n, $7.n, null, null, null, $8.n, $2.s, $9.n, $6.n); }
             | TSELECT opt_distinct select_field_list
             { $$.n = new(NodeType.Select, $3.n, null, null, null, null, null, null, $2.s, null); }
+            | TSELECT opt_distinct select_field_list TWHERE condition
+            { $$.n = new(NodeType.Select, $3.n, null, $5.n, null, null, null, null, $2.s, null); }
             ;
 
 order_clause : TORDER TBY order_list { $$.n = $3.n; }
@@ -1919,6 +1931,7 @@ expr       : equals_expr { $$.n = $1.n; }
            | mult_expr { $$.n = $1.n; }
            | div_expr { $$.n = $1.n; }
            | mod_expr { $$.n = $1.n; }
+           | power_expr { $$.n = $1.n; }
            | concat_expr { $$.n = $1.n; }
            | bitwise_expr { $$.n = $1.n; }
            | json_op_expr { $$.n = $1.n; }
@@ -1988,6 +2001,7 @@ between_bound : simple_expr { $$.n = $1.n; }
               | between_bound TMULT between_bound { $$.n = new(NodeType.ExprMult, $1.n, $3.n, null, null, null, null, null, null); }
               | between_bound TDIV between_bound { $$.n = new(NodeType.ExprDiv, $1.n, $3.n, null, null, null, null, null, null); }
               | between_bound TMOD between_bound { $$.n = NodeAst.ModCall($1.n, $3.n); }
+              | between_bound TCARET between_bound { $$.n = NodeAst.FunctionCall("pow", $1.n, $3.n); }
               | between_bound TCONCAT between_bound { $$.n = new(NodeType.ExprConcat, $1.n, $3.n, null, null, null, null, null, null); }
               | between_bound TBITAND between_bound { $$.n = new(NodeType.ExprBitAnd, $1.n, $3.n, null, null, null, null, null, null); }
               | between_bound TBITOR between_bound { $$.n = new(NodeType.ExprBitOr, $1.n, $3.n, null, null, null, null, null, null); }
@@ -2089,8 +2103,12 @@ json_op_expr : condition TJSONFIELD condition { $$.n = NodeAst.FunctionCall("jso
              | condition TJSONDELETEPATH condition { $$.n = NodeAst.FunctionCall("jsonb_delete_path", $1.n, $3.n); }
              ;
 
-/* The binary bitwise operators. `#` is XOR, as in PostgreSQL; `^` is not an operator here, because
-   it is power in PostgreSQL and XOR in MySQL. */
+/* `a ^ b` is a call of pow, as in PostgreSQL, so the operator and the function cannot differ on a domain
+   error, on overflow or on a special value. Its precedence is in the table at the top of this file. */
+power_expr : condition TCARET condition { $$.n = NodeAst.FunctionCall("pow", $1.n, $3.n); }
+           ;
+
+/* The binary bitwise operators. `#` is XOR, as in PostgreSQL; `^` is power. */
 bitwise_expr : condition TBITAND condition { $$.n = new(NodeType.ExprBitAnd, $1.n, $3.n, null, null, null, null, null, null); }
              | condition TBITOR condition { $$.n = new(NodeType.ExprBitOr, $1.n, $3.n, null, null, null, null, null, null); }
              | condition TBITXOR condition { $$.n = new(NodeType.ExprBitXor, $1.n, $3.n, null, null, null, null, null, null); }
