@@ -258,6 +258,7 @@ internal sealed class SemiJoinAnalyzer
             // skips the binder, so the statement checks of a bound SELECT run here.
             ConditionalResultTypes.CheckCondition(
                 innerFilter, ConditionalResultTypes.LookupFor(innerTable.Schema), innerResolver, "WHERE", allowAggregates: false);
+            ConstantDivisionCheck.Check(innerFilter);
         }
 
         innerResolver.FreezeForSharedReuse();

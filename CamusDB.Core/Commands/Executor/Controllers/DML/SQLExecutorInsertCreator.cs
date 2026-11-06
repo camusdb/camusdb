@@ -303,7 +303,10 @@ internal sealed class SQLExecutorInsertCreator : SQLExecutorBaseCreator
         // an unknown function, and a CASE, COALESCE, IFNULL or IF whose literal inputs have no common
         // type. A VALUES expression has no columns, so its literals are all the check can see.
         if (node.leftAst is not null || node.rightAst is not null)
+        {
             Queries.ConditionalResultTypes.Check(node, lookup: null, recorder: null, allowAggregates: false);
+            Queries.ConstantDivisionCheck.Check(node);
+        }
 
         slots[filled++] = EvalExpr(node, EmptyRow, parameters);
     }

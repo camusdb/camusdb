@@ -59,6 +59,9 @@ public enum NumericConversionStatus
 /// </summary>
 public static class NumericMath
 {
+    /// <summary>The text of the division by zero error, for each numeric type. <see cref="Controllers.Queries.ConstantDivisionCheck"/> tells this error from other value errors by it.</summary>
+    internal const string DivisionByZeroMessage = "Division by zero";
+
     /// <summary>Count of digits after the decimal point. Fixed for the type.</summary>
     public const int Scale = 9;
 
@@ -507,7 +510,7 @@ public static class NumericMath
     public static Int128 Divide(Int128 left, Int128 right)
     {
         if (right == 0)
-            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Division by zero");
+            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, DivisionByZeroMessage);
 
         bool negative = (left < 0) != (right < 0);
         UInt128 a = Magnitude(left);
@@ -550,7 +553,7 @@ public static class NumericMath
     public static Int128 Remainder(Int128 left, Int128 right)
     {
         if (right == 0)
-            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Division by zero");
+            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, DivisionByZeroMessage);
 
         // Both operands share the scale, so the remainder of the unscaled values is the unscaled remainder.
         return left % right;

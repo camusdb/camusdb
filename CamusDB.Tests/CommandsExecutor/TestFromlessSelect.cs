@@ -181,7 +181,6 @@ public sealed class TestFromlessSelect : SharedNodeBaseTest
     [TestCase("SELECT DISTINCT 5 WHERE TRUE", 1, TestName = "Where_WithDistinct_KeepsTheRow")]
     [TestCase("SELECT 5 WHERE TRUE LIMIT 0", 0, TestName = "Where_True_LimitZero_DropsTheRow")]
     [TestCase("SELECT 5 WHERE TRUE OFFSET 1", 0, TestName = "Where_True_OffsetOne_DropsTheRow")]
-    [TestCase("SELECT 1 / 0 AS x WHERE FALSE", 0, TestName = "Where_False_DoesNotRunTheProjection")]
     public async Task Where_DecidesTheRow(string sql, int expectedRows)
     {
         (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
@@ -206,6 +205,7 @@ public sealed class TestFromlessSelect : SharedNodeBaseTest
     [TestCase("SELECT 5 WHERE 'true'", CamusDBErrorCodes.InvalidInput, TestName = "Where_BooleanWordInAString_IsRefused")]
     [TestCase("SELECT 5 WHERE nope = 1", CamusDBErrorCodes.UnknownColumn, TestName = "Where_UnknownColumn_IsRefused")]
     [TestCase("SELECT 5 WHERE 1 / 0 = 1", CamusDBErrorCodes.InvalidInput, TestName = "Where_DivisionByZero_IsRefused")]
+    [TestCase("SELECT 1 / 0 AS x WHERE FALSE", CamusDBErrorCodes.InvalidInput, TestName = "Where_False_ConstantDivisionInTheProjection_IsRefused")]
     [TestCase("SELECT 5 WHERE COUNT(*) > 0", CamusDBErrorCodes.InvalidInput, TestName = "Where_Aggregate_IsRefused")]
     [TestCase("SELECT * WHERE TRUE", CamusDBErrorCodes.InvalidInput, TestName = "Where_Star_IsRefused")]
     [TestCase("SELECT COUNT(*) WHERE TRUE", CamusDBErrorCodes.InvalidInput, TestName = "Where_AggregateProjection_IsRefused")]

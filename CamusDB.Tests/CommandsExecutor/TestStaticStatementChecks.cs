@@ -512,8 +512,6 @@ public sealed class TestStaticStatementChecks : SharedNodeBaseTest
     // These statements return no rows on an empty table, which is a recorded difference from PostgreSQL.
     // A row must still reach the error: the difference is when the mistake shows, never whether it does.
     [TestCase("SELECT d.id FROM (SELECT id, s FROM t) AS d WHERE d.id = d.s", CamusDBErrorCodes.InvalidInput, TestName = "RowReachesIt_DerivedStringColumn")]
-    [TestCase("SELECT 1 / 0 FROM t", CamusDBErrorCodes.InvalidInput, TestName = "RowReachesIt_DivisionByZero_InProjection")]
-    [TestCase("SELECT id FROM t WHERE id = 1 / 0", CamusDBErrorCodes.InvalidInput, TestName = "RowReachesIt_DivisionByZero_InCondition")]
     [TestCase("SELECT 9223372036854775807 + 1 FROM t", CamusDBErrorCodes.IntegerValueOutOfRange, TestName = "RowReachesIt_IntegerOverflow")]
     public async Task ADifferenceOnNoRows_StillFails_WhenARowReachesIt(string sql, string code)
     {

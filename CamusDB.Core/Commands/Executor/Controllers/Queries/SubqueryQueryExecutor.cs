@@ -82,7 +82,7 @@ internal sealed class SubqueryQueryExecutor
         Dictionary<string, ColumnValue>? parameters,
         CancellationToken cancellationToken = default,
         SubqueryOutputType? outputType = null) =>
-        ExecuteSelectInternalAsync(database, selectAst, txnState, parameters, requireSingleColumn: true, outputType, cancellationToken);
+        ExecuteSelectInternalAsync(database, selectAst, txnState, parameters, requireSingleColumn: true, outputType, isExistsBody: false, cancellationToken);
 
     /// <summary>
     /// Executes a subquery for EXISTS semantics and returns a streaming cursor.
@@ -94,7 +94,7 @@ internal sealed class SubqueryQueryExecutor
         KvTransaction txnState,
         Dictionary<string, ColumnValue>? parameters,
         CancellationToken cancellationToken = default) =>
-        ExecuteSelectInternalAsync(database, selectAst, txnState, parameters, requireSingleColumn: false, outputType: null, cancellationToken);
+        ExecuteSelectInternalAsync(database, selectAst, txnState, parameters, requireSingleColumn: false, outputType: null, isExistsBody: true, cancellationToken);
 
     private async IAsyncEnumerable<QueryResultRow> ExecuteSelectInternalAsync(
         DatabaseDescriptor database,
@@ -103,6 +103,7 @@ internal sealed class SubqueryQueryExecutor
         Dictionary<string, ColumnValue>? parameters,
         bool requireSingleColumn,
         SubqueryOutputType? outputType,
+        bool isExistsBody,
         [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct = default)
     {
         if (selectAst.nodeType != NodeType.Select)
@@ -137,7 +138,7 @@ internal sealed class SubqueryQueryExecutor
             parameters: parameters,
             cancellationToken: ct);
 
-        SelectBindResult bound = await bindPipeline.BindAsync(database, subquery, executeTicket).ConfigureAwait(false);
+        SelectBindResult bound = await bindPipeline.BindAsync(database, subquery, executeTicket, isExistsBody).ConfigureAwait(false);
 
         if (requireSingleColumn && isSetOperation && bound.Bound.DerivedSources[0].Columns.Count != 1)
             throw new CamusDBException(

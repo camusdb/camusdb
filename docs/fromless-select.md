@@ -60,8 +60,9 @@ A `WHERE` decides whether the one row exists, and it follows the rule of the `WH
 keeps the row. `FALSE` and `NULL` drop it. Any other type is `InvalidInput` (`CADB0400`): `SELECT 5 WHERE 1`
 fails, and so does `SELECT 5 WHERE 'true'`.
 
-The condition can hold a subquery. When it drops the row, the projections do not run, so
-`SELECT 1 / 0 WHERE FALSE` returns no rows and no error. PostgreSQL reports the division by zero there.
+The condition can hold a subquery. When it drops the row, the projections do not run. A division by zero
+over constants does not depend on that, so `SELECT 1 / 0 WHERE FALSE` fails with `CADB0400`, as it does in
+PostgreSQL. See [Errors that do not depend on the rows](data-types.md#errors-that-do-not-depend-on-the-rows).
 
 This form runs as a query over one row, so its plan is a `function-scan` of `*single_row*`, and
 `EXPLAIN (ANALYZE)` works on it. It works as an `INSERT ... SELECT` or a `CREATE TABLE AS` source, and

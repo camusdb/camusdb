@@ -701,8 +701,35 @@ check does not read such a column as `string`, even when it comes from a real `s
 checked when it runs: `length(v)` with a number fails for the first row. The check never guesses a type, so it does
 not refuse a correct statement.
 
-A value error is not a statement mistake, so it still needs a row: `SELECT 1 / 0 FROM t WHERE FALSE` returns
-no rows.
+#### Division by zero
+
+A division by zero whose operands are both constant is a statement mistake too, so it fails with `CADB0400`
+before any row is read. `SELECT 1 / 0 FROM t WHERE FALSE`, `1 / (1 - 1)` and `1.5 / 0` all fail, in every
+position above. This follows PostgreSQL.
+
+A constant condition removes a branch, so these do not fail: `CASE WHEN FALSE THEN 1 / 0 ELSE 1 END`,
+`IF(true, 1, 1 / 0)`, `FALSE AND 1 / 0 = 1` and `TRUE OR 1 / 0 = 1`. The order counts, as it does when a row is
+evaluated: `1 / 0 = 1 AND FALSE` fails. A subquery has its own check, so `CASE WHEN FALSE THEN (SELECT 1 / 0 FROM t)
+ELSE 1 END` fails, which is [a difference from PostgreSQL](postgresql-differences.md#statement-checks).
+
+A condition that reads a row removes nothing. So `CASE WHEN v > 0 THEN 1 / 0 ELSE 1 END` fails, even on a table
+where no row selects that branch. To guard a division, read the divisor from the row:
+`CASE WHEN v <> 0 THEN 1 / v END` runs.
+
+These are not constant, so they need a row: a column (`v / 0`, `1 / v`), a parameter (`1 / @p`), a subquery
+(`1 / (SELECT 0 FROM t)`), and a function call (`length('a') / 0`, `mod(1, 0)`, `1 % 0`, because the parser
+builds `%` as a call of `mod`).
+
+`CREATE VIEW` and a `CHECK` constraint accept a constant division. The statement that reads the view, or writes
+to the table, fails. `CREATE TABLE AS SELECT` and `CREATE MATERIALIZED VIEW` run their `SELECT`, so they fail at
+once. `EXISTS` discards its select list and its `ORDER BY`, so `EXISTS (SELECT 1 / 0 FROM empty)` does not fail,
+unless the select list holds an aggregate. On a table with rows that form still fails, because the select list
+is evaluated for the first row.
+
+`COALESCE(1, 1 / 0)` does not fail before the rows are read, because the first argument decides the result. For a
+row it still fails, because a function call evaluates all its arguments.
+
+Every other value error still needs a row: `SELECT 9223372036854775807 + 1 FROM t WHERE FALSE` returns no rows.
 
 **A condition must be a `bool`.** `WHERE`, `HAVING` and `ON` accept `bool` or NULL only: `TRUE` keeps the row,
 and `FALSE` and NULL drop it. A number is not a truth value, so `WHERE 1` and `UPDATE t SET a = 0 WHERE 1` fail
@@ -771,7 +798,9 @@ argument.
 `CASE WHEN condition THEN true_result ELSE else_result END`:
 
 - A `condition` that is not a boolean fails with `CADB0400`.
-- Only the selected result is evaluated, so `IF(true, 1, 1 / 0)` returns `1`.
+- Only the selected result is evaluated, so `IF(true, 1, 1 / 0)` returns `1`. A condition that reads a row does
+  not remove a result before the statement runs, so `IF(v > 0, 1 / 0, 1)` fails. See
+  [Division by zero](#division-by-zero).
 - The two results follow the rule above.
 
 `IF` is a reserved word, so `IF NOT EXISTS` and `IF EXISTS` in DDL do not change. `EXPLAIN` shows

@@ -346,7 +346,7 @@ internal abstract class SQLExecutorBaseCreator
             long l = left.LongValue, r = right.LongValue;
 
             if (op == NodeType.ExprDiv && r == 0)
-                throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Division by zero");
+                throw new CamusDBException(CamusDBErrorCodes.InvalidInput, NumericMath.DivisionByZeroMessage);
 
             // Checked: a result outside the int64 range is an error, never a wrapped value.
             long integerResult = op switch
@@ -366,7 +366,7 @@ internal abstract class SQLExecutorBaseCreator
         double dr = right.Type == ColumnType.Float32 ? right.FloatValue : MixedNumericComparison.ToDouble(right);
 
         if (op == NodeType.ExprDiv && dr == 0.0)
-            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Division by zero");
+            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, NumericMath.DivisionByZeroMessage);
 
         // Checked: an overflow or an underflow from finite operands is an error, never ±infinity or 0.
         double result = op switch

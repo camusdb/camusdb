@@ -123,14 +123,21 @@ internal static class RegressionTestPrinter
 /// </summary>
 internal static class FindingWriter
 {
+    /// <summary>
+    /// UTF-8 that writes U+FFFD for an unpaired surrogate. The default of <see cref="File.WriteAllText(string, string?)"/>
+    /// throws on one, and a message cut at a fixed length can split a pair. A throw here ends the campaign
+    /// and loses the finding, its seed and its round.
+    /// </summary>
+    public static readonly UTF8Encoding Utf8 = new(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: false);
+
     public static string Write(string directory, Finding finding, ISqlPrinter? printer = null, bool original = false)
     {
         printer ??= CamusSqlPrinter.Instance;
         Directory.CreateDirectory(directory);
         string className = RegressionTestPrinter.ClassName(finding, original);
 
-        File.WriteAllText(Path.Combine(directory, className + ".cs"), RegressionTestPrinter.Print(finding, printer, original));
-        File.WriteAllText(Path.Combine(directory, className + ".md"), Report(finding, printer, original));
+        File.WriteAllText(Path.Combine(directory, className + ".cs"), RegressionTestPrinter.Print(finding, printer, original), Utf8);
+        File.WriteAllText(Path.Combine(directory, className + ".md"), Report(finding, printer, original), Utf8);
         return Path.Combine(directory, className + ".cs");
     }
 

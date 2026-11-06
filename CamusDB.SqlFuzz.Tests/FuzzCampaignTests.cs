@@ -9,6 +9,7 @@ using NUnit.Framework;
 
 using CamusDB.SqlFuzz.Tests.Campaign;
 using CamusDB.SqlFuzz.Tests.Oracles;
+using CamusDB.SqlFuzz.Tests.Shrinking;
 
 namespace CamusDB.SqlFuzz.Tests;
 
@@ -59,7 +60,7 @@ internal sealed class FuzzCampaignTests
 
         TestContext.Progress.WriteLine(result.Report);
         Directory.CreateDirectory(settings.OutputDirectory);
-        await File.WriteAllTextAsync(Path.Combine(settings.OutputDirectory, $"summary-{FuzzSettings.OracleName(kind)}.txt"), result.Report);
+        await File.WriteAllTextAsync(Path.Combine(settings.OutputDirectory, $"summary-{FuzzSettings.OracleName(kind)}.txt"), result.Report, FindingWriter.Utf8);
 
         Assert.That(result.Stats.Checks, Is.GreaterThan(0), "the campaign ran no check");
         Assert.That(result.DistinctSignatures, Is.Zero, result.Report);

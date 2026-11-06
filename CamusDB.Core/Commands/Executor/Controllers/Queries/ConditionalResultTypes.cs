@@ -88,7 +88,7 @@ internal static class ConditionalResultTypes
     internal static bool IsIf(NodeAst node) =>
         node.nodeType == NodeType.ExprCase && string.Equals(node.yytext, "IF", StringComparison.Ordinal);
 
-    private static bool IsCoalesceCall(NodeAst node) =>
+    internal static bool IsCoalesceCall(NodeAst node) =>
         node.nodeType == NodeType.ExprFuncCall
         && node.leftAst?.yytext is { } name
         && (name.Equals("coalesce", StringComparison.OrdinalIgnoreCase)
