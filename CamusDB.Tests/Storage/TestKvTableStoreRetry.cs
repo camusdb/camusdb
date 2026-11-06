@@ -109,14 +109,14 @@ public sealed class TestKvTableStoreRetry
         }
 
         // ---- intercepted: single-key get ----
-        public override Task<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> LocateAndTryGetValue(
+        public override ValueTask<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> LocateAndTryGetValue(
             HLCTimestamp txId, string key, long revision, HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken ct,
             string coordinatorKey = "", TransactionOperationId operationId = default, KeyValueReadMode readMode = KeyValueReadMode.Default)
         {
             if (InjectGetValueFaults-- > 0)
-                return Task.FromResult<(KeyValueResponseType, ReadOnlyKeyValueEntry?)>((KeyValueResponseType.MustRetry, null));
+                return ValueTask.FromResult<(KeyValueResponseType, ReadOnlyKeyValueEntry?)>((KeyValueResponseType.MustRetry, null));
             if (InjectGetValueTerminalFaults-- > 0)
-                return Task.FromResult<(KeyValueResponseType, ReadOnlyKeyValueEntry?)>((GetValueTerminalType, null));
+                return ValueTask.FromResult<(KeyValueResponseType, ReadOnlyKeyValueEntry?)>((GetValueTerminalType, null));
             return inner.LocateAndTryGetValue(txId, key, revision, readTimestamp, durability, ct, coordinatorKey, operationId, readMode);
         }
 
