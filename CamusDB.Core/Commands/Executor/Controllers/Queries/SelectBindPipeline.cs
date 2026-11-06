@@ -74,8 +74,9 @@ internal sealed class SelectBindPipeline
     /// the binder gives it: an expanded view's body, and so every subquery in it, runs as the view's
     /// owner, and a hand-written derived table runs as the caller.
     /// </summary>
-    /// <param name="isExistsBody">True when this SELECT is the body of an uncorrelated EXISTS, which
-    /// discards its select list. See <see cref="ConstantDivisionCheck.CheckSelect"/>.</param>
+    /// <param name="isExistsBody">True when this SELECT is the body of an uncorrelated EXISTS. When
+    /// <see cref="ExistsBody"/> discards its output, only the mistakes in that output are checked, and
+    /// nothing in it runs. That includes its subqueries, which the stages below would run.</param>
     public async ValueTask<SelectBindResult> BindAsync(
         DatabaseDescriptor database,
         SelectQuery selectQuery,
@@ -83,6 +84,14 @@ internal sealed class SelectBindPipeline
         bool isExistsBody = false)
     {
         NestedSelectBinder nested = new(this, ticket);
+
+        if (isExistsBody && ExistsBody.Classify(selectQuery, ticket.Parameters) == ExistsBodyForm.OutputDiscarded)
+        {
+            if (ExistsBody.OutputNeedsCheck(selectQuery))
+                await queryBinder.CheckDiscardedOutputAsync(database, selectQuery, [], []).ConfigureAwait(false);
+
+            selectQuery = ExistsBody.DiscardOutput(selectQuery);
+        }
 
         // The next two stages replace subqueries with literals, and a subquery is not a constant.
         SelectQuery asWritten = selectQuery;
@@ -97,7 +106,7 @@ internal sealed class SelectBindPipeline
 
         BoundSelectQuery boundQuery = await queryBinder.BindAsync(database, selectQuery, nested).ConfigureAwait(false);
 
-        ConstantDivisionCheck.CheckSelect(asWritten, isExistsBody);
+        ConstantDivisionCheck.CheckSelect(asWritten);
 
         (selectQuery, ExistsSubqueryRegistry? existsRegistry) = await existsSubqueryPreparer
             .PrepareAsync(

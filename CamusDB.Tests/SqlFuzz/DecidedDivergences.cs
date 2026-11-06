@@ -42,6 +42,9 @@ public sealed record DecidedDivergence(
 /// </summary>
 public static class DecidedDivergences
 {
+    private const string CorrelatedBodyMustRun =
+        "The evaluator of a correlated EXISTS reads only FROM and WHERE, once for each outer row. These clauses change the number of rows, so they need the whole body to run for each outer row. An error is better than the wrong answer that ignoring them gave.";
+
     private static readonly string[] NoSetup = [];
 
     private static readonly string[] RowTable =
@@ -198,6 +201,26 @@ public static class DecidedDivergences
             "SELECT length(v) FROM em",
             "no rows", "function length(bigint) does not exist",
             "Functions have no signature table. The name and the argument count are checked at bind time, and each function checks its argument types when it runs."),
+
+        new("A function argument type in a discarded EXISTS output is never checked", RowTable,
+            "SELECT id FROM d WHERE EXISTS (SELECT length(v) FROM d) ORDER BY id",
+            "1", "function length(bigint) does not exist",
+            "Functions have no signature table, so only a call shows a wrong argument type, and EXISTS does not evaluate its output."),
+
+        new("A correlated EXISTS with an aggregate is refused", RowTable,
+            "SELECT id FROM d o WHERE EXISTS (SELECT COUNT(*) FROM d i WHERE i.id = o.id + 100) ORDER BY id",
+            CamusDBErrorCodes.FeatureNotSupported, "1",
+            CorrelatedBodyMustRun),
+
+        new("A correlated EXISTS with HAVING is refused", RowTable,
+            "SELECT id FROM d o WHERE EXISTS (SELECT COUNT(*) FROM d i WHERE i.id = o.id HAVING COUNT(*) > 5) ORDER BY id",
+            CamusDBErrorCodes.FeatureNotSupported, "no rows",
+            CorrelatedBodyMustRun),
+
+        new("A correlated EXISTS with OFFSET is refused", RowTable,
+            "SELECT id FROM d o WHERE EXISTS (SELECT 1 FROM d i WHERE i.id = o.id OFFSET 1) ORDER BY id",
+            CamusDBErrorCodes.FeatureNotSupported, "no rows",
+            CorrelatedBodyMustRun),
 
         new("A derived string column is checked when a row reaches the operator", EmptyTable,
             "SELECT d.id FROM (SELECT id, s FROM em) AS d WHERE d.id = d.s",

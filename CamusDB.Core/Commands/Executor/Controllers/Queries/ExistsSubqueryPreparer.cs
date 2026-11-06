@@ -119,7 +119,7 @@ internal sealed class ExistsSubqueryPreparer
 
             SelectQuery innerQuery = selectQueryCreator.CreateSelectQuery(expr.leftAst);
 
-            if (!ExistsSubqueryAnalyzer.IsCorrelated(innerQuery))
+            if (!ExistsSubqueryAnalyzer.ExistsBodyReadsOuterRow(innerQuery))
             {
                 bool exists = await existsExecutor.ExecuteUncorrelatedAsync(
                     database,
@@ -131,12 +131,27 @@ internal sealed class ExistsSubqueryPreparer
                 return ColumnValueAstBuilder.FromColumnValue(ColumnValue.FromBool(exists));
             }
 
+            // The correlated evaluator reads only FROM and WHERE, so it cannot run a body that needs
+            // more. It once ignored those clauses, which gave a wrong answer with no error.
+            ExistsBodyForm form = ExistsBody.Classify(innerQuery, ticket.Parameters);
+
+            if (form == ExistsBodyForm.MustRun)
+            {
+                throw new CamusDBException(
+                    CamusDBErrorCodes.FeatureNotSupported,
+                    "A correlated EXISTS subquery with an aggregate, HAVING, OFFSET or a LIMIT that is not a positive constant or zero is not supported");
+            }
+
             PreparedExistsSubquery prepared = await PrepareCorrelatedAsync(
                 database,
                 innerQuery,
+                form,
                 outerTableSources,
                 outerDerivedSources,
                 context.Nested).ConfigureAwait(false);
+
+            if (form == ExistsBodyForm.NoRows)
+                return ColumnValueAstBuilder.FromColumnValue(ColumnValue.FromBool(false));
 
             NodeAst correlatedNode = new(
                 NodeType.ExprExistsCorrelated,
@@ -207,14 +222,22 @@ internal sealed class ExistsSubqueryPreparer
     private async Task<PreparedExistsSubquery> PrepareCorrelatedAsync(
         DatabaseDescriptor database,
         SelectQuery innerQuery,
+        ExistsBodyForm form,
         IReadOnlyList<BoundTableSource> outerTableSources,
         IReadOnlyList<BoundDerivedTableSource> outerDerivedSources,
         NestedSelectBinder nested)
     {
-        BoundSelectQuery innerBound = await queryBinder.BindSubqueryAsync(database, innerQuery, nested).ConfigureAwait(false);
+        // The output can read the outer row, so it is not part of the shell and has its own check.
+        SelectQuery shell = ExistsBody.DiscardOutput(innerQuery);
 
-        // This shell skips the pipeline, so the check of its stage runs here.
-        ConstantDivisionCheck.CheckSelect(innerQuery, isExistsBody: true);
+        BoundSelectQuery innerBound = await queryBinder.BindSubqueryAsync(database, shell, nested).ConfigureAwait(false);
+
+        if (ExistsBody.OutputNeedsCheck(innerQuery))
+            await queryBinder.CheckDiscardedOutputAsync(database, innerQuery, outerTableSources, outerDerivedSources).ConfigureAwait(false);
+
+        // This shell skips the pipeline, so the check of its stage runs here. PostgreSQL keeps the whole
+        // body under LIMIT 0, so a constant division in its output fails there.
+        ConstantDivisionCheck.CheckSelect(form == ExistsBodyForm.NoRows ? innerQuery : shell);
 
         List<BoundTableSource> combinedTableSources = new(innerBound.Sources.Count + outerTableSources.Count);
         combinedTableSources.AddRange(innerBound.Sources);

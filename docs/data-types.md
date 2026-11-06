@@ -758,9 +758,9 @@ builds `%` as a call of `mod`).
 
 `CREATE VIEW` and a `CHECK` constraint accept a constant division. The statement that reads the view, or writes
 to the table, fails. `CREATE TABLE AS SELECT` and `CREATE MATERIALIZED VIEW` run their `SELECT`, so they fail at
-once. `EXISTS` discards its select list and its `ORDER BY`, so `EXISTS (SELECT 1 / 0 FROM empty)` does not fail,
-unless the select list holds an aggregate. On a table with rows that form still fails, because the select list
-is evaluated for the first row.
+once. `EXISTS` discards its select list, `GROUP BY`, `DISTINCT` and `ORDER BY`, so `EXISTS (SELECT 1 / 0 FROM t)`
+does not fail, with rows or with no rows. A select list with an aggregate, `HAVING`, `OFFSET` and `LIMIT 0` keep the
+whole body, so `EXISTS (SELECT 1 / 0 FROM t LIMIT 0)` fails.
 
 `COALESCE(1, 1 / 0)` does not fail before the rows are read, because the first argument decides the result. For a
 row it still fails, because a function call evaluates all its arguments.

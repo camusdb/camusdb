@@ -84,6 +84,17 @@ differences that stay. `em` is an empty table.
 | `SELECT CAST(70000 AS SMALLINT) FROM em` | No rows | `smallint out of range` | The same reason. |
 | `UPDATE em SET small = 70000 WHERE FALSE` | No row written | `smallint out of range` | The declared range is a write rule, so it applies to a row that the statement writes. |
 | `SELECT length(v) FROM em` | No rows, and `CADB0400` when a row reaches it | `function length(bigint) does not exist` | Functions have no signature table. The name and the argument count are checked at bind time, and each function checks its argument types when it runs. |
+| `SELECT id FROM d WHERE EXISTS (SELECT length(v) FROM d)` | Every row | `function length(bigint) does not exist` | Functions have no signature table, so only a call shows a wrong argument type, and `EXISTS` does not evaluate its output. |
+
+## EXISTS
+
+`EXISTS` does not evaluate a select list, `GROUP BY`, `DISTINCT` or `ORDER BY`, as in PostgreSQL. An unknown name or a known type mistake in those clauses still fails. An aggregate, `HAVING`, `OFFSET` and `LIMIT 0` can change the number of rows, so they keep their meaning. A correlated `EXISTS` reads the outer row, and it runs only its `FROM` and `WHERE` for each outer row, so these forms differ.
+
+| Statement | CamusDB | PostgreSQL | Why |
+|---|---|---|---|
+| `SELECT id FROM d o WHERE EXISTS (SELECT COUNT(*) FROM d i WHERE i.id = o.id + 100)` | `CADB0533` | Every row | The aggregate needs the whole body to run for each outer row. An error is better than a wrong answer. |
+| `SELECT id FROM d o WHERE EXISTS (SELECT COUNT(*) FROM d i WHERE i.id = o.id HAVING COUNT(*) > 5)` | `CADB0533` | No rows | The same reason. |
+| `SELECT id FROM d o WHERE EXISTS (SELECT 1 FROM d i WHERE i.id = o.id OFFSET 1)` | `CADB0533` | No rows | The same reason. |
 
 ## Aggregates
 

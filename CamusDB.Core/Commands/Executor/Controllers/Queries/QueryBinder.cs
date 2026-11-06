@@ -23,6 +23,8 @@ internal sealed class QueryBinder
 {
     private readonly TableOpener tableOpener;
 
+    private readonly SelectQueryCreator selectQueryCreator = new();
+
     /// <summary>
     /// Resolves a view owner (name plus immutable id) to the principal its body runs as, or null when
     /// that owner can no longer be established. Null on an engine built without authentication.
@@ -129,6 +131,143 @@ internal sealed class QueryBinder
         ConditionalResultTypes.CheckQuery(bound);
 
         return bound;
+    }
+
+    /// <summary>
+    /// Finds the statement mistakes in the output of an EXISTS body whose output
+    /// <see cref="ExistsBody"/> discards. The same checks run as for any SELECT, except that a select
+    /// list needs only grouped columns, not the exact group key: PostgreSQL accepts
+    /// <c>EXISTS (SELECT v + 1 FROM r GROUP BY v)</c>.
+    ///
+    /// <para>This reads no row and evaluates nothing, and a subquery in the output does not run. That is
+    /// why it binds with no nested binder, as CREATE VIEW does, and walks the subqueries itself.</para>
+    /// </summary>
+    /// <param name="query">The body as the statement wrote it.</param>
+    /// <param name="outerSources">The sources of the outer query, which a correlated body can read.</param>
+    /// <param name="outerDerivedSources">The derived tables of the outer query.</param>
+    internal async Task CheckDiscardedOutputAsync(
+        DatabaseDescriptor database,
+        SelectQuery query,
+        IReadOnlyList<BoundTableSource> outerSources,
+        IReadOnlyList<BoundDerivedTableSource> outerDerivedSources)
+    {
+        List<BoundTableSource> sources = [];
+        List<BoundDerivedTableSource> derivedSources = [];
+        HashSet<string> aliases = new(StringComparer.OrdinalIgnoreCase);
+
+        await CollectBoundSourcesAsync(database, query.Source, sources, derivedSources, aliases, nested: null).ConfigureAwait(false);
+
+        int nestedSourceCount = sources.Count;
+        int nestedDerivedCount = derivedSources.Count;
+
+        sources.AddRange(outerSources);
+        derivedSources.AddRange(outerDerivedSources);
+
+        // An uncorrelated body has no outer source here, so it reads its own row keys as usual.
+        QueryRowNameResolver rowNames = outerSources.Count + outerDerivedSources.Count == 0
+            ? new QueryRowNameResolver(sources, derivedSources)
+            : new QueryRowNameResolver(sources, derivedSources, nestedSourceCount, nestedDerivedCount);
+
+        ValidateQuery(query, rowNames, outputIsDiscarded: true);
+        ConditionalResultTypes.CheckQuery(new BoundSelectQuery(query, sources, rowNames, derivedSources));
+
+        await CheckSubqueriesOfOutputAsync(database, query).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Binds each subquery in the output of <paramref name="query"/>. The subquery rewrite would run them,
+    /// so without this walk a discarded subquery could hold an unknown column with no error.
+    /// </summary>
+    private async Task CheckSubqueriesOfOutputAsync(DatabaseDescriptor database, SelectQuery query)
+    {
+        foreach (ProjectionItem projection in query.Projections)
+            await CheckSubqueriesAsync(database, projection.Expression).ConfigureAwait(false);
+
+        if (query.OrderBy is not null)
+            foreach (OrderByItem item in query.OrderBy)
+                await CheckSubqueriesAsync(database, item.Expression).ConfigureAwait(false);
+    }
+
+    private async Task CheckSubqueriesAsync(DatabaseDescriptor database, NodeAst expression)
+    {
+        // An async frame is large, and subqueries can nest. See StatementDepthGuard.HasStackHeadroom.
+        if (!StatementDepthGuard.HasStackHeadroom())
+        {
+            await Task.Run(() => CheckSubqueriesAsync(database, expression)).ConfigureAwait(false);
+            return;
+        }
+
+        Stack<NodeAst> pending = new();
+        pending.Push(expression);
+
+        while (pending.TryPop(out NodeAst? node))
+        {
+            if (node.nodeType == NodeType.Select)
+            {
+                SelectQuery subquery = selectQueryCreator.CreateSelectQuery(node);
+                await BindAsync(database, subquery, nested: null).ConfigureAwait(false);
+                await CheckSubqueriesOfOutputAsync(database, subquery).ConfigureAwait(false);
+                continue;
+            }
+
+            foreach (NodeAst? child in (ReadOnlySpan<NodeAst?>)[
+                node.leftAst, node.rightAst,
+                node.extendedOne, node.extendedTwo, node.extendedThree, node.extendedFour,
+                node.extendedFive, node.extendedSix, node.extendedSeven])
+            {
+                if (child is not null)
+                    pending.Push(child);
+            }
+        }
+    }
+
+    /// <summary>
+    /// The grouping rule of a discarded select list: every column it reads must be grouped, or the whole
+    /// expression must be a group key.
+    /// </summary>
+    private static void ValidateDiscardedGrouping(SelectQuery query, QueryRowNameResolver rowNames)
+    {
+        if (query.GroupBy is not { Count: > 0 } groupBy)
+            return;
+
+        foreach (ProjectionItem projection in query.Projections)
+        {
+            NodeAst expression = QueryExpressionClassifier.UnwrapAlias(projection.Expression);
+
+            if (expression.nodeType == NodeType.ExprAllFields)
+                throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Non-aggregate projection must appear in GROUP BY");
+
+            if (IsExpressionListedInGroupBy(expression, groupBy))
+                continue;
+
+            List<NodeAst> columns = [];
+            QueryExpressionClassifier.CollectNonAggregateColumnRefs(expression, columns);
+
+            foreach (NodeAst column in columns)
+            {
+                if (!IsColumnGrouped(column, groupBy, rowNames))
+                {
+                    throw new CamusDBException(
+                        CamusDBErrorCodes.InvalidInput,
+                        $"Column '{column.yytext}' must appear in the GROUP BY clause or be used in an aggregate function");
+                }
+            }
+        }
+    }
+
+    /// <summary>Compares resolved names, because <c>v</c> and <c>r.v</c> can be one column.</summary>
+    private static bool IsColumnGrouped(NodeAst column, IReadOnlyList<NodeAst> groupBy, QueryRowNameResolver rowNames)
+    {
+        string key = rowNames.ResolveRowLookupKey(column.yytext!);
+
+        foreach (NodeAst groupExpression in groupBy)
+        {
+            if (groupExpression.nodeType == NodeType.Identifier
+                && string.Equals(rowNames.ResolveRowLookupKey(groupExpression.yytext!), key, StringComparison.OrdinalIgnoreCase))
+                return true;
+        }
+
+        return false;
     }
 
     private async Task CollectBoundSourcesAsync(
@@ -490,7 +629,7 @@ internal sealed class QueryBinder
     /// precondition for freezing that resolver when the binding is shared across concurrent
     /// executions (<see cref="QueryRowNameResolver.FreezeForSharedReuse"/>).</para>
     /// </summary>
-    private static void ValidateQuery(SelectQuery query, QueryRowNameResolver rowNames)
+    private static void ValidateQuery(SelectQuery query, QueryRowNameResolver rowNames, bool outputIsDiscarded = false)
     {
         foreach (ProjectionItem projection in query.Projections)
         {
@@ -526,7 +665,11 @@ internal sealed class QueryBinder
         QueryPostAggregateScopeValidator.ValidateHaving(query, rowNames);
 
         ValidateDistinct(query);
-        ValidateProjectionAndGrouping(query);
+
+        if (outputIsDiscarded)
+            ValidateDiscardedGrouping(query, rowNames);
+        else
+            ValidateProjectionAndGrouping(query);
     }
 
     private static void ValidateDistinct(SelectQuery query)
