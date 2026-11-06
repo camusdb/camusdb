@@ -188,6 +188,34 @@ internal sealed class TestHarnessRules
         Assert.That(result.Setup, Has.Count.EqualTo(1));
     }
 
+    /// <summary>
+    /// A detail text cut at a fixed length can end in half of a surrogate pair. The writer must keep the
+    /// finding: a throw there ended a campaign and lost the seed, the round and the statements.
+    /// </summary>
+    [Test]
+    public void AnUnpairedSurrogateInAFindingDoesNotStopTheWriter()
+    {
+        TableDef table = new("t0", [new ColumnDef("c0", FuzzType.Int64, true, true), new ColumnDef("c1", FuzzType.Int64, false, false)]);
+        Finding finding = new(OracleKind.Tlp, "tlp:where:mismatch", "cut here: \uD83D", 77, 0, 1,
+            [SetupStatement.Of(new CreateTableStmt(table))],
+            new TlpCheck(TlpVariant.Where, new TableRef("t0", "a0"), [new SelectItem(new ColumnExpr("a0", "c0", FuzzType.Int64))],
+                new BinaryExpr(BinaryOp.Gt, new ColumnExpr("a0", "c1", FuzzType.Int64), new LiteralExpr(FuzzValue.Of(1L)), FuzzType.Bool)),
+            "CamusDB");
+
+        string directory = Path.Combine(Path.GetTempPath(), "sqlfuzz-writer-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            string test = FindingWriter.Write(directory, finding, original: true);
+
+            Assert.That(File.ReadAllText(test), Does.Contain("cut here: �"));
+            Assert.That(File.ReadAllText(Path.ChangeExtension(test, ".md")), Does.Contain("base seed: 77"));
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
     // -- Read history ---------------------------------------------------------------------------
 
     /// <summary>

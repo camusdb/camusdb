@@ -213,6 +213,9 @@ internal sealed class ExistsSubqueryPreparer
     {
         BoundSelectQuery innerBound = await queryBinder.BindSubqueryAsync(database, innerQuery, nested).ConfigureAwait(false);
 
+        // This shell skips the pipeline, so the check of its stage runs here.
+        ConstantDivisionCheck.CheckSelect(innerQuery, isExistsBody: true);
+
         List<BoundTableSource> combinedTableSources = new(innerBound.Sources.Count + outerTableSources.Count);
         combinedTableSources.AddRange(innerBound.Sources);
         combinedTableSources.AddRange(outerTableSources);

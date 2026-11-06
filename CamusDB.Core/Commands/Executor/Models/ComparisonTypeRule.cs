@@ -42,8 +42,11 @@ namespace CamusDB.Core.CommandsExecutor.Models;
 /// constant with no rule to the evaluator instead of building an index key from it. See
 /// <c>docs/data-types.md</c>, "Comparing values of different types".</para>
 ///
-/// <para>The check runs when values are evaluated, not when the statement is bound, so a predicate
-/// over an empty table, or one whose operand is NULL, raises no error.</para>
+/// <para>The check runs twice. When a statement is bound,
+/// <see cref="Controllers.Queries.StaticOperandRules"/> applies it to each pair whose types the statement
+/// shows, so such a pair fails over an empty table too. When values are evaluated, it applies to the rest:
+/// a parameter or a function result has a type that only its value shows, and a NULL value raises no
+/// error.</para>
 /// </summary>
 public static class ComparisonTypeRule
 {
@@ -88,6 +91,18 @@ public static class ComparisonTypeRule
         left == right || left == ColumnType.Null || right == ColumnType.Null;
 
     /// <summary>
+    /// True when two static types can be compared. It is <see cref="HasRule(ColumnType, ColumnType)"/>,
+    /// plus the element type check for two arrays, as for two values.
+    /// </summary>
+    public static bool HasRule(ExpressionType left, ExpressionType right)
+    {
+        if (left.Type == ColumnType.Array && right.Type == ColumnType.Array)
+            return ArrayElementTypesAgree(left.ElementType, right.ElementType);
+
+        return HasRule(left.Type, right.Type);
+    }
+
+    /// <summary>
     /// Throws the error for a pair with no rule, naming <paramref name="op"/> (<c>=</c>, <c>IN</c>,
     /// <c>CASE</c>, a function name) and both types. Does nothing for a pair that has one.
     /// </summary>
@@ -117,6 +132,10 @@ public static class ComparisonTypeRule
     /// </summary>
     public static CamusDBException NoRule(string op, ColumnValue left, ColumnValue right) =>
         new(CamusDBErrorCodes.InvalidInput, $"No matching signature for operator {op} for argument types: {TypeName(left)}, {TypeName(right)}");
+
+    /// <summary><see cref="NoRule(string, ColumnValue, ColumnValue)"/> for two static types, with the same text.</summary>
+    public static CamusDBException NoRule(string op, ExpressionType left, ExpressionType right) =>
+        new(CamusDBErrorCodes.InvalidInput, $"No matching signature for operator {op} for argument types: {left}, {right}");
 
     private static string TypeName(ColumnValue value) =>
         value.Type == ColumnType.Array ? $"ARRAY<{value.ArrayElementType}>" : value.Type.ToString();

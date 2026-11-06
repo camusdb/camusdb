@@ -48,7 +48,7 @@ internal sealed class QueryFilterer
             return new ValueTask<bool>(true);
 
         if (!PredicateNeedsAsync(filter))
-            return new ValueTask<bool>(ToPredicateResult(EvaluatePredicate(filter, row, plan.Ticket)));
+            return new ValueTask<bool>(ToPredicateResult(EvaluatePredicate(filter, row, plan.Ticket), "WHERE"));
 
         return MeetWhereAsyncCore(filter, row, plan.Ticket, plan.Database);
     }
@@ -59,7 +59,7 @@ internal sealed class QueryFilterer
         QueryTicket ticket)
     {
         ColumnValue evaluatedExpr = await EvaluateHavingAsync(having, row, ticket).ConfigureAwait(false);
-        return ToPredicateResult(evaluatedExpr);
+        return ToPredicateResult(evaluatedExpr, "HAVING");
     }
 
     /// <summary>
@@ -74,7 +74,7 @@ internal sealed class QueryFilterer
         DatabaseDescriptor database)
     {
         if (!PredicateNeedsAsync(where))
-            return new ValueTask<bool>(ToPredicateResult(EvaluatePredicate(where, row, ticket)));
+            return new ValueTask<bool>(ToPredicateResult(EvaluatePredicate(where, row, ticket), "WHERE or ON"));
 
         return MeetWhereAsyncCore(where, row, ticket, database);
     }
@@ -87,7 +87,7 @@ internal sealed class QueryFilterer
     {
         ColumnValue evaluatedExpr = await EvaluatePredicateAsync(where, row, ticket, database).ConfigureAwait(false);
 
-        return ToPredicateResult(evaluatedExpr);
+        return ToPredicateResult(evaluatedExpr, "WHERE or ON");
     }
 
     /// <summary>
@@ -431,13 +431,20 @@ internal sealed class QueryFilterer
         return ColumnValue.FromBool(!value.BoolValue);
     }
 
-    private static bool ToPredicateResult(ColumnValue evaluatedExpr) =>
+    /// <summary>
+    /// Decides whether a row passes a condition: TRUE keeps it, FALSE and NULL drop it. Any other type is
+    /// an error and never a truth value, as in PostgreSQL, because <c>UPDATE t SET a = 0 WHERE 1</c> would
+    /// otherwise write every row, and <c>WHERE 'x'</c> would return nothing with no error. The binding
+    /// refuses a condition whose type the statement shows
+    /// (<see cref="ConditionalResultTypes.CheckCondition"/>), so this check is for a condition whose type
+    /// only its value shows: a parameter or a function call.
+    /// </summary>
+    /// <param name="clause">The clause name the error uses.</param>
+    internal static bool ToPredicateResult(ColumnValue evaluatedExpr, string clause) =>
         evaluatedExpr.Type switch
         {
-            ColumnType.Null => false,
             ColumnType.Bool => evaluatedExpr.BoolValue,
-            ColumnType.Float64 => evaluatedExpr.FloatValue != 0,
-            ColumnType.Integer64 => evaluatedExpr.LongValue != 0,
-            _ => false,
+            ColumnType.Null => false,
+            _ => throw StaticOperandRules.ConditionNotBoolean(clause, evaluatedExpr.Type.ToString()),
         };
 }

@@ -299,11 +299,14 @@ internal sealed class SQLExecutorInsertCreator : SQLExecutorBaseCreator
             return;
         }
 
-        // A CASE, COALESCE, IFNULL or IF whose literal inputs have no common type fails even when
-        // the input that would fail is not the one returned. A VALUES expression has no columns, so
-        // its literals are all the check can see.
+        // The statement checks run on the whole expression, so a branch that does not run still fails:
+        // an unknown function, and a CASE, COALESCE, IFNULL or IF whose literal inputs have no common
+        // type. A VALUES expression has no columns, so its literals are all the check can see.
         if (node.leftAst is not null || node.rightAst is not null)
-            Queries.ConditionalResultTypes.Check(node, lookup: null, recorder: null);
+        {
+            Queries.ConditionalResultTypes.Check(node, lookup: null, recorder: null, allowAggregates: false);
+            Queries.ConstantDivisionCheck.Check(node);
+        }
 
         slots[filled++] = EvalExpr(node, EmptyRow, parameters);
     }

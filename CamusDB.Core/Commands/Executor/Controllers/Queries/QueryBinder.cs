@@ -78,8 +78,9 @@ internal sealed class QueryBinder
 
         BoundSelectQuery bound = new(query, sources, rowNames, derivedSources);
 
-        // CASE, COALESCE, IFNULL and IF get one result type here, before any row is read; a pair of
-        // inputs with no common type fails the statement even over an empty table.
+        // The statement checks run here, before any row is read, so an unknown function, a known type
+        // mismatch, a non-boolean condition, or a CASE, COALESCE, IFNULL or IF with no common type fails
+        // the statement over an empty table and under LIMIT 0 too.
         ConditionalResultTypes.CheckQuery(bound);
 
         return bound;
@@ -177,6 +178,10 @@ internal sealed class QueryBinder
                 if (derivedSource.Function is { } call)
                 {
                     TableFunction function = TableFunctionRegistry.Resolve(call.FunctionName, call.Arguments.Count);
+
+                    // The arguments run only when the source is read, and a LIMIT 0 reads nothing.
+                    foreach (NodeAst argument in call.Arguments)
+                        ConditionalResultTypes.Check(argument, lookup: null, recorder: null, allowAggregates: false);
 
                     List<DerivedColumnSchema> functionColumns = new(call.ColumnNames.Count);
                     if (function.OutputColumns is { } outputs)

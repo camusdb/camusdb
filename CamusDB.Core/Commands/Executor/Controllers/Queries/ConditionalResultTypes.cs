@@ -50,6 +50,13 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 ///
 /// <para>The walk does not enter a subquery. A subquery binds through the bind pipeline with its own
 /// sources, and its names would resolve against the wrong columns here.</para>
+///
+/// <para><b>The one bind-time walk.</b> <see cref="Check"/> visits every expression position of a
+/// statement once, so it also applies <see cref="StaticOperandRules"/> to each node: a function name
+/// and its argument count, and each operator whose operand types the statement shows. Each node
+/// receives the types of its operands from the visit of its children, so a long operator chain costs
+/// one pass and not one pass per level. A statement error therefore does not depend on the rows, a
+/// LIMIT, or a dead branch.</para>
 /// </summary>
 internal static class ConditionalResultTypes
 {
@@ -81,7 +88,7 @@ internal static class ConditionalResultTypes
     internal static bool IsIf(NodeAst node) =>
         node.nodeType == NodeType.ExprCase && string.Equals(node.yytext, "IF", StringComparison.Ordinal);
 
-    private static bool IsCoalesceCall(NodeAst node) =>
+    internal static bool IsCoalesceCall(NodeAst node) =>
         node.nodeType == NodeType.ExprFuncCall
         && node.leftAst?.yytext is { } name
         && (name.Equals("coalesce", StringComparison.OrdinalIgnoreCase)
@@ -91,8 +98,8 @@ internal static class ConditionalResultTypes
     // ── Bind time ────────────────────────────────────────────────────────────
 
     /// <summary>
-    /// Checks every conditional expression in a bound SELECT: its projections, WHERE, GROUP BY,
-    /// HAVING, ORDER BY and each JOIN ON. Records each known result type on
+    /// Checks every expression of a bound SELECT: its projections, WHERE, GROUP BY, HAVING, ORDER BY
+    /// and each JOIN ON. WHERE, HAVING and ON must also be boolean. Records each known result type on
     /// <see cref="BoundSelectQuery.RowNames"/>. In GROUP BY, HAVING and ORDER BY a name that is also
     /// an output alias is read as unknown, because there it may mean the alias. In the select list,
     /// WHERE and JOIN ON a name always means a column.
@@ -108,7 +115,7 @@ internal static class ConditionalResultTypes
             Check(projection.Expression, columns, recorder);
 
         if (query.Where is not null)
-            Check(query.Where.Expression, columns, recorder);
+            CheckCondition(query.Where.Expression, columns, recorder, "WHERE");
 
         CheckJoinPredicates(query.Source, columns, recorder);
 
@@ -117,7 +124,7 @@ internal static class ConditionalResultTypes
                 Check(expression, aliasAware, recorder);
 
         if (query.Having is not null)
-            Check(query.Having.Expression, aliasAware, recorder);
+            CheckCondition(query.Having.Expression, aliasAware, recorder, "HAVING");
 
         if (query.OrderBy is not null)
             foreach (OrderByItem item in query.OrderBy)
@@ -131,37 +138,121 @@ internal static class ConditionalResultTypes
 
         CheckJoinPredicates(join.Left, lookup, recorder);
         CheckJoinPredicates(join.Right, lookup, recorder);
-        Check(join.OnPredicate, lookup, recorder);
+        CheckCondition(join.OnPredicate, lookup, recorder, "ON");
     }
 
     /// <summary>
-    /// Checks every conditional expression in <paramref name="expression"/> and records each known
-    /// result type on <paramref name="recorder"/> when it is given. Throws
-    /// <see cref="CamusDBErrorCodes.InvalidInput"/> for the first one whose known inputs have no
-    /// common type.
+    /// Checks every node of <paramref name="expression"/>: <see cref="StaticOperandRules"/>, and the
+    /// result type of each conditional expression, which it records on <paramref name="recorder"/> when
+    /// that is given. Throws for the first node the statement alone shows to be wrong.
     /// </summary>
-    internal static void Check(NodeAst? expression, ColumnTypeLookup? lookup, QueryRowNameResolver? recorder)
+    /// <param name="expression">The expression, or null when the statement has none at this position.</param>
+    /// <param name="lookup">The column types of this scope, or null when the scope has no columns.</param>
+    /// <param name="recorder">Where a result type goes, or null when no binding holds it.</param>
+    /// <param name="allowAggregates">False where no aggregate can run (UPDATE, DELETE, VALUES). There an
+    /// aggregate name resolves as a scalar function, and fails as it does when a row reaches it.</param>
+    internal static void Check(NodeAst? expression, ColumnTypeLookup? lookup, QueryRowNameResolver? recorder, bool allowAggregates = true) =>
+        Visit(expression, lookup, recorder, allowAggregates);
+
+    /// <summary>
+    /// <see cref="Check"/> for the condition of a clause. The condition must also be a boolean or NULL,
+    /// so a known type of any other kind is <see cref="CamusDBErrorCodes.InvalidInput"/>. A condition
+    /// whose type only its value shows (a parameter, a function call) is checked per row
+    /// (<see cref="QueryFilterer.ToPredicateResult"/>).
+    /// </summary>
+    /// <param name="clause">The clause name an error uses: WHERE, HAVING or ON.</param>
+    internal static void CheckCondition(NodeAst? condition, ColumnTypeLookup? lookup, QueryRowNameResolver? recorder, string clause, bool allowAggregates = true)
     {
-        if (expression is null || IsSubquery(expression.nodeType))
-            return;
+        if (Visit(condition, lookup, recorder, allowAggregates) is { Type: not (ColumnType.Bool or ColumnType.Null) } type)
+            throw StaticOperandRules.ConditionNotBoolean(clause, type.ToString());
+    }
 
-        // The depth of a statement is capped right after parsing (StatementDepthGuard), so this
-        // recursion is bounded.
-        Check(expression.leftAst, lookup, recorder);
-        Check(expression.rightAst, lookup, recorder);
-        Check(expression.extendedOne, lookup, recorder);
-        Check(expression.extendedTwo, lookup, recorder);
-        Check(expression.extendedThree, lookup, recorder);
-        Check(expression.extendedFour, lookup, recorder);
-        Check(expression.extendedFive, lookup, recorder);
-        Check(expression.extendedSix, lookup, recorder);
-        Check(expression.extendedSeven, lookup, recorder);
+    /// <summary>
+    /// <see cref="Check"/> for a value that is written to <paramref name="column"/>. The value must also
+    /// have a type that the column accepts (<see cref="StaticOperandRules.RequireAssignable"/>).
+    /// </summary>
+    internal static void CheckAssignment(NodeAst value, TableColumnSchema column, ColumnTypeLookup? lookup)
+    {
+        if (Visit(value, lookup, recorder: null, allowAggregates: false) is { } type)
+            StaticOperandRules.RequireAssignable(value, type, column);
+    }
 
-        if (!IsConditional(expression))
-            return;
+    /// <summary>
+    /// The static type of each output column of <paramref name="bound"/>, for a statement that writes
+    /// them, or null when the select list does not line up with <paramref name="columns"/>. A
+    /// <c>SELECT *</c> reads each column through the lookup, so a derived column declared as the String
+    /// fallback is unknown here too. An entry is null when the statement does not show that type.
+    /// </summary>
+    internal static IReadOnlyList<ExpressionType?>? OutputTypes(BoundSelectQuery bound, IReadOnlyList<DerivedColumnSchema> columns)
+    {
+        IReadOnlyList<ProjectionItem> projections = bound.Query.Projections;
+        ColumnTypeLookup lookup = LookupFor(bound, excludeOutputAliases: false);
+        ExpressionType?[] types = new ExpressionType?[columns.Count];
 
-        if (Combine(expression, lookup, throwOnConflict: true, out _) is { } resultType)
-            recorder?.RecordConditionalResultType(expression, resultType);
+        if (projections is [{ Expression.nodeType: NodeType.ExprAllFields }])
+        {
+            for (int i = 0; i < types.Length; i++)
+                types[i] = lookup(columns[i].RowKey);
+
+            return types;
+        }
+
+        if (projections.Count != types.Length)
+            return null;
+
+        for (int i = 0; i < types.Length; i++)
+            types[i] = TypeOf(projections[i].Expression, lookup);
+
+        return types;
+    }
+
+    /// <summary>
+    /// Visits <paramref name="node"/> and its children, applies the rules with the types its children
+    /// returned, and returns its own static type, or null when the statement does not show it. The
+    /// depth of a statement is capped right after parsing (<see cref="StatementDepthGuard"/>), so this
+    /// recursion is bounded, and the rules live in other methods so that its frame stays small.
+    /// </summary>
+    private static ExpressionType? Visit(NodeAst? node, ColumnTypeLookup? lookup, QueryRowNameResolver? recorder, bool allowAggregates)
+    {
+        if (node is null)
+            return null;
+
+        if (IsSubquery(node.nodeType))
+            return FromOperands(node, null, null, lookup);
+
+        if (node.nodeType == NodeType.ExprAlias)
+            return Visit(node.leftAst, lookup, recorder, allowAggregates);
+
+        // A SELECT replaces each window call it allows with a result column when it is created, so one
+        // that remains sits where SQL allows none. Its function is not a scalar call, so the walk stops here.
+        if (node.nodeType == NodeType.ExprWindowCall)
+            throw SQLExecutorBaseCreator.UnevaluableExpression(NodeType.ExprWindowCall);
+
+        // The left child of a call is the function name, and the right child of a cast is the target
+        // type. Neither is an expression.
+        ExpressionType? left = node.nodeType == NodeType.ExprFuncCall ? null : Visit(node.leftAst, lookup, recorder, allowAggregates);
+        ExpressionType? right = node.nodeType == NodeType.ExprCast ? null : Visit(node.rightAst, lookup, recorder, allowAggregates);
+        ExpressionType? one = Visit(node.extendedOne, lookup, recorder, allowAggregates);
+        ExpressionType? two = Visit(node.extendedTwo, lookup, recorder, allowAggregates);
+
+        Visit(node.extendedThree, lookup, recorder, allowAggregates);
+        Visit(node.extendedFour, lookup, recorder, allowAggregates);
+        Visit(node.extendedFive, lookup, recorder, allowAggregates);
+        Visit(node.extendedSix, lookup, recorder, allowAggregates);
+        Visit(node.extendedSeven, lookup, recorder, allowAggregates);
+
+        StaticOperandRules.Check(node, left, right, one, two, lookup, allowAggregates);
+
+        if (!IsConditional(node))
+            return FromOperands(node, left, right, lookup);
+
+        ExpressionType? resultType = Combine(node, lookup, throwOnConflict: true, out bool complete);
+
+        if (resultType is { } known)
+            recorder?.RecordConditionalResultType(node, known);
+
+        // A nested conditional is not a literal, even when all its inputs are, as in GoogleSQL.
+        return complete && resultType is { } whole ? whole with { IsStringLiteral = false } : null;
     }
 
     /// <summary>
@@ -213,9 +304,15 @@ internal static class ConditionalResultTypes
 
             int dot = identifier.IndexOf('.');
             string bareName = dot > 0 ? identifier[(dot + 1)..] : identifier;
+            string? qualifier = dot > 0 ? identifier[..dot] : null;
 
             foreach (BoundDerivedTableSource source in bound.DerivedSources)
             {
+                // Two derived tables can each have a column of one name, so a qualified name reads
+                // the column of the table it names and no other.
+                if (qualifier is not null && !string.Equals(source.Alias, qualifier, StringComparison.OrdinalIgnoreCase))
+                    continue;
+
                 foreach (DerivedColumnSchema column in source.Columns)
                 {
                     if (string.Equals(column.Name, lookupKey, StringComparison.OrdinalIgnoreCase)
@@ -243,6 +340,21 @@ internal static class ConditionalResultTypes
                 if (SchemaElementStateRules.IsReadable(column)
                     && string.Equals(column.Name, bareName, StringComparison.OrdinalIgnoreCase))
                     return TypeOf(column);
+            }
+
+            return null;
+        };
+    }
+
+    /// <summary>A lookup over the columns a CREATE TABLE declares, for its CHECK constraints.</summary>
+    internal static ColumnTypeLookup LookupFor(IReadOnlyList<ColumnInfo> columns)
+    {
+        return identifier =>
+        {
+            foreach (ColumnInfo column in columns)
+            {
+                if (string.Equals(column.Name, identifier, StringComparison.OrdinalIgnoreCase))
+                    return new ExpressionType(column.Type, column.Type == ColumnType.Array ? column.ArrayElementType ?? ColumnType.Null : ColumnType.Null);
             }
 
             return null;
@@ -395,17 +507,45 @@ internal static class ConditionalResultTypes
     /// <summary>
     /// The static type of <paramref name="expression"/>, or null when the statement does not show it.
     /// </summary>
-    private static ExpressionType? TypeOf(NodeAst expression, ColumnTypeLookup? lookup)
+    internal static ExpressionType? TypeOf(NodeAst expression, ColumnTypeLookup? lookup)
     {
         NodeAst target = QueryExpressionClassifier.UnwrapAlias(expression);
 
+        ExpressionType? left = null;
+        ExpressionType? right = null;
+
+        switch (target.nodeType)
+        {
+            case NodeType.ExprSubscript or NodeType.ExprNegate or NodeType.ExprBitNot:
+                left = TypeOf(target.leftAst!, lookup);
+                break;
+
+            case NodeType.ExprAdd or NodeType.ExprSub or NodeType.ExprMult or NodeType.ExprDiv
+                or NodeType.ExprConcat or NodeType.ExprBitAnd or NodeType.ExprBitOr or NodeType.ExprBitXor
+                or NodeType.ExprShiftLeft or NodeType.ExprShiftRight
+                when target.leftAst is not null && target.rightAst is not null:
+                left = TypeOf(target.leftAst, lookup);
+                right = TypeOf(target.rightAst, lookup);
+                break;
+        }
+
+        return FromOperands(target, left, right, lookup);
+    }
+
+    /// <summary>
+    /// The static type of <paramref name="target"/> from the types of its left and right operands, the
+    /// one table both <see cref="TypeOf"/> and <see cref="Visit"/> read. A pair the evaluator refuses
+    /// gives null here, because the refusal is the job of <see cref="StaticOperandRules"/>.
+    /// </summary>
+    private static ExpressionType? FromOperands(NodeAst target, ExpressionType? left, ExpressionType? right, ColumnTypeLookup? lookup)
+    {
         switch (target.nodeType)
         {
             case NodeType.Integer: return new(ColumnType.Integer64);
             case NodeType.Float: return new(ColumnType.Float64);
             case NodeType.String: return ExpressionType.StringLiteral;
             case NodeType.Bool: return new(ColumnType.Bool);
-            case NodeType.Null: return ExpressionType.Null;
+            case NodeType.Null: return SubqueryResultTypes.TypeOf(target) ?? ExpressionType.Null;
             case NodeType.BytesLiteral: return new(ColumnType.Bytes);
             case NodeType.ObjectIdLiteral: return new(ColumnType.Id);
 
@@ -427,21 +567,32 @@ internal static class ConditionalResultTypes
                 return new ExpressionType(ColumnType.Array, ArrayLiteralElementType(target.leftAst, lookup) ?? ColumnType.Null);
 
             case NodeType.ExprSubscript:
-                return TypeOf(target.leftAst!, lookup) is { Type: ColumnType.Array, ElementType: not ColumnType.Null } array
+                return left is { Type: ColumnType.Array, ElementType: not ColumnType.Null } array
                     ? new ExpressionType(array.ElementType)
                     : null;
 
             case NodeType.ExprNegate:
-                return TypeOf(target.leftAst!, lookup) is { } operand && MixedNumericComparison.IsNumeric(operand.Type)
-                    ? operand
+                return left is { } operand && MixedNumericComparison.IsNumeric(operand.Type)
+                    ? operand with { IsStringLiteral = false }
                     : null;
 
-            case NodeType.ExprAdd or NodeType.ExprSub or NodeType.ExprMult or NodeType.ExprDiv
-                when target.leftAst is not null && target.rightAst is not null:
-                return TypeOf(target.leftAst, lookup) is { } left
-                       && TypeOf(target.rightAst, lookup) is { } right
-                       && MixedNumericComparison.ArithmeticResultType(left.Type, right.Type) is { } arithmetic
+            case NodeType.ExprAdd or NodeType.ExprSub or NodeType.ExprMult or NodeType.ExprDiv:
+                return left is { } addend && right is { } other
+                       && MixedNumericComparison.ArithmeticResultType(addend.Type, other.Type) is { } arithmetic
                     ? new ExpressionType(arithmetic)
+                    : null;
+
+            case NodeType.ExprConcat or NodeType.ExprBitAnd or NodeType.ExprBitOr or NodeType.ExprBitXor
+                or NodeType.ExprShiftLeft or NodeType.ExprShiftRight:
+                return left is { } first && right is { } second
+                       && ConcatAndBitwiseOperators.ResultType(target.nodeType, first.Type, second.Type) is { } combined
+                    ? new ExpressionType(combined)
+                    : null;
+
+            case NodeType.ExprBitNot:
+                return left is { } complement
+                       && ConcatAndBitwiseOperators.ResultType(NodeType.ExprBitNot, complement.Type, ColumnType.Null) is { } bitNot
+                    ? new ExpressionType(bitNot)
                     : null;
 
             // A nested conditional is not a literal, even when all its inputs are, as in GoogleSQL.

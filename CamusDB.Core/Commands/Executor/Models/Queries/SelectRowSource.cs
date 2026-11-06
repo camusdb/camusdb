@@ -39,6 +39,13 @@ internal sealed class SelectRowSource : IAsyncDisposable
     public IReadOnlyList<NodeAst> Projections { get; }
 
     /// <summary>
+    /// The static type of each entry of <see cref="Columns"/>, or null when no binding gives them. A
+    /// statement that writes the rows reads this and not <see cref="Columns"/>, which declares String for
+    /// a column whose type it does not know.
+    /// </summary>
+    public IReadOnlyList<ExpressionType?>? StaticTypes { get; init; }
+
+    /// <summary>
     /// The bound set operation when the source query is <c>q1 UNION q2</c> (or INTERSECT, EXCEPT);
     /// null otherwise. Its <see cref="Projections"/> are then only <c>*</c>, and <c>CREATE VIEW</c>
     /// reads the output columns of each operand from here to freeze every operand's <c>*</c>.

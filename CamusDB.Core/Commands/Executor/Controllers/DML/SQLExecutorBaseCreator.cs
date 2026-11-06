@@ -235,7 +235,7 @@ internal abstract class SQLExecutorBaseCreator
         return true;
     }
 
-    private static string ComparisonSymbol(NodeType op) => op switch
+    internal static string ComparisonSymbol(NodeType op) => op switch
     {
         NodeType.ExprEquals => "=",
         NodeType.ExprNotEquals => "<>",
@@ -346,7 +346,7 @@ internal abstract class SQLExecutorBaseCreator
             long l = left.LongValue, r = right.LongValue;
 
             if (op == NodeType.ExprDiv && r == 0)
-                throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Division by zero");
+                throw new CamusDBException(CamusDBErrorCodes.InvalidInput, NumericMath.DivisionByZeroMessage);
 
             // Checked: a result outside the int64 range is an error, never a wrapped value.
             long integerResult = op switch
@@ -366,7 +366,7 @@ internal abstract class SQLExecutorBaseCreator
         double dr = right.Type == ColumnType.Float32 ? right.FloatValue : MixedNumericComparison.ToDouble(right);
 
         if (op == NodeType.ExprDiv && dr == 0.0)
-            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Division by zero");
+            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, NumericMath.DivisionByZeroMessage);
 
         // Checked: an overflow or an underflow from finite operands is an error, never ±infinity or 0.
         double result = op switch
@@ -415,7 +415,7 @@ internal abstract class SQLExecutorBaseCreator
         }
     }
 
-    private static string ArithmeticSymbol(NodeType op) => op switch
+    internal static string ArithmeticSymbol(NodeType op) => op switch
     {
         NodeType.ExprAdd => "+",
         NodeType.ExprSub => "-",
@@ -1125,7 +1125,7 @@ internal abstract class SQLExecutorBaseCreator
     /// step must have replaced first, or an unknown node type. Returned rather than thrown so the
     /// dispatcher's frame carries no message formatting.
     /// </summary>
-    private static CamusDBException UnevaluableExpression(NodeType nodeType) => nodeType switch
+    internal static CamusDBException UnevaluableExpression(NodeType nodeType) => nodeType switch
     {
         // A window call is replaced by its result column when a SELECT is created. One that reaches a
         // per-row evaluator sits where SQL allows none: UPDATE SET, INSERT VALUES, a CHECK, an index

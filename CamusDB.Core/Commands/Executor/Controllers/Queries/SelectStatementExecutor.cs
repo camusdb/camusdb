@@ -1516,6 +1516,7 @@ internal sealed class SelectStatementExecutor
                 bound.Query.Projections.Select(projection => projection.Expression).ToList(),
                 lease)
             {
+                StaticTypes = ConditionalResultTypes.OutputTypes(bound, columns),
                 SetOperation = bound.Query.Source is DerivedTableSource { SetOperation: not null } && bound.DerivedSources.Count == 1
                     ? bound.DerivedSources[0].SetOperation
                     : null,
@@ -1545,9 +1546,14 @@ internal sealed class SelectStatementExecutor
     /// <para>The returned source's cursor is never opened by the caller; disposing it releases the
     /// binding without having scanned anything.</para>
     /// </summary>
-    internal Task<SelectRowSource> BuildViewSourceAsync(
+    internal async Task<SelectRowSource> BuildViewSourceAsync(
         DatabaseDescriptor database, NodeAst bodyAst, ExecuteSQLTicket ticket)
-        => BuildSelectSourceAsync(database, ExpandViews(database, bodyAst), ticket, "CREATE VIEW");
+    {
+        // A stored body fails when a statement uses it, as in PostgreSQL. The statement that reads the
+        // view binds this body again, with the check on.
+        using (ConstantDivisionCheck.SuspendForStoredDefinition())
+            return await BuildSelectSourceAsync(database, ExpandViews(database, bodyAst), ticket, "CREATE VIEW").ConfigureAwait(false);
+    }
 
     /// <summary>
     /// Opens a materialized view's body as a row source pinned to <paramref name="snapshot"/>, with
@@ -1684,9 +1690,10 @@ internal sealed class SelectStatementExecutor
                 .RewriteExpressionAsync(database, valueExpr, ticket, "the select list")
                 .ConfigureAwait(false);
 
-            // No binding runs for a FROM-less SELECT, so its CASE, COALESCE, IFNULL and IF are checked
-            // here, over their literal inputs, before the expression is evaluated.
+            // No binding runs for a FROM-less SELECT, so the statement checks run here, over its
+            // literal inputs, before the expression is evaluated.
             ConditionalResultTypes.Check(resolved, lookup: null, recorder: null);
+            ConstantDivisionCheck.Check(valueExpr);
 
             projected[rowKeys[i]] = SQLExecutorBaseCreator.EvalExpr(resolved, emptyRow, ticket.Parameters);
         }

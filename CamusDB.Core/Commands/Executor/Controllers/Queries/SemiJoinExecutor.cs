@@ -50,7 +50,7 @@ internal sealed class SemiJoinExecutor
         int dot = outerCol.IndexOf('.');
         if (dot >= 0) outerCol = outerCol[(dot + 1)..];
 
-        // For Anti/NullAwareAnti, a NULL outer value emits iff the inner is empty:
+        // For Anti/NullAwareAnti, a NULL outer value emits iff the subquery has no row after its WHERE:
         //   NULL NOT IN ()          → TRUE  (emit)
         //   NULL NOT IN (non-empty) → UNKNOWN → FALSE (skip)
         // We check emptiness lazily (once) for Anti; NullAwareAnti already has it from the pre-scan.
@@ -268,20 +268,34 @@ internal sealed class SemiJoinExecutor
     }
 
     /// <summary>
-    /// Returns true if the inner table contains at least one non-empty row.
-    /// Used to resolve NULL-outer semantics for Anti mode lazily (once per execution).
+    /// Returns true if the subquery has at least one row, which is the answer that a NULL outer value
+    /// needs in Anti mode. Called lazily, once per execution.
+    ///
+    /// The subquery result is the rows that pass the inner WHERE, not the rows of the table. A row that
+    /// the filter removes says nothing, so the scan continues until a row passes: <c>maxRows: 1</c> is
+    /// correct only with no filter. With a filter that removes every row, this reads the whole inner
+    /// table once, the same cost as the pre-scan of <see cref="InnerScanForNullsAsync"/>.
     /// </summary>
     private static async Task<bool> InnerHasAnyRowAsync(SemiJoinNode node, QueryTicket outerTicket)
     {
         TableDescriptor inner = node.InnerTable;
-        HLCTimestamp txId = outerTicket.TxnState.TransactionId;
+        NodeAst? filter = node.InnerFilter;
 
         await AcquireInnerRowRangeLockAsync(inner, outerTicket).ConfigureAwait(false);
 
-        await foreach ((ObjectIdValue _, ReadOnlyMemory<byte> data) in inner.Store.ScanRows(
-            outerTicket.TxnState, maxRows: 1, cancellationToken: outerTicket.CancellationToken))
+        await foreach ((ObjectIdValue rowId, ReadOnlyMemory<byte> data) in inner.Store.ScanRows(
+            outerTicket.TxnState, maxRows: filter is null ? 1 : null, cancellationToken: outerTicket.CancellationToken))
         {
-            if (data.Length > 0)
+            if (data.Length == 0)
+                continue;
+
+            if (filter is null)
+                return true;
+
+            Dictionary<string, ColumnValue> innerRow = await RowEncoder.DecodeAsync(
+                inner.Schema, outerTicket.TxnState.TransactionId, rowId, data, node.InnerRequiredColumns, inner.Schema.Version).ConfigureAwait(false);
+
+            if (EvalFilter(filter, innerRow, outerTicket.Parameters, node.InnerResolver))
                 return true;
         }
 
@@ -310,7 +324,7 @@ internal sealed class SemiJoinExecutor
         QueryRowNameResolver innerResolver)
     {
         ColumnValue result = SqlExecutor.EvalExpr(filter, row, parameters, innerResolver);
-        return result.Type == ColumnType.Bool && result.BoolValue;
+        return QueryFilterer.ToPredicateResult(result, "WHERE");
     }
 
     /// <summary>

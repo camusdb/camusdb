@@ -193,6 +193,29 @@ public sealed class TestExtensionTriggers : ExtensionTestBase
     }
 
     /// <summary>A trigger runs before the checks, so a value it writes past a declared integer width is refused.</summary>
+    /// <summary>
+    /// A BEFORE trigger may replace the value a statement assigns, so a value of the wrong type is not
+    /// refused before the trigger runs. The same statement on a table with no trigger fails at once.
+    /// </summary>
+    [Test]
+    public async Task BeforeTrigger_MayRepairAValue_SoTheStaticAssignmentCheckSkipsTheTable()
+    {
+        (string db, _, CommandExecutor executor) = await CreateDatabaseWithGoodFixture();
+        await ExecDdl(executor, db, "CREATE TABLE plain (id INT64 PRIMARY KEY, a INT64)");
+        await ExecDdl(executor, db, "CREATE TABLE guarded (id INT64 PRIMARY KEY, a INT64)");
+        await ExecDdl(executor, db, $"CREATE TRIGGER g ON guarded BEFORE INSERT, UPDATE EXTERNAL NAME '{Fixture}GuardTrigger'");
+
+        foreach (string sql in new[] { "UPDATE {0} SET a = 'x' WHERE TRUE", "INSERT INTO {0} (id, a) SELECT id, 'x' FROM {0}" })
+        {
+            Assert.AreEqual(
+                CamusDBErrorCodes.UnknownType,
+                Assert.ThrowsAsync<CamusDBException>(() => ExecNonQuery(executor, db, string.Format(sql, "plain")))!.Code,
+                sql);
+
+            await ExecNonQuery(executor, db, string.Format(sql, "guarded"));
+        }
+    }
+
     [Test]
     public async Task BeforeTrigger_OutputMustFitADeclaredIntegerWidth()
     {

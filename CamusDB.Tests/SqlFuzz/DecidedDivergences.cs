@@ -56,6 +56,11 @@ public static class DecidedDivergences
         "INSERT INTO ch (id, c) VALUES (1, 'ab')",
     ];
 
+    private static readonly string[] EmptyTable =
+    [
+        "CREATE TABLE em (id INT64 PRIMARY KEY, v INT64, s STRING, small SMALLINT)",
+    ];
+
     public static IReadOnlyList<DecidedDivergence> All { get; } =
     [
         new("UPDATE without WHERE is refused", RowTable,
@@ -123,10 +128,75 @@ public static class DecidedDivergences
             CamusDBErrorCodes.InvalidInput, "5",
             "A literal has its own type, and no implicit conversion from string to boolean exists."),
 
-        new("A projection does not run when a FROM-less WHERE drops the row", NoSetup,
-            "SELECT 1 / 0 AS x WHERE FALSE",
+        new("An untyped string is not a boolean condition on a table", RowTable,
+            "SELECT id FROM d WHERE 'true'",
+            CamusDBErrorCodes.InvalidInput, "1",
+            "The same rule as a FROM-less WHERE: a literal has its own type, and no implicit conversion from string to boolean exists."),
+
+        new("A function result is checked as a condition when a row reaches it", EmptyTable,
+            "SELECT id FROM em WHERE length(s)",
+            "no rows", "argument of WHERE must be type boolean, not type integer",
+            "A function has no static result type in the bind-time check, so only its value shows the type. With a row the statement is CADB0400."),
+
+        new("A function result is checked as an operand when a row reaches it", EmptyTable,
+            "SELECT id FROM em WHERE s = length(s)",
+            "no rows", "operator does not exist: text = integer",
+            "A function has no static result type in the bind-time check, so only its value shows the type. With a row the statement is CADB0400."),
+
+        new("A subquery column that is a function is checked when a value reaches the operator", EmptyTable,
+            "SELECT id FROM em WHERE id = (SELECT upper(s) FROM em)",
+            "no rows", "operator does not exist: bigint = text",
+            "A subquery column has the static type of its expression, and a function has none. With a row the statement is CADB0400."),
+
+        new("A function argument type is checked when a row reaches it", EmptyTable,
+            "SELECT length(v) FROM em",
+            "no rows", "function length(bigint) does not exist",
+            "Functions have no signature table. The name and the argument count are checked at bind time, and each function checks its argument types when it runs."),
+
+        new("A derived string column is checked when a row reaches the operator", EmptyTable,
+            "SELECT d.id FROM (SELECT id, s FROM em) AS d WHERE d.id = d.s",
+            "no rows", "operator does not exist: bigint = text",
+            "A derived table declares String also for a column whose type it does not know, so the bind-time check reads every derived String column as unknown. With a row the statement is CADB0400."),
+
+        new("A function result with a constant zero is checked when a row reaches it", EmptyTable,
+            "SELECT length('a') / 0 FROM em",
             "no rows", "division by zero",
-            "A value that nothing reads is not computed. The same holds for a table with no matching row."),
+            "A function call is not a constant here, because the engine has no list of deterministic functions. With a row the statement is CADB0400."),
+
+        new("A function result of zero as a divisor is checked when a row reaches it", EmptyTable,
+            "SELECT 1 / length('') FROM em",
+            "no rows", "division by zero",
+            "A function call is not a constant here, because the engine has no list of deterministic functions. With a row the statement is CADB0400."),
+
+        new("mod with a constant zero is checked when a row reaches it", EmptyTable,
+            "SELECT mod(1, 0) FROM em",
+            "no rows", "division by zero",
+            "A function call is not a constant here, because the engine has no list of deterministic functions. With a row the statement is CADB0400."),
+
+        new("The percent operator is a call of mod, so it is checked when a row reaches it", EmptyTable,
+            "SELECT 1 % 0 FROM em",
+            "no rows", "division by zero",
+            "The parser builds `a % b` as `mod(a, b)`, so the rule of a function call applies. With a row the statement is CADB0400."),
+
+        new("A subquery in a dead branch still has its constant division checked", EmptyTable,
+            "SELECT CASE WHEN FALSE THEN (SELECT 1 / 0 FROM em) ELSE 1 END FROM em",
+            CamusDBErrorCodes.InvalidInput, "no rows",
+            "A subquery binds before the statement around it, so the check of the subquery runs before anything shows that its branch is dead. Such a branch can never run, so the refusal rejects no useful statement."),
+
+        new("An integer overflow in a constant needs a row", EmptyTable,
+            "SELECT 9223372036854775807 + 1 FROM em",
+            "no rows", "bigint out of range",
+            "A value error is not a statement mistake, and the engine does not evaluate a constant at bind time. With a row the statement is CADB0420."),
+
+        new("A cast of a constant past SMALLINT needs a row", EmptyTable,
+            "SELECT CAST(70000 AS SMALLINT) FROM em",
+            "no rows", "smallint out of range",
+            "A value error is not a statement mistake, and the engine does not evaluate a constant at bind time."),
+
+        new("A constant past the range of a column needs a row", EmptyTable,
+            "UPDATE em SET small = 70000 WHERE FALSE",
+            "written", "smallint out of range",
+            "A value error is not a statement mistake. The declared range is a write rule, so it applies to a row that the statement writes."),
 
         new("A FROM-less SELECT has no aggregates", NoSetup,
             "SELECT COUNT(*) WHERE TRUE",

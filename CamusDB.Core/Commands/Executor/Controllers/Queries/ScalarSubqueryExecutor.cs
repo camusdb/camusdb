@@ -33,7 +33,8 @@ internal sealed class ScalarSubqueryExecutor
         DatabaseDescriptor database,
         NodeAst selectAst,
         KvTransaction txnState,
-        Dictionary<string, ColumnValue>? parameters)
+        Dictionary<string, ColumnValue>? parameters,
+        SubqueryOutputType? outputType = null)
     {
         SelectQuery subquery = selectAst.nodeType == NodeType.Select
             ? selectQueryCreator.CreateSelectQuery(selectAst)
@@ -43,7 +44,7 @@ internal sealed class ScalarSubqueryExecutor
         int count = 0;
 
         await foreach (QueryResultRow row in queryExecutor.ExecuteSelectAsync(
-            database, selectAst, txnState, parameters).ConfigureAwait(false))
+            database, selectAst, txnState, parameters, outputType: outputType).ConfigureAwait(false))
         {
             count++;
             first ??= row;

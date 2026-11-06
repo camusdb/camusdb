@@ -124,7 +124,10 @@ internal sealed class SQLExecutorAlterConstraintCreator : SQLExecutorBaseCreator
             foreach (TableColumnSchema col in tableSchema.Columns)
                 columnNames.Add(col.Name);
 
-        SQLExecutorCreateTableCreator.ValidateCheckConditionForAlter(condition, columnNames);
+        SQLExecutorCreateTableCreator.ValidateCheckConditionForAlter(
+            condition,
+            columnNames,
+            Queries.ConditionalResultTypes.LookupFor(tableSchema));
 
         string expression = CheckConditionRenderer.Render(condition);
         HashSet<string> referenced = [];

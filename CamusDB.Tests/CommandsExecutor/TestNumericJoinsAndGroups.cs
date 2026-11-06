@@ -340,8 +340,13 @@ internal sealed class TestNumericJoinsAndGroups : BaseTest
             await Run(database, executor, db, "SELECT id FROM s WHERE p < '2'"))!;
         Assert.AreEqual(CamusDBErrorCodes.InvalidInput, ordering.Code);
 
-        // CHECK applies the same refusal at write time.
-        await ExecDDL(executor, database, "CREATE TABLE c (id int64 PRIMARY KEY, p numeric, CHECK (p > '0'))");
+        // CHECK applies the same refusal when the constraint is declared.
+        CamusDBException declared = Assert.ThrowsAsync<CamusDBException>(async () =>
+            await ExecDDL(executor, database, "CREATE TABLE d (id int64 PRIMARY KEY, p numeric, CHECK (p > '0'))"))!;
+        Assert.AreEqual(CamusDBErrorCodes.InvalidInput, declared.Code);
+
+        // A function result has a type that only its value shows, so that form is refused at write time.
+        await ExecDDL(executor, database, "CREATE TABLE c (id int64 PRIMARY KEY, p numeric, CHECK (p > upper('0')))");
         CamusDBException check = Assert.ThrowsAsync<CamusDBException>(async () =>
             await Exec(executor, database, "INSERT INTO c (id, p) VALUES (1, 1.5)"))!;
         Assert.AreEqual(CamusDBErrorCodes.CheckConstraintViolation, check.Code);

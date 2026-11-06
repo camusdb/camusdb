@@ -38,6 +38,45 @@ internal sealed class RowInsertSelector
     internal Func<Task>? TestBeforeSourceReadHook;
 
     /// <summary>
+    /// Refuses a source column whose static type its target column cannot take, before any source row is
+    /// read, so the error does not depend on how many rows the source returns. A column whose values the
+    /// statement discards is skipped, and so is a table with a BEFORE INSERT trigger, because the trigger
+    /// may replace the value and every written row still passes the type check after it ran.
+    /// </summary>
+    private static void RequireAssignableSource(
+        TableDescriptor table,
+        List<string> targetColumns,
+        IReadOnlySet<string>? ignoredColumns,
+        IReadOnlyList<ExpressionType?>? sourceTypes,
+        IReadOnlyList<SQLParser.NodeAst>? sourceProjections)
+    {
+        if (sourceTypes is null || sourceTypes.Count != targetColumns.Count)
+            return;
+
+        foreach (TriggerDefinition trigger in table.Schema.Triggers ?? [])
+        {
+            if (trigger.Timing == TriggerFireTiming.Before && trigger.FiresOn(TriggerEventSet.Insert))
+                return;
+        }
+
+        for (int i = 0; i < targetColumns.Count; i++)
+        {
+            if (sourceTypes[i] is not { } type || ignoredColumns?.Contains(targetColumns[i]) == true)
+                continue;
+
+            foreach (TableColumnSchema column in table.Schema.Columns!)
+            {
+                if (!string.Equals(column.Name, targetColumns[i], StringComparison.OrdinalIgnoreCase) || !SchemaElementStateRules.IsWritable(column))
+                    continue;
+
+                SQLParser.NodeAst? value = sourceProjections?.Count == targetColumns.Count ? sourceProjections[i] : null;
+                Queries.StaticOperandRules.RequireAssignable(value, type, column);
+                break;
+            }
+        }
+    }
+
+    /// <summary>
     /// Maps the source's output columns onto the target columns <b>positionally</b> and inserts them.
     /// </summary>
     /// <param name="sourceColumns">
@@ -85,7 +124,9 @@ internal sealed class RowInsertSelector
         IAsyncEnumerable<QueryResultRow> cursor,
         List<QueryResultRow>? insertedRows = null,
         Kommander.Time.HLCTimestamp? sourceTimestamp = null,
-        (RowUpserter Upserter, OnConflictClause Clause)? upsert = null)
+        (RowUpserter Upserter, OnConflictClause Clause)? upsert = null,
+        IReadOnlyList<ExpressionType?>? sourceTypes = null,
+        IReadOnlyList<SQLParser.NodeAst>? sourceProjections = null)
     {
         // Target columns: the explicit list, or every column in schema order. The implicit list
         // deliberately mirrors INSERT … VALUES (which also takes every column) so the two forms
@@ -115,6 +156,8 @@ internal sealed class RowInsertSelector
         // says OVERRIDING SYSTEM VALUE; OVERRIDING USER VALUE discards the identity columns' values.
         IReadOnlySet<string>? ignoredColumns = Functions.SequenceDefaults.ApplyIdentityRules(
             database.Schema, table.Schema, targetColumns, ticket.Overriding);
+
+        RequireAssignableSource(table, targetColumns, ignoredColumns, sourceTypes, sourceProjections);
 
         InsertRowShaper shaper = InsertRowShaper.Create(table.Schema, targetColumns, ignoredColumns);
 

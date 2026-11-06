@@ -415,11 +415,11 @@ public class TestBareBooleanPredicateIndexUse : BaseTest
     }
 
     /// <summary>
-    /// A bare non-boolean column keeps numeric truthiness (non-zero is true). Rewriting it to
-    /// <c>= true</c> would silently change which rows match, so it must stay a residual filter.
+    /// A bare non-boolean column is not a condition. It is refused before any row is read, so it
+    /// never reaches the rewrite to <c>= true</c>, which only a boolean column may take.
     /// </summary>
     [Test]
-    public async Task BareIntegerColumnKeepsTruthinessSemantics()
+    public async Task BareIntegerColumnIsRefused()
     {
         (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupTriggersTable();
         await InsertTriggers(executor, database, dbname,
@@ -429,12 +429,9 @@ public class TestBareBooleanPredicateIndexUse : BaseTest
             ("wf-two", 2, true, 30),
         ]);
 
-        List<QueryResultRow> rows = await RunSql(executor, database, dbname,
-            "SELECT w.workflowId FROM workflow_triggers AS w WHERE w.kind");
+        CamusDBException ex = Assert.ThrowsAsync<CamusDBException>(async () =>
+            await RunSql(executor, database, dbname, "SELECT w.workflowId FROM workflow_triggers AS w WHERE w.kind"))!;
 
-        CollectionAssert.AreEquivalent(
-            new[] { "wf-one", "wf-two" },
-            rows.Select(r => r.Row["workflowId"].StrValue!).ToList(),
-            "A bare integer predicate matches every non-zero value, not just 1");
+        Assert.AreEqual(CamusDBErrorCodes.InvalidInput, ex.Code);
     }
 }

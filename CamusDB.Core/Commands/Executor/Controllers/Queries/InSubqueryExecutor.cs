@@ -45,6 +45,7 @@ internal sealed class InSubqueryExecutor
         CancellationToken cancellationToken = default)
     {
         QueryExecutionContext context = QueryExecutionContext.For(database, cancellationToken);
+        SubqueryOutputType outputType = new();
 
         SpillableValueList valueList = new(context);
         bool containsNull = false;
@@ -53,7 +54,7 @@ internal sealed class InSubqueryExecutor
         try
         {
             await foreach (QueryResultRow row in queryExecutor.ExecuteSelectAsync(
-                database, selectAst, txnState, parameters, cancellationToken).ConfigureAwait(false))
+                database, selectAst, txnState, parameters, cancellationToken, outputType).ConfigureAwait(false))
             {
                 anyRow = true;
                 ColumnValue value = SubqueryQueryExecutor.ExtractSingleColumnValue(row);
@@ -82,10 +83,10 @@ internal sealed class InSubqueryExecutor
         if (!anyRow)
         {
             await valueList.DisposeAsync().ConfigureAwait(false);
-            return new InSubqueryMaterialization(new SpillableValueList(context), ContainsNull: false, IsEmpty: true);
+            return new InSubqueryMaterialization(new SpillableValueList(context), ContainsNull: false, IsEmpty: true) { OutputType = outputType.Type };
         }
 
-        return new InSubqueryMaterialization(valueList, containsNull, IsEmpty: false);
+        return new InSubqueryMaterialization(valueList, containsNull, IsEmpty: false) { OutputType = outputType.Type };
     }
 
     public async Task<IAsyncEnumerable<ColumnValue>> ExecuteAsync(

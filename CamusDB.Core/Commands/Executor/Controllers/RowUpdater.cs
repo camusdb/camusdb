@@ -145,10 +145,10 @@ public sealed class RowUpdater
 
     /// <param name="checkNotNull">
     /// False when the table has a BEFORE UPDATE trigger: the trigger runs before the row is validated
-    /// and may replace a NULL the statement assigns, so the early NOT NULL refusal of a literal NULL
-    /// would refuse a statement the trigger repairs. The structural checks (the column exists, the
-    /// primary key is not assigned) still run here, and every written row still passes the NOT NULL
-    /// check after the trigger ran.
+    /// and may replace a value the statement assigns, so the early refusal of a literal NULL or of a
+    /// value of the wrong type would refuse a statement the trigger repairs. The structural checks (the
+    /// column exists, the primary key is not assigned) still run here, and every written row still
+    /// passes the NOT NULL and type checks after the trigger ran.
     /// </param>
     internal static void Validate(TableDescriptor table, UpdateTicket ticket, bool checkNotNull = true)
     {
@@ -164,15 +164,32 @@ public sealed class RowUpdater
         if (ticket.ExprValues is not null)
             ValidateExprValues(columns, indexes, ticket.ExprValues, checkNotNull);
 
-        // CASE, COALESCE, IFNULL and IF in the SET values and the WHERE get one result type from the
-        // table's column types; a pair of inputs with no common type fails before any row is read.
+        // The statement checks run here, so an error in the SET values or the WHERE does not depend on
+        // which rows match: an unknown function, a known type mismatch, a value the column cannot take,
+        // a non-boolean WHERE, and a CASE, COALESCE, IFNULL or IF whose inputs have no common type.
         ConditionalResultTypes.ColumnTypeLookup lookup = ConditionalResultTypes.LookupFor(table.Schema);
 
         if (ticket.ExprValues is not null)
-            foreach (NodeAst value in ticket.ExprValues.Values)
-                ConditionalResultTypes.Check(value, lookup, recorder: null);
+            foreach ((string columnName, NodeAst value) in ticket.ExprValues)
+            {
+                if (checkNotNull && FindWritableColumn(columns, columnName) is { } column)
+                    ConditionalResultTypes.CheckAssignment(value, column, lookup);
+                else
+                    ConditionalResultTypes.Check(value, lookup, recorder: null, allowAggregates: false);
+            }
 
-        ConditionalResultTypes.Check(ticket.Where, lookup, recorder: null);
+        ConditionalResultTypes.CheckCondition(ticket.Where, lookup, recorder: null, "WHERE", allowAggregates: false);
+    }
+
+    private static TableColumnSchema? FindWritableColumn(List<TableColumnSchema> columns, string columnName)
+    {
+        foreach (TableColumnSchema column in columns)
+        {
+            if (string.Equals(column.Name, columnName, StringComparison.OrdinalIgnoreCase) && SchemaElementStateRules.IsWritable(column))
+                return column;
+        }
+
+        return null;
     }
 
     /// <summary>

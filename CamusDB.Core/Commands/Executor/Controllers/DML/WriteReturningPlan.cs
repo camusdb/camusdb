@@ -99,6 +99,9 @@ internal sealed class WriteReturningPlan
         {
             NodeAst expression = QueryExpressionClassifier.UnwrapAlias(item);
 
+            // A statement that writes no row projects nothing, and the mistake must not depend on that.
+            ConstantDivisionCheck.Check(expression);
+
             if (QueryExpressionClassifier.IsAggregateProjection(expression)
                 || QueryExpressionClassifier.IsCompoundAggregateProjection(expression))
             {

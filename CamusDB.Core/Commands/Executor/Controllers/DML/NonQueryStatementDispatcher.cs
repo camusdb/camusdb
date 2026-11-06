@@ -477,7 +477,9 @@ internal sealed class NonQueryStatementDispatcher
                                     rowInserter, context.Statistics, sequenceBinder, database, table,
                                     insertSelectTicket, ticket, source.Columns, source.Cursor, insertedRows,
                                     sourceTimestamp: statementTimestamp,
-                                    upsert: onConflict is null ? null : (rowUpserter, onConflict))
+                                    upsert: onConflict is null ? null : (rowUpserter, onConflict),
+                                    sourceTypes: source.StaticTypes,
+                                    sourceProjections: source.Projections)
                                 .ConfigureAwait(false);
 
                             string? insertWarning = ctasExecutor.WarnIfTimeTravelCopyReadNothing(
@@ -566,6 +568,9 @@ internal sealed class NonQueryStatementDispatcher
                         WriteReturningPlan.Validate(returningList);
 
                     DeleteTicket deleteTicket = sqlExecutor.CreateDeleteTicket(ticket, ast);
+
+                    // Before the rewrite below, which turns a subquery into a literal.
+                    Queries.ConstantDivisionCheck.Check(deleteTicket.Where);
 
                     // The subqueries and the locate scan read at one timestamp; see MintStatementTimestamp.
                     HLCTimestamp? statementTimestamp = MintStatementTimestamp(database, ticket.TxnState);
@@ -854,6 +859,13 @@ internal sealed class NonQueryStatementDispatcher
     internal async Task<UpdateTicket> RewriteUpdateSubqueriesAsync(
         DatabaseDescriptor database, UpdateTicket ticket, ExecuteSQLTicket sqlTicket, string statementKind)
     {
+        // Before the rewrite below, which turns a subquery into a literal.
+        Queries.ConstantDivisionCheck.Check(ticket.Where);
+
+        if (ticket.ExprValues is not null)
+            foreach (NodeAst value in ticket.ExprValues.Values)
+                Queries.ConstantDivisionCheck.Check(value);
+
         bool changed = false;
 
         NodeAst? newWhere = ticket.Where;

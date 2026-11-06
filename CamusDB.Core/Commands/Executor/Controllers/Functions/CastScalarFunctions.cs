@@ -221,6 +221,32 @@ internal static class CastScalarFunctions
         };
     }
 
+    /// <summary>
+    /// True when <see cref="CoerceToColumnType(ColumnValue, ColumnType)"/> converts a value of type
+    /// <paramref name="from"/> to <paramref name="to"/>, and does not pass it through. The two lists must
+    /// stay equal: the statement checks read this one to refuse a write before any row is read, and a pair
+    /// missing here would refuse a correct statement. <c>TestStaticStatementChecks</c> compares them.
+    /// </summary>
+    internal static bool HasImplicitConversion(ColumnType from, ColumnType to) => (from, to) is
+        (ColumnType.String, ColumnType.Id) or
+        (ColumnType.Integer64, ColumnType.Float64) or
+        (ColumnType.Float64, ColumnType.Float32) or
+        (ColumnType.Integer64, ColumnType.Float32) or
+        (ColumnType.String, ColumnType.Float64) or
+        (ColumnType.String, ColumnType.Float32) or
+        (ColumnType.String, ColumnType.Date) or
+        (ColumnType.String, ColumnType.DateTime) or
+        (ColumnType.Date, ColumnType.DateTime) or
+        (ColumnType.String, ColumnType.Bytes) or
+        (ColumnType.String, ColumnType.Uuid) or
+        (ColumnType.Integer64, ColumnType.Numeric) or
+        (ColumnType.Float64, ColumnType.Numeric) or
+        (ColumnType.Float32, ColumnType.Numeric) or
+        (ColumnType.String, ColumnType.Numeric) or
+        (ColumnType.Numeric, ColumnType.Float64) or
+        (ColumnType.Numeric, ColumnType.Float32) or
+        (ColumnType.String, ColumnType.Jsonb);
+
     internal static ColumnType ResolveTargetType(string castName, NodeAst targetTypeAst)
     {
         return targetTypeAst.nodeType switch

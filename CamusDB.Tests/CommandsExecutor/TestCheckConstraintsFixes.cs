@@ -83,10 +83,18 @@ public sealed class TestCheckConstraintsFixes : BaseTest
     public async Task IncompatibleTypeCheck_SurfacesDomainError_NotRawException()
     {
         (string dbname, _, CommandExecutor executor) = await CreateDatabase();
-        // String column compared to an integer literal has no coercion; enforcement must raise a
-        // CamusDBException rather than letting ColumnValue.CompareTo escape as an ArgumentException.
+
+        // A string column compared with an integer literal has no rule, and the statement shows both
+        // types, so the constraint is refused when it is declared.
+        CamusDBException declared = Assert.ThrowsAsync<CamusDBException>(async () =>
+            await ExecDDL(executor, dbname, "CREATE TABLE s (id object_id PRIMARY KEY, name string CHECK (name > 5))"))!;
+        Assert.AreEqual(CamusDBErrorCodes.InvalidInput, declared.Code);
+
+        // A function result has a type that only its value shows, so this one is checked at write time.
+        // Enforcement must raise a CamusDBException rather than letting ColumnValue.CompareTo escape as
+        // an ArgumentException. A constraint stored before the DDL check takes this path too.
         await ExecDDL(executor, dbname,
-            "CREATE TABLE t (id object_id PRIMARY KEY, name string CHECK (name > 5))");
+            "CREATE TABLE t (id object_id PRIMARY KEY, name string CHECK (name > length(name)))");
 
         CamusDBException ex = Assert.ThrowsAsync<CamusDBException>(async () =>
             await ExecInsert(executor, dbname,

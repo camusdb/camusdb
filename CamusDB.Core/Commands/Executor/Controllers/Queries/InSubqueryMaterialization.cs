@@ -26,5 +26,11 @@ internal sealed record InSubqueryMaterialization(
     bool ContainsNull,
     bool IsEmpty) : IAsyncDisposable
 {
+    /// <summary>
+    /// The static type of the subquery's column, or null when the subquery does not show it. A list with
+    /// no value has no other record of the type; see <see cref="SubqueryResultTypes"/>.
+    /// </summary>
+    public Models.ExpressionType? OutputType { get; init; }
+
     public ValueTask DisposeAsync() => Values.DisposeAsync();
 }

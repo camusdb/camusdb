@@ -653,17 +653,88 @@ Notes:
 
 - `x IN (a, b)` means `x = a OR x = b`, and `OR` evaluates both sides. So an item with no rule fails
   the statement even when another item matches: `1 IN (1, 'a')` fails.
-- A simple `CASE` stops at the first `WHEN` that matches. A later `WHEN` is not compared, so
-  `CASE 5 WHEN 5 THEN 1 WHEN 'a' THEN 2 END` returns 1.
+- A simple `CASE` stops at the first `WHEN` that matches, so a later `WHEN` is not evaluated. Its type
+  is still checked when the statement shows it: `CASE 5 WHEN 5 THEN 1 WHEN 'a' THEN 2 END` fails.
 - A NULL operand makes the comparison UNKNOWN before any type check, so `NULL = 'a'` is NULL, not an
   error.
-- The check runs when values are compared, not when the statement is parsed. A predicate over an
-  empty table compares no values and raises no error.
+- The check runs when the statement is bound, for every pair whose types the statement shows. See
+  [Errors that do not depend on the rows](#errors-that-do-not-depend-on-the-rows).
 - An index is never used to answer a comparison that has no rule. The filter evaluates it and raises
   the error, so an index seek and a table scan give the same result.
 - A `UNION`, `INTERSECT` or `EXCEPT` refuses two array columns whose element types are known and are
   not the same, as it refuses two scalar types that cannot be combined. When an array expression's
   element type is known only from its value, this check does not apply.
+
+### Errors that do not depend on the rows
+
+A mistake that the statement alone shows fails before any row is read. The error is the same over a table
+with rows, over an empty table, under `LIMIT 0` and `WHERE FALSE`, and in a branch that never runs, such as
+the right side of `a = 'x' AND FALSE`. An unknown column has always worked this way. These mistakes work the
+same way:
+
+- A function name that does not exist (`CADB0407`), or a wrong argument count (`CADB0400`).
+- A comparison with no rule: `=`, `<>`, `<`, `<=`, `>`, `>=`, `BETWEEN`, `IN`, `NOT IN`, a simple `CASE`,
+  `NULLIF`, `ANY`, `SOME`, `ALL`.
+- An operator with a wrong operand type: `+ - * /`, unary minus, `||`, the bitwise operators, `AND`, `OR`,
+  `NOT`, `IS TRUE`, `IS FALSE`, a subscript, and `LIKE`, `ILIKE` and the regex operators (`CADB0407`).
+- A string literal that is not a valid value beside a `date` or a `datetime`: `day = 'not a date'`.
+- A `WHEN` of a searched `CASE`, or the condition of `IF`, that is not a `bool`.
+- A `WHERE`, `HAVING` or `ON` condition that is not a `bool`. See below.
+- A value of a type that the column cannot take (`CADB0401`): `UPDATE t SET a = 'x' WHERE FALSE` on an `int64`
+  column, or `INSERT INTO t (a) SELECT s FROM other WHERE FALSE` from a `string` column. A string literal that
+  does not convert fails too. A table with a `BEFORE` trigger is skipped, because the trigger may replace the
+  value. The write checks each row after the trigger ran.
+
+The check covers every expression of a `SELECT`, its subqueries, derived tables, set operation operands and
+the arguments of a window call or a table function. It also covers `CREATE VIEW` and `CREATE TABLE AS SELECT`,
+the `SET` values, `WHERE` and `RETURNING` of a write, `ON CONFLICT DO UPDATE`, and `INSERT … SELECT`.
+
+The statement shows the type of a literal, a `CAST`, a column, and an operator over those. It also shows the type
+of a subquery whose column is one of those, even when the subquery returns no row, so
+`id = (SELECT name FROM empty)` and `id IN (SELECT name FROM empty)` fail on an `int64` `id`.
+
+A **parameter** and a **function result** have a type that only the value shows, so they are checked when a value
+reaches the operator. Thus `a = @p` with a `string` `@p` fails on a table with rows and returns no rows on an
+empty table. The same holds for a subquery whose column is a function or an aggregate, and for every derived
+`string` column, because a derived table also declares `string` for a column whose type it does not know. The
+check does not read such a column as `string`, even when it comes from a real `string` column. The arguments of a function are also
+checked when it runs: `length(v)` with a number fails for the first row. The check never guesses a type, so it does
+not refuse a correct statement.
+
+#### Division by zero
+
+A division by zero whose operands are both constant is a statement mistake too, so it fails with `CADB0400`
+before any row is read. `SELECT 1 / 0 FROM t WHERE FALSE`, `1 / (1 - 1)` and `1.5 / 0` all fail, in every
+position above. This follows PostgreSQL.
+
+A constant condition removes a branch, so these do not fail: `CASE WHEN FALSE THEN 1 / 0 ELSE 1 END`,
+`IF(true, 1, 1 / 0)`, `FALSE AND 1 / 0 = 1` and `TRUE OR 1 / 0 = 1`. The order counts, as it does when a row is
+evaluated: `1 / 0 = 1 AND FALSE` fails. A subquery has its own check, so `CASE WHEN FALSE THEN (SELECT 1 / 0 FROM t)
+ELSE 1 END` fails, which is [a difference from PostgreSQL](postgresql-differences.md#statement-checks).
+
+A condition that reads a row removes nothing. So `CASE WHEN v > 0 THEN 1 / 0 ELSE 1 END` fails, even on a table
+where no row selects that branch. To guard a division, read the divisor from the row:
+`CASE WHEN v <> 0 THEN 1 / v END` runs.
+
+These are not constant, so they need a row: a column (`v / 0`, `1 / v`), a parameter (`1 / @p`), a subquery
+(`1 / (SELECT 0 FROM t)`), and a function call (`length('a') / 0`, `mod(1, 0)`, `1 % 0`, because the parser
+builds `%` as a call of `mod`).
+
+`CREATE VIEW` and a `CHECK` constraint accept a constant division. The statement that reads the view, or writes
+to the table, fails. `CREATE TABLE AS SELECT` and `CREATE MATERIALIZED VIEW` run their `SELECT`, so they fail at
+once. `EXISTS` discards its select list and its `ORDER BY`, so `EXISTS (SELECT 1 / 0 FROM empty)` does not fail,
+unless the select list holds an aggregate. On a table with rows that form still fails, because the select list
+is evaluated for the first row.
+
+`COALESCE(1, 1 / 0)` does not fail before the rows are read, because the first argument decides the result. For a
+row it still fails, because a function call evaluates all its arguments.
+
+Every other value error still needs a row: `SELECT 9223372036854775807 + 1 FROM t WHERE FALSE` returns no rows.
+
+**A condition must be a `bool`.** `WHERE`, `HAVING` and `ON` accept `bool` or NULL only: `TRUE` keeps the row,
+and `FALSE` and NULL drop it. A number is not a truth value, so `WHERE 1` and `UPDATE t SET a = 0 WHERE 1` fail
+with `CADB0400`, as in PostgreSQL. Write `WHERE TRUE` to select every row on purpose, and `WHERE a <> 0` to test
+a number.
 
 ### Result types of CASE, COALESCE, IFNULL and IF
 
@@ -727,7 +798,9 @@ argument.
 `CASE WHEN condition THEN true_result ELSE else_result END`:
 
 - A `condition` that is not a boolean fails with `CADB0400`.
-- Only the selected result is evaluated, so `IF(true, 1, 1 / 0)` returns `1`.
+- Only the selected result is evaluated, so `IF(true, 1, 1 / 0)` returns `1`. A condition that reads a row does
+  not remove a result before the statement runs, so `IF(v > 0, 1 / 0, 1)` fails. See
+  [Division by zero](#division-by-zero).
 - The two results follow the rule above.
 
 `IF` is a reserved word, so `IF NOT EXISTS` and `IF EXISTS` in DDL do not change. `EXPLAIN` shows
