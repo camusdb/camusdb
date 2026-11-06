@@ -74,6 +74,12 @@ internal sealed class ClusterSession : IAsyncDisposable
     /// </summary>
     private static readonly TimeSpan LeaderWaitBudget = TimeSpan.FromSeconds(60);
 
+    /// <summary>
+    /// How long a visitor's statement may run. The page can stop enough members that a partition has
+    /// no majority, and a statement that needs that partition would otherwise wait for minutes.
+    /// </summary>
+    private static readonly TimeSpan StatementBudget = TimeSpan.FromSeconds(15);
+
     private readonly MemoryInterNodeCommmunication interNode = new();
 
     private readonly InMemoryCommunication raftTransport = new();
@@ -407,8 +413,8 @@ internal sealed class ClusterSession : IAsyncDisposable
     /// <summary>
     /// Stops the member at <paramref name="index"/> as if the host it ran on had crashed: its
     /// traffic is cut, it leaves both transports and the address book, and its engine is disposed.
-    /// The others elect new leaders for the partitions it led. A majority must survive, so the
-    /// last member that a quorum needs cannot be stopped.
+    /// Multiple members may be stopped to demonstrate loss of quorum. Remaining replicas can
+    /// elect leaders and commit only where enough voters survive.
     /// </summary>
     public async Task StopNodeAsync(int index)
     {
@@ -416,19 +422,6 @@ internal sealed class ClusterSession : IAsyncDisposable
 
         Member member = members[index]
             ?? throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, $"Node {index + 1} is already stopped.");
-
-        int running = 0;
-        foreach (Member? other in members)
-        {
-            if (other is not null)
-                running++;
-        }
-
-        if (running - 1 < members.Length / 2 + 1)
-            throw new CamusDBException(
-                CamusDBErrorCodes.InvalidInternalOperation,
-                $"Stopping node {index + 1} would leave {running - 1} of {members.Length} nodes, which is less than a majority. The cluster would stop committing."
-            );
 
         // Cut the member off before it is disposed, so no peer calls into a node that is shutting
         // down, and so a statement addressed to it fails as a crashed host rather than reaching a
@@ -690,7 +683,7 @@ internal sealed class ClusterSession : IAsyncDisposable
             activityTransport: activityTransport
         );
 
-        member.Attach(executor, new StatementRunner(executor, options));
+        member.Attach(executor, new StatementRunner(executor, options, StatementBudget));
         registry.Register(member.Node, executor);
         member.Node.SetSchemaAckForwarder(schemaTransport);
     }
