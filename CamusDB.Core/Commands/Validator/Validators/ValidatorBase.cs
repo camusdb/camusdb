@@ -193,7 +193,7 @@ internal abstract class ValidatorBase
         if (column.Type == ColumnType.String)
         {
             int max = column.MaxLength ?? CamusDBConstants.DefaultStringMaxLength;
-            int length = (coerced.StrValue ?? "").Length;
+            int length = TextCodePoints.LengthForLimit(coerced.StrValue ?? "", max);
 
             if (length > max)
                 throw new CamusDBException(

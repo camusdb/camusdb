@@ -377,13 +377,30 @@ internal static class JsonScalarFunctions
     {
         return element.ValueKind switch
         {
-            JsonValueKind.String => new ColumnValue(ColumnType.String, element.GetString()!),
+            JsonValueKind.String => new ColumnValue(ColumnType.String, ReadJsonText(element)),
             JsonValueKind.True => ColumnValue.True,
             JsonValueKind.False => ColumnValue.False,
             JsonValueKind.Null => ColumnValue.Null,
             JsonValueKind.Number => ToNumericColumnValue(element),
             _ => ColumnValue.Null,
         };
+    }
+
+    /// <summary>
+    /// The text of a JSON string. Text that a <c>json</c> function reads is not validated when it is stored,
+    /// and the parser accepts a <c>\ud83d</c> escape with no pair, so the read itself fails with
+    /// <see cref="InvalidOperationException"/>. That must reach the client as a SQL error.
+    /// </summary>
+    private static string ReadJsonText(JsonElement element)
+    {
+        try
+        {
+            return element.GetString()!;
+        }
+        catch (InvalidOperationException)
+        {
+            throw new CamusDBException(CamusDBErrorCodes.InvalidJsonText, "invalid input syntax for type json: invalid Unicode surrogate");
+        }
     }
 
     private static ColumnValue ToNumericColumnValue(JsonElement element)
@@ -420,7 +437,7 @@ internal static class JsonScalarFunctions
 
         return left.ValueKind switch
         {
-            JsonValueKind.String => left.GetString() == right.GetString(),
+            JsonValueKind.String => ReadJsonText(left) == ReadJsonText(right),
             JsonValueKind.Number => NumbersEqual(left, right),
             JsonValueKind.True or JsonValueKind.False => left.GetBoolean() == right.GetBoolean(),
             JsonValueKind.Null => true,

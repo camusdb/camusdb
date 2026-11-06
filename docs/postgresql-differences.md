@@ -24,11 +24,22 @@ The PostgreSQL column shows what PostgreSQL 16 did in the C locale when the beha
 | Insert `'abc '` into `CHAR(3)` | `CADB0302` | Stores `'abc'` | A trailing blank counts toward the length, because nothing is trimmed from a value without an error. |
 | `'😀' > '�'` | `FALSE` | `TRUE` | Strings compare by UTF-16 code unit, not by UTF-8 byte. |
 | `'a' COLLATE "C"`, and any other `COLLATE` clause | `CADB0406` | Accepted | Only one collation exists, and a clause that is accepted but ignored would be worse than none. |
+| `regexp_count('🙂', '.')` | `2` | `1` | The regular expression engine matches UTF-16 units and has no code point mode. Translating a pattern needs a parser for its whole syntax. A pattern that names the character matches it. |
+| `regexp_like('🙂', '^.$')` | `FALSE` | `TRUE` | The same reason. |
+| `'🙂' ~ '^.$'` | `FALSE` | `TRUE` | The same reason. |
+| `regexp_replace('🙂', '.', 'x', 'g')` | `xx` | `x` | The same reason. |
+| `cardinality(regexp_split_to_array('🙂', '.'))` | `3` | `2` | The same reason. Each element of the result is empty, so no element holds half of a pair. |
+| `regexp_substr('🙂x', '.')` | `CADB0400` | `🙂` | The engine matches UTF-16 units, so the result would hold half of a pair, which has no UTF-8 form. An error is better than a damaged value. |
+| `regexp_replace('🙂', '.', 'x')` | `CADB0400` | `x` | The same reason. |
+| `regexp_instr('🙂x', '.', 1, 2)` | `CADB0400` | `2` | The same reason: the position is inside a pair. |
 
 The one string order is binary, so `'a' < 'B'` is `FALSE`, and `_aa` sorts between `B` and `a`. A full
 sort, a top-N, `LIMIT` with `OFFSET`, a range predicate, `MIN`, `MAX` and every index use this order, so a
 plan cannot change a result. PostgreSQL in the C locale gives the same answers for ASCII text. A
 linguistic locale gives different ones. Use `LOWER(v)` for a comparison that ignores case.
+
+Text functions and a `CHAR(n)` limit count code points, as PostgreSQL does. See
+[Characters and code points](data-types.md#characters-and-code-points).
 
 ## Numbers
 

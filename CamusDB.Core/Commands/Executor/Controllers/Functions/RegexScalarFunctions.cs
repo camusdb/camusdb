@@ -28,6 +28,11 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Functions;
 /// <c>\&amp;</c>) which is translated to .NET syntax (<c>$1</c>…<c>$9</c>, <c>$0</c>) before
 /// the replacement is applied.</para>
 ///
+/// <para>A start argument and a returned position count code points, as <c>substring</c> does. The match
+/// itself runs over UTF-16 units, because the engine has no code point mode. So <c>.</c> takes half of a
+/// pair, and <c>regexp_count('🙂', '.')</c> is 2. A result that would hold half of a pair, or a position
+/// inside a pair, fails instead of returning a damaged value. See <see cref="TextCodePoints"/>.</para>
+///
 /// <para>Phase-2 set-returning functions (<c>regexp_matches</c>, <c>regexp_split_to_table</c>)
 /// are not registered; calling them returns a clear "not supported" error. They require
 /// SRF/LATERAL infrastructure that does not exist yet.</para>
@@ -169,7 +174,7 @@ internal static class RegexScalarFunctions
 
         // No capture groups → one-element array with the whole match (PostgreSQL behavior).
         if (m.Groups.Count <= 1)
-            return ColumnValue.FromArray(ColumnType.String, [new ColumnValue(ColumnType.String, m.Value)]);
+            return ColumnValue.FromArray(ColumnType.String, [WholeText(calledName, m.Value)]);
 
         // Capture groups → array of groups[1..]; non-participating group → Null element.
         List<ColumnValue> groups = new(m.Groups.Count - 1);
@@ -177,7 +182,7 @@ internal static class RegexScalarFunctions
         {
             Group g = m.Groups[i];
             groups.Add(g.Success
-                ? new ColumnValue(ColumnType.String, g.Value)
+                ? WholeText(calledName, g.Value)
                 : ColumnValue.Null);
         }
         return ColumnValue.FromArray(ColumnType.String, groups);
@@ -203,7 +208,7 @@ internal static class RegexScalarFunctions
                 ? re.Replace(args[0].StrValue!, dotnetReplacement)
                 : re.Replace(args[0].StrValue!, dotnetReplacement, count: 1));
 
-        return new ColumnValue(ColumnType.String, result);
+        return WholeText(calledName, result);
     }
 
     // ── regexp_count(text, pattern [, start [, flags]]) → integer ────────────
@@ -242,7 +247,7 @@ internal static class RegexScalarFunctions
         // Match from the start offset without slicing, so an anchored '^' still refers to the true
         // start of the string (or line, with 'm') rather than the offset — matching PostgreSQL and
         // the regexp_instr/regexp_substr functions.
-        int offset = start <= 1 ? 0 : Math.Min(start - 1, subject.Length);
+        int offset = TextCodePoints.UnitOffset(subject, start - 1);
         int count = RegexMatcher.GuardTimeout(() => re.Matches(subject, offset).Count);
         return new ColumnValue(ColumnType.Integer64, (long)count);
     }
@@ -297,7 +302,7 @@ internal static class RegexScalarFunctions
         (RegexOptions opts, _) = RegexMatcher.ParseFlags(flagsStr);
         Regex re = RegexMatcher.GetRegex(args[1].StrValue!, opts);
         string subject = args[0].StrValue!;
-        int offset = start <= 1 ? 0 : Math.Min(start - 1, subject.Length);
+        int offset = TextCodePoints.UnitOffset(subject, start - 1);
 
         MatchCollection matches = RegexMatcher.GuardTimeout(() => re.Matches(subject, offset));
         if (matches.Count < nth)
@@ -309,7 +314,7 @@ internal static class RegexScalarFunctions
         {
             // Whole match position.
             int pos = endOption == 0 ? m.Index : m.Index + m.Length;
-            return new ColumnValue(ColumnType.Integer64, (long)(pos + 1)); // 1-based
+            return new ColumnValue(ColumnType.Integer64, CodePointPosition(calledName, subject, pos));
         }
         else
         {
@@ -318,7 +323,7 @@ internal static class RegexScalarFunctions
                 return new ColumnValue(ColumnType.Integer64, 0L);
             Group g = m.Groups[subexpr];
             int pos = endOption == 0 ? g.Index : g.Index + g.Length;
-            return new ColumnValue(ColumnType.Integer64, (long)(pos + 1));
+            return new ColumnValue(ColumnType.Integer64, CodePointPosition(calledName, subject, pos));
         }
     }
 
@@ -365,7 +370,7 @@ internal static class RegexScalarFunctions
         (RegexOptions opts, _) = RegexMatcher.ParseFlags(flagsStr);
         Regex re = RegexMatcher.GetRegex(args[1].StrValue!, opts);
         string subject = args[0].StrValue!;
-        int offset = start <= 1 ? 0 : Math.Min(start - 1, subject.Length);
+        int offset = TextCodePoints.UnitOffset(subject, start - 1);
 
         MatchCollection matches = RegexMatcher.GuardTimeout(() => re.Matches(subject, offset));
         if (matches.Count < nth)
@@ -374,12 +379,12 @@ internal static class RegexScalarFunctions
         Match m = matches[nth - 1];
 
         if (subexpr == 0)
-            return new ColumnValue(ColumnType.String, m.Value);
+            return WholeText(calledName, m.Value);
 
         if (subexpr >= m.Groups.Count || !m.Groups[subexpr].Success)
             return ColumnValue.Null;
 
-        return new ColumnValue(ColumnType.String, m.Groups[subexpr].Value);
+        return WholeText(calledName, m.Groups[subexpr].Value);
     }
 
     // ── regexp_split_to_array(text, pattern [, flags]) → text[] ──────────────
@@ -402,9 +407,7 @@ internal static class RegexScalarFunctions
         {
             // Empty pattern → split into individual characters (PostgreSQL parity).
             // .NET Regex.Split("abc", "") gives ["", "a", "b", "c", ""] which differs.
-            parts = subject.Length == 0
-                ? [""]
-                : subject.Select(c => c.ToString()).ToArray();
+            parts = subject.Length == 0 ? [""] : SplitCodePoints(subject);
         }
         else
         {
@@ -412,11 +415,55 @@ internal static class RegexScalarFunctions
             parts = RegexMatcher.GuardTimeout(() => re.Split(subject));
         }
 
-        List<ColumnValue> elements = parts.Select(p => new ColumnValue(ColumnType.String, p)).ToList<ColumnValue>();
+        List<ColumnValue> elements = parts.Select(p => WholeText(calledName, p)).ToList();
         return ColumnValue.FromArray(ColumnType.String, elements);
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// A text result of a regular expression. The engine matches UTF-16 units and has no code point mode,
+    /// so <c>.</c> can match half of a pair. Half of a pair has no UTF-8 form, so a statement fails here
+    /// and does not get a damaged value.
+    /// </summary>
+    private static ColumnValue WholeText(string calledName, string text)
+    {
+        if (TextCodePoints.HasUnpairedSurrogate(text))
+            throw HalfPair(calledName);
+
+        return new ColumnValue(ColumnType.String, text);
+    }
+
+    /// <summary>
+    /// The 1-based code point position of the UTF-16 offset <paramref name="offset"/>. An offset inside a
+    /// pair has no code point position, so it fails for the same reason as <see cref="WholeText"/>.
+    /// </summary>
+    private static long CodePointPosition(string calledName, string subject, int offset)
+    {
+        if (TextCodePoints.IsInsidePair(subject, offset))
+            throw HalfPair(calledName);
+
+        return (long)TextCodePoints.Count(subject.AsSpan(0, offset)) + 1;
+    }
+
+    private static CamusDBException HalfPair(string calledName) => new(
+        CamusDBErrorCodes.InvalidInput,
+        $"Function '{calledName}' matched half of a surrogate pair, because a regular expression matches UTF-16 units. Name the character in the pattern, or use a class that matches both units");
+
+    private static string[] SplitCodePoints(string subject)
+    {
+        string[] parts = new string[TextCodePoints.Count(subject)];
+        int offset = 0;
+
+        for (int i = 0; i < parts.Length; i++)
+        {
+            int units = TextCodePoints.UnitsAt(subject, offset);
+            parts[i] = subject.Substring(offset, units);
+            offset += units;
+        }
+
+        return parts;
+    }
 
     /// <summary>
     /// Reads the optional flags argument at <paramref name="flagsArgIndex"/> from

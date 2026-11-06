@@ -400,4 +400,51 @@ public sealed class TestCompiledRowCodec
         CamusDBException? ex = Assert.Throws<CamusDBException>(() => codec.ValidateFrame(new byte[length]));
         Assert.AreEqual(CamusDBErrorCodes.SystemSpaceCorrupt, ex!.Code);
     }
+
+    // ── An unpaired surrogate has no UTF-8 form, so an encode refuses it and does not write U+FFFD. ──
+
+    // A source and not attributes: an attribute string goes through UTF-8, which would damage half of a pair.
+    private static IEnumerable<TestCaseData> HalvesOfAPair()
+    {
+        yield return new TestCaseData("\uD83D").SetName("Codec_RefusesAHighHalf");
+        yield return new TestCaseData("\uDE42").SetName("Codec_RefusesALowHalf");
+        yield return new TestCaseData("x\uD83Dy").SetName("Codec_RefusesAHalfInsideAValue");
+    }
+
+    [TestCaseSource(nameof(HalvesOfAPair))]
+    public void Encode_HalfOfAPair_IsRefusedInEveryForm(string text)
+    {
+        CompiledRowCodec codec = CodecFor(1, Col("id", ColumnType.Integer64), Col("name", ColumnType.String));
+        ValueSlot[] values = [ValueSlot.FromLong(ColumnType.Integer64, 1), ValueSlot.FromString(text)];
+
+        CamusDBException? bare = Assert.Throws<CamusDBException>(() => codec.Encode(values));
+        CamusDBException? storage = Assert.Throws<CamusDBException>(() => codec.EncodeStorageValue(values));
+
+        foreach (CamusDBException? error in new[] { bare, storage })
+        {
+            Assert.AreEqual(CamusDBErrorCodes.InvalidInput, error!.Code);
+            StringAssert.Contains("column 'name'", error.Message);
+        }
+    }
+
+    [Test]
+    public void Encode_AHalfInAnArrayElement_IsRefused()
+    {
+        CompiledRowCodec codec = CodecFor(1, Col("tags", ColumnType.Array, ColumnType.String));
+        ValueSlot[] values = [ValueSlot.FromColumnValue(ColumnValue.FromArray(ColumnType.String, [new ColumnValue(ColumnType.String, "ok"), new ColumnValue(ColumnType.String, "\uD83D")]))];
+
+        CamusDBException? error = Assert.Throws<CamusDBException>(() => codec.Encode(values));
+
+        Assert.AreEqual(CamusDBErrorCodes.InvalidInput, error!.Code);
+        StringAssert.Contains("column 'tags'", error.Message);
+    }
+
+    [Test]
+    public void Encode_AWholePair_RoundTrips()
+    {
+        CompiledRowCodec codec = CodecFor(1, Col("name", ColumnType.String));
+
+        AssertRoundTrip(codec, ValueSlot.FromString("\U0001F642"));
+        AssertRoundTrip(codec, ValueSlot.FromString("\uFFFD"));
+    }
 }
