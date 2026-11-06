@@ -75,7 +75,7 @@
 
   <ItemGroup>
     <PackageReference Include="CommandLineParser" Version="2.9.1" />
-    <PackageReference Include="Grpc.AspNetCore" Version="2.67.0" />
+    <PackageReference Include="Grpc.AspNetCore" Version="2.85.0" />
   </ItemGroup>
 
   <!-- Opt-in diagnostics exporters. These live only in the host; CamusDB.Core emits via plain
