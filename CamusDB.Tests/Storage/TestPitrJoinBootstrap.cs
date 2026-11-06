@@ -312,8 +312,12 @@ public sealed class TestPitrJoinBootstrap
     [Test]
     public async Task FailedBootstrap_BlocksStart()
     {
+        // The other tests let the backup service create this root, which it does with mode 0700; here
+        // nothing is backed up first, and Kahuna refuses a root the host's umask left group-writable.
         string backupDir = Path.Combine(root, "backups");
         Directory.CreateDirectory(backupDir);
+        if (!OperatingSystem.IsWindows())
+            File.SetUnixFileMode(backupDir, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
 
         await using EmbeddedKahuna joiner = Joiner(MemoryJoinerOptions(backupDir));
 

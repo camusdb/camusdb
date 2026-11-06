@@ -40,6 +40,11 @@ public sealed class TestEmbeddedKahunaBackup
     {
         string dir = Path.Combine(Path.GetTempPath(), "camusdb-backup-test", Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(dir);
+        // Kahuna refuses a backup root that the group or the world may write to, and CreateDirectory
+        // leaves the mode to the host's umask, so a permissive umask would fail the test rather than
+        // the code under test.
+        if (!OperatingSystem.IsWindows())
+            File.SetUnixFileMode(dir, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
         return dir;
     }
 
