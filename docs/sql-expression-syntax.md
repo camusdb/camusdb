@@ -157,6 +157,58 @@ SELECT -total, -(price * qty), 3 - -4;   -- 3 - -4 is 7
 A minus sign directly before a number, as in `-5` or `- 5`, gives a negative constant, not a
 negation. The planner can then use it as an index bound.
 
+## `LIKE` and `ILIKE` patterns
+
+A pattern follows the rule of PostgreSQL:
+
+| In the pattern | What it matches |
+|---|---|
+| `%` | Any run of characters, also an empty one |
+| `_` | One character. It counts a code point, so `'🙂' LIKE '_'` is true |
+| `\` and the character after it | That character as a literal, so `'a%' LIKE 'a\%'` is true and `'ab' LIKE 'a\%'` is false |
+| Any other character | Itself. `LIKE` compares it exactly, and `ILIKE` ignores case |
+
+A newline is one character like any other. `SHOW ... LIKE` uses the same rule.
+
+A plain string literal keeps a backslash, so `'a\_'` holds three characters. In an `E''` literal, write
+`E'a\\_'` for the same value.
+
+A pattern that ends with the escape character fails with `CADB0400`, but only when the match reaches that
+character. So `'b' LIKE 'a\'` is `false`, and `'a\' LIKE 'a\'` fails. This is also the rule of PostgreSQL.
+
+### The `ESCAPE` clause
+
+`ESCAPE` selects another escape character:
+
+```sql
+SELECT 'a_' LIKE 'a#_' ESCAPE '#';    -- true
+SELECT 'ab' LIKE 'a#_' ESCAPE '#';    -- false
+SELECT 'a\b' LIKE 'a\b' ESCAPE '#';   -- true: a backslash is a literal here
+SELECT 'a\b' LIKE 'a\b' ESCAPE '';    -- true: an empty string means no escape character
+```
+
+The clause applies to `LIKE`, `ILIKE`, `NOT LIKE` and `NOT ILIKE`. Its value can be a column or a parameter. A
+`NULL` value makes the result UNKNOWN, and a string of more than one character fails with `CADB0400`. `ESCAPE` is
+not a reserved word, so a column can have that name.
+
+`x LIKE p ESCAPE e` is the same as `x LIKE like_escape(p, e)`, as in PostgreSQL. `SHOW CREATE VIEW`, a CHECK
+constraint and `EXPLAIN` show that form. `like_escape` returns the pattern in its backslash form, and it can be
+called directly.
+
+### Definitions stored by an older build
+
+An older build read `_` and a backslash as literals. Nothing rewrites a stored definition, so each one takes the
+rule above when it next runs:
+
+- A CHECK constraint can refuse a row that it accepted before. `CHECK (s NOT LIKE 'a_')` accepted `'ab'`, and now
+  refuses it. An old row stays stored, and the next write that checks it fails with `CADB0303`.
+- A view takes the new rule at once, so its rows can change.
+- A materialized view keeps its old rows until `REFRESH MATERIALIZED VIEW`.
+- During a rolling upgrade, two nodes can give different answers for the same pattern.
+
+To keep the old meaning, write `\_` for a literal underscore and `\\` for a literal backslash. Use
+`SHOW CREATE TABLE` and `SHOW CREATE VIEW` to find a pattern that holds either character.
+
 ## `NOT BETWEEN`, `NOT LIKE` and `NOT ILIKE`
 
 These spellings are the same as `NOT` over the positive predicate:

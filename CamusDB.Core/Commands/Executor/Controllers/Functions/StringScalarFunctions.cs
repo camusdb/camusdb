@@ -55,6 +55,17 @@ internal static class StringScalarFunctions
         });
 
         RegisterTernaryString(registry, "replace", EvaluateReplace, _ => ColumnType.String);
+
+        // The form that `x LIKE p ESCAPE e` parses to. It is also callable, as in PostgreSQL.
+        registry.Register(new ScalarFunctionDescriptor
+        {
+            Name = "like_escape",
+            MinArity = 2,
+            MaxArity = 2,
+            Evaluator = EvaluateLikeEscape,
+            InferReturnType = _ => ColumnType.String,
+        });
+
         RegisterBinaryStringPredicate(registry, "contains", EvaluateContains);
         RegisterBinaryStringPredicate(registry, "starts_with", EvaluateStartsWith);
         RegisterBinaryStringPredicate(registry, "ends_with", EvaluateEndsWith);
@@ -364,6 +375,17 @@ internal static class StringScalarFunctions
 
     private static ColumnValue EvaluateContains(string calledName, IReadOnlyList<ColumnValue> arguments)
         => EvaluateMatch(calledName, arguments, MatchKind.Contains);
+
+    private static ColumnValue EvaluateLikeEscape(string calledName, IReadOnlyList<ColumnValue> arguments)
+    {
+        if (PropagateNull(arguments) is ColumnValue nullResult)
+            return nullResult;
+
+        ScalarFunctionArguments.RequireType(calledName, 0, arguments[0], ColumnType.String);
+        ScalarFunctionArguments.RequireType(calledName, 1, arguments[1], ColumnType.String);
+
+        return new ColumnValue(ColumnType.String, LikeMatcher.RewriteEscape(arguments[0].StrValue!, arguments[1].StrValue!));
+    }
 
     private static ColumnValue EvaluateStartsWith(string calledName, IReadOnlyList<ColumnValue> arguments)
         => EvaluateMatch(calledName, arguments, MatchKind.StartsWith);

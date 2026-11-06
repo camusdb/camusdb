@@ -366,8 +366,8 @@ although it takes four bytes in UTF-8.
 | `ltrim('🙂x', '😀')` | `🙂x` |
 | `octet_length('🙂')` | `4`, because this function counts bytes |
 
-The same count applies to `POSITION`, to the character set of `trim`, `ltrim` and `rtrim`, to a `CHAR(n)` or
-`VARCHAR(n)` limit, and to the `start` argument and the result of `regexp_instr`, `regexp_count` and
+The same count applies to `POSITION`, to the character set of `trim`, `ltrim` and `rtrim`, to the `_` of a `LIKE`
+pattern, to a `CHAR(n)` or `VARCHAR(n)` limit, and to the `start` argument and the result of `regexp_instr`, `regexp_count` and
 `regexp_substr`. For a `bytes` value, these functions count bytes. The sort order of strings is separate, and it
 stays by UTF-16 code unit. See [Differences from PostgreSQL](postgresql-differences.md#strings).
 

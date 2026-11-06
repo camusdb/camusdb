@@ -49,7 +49,11 @@ Rows are sorted by name using ordinal comparison, so output from two nodes diffs
 ## `LIKE`
 
 The optional pattern matches against the **variable name**. `%` matches any run of characters, `_`
-matches exactly one. A pattern that matches nothing returns zero rows rather than an error.
+matches exactly one, and a backslash makes the next character a literal, so `ttl\_%` reads the underscore as
+itself. This is the rule of `LIKE` in a query, see
+[`LIKE` and `ILIKE` patterns](sql-expression-syntax.md#like-and-ilike-patterns). A pattern that matches nothing
+returns zero rows rather than an error. A pattern that ends with a backslash fails with `CADB0400` when the match
+reaches it.
 
 Matching is **case-sensitive**, the same as `SHOW TABLES`, `SHOW DATABASES`, and `SHOW ENGINE STATS`
 — they share one matcher. Variable names are all lowercase, so `LIKE 'TTL_%'` legitimately matches

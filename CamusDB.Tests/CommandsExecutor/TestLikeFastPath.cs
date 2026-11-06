@@ -18,10 +18,9 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// <summary>
 /// Parity tests for the LIKE / ILIKE fast-path matchers.
 ///
-/// Each test case verifies that the fast-path result (now in Like/ILike) matches
-/// what the previous regex-only implementation produced. The table of patterns covers:
-///   - no %, leading %, trailing %, both % (contains), embedded % (regex fallback)
-///   - underscore '_' is NOT a wildcard (matches current semantics)
+/// Each test case verifies the result of a pattern through the evaluator. The table of patterns covers:
+///   - no %, leading %, trailing %, both % (contains), embedded % (the walk of the matcher)
+///   - underscore '_', which matches one character, and a backslash, which makes it a literal
 ///   - non-ASCII: ordinal comparison must not change results across locales
 ///   - ILIKE: same shapes with case-insensitive matching
 /// </summary>
@@ -148,22 +147,25 @@ public class TestLikeFastPath
         Assert.IsFalse(EvalLike("aXYZc", "a%b%c"));
     }
 
-    // ── underscore '_' is NOT a wildcard ─────────────────────────────────────
+    // ── underscore '_' matches one character ─────────────────────────────────
 
     [Test]
-    public void Like_Underscore_IsLiteral_NotWildcard()
+    public void Like_Underscore_MatchesOneCharacter()
     {
-        // '_' must match the literal underscore character, not any character
         Assert.IsTrue(EvalLike("h_llo", "h_llo"));
-        Assert.IsFalse(EvalLike("hello", "h_llo"));
+        Assert.IsTrue(EvalLike("hello", "h_llo"));
+        Assert.IsFalse(EvalLike("hllo", "h_llo"));
+        Assert.IsTrue(EvalLike("h_llo", @"h\_llo"));
+        Assert.IsFalse(EvalLike("hello", @"h\_llo"));
     }
 
     [Test]
-    public void Like_UnderscoreWithPercent_BothLiteralAndWildcard()
+    public void Like_UnderscoreWithPercent_BothWildcards()
     {
-        // pattern 'h_l%' means: starts with "h_l" (literal underscore, not wildcard)
         Assert.IsTrue(EvalLike("h_lo world", "h_l%"));
-        Assert.IsFalse(EvalLike("hello world", "h_l%"));
+        Assert.IsTrue(EvalLike("hello world", "h_l%"));
+        Assert.IsFalse(EvalLike("hxxlo world", "h_l%"));
+        Assert.IsFalse(EvalLike("hello world", @"h\_l%"));
     }
 
     // ── non-ASCII ordinal comparison ─────────────────────────────────────────
@@ -241,10 +243,11 @@ public class TestLikeFastPath
     }
 
     [Test]
-    public void ILike_Underscore_IsLiteral_NotWildcard()
+    public void ILike_Underscore_MatchesOneCharacter()
     {
         Assert.IsTrue(EvalILike("H_LLO", "h_llo"));
-        Assert.IsFalse(EvalILike("HELLO", "h_llo"));
+        Assert.IsTrue(EvalILike("HELLO", "h_llo"));
+        Assert.IsFalse(EvalILike("HELLO", @"h\_llo"));
     }
 
     [Test]

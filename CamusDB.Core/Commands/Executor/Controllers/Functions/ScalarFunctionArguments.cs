@@ -84,10 +84,14 @@ internal static class ScalarFunctionArguments
         if (allowedTypes.Contains(argument.Type))
             return;
 
-        throw new CamusDBException(
-            CamusDBErrorCodes.InvalidInput,
-            $"Function '{functionName}' expects argument {argumentIndex + 1} of type {FormatTypes(allowedTypes)} but received {argument.Type}");
+        throw WrongType(functionName, argumentIndex, argument.Type, allowedTypes);
     }
+
+    /// <summary>The error of <see cref="RequireType"/>, so a bind-time rule can raise the same code and text.</summary>
+    public static CamusDBException WrongType(string functionName, int argumentIndex, ColumnType received, params ColumnType[] allowedTypes) =>
+        new(
+            CamusDBErrorCodes.InvalidInput,
+            $"Function '{functionName}' expects argument {argumentIndex + 1} of type {FormatTypes(allowedTypes)} but received {received}");
 
     /// <summary>
     /// Accepts Integer64, Float64 and NUMERIC. A caller that branches on the type must handle NUMERIC

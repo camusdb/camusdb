@@ -220,6 +220,7 @@ TRevoke         (R|r)(E|e)(V|v)(O|o)(K|k)(E|e)
 TPrivileges     (P|p)(R|r)(I|i)(V|v)(I|i)(L|l)(E|e)(G|g)(E|e)(S|s)
 TFor            (F|f)(O|o)(R|r)
 TOver           (O|o)(V|v)(E|e)(R|r)
+TEscape         (E|e)(S|s)(C|c)(A|a)(P|p)(E|e)
 TViews          (V|v)(I|i)(E|e)(W|w)(S|s)
 TView           (V|v)(I|i)(E|e)(W|w)
 TMaterialized   (M|m)(A|a)(T|t)(E|e)(R|r)(I|i)(A|a)(L|l)(I|i)(Z|z)(E|e)(D|d)
@@ -608,6 +609,8 @@ TSequence       (S|s)(E|e)(Q|q)(U|u)(E|e)(N|n)(C|c)(E|e)
 {TFor} { return (int)Token.TFOR; }
 
 {TOver} { return (int)Token.TOVER; }
+
+{TEscape} { yylval.s = yytext; return (int)Token.TESCAPE; }
 
 {TViews} { return (int)Token.TVIEWS; }
 

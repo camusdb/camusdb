@@ -13,7 +13,6 @@ using CamusDB.Core.CommandsExecutor.Controllers.Functions;
 using CamusDB.Core.CommandsExecutor.Controllers.Queries;
 using CamusDB.Core.CommandsExecutor.Models.Queries;
 using System.Text;
-using System.Text.RegularExpressions;
 using System.Globalization;
 using System.Runtime.CompilerServices;
 
@@ -1056,13 +1055,13 @@ internal abstract class SQLExecutorBaseCreator
                 if (leftValue.Type != ColumnType.String || rightValue.Type != ColumnType.String)
                     throw new CamusDBException(CamusDBErrorCodes.InvalidAstStmt, $"No matching signature for operator LIKE for argument types: {leftValue.Type}, {rightValue.Type}");
 
-                return ColumnValue.FromBool(Like(leftValue.StrValue!, rightValue.StrValue!));
+                return ColumnValue.FromBool(Functions.LikeMatcher.Matches(leftValue.StrValue!, rightValue.StrValue!, ignoreCase: false));
 
             case NodeType.ExprILike:
                 if (leftValue.Type != ColumnType.String || rightValue.Type != ColumnType.String)
                     throw new CamusDBException(CamusDBErrorCodes.InvalidAstStmt, $"No matching signature for operator ILIKE for argument types: {leftValue.Type}, {rightValue.Type}");
 
-                return ColumnValue.FromBool(ILike(leftValue.StrValue!, rightValue.StrValue!));
+                return ColumnValue.FromBool(Functions.LikeMatcher.Matches(leftValue.StrValue!, rightValue.StrValue!, ignoreCase: true));
 
             default:
                 {
@@ -1534,110 +1533,5 @@ internal abstract class SQLExecutorBaseCreator
         if (returnType != columnType && !widens)
             throw new CamusDBException(CamusDBErrorCodes.InvalidInput,
                 $"DEFAULT function '{functionName}()' returns {returnType} but column '{columnName}' is {columnType}");
-    }
-
-    internal static bool Like(string text, string pattern)
-    {
-        // Fast paths: only '%' is a wildcard ('_' is literal, matching current semantics).
-        // Use ordinal comparison to avoid culture-dependent results for non-ASCII input.
-        int percentCount = CountChar(pattern, '%');
-
-        if (percentCount == 0)
-            return text.Equals(pattern, StringComparison.Ordinal);
-
-        if (percentCount == 1)
-        {
-            if (pattern[^1] == '%')
-                return text.AsSpan().StartsWith(pattern.AsSpan(0, pattern.Length - 1), StringComparison.Ordinal);
-            if (pattern[0] == '%')
-                return text.AsSpan().EndsWith(pattern.AsSpan(1), StringComparison.Ordinal);
-        }
-
-        if (percentCount == 2 && pattern[0] == '%' && pattern[^1] == '%')
-        {
-            ReadOnlySpan<char> inner = pattern.AsSpan(1, pattern.Length - 2);
-            if (!inner.Contains('%'))
-                return text.Contains(inner, StringComparison.Ordinal);
-        }
-
-        // Fallback: regex for multi-wildcard patterns (e.g. 'a%b%c'). Route through RegexMatcher
-        // so this path inherits the bounded compiled-pattern cache and the ReDoS match-timeout.
-        // The glob is escaped first and only '%' becomes '.*', so LIKE semantics are unchanged
-        // (still ordinal, case-sensitive).
-        string regexPattern = string.Concat("^", Regex.Escape(pattern).Replace("%", ".*"), "$");
-        return Functions.RegexMatcher.IsMatch(text, regexPattern, ignoreCase: false);
-    }
-
-    internal static bool ILike(string text, string pattern)
-    {
-        int percentCount = CountChar(pattern, '%');
-
-        if (percentCount == 0)
-            return text.Equals(pattern, StringComparison.OrdinalIgnoreCase);
-
-        if (percentCount == 1)
-        {
-            if (pattern[^1] == '%')
-                return text.AsSpan().StartsWith(pattern.AsSpan(0, pattern.Length - 1), StringComparison.OrdinalIgnoreCase);
-            if (pattern[0] == '%')
-                return text.AsSpan().EndsWith(pattern.AsSpan(1), StringComparison.OrdinalIgnoreCase);
-        }
-
-        if (percentCount == 2 && pattern[0] == '%' && pattern[^1] == '%')
-        {
-            ReadOnlySpan<char> inner = pattern.AsSpan(1, pattern.Length - 2);
-            if (!inner.Contains('%'))
-                return text.Contains(inner, StringComparison.OrdinalIgnoreCase);
-        }
-
-        // Multi-wildcard fallback: sequential ordinal-ignore-case segment scan.
-        // Keeps ILIKE fully ordinal — culture-default regex would diverge for non-ASCII.
-        return ILikeMultiWildcard(text, pattern);
-    }
-
-    private static bool ILikeMultiWildcard(string text, string pattern)
-    {
-        // Split pattern on '%' and match each segment in sequence with OrdinalIgnoreCase.
-        // Leading segment anchors to the start; trailing segment anchors to the end;
-        // interior segments advance a left-to-right scan cursor.
-        string[] segments = pattern.Split('%');
-        ReadOnlySpan<char> span = text.AsSpan();
-        int pos = 0;
-
-        string first = segments[0];
-        if (first.Length > 0)
-        {
-            if (!span.StartsWith(first.AsSpan(), StringComparison.OrdinalIgnoreCase))
-                return false;
-            pos += first.Length;
-        }
-
-        for (int i = 1; i < segments.Length - 1; i++)
-        {
-            string seg = segments[i];
-            if (seg.Length == 0) continue;
-            int found = span[pos..].IndexOf(seg.AsSpan(), StringComparison.OrdinalIgnoreCase);
-            if (found < 0) return false;
-            pos += found + seg.Length;
-        }
-
-        string last = segments[^1];
-        if (last.Length > 0)
-        {
-            int lastStart = text.Length - last.Length;
-            if (lastStart < pos) return false;
-            if (!span[lastStart..].StartsWith(last.AsSpan(), StringComparison.OrdinalIgnoreCase))
-                return false;
-        }
-
-        return true;
-    }
-
-    private static int CountChar(string s, char c)
-    {
-        int count = 0;
-        foreach (char ch in s)
-            if (ch == c) count++;
-        return count;
     }
 }

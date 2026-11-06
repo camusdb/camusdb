@@ -1863,43 +1863,9 @@ internal sealed class SchemaQuerier
     private static string IsoFromUnixMs(long unixMs) =>
         DateTimeOffset.FromUnixTimeMilliseconds(unixMs).UtcDateTime.ToString("yyyy-MM-ddTHH:mm:ss.fff'Z'", CultureInfo.InvariantCulture);
 
-    /// <summary>
-    /// SQL LIKE pattern match: '%' matches any sequence, '_' matches any single character.
-    /// Matching is case-sensitive (standard SQL semantics).
-    /// </summary>
-    private static bool LikeMatch(string value, string pattern)
-    {
-        int vi = 0, pi = 0;
-        int starPi = -1, starVi = -1;
-
-        while (vi < value.Length)
-        {
-            if (pi < pattern.Length && (pattern[pi] == '_' || pattern[pi] == value[vi]))
-            {
-                vi++;
-                pi++;
-            }
-            else if (pi < pattern.Length && pattern[pi] == '%')
-            {
-                starPi = pi++;
-                starVi = vi;
-            }
-            else if (starPi != -1)
-            {
-                pi = starPi + 1;
-                vi = ++starVi;
-            }
-            else
-            {
-                return false;
-            }
-        }
-
-        while (pi < pattern.Length && pattern[pi] == '%')
-            pi++;
-
-        return pi == pattern.Length;
-    }
+    /// <summary>The pattern of every SHOW statement. Matching is case-sensitive, as in <c>LIKE</c>.</summary>
+    private static bool LikeMatch(string value, string pattern) =>
+        Functions.LikeMatcher.Matches(value, pattern, ignoreCase: false);
 
     /// <summary>
     /// Renders a column's type as re-parseable CREATE TABLE syntax. Strings and bytes carry their

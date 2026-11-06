@@ -32,6 +32,7 @@ The PostgreSQL column shows what PostgreSQL 16 did in the C locale when the beha
 | `regexp_substr('🙂x', '.')` | `CADB0400` | `🙂` | The engine matches UTF-16 units, so the result would hold half of a pair, which has no UTF-8 form. An error is better than a damaged value. |
 | `regexp_replace('🙂', '.', 'x')` | `CADB0400` | `x` | The same reason. |
 | `regexp_instr('🙂x', '.', 1, 2)` | `CADB0400` | `2` | The same reason: the position is inside a pair. |
+| `'É' ILIKE 'é'` | `TRUE` | `FALSE` | `ILIKE` uses ordinal case folding, which covers every cased letter. PostgreSQL in the C locale folds only ASCII, and a linguistic locale gives the same answer as CamusDB. |
 
 The one string order is binary, so `'a' < 'B'` is `FALSE`, and `_aa` sorts between `B` and `a`. A full
 sort, a top-N, `LIMIT` with `OFFSET`, a range predicate, `MIN`, `MAX` and every index use this order, so a
@@ -83,6 +84,7 @@ differences that stay. `em` is an empty table.
 | `SELECT 9223372036854775807 + 1 FROM em` | No rows, and `CADB0420` when a row reaches it | `bigint out of range` | A value error other than a constant division by zero is not a statement mistake, and the engine does not evaluate a constant at bind time. |
 | `SELECT CAST(70000 AS SMALLINT) FROM em` | No rows | `smallint out of range` | The same reason. |
 | `UPDATE em SET small = 70000 WHERE FALSE` | No row written | `smallint out of range` | The declared range is a write rule, so it applies to a row that the statement writes. |
+| `SELECT id FROM em WHERE s LIKE 'a' ESCAPE 'xy'` | No rows, and `CADB0400` when a row reaches it | `invalid escape string` | A value error is not a statement mistake, and the engine does not evaluate a constant at bind time. |
 | `SELECT length(v) FROM em` | No rows, and `CADB0400` when a row reaches it | `function length(bigint) does not exist` | Functions have no signature table. The name and the argument count are checked at bind time, and each function checks its argument types when it runs. |
 | `SELECT id FROM d WHERE EXISTS (SELECT length(v) FROM d)` | Every row | `function length(bigint) does not exist` | Functions have no signature table, so only a call shows a wrong argument type, and `EXISTS` does not evaluate its output. |
 

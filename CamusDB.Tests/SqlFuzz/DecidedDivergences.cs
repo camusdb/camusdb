@@ -207,6 +207,16 @@ public static class DecidedDivergences
             "1", "function length(bigint) does not exist",
             "Functions have no signature table, so only a call shows a wrong argument type, and EXISTS does not evaluate its output."),
 
+        new("An ESCAPE string of two characters needs a row", EmptyTable,
+            "SELECT id FROM em WHERE s LIKE 'a' ESCAPE 'xy'",
+            "no rows", "invalid escape string",
+            "A value error is not a statement mistake, and the engine does not evaluate a constant at bind time."),
+
+        new("ILIKE folds non-ASCII letters", NoSetup,
+            "SELECT 'É' ILIKE 'é'",
+            "True", "false",
+            "ILIKE uses ordinal case folding, which covers every cased letter. PostgreSQL in the C locale folds only ASCII, and a linguistic locale gives the same answer as CamusDB."),
+
         new("A correlated EXISTS with an aggregate is refused", RowTable,
             "SELECT id FROM d o WHERE EXISTS (SELECT COUNT(*) FROM d i WHERE i.id = o.id + 100) ORDER BY id",
             CamusDBErrorCodes.FeatureNotSupported, "1",

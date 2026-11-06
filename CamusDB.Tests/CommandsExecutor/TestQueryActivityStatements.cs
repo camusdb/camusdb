@@ -127,8 +127,13 @@ internal sealed class TestQueryActivityStatements : BaseTest
         (KvTransaction txn, IAsyncEnumerator<QueryResultRow> cursor) =
             await HoldSelectAsync(executor, database, db, "SELECT name FROM robots");
 
-        List<QueryResultRow> matched = await QueryAsync(executor, db, "SHOW QUERIES LIKE '%robots%'");
+        List<QueryResultRow> matched = await QueryAsync(executor, db, "SHOW QUERIES LIKE 'SELECT%robots'");
         Assert.That(matched.Select(r => Text(r, "sql")), Is.EqualTo(new[] { "SELECT name FROM robots" }));
+
+        // The statement that asks is also running, and its text holds its own pattern.
+        const string own = "SHOW QUERIES LIKE '%robots%'";
+        List<QueryResultRow> withOwn = await QueryAsync(executor, db, own);
+        Assert.That(withOwn.Select(r => Text(r, "sql")), Is.EquivalentTo(new[] { "SELECT name FROM robots", own }));
 
         await cursor.DisposeAsync();
         await database.Transactions.RollbackAsync(txn);

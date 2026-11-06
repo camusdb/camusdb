@@ -62,6 +62,43 @@ public sealed class TestPatternSelectivity : BaseTest
     }
 
     [Test]
+    public async Task Analyze_AnUnderscoreOrAnEscape_EndsTheFixedPrefix()
+    {
+        Db db = await CreatePeople();
+        await Analyze(db);
+
+        // The prefix is Ann in each case, so the range of 100 rows bounds the estimate. A prefix that kept
+        // the underscore or the escape would read an empty range.
+        Assert.That(await FilterEstimate(db, "SELECT id FROM people WHERE name LIKE 'Ann_%'"), Is.InRange(1, 130));
+        Assert.That(await FilterEstimate(db, @"SELECT id FROM people WHERE name LIKE 'Ann\ %'"), Is.InRange(1, 130));
+
+        // A last underscore or escape is not the trailing % of a prefix pattern, so the whole range of 100
+        // rows would be too much: no name has the form Ann and then one character.
+        Assert.That(await FilterEstimate(db, "SELECT id FROM people WHERE name LIKE 'Ann_'"), Is.InRange(0, 40));
+        Assert.That(await FilterEstimate(db, @"SELECT id FROM people WHERE name LIKE 'Ann\'"), Is.InRange(0, 40));
+
+        // A pattern with no wildcard and an underscore is not an equality.
+        Assert.That(await FilterEstimate(db, "SELECT id FROM people WHERE name NOT LIKE 'Ann_%'"), Is.InRange(1870, 1999));
+    }
+
+    /// <summary>
+    /// The estimate reads bucket bounds that a row may never reach, so a pattern that fails on a value must
+    /// not fail the plan. Only a row can raise the error, as in PostgreSQL.
+    /// </summary>
+    [TestCase(@"name LIKE '%\'")]
+    [TestCase(@"name LIKE 'Ann%\'")]
+    [TestCase(@"name LIKE 'A\'")]
+    [TestCase(@"name ILIKE 'a%\'")]
+    [TestCase(@"name LIKE '%\' OR name LIKE '%x%'")]
+    public async Task Analyze_APatternThatEndsWithTheEscape_DoesNotFailThePlan(string condition)
+    {
+        Db db = await CreatePeople();
+        await Analyze(db);
+
+        Assert.That(await FilterEstimate(db, $"SELECT id FROM people WHERE {condition}"), Is.GreaterThanOrEqualTo(0));
+    }
+
+    [Test]
     public async Task Analyze_AnOrOfPatternsOnOneColumn_IsTheirUnion()
     {
         Db db = await CreatePeople();

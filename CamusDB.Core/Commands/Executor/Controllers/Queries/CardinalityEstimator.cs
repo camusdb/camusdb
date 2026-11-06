@@ -10,6 +10,7 @@ using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Plans;
 using CamusDB.Core.CommandsExecutor.Models.Predicates;
 using CamusDB.Core.CommandsExecutor.Controllers.DML;
+using CamusDB.Core.CommandsExecutor.Controllers.Functions;
 using CamusDB.Core.SQLParser;
 using CamusDB.Core.Statistics;
 using CamusDB.Core.Statistics.Models;
@@ -204,7 +205,7 @@ internal static class CardinalityEstimator
                 bool any = false;
                 foreach (string pattern in predicate.Patterns)
                 {
-                    if (predicate.IgnoreCase ? SQLExecutorBaseCreator.ILike(text, pattern) : SQLExecutorBaseCreator.Like(text, pattern))
+                    if (LikeMatcher.MatchesForEstimate(text, pattern, predicate.IgnoreCase))
                     {
                         any = true;
                         break;
@@ -289,8 +290,9 @@ internal static class CardinalityEstimator
 
     private static double SinglePatternFraction(ColumnHistogram hist, long? ndv, string pattern, bool ignoreCase, out EstimateRule rule)
     {
-        // Only '%' is a wildcard; '_' is literal (the matcher's semantics).
-        int wildcard = pattern.IndexOf('%');
+        // The fixed prefix ends at the first character that is not a plain literal. An escape counts, so
+        // a prefix never holds the character after an escape with the escape still in it.
+        int wildcard = pattern.AsSpan().IndexOfAny('%', '_', '\\');
 
         if (wildcard < 0 && !ignoreCase)
         {
@@ -310,7 +312,7 @@ internal static class CardinalityEstimator
         ScalarBound? hi = PrefixUpperBound(prefix);
         double range = hist.RangeFraction(lo, loInclusive: true, hi, hiInclusive: false);
 
-        if (wildcard == pattern.Length - 1)
+        if (wildcard == pattern.Length - 1 && pattern[wildcard] == '%')
         {
             rule = EstimateRule.LikePrefix;
             return range;
@@ -339,7 +341,7 @@ internal static class CardinalityEstimator
 
             foreach (string pattern in patterns)
             {
-                if (ignoreCase ? SQLExecutorBaseCreator.ILike(text, pattern) : SQLExecutorBaseCreator.Like(text, pattern))
+                if (LikeMatcher.MatchesForEstimate(text, pattern, ignoreCase))
                 {
                     matched += rows;
                     break;
@@ -373,7 +375,7 @@ internal static class CardinalityEstimator
                 continue;
 
             candidates += rows;
-            if (SQLExecutorBaseCreator.Like(text, pattern))
+            if (LikeMatcher.MatchesForEstimate(text, pattern, ignoreCase: false))
                 matched += rows;
         }
 

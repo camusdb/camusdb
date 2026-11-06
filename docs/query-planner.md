@@ -919,7 +919,7 @@ an estimated row fraction/count. Falls back to the fixed constants above when no
 | `col < v` / `<= v` | histogram `RangeFraction(−∞, v)` |
 | `col IN (a,b,…)` | sum of per-value equality selectivities, capped at 1.0 |
 | `col LIKE 'abc%'` | the histogram range of the prefix, `[abc, abd)` |
-| `col LIKE 'abc%x%'` | the prefix range, scaled by the share of the bucket bounds in it that match the whole pattern |
+| `col LIKE 'abc%x%'`, `col LIKE 'abc_'`, `col LIKE 'abc\_%'` | the prefix range, scaled by the share of the bucket bounds in it that match the whole pattern. The prefix ends at the first `%`, `_` or backslash |
 | `col LIKE '%abc%'`, `col ILIKE …`, `col LIKE … OR col LIKE …` | the share of the histogram's bucket bounds that match, each bound weighted by its bucket's rows (the bounds sample the sorted column at every hundredth rank, so a pattern unrelated to the order hits them in proportion, and a heavy value counts with all its buckets); half a bucket when none matches; the fallback without a histogram |
 | `col NOT LIKE …` | `1 − pattern(…)` |
 | `p AND q` | product (independence) — **unless** the equality columns form a composite-index prefix, then `1/KeyNdv` for that tuple (corrects correlated columns like `city`+`zip`) |

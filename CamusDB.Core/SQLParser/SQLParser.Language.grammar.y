@@ -22,6 +22,9 @@
 %left TAND
 %right TNOT
 %left TLIKE TILIKE TREGEXMATCH TREGEXIMATCH TREGEXNOTMATCH TREGEXNOTIMATCH
+/* ESCAPE binds to the LIKE before it, so `x LIKE p ESCAPE e` shifts. It is not reserved: the identifier rule
+   accepts it, so a column named escape keeps working, as in PostgreSQL. */
+%nonassoc TESCAPE
 %left TEQUALS TNOTEQUALS TBETWEEN
 %left TLESSTHAN TGREATERTHAN TLESSTHANEQUALS TGREATERTHANEQUALS
 /* Concatenation and the binary bitwise operators share one level, the PostgreSQL "any other
@@ -2134,17 +2137,23 @@ postfix_cast_expr : condition TCOLONCOLON cast_target_type { $$.n = new(NodeType
 subscript_expr : condition LBRACKET condition RBRACKET { $$.n = new(NodeType.ExprSubscript, $1.n, $3.n, null, null, null, null, null, null); }
                ;
 
+/* `x LIKE p ESCAPE e` is `x LIKE like_escape(p, e)`, as in PostgreSQL. So the matcher knows one escape
+   character, and no expression walk needs a third operand. */
 like_expr : condition TLIKE condition { $$.n = new(NodeType.ExprLike, $1.n, $3.n, null, null, null, null, null, null); }
+          | condition TLIKE condition TESCAPE condition %prec TLIKE { $$.n = new(NodeType.ExprLike, $1.n, NodeAst.FunctionCall("like_escape", $3.n, $5.n), null, null, null, null, null, null); }
           ;
 
 ilike_expr : condition TILIKE condition { $$.n = new(NodeType.ExprILike, $1.n, $3.n, null, null, null, null, null, null); }
+           | condition TILIKE condition TESCAPE condition %prec TILIKE { $$.n = new(NodeType.ExprILike, $1.n, NodeAst.FunctionCall("like_escape", $3.n, $5.n), null, null, null, null, null, null); }
            ;
 
 /* `x NOT LIKE p` and `x NOT ILIKE p` are NOT over the positive node (NodeAst.Not). */
 not_like_expr : condition TNOT TLIKE condition { $$.n = NodeAst.Not(new(NodeType.ExprLike, $1.n, $4.n, null, null, null, null, null, null)); }
+              | condition TNOT TLIKE condition TESCAPE condition %prec TLIKE { $$.n = NodeAst.Not(new(NodeType.ExprLike, $1.n, NodeAst.FunctionCall("like_escape", $4.n, $6.n), null, null, null, null, null, null)); }
               ;
 
 not_ilike_expr : condition TNOT TILIKE condition { $$.n = NodeAst.Not(new(NodeType.ExprILike, $1.n, $4.n, null, null, null, null, null, null)); }
+               | condition TNOT TILIKE condition TESCAPE condition %prec TILIKE { $$.n = NodeAst.Not(new(NodeType.ExprILike, $1.n, NodeAst.FunctionCall("like_escape", $4.n, $6.n), null, null, null, null, null, null)); }
                ;
 
 regex_match_expr      : condition TREGEXMATCH    condition { $$.n = new(NodeType.ExprRegexMatch,      $1.n, $3.n, null, null, null, null, null, null); } ;
@@ -2369,6 +2378,7 @@ qualified_identifier : any_identifier TDOT any_identifier
                      ;
            
 identifier  : TIDENTIFIER { $$.n = new(NodeType.Identifier, null, null, null, null, null, null, null, $$.s); }
+            | TESCAPE { $$.n = new(NodeType.Identifier, null, null, null, null, null, null, null, $1.s); }
             ;
 
 escaped_identifier  : TESCAPED_IDENTIFIER { $$.n = new(NodeType.Identifier, null, null, null, null, null, null, null, $$.s.Trim('`')); }

@@ -151,6 +151,20 @@ internal static class StaticOperandRules
             return;
         }
 
+        // `x LIKE p ESCAPE e` parses to this call, so a known wrong type is a mistake in a clause, not in a call.
+        if (string.Equals(name, "like_escape", StringComparison.OrdinalIgnoreCase))
+        {
+            List<NodeAst> arguments = ConditionalResultTypes.Arguments(call.rightAst);
+
+            for (int i = 0; i < arguments.Count; i++)
+            {
+                if (ConditionalResultTypes.TypeOf(arguments[i], lookup) is { Type: not (ColumnType.String or ColumnType.Null) } known)
+                    throw ScalarFunctionArguments.WrongType(name!, i, known.Type, ColumnType.String);
+            }
+
+            return;
+        }
+
         if (string.Equals(name, "array_contains", StringComparison.OrdinalIgnoreCase))
         {
             List<NodeAst> arguments = ConditionalResultTypes.Arguments(call.rightAst);
