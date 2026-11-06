@@ -271,9 +271,8 @@ public static partial class PlaygroundEngine
     }
 
     /// <summary>
-    /// Stops one node as if its host had crashed. The call is refused when it would leave fewer
-    /// than a majority running, because the cluster would then stop committing and the page would
-    /// look broken rather than instructive.
+    /// Stops one node as if its host had crashed, including when fewer than a majority remain.
+    /// This lets the playground demonstrate loss of quorum as well as successful failover.
     /// </summary>
     [JSExport]
     public static async Task<string> StopNodeAsync(int nodeIndex)

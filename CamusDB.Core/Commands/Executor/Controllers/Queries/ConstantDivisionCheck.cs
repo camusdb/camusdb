@@ -101,22 +101,17 @@ internal static class ConstantDivisionCheck
     /// Checks every expression position of one SELECT level. A nested SELECT has its own bind, so its
     /// expressions are not visited here.
     /// </summary>
-    /// <param name="query">The query as the statement wrote it, before the subquery rewrite.</param>
-    /// <param name="isExistsBody">True for the body of an EXISTS, which discards its select list and
-    /// its ORDER BY. An aggregate in the select list stays, because it decides the number of rows.</param>
-    internal static void CheckSelect(SelectQuery query, bool isExistsBody = false)
+    /// <param name="query">The query as the statement wrote it, before the subquery rewrite. For an EXISTS
+    /// body whose output <see cref="ExistsBody"/> discards, this is the body without that output, so a
+    /// constant division there does not fail. PostgreSQL fails on one when the whole body must run.</param>
+    internal static void CheckSelect(SelectQuery query)
     {
-        bool outputIsDiscarded = isExistsBody && !HasAggregateOutput(query);
+        foreach (ProjectionItem projection in query.Projections)
+            Check(projection.Expression);
 
-        if (!outputIsDiscarded)
-        {
-            foreach (ProjectionItem projection in query.Projections)
-                Check(projection.Expression);
-
-            if (query.OrderBy is not null)
-                foreach (OrderByItem item in query.OrderBy)
-                    Check(item.Expression);
-        }
+        if (query.OrderBy is not null)
+            foreach (OrderByItem item in query.OrderBy)
+                Check(item.Expression);
 
         Check(query.Where?.Expression);
         CheckSource(query.Source);
@@ -128,15 +123,6 @@ internal static class ConstantDivisionCheck
         Check(query.Having?.Expression);
         Check(query.Limit);
         Check(query.Offset);
-    }
-
-    private static bool HasAggregateOutput(SelectQuery query)
-    {
-        foreach (ProjectionItem projection in query.Projections)
-            if (QueryExpressionClassifier.ContainsAggregate(projection.Expression))
-                return true;
-
-        return false;
     }
 
     private static void CheckSource(QuerySource source)

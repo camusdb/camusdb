@@ -21,8 +21,9 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Functions;
 /// <para>A call that mixes the two types (<c>contains(bytes, string)</c>) is an error: there is no
 /// implicit conversion between text and bytes. Use <c>convert_to</c> / <c>convert_from</c>.</para>
 ///
-/// <para>Text positions and lengths count UTF-16 code units, the same as <c>length</c>. A character
-/// outside the Basic Multilingual Plane therefore counts as two.</para>
+/// <para>Text positions and lengths count code points, as in PostgreSQL, so a character outside the Basic
+/// Multilingual Plane counts as one, and <c>substring</c> and the trims cannot cut it in half. See
+/// <see cref="TextCodePoints"/>.</para>
 /// </summary>
 internal static class StringScalarFunctions
 {
@@ -156,7 +157,7 @@ internal static class StringScalarFunctions
             return new ColumnValue(ColumnType.Integer64, input.BytesValue?.Length ?? 0);
 
         RequireString(calledName, 0, input);
-        return new ColumnValue(ColumnType.Integer64, input.StrValue!.Length);
+        return new ColumnValue(ColumnType.Integer64, TextCodePoints.Count(input.StrValue));
     }
 
     private static ColumnValue EvaluateLower(string calledName, IReadOnlyList<ColumnValue> arguments)
@@ -212,14 +213,53 @@ internal static class StringScalarFunctions
         if (chars.IsEmpty)
             return input;
 
-        ReadOnlySpan<char> trimmedText = side switch
-        {
-            TrimSide.Start => text.AsSpan().TrimStart(chars),
-            TrimSide.End => text.AsSpan().TrimEnd(chars),
-            _ => text.AsSpan().Trim(chars),
-        };
+        // The span overloads take the set as single units, so a set with a pair would remove half of a
+        // different pair that starts with the same unit.
+        ReadOnlySpan<char> trimmedText = TextCodePoints.HasSurrogate(chars)
+            ? TrimCodePoints(text, chars, side)
+            : side switch
+            {
+                TrimSide.Start => text.AsSpan().TrimStart(chars),
+                TrimSide.End => text.AsSpan().TrimEnd(chars),
+                _ => text.AsSpan().Trim(chars),
+            };
 
         return trimmedText.Length == text.Length ? input : new ColumnValue(ColumnType.String, trimmedText.ToString());
+    }
+
+    /// <summary>Removes from the chosen sides each code point that <paramref name="set"/> holds.</summary>
+    private static ReadOnlySpan<char> TrimCodePoints(ReadOnlySpan<char> text, ReadOnlySpan<char> set, TrimSide side)
+    {
+        int start = 0;
+        int end = text.Length;
+
+        if (side != TrimSide.End)
+        {
+            while (start < end)
+            {
+                int units = TextCodePoints.UnitsAt(text, start);
+
+                if (set.IndexOf(text.Slice(start, units)) < 0)
+                    break;
+
+                start += units;
+            }
+        }
+
+        if (side != TrimSide.Start)
+        {
+            while (end > start)
+            {
+                int units = TextCodePoints.UnitsBefore(text, end);
+
+                if (set.IndexOf(text.Slice(end - units, units)) < 0)
+                    break;
+
+                end -= units;
+            }
+        }
+
+        return text[start..end];
     }
 
     private static ColumnValue EvaluateSubstring(string calledName, IReadOnlyList<ColumnValue> arguments)
@@ -262,7 +302,12 @@ internal static class StringScalarFunctions
         }
 
         string input = arguments[0].StrValue!;
-        (int textOffset, int textCount) = SliceBounds(input.Length, start, length);
+        int textOffset = TextCodePoints.UnitOffset(input, start - 1);
+
+        if (length is null)
+            return new ColumnValue(ColumnType.String, input[textOffset..]);
+
+        int textCount = TextCodePoints.UnitOffset(input.AsSpan(textOffset), length.Value);
         return new ColumnValue(ColumnType.String, input.Substring(textOffset, textCount));
     }
 
@@ -279,11 +324,13 @@ internal static class StringScalarFunctions
         RequireStringOrBytes(calledName, 0, arguments[0]);
         ScalarFunctionArguments.RequireType(calledName, 1, arguments[1], arguments[0].Type);
 
-        int index = arguments[0].Type == ColumnType.Bytes
-            ? arguments[0].BytesValue.AsSpan().IndexOf(arguments[1].BytesValue.AsSpan())
-            : arguments[0].StrValue!.IndexOf(arguments[1].StrValue!, StringComparison.Ordinal);
+        if (arguments[0].Type == ColumnType.Bytes)
+            return new ColumnValue(ColumnType.Integer64, arguments[0].BytesValue.AsSpan().IndexOf(arguments[1].BytesValue.AsSpan()) + 1);
 
-        return new ColumnValue(ColumnType.Integer64, index + 1);
+        string haystack = arguments[0].StrValue!;
+        int index = haystack.IndexOf(arguments[1].StrValue!, StringComparison.Ordinal);
+
+        return new ColumnValue(ColumnType.Integer64, index < 0 ? 0 : TextCodePoints.Count(haystack.AsSpan(0, index)) + 1);
     }
 
     private static ColumnValue EvaluateReplace(string calledName, IReadOnlyList<ColumnValue> arguments)
@@ -393,8 +440,8 @@ internal static class StringScalarFunctions
     }
 
     /// <summary>
-    /// The 0-based offset and the count of a 1-based <c>substring</c> slice of a value of
-    /// <paramref name="valueLength"/> units. A start past the end, or a zero length, gives an empty
+    /// The 0-based offset and the count of a 1-based <c>substring</c> slice of a <c>bytes</c> value of
+    /// <paramref name="valueLength"/> bytes. A start past the end, or a zero length, gives an empty
     /// slice; a length past the end stops at the end.
     /// </summary>
     private static (int offset, int count) SliceBounds(int valueLength, long start, long? length)

@@ -22,8 +22,8 @@ and reserved keywords.
 | `float32` | IEEE-754 single | yes | Stored at single precision; comparisons and storage narrow to `float`. A value past the `float32` range is an error, never infinity. |
 | `numeric` | exact decimal: 38 digits, 9 after the point | yes | Fixed precision and scale, as Spanner's NUMERIC. See [NUMERIC](#numeric). |
 | `bool` | boolean | yes | |
-| `string` | UTF-16 text | yes | Length-bounded — see [String and bytes length](#string-and-bytes-length-bounds). |
-| `string(N)` | UTF-16 text, max `N` chars | yes | `N` is a positive integer count of characters. |
+| `string` | Unicode text | yes | Length-bounded — see [String and bytes length](#string-and-bytes-length-bounds). |
+| `string(N)` | Unicode text, max `N` characters | yes | `N` is a positive integer count of code points. |
 | `date` | calendar date (no time) | yes | Stored as UTC ticks truncated to midnight. |
 | `datetime` | instant in time (UTC) | yes | Stored as UTC ticks. A `date` value written to a `datetime` column (INSERT, UPDATE, DEFAULT) becomes midnight UTC of that day. A `datetime` value written to a `date` column is refused, because it would lose the time of day. |
 | `bytes` | opaque byte string | yes | Length-bounded (default 10 MB). |
@@ -319,8 +319,8 @@ A `string(N)` column accepts at most `N` characters. A bare `string` column (no 
 maximum of **2 621 440 characters**. A `bytes` column defaults to a maximum of **10 MB**
 (10 485 760 bytes).
 
-- **String length is measured in UTF-16 code units** (`.Length`), so a character outside the Basic
-  Multilingual Plane (e.g. many emoji) counts as **2** toward the limit.
+- **String length is measured in code points**, as in PostgreSQL, so an emoji such as `🙂` counts as **1**
+  toward the limit. See [Characters and code points](#characters-and-code-points).
 - **Bytes length is measured in bytes.**
 - A `NULL` value has no length and is never rejected by the bound.
 
@@ -351,6 +351,42 @@ The form never changes a result. It changes the I/O a query does and the size of
 See [Large values: compression and out-of-line storage](storage-layout.md).
 
 ---
+
+
+## Characters and code points
+
+Text functions count code points, as PostgreSQL does. A code point is one Unicode character, so `🙂` is one,
+although it takes four bytes in UTF-8.
+
+| Statement | Result |
+|---|---|
+| `length('🙂')` | `1` |
+| `substring('x🙂y', 2, 1)` | `🙂` |
+| `strpos('x🙂y', 'y')` | `3` |
+| `ltrim('🙂x', '😀')` | `🙂x` |
+| `octet_length('🙂')` | `4`, because this function counts bytes |
+
+The same count applies to `POSITION`, to the character set of `trim`, `ltrim` and `rtrim`, to a `CHAR(n)` or
+`VARCHAR(n)` limit, and to the `start` argument and the result of `regexp_instr`, `regexp_count` and
+`regexp_substr`. For a `bytes` value, these functions count bytes. The sort order of strings is separate, and it
+stays by UTF-16 code unit. See [Differences from PostgreSQL](postgresql-differences.md#strings).
+
+**Half of a pair.** A .NET string holds a character such as `🙂` as a pair of UTF-16 units. One unit alone has
+no UTF-8 form, so it cannot be stored:
+
+- A literal with half of a pair, such as `E'\uD83D'`, fails with `CADB0400` when the statement is parsed.
+- A write of a parameter with half of a pair fails with `CADB0400`, and the message names the column. The row does
+  not change. CamusDB does not replace the value with U+FFFD.
+
+**Regular expressions match UTF-16 units.** The engine has no code point mode, so `.` and a negated class match
+one unit, which is half of `🙂`. These differences from PostgreSQL stay:
+
+- `regexp_count('🙂', '.')` is `2`, and `regexp_like('🙂', '^.$')` and `'🙂' ~ '^.$'` are `FALSE`.
+- A function that would return half of a pair, or a position inside a pair, fails with `CADB0400`. This applies to
+  `regexp_substr`, `regexp_match`, `regexp_replace`, `regexp_instr` and `regexp_split_to_array`.
+
+To match such a character, name it in the pattern: `regexp_replace('a🙂', '🙂', 'b')` returns `ab`. To match any one
+character, write the pair as a group before the dot: `(?:[\uD800-\uDBFF][\uDC00-\uDFFF]|.)`.
 
 ## Arrays
 
@@ -722,9 +758,9 @@ builds `%` as a call of `mod`).
 
 `CREATE VIEW` and a `CHECK` constraint accept a constant division. The statement that reads the view, or writes
 to the table, fails. `CREATE TABLE AS SELECT` and `CREATE MATERIALIZED VIEW` run their `SELECT`, so they fail at
-once. `EXISTS` discards its select list and its `ORDER BY`, so `EXISTS (SELECT 1 / 0 FROM empty)` does not fail,
-unless the select list holds an aggregate. On a table with rows that form still fails, because the select list
-is evaluated for the first row.
+once. `EXISTS` discards its select list, `GROUP BY`, `DISTINCT` and `ORDER BY`, so `EXISTS (SELECT 1 / 0 FROM t)`
+does not fail, with rows or with no rows. A select list with an aggregate, `HAVING`, `OFFSET` and `LIMIT 0` keep the
+whole body, so `EXISTS (SELECT 1 / 0 FROM t LIMIT 0)` fails.
 
 `COALESCE(1, 1 / 0)` does not fail before the rows are read, because the first argument decides the result. For a
 row it still fails, because a function call evaluates all its arguments.

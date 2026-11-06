@@ -300,7 +300,7 @@ internal sealed class SubqueryRewriter
 
         SelectQuery innerQuery = selectQueryCreator.CreateSelectQuery(expr.leftAst);
 
-        if (ExistsSubqueryAnalyzer.IsCorrelated(innerQuery))
+        if (ExistsSubqueryAnalyzer.ExistsBodyReadsOuterRow(innerQuery))
         {
             throw new CamusDBException(
                 CamusDBErrorCodes.FeatureNotSupported,

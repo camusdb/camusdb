@@ -70,7 +70,64 @@ public sealed class QueryRowNameResolver
         aliasToDerived = new Dictionary<string, BoundDerivedTableSource>(StringComparer.OrdinalIgnoreCase);
         columnNameToAliases = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
 
-        foreach (BoundTableSource source in sources)
+        RegisterSources(sources, this.derivedSources);
+    }
+
+    /// <summary>
+    /// A resolver for a nested query that can read an outer query. A bare name or an alias resolves to
+    /// the nearest query that has it, so a column that both queries have is not ambiguous, as in
+    /// PostgreSQL. <paramref name="sources"/> and <paramref name="derivedSources"/> hold the nested
+    /// query's sources first and then the outer sources, and the first
+    /// <paramref name="nestedSourceCount"/> and <paramref name="nestedDerivedCount"/> belong to the nested
+    /// query. Row keys are always qualified, because more than one source is in scope.
+    /// </summary>
+    internal QueryRowNameResolver(
+        IReadOnlyList<BoundTableSource> sources,
+        IReadOnlyList<BoundDerivedTableSource> derivedSources,
+        int nestedSourceCount,
+        int nestedDerivedCount)
+    {
+        this.sources = sources;
+        this.derivedSources = derivedSources;
+        aliasToSource = new Dictionary<string, BoundTableSource>(StringComparer.OrdinalIgnoreCase);
+        aliasToDerived = new Dictionary<string, BoundDerivedTableSource>(StringComparer.OrdinalIgnoreCase);
+        columnNameToAliases = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
+
+        RegisterSources(sources.Take(nestedSourceCount), derivedSources.Take(nestedDerivedCount));
+
+        HashSet<string> nestedNames = new(columnNameToAliases.Keys, StringComparer.OrdinalIgnoreCase);
+        HashSet<string> nestedAliases = new(aliasToSource.Keys.Concat(aliasToDerived.Keys), StringComparer.OrdinalIgnoreCase);
+
+        foreach (BoundTableSource source in sources.Skip(nestedSourceCount))
+        {
+            if (nestedAliases.Contains(source.Alias))
+                continue;
+
+            if (!aliasToSource.TryAdd(source.Alias, source))
+                throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Duplicate alias '{source.Alias}'");
+
+            foreach (TableColumnSchema column in source.Table.Schema.Columns ?? [])
+                if (SchemaElementStateRules.IsReadable(column) && !nestedNames.Contains(column.Name))
+                    RegisterColumnAlias(column.Name, source.Alias);
+        }
+
+        foreach (BoundDerivedTableSource source in derivedSources.Skip(nestedDerivedCount))
+        {
+            if (nestedAliases.Contains(source.Alias))
+                continue;
+
+            if (!aliasToDerived.TryAdd(source.Alias, source))
+                throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Duplicate alias '{source.Alias}'");
+
+            foreach (DerivedColumnSchema column in source.Columns)
+                if (!nestedNames.Contains(column.Name))
+                    RegisterColumnAlias(column.Name, source.Alias);
+        }
+    }
+
+    private void RegisterSources(IEnumerable<BoundTableSource> tables, IEnumerable<BoundDerivedTableSource> derived)
+    {
+        foreach (BoundTableSource source in tables)
         {
             if (!aliasToSource.TryAdd(source.Alias, source))
             {
@@ -88,7 +145,7 @@ public sealed class QueryRowNameResolver
             }
         }
 
-        foreach (BoundDerivedTableSource source in this.derivedSources)
+        foreach (BoundDerivedTableSource source in derived)
         {
             if (!aliasToDerived.TryAdd(source.Alias, source))
             {

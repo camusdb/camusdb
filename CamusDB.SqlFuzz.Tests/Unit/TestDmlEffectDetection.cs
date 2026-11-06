@@ -113,6 +113,35 @@ internal sealed class TestDmlEffectDetection
         };
     };
 
+    /// <summary>
+    /// <c>substring</c> counted UTF-16 units, so these writes stored U+FFFD where the expression in a SELECT
+    /// gave half of a pair. The effect rule reads the same expression in a SELECT, so it reported them. A
+    /// write now stores the value of that SELECT.
+    /// </summary>
+    [TestCase("c2", TestName = "ASubstringOfAColumnWithAPairPasses")]
+    [TestCase(null, TestName = "ASubstringOfALiteralWithAPairPasses")]
+    public async Task ASubstringOverAPairStoresTheValueOfTheSelect(string? column)
+    {
+        (FuzzArm db, SqlRunner runner) = await FreshAsync("(1, 1, '\U0001F642x'), (2, 2, 'b')");
+        Expr subject = column is null ? S("\U0001F642x") : new ColumnExpr(null, column, FuzzType.String);
+        Expr call = new FunctionExpr("substring", [subject, I(1), I(1)], FuzzType.String);
+
+        foreach (OracleCheck check in new OracleCheck[]
+        {
+            new WriteCheck(new UpdateStmt("tf", [new Assignment("c2", call)], new BinaryExpr(BinaryOp.Eq, C1, I(1), FuzzType.Bool)), Schema()),
+            new WriteCheck(new InsertStmt("tf", ["c0", "c1", "c2"], [[I(10), I(1), new FunctionExpr("substring", [S("\U0001F642x"), I(1), I(1)], FuzzType.String)]]), Schema()),
+        })
+        {
+            CheckResult result = await RoundContext.RunGuardedAsync(check, new CheckContext(runner));
+            Assert.That(result.Status, Is.EqualTo(CheckStatus.Pass), result.Detail);
+        }
+
+        StatementOutcome stored = await runner.ExecuteAsync(StatementRoute.Query, "SELECT c2 FROM tf WHERE c0 = 10");
+        Assert.That(stored.Rows[0][0].StrValue, Is.EqualTo("\U0001F642"));
+
+        await engine.DropDatabaseAsync(db.DatabaseName);
+    }
+
     [Test]
     public Task AFailedInsertThatKeptARowIsAFinding() =>
         // From an empty table: before the fix, a failed write was checked only against the keys that

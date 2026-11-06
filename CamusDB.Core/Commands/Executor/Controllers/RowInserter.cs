@@ -135,12 +135,12 @@ internal sealed class RowInserter
     {
         if (column.Type == ColumnType.String)
         {
-            string s = value.StrValue ?? "";
             int max = column.MaxLength ?? CamusDBConstants.DefaultStringMaxLength;
-            if (s.Length > max)
+            int length = TextCodePoints.LengthForLimit(value.StrValue ?? "", max);
+            if (length > max)
                 throw new CamusDBException(
                     CamusDBErrorCodes.ValueTooLong,
-                    $"value too long for column '{column.Name}' (max {max}, got {s.Length})");
+                    $"value too long for column '{column.Name}' (max {max}, got {length})");
         }
         else if (column.Type == ColumnType.Bytes)
         {

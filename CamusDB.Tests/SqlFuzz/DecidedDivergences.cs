@@ -42,6 +42,9 @@ public sealed record DecidedDivergence(
 /// </summary>
 public static class DecidedDivergences
 {
+    private const string CorrelatedBodyMustRun =
+        "The evaluator of a correlated EXISTS reads only FROM and WHERE, once for each outer row. These clauses change the number of rows, so they need the whole body to run for each outer row. An error is better than the wrong answer that ignoring them gave.";
+
     private static readonly string[] NoSetup = [];
 
     private static readonly string[] RowTable =
@@ -60,6 +63,12 @@ public static class DecidedDivergences
     [
         "CREATE TABLE em (id INT64 PRIMARY KEY, v INT64, s STRING, small SMALLINT)",
     ];
+
+    private const string RegexUnits =
+        "The regular expression engine matches UTF-16 units and has no code point mode. Translating a pattern needs a parser for its whole syntax. A pattern that names the character matches it.";
+
+    private const string RegexHalfPair =
+        "The engine matches UTF-16 units, so the result would hold half of a pair, which has no UTF-8 form. An error is better than a damaged value.";
 
     public static IReadOnlyList<DecidedDivergence> All { get; } =
     [
@@ -92,6 +101,46 @@ public static class DecidedDivergences
             "SELECT '\U0001F600' > '�'",
             "False", "true",
             "The one binary order of the engine. A sort, a top-N, a range scan and every index key use it, and ranged text indexes route by it."),
+
+        new("A regular expression matches UTF-16 units, so a dot counts each half of a pair", NoSetup,
+            "SELECT regexp_count('\U0001F642', '.')",
+            "2", "1",
+            RegexUnits),
+
+        new("A regular expression dot does not match a pair as one character", NoSetup,
+            "SELECT regexp_like('\U0001F642', '^.$')",
+            "False", "true",
+            RegexUnits),
+
+        new("The regex operator matches UTF-16 units too", NoSetup,
+            "SELECT '\U0001F642' ~ '^.$'",
+            "False", "true",
+            RegexUnits),
+
+        new("A global replace counts each half of a pair", NoSetup,
+            "SELECT regexp_replace('\U0001F642', '.', 'x', 'g') = 'xx'",
+            "True", "false",
+            RegexUnits),
+
+        new("A split counts each half of a pair as one match", NoSetup,
+            "SELECT cardinality(regexp_split_to_array('\U0001F642', '.'))",
+            "3", "2",
+            RegexUnits),
+
+        new("A regular expression that would return half of a pair is refused", NoSetup,
+            "SELECT regexp_substr('\U0001F642x', '.')",
+            CamusDBErrorCodes.InvalidInput, "\U0001F642",
+            RegexHalfPair),
+
+        new("A replace that would keep half of a pair is refused", NoSetup,
+            "SELECT regexp_replace('\U0001F642', '.', 'x')",
+            CamusDBErrorCodes.InvalidInput, "x",
+            RegexHalfPair),
+
+        new("A position inside a pair is refused", NoSetup,
+            "SELECT regexp_instr('\U0001F642x', '.', 1, 2)",
+            CamusDBErrorCodes.InvalidInput, "2",
+            RegexHalfPair),
 
         new("A COLLATE clause is refused", NoSetup,
             "SELECT 'a' COLLATE \"C\"",
@@ -152,6 +201,26 @@ public static class DecidedDivergences
             "SELECT length(v) FROM em",
             "no rows", "function length(bigint) does not exist",
             "Functions have no signature table. The name and the argument count are checked at bind time, and each function checks its argument types when it runs."),
+
+        new("A function argument type in a discarded EXISTS output is never checked", RowTable,
+            "SELECT id FROM d WHERE EXISTS (SELECT length(v) FROM d) ORDER BY id",
+            "1", "function length(bigint) does not exist",
+            "Functions have no signature table, so only a call shows a wrong argument type, and EXISTS does not evaluate its output."),
+
+        new("A correlated EXISTS with an aggregate is refused", RowTable,
+            "SELECT id FROM d o WHERE EXISTS (SELECT COUNT(*) FROM d i WHERE i.id = o.id + 100) ORDER BY id",
+            CamusDBErrorCodes.FeatureNotSupported, "1",
+            CorrelatedBodyMustRun),
+
+        new("A correlated EXISTS with HAVING is refused", RowTable,
+            "SELECT id FROM d o WHERE EXISTS (SELECT COUNT(*) FROM d i WHERE i.id = o.id HAVING COUNT(*) > 5) ORDER BY id",
+            CamusDBErrorCodes.FeatureNotSupported, "no rows",
+            CorrelatedBodyMustRun),
+
+        new("A correlated EXISTS with OFFSET is refused", RowTable,
+            "SELECT id FROM d o WHERE EXISTS (SELECT 1 FROM d i WHERE i.id = o.id OFFSET 1) ORDER BY id",
+            CamusDBErrorCodes.FeatureNotSupported, "no rows",
+            CorrelatedBodyMustRun),
 
         new("A derived string column is checked when a row reaches the operator", EmptyTable,
             "SELECT d.id FROM (SELECT id, s FROM em) AS d WHERE d.id = d.s",

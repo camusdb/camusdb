@@ -56,6 +56,14 @@ namespace CamusDB.Core.Storage.Kv;
 /// </summary>
 internal sealed class CompiledRowCodec
 {
+    /// <summary>
+    /// UTF-8 that throws on an unpaired surrogate. The default of <see cref="Encoding.UTF8"/> writes U+FFFD,
+    /// which stores a value different from the one the statement wrote and gives no error. This is the one
+    /// place every stored string passes, so the refusal here holds for every write path. A stored value
+    /// is always valid, so a decode does not need it.
+    /// </summary>
+    private static readonly UTF8Encoding StrictUtf8 = new(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true);
+
     /// <summary>How a column's value is physically stored.</summary>
     private enum StorageClass : byte
     {
@@ -83,6 +91,9 @@ internal sealed class CompiledRowCodec
         public required StorageClass Class { get; init; }
         
         public required int NullBitIndex { get; init; }
+
+        /// <summary>The column name, for an error that names the value it refuses.</summary>
+        public required string Name { get; init; }
         
         public int FixedOffset { get; init; }
         
@@ -168,6 +179,7 @@ internal sealed class CompiledRowCodec
                         Type = column.Type,
                         Class = StorageClass.Fixed,
                         NullBitIndex = i,
+                        Name = column.Name,
                         FixedWidth = width,
                         FixedOffset = fixedCursor,   // relative to fixedArea; absolute offset added lazily below
                     };
@@ -181,6 +193,7 @@ internal sealed class CompiledRowCodec
                         Type = column.Type,
                         Class = StorageClass.Bool,
                         NullBitIndex = i,
+                        Name = column.Name,
                         BoolBitIndex = boolCursor++,
                     };
                     break;
@@ -191,6 +204,7 @@ internal sealed class CompiledRowCodec
                         Type = column.Type,
                         Class = StorageClass.Variable,
                         NullBitIndex = i,
+                        Name = column.Name,
                         VariableOrdinal = variableCursor++,
                         ArrayElementType = column.Type == ColumnType.Array
                             ? column.ArrayElementType ?? throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Array column '{column.Name}' has no element type")
@@ -228,11 +242,18 @@ internal sealed class CompiledRowCodec
     /// </summary>
     public byte[] EncodeStorageValue(ReadOnlySpan<ValueSlot> values)
     {
-        int payloadSize = ComputePayloadSize(values);
-        byte[] buffer = new byte[1 + payloadSize];
-        buffer[0] = (byte)BranchKvKind.Value;
-        WritePayload(buffer.AsSpan(1), values);
-        return buffer;
+        try
+        {
+            int payloadSize = ComputePayloadSize(values);
+            byte[] buffer = new byte[1 + payloadSize];
+            buffer[0] = (byte)BranchKvKind.Value;
+            WritePayload(buffer.AsSpan(1), values);
+            return buffer;
+        }
+        catch (EncoderFallbackException)
+        {
+            throw UnpairedSurrogate(values);
+        }
     }
 
     /// <summary>
@@ -258,6 +279,22 @@ internal sealed class CompiledRowCodec
         LargeValuePolicy policy,
         ReadOnlySpan<byte> carrySource = default,
         ReadOnlySpan<bool> carryColumns = default)
+    {
+        try
+        {
+            return EncodeUnderPolicy(values, policy, carrySource, carryColumns);
+        }
+        catch (EncoderFallbackException)
+        {
+            throw UnpairedSurrogate(values);
+        }
+    }
+
+    private EncodedRow EncodeUnderPolicy(
+        ReadOnlySpan<ValueSlot> values,
+        LargeValuePolicy policy,
+        ReadOnlySpan<byte> carrySource,
+        ReadOnlySpan<bool> carryColumns)
     {
         if (values.Length != ColumnCount)
             throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Row has {values.Length} values but schema version {SchemaVersion} has {ColumnCount} columns");
@@ -603,10 +640,51 @@ internal sealed class CompiledRowCodec
     /// </summary>
     public byte[] Encode(ReadOnlySpan<ValueSlot> values)
     {
-        int payloadSize = ComputePayloadSize(values);
-        byte[] buffer = new byte[payloadSize];
-        WritePayload(buffer, values);
-        return buffer;
+        try
+        {
+            int payloadSize = ComputePayloadSize(values);
+            byte[] buffer = new byte[payloadSize];
+            WritePayload(buffer, values);
+            return buffer;
+        }
+        catch (EncoderFallbackException)
+        {
+            throw UnpairedSurrogate(values);
+        }
+    }
+
+    /// <summary>
+    /// The error for a value that <see cref="StrictUtf8"/> refused. It runs only after a refusal, so the
+    /// search for the column adds nothing to a write that succeeds.
+    /// </summary>
+    private CamusDBException UnpairedSurrogate(ReadOnlySpan<ValueSlot> values)
+    {
+        for (int i = 0; i < columns.Length; i++)
+        {
+            ref readonly ValueSlot slot = ref values[i];
+
+            if (!slot.IsNull && HoldsUnpairedSurrogate(in slot, columns[i]))
+                return new CamusDBException(CamusDBErrorCodes.InvalidInput, $"String value for column '{columns[i].Name}' contains an unpaired surrogate");
+        }
+
+        return new CamusDBException(CamusDBErrorCodes.InvalidInput, "String value contains an unpaired surrogate");
+    }
+
+    private static bool HoldsUnpairedSurrogate(in ValueSlot slot, in ColumnPlan plan)
+    {
+        if (plan.Type == ColumnType.String)
+            return TextCodePoints.HasUnpairedSurrogate(slot.AsString);
+
+        if (plan.Type != ColumnType.Array || plan.ArrayElementType != ColumnType.String)
+            return false;
+
+        foreach (ValueSlot element in slot.ArrayElements)
+        {
+            if (!element.IsNull && TextCodePoints.HasUnpairedSurrogate(element.AsString))
+                return true;
+        }
+
+        return false;
     }
 
     /// <summary>
@@ -724,7 +802,7 @@ internal sealed class CompiledRowCodec
     /// <summary>Bytes a non-NULL variable value occupies in <c>variableArea</c>.</summary>
     private static int VariablePayloadSize(in ValueSlot slot, ColumnType type, ColumnType arrayElementType) => type switch
     {
-        ColumnType.String => Encoding.UTF8.GetByteCount(slot.AsString ?? ""),
+        ColumnType.String => StrictUtf8.GetByteCount(slot.AsString ?? ""),
         ColumnType.Bytes or ColumnType.Jsonb => slot.AsBytes?.Length ?? 0,
         ColumnType.Array => ArrayBlobSize(arrayElementType, slot.ArrayElements),
         _ => throw new CamusDBException(CamusDBErrorCodes.UnknownType, "Not a variable-width type: " + type),
@@ -736,7 +814,7 @@ internal sealed class CompiledRowCodec
         switch (type)
         {
             case ColumnType.String:
-                return Encoding.UTF8.GetBytes(slot.AsString ?? "", dest);
+                return StrictUtf8.GetBytes(slot.AsString ?? "", dest);
             case ColumnType.Bytes:
             case ColumnType.Jsonb:
             {
@@ -930,7 +1008,7 @@ internal sealed class CompiledRowCodec
             if (el.IsNull)
                 continue;
             size += elementType == ColumnType.String
-                ? Encoding.UTF8.GetByteCount(el.AsString ?? "")
+                ? StrictUtf8.GetByteCount(el.AsString ?? "")
                 : (el.AsBytes?.Length ?? 0);
         }
         return size;
@@ -973,7 +1051,7 @@ internal sealed class CompiledRowCodec
             }
             else if (elementType == ColumnType.String)
             {
-                cursor += Encoding.UTF8.GetBytes(el.AsString ?? "", dest.Slice(areaStart + cursor));
+                cursor += StrictUtf8.GetBytes(el.AsString ?? "", dest.Slice(areaStart + cursor));
             }
             else // Bytes
             {
