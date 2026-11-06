@@ -179,6 +179,7 @@ internal abstract class DelegatingKahuna : IKahuna
         public virtual Task<(KeyValueResponseType Type, HLCTimestamp EffectiveFloor, int LiveHolds)> GetSnapshotFloor(CancellationToken ct) => inner.GetSnapshotFloor(ct);
         public virtual Task<(KeyValueResponseType Type, KeyValueApplyFingerprint Fingerprint)> GetPartitionApplyFingerprint(int partitionId, CancellationToken ct) => inner.GetPartitionApplyFingerprint(partitionId, ct);
         public virtual Task<(KeyValueResponseType Type, bool Held, long AppliedLogId)> GetPreparedIntentPresence(int partitionId, HLCTimestamp transactionId, long epoch, string key, CancellationToken ct) => inner.GetPreparedIntentPresence(partitionId, transactionId, epoch, key, ct);
+        public virtual Task<KeyValueResponseType> ConfirmRangeQuiesce(int partitionId, string keySpace, string? startKey, string? endKey, HLCTimestamp owner, CancellationToken ct) => inner.ConfirmRangeQuiesce(partitionId, keySpace, startKey, endKey, owner, ct);
         public virtual Task<KeyValueWatchOpening> WatchKeyValues(KeyValueWatchRequest request, CancellationToken ct) => inner.WatchKeyValues(request, ct);
         public virtual Task<HistoryHoldAnswer> HistoryHold(HistoryHoldRequest request, CancellationToken ct) => inner.HistoryHold(request, ct);
 }
