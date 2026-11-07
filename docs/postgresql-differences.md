@@ -91,6 +91,13 @@ differences that stay. `em` is an empty table.
 | `SELECT length(v) FROM em` | No rows, and `CADB0400` when a row reaches it | `function length(bigint) does not exist` | Functions have no signature table. The name and the argument count are checked at bind time, and each function checks its argument types when it runs. |
 | `SELECT id FROM d WHERE EXISTS (SELECT length(v) FROM d)` | Every row | `function length(bigint) does not exist` | Functions have no signature table, so only a call shows a wrong argument type, and `EXISTS` does not evaluate its output. |
 
+## Operator precedence
+
+| Statement | CamusDB | PostgreSQL | Why |
+|---|---|---|---|
+| `SELECT 1 BETWEEN 0 AND 2 BETWEEN FALSE AND TRUE` | `true` | Syntax error | The form has one reading, left to right. A refusal needs grammar rules that exist only to refuse it. |
+| `SELECT 1 BETWEEN 0 AND 2 IN (TRUE)` | `true` | Syntax error | The same reason. |
+
 ## EXISTS
 
 `EXISTS` does not evaluate a select list, `GROUP BY`, `DISTINCT` or `ORDER BY`, as in PostgreSQL. An unknown name or a known type mistake in those clauses still fails. An aggregate, `HAVING`, `OFFSET` and `LIMIT 0` can change the number of rows, so they keep their meaning. A correlated `EXISTS` reads the outer row, and it runs only its `FROM` and `WHERE` for each outer row, so these forms differ.

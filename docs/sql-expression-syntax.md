@@ -324,20 +324,21 @@ both systems.
 ## Operator precedence
 
 The table lists the operators from the tightest binding to the loosest. Operators on one row have the
-same precedence. A left-associative row groups from left to right: `a - b - c` is `(a - b) - c`.
+same precedence. A left-associative row groups from left to right: `a - b - c` is `(a - b) - c`. The
+table is the table of PostgreSQL. The one exception is prefix `~` (see [above](#bitwise-operators)).
 
 | Operators | Associativity |
 |-----------|---------------|
 | `::` (cast), `[ ]` (subscript) | left |
 | unary `-`, prefix `~` | right |
-| `->`, `->>`, `#>`, `#>>`, `@>`, `<@`, `?`, `?\|`, `?&`, `#-` (jsonb, see [json.md](json.md#precedence)) | left |
-| `IS`, `IN`, `.` (qualified name) | left |
+| `.` (qualified name) | left |
+| `^` | left |
 | `*`, `/`, `%` | left |
 | `+`, `-` | left |
-| `\|\|`, `&`, `\|`, `#`, `<<`, `>>` | left |
-| `<`, `>`, `<=`, `>=` | left |
-| `=`, `<>`, `!=`, `BETWEEN` | left |
-| `LIKE`, `ILIKE`, `~`, `~*`, `!~`, `!~*` | left |
+| `\|\|`, `&`, `\|`, `#`, `<<`, `>>`, `~`, `~*`, `!~`, `!~*`, and the jsonb operators (`->`, `->>`, `#>`, `#>>`, `@>`, `<@`, `?`, `?\|`, `?&`, `#-`) | left |
+| `BETWEEN`, `IN`, `LIKE`, `ILIKE`, and their `NOT` forms | no chain |
+| `<`, `>`, `<=`, `>=`, `=`, `<>`, `!=` | no chain |
+| `IS` | no chain |
 | `NOT` | right |
 | `AND` | left |
 | `OR` | left |
@@ -345,14 +346,47 @@ same precedence. A left-associative row groups from left to right: `a - b - c` i
 Some results of this table:
 
 ```sql
-SELECT 1 + 2 & 3;        -- 3, that is (1 + 2) & 3
-SELECT 6 | 1 & 3;        -- 3, that is (6 | 1) & 3
-SELECT 1 << 1 + 1;       -- 4, that is 1 << (1 + 1)
-SELECT 'a' || 'b' = 'ab';  -- true, that is ('a' || 'b') = 'ab'
+SELECT 1 + 2 & 3;            -- 3, that is (1 + 2) & 3
+SELECT 6 | 1 & 3;            -- 3, that is (6 | 1) & 3
+SELECT 1 << 1 + 1;           -- 4, that is 1 << (1 + 1)
+SELECT 'a' || 'b' = 'ab';    -- true, that is ('a' || 'b') = 'ab'
+SELECT 1 + 1 IS NULL;        -- false, that is (1 + 1) IS NULL
+SELECT FALSE = NULL IS NULL; -- true, that is (FALSE = NULL) IS NULL
+SELECT 1 + 4 IN (5);         -- true, that is (1 + 4) IN (5)
+SELECT 'a' LIKE 'a' = TRUE;  -- true, that is ('a' LIKE 'a') = TRUE
+SELECT TRUE = 1 NOT IN (2);  -- true, that is TRUE = (1 NOT IN (2))
+SELECT NOT 1 + 1 IS NULL;    -- true, that is NOT ((1 + 1) IS NULL)
 ```
 
 `||` and the bitwise operators share one level, as in PostgreSQL. Thus `6 | 1 & 3` is `(6 | 1) & 3`.
 In C, `&` binds tighter than `|`, and the result is 7.
+
+### No chain
+
+A chain of two comparisons is a syntax error, as in PostgreSQL. Also, a `LIKE` cannot directly follow
+another `LIKE`, and `IN` or `BETWEEN` cannot directly follow a `LIKE`. Parentheses write the grouping that you
+mean:
+
+```sql
+SELECT a = b = c;     -- CADB0406
+SELECT (a = b) = c;
+SELECT a < b < c;     -- CADB0406
+SELECT a < b AND b < c;
+```
+
+A predicate that ends at its own closing token can have another predicate after it, also as in PostgreSQL:
+`x IN (1) IN (TRUE)` is `(x IN (1)) IN (TRUE)`. `BETWEEN` follows this rule too, and PostgreSQL refuses that
+form. See [the differences from PostgreSQL](postgresql-differences.md#operator-precedence).
+
+### Stored definitions
+
+A change of this table does not change a stored definition. CamusDB stores a view body and a `CHECK` condition
+as text that writes each grouping out with parentheses, so `SHOW CREATE VIEW` prints `(a = b) IS NULL`.
+
+Before this table followed PostgreSQL, `IS` and `IN` bound tighter than every binary operator. A view or a
+`CHECK` from that time keeps the grouping of that time. For example, a view that was created with
+`a = b IS NULL` holds the text `a = (b IS NULL)`, and it continues to read that. To get the PostgreSQL reading,
+create the view again. Use `SHOW CREATE VIEW` and `SHOW CREATE TABLE` to read what a definition holds.
 
 ## Several aggregates without `GROUP BY`
 

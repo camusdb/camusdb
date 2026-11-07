@@ -20,34 +20,39 @@
 %left TINTERSECT
 %left TOR
 %left TAND
-%right TNOT
-%left TLIKE TILIKE TREGEXMATCH TREGEXIMATCH TREGEXNOTMATCH TREGEXNOTIMATCH
+/* The operators below follow the table of PostgreSQL, from NOT up to the arithmetic operators:
+   IS, then the comparisons, then BETWEEN, IN and LIKE, then every other operator. So `1 + 1 IS NULL` is
+   `(1 + 1) IS NULL`, `a = b IS NULL` is `(a = b) IS NULL`, `a = b IN (1)` is `a = (b IN (1))`,
+   `a LIKE b = c` is `(a LIKE b) = c`, and `NOT a IS NULL` is `NOT (a IS NULL)`.
+
+   NOTPREFIX is a precedence name only, and the prefix rule of NOT carries it. The token TNOT has another
+   place, on the level of LIKE, because after an operand NOT can only start NOT LIKE, NOT ILIKE, NOT IN or
+   NOT BETWEEN. So `a = b NOT IN (1)` is `a = (b NOT IN (1))`, the same grouping as without the NOT, and
+   `NOT a = b` is still `NOT (a = b)`. */
+%right NOTPREFIX
+%nonassoc TIS
+/* The comparisons and the LIKE level do not chain, as in PostgreSQL: `a < b < c` and `a = b = c` are syntax
+   errors, because no reader can say what they compare. Parentheses write either grouping. Non-associativity
+   acts only where the parser can choose, so `x IN (1) IN (TRUE)` and a second BETWEEN still parse: the first
+   predicate is complete at its closing token. */
+%nonassoc TEQUALS TNOTEQUALS TLESSTHAN TGREATERTHAN TLESSTHANEQUALS TGREATERTHANEQUALS
+%nonassoc TBETWEEN TIN TLIKE TILIKE TNOT
 /* ESCAPE binds to the LIKE before it, so `x LIKE p ESCAPE e` shifts. It is not reserved: the identifier rule
    accepts it, so a column named escape keeps working, as in PostgreSQL. */
 %nonassoc TESCAPE
-%left TEQUALS TNOTEQUALS TBETWEEN
-%left TLESSTHAN TGREATERTHAN TLESSTHANEQUALS TGREATERTHANEQUALS
-/* Concatenation and the binary bitwise operators share one level, the PostgreSQL "any other
-   operator" level: above every comparison, below + and -. So `a || b = c` is `(a || b) = c`,
-   `1 + 2 & 3` is `(1 + 2) & 3`, and `a & b | c` groups left to right as `(a & b) | c`, not by the
-   C rule that puts & above |. */
-%left TCONCAT TBITAND TBITOR TBITXOR TSHIFTLEFT TSHIFTRIGHT
+/* The PostgreSQL "any other operator" level: above BETWEEN, IN and LIKE, below + and -. It holds
+   concatenation, the binary bitwise operators, the regular expression operators and the jsonb operators, and
+   they group left to right with each other. So `a || b = c` is `(a || b) = c`, `1 + 2 & 3` is `(1 + 2) & 3`,
+   `a & b | c` is `(a & b) | c` and not the C rule that puts & above |, `a ~ b || c` is `(a ~ b) || c`,
+   `doc ->> 'k' IS NULL` tests the extracted value, and `doc -> 0 + 1` is `doc -> (0 + 1)`. */
+%left TCONCAT TBITAND TBITOR TBITXOR TSHIFTLEFT TSHIFTRIGHT TREGEXMATCH TREGEXIMATCH TREGEXNOTMATCH TREGEXNOTIMATCH TJSONFIELD TJSONFIELDTEXT TJSONPATH TJSONPATHTEXT TJSONCONTAINS TJSONCONTAINEDBY TJSONEXISTS TJSONEXISTSANY TJSONEXISTSALL TJSONDELETEPATH
 %left TADD TMINUS
 %left TMULT TDIV TMOD
 /* Power binds tighter than the multiplying operators and below unary minus, and it groups to the left,
    as in PostgreSQL and not as in mathematics: `2 * 3 ^ 2` is 18, `-2 ^ 2` is 4, `2 ^ 3 ^ 2` is 64. */
 %left TCARET
-/* IS (IS NULL / IS NOT NULL), IN, and the qualified-name dot bind tighter than any binary operator.
-   Without a precedence they produced shift/reduce warnings that gppg resolved by its default shift —
-   which is already the intended parse (a AND b IS NULL -> a AND (b IS NULL); a.b as one name). Declaring
-   their precedence makes that resolution explicit and removes the warnings without changing any parse. */
-%left TIS TIN TDOT
-/* The jsonb operators bind tighter than IS and IN, so `doc ->> 'deleted_at' IS NULL` and
-   `doc ->> 'kind' IN ('a', 'b')` test the extracted value, the way applications write them. In
-   PostgreSQL they share the "any other operator" level with ||, below IS; at that level CamusDB's
-   IS-above-every-operator rule would read the first form as `doc ->> ('deleted_at' IS NULL)`. They
-   stay below unary minus and the postfix cast, so `doc -> -1` and `doc -> 'k'::text` parse as written. */
-%left TJSONFIELD TJSONFIELDTEXT TJSONPATH TJSONPATHTEXT TJSONCONTAINS TJSONCONTAINEDBY TJSONEXISTS TJSONEXISTSANY TJSONEXISTSALL TJSONDELETEPATH
+/* The qualified-name dot makes a.b one name. */
+%left TDOT
 /* Unary minus binds tighter than every binary operator and IS, as in PostgreSQL: `-a * b` is
    `(-a) * b` and `-a IS NULL` is `(-a) IS NULL`. It stays below the postfix cast and subscript, so
    `-x::int` negates the cast value. UMINUS is a precedence name only; no token carries it. */
@@ -2011,6 +2016,10 @@ between_bound : simple_expr { $$.n = $1.n; }
               | between_bound TBITXOR between_bound { $$.n = new(NodeType.ExprBitXor, $1.n, $3.n, null, null, null, null, null, null); }
               | between_bound TSHIFTLEFT between_bound { $$.n = new(NodeType.ExprShiftLeft, $1.n, $3.n, null, null, null, null, null, null); }
               | between_bound TSHIFTRIGHT between_bound { $$.n = new(NodeType.ExprShiftRight, $1.n, $3.n, null, null, null, null, null, null); }
+              | between_bound TREGEXMATCH between_bound { $$.n = new(NodeType.ExprRegexMatch, $1.n, $3.n, null, null, null, null, null, null); }
+              | between_bound TREGEXIMATCH between_bound { $$.n = new(NodeType.ExprRegexMatchCi, $1.n, $3.n, null, null, null, null, null, null); }
+              | between_bound TREGEXNOTMATCH between_bound { $$.n = new(NodeType.ExprRegexNotMatch, $1.n, $3.n, null, null, null, null, null, null); }
+              | between_bound TREGEXNOTIMATCH between_bound { $$.n = new(NodeType.ExprRegexNotMatchCi, $1.n, $3.n, null, null, null, null, null, null); }
               | between_bound TJSONFIELD between_bound { $$.n = NodeAst.FunctionCall("jsonb_object_field", $1.n, $3.n); }
               | between_bound TJSONFIELDTEXT between_bound { $$.n = NodeAst.FunctionCall("jsonb_object_field_text", $1.n, $3.n); }
               | between_bound TJSONPATH between_bound { $$.n = NodeAst.FunctionCall("jsonb_path_get", $1.n, $3.n); }
@@ -2033,7 +2042,7 @@ and_expr  : condition TAND condition { $$.n = new(NodeType.ExprAnd, $1.n, $3.n, 
 or_expr   : condition TOR condition { $$.n = new(NodeType.ExprOr, $1.n, $3.n, null, null, null, null, null, null); }
           ;
 
-not_expr  : TNOT condition { $$.n = new(NodeType.ExprNot, $2.n, null, null, null, null, null, null, null); }
+not_expr  : TNOT condition %prec NOTPREFIX { $$.n = new(NodeType.ExprNot, $2.n, null, null, null, null, null, null, null); }
           ;
 
 /* Unary minus over any expression. NodeAst.Negate folds a numeric literal operand into a negative
@@ -2088,8 +2097,8 @@ mod_expr  : condition TMOD condition { $$.n = NodeAst.ModCall($1.n, $3.n); }
 concat_expr : condition TCONCAT condition { $$.n = new(NodeType.ExprConcat, $1.n, $3.n, null, null, null, null, null, null); }
             ;
 
-/* The jsonb operators of PostgreSQL. They group left to right and bind tighter than comparison, IS
-   and IN (see the precedence table), so `doc -> 'a' ->> 'b' = 'x'` is `((doc -> 'a') ->> 'b') = 'x'`. Each one is a call to the function
+/* The jsonb operators of PostgreSQL. They group left to right on the "any other operator" level (see the
+   precedence table), so `doc -> 'a' ->> 'b' = 'x'` is `((doc -> 'a') ->> 'b') = 'x'`. Each one is a call to the function
    PostgreSQL defines it through (`@>` is jsonb_contains, `?` is jsonb_exists, `#-` is
    jsonb_delete_path), as `%` is a call to mod(): every walker already handles a call, and a view body
    renders the call form, which parses back to the same tree. `->` and `->>` take a key or an index
@@ -2279,8 +2288,8 @@ extract_expr : identifier LPAREN identifier TFROM condition RPAREN { $$.n = Extr
    reason as EXTRACT; PositionCall checks the name and builds the call strpos(haystack, needle).
    The haystack is restricted to position_operand, which cannot start with a parenthesis: after IN a
    parenthesis already opens an IN list or a subquery, so a parenthesised haystack would be ambiguous.
-   A needle that uses a binary operator must be parenthesised, because IN binds tighter than those
-   operators. strpos(haystack, needle) takes any expression in both places. */
+   A needle can use any operator that binds tighter than IN, such as || or +. A needle that uses a comparison
+   or AND must be parenthesised. strpos(haystack, needle) takes any expression in both places. */
 position_expr : identifier LPAREN condition TIN position_operand RPAREN { $$.n = PositionCall.Build($1.n, $3.n, $5.n); }
               ;
 

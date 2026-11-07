@@ -145,19 +145,26 @@ Rules:
 
 ### Precedence
 
-The jsonb operators bind tighter than comparison, `IS` and `IN`, and less tightly than unary minus
-and `::`. So these forms parse as applications write them:
+The jsonb operators are on the level of `||`, as in PostgreSQL: above `BETWEEN`, `IN`, `LIKE`, the comparisons
+and `IS`, and below `+` and `-`. They group from left to right with `||`, with the bitwise operators and with
+each other. So these forms parse as applications write them:
 
 ```sql
 WHERE doc ->> 'deleted_at' IS NULL
 WHERE doc ->> 'kind' IN ('login', 'logout')
 WHERE doc -> 'user' ->> 'id' = '7'
-SELECT doc -> -1, doc -> 'n'::string
+SELECT doc -> -1, doc -> 'n'::string, doc -> 0 + 1
 ```
 
-PostgreSQL puts these operators at the level of `||`. CamusDB uses its own level, because CamusDB
-binds `IS` tighter than every binary operator, and `doc ->> 'k' IS NULL` would then read as
-`doc ->> ('k' IS NULL)`.
+An operator on the same level or a tighter one reads first when it is on the left, so these two forms need
+parentheses:
+
+```sql
+SELECT 'x' || (doc ->> 'k');  -- without the parentheses, ('x' || doc) ->> 'k'
+SELECT 1 + (doc ->> 'n')::int;
+```
+
+See [the whole table](sql-expression-syntax.md#operator-precedence).
 
 ### Lexer notes
 
@@ -407,7 +414,6 @@ part of a document.
 |---|---|---|
 | `json` type | Keeps the input text: whitespace, key order, duplicate keys. | An alias of `jsonb`. The text is canonical. |
 | `jsonb_path_ops` | A smaller index that serves `@>` only. | The same index as `jsonb_ops`; it serves every GIN operator. |
-| Precedence | The jsonb operators are at the `||` level. | Their own level, above `IS` and `IN` (see [Precedence](#precedence)). |
 | `x #-1` | Path delete. | Path delete; before `jsonb` it was XOR with `-1`. |
 | A text column as a document operand | Refused: the operator needs `jsonb`. | Parsed as a document, as a literal is. |
 | Text that is not JSON compared with a document | The literal is refused. | Equal to no document. |

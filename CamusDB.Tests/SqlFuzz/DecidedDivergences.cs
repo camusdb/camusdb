@@ -307,6 +307,16 @@ public static class DecidedDivergences
             CamusDBErrorCodes.SequenceCallNotAllowedHere, "1",
             "A statement must know how many values it draws before it runs, and the condition decides that only when it runs."),
 
+        new("A second predicate after BETWEEN reads left to right", NoSetup,
+            "SELECT 1 BETWEEN 0 AND 2 BETWEEN FALSE AND TRUE",
+            "True", "syntax error at or near \"BETWEEN\"",
+            "The form has one reading, and a refusal needs grammar rules that exist only to refuse it."),
+
+        new("IN after BETWEEN reads left to right", NoSetup,
+            "SELECT 1 BETWEEN 0 AND 2 IN (TRUE)",
+            "True", "syntax error at or near \"IN\"",
+            "The same reason."),
+
         new("An aggregate ORDER BY cannot hold a subquery", RowTable,
             "SELECT COUNT(*) FROM d ORDER BY (SELECT 1)",
             CamusDBErrorCodes.InvalidInput, "2",
