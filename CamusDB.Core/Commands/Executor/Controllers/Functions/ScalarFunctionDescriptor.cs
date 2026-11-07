@@ -8,6 +8,8 @@
 
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
+using CamusDB.Core.CommandsExecutor.Models.Queries;
+using CamusDB.Core.SQLParser;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers.Functions;
 
@@ -34,6 +36,19 @@ internal delegate ColumnValue ScalarSessionEvaluatorDelegate(string calledName, 
 /// </summary>
 internal delegate ColumnValue ScalarStatementEvaluatorDelegate(
     string calledName, IReadOnlyList<ColumnValue> arguments, Dictionary<string, ColumnValue>? parameters);
+
+/// <summary>
+/// Evaluator for a function that decides which of its arguments run. It receives the argument nodes
+/// instead of their values, so an argument that does not run raises no error and has no side effect.
+/// The evaluator checks the argument count before it calls this delegate.
+/// </summary>
+internal delegate ColumnValue ScalarLazyEvaluatorDelegate(
+    string calledName,
+    IReadOnlyList<NodeAst> arguments,
+    IReadOnlyDictionary<string, ColumnValue> row,
+    Dictionary<string, ColumnValue>? parameters,
+    QueryRowNameResolver? rowNameResolver,
+    ScalarFunctionArguments.EvaluateExpressionDelegate evaluateExpression);
 
 internal sealed class ScalarFunctionDescriptor
 {
@@ -66,6 +81,14 @@ internal sealed class ScalarFunctionDescriptor
     /// paths that carry no statement and exists to raise a clear error there.
     /// </summary>
     public ScalarStatementEvaluatorDelegate? StatementEvaluator { get; init; }
+
+    /// <summary>
+    /// Set instead of using <see cref="Evaluator"/> alone when the function decides which arguments run
+    /// (<c>COALESCE</c>, <c>IFNULL</c>). When present the evaluator dispatches here before it evaluates
+    /// any argument. A static check that must see every argument, such as the result type of
+    /// <see cref="Queries.ConditionalResultTypes"/>, still reads the statement and not this path.
+    /// </summary>
+    public ScalarLazyEvaluatorDelegate? LazyEvaluator { get; init; }
 
     public required ScalarReturnTypeInferenceDelegate InferReturnType { get; init; }
 

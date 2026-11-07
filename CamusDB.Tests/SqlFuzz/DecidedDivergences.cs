@@ -64,6 +64,21 @@ public static class DecidedDivergences
         "CREATE TABLE em (id INT64 PRIMARY KEY, v INT64, s STRING, small SMALLINT)",
     ];
 
+    private static readonly string[] ZeroTable =
+    [
+        "CREATE TABLE z (id INT64 PRIMARY KEY, v INT64, n INT64)",
+        "INSERT INTO z (id, v, n) VALUES (1, 0, NULL)",
+    ];
+
+    private const string FunctionResultType =
+        "A function result shows its type when it runs, and an argument or a branch that does not run is not read. A statement that shows both types is still refused before any row is read.";
+
+    private const string RunsBeforeTheRow =
+        "A subquery, an aggregate and a window function are computed before the row is evaluated, so the expression around them cannot stop them.";
+
+    private const string ConstantValueError =
+        "A value error is not a statement mistake, and the engine does not evaluate a constant at bind time. An argument that does not run raises nothing, as in a CASE branch.";
+
     private const string RegexUnits =
         "The regular expression engine matches UTF-16 units and has no code point mode. Translating a pattern needs a parser for its whole syntax. A pattern that names the character matches it.";
 
@@ -306,6 +321,73 @@ public static class DecidedDivergences
             "SELECT nextval('sq') WHERE TRUE",
             CamusDBErrorCodes.SequenceCallNotAllowedHere, "1",
             "A statement must know how many values it draws before it runs, and the condition decides that only when it runs."),
+
+        new("A function call in a COALESCE argument that does not run shows no type", ZeroTable,
+            "SELECT COALESCE(1, upper('a')) FROM z",
+            "1", "COALESCE types integer and text cannot be matched",
+            FunctionResultType),
+
+        new("A function call in a CASE branch that does not run shows no type", ZeroTable,
+            "SELECT CASE WHEN TRUE THEN 1 ELSE upper('a') END FROM z",
+            "1", "CASE types text and integer cannot be matched",
+            FunctionResultType),
+
+        new("A subquery in a COALESCE argument runs before the row", ZeroTable,
+            "SELECT COALESCE(id, (SELECT 1 / b.v FROM z b)) FROM z",
+            CamusDBErrorCodes.InvalidInput, "1",
+            RunsBeforeTheRow),
+
+        new("A subquery in a COALESCE argument can return too many rows", RowTable,
+            "SELECT COALESCE(1, (SELECT id FROM d))",
+            CamusDBErrorCodes.InvalidInput, "1",
+            RunsBeforeTheRow),
+
+        new("A subquery in a CASE branch runs before the row", ZeroTable,
+            "SELECT CASE WHEN TRUE THEN 1 ELSE (SELECT 1 / b.v FROM z b) END FROM z",
+            CamusDBErrorCodes.InvalidInput, "1",
+            RunsBeforeTheRow),
+
+        new("An aggregate in a COALESCE argument runs before the row", ZeroTable,
+            "SELECT COALESCE(1, SUM(1 / v)) FROM z",
+            CamusDBErrorCodes.InvalidInput, "1",
+            RunsBeforeTheRow),
+
+        new("A window function in a COALESCE argument runs before the row", ZeroTable,
+            "SELECT COALESCE(1, SUM(1 / v) OVER (ORDER BY id)) FROM z",
+            CamusDBErrorCodes.InvalidInput, "1",
+            RunsBeforeTheRow),
+
+        new("A sequence call after an argument that must run reserves a value",
+            ["CREATE SEQUENCE sq", "CREATE TABLE w (id INT64 PRIMARY KEY, c INT64)", "INSERT INTO w (id, c) VALUES (1, COALESCE(nextval('sq'), nextval('sq')))"],
+            "SELECT nextval('sq')",
+            "3", "2",
+            "A statement reserves its values before it runs, and only a literal or a parameter shows its value then. An unused value is a gap, which a sequence is allowed to have. The result of the statement stays correct."),
+
+        new("A sequence call over a relation is refused when a row reaches it",
+            ["CREATE SEQUENCE sq", "CREATE TABLE z (id INT64 PRIMARY KEY, v INT64, n INT64)", "INSERT INTO z (id, v, n) VALUES (1, 0, NULL)"],
+            "SELECT COALESCE(n, nextval('sq')) FROM z",
+            CamusDBErrorCodes.SequenceCallNotAllowedHere, "1",
+            "A statement over a relation cannot know how many values it draws before it runs. A call that no row reaches draws nothing, so it needs no refusal, as in a CASE branch."),
+
+        new("An integer overflow in a constant COALESCE argument needs that argument to run", ZeroTable,
+            "SELECT COALESCE(v, 9223372036854775807 + 1) FROM z",
+            "0", "bigint out of range",
+            ConstantValueError),
+
+        new("A bad cast of a constant in a COALESCE argument needs that argument to run", ZeroTable,
+            "SELECT COALESCE(1, CAST('x' AS BIGINT)) FROM z",
+            "1", "invalid input syntax for type bigint: \"x\"",
+            ConstantValueError),
+
+        new("A domain error of a function in a COALESCE argument needs that argument to run", ZeroTable,
+            "SELECT COALESCE(v, sqrt(-1.0)) FROM z",
+            "0", "cannot take square root of a negative number",
+            ConstantValueError),
+
+        new("The percent operator in a COALESCE argument needs that argument to run", ZeroTable,
+            "SELECT COALESCE(v, 1 % 0) FROM z",
+            "0", "division by zero",
+            "The parser builds `a % b` as `mod(a, b)`, so the rule of a function call applies, and the call runs only when an earlier argument is NULL."),
 
         new("A second predicate after BETWEEN reads left to right", NoSetup,
             "SELECT 1 BETWEEN 0 AND 2 BETWEEN FALSE AND TRUE",

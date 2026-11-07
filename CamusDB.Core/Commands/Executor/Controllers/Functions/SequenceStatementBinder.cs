@@ -49,6 +49,14 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Functions;
 /// unpredictable number of values from. Refusing is the honest answer; silently evaluating it
 /// per row would put the round trip back.</para>
 ///
+/// <para><b>A call that does not run draws nothing, when the statement shows that.</b> COALESCE stops
+/// at its first argument that is not NULL, so <c>COALESCE(@p, nextval('s'))</c> draws only when
+/// <c>@p</c> is NULL. A literal or a parameter is known here, so its call is left out of the count
+/// (<see cref="CollectUnreachableCalls"/>). Any other argument before the call is not known until it
+/// runs, so the call is counted, and an unused value is a gap, which a sequence is allowed to have. The
+/// count must never be lower than the draws, because an exhausted run is an engine defect, so a call
+/// is left out only when the evaluator cannot reach it.</para>
+///
 /// <para><b>Allocation happens before the mutation begins.</b> A sequence failure must not be able
 /// to fail a transaction late, after rows have already been written.</para>
 /// </summary>
@@ -152,6 +160,8 @@ internal sealed class SequenceStatementBinder
             ? CollectStandalonePositions(allowedRegion)
             : [];
 
+        HashSet<NodeAst> unreachable = CollectUnreachableCalls(allowedRegion, ticket.Parameters);
+
         foreach (NodeAst call in callsInRegion)
         {
             string functionName = call.leftAst!.yytext!.ToLowerInvariant();
@@ -173,7 +183,9 @@ internal sealed class SequenceStatementBinder
                 // One value per call site, not one per row. A VALUES list holds its own copy of the
                 // call for every row it writes, so the call sites already carry the row count;
                 // multiplying by it again over-reserves, and every value over-reserved is a gap.
-                demandById[sequence.Id!] += 1;
+                if (!unreachable.Contains(call))
+                    demandById[sequence.Id!] += 1;
+
                 continue;
             }
 
@@ -632,7 +644,72 @@ internal sealed class SequenceStatementBinder
     /// call per statement, and which value <c>lastval</c> reports is decided by the draws
     /// themselves rather than by this walk.</para>
     /// </remarks>
-    private static void Collect(NodeAst? ast, List<NodeAst> into)
+    private static void Collect(NodeAst? ast, List<NodeAst> into) => CollectMatching(ast, IsSequenceCall, into);
+
+    /// <summary>
+    /// The sequence calls in <paramref name="region"/> that the evaluator cannot reach, because an earlier
+    /// argument of a COALESCE, IFNULL or NVL is known to be not NULL. The later arguments of such a call
+    /// do not run, whatever they hold, so every sequence call below them is unreachable.
+    /// </summary>
+    private static HashSet<NodeAst> CollectUnreachableCalls(NodeAst? region, Dictionary<string, ColumnValue>? parameters)
+    {
+        HashSet<NodeAst> unreachable = [];
+
+        List<NodeAst> coalesceCalls = [];
+        CollectMatching(region, Queries.ConditionalResultTypes.IsCoalesceCall, coalesceCalls);
+
+        foreach (NodeAst coalesce in coalesceCalls)
+        {
+            List<NodeAst> arguments = Queries.ConditionalResultTypes.Arguments(coalesce.rightAst);
+            int decidedAt = arguments.FindIndex(argument => IsKnownNotNull(argument, parameters));
+
+            if (decidedAt < 0)
+                continue;
+
+            List<NodeAst> calls = [];
+
+            for (int i = decidedAt + 1; i < arguments.Count; i++)
+                Collect(arguments[i], calls);
+
+            unreachable.UnionWith(calls);
+        }
+
+        return unreachable;
+    }
+
+    /// <summary>
+    /// True when <paramref name="argument"/> is known not to be NULL before the statement runs: a literal, a
+    /// parameter that holds a value, or a nested call with such an argument, because that call stops at it at
+    /// the latest. False also means that only running the argument shows it, so the call after it is counted.
+    /// The depth of this recursion is the nesting of the calls in the statement, and the parser bounds it.
+    /// </summary>
+    private static bool IsKnownNotNull(NodeAst argument, Dictionary<string, ColumnValue>? parameters)
+    {
+        switch (argument.nodeType)
+        {
+            case NodeType.Integer or NodeType.Float or NodeType.String or NodeType.Bool
+                or NodeType.BytesLiteral or NodeType.ObjectIdLiteral:
+                return true;
+
+            case NodeType.Placeholder:
+                return parameters is not null
+                    && argument.yytext is not null
+                    && parameters.TryGetValue(argument.yytext, out ColumnValue? value)
+                    && value.Type != ColumnType.Null;
+
+            case NodeType.ExprFuncCall when Queries.ConditionalResultTypes.IsCoalesceCall(argument):
+                foreach (NodeAst nested in Queries.ConditionalResultTypes.Arguments(argument.rightAst))
+                    if (IsKnownNotNull(nested, parameters))
+                        return true;
+
+                return false;
+
+            default:
+                return false;
+        }
+    }
+
+    private static void CollectMatching(NodeAst? ast, Func<NodeAst, bool> predicate, List<NodeAst> into)
     {
         if (ast is null)
             return;
@@ -644,7 +721,7 @@ internal sealed class SequenceStatementBinder
         {
             NodeAst node = pending.Pop();
 
-            if (IsSequenceCall(node))
+            if (predicate(node))
                 into.Add(node);
 
             Push(pending, node.leftAst);

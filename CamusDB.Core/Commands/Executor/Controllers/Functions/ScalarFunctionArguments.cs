@@ -53,6 +53,23 @@ internal static class ScalarFunctionArguments
         return argumentList;
     }
 
+    /// <summary>
+    /// The argument nodes of a call, in source order, for a function that decides which of them run. Not
+    /// recursive, for the reason <see cref="EvaluateArgumentList"/> gives: this runs for each row.
+    /// </summary>
+    public static List<NodeAst> ArgumentNodes(NodeAst? argumentAst)
+    {
+        if (argumentAst is null)
+            return [];
+
+        if (argumentAst.nodeType != NodeType.ExprArgumentList)
+            return new List<NodeAst>(1) { argumentAst };
+
+        List<NodeAst> argumentNodes = [];
+        ExpressionChains.Flatten(argumentAst, NodeType.ExprArgumentList, argumentNodes);
+        return argumentNodes;
+    }
+
     public static void ValidateExactArity(string functionName, int expectedArity, int actualArity)
     {
         ValidateArity(functionName, expectedArity, expectedArity, actualArity);

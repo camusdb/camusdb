@@ -781,8 +781,10 @@ once. `EXISTS` discards its select list, `GROUP BY`, `DISTINCT` and `ORDER BY`, 
 does not fail, with rows or with no rows. A select list with an aggregate, `HAVING`, `OFFSET` and `LIMIT 0` keep the
 whole body, so `EXISTS (SELECT 1 / 0 FROM t LIMIT 0)` fails.
 
-`COALESCE(1, 1 / 0)` does not fail before the rows are read, because the first argument decides the result. For a
-row it still fails, because a function call evaluates all its arguments.
+`COALESCE(1, 1 / 0)` does not fail, with rows or with no rows, because the first argument decides the result. An
+argument that reads a row does not remove a later division before the statement runs, so `COALESCE(v, 1 / 0)` fails.
+A division that depends on a row runs only when `COALESCE` reaches it: `COALESCE(n, 1 / v)` divides only in a row where
+`n` is NULL. See [Result types of CASE, COALESCE, IFNULL and IF](#result-types-of-case-coalesce-ifnull-and-if).
 
 Every other value error still needs a row: `SELECT 9223372036854775807 + 1 FROM t WHERE FALSE` returns no rows.
 
@@ -840,11 +842,16 @@ empty table, still fail. The check covers the select list, `WHERE`, `GROUP BY`, 
 
 An input whose type only its value shows, such as a parameter or a function call, is checked when
 the value is returned. A branch that does not run is not checked then:
-`CASE WHEN false THEN @p ELSE 1 END` with a `string` `@p` returns `1`.
+`CASE WHEN false THEN @p ELSE 1 END` with a `string` `@p` returns `1`. A function call in a `COALESCE`
+argument that does not run is not checked either, so `COALESCE(1, upper(s))` returns `1`, and
+`COALESCE(1, sqrt(f))` is an `int64`. A parameter in a `COALESCE` argument is read also when the argument
+does not win, so `COALESCE(id, @p)` with a `string` `@p` fails.
 
-**Evaluation order does not change.** A `CASE` stops at the first `WHEN` that matches, and an `IF`
-evaluates only the result that its condition selects. `COALESCE` and `IFNULL` evaluate every
-argument.
+**Evaluation order.** A `CASE` stops at the first `WHEN` that matches, and an `IF` evaluates only the
+result that its condition selects. `COALESCE`, `IFNULL` and `NVL` run their arguments in order and stop
+at the first that is not NULL, so an argument after it raises no error, and a `nextval` in it draws no
+value. `NULLIF` always runs both arguments. A subquery, an aggregate and a window function are computed
+before the row is evaluated, so stopping does not stop them.
 
 #### IF
 

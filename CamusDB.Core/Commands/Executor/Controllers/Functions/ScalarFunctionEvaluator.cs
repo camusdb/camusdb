@@ -29,6 +29,16 @@ internal static class ScalarFunctionEvaluator
         if (!TryResolve(functionName, out ScalarFunctionDescriptor? descriptor))
             throw NotCallable(functionName);
 
+        // Checked before the argument list runs, because this path exists so that some arguments do not.
+        if (descriptor.LazyEvaluator is not null)
+        {
+            List<NodeAst> argumentNodes = ScalarFunctionArguments.ArgumentNodes(funcCallExpr.rightAst);
+
+            ScalarFunctionArguments.ValidateArity(functionName, descriptor.MinArity, descriptor.MaxArity, argumentNodes.Count);
+
+            return descriptor.LazyEvaluator(functionName, argumentNodes, row, parameters, rowNameResolver, evaluateExpression);
+        }
+
         IReadOnlyList<ColumnValue> arguments = ScalarFunctionArguments.EvaluateArgumentList(
             funcCallExpr.rightAst,
             row,

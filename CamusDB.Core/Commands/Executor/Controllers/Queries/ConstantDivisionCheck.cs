@@ -382,9 +382,8 @@ internal static class ConstantDivisionCheck
     }
 
     /// <summary>
-    /// COALESCE, IFNULL and NVL. A constant that is not NULL ends the walk. The evaluator computes
-    /// every argument of a function, so a dead argument that holds a division makes this node vary:
-    /// a parent must not evaluate it, or it would raise the error for a branch that does not run.
+    /// COALESCE, IFNULL and NVL. A constant that is not NULL ends the walk, as it ends the evaluator, so
+    /// an argument after it does not count.
     /// </summary>
     private static Shape ScanCoalesce(NodeAst node)
     {
@@ -404,10 +403,6 @@ internal static class ConstantDivisionCheck
 
             if (value.Type == Catalogs.Models.ColumnType.Null)
                 continue;
-
-            for (int dead = i + 1; dead < arguments.Count; dead++)
-                if (ContainsDivision(arguments[dead]))
-                    return Shape.Varying;
 
             break;
         }

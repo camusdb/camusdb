@@ -10,6 +10,7 @@ using System.Linq;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Controllers.DML;
 using CamusDB.Core.CommandsExecutor.Models;
+using CamusDB.Core.CommandsExecutor.Models.Queries;
 using CamusDB.Core.SQLParser;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers.Functions;
@@ -19,20 +20,27 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Functions;
 /// IFNULL), and NULLIF (2-arg). The first three return the first argument whose type is not
 /// ColumnType.Null, or ColumnValue.Null when every argument is null.
 ///
-/// For those three, the result type is the common type of the arguments, by
-/// <see cref="ResultTypeRule"/> (the rule CASE, IF and the set operations use): numbers widen by the
-/// arithmetic rule, a date with a datetime gives datetime, two arrays need one element type, and any
-/// other pair (a number with a String, a Bool with an INT64) is InvalidInput. Every argument is
-/// evaluated, so the evaluator checks the types of all argument values in every row, and widens the
-/// value it returns to their common type: COALESCE(int_col, 3.5) returns a Float64 even for a row
-/// where int_col is not NULL.
+/// For those three, the arguments run in order, and the first that is not NULL ends the call (a
+/// <see cref="ScalarFunctionDescriptor.LazyEvaluator"/>). An argument after it does not run, so it raises no
+/// error, and a sequence call in it draws no value. This makes COALESCE usable as a guard:
+/// COALESCE(n, 1 / v) divides only in a row where n is NULL. A subquery, an aggregate and a window
+/// function are computed before the row is evaluated, so stopping here does not stop them.
+///
+/// <para>The result type is the common type of the arguments, by <see cref="ResultTypeRule"/> (the rule
+/// CASE, IF and the set operations use): numbers widen by the arithmetic rule, a date with a datetime
+/// gives datetime, two arrays need one element type, and any other pair (a number with a String, a Bool
+/// with an INT64) is InvalidInput. So the type must not depend on which argument won: COALESCE(int_col,
+/// 3.5) returns a Float64 even for a row where int_col is not NULL. For an argument that does not run,
+/// the type comes from what shows it without running it: the literal, the cast or the arithmetic over
+/// those, the value of a parameter or a column. A function result does not show its type this way, so
+/// COALESCE(1, sqrt(f)) is an INT64, as a CASE with such a branch is.</para>
 ///
 /// <para>A NULL argument value has the type Null, so the values alone cannot show the declared type
 /// of a NULL column. The statement's binding therefore checks the declared types before any row is
 /// read and records the result type (<see cref="Queries.ConditionalResultTypes"/>); the expression
 /// evaluator widens the returned value to it, so COALESCE(int_col, float_col) is a Float64 also in a
 /// row where float_col is NULL. A call that no binding checked (a CHECK constraint, a default) keeps
-/// the value rule alone.</para>
+/// the rule above alone.</para>
 ///
 /// <para>NULLIF(a, b) is the inverse rule: it returns NULL when <c>a = b</c> is TRUE and returns
 /// <c>a</c> otherwise. It compares through <see cref="SQLExecutorBaseCreator.EvalComparison"/>, the
@@ -40,7 +48,8 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Functions;
 /// and a pair with no comparison rule (a type error, see <see cref="ComparisonTypeRule"/>) behave
 /// exactly as <c>a = b</c> does. A NULL
 /// <c>b</c> makes the comparison UNKNOWN, so the result is <c>a</c>. The declared type is the type
-/// of <c>a</c>, and <c>a</c> is returned without widening.</para>
+/// of <c>a</c>, and <c>a</c> is returned without widening. Both arguments always run, as in PostgreSQL,
+/// because the comparison needs both.</para>
 /// </summary>
 internal static class NullScalarFunctions
 {
@@ -52,7 +61,8 @@ internal static class NullScalarFunctions
             MinArity = 1,
             MaxArity = int.MaxValue,
             IsVolatile = false,
-            Evaluator = EvaluateCoalesce,
+            LazyEvaluator = EvaluateUntilNotNull,
+            Evaluator = static (calledName, _) => throw NotLazy(calledName),
             InferReturnType = InferCoalesceReturnType,
         });
 
@@ -63,7 +73,8 @@ internal static class NullScalarFunctions
             MinArity = 2,
             MaxArity = 2,
             IsVolatile = false,
-            Evaluator = EvaluateCoalesce,
+            LazyEvaluator = EvaluateUntilNotNull,
+            Evaluator = static (calledName, _) => throw NotLazy(calledName),
             InferReturnType = InferCoalesceReturnType,
         });
 
@@ -91,49 +102,79 @@ internal static class NullScalarFunctions
     private static ColumnType InferNullIfReturnType(IReadOnlyList<ColumnType> argumentTypes)
         => argumentTypes.Count > 0 ? argumentTypes[0] : ColumnType.Null;
 
-    private static ColumnValue EvaluateCoalesce(string calledName, IReadOnlyList<ColumnValue> arguments)
+    /// <summary>
+    /// Runs the arguments in order and stops at the first that is not NULL. The arguments after it do not
+    /// run, so only the type rule reads them (<see cref="TypeWithoutRunning"/>): a pair with no common type
+    /// that the row can show is still an error, also when an earlier argument wins.
+    /// </summary>
+    private static ColumnValue EvaluateUntilNotNull(
+        string calledName,
+        IReadOnlyList<NodeAst> arguments,
+        IReadOnlyDictionary<string, ColumnValue> row,
+        Dictionary<string, ColumnValue>? parameters,
+        QueryRowNameResolver? rowNameResolver,
+        ScalarFunctionArguments.EvaluateExpressionDelegate evaluateExpression)
     {
-        // Every argument is evaluated, so the result type comes from all of their values, and the
-        // winning value widens to it: COALESCE(int_col, 3.5) returns a Float64 for every row, not only
-        // for a NULL int_col. A pair with no common type is an error in every row, also when an earlier
-        // argument wins.
-        ExpressionType resultType = ExpressionType.Null;
         ColumnValue? winner = null;
+        int next = 0;
 
-        foreach (ColumnValue arg in arguments)
+        while (winner is null && next < arguments.Count)
         {
-            if (arg.Type == ColumnType.Null)
+            ColumnValue value = evaluateExpression(arguments[next++], row, parameters, rowNameResolver);
+
+            if (value.Type != ColumnType.Null)
+                winner = value;
+        }
+
+        if (winner is null)
+            return ColumnValue.Null;
+
+        ExpressionType resultType = ValueType(winner);
+
+        for (; next < arguments.Count; next++)
+        {
+            if (TypeWithoutRunning(arguments[next], row, parameters, rowNameResolver, evaluateExpression) is not { } later)
                 continue;
 
-            // A string value may be a literal, so it can take a date or datetime result type; a typed
-            // string column with a date column was already refused when the statement was bound.
-            ExpressionType argType = ExpressionType.Of(arg) with { IsStringLiteral = arg.Type == ColumnType.String };
-            if (!ResultTypeRule.TryCombine(resultType, argType, out resultType))
-                throw ResultTypeRule.NoCommonType(calledName.ToUpperInvariant(), PreviousType(arguments, arg), argType);
+            if (!ResultTypeRule.TryCombine(resultType, later, out ExpressionType combined))
+                throw ResultTypeRule.NoCommonType(calledName.ToUpperInvariant(), resultType, later);
 
-            winner ??= arg;
+            resultType = combined;
         }
 
-        return winner is null ? ColumnValue.Null : ResultTypeRule.Widen(winner, resultType.Type);
+        return ResultTypeRule.Widen(winner, resultType.Type);
     }
 
-    // The combined type of the non-NULL arguments before `failing`, for the error message.
-    private static ExpressionType PreviousType(IReadOnlyList<ColumnValue> arguments, ColumnValue failing)
+    /// <summary>
+    /// The type of an argument that must not run, or null when only running it shows the type. A parameter
+    /// or a column is read, because a read has no effect and cannot fail for a reason the statement did not
+    /// already have. Everything else comes from the syntax, so a division or a sequence call in it stays
+    /// unevaluated.
+    /// </summary>
+    private static ExpressionType? TypeWithoutRunning(
+        NodeAst argument,
+        IReadOnlyDictionary<string, ColumnValue> row,
+        Dictionary<string, ColumnValue>? parameters,
+        QueryRowNameResolver? rowNameResolver,
+        ScalarFunctionArguments.EvaluateExpressionDelegate evaluateExpression)
     {
-        ExpressionType combined = ExpressionType.Null;
+        if (argument.nodeType is not (NodeType.Placeholder or NodeType.Identifier))
+            return Queries.ConditionalResultTypes.TypeOf(argument, lookup: null);
 
-        foreach (ColumnValue arg in arguments)
-        {
-            if (ReferenceEquals(arg, failing))
-                break;
+        ColumnValue value = evaluateExpression(argument, row, parameters, rowNameResolver);
 
-            if (arg.Type != ColumnType.Null
-                && ResultTypeRule.TryCombine(combined, ExpressionType.Of(arg) with { IsStringLiteral = arg.Type == ColumnType.String }, out ExpressionType next))
-                combined = next;
-        }
-
-        return combined;
+        return value.Type == ColumnType.Null ? null : ValueType(value);
     }
+
+    // A string value may be a literal, so it can take a date or datetime result type; a typed string
+    // column with a date column was already refused when the statement was bound.
+    private static ExpressionType ValueType(ColumnValue value) =>
+        ExpressionType.Of(value) with { IsStringLiteral = value.Type == ColumnType.String };
+
+    // The evaluator always takes the lazy path for these functions, so this is not reachable from SQL. It
+    // exists because a descriptor requires a plain evaluator, and a plain evaluator has no way to stop.
+    private static CamusDBException NotLazy(string calledName) =>
+        new(CamusDBErrorCodes.InvalidInternalOperation, $"Function '{calledName}' must run through its lazy evaluator");
 
     /// <summary>
     /// The declared type of a COALESCE, IFNULL or NVL call from its argument types, by

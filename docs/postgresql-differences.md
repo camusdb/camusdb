@@ -98,6 +98,27 @@ differences that stay. `em` is an empty table.
 | `SELECT 1 BETWEEN 0 AND 2 BETWEEN FALSE AND TRUE` | `true` | Syntax error | The form has one reading, left to right. A refusal needs grammar rules that exist only to refuse it. |
 | `SELECT 1 BETWEEN 0 AND 2 IN (TRUE)` | `true` | Syntax error | The same reason. |
 
+## COALESCE and CASE
+
+`COALESCE`, `IFNULL` and `NVL` stop at the first argument that is not NULL, as in PostgreSQL. A `CASE` stops at the first `WHEN` that matches. A type that the statement shows is still checked before any row is read, for each argument and branch. `z` has one row with `v = 0` and `n` NULL, and `d` has two rows.
+
+| Statement | CamusDB | PostgreSQL | Why |
+|---|---|---|---|
+| `SELECT COALESCE(1, upper('a')) FROM z` | `1` | Error | A function result shows its type when it runs, and an argument that does not run is not read. |
+| `SELECT CASE WHEN TRUE THEN 1 ELSE upper('a') END FROM z` | `1` | Error | The same reason. |
+| `SELECT COALESCE(1, sqrt(f)) FROM z` | An `int64` | A `double precision` | The same reason. The values are equal. So the type can differ by row: `COALESCE(n, sqrt(4.0))` is an `int64` in a row where `n` wins. |
+| `SELECT COALESCE(id, (SELECT 1 / b.v FROM z b)) FROM z` | `CADB0400` | Every row | A subquery runs before the row is evaluated, so the expression around it cannot stop it. |
+| `SELECT COALESCE(1, (SELECT id FROM d))` | `CADB0400` | `1` | The same reason. |
+| `SELECT CASE WHEN TRUE THEN 1 ELSE (SELECT 1 / b.v FROM z b) END FROM z` | `CADB0400` | `1` | The same reason. |
+| `SELECT COALESCE(1, SUM(1 / v)) FROM z` | `CADB0400` | `1` | The same reason, for an aggregate. |
+| `SELECT COALESCE(1, SUM(1 / v) OVER (ORDER BY id)) FROM z` | `CADB0400` | `1` | The same reason, for a window function. |
+| `SELECT COALESCE(nextval('s'), nextval('s'))`, then `SELECT nextval('s')` | `3` | `2` | A statement reserves its values before it runs, and only a literal or a parameter shows its value then. `COALESCE(1, nextval('s'))` and `COALESCE(@p, nextval('s'))` with a value in `@p` draw nothing. Any other argument before the call leaves a gap. The result of the statement stays correct. |
+| `SELECT COALESCE(n, nextval('s')) FROM z` | `CADB0547` in a row where `n` is NULL | A new value | A statement over a relation cannot know how many values it draws. A call that no row reaches draws nothing, so it needs no refusal. |
+| `SELECT COALESCE(v, 9223372036854775807 + 1) FROM z` | The value of `v` | Error | A value error is not a statement mistake, and the engine does not evaluate a constant at bind time. Only a constant division is refused before the rows are read. |
+| `SELECT COALESCE(1, CAST('x' AS BIGINT)) FROM z` | `1` | Error | The same reason. |
+| `SELECT COALESCE(v, sqrt(-1.0)) FROM z` | The value of `v` | Error | The same reason. |
+| `SELECT COALESCE(v, 1 % 0) FROM z` | The value of `v` | Error | The parser builds `a % b` as `mod(a, b)`, so the rule of a function call applies. |
+
 ## EXISTS
 
 `EXISTS` does not evaluate a select list, `GROUP BY`, `DISTINCT` or `ORDER BY`, as in PostgreSQL. An unknown name or a known type mistake in those clauses still fails. An aggregate, `HAVING`, `OFFSET` and `LIMIT 0` can change the number of rows, so they keep their meaning. A correlated `EXISTS` reads the outer row, and it runs only its `FROM` and `WHERE` for each outer row, so these forms differ.

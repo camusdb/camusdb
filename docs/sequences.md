@@ -96,6 +96,15 @@ is not known when the statement is bound, and the update path drains its matched
 supporting it means reserving per chunk. It is refused with the same message as every other
 unbounded position, so nobody discovers the gap from their data.
 
+`COALESCE`, `IFNULL` and `NVL` stop at the first argument that is not NULL, so a call after it does not
+run and draws nothing. In the accepted positions, a call after a literal or a parameter that holds a
+value is not reserved: `COALESCE(@p, nextval('s'))` draws only when `@p` is NULL. A call after any other
+argument is reserved, because that argument shows its value only when it runs. If the call then does not
+run, the unused value is a gap: `COALESCE(abs(-1), nextval('s'))` returns `1` and uses one value. In a
+refused position, the refusal comes when a row reaches the call, so
+`SELECT COALESCE(n, nextval('s')) FROM t` fails with `CADB0547` in a row where `n` is NULL, and a row where
+`n` holds a value does not fail.
+
 ### `currval` and `lastval` are scoped to the transaction
 
 PostgreSQL scopes them to a backend connection. CamusDB has no connection to scope them to: the
