@@ -1549,6 +1549,11 @@ internal sealed class SelectStatementExecutor
     /// <para><b>A body with no FROM.</b> The statement path for that form evaluates its projections and
     /// its subqueries at once, which would run the body here. So the body binds over one row, as it does
     /// when a statement reads the view.</para>
+    ///
+    /// <para><b>No subquery runs.</b> The bind runs inside <see cref="StoredDefinitionBind"/>, so a
+    /// subquery of the body binds and gives its declared type, and its rows are not read. A body that
+    /// fails on the current rows (a division by zero, a scalar subquery with two rows) is accepted, and
+    /// the statement that reads the view fails, as in PostgreSQL.</para>
     /// </summary>
     internal async Task<SelectRowSource> BuildViewSourceAsync(
         DatabaseDescriptor database, NodeAst bodyAst, ExecuteSQLTicket ticket)
@@ -1558,9 +1563,7 @@ internal sealed class SelectStatementExecutor
         if (expanded.nodeType == NodeType.Select && expanded.rightAst is null)
             expanded = SelectQueryCreator.WithOneRowSource(expanded);
 
-        // A stored body fails when a statement uses it, as in PostgreSQL. The statement that reads the
-        // view binds this body again, with the check on.
-        using (ConstantDivisionCheck.SuspendForStoredDefinition())
+        using (StoredDefinitionBind.Enter())
             return await BuildSelectSourceAsync(database, expanded, ticket, "CREATE VIEW").ConfigureAwait(false);
     }
 
@@ -1657,6 +1660,11 @@ internal sealed class SelectStatementExecutor
     internal async Task<IAsyncEnumerable<QueryResultRow>> ExecuteFromlessSelectAsync(
         DatabaseDescriptor database, NodeAst ast, ExecuteSQLTicket ticket, QuerySchemaHolder? schemaOut = null)
     {
+        // Read first, so a LIMIT or OFFSET that is negative or not an integer fails the statement before
+        // a sequence value is drawn or a projection is evaluated.
+        long offset = EvalRowCount(ast.extendedFour, ticket.Parameters, "OFFSET");
+        long limit = ast.extendedThree is null ? long.MaxValue : EvalRowCount(ast.extendedThree, ticket.Parameters, "LIMIT");
+
         // A FROM-less SELECT produces exactly one row, so each nextval call site draws exactly one
         // value and the reservation is sized by counting the call sites. This is also where setval
         // is applied: it moves a counter, which is an asynchronous call that takes about one block
@@ -1716,10 +1724,7 @@ internal sealed class SelectStatementExecutor
             schemaOut.Schema = DerivedTableSchemaBuilder.BuildFromless(projections, projected);
 
         // A single constant row: apply OFFSET (any offset >= 1 skips it) then LIMIT (0 drops it).
-        long offset = EvalRowCount(ast.extendedFour, ticket.Parameters, "OFFSET");
-        long limit = ast.extendedThree is null ? long.MaxValue : EvalRowCount(ast.extendedThree, ticket.Parameters, "LIMIT");
-
-        if (offset >= 1 || limit <= 0)
+        if (offset >= 1 || limit == 0)
             return QueryResultStream.Empty();
 
         return QueryResultStream.FromRow(new QueryResultRow(new ObjectIdValue(), projected));
@@ -2075,17 +2080,11 @@ internal sealed class SelectStatementExecutor
         projections.Add(ast);
     }
 
-    /// <summary>Evaluates a LIMIT/OFFSET count node to a non-negative long; a null node means "none".</summary>
-    internal static long EvalRowCount(NodeAst? node, Dictionary<string, ColumnValue>? parameters, string clause)
-    {
-        if (node is null)
-            return 0;
-
-        ColumnValue value = SQLExecutorBaseCreator.EvalExpr(node, new Dictionary<string, ColumnValue>(), parameters);
-        if (value.Type != ColumnType.Integer64)
-            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"{clause} must be an integer");
-
-        return value.LongValue;
-    }
+    /// <summary>
+    /// Evaluates a LIMIT/OFFSET count node with <see cref="QueryLimiter.ReadRowCount"/>, which refuses a
+    /// value that is negative or not an integer; a null node means "none" and gives 0.
+    /// </summary>
+    internal static long EvalRowCount(NodeAst? node, Dictionary<string, ColumnValue>? parameters, string clause) =>
+        node is null ? 0 : QueryLimiter.ReadRowCount(node, parameters, clause);
 
 }

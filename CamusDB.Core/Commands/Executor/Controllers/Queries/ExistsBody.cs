@@ -56,6 +56,11 @@ internal static class ExistsBody
     /// <summary>Classifies a body as the statement wrote it, with the values of its parameters.</summary>
     public static ExistsBodyForm Classify(SelectQuery query, Dictionary<string, ColumnValue>? parameters)
     {
+        if (query.Offset is not null
+            && PredicateAnalyzer.TryGetConstant(query.Offset, parameters, out ColumnValue? offset)
+            && offset is { Type: ColumnType.Integer64, LongValue: < 0 })
+            throw QueryLimiter.Negative("OFFSET");
+
         if (query.Having is not null || query.Offset is not null)
             return ExistsBodyForm.MustRun;
 
@@ -69,11 +74,13 @@ internal static class ExistsBody
         if (!PredicateAnalyzer.TryGetConstant(query.Limit, parameters, out ColumnValue? limit) || limit is not { Type: ColumnType.Integer64 })
             return ExistsBodyForm.MustRun;
 
+        // A negative count fails the statement here, before the body is classified as one that needs
+        // no run, so a negative parameter fails even when no outer row reaches the body.
         return limit.LongValue switch
         {
             > 0 => ExistsBodyForm.OutputDiscarded,
             0 => ExistsBodyForm.NoRows,
-            _ => ExistsBodyForm.MustRun,
+            _ => throw QueryLimiter.Negative("LIMIT"),
         };
     }
 

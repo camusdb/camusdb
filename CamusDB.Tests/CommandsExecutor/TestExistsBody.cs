@@ -260,6 +260,7 @@ internal sealed class TestExistsBody : BaseTest
         Assert.That(await Run(database, executor, dbname, Correlated, Limit(5)), Is.EqualTo("1"));
     }
 
+    /// <summary>A negative LIMIT is a value error, as in PostgreSQL, also in a correlated body.</summary>
     [Test]
     public async Task Limit_ANegativeParameter_IsRefusedWhenCorrelated()
     {
@@ -267,7 +268,7 @@ internal sealed class TestExistsBody : BaseTest
 
         Assert.That(
             await Run(database, executor, dbname, "SELECT id FROM r o WHERE EXISTS (SELECT 1 FROM r i WHERE i.id = o.id LIMIT @p)", Limit(-1)),
-            Is.EqualTo(NotSupported));
+            Is.EqualTo(Invalid));
     }
 
     // ── A statement mistake in a discarded clause still fails, on any rows ───────────────────────

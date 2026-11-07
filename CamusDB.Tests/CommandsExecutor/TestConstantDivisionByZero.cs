@@ -424,9 +424,9 @@ internal sealed class TestConstantDivisionByZero : BaseTest
     {
         NodeAst division = SQLParserProcessor.Parse("SELECT 1 / 0").leftAst!;
 
-        using (ConstantDivisionCheck.SuspendForStoredDefinition())
+        using (StoredDefinitionBind.Enter())
         {
-            using (ConstantDivisionCheck.SuspendForStoredDefinition())
+            using (StoredDefinitionBind.Enter())
                 ConstantDivisionCheck.Check(division);
 
             ConstantDivisionCheck.Check(division);

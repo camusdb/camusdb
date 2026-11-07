@@ -28,8 +28,8 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 /// <para><b>Why this is not part of <see cref="ConditionalResultTypes.Check"/>.</b> That walk also
 /// runs on a stored definition at DDL: a CHECK condition, and a view body. PostgreSQL accepts those,
 /// and the statement that uses them fails. So this class is called only from the positions that run a
-/// statement. A view body binds through the same pipeline as a query, so
-/// <see cref="SuspendForStoredDefinition"/> turns the check off while CREATE VIEW binds it.</para>
+/// statement. A view body binds through the same pipeline as a query, so the check is off while
+/// <see cref="StoredDefinitionBind"/> is active.</para>
 ///
 /// <para><b>Why callers pass the expression from before the subquery rewrite.</b> The rewrite replaces
 /// a subquery with a literal, so <c>1 / (SELECT 0 FROM t)</c> would look constant. A subquery is not
@@ -72,30 +72,7 @@ internal static class ConstantDivisionCheck
         Unknown,
     }
 
-    private static readonly AsyncLocal<bool> Suspended = new();
-
     private static readonly Dictionary<string, ColumnValue> EmptyRow = new();
-
-    /// <summary>
-    /// Turns the check off in this asynchronous flow until the scope ends. Only CREATE VIEW uses it.
-    /// The flow includes each subquery that the body runs while it binds, and a view that the body
-    /// expands. Reads of the flag happen only for an expression that holds a division.
-    /// </summary>
-    internal static SuspendScope SuspendForStoredDefinition() => new(Suspended.Value);
-
-    /// <summary>Restores the earlier state of <see cref="SuspendForStoredDefinition"/>.</summary>
-    internal readonly struct SuspendScope : IDisposable
-    {
-        private readonly bool previous;
-
-        internal SuspendScope(bool previous)
-        {
-            this.previous = previous;
-            Suspended.Value = true;
-        }
-
-        public void Dispose() => Suspended.Value = previous;
-    }
 
     /// <summary>
     /// Checks every expression position of one SELECT level. A nested SELECT has its own bind, so its
@@ -150,7 +127,7 @@ internal static class ConstantDivisionCheck
     /// </summary>
     internal static void Check(NodeAst? expression)
     {
-        if (expression is null || !ContainsDivision(expression) || Suspended.Value)
+        if (expression is null || !ContainsDivision(expression) || StoredDefinitionBind.IsActive)
             return;
 
         NodeAst target = QueryExpressionClassifier.UnwrapAlias(expression);

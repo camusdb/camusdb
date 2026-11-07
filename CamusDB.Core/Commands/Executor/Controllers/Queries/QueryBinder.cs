@@ -107,6 +107,8 @@ internal sealed class QueryBinder
 
         QueryRowNameResolver rowNames = new(sources, derivedSources);
 
+        QueryLimiter.RefuseNegativeLiteral(query);
+
         foreach (ProjectionItem projection in query.Projections)
             ValidateExpression(projection.Expression, rowNames);
 
@@ -631,6 +633,8 @@ internal sealed class QueryBinder
     /// </summary>
     private static void ValidateQuery(SelectQuery query, QueryRowNameResolver rowNames, bool outputIsDiscarded = false)
     {
+        QueryLimiter.RefuseNegativeLiteral(query);
+
         foreach (ProjectionItem projection in query.Projections)
         {
             QueryExpressionClassifier.ValidateNoNestedAggregate(projection.Expression);

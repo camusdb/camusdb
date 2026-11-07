@@ -82,6 +82,27 @@ public static class DecidedDivergences
     private const string RegexHalfPair =
         "The engine matches UTF-16 units, so the result would hold half of a pair, which has no UTF-8 form. An error is better than a damaged value.";
 
+    private const string NotSupportedYet =
+        "CamusDB does not have this form yet. The statement fails with a clear error, and no answer is wrong.";
+
+    private const string UntypedNull =
+        "A NULL literal has no type, and it takes the type that the operator needs, the GoogleSQL rule. PostgreSQL gives an output column of NULL the type text.";
+
+    private const string EveryDerivedColumnRuns =
+        "A derived table and a view compute every column of each of their rows before the outer query reads or filters that row. PostgreSQL computes only the columns it reads, and can filter first.";
+
+    private const string ReservedPerCallSite =
+        "A FROM-less SELECT reserves one value for each call site before it evaluates. An unused value is a gap, which a sequence is allowed to have, and no value repeats.";
+
+    private const string NegativeCountAtBind =
+        "A negative LIMIT or OFFSET literal is a statement mistake, so it is refused when the statement binds, before any row is read. PostgreSQL reads the clause only when its node runs.";
+
+    private static readonly string[] TwoRowZeroTable =
+    [
+        "CREATE TABLE t (id INT64 PRIMARY KEY, v INT64)",
+        "INSERT INTO t (id, v) VALUES (1, 0), (2, 2)",
+    ];
+
     public static IReadOnlyList<DecidedDivergence> All { get; } =
     [
         new("UPDATE without WHERE is refused", RowTable,
@@ -395,5 +416,202 @@ public static class DecidedDivergences
             "SELECT COUNT(*) FROM d ORDER BY (SELECT 1)",
             CamusDBErrorCodes.InvalidInput, "2",
             "ORDER BY holds no subquery in any SELECT, and an aggregate query follows that rule."),
+
+        new("An expression over a group key is not supported", RowTable,
+            "SELECT v + 1 FROM d GROUP BY v",
+            CamusDBErrorCodes.InvalidInput, "11",
+            NotSupportedYet),
+
+        new("A column that the primary key fixes must be in GROUP BY", RowTable,
+            "SELECT id, v FROM d GROUP BY id",
+            CamusDBErrorCodes.InvalidInput, "1",
+            NotSupportedYet),
+
+        new("GROUP BY cannot name an output alias", RowTable,
+            "SELECT v AS q FROM d GROUP BY q",
+            CamusDBErrorCodes.UnknownColumn, "10",
+            NotSupportedYet),
+
+        new("ORDER BY cannot hold an aggregate that the select list does not hold", RowTable,
+            "SELECT v FROM d GROUP BY v ORDER BY COUNT(*), v",
+            CamusDBErrorCodes.InvalidInput, "10",
+            NotSupportedYet),
+
+        new("HAVING needs GROUP BY or an aggregate in the select list", EmptyTable,
+            "SELECT 1 FROM em HAVING COUNT(*) = 0",
+            CamusDBErrorCodes.InvalidInput, "1",
+            NotSupportedYet),
+
+        new("LIMIT NULL is not supported", RowTable,
+            "SELECT id FROM d LIMIT NULL",
+            CamusDBErrorCodes.SqlSyntaxError, "1",
+            NotSupportedYet),
+
+        new("A qualified star is not supported", RowTable,
+            "SELECT d.* FROM d",
+            CamusDBErrorCodes.SqlSyntaxError, "1",
+            NotSupportedYet),
+
+        new("WITH is not supported", NoSetup,
+            "WITH c AS (SELECT 5 AS x) SELECT x FROM c",
+            CamusDBErrorCodes.SqlSyntaxError, "5",
+            NotSupportedYet),
+
+        new("IS UNKNOWN is not supported", NoSetup,
+            "SELECT NULL IS UNKNOWN",
+            CamusDBErrorCodes.SqlSyntaxError, "true",
+            NotSupportedYet),
+
+        new("IS DISTINCT FROM is not supported", NoSetup,
+            "SELECT 1 IS DISTINCT FROM 2",
+            CamusDBErrorCodes.SqlSyntaxError, "true",
+            NotSupportedYet),
+
+        new("ISNULL and NOTNULL are not supported", NoSetup,
+            "SELECT 1 ISNULL",
+            CamusDBErrorCodes.SqlSyntaxError, "false",
+            NotSupportedYet),
+
+        new("An aggregate FILTER clause is not supported", RowTable,
+            "SELECT COUNT(*) FILTER (WHERE v > 10) FROM d",
+            CamusDBErrorCodes.SqlSyntaxError, "1",
+            NotSupportedYet),
+
+        new("The haystack of POSITION cannot hold a binary operator", NoSetup,
+            "SELECT POSITION('a' IN 'x' || 'a')",
+            CamusDBErrorCodes.SqlSyntaxError, "2",
+            NotSupportedYet),
+
+        new("A DEFAULT needs parentheses", NoSetup,
+            "CREATE TABLE dd (id INT64 PRIMARY KEY, v INT64 DEFAULT 1)",
+            CamusDBErrorCodes.SqlSyntaxError, "CREATE TABLE",
+            NotSupportedYet),
+
+        new("A set-returning function is not supported in a select list", RowTable,
+            "SELECT generate_series(1, 2) FROM d",
+            CamusDBErrorCodes.FeatureNotSupported, "1",
+            NotSupportedYet),
+
+        new("A view column needs a name", NoSetup,
+            "CREATE VIEW vv AS SELECT 1",
+            CamusDBErrorCodes.InvalidInput, "CREATE VIEW",
+            NotSupportedYet),
+
+        new("FOR UPDATE is not supported on a derived table", NoSetup,
+            "SELECT x FROM (SELECT 5 AS x) d FOR UPDATE",
+            CamusDBErrorCodes.InvalidInput, "5",
+            NotSupportedYet),
+
+        new("FOR UPDATE is not supported in a subquery", NoSetup,
+            "SELECT (SELECT 1 FOR UPDATE)",
+            CamusDBErrorCodes.SqlSyntaxError, "1",
+            NotSupportedYet),
+
+        new("A subquery is not supported in RETURNING", EmptyTable,
+            "INSERT INTO em (id, v) VALUES (1, 1) RETURNING (SELECT 7)",
+            CamusDBErrorCodes.InvalidInput, "7",
+            NotSupportedYet),
+
+        new("A NULL subquery result takes the type of the other operand", NoSetup,
+            "SELECT (SELECT NULL) + 1",
+            "NULL", "operator does not exist: text + integer",
+            UntypedNull),
+
+        new("A NULL derived column takes the type of the other operand", NoSetup,
+            "SELECT x + 1 FROM (SELECT NULL AS x) d",
+            "NULL", "operator does not exist: text + integer",
+            UntypedNull),
+
+        new("IN over a NULL subquery result has a NULL answer", NoSetup,
+            "SELECT 1 IN (SELECT NULL)",
+            "NULL", "operator does not exist: integer = text",
+            UntypedNull),
+
+        new("IN over a NULL subquery result selects no row", RowTable,
+            "SELECT id FROM d WHERE id IN (SELECT NULL)",
+            "no rows", "operator does not exist: bigint = text",
+            UntypedNull),
+
+        new("NOT IN over a NULL subquery result selects no row", RowTable,
+            "SELECT id FROM d WHERE id NOT IN (SELECT NULL)",
+            "no rows", "operator does not exist: bigint = text",
+            UntypedNull),
+
+        new("A NULL subquery result is a NULL condition", RowTable,
+            "SELECT id FROM d WHERE (SELECT NULL)",
+            "no rows", "argument of WHERE must be type boolean, not type text",
+            UntypedNull),
+
+        new("A COALESCE of NULL literals takes the type of the next argument", ["CREATE SEQUENCE sq"],
+            "SELECT COALESCE(COALESCE(NULL, NULL), nextval('sq'))",
+            "1", "COALESCE types text and bigint cannot be matched",
+            UntypedNull),
+
+        new("An integer overflow in a CASE branch that does not run raises nothing", ZeroTable,
+            "SELECT CASE WHEN id > 0 THEN 1 ELSE 9223372036854775807 + 1 END FROM z",
+            "1", "bigint out of range",
+            ConstantValueError),
+
+        new("A bad cast in a CASE branch that does not run raises nothing", ZeroTable,
+            "SELECT CASE WHEN id > 0 THEN 1 ELSE CAST('x' AS BIGINT) END FROM z",
+            "1", "invalid input syntax for type bigint: \"x\"",
+            ConstantValueError),
+
+        new("A domain error in a CASE branch that does not run raises nothing", ZeroTable,
+            "SELECT CASE WHEN id > 0 THEN 1 ELSE sqrt(-1.0) END FROM z",
+            "1", "cannot take square root of a negative number",
+            ConstantValueError),
+
+        new("A subscript applies to an array constructor without parentheses", NoSetup,
+            "SELECT ARRAY[1, 2][1] + 1 IS NULL",
+            "False", "syntax error at or near \"[\"",
+            "The form has one reading, and PostgreSQL needs (ARRAY[1, 2])[1] for it. A refusal needs grammar rules that exist only to refuse it."),
+
+        new("A derived column that the outer query does not read is computed", ZeroTable,
+            "SELECT 1 FROM (SELECT v / 0 AS q FROM z) d",
+            CamusDBErrorCodes.InvalidInput, "1",
+            EveryDerivedColumnRuns),
+
+        new("A derived column is computed before the outer WHERE filters its row", TwoRowZeroTable,
+            "SELECT x FROM (SELECT id, 1 / v AS x FROM t) d WHERE id = 2",
+            CamusDBErrorCodes.InvalidInput, "0",
+            EveryDerivedColumnRuns),
+
+        new("A view column is computed before the outer WHERE filters its row",
+            [.. TwoRowZeroTable, "CREATE VIEW c AS SELECT id, 1 / v AS x FROM t"],
+            "SELECT x FROM c WHERE id = 2",
+            CamusDBErrorCodes.InvalidInput, "0",
+            EveryDerivedColumnRuns),
+
+        new("A view column that the outer query does not read is computed",
+            [.. TwoRowZeroTable, "CREATE VIEW c AS SELECT id, (SELECT 1 / v FROM t WHERE id = 1) AS x FROM t"],
+            "SELECT id FROM c ORDER BY id",
+            CamusDBErrorCodes.InvalidInput, "1",
+            EveryDerivedColumnRuns),
+
+        new("A FROM-less SELECT under LIMIT 0 reserves a sequence value", ["CREATE SEQUENCE sq", "SELECT nextval('sq') LIMIT 0"],
+            "SELECT nextval('sq')",
+            "2", "1",
+            ReservedPerCallSite),
+
+        new("A sequence call in a CASE branch that does not run reserves a value", ["CREATE SEQUENCE sq", "SELECT CASE WHEN FALSE THEN nextval('sq') ELSE 1 END"],
+            "SELECT nextval('sq')",
+            "2", "1",
+            ReservedPerCallSite),
+
+        new("setval is refused inside COALESCE", ["CREATE SEQUENCE sq"],
+            "SELECT COALESCE(1, setval('sq', 100))",
+            CamusDBErrorCodes.SequenceCallNotAllowedHere, "1",
+            "setval moves a counter, so it is allowed only as a whole projection of a FROM-less SELECT, where the statement applies it once before it evaluates."),
+
+        new("A negative LIMIT in a view body is refused at CREATE VIEW", RowTable,
+            "CREATE VIEW c AS SELECT id FROM d LIMIT -1",
+            CamusDBErrorCodes.InvalidInput, "CREATE VIEW",
+            NegativeCountAtBind),
+
+        new("A negative LIMIT in a correlated EXISTS is refused also when no outer row reaches it", EmptyTable,
+            "SELECT id FROM em o WHERE EXISTS (SELECT 1 FROM em i WHERE i.id = o.id LIMIT -1)",
+            CamusDBErrorCodes.InvalidInput, "no rows",
+            NegativeCountAtBind),
     ];
 }

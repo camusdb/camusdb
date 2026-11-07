@@ -39,6 +39,12 @@ public sealed class TestPostgreSqlDivergences : SharedNodeBaseTest
 
         if (sql.StartsWith("CREATE", StringComparison.Ordinal))
             await executor.ExecuteDDLSQL(new(txnState: tx, database: dbname, sql: sql, parameters: null));
+        else if (sql.StartsWith("SELECT", StringComparison.Ordinal))
+        {
+            // A setup SELECT runs for its effect, such as a sequence value that it draws.
+            (_, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(new ExecuteSQLTicket(tx, dbname, sql, null));
+            _ = await cursor.ToListAsync();
+        }
         else
             _ = await executor.ExecuteNonSQLQuery(new(txnState: tx, database: dbname, sql: sql, parameters: null));
 
@@ -61,6 +67,11 @@ public sealed class TestPostgreSqlDivergences : SharedNodeBaseTest
                 if (rows.Count > 0)
                     outcome = Render(rows[0].Row.First().Value);
             }
+            else if (sql.StartsWith("CREATE", StringComparison.Ordinal))
+            {
+                await executor.ExecuteDDLSQL(new(txnState: tx, database: dbname, sql: sql, parameters: null));
+                outcome = "written";
+            }
             else
             {
                 _ = await executor.ExecuteNonSQLQuery(new(txnState: tx, database: dbname, sql: sql, parameters: null));
@@ -79,6 +90,7 @@ public sealed class TestPostgreSqlDivergences : SharedNodeBaseTest
 
     private static string Render(ColumnValue value) => value.Type switch
     {
+        ColumnType.Null => "NULL",
         ColumnType.Bool => value.BoolValue.ToString(),
         ColumnType.Integer64 => value.LongValue.ToString(),
         ColumnType.Float64 => value.FloatValue.ToString("R", System.Globalization.CultureInfo.InvariantCulture),

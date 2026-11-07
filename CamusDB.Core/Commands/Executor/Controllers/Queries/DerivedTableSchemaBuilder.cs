@@ -723,6 +723,12 @@ internal static class DerivedTableSchemaBuilder
         if (target.nodeType == NodeType.BytesLiteral)
             return ColumnType.Bytes;
 
+        // The NULL that replaces a scalar subquery with no value keeps the declared type of the
+        // subquery column (SubqueryResultTypes), so the column has that type and not the String
+        // fallback of a NULL literal. A stored definition binds every scalar subquery to such a NULL.
+        if (target.nodeType == NodeType.Null && SubqueryResultTypes.TypeOf(target) is { } recorded)
+            return recorded.Type;
+
         // A literal has the type its value evaluates to. `SELECT 1 FROM t` used to declare a String
         // column that carried Int64 cells; a set operation compares the declared types of its
         // operands, so `SELECT 1 FROM t UNION SELECT id FROM u` failed as String against Int64. A
@@ -1198,7 +1204,7 @@ internal static class DerivedTableSchemaBuilder
             NodeType.Float      => ColumnType.Float64,
             NodeType.String     => ColumnType.String,
             NodeType.Bool       => ColumnType.Bool,
-            NodeType.Null       => ColumnType.Null,
+            NodeType.Null       => SubqueryResultTypes.TypeOf(arg)?.Type ?? ColumnType.Null,
             NodeType.Identifier => arg.yytext is not null
                 ? ResolveColumnType(innerBound, innerResolver.ResolveRowLookupKey(arg.yytext), arg.yytext)
                 : ColumnType.String,

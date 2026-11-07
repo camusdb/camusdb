@@ -155,12 +155,38 @@ internal sealed class SubqueryQueryExecutor
         // carry the same schema pins a top-level SELECT of them would take.
         SelectStatementExecutor.PinSchemaVersions(database, bound.Bound.Sources, txnState);
 
+        // A stored definition binds its subqueries and reads no row of them: its result must not
+        // depend on the data. See StoredDefinitionBind. No value shows the type of the column then, so
+        // a type the static rules do not show comes from the schema builder, which types an aggregate
+        // as CREATE TABLE AS does: the column of (SELECT MAX(v) FROM t) is the type of v.
+        if (StoredDefinitionBind.IsActive)
+        {
+            if (outputType is not null && outputType.Type is null)
+                outputType.Type = DeclaredColumnType(bound.Bound);
+
+            yield break;
+        }
+
         IAsyncEnumerable<QueryResultRow> cursor = bound.Bound.IsMultiSource
             ? queryJoinExecutor.ExecuteJoinQuery(database, bound.Bound, queryTicket)
             : queryExecutor.Query(database, bound.Bound.PrimaryTable, queryTicket);
 
         await foreach (QueryResultRow row in cursor.WithCancellation(ct).ConfigureAwait(false))
             yield return row;
+    }
+
+    /// <summary>
+    /// The type of the one output column of <paramref name="bound"/> as the schema builder derives it,
+    /// or null when the builder gives NULL. Used only while a stored definition binds.
+    /// </summary>
+    private static ExpressionType? DeclaredColumnType(BoundSelectQuery bound)
+    {
+        IReadOnlyList<DerivedColumnSchema> columns = DerivedTableSchemaBuilder.Build(bound.Query, bound);
+
+        if (columns.Count != 1 || columns[0].Type == ColumnType.Null)
+            return null;
+
+        return new ExpressionType(columns[0].Type, columns[0].ElementType ?? ColumnType.Null);
     }
 
     internal static void ValidateSingleColumnProjection(SelectQuery subquery)

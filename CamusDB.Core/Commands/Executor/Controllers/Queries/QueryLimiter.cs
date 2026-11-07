@@ -6,9 +6,13 @@
  * file that was distributed with this source code.
  */
 
+using System.Globalization;
+
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
+using CamusDB.Core.CommandsExecutor.Models.Queries;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
+using CamusDB.Core.SQLParser;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 
@@ -22,6 +26,52 @@ internal sealed class QueryLimiter
     /// </summary>
     internal static CamusDBException NotAnInteger(string clause, ColumnValue value) =>
         new(CamusDBErrorCodes.InvalidInput, $"{clause} must be an integer, got {value.Type}");
+
+    /// <summary>
+    /// The error for a negative LIMIT or OFFSET, with the message of PostgreSQL. A negative count used
+    /// to give an answer: <c>LIMIT -1</c> returned no rows, <c>OFFSET -1</c> skipped none, and
+    /// <c>LIMIT 2 OFFSET -1</c> returned one row. PostgreSQL refuses the statement.
+    /// </summary>
+    internal static CamusDBException Negative(string clause) =>
+        new(CamusDBErrorCodes.InvalidInput, $"{clause} must not be negative");
+
+    /// <summary>
+    /// Reads the value of a LIMIT or OFFSET clause: an integer literal or a parameter. Every place that
+    /// reads one of these clauses calls this, so a value that is not an integer, or that is negative,
+    /// fails the statement the same way wherever the clause is read.
+    /// </summary>
+    internal static long ReadRowCount(NodeAst node, Dictionary<string, ColumnValue>? parameters, string clause)
+    {
+        ColumnValue value = SqlExecutor.EvalExpr(node, new Dictionary<string, ColumnValue>(), parameters);
+        if (value.Type != ColumnType.Integer64)
+            throw NotAnInteger(clause, value);
+
+        if (value.LongValue < 0)
+            throw Negative(clause);
+
+        return value.LongValue;
+    }
+
+    /// <summary>
+    /// Refuses a negative integer literal in the LIMIT or OFFSET of <paramref name="query"/>. The binder
+    /// calls this for every SELECT it binds, so the statement fails before any row is read, also when
+    /// the clause sits in a subquery that no row reaches. A parameter has no value at bind;
+    /// <see cref="ReadRowCount"/> refuses it when the clause is read.
+    /// </summary>
+    internal static void RefuseNegativeLiteral(SelectQuery query)
+    {
+        RefuseNegativeLiteral(query.Limit, "LIMIT");
+        RefuseNegativeLiteral(query.Offset, "OFFSET");
+    }
+
+    private static void RefuseNegativeLiteral(NodeAst? node, string clause)
+    {
+        // A literal too large for INT64 is left to the evaluator, which reports the overflow.
+        if (node is { nodeType: NodeType.Integer }
+            && long.TryParse(node.yytext, NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture, out long value)
+            && value < 0)
+            throw Negative(clause);
+    }
 
     /// <summary>
     /// Applies LIMIT and/or OFFSET to the cursor. Either clause may be present alone:
@@ -42,33 +92,21 @@ internal sealed class QueryLimiter
         long offset = 0;
 
         if (ticket.Limit is not null)
-        {
-            ColumnValue limitValue = SqlExecutor.EvalExpr(ticket.Limit, new Dictionary<string, ColumnValue>(), ticket.Parameters);
-            if (limitValue.Type != ColumnType.Integer64)
-                throw NotAnInteger("LIMIT", limitValue);
-
-            limit = limitValue.LongValue;
-        }
+            limit = ReadRowCount(ticket.Limit, ticket.Parameters, "LIMIT");
 
         if (ticket.Offset is not null)
-        {
-            ColumnValue offsetValue = SqlExecutor.EvalExpr(ticket.Offset, new Dictionary<string, ColumnValue>(), ticket.Parameters);
-            if (offsetValue.Type != ColumnType.Integer64)
-                throw NotAnInteger("OFFSET", offsetValue);
-
-            offset = offsetValue.LongValue;
-        }
+            offset = ReadRowCount(ticket.Offset, ticket.Parameters, "OFFSET");
 
         // The input is lazy, so every row pulled from it is work done upstream — for a join, finding
         // one more match can mean reading much of its right side. The loop therefore stops as soon as
         // it has yielded the last row it needs, and LIMIT 0 pulls nothing, instead of pulling one row
         // past the limit only to discard it.
-        if (limit is not null && limit.Value <= 0)
+        if (limit == 0)
             yield break;
 
         // The position after the last row to return. It saturates: a LIMIT near long.MaxValue plus an
         // OFFSET must not wrap to a negative end, which would stop the query after its first row.
-        long end = limit is null || (offset > 0 && limit.Value > long.MaxValue - offset)
+        long end = limit is null || limit.Value > long.MaxValue - offset
             ? long.MaxValue
             : offset + limit.Value;
 

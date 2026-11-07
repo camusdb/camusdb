@@ -86,8 +86,9 @@ CREATE VIEW five AS SELECT 5 AS x;
 ```
 
 `CREATE VIEW` binds the body and does not evaluate it, so `CREATE VIEW v AS SELECT 1 / 0 AS x` succeeds and a
-read of `v` fails, as in PostgreSQL. A subquery in a view body is different: it runs when `CREATE VIEW` binds
-the body, also when the body has a `FROM`.
+read of `v` fails, as in PostgreSQL. A subquery in the body binds and does not run either, so
+`CREATE VIEW v AS SELECT (SELECT 1 / 0) AS x` succeeds too. An unknown name in a subquery still fails the
+`CREATE VIEW`.
 
 The rejected shapes below apply in each of these positions. A sequence call is also refused there
 (`CADB0547`), because a statement must know how many values it draws before it runs.

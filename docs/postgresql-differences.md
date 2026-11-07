@@ -97,6 +97,7 @@ differences that stay. `em` is an empty table.
 |---|---|---|---|
 | `SELECT 1 BETWEEN 0 AND 2 BETWEEN FALSE AND TRUE` | `true` | Syntax error | The form has one reading, left to right. A refusal needs grammar rules that exist only to refuse it. |
 | `SELECT 1 BETWEEN 0 AND 2 IN (TRUE)` | `true` | Syntax error | The same reason. |
+| `SELECT ARRAY[1, 2][1] + 1 IS NULL` | `false` | Syntax error | The subscript applies to the array constructor, the one reading of the form. PostgreSQL needs `(ARRAY[1, 2])[1]`. |
 
 ## COALESCE and CASE
 
@@ -116,6 +117,52 @@ differences that stay. `em` is an empty table.
 | `SELECT COALESCE(1, CAST('x' AS BIGINT)) FROM z` | `1` | Error | The same reason. |
 | `SELECT COALESCE(v, sqrt(-1.0)) FROM z` | The value of `v` | Error | The same reason. |
 | `SELECT COALESCE(v, 1 % 0) FROM z` | The value of `v` | Error | The parser builds `a % b` as `mod(a, b)`, so the rule of a function call applies. |
+| `SELECT CASE WHEN id > 0 THEN 1 ELSE 9223372036854775807 + 1 END FROM z` | `1` | `bigint out of range` | A value error is not a statement mistake, and a `CASE` branch that does not run raises nothing. |
+| `SELECT CASE WHEN id > 0 THEN 1 ELSE CAST('x' AS BIGINT) END FROM z` | `1` | Error | The same reason. |
+| `SELECT CASE WHEN id > 0 THEN 1 ELSE sqrt(-1.0) END FROM z` | `1` | Error | The same reason. |
+| `SELECT COALESCE(COALESCE(NULL, NULL), nextval('s'))` | `1` | `COALESCE types text and bigint cannot be matched` | A `NULL` literal has no type, and it takes the type that the expression needs. PostgreSQL types it as `text`. |
+
+## NULL from a subquery
+
+A `NULL` literal has no type, and it takes the type that the operator needs, the GoogleSQL rule. PostgreSQL gives an output column of `NULL` the type `text`, so it refuses these forms.
+
+| Statement | CamusDB | PostgreSQL | Why |
+|---|---|---|---|
+| `SELECT (SELECT NULL) + 1` | `NULL` | `operator does not exist: text + integer` | An untyped `NULL` takes the type of the other operand. |
+| `SELECT x + 1 FROM (SELECT NULL AS x) d` | `NULL` | The same error | The same reason, for a derived column. |
+| `SELECT 1 IN (SELECT NULL)`, and the `NOT IN` form | `NULL` | `operator does not exist: integer = text` | The same reason. |
+| `SELECT id FROM d WHERE id IN (SELECT NULL)`, and the `NOT IN` form | No rows | `operator does not exist: bigint = text` | The same reason. |
+| `SELECT id FROM d WHERE (SELECT NULL)` | No rows | `argument of WHERE must be type boolean, not type text` | The same reason. |
+
+## Derived tables and views
+
+A derived table and a view compute every column of each of their rows before the outer query reads or filters that row. PostgreSQL computes only the columns it reads, and can filter first. So a filter outside a view cannot guard a division inside it. `t` has the rows `(1, v = 0)` and `(2, v = 2)`.
+
+| Statement | CamusDB | PostgreSQL | Why |
+|---|---|---|---|
+| `SELECT 1 FROM (SELECT v / 0 AS q FROM z) d` | `CADB0400` | One row | The column `q` is computed, although the outer query does not read it. |
+| `SELECT x FROM (SELECT id, 1 / v AS x FROM t) d WHERE id = 2` | `CADB0400` | `0` | The column `x` is computed for the row with `id = 1` before the outer `WHERE` removes it. |
+| `SELECT x FROM c WHERE id = 2`, where the view `c` is `SELECT id, 1 / v AS x FROM t` | `CADB0400` | `0` | The same reason, for a view. |
+| `SELECT id FROM c`, where `c` is `SELECT id, (SELECT 1 / v FROM t WHERE id = 1) AS x FROM t` | `CADB0400` | Every row | The same reason, for a column that the outer query does not read. |
+
+`CREATE VIEW` and `CREATE MATERIALIZED VIEW` bind the body and run none of its subqueries, as PostgreSQL does. So `CREATE VIEW c AS SELECT (SELECT 1 / 0) AS x` succeeds, and a read of `x` fails. A scalar subquery column has the declared type of the subquery column, also when the subquery returns no row.
+
+## LIMIT and OFFSET
+
+A negative `LIMIT` or `OFFSET` fails with `CADB0400` and the message of PostgreSQL, `LIMIT must not be negative`. A literal is refused when the statement binds, and a parameter when the clause is read.
+
+| Statement | CamusDB | PostgreSQL | Why |
+|---|---|---|---|
+| `CREATE VIEW c AS SELECT id FROM d LIMIT -1` | `CADB0400` | Accepted | A negative literal is a statement mistake, so it is refused before any row is read. PostgreSQL reads the clause only when its node runs. |
+| `SELECT id FROM em o WHERE EXISTS (SELECT 1 FROM em i WHERE i.id = o.id LIMIT -1)` | `CADB0400` | No rows | The same reason. No outer row reaches the body, so PostgreSQL never reads its `LIMIT`. |
+
+## Sequences
+
+| Statement | CamusDB | PostgreSQL | Why |
+|---|---|---|---|
+| `SELECT nextval('s') LIMIT 0`, then `SELECT nextval('s')` | `2` | `1` | A `SELECT` with no `FROM` reserves one value for each call site before it evaluates. An unused value is a gap, which a sequence is allowed to have, and no value repeats. |
+| `SELECT CASE WHEN FALSE THEN nextval('s') ELSE 1 END`, then `SELECT nextval('s')` | `2` | `1` | The same reason. |
+| `SELECT COALESCE(1, setval('s', 100))` | `CADB0547` | `1` | `setval` moves a counter, so it is allowed only as a whole projection of a `SELECT` with no `FROM`. |
 
 ## EXISTS
 
@@ -132,3 +179,29 @@ differences that stay. `em` is an empty table.
 | Statement | CamusDB | PostgreSQL | Why |
 |---|---|---|---|
 | `SELECT COUNT(*) FROM d ORDER BY (SELECT 1)` | `CADB0400` | One row | `ORDER BY` holds no subquery in any `SELECT`. |
+
+## Forms that CamusDB does not have yet
+
+CamusDB refuses these forms with a clear error, so no answer is wrong. `d` has the rows `(1, 10)` and `(2, 20)`, and `em` is empty.
+
+| Statement | CamusDB | PostgreSQL |
+|---|---|---|
+| `SELECT v + 1 FROM d GROUP BY v` | `CADB0400` | `11`, `21` |
+| `SELECT id, v FROM d GROUP BY id`, where `id` is the primary key | `CADB0400` | Both rows |
+| `SELECT v AS q FROM d GROUP BY q` | `CADB0404` | `10`, `20` |
+| `SELECT v FROM d GROUP BY v ORDER BY COUNT(*), v` | `CADB0400` | `10`, `20` |
+| `SELECT 1 FROM em HAVING COUNT(*) = 0` | `CADB0400` | `1` |
+| `SELECT id FROM d LIMIT NULL` | `CADB0406` | Both rows |
+| `SELECT d.* FROM d` | `CADB0406` | Both rows |
+| `WITH c AS (SELECT 5 AS x) SELECT x FROM c` | `CADB0406` | `5` |
+| `SELECT NULL IS UNKNOWN`, and `IS NOT UNKNOWN` | `CADB0406` | `true` |
+| `SELECT 1 IS DISTINCT FROM 2`, and `IS NOT DISTINCT FROM` | `CADB0406` | `true` |
+| `SELECT 1 ISNULL`, and `NOTNULL` | `CADB0406` | `false` |
+| `SELECT COUNT(*) FILTER (WHERE v > 10) FROM d` | `CADB0406` | `1` |
+| `SELECT POSITION('a' IN 'x' \|\| 'a')` | `CADB0406` | `2` |
+| `CREATE TABLE dd (id INT64 PRIMARY KEY, v INT64 DEFAULT 1)` | `CADB0406`; write `DEFAULT (1)` | Accepted |
+| `SELECT generate_series(1, 2) FROM d` | `CADB0533`; use `generate_series` in `FROM` | 4 rows |
+| `CREATE VIEW vv AS SELECT 1` | `CADB0400`; name the column with `AS` | Accepted, with the column `?column?` |
+| `SELECT x FROM (SELECT 5 AS x) d FOR UPDATE` | `CADB0400` | `5` |
+| `SELECT (SELECT 1 FOR UPDATE)` | `CADB0406` | `1` |
+| `INSERT INTO em (id, v) VALUES (1, 1) RETURNING (SELECT 7)` | `CADB0400` | `7` |
