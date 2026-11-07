@@ -348,20 +348,22 @@ internal sealed class TestLikeMatcher : BaseTest
         Assert.That(await Run(database, executor, dbname, "SELECT id FROM lk WHERE s LIKE 'a#_' ESCAPE @e ORDER BY id", Text("@e", escape)), Is.EqualTo(expected));
     }
 
+    /// <summary>
+    /// A pair in a parameter is one character for <c>_</c>. Half of a pair in a parameter is refused
+    /// before the statement runs, so SQL never reaches the matcher with one; the matcher tests below
+    /// still cover half of a pair, for a typed caller.
+    /// </summary>
     [Test]
-    public async Task Parameter_WithHalfOfAPair_CountsAsOneCharacter()
+    public async Task Parameter_WithAPair_CountsAsOneCharacter()
     {
         (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateTables();
 
         foreach ((string text, string pattern, string expected) in new[]
         {
-            ("\uD83D", "_", "t"),
-            ("\uD83Dx", "__", "t"),
             ("🙂", "__", "f"),
             ("🙂", "_", "t"),
-            ("🙂", "%\uDE42", "f"),
-            ("🙂", "%\uDE42%", "f"),
-            ("\uDE42", "%\uDE42", "t"),
+            ("🙂x", "__", "t"),
+            ("x🙂", "%🙂", "t"),
         })
         {
             Dictionary<string, ColumnValue> parameters = new()
@@ -371,6 +373,17 @@ internal sealed class TestLikeMatcher : BaseTest
             };
 
             Assert.That(await Run(database, executor, dbname, "SELECT @t LIKE @p", parameters), Is.EqualTo(expected));
+        }
+
+        foreach ((string text, string pattern) in new[] { ("\uD83D", "_"), ("🙂", "%\uDE42") })
+        {
+            Dictionary<string, ColumnValue> parameters = new()
+            {
+                ["@t"] = new ColumnValue(ColumnType.String, text),
+                ["@p"] = new ColumnValue(ColumnType.String, pattern),
+            };
+
+            Assert.That(await Run(database, executor, dbname, "SELECT @t LIKE @p", parameters), Is.EqualTo(CamusDBErrorCodes.InvalidInput));
         }
     }
 

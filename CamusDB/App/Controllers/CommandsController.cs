@@ -105,6 +105,23 @@ public abstract class CommandsController : ControllerBase
     /// greps for it and finds the stack trace. Reusing <c>TraceIdentifier</c> rather than minting a
     /// second identifier means the id also matches the one the error page shows.</para>
     /// </summary>
+    /// <summary>
+    /// The client error for a request body that does not parse as the request JSON, so the client gets
+    /// <see cref="CamusDBErrorCodes.InvalidInput"/> and the place in the body, and not an internal
+    /// error. One case is an escaped half of a surrogate pair in a string, which the JSON reader
+    /// refuses. The message is built from the position only: the text of the exception can name an
+    /// engine type, and a converter can put a value in it.
+    /// </summary>
+    protected static CamusDBException InvalidRequestBody(JsonException e)
+    {
+        string path = string.IsNullOrEmpty(e.Path) ? "" : $" at {e.Path}";
+        string place = e.LineNumber is { } line && e.BytePositionInLine is { } position
+            ? $" (line {line + 1}, byte {position + 1})"
+            : "";
+
+        return new CamusDBException(CamusDBErrorCodes.InvalidInput, $"The request body is not valid JSON{path}{place}.");
+    }
+
     protected string LogUnclassifiedFailure(Exception e)
     {
         string requestId = HttpContext.TraceIdentifier;

@@ -390,12 +390,21 @@ pattern, to a `CHAR(n)` or `VARCHAR(n)` limit, and to the `start` argument and t
 `regexp_substr`. For a `bytes` value, these functions count bytes. The sort order of strings is separate, and it
 stays by UTF-16 code unit. See [Differences from PostgreSQL](postgresql-differences.md#strings).
 
-**Half of a pair.** A .NET string holds a character such as `🙂` as a pair of UTF-16 units. One unit alone has
-no UTF-8 form, so it cannot be stored:
+**Half of a pair.** A .NET string holds a character such as `🙂` as a pair of UTF-16 units. One unit alone is
+not a character and has no UTF-8 form. A PostgreSQL string cannot hold one, and CamusDB refuses it at each
+place where it can enter. CamusDB never replaces it with U+FFFD.
 
 - A literal with half of a pair, such as `E'\uD83D'`, fails with `CADB0400` when the statement is parsed.
-- A write of a parameter with half of a pair fails with `CADB0400`, and the message names the column. The row does
-  not change. CamusDB does not replace the value with U+FFFD.
+- A statement with half of a pair in a string parameter, or in an element of a string array parameter, fails
+  with `CADB0400` before it runs. The message names the parameter and the character position. This applies to
+  every statement, also a SELECT, so no function, filter or plan step sees the value.
+- Over HTTP, a JSON body with an escaped half (`"\uD83D"`) does not parse, and the request fails with
+  `CADB0400`. The message gives the JSON path and the byte position. Any other body that does not parse gets
+  the same answer.
+- Over gRPC, a protobuf string is UTF-8, so a client library changes half of a pair to U+FFFD before it sends
+  the request. The server then receives U+FFFD, which is a valid character, and cannot see the change.
+- A typed write ticket with half of a pair fails with `CADB0400`, and the message names the column. The row does
+  not change.
 
 **Regular expressions match UTF-16 units.** The engine has no code point mode, so `.` and a negated class match
 one unit, which is half of `🙂`. These differences from PostgreSQL stay:

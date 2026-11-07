@@ -25,7 +25,8 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// Text functions and a <c>CHAR(n)</c> limit count code points, so a character outside the Basic
 /// Multilingual Plane counts as one and a slice cannot cut it in half. Half of a pair has no UTF-8 form, and
 /// a write once stored U+FFFD for it with no error, so the stored value differed from the same expression
-/// in a SELECT. Now no function returns half of a pair, and a write refuses one. Each expected result
+/// in a SELECT. Now no function returns half of a pair, a statement with one in a parameter is refused
+/// before it runs, and a typed write refuses one. Each expected result
 /// was measured on PostgreSQL 16.11, except the refusals, which cannot occur there: a PostgreSQL string
 /// cannot hold half of a pair.
 /// </summary>
@@ -307,7 +308,7 @@ internal sealed class TestStringCodePoints : BaseTest
         Assert.That(error!.Code, Is.EqualTo(CamusDBErrorCodes.ValueTooLong));
     }
 
-    // ── Half of a pair is refused at a write ─────────────────────────────────────────────────────
+    // ── Half of a pair is refused ─────────────────────────────────────────────────────────────────
 
     // These cases come from a source and not from attributes. The compiler writes an attribute string to
     // the metadata as UTF-8, so half of a pair in one reaches the test as replacement characters.
@@ -330,8 +331,10 @@ internal sealed class TestStringCodePoints : BaseTest
             CamusDBException? error = Assert.ThrowsAsync<CamusDBException>(() =>
                 Commit(database, executor, dbname, $"INSERT INTO {table} (id, s) VALUES (1, @p)", Param(value)));
 
+            // The parameter check runs before the statement, so the message names the parameter. The
+            // typed insert below reaches the row encoder, which names the column.
             Assert.That(error!.Code, Is.EqualTo(CamusDBErrorCodes.InvalidInput));
-            Assert.That(error.Message, Does.Contain("column 's'"));
+            Assert.That(error.Message, Does.Contain("Parameter '@p'"));
             Assert.That(await Rows(database, executor, dbname, $"SELECT id FROM {table}"), Is.Empty);
         }
     }
@@ -368,13 +371,42 @@ internal sealed class TestStringCodePoints : BaseTest
         (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateTables();
 
         // Past the size where a cell goes out of line, so the value takes the other path of the encoder.
+        // A typed ticket reaches the encoder; a SQL parameter is refused before it.
         string large = new string('x', 100_000) + HighHalf;
 
-        CamusDBException? error = Assert.ThrowsAsync<CamusDBException>(() =>
-            Commit(database, executor, dbname, "INSERT INTO t (id, s) VALUES (1, @p)", Param(large)));
+        CamusDBException? error = Assert.ThrowsAsync<CamusDBException>(() => TypedInsert(database, executor, dbname, large));
 
         Assert.That(error!.Code, Is.EqualTo(CamusDBErrorCodes.InvalidInput));
+        Assert.That(error.Message, Does.Contain("column 's'"));
         Assert.That(await Rows(database, executor, dbname, "SELECT id FROM t"), Is.Empty);
+    }
+
+    private static async Task TypedInsert(DatabaseDescriptor database, CommandExecutor executor, string dbname, string value)
+    {
+        KvTransaction tx = await database.Transactions.BeginAsync();
+
+        try
+        {
+            await executor.Insert(new InsertTicket(
+                txnState: tx,
+                databaseName: dbname,
+                tableName: "t",
+                values:
+                [
+                    new Dictionary<string, ColumnValue>
+                    {
+                        ["id"] = new ColumnValue(ColumnType.Integer64, 1),
+                        ["s"] = new ColumnValue(ColumnType.String, value),
+                    },
+                ]));
+
+            await database.Transactions.CommitAsync(tx);
+        }
+        catch
+        {
+            await database.Transactions.RollbackAsync(tx);
+            throw;
+        }
     }
 
     [Test]
@@ -404,15 +436,23 @@ internal sealed class TestStringCodePoints : BaseTest
     }
 
     [Test]
-    public async Task AFilterWithHalfAPair_FindsNoRowAndDoesNotFail()
+    public async Task AFilterWithHalfAPair_IsRefused()
     {
         (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateTables();
 
         await Commit(database, executor, dbname, $"INSERT INTO t (id, s) VALUES (1, '{Smile}')");
         await Commit(database, executor, dbname, $"INSERT INTO ix (id, s) VALUES (1, '{Smile}')");
 
-        Assert.That(await Rows(database, executor, dbname, "SELECT id FROM t WHERE s = @p", Param(HighHalf)), Is.Empty);
-        Assert.That(await Rows(database, executor, dbname, "SELECT id FROM ix WHERE s = @p", Param(HighHalf)), Is.Empty);
+        // A scan and an index seek both refuse it, so the answer does not depend on the plan.
+        foreach (string table in new[] { "t", "ix" })
+        {
+            CamusDBException? error = Assert.ThrowsAsync<CamusDBException>(() =>
+                Rows(database, executor, dbname, $"SELECT id FROM {table} WHERE s = @p", Param(HighHalf)));
+
+            Assert.That(error!.Code, Is.EqualTo(CamusDBErrorCodes.InvalidInput), table);
+        }
+
+        Assert.That(await Rows(database, executor, dbname, "SELECT id FROM ix WHERE s = @p", Param(Smile)), Is.EqualTo(new[] { "1" }));
     }
 
     // ── The helper ───────────────────────────────────────────────────────────────────────────────

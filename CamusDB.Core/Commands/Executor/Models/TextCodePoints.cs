@@ -16,7 +16,8 @@ namespace CamusDB.Core.CommandsExecutor.Models;
 ///
 /// <para>Every method first searches for a surrogate, because almost no text holds one, and that search
 /// is vectorized. Text with no surrogate costs one such search and no loop. An unpaired surrogate counts
-/// as one code point: it cannot come from a literal or from storage, but it can come from a parameter.</para>
+/// as one code point. It cannot come from a literal, a SQL parameter or storage, because each of them
+/// refuses it, but a typed ticket can still carry one in a filter value.</para>
 ///
 /// <para>The sort order of strings stays by UTF-16 unit. That is a separate rule, and every index key
 /// depends on it.</para>
@@ -81,11 +82,15 @@ internal static class TextCodePoints
 
     /// <summary>True when the text holds half of a surrogate pair.</summary>
     public static bool HasUnpairedSurrogate(ReadOnlySpan<char> text)
+        => IndexOfUnpairedSurrogate(text) >= 0;
+
+    /// <summary>The UTF-16 offset of the first half of a surrogate pair in the text, or -1 when it holds none.</summary>
+    public static int IndexOfUnpairedSurrogate(ReadOnlySpan<char> text)
     {
         int first = text.IndexOfAnyInRange(FirstSurrogate, LastSurrogate);
 
         if (first < 0)
-            return false;
+            return -1;
 
         for (int i = first; i < text.Length; i++)
         {
@@ -93,12 +98,12 @@ internal static class TextCodePoints
                 continue;
 
             if (UnitsAt(text, i) == 1)
-                return true;
+                return i;
 
             i++;
         }
 
-        return false;
+        return -1;
     }
 
     /// <summary>True when <paramref name="offset"/> falls between the two units of a pair.</summary>

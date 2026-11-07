@@ -49,7 +49,71 @@ internal sealed class ExecuteSQLValidator : ValidatorBase
                 );
         }
 
+        RefuseHalfOfAPair(ticket.Parameters);
+
         CanonicalizeIdParameters(ticket.Parameters);
+    }
+
+    /// <summary>
+    /// Refuses a string parameter, or an element of a string array parameter, that holds half of a
+    /// surrogate pair, with <see cref="CamusDBErrorCodes.InvalidInput"/>. Such a value is not text: it
+    /// has no UTF-8 form, and a PostgreSQL string cannot hold one.
+    ///
+    /// <para>A literal cannot carry half of a pair, because the parser refuses it, and no function
+    /// returns one, so a parameter is the only source. One check here covers every later use. Without
+    /// it, each place that encodes text as UTF-8 decided on its own: <c>convert_to</c>, the hash
+    /// functions and <c>octet_length</c> used U+FFFD with no error, so two different halves gave the same
+    /// hash; the jsonb builders threw a .NET exception; and a GROUP BY that spilled to disk returned
+    /// U+FFFD where the same GROUP BY in memory returned the half. HTTP refuses such a value when it
+    /// parses the JSON body, and protobuf changes it to U+FFFD in the client, so in practice the value
+    /// comes from an in-process caller.</para>
+    ///
+    /// <para>The cost for text with no surrogate is one vectorized search for each string parameter. The
+    /// check in the row encoder stays, for typed write tickets, which do not come through here.</para>
+    /// </summary>
+    private static void RefuseHalfOfAPair(Dictionary<string, ColumnValue>? parameters)
+    {
+        if (parameters is null)
+            return;
+
+        foreach (KeyValuePair<string, ColumnValue> parameter in parameters)
+        {
+            ColumnValue value = parameter.Value;
+
+            if (value.Type == ColumnType.String)
+            {
+                RefuseHalfOfAPair(parameter.Key, value.StrValue, element: -1);
+                continue;
+            }
+
+            if (value is not { Type: ColumnType.Array, ArrayValues: { } elements })
+                continue;
+
+            for (int i = 0; i < elements.Count; i++)
+            {
+                if (elements[i].Type == ColumnType.String)
+                    RefuseHalfOfAPair(parameter.Key, elements[i].StrValue, element: i);
+            }
+        }
+    }
+
+    private static void RefuseHalfOfAPair(string name, string? text, int element)
+    {
+        if (text is null)
+            return;
+
+        int offset = TextCodePoints.IndexOfUnpairedSurrogate(text);
+        if (offset < 0)
+            return;
+
+        // The position counts characters from 1, as the SQL text functions do.
+        int position = TextCodePoints.Count(text.AsSpan(0, offset)) + 1;
+        string where = element < 0 ? $"Parameter '{name}'" : $"Element {element + 1} of parameter '{name}'";
+
+        throw new CamusDBException(
+            CamusDBErrorCodes.InvalidInput,
+            $"{where} holds half of a surrogate pair (U+{(int)text[offset]:X4}) at character {position}. " +
+            "Half of a pair is not a character and has no UTF-8 form; send the whole pair.");
     }
 
     /// <summary>

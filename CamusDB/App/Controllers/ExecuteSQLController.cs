@@ -32,6 +32,35 @@ namespace CamusDB.App.Controllers;
 [ApiController]
 public sealed class ExecuteSQLController : CommandsController
 {
+    /// <summary>
+    /// Reads the request body as an <see cref="ExecuteSQLRequest"/>. A body that does not parse is a
+    /// client error (<see cref="CommandsController.InvalidRequestBody"/>), not an internal one.
+    /// </summary>
+    private async ValueTask<ExecuteSQLRequest?> ReadRequestAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await JsonSerializer.DeserializeAsync<ExecuteSQLRequest>(Request.Body, jsonOptions, cancellationToken).ConfigureAwait(false);
+        }
+        catch (JsonException e)
+        {
+            throw InvalidRequestBody(e);
+        }
+    }
+
+    /// <summary>The same as <see cref="ReadRequestAsync"/>, for a body that is already read.</summary>
+    private ExecuteSQLRequest? ParseRequest(string body)
+    {
+        try
+        {
+            return JsonSerializer.Deserialize<ExecuteSQLRequest>(body, jsonOptions);
+        }
+        catch (JsonException e)
+        {
+            throw InvalidRequestBody(e);
+        }
+    }
+
     private readonly PreparedStatementRegistry preparedStatements;
 
     private readonly StatementRoutingResolver? routing;
@@ -215,7 +244,7 @@ public sealed class ExecuteSQLController : CommandsController
 
         try
         {
-            ExecuteSQLRequest? request = await JsonSerializer.DeserializeAsync<ExecuteSQLRequest>(Request.Body, jsonOptions, requestAborted).ConfigureAwait(false);
+            ExecuteSQLRequest? request = await ReadRequestAsync(requestAborted).ConfigureAwait(false);
             if (request == null)
                 throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "ExecuteSQLQuery request is not valid");
 
@@ -430,7 +459,7 @@ public sealed class ExecuteSQLController : CommandsController
         // can still be reported as a normal JSON error response with the correct HTTP status code.
         try
         {
-            request = await JsonSerializer.DeserializeAsync<ExecuteSQLRequest>(Request.Body, jsonOptions, ct).ConfigureAwait(false);
+            request = await ReadRequestAsync(ct).ConfigureAwait(false);
             if (request == null)
                 throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "ExecuteSQLQuery request is not valid");
 
@@ -747,7 +776,7 @@ public sealed class ExecuteSQLController : CommandsController
 
         try
         {
-            ExecuteSQLRequest? request = await JsonSerializer.DeserializeAsync<ExecuteSQLRequest>(Request.Body, jsonOptions, HttpContext.RequestAborted).ConfigureAwait(false);
+            ExecuteSQLRequest? request = await ReadRequestAsync(HttpContext.RequestAborted).ConfigureAwait(false);
             if (request == null)
                 throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "ExecuteNonSQLQuery request is not valid");
 
@@ -889,7 +918,7 @@ public sealed class ExecuteSQLController : CommandsController
             using StreamReader reader = new(Request.Body);
             string body = await reader.ReadToEndAsync(HttpContext.RequestAborted).ConfigureAwait(false);
 
-            ExecuteSQLRequest? request = JsonSerializer.Deserialize<ExecuteSQLRequest>(body, jsonOptions);
+            ExecuteSQLRequest? request = ParseRequest(body);
 
             LogRequestRedacted(request);
 

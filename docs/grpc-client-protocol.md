@@ -68,6 +68,10 @@ integers exactly — never renumber or reuse them:
    The server refuses an `Id` parameter whose text is not 24 hex characters with `CADB0400`
    (invalid input), and the message names the parameter. It converts upper-case hex to lower case.
    A GUID is never an ObjectId: send a GUID as `uuid_value`, not as its text in `id_value`.
+   - A `string_value` is UTF-8 on the wire. A client library changes half of a surrogate pair to
+     U+FFFD before it sends the request, so the server stores U+FFFD with no error. Check your text
+     before you send it. An in-process caller that binds half of a pair gets `CADB0400`
+     (`INVALID_ARGUMENT`).
 
 3. **Date / DateTime are raw ticks, not formatted strings.** The `int64` is a .NET-style tick count
    (100-nanosecond intervals since 0001-01-01) in **UTC**. `DATE` is the same tick scale but
