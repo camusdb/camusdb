@@ -1319,7 +1319,7 @@ internal sealed class KvIndexAccessor
                 // already processed in a previous partial run, or a genuine duplicate key.
                 // Read back the existing entry to distinguish: same rowId → skip; different → throw.
                 (_, ReadOnlyKeyValueEntry? existing) = await KahunaRetryPolicy.RetryOnMustRetry(
-                    () => kahuna.LocateAndTryGetValue(tx.TransactionId, kvKey, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, cancellationToken),
+                    () => kahuna.LocateAndTryGetValue(tx.TransactionId, kvKey, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, cancellationToken).AsTask(),
                     cancellationToken
                 ).ConfigureAwait(false);
                 BranchKvValue existingDecoded = BranchKvCodec.Decode(existing?.Value);

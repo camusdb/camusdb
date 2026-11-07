@@ -393,7 +393,7 @@ public sealed class DatabaseRegistry : IAsyncDisposable
         (KeyValueResponseType type, ReadOnlyKeyValueEntry? entry) = await KahunaRetryPolicy.RetryOnMustRetry(
             () => kahuna.LocateAndTryGetValue(
                 HLCTimestamp.Zero, GenerationKey, -1,
-                HLCTimestamp.Zero, KeyValueDurability.Persistent, CancellationToken.None),
+                HLCTimestamp.Zero, KeyValueDurability.Persistent, CancellationToken.None).AsTask(),
             CancellationToken.None
         ).ConfigureAwait(false);
 
@@ -749,7 +749,7 @@ public sealed class DatabaseRegistry : IAsyncDisposable
         (KeyValueResponseType getType, ReadOnlyKeyValueEntry? kvEntry) = await KahunaRetryPolicy.RetryOnMustRetry(
             () => kahuna.LocateAndTryGetValue(
                 HLCTimestamp.Zero, NameKey(normalizedName), -1,
-                HLCTimestamp.Zero, KeyValueDurability.Persistent, CancellationToken.None),
+                HLCTimestamp.Zero, KeyValueDurability.Persistent, CancellationToken.None).AsTask(),
             CancellationToken.None
         ).ConfigureAwait(false);
 
@@ -1076,7 +1076,7 @@ public sealed class DatabaseRegistry : IAsyncDisposable
                 await KahunaRetryPolicy.RetryOnMustRetry(
                     () => kahuna.LocateAndTryGetValue(
                         tx.TransactionId, NameKey(name), -1,
-                        HLCTimestamp.Zero, KeyValueDurability.Persistent, CancellationToken.None),
+                        HLCTimestamp.Zero, KeyValueDurability.Persistent, CancellationToken.None).AsTask(),
                     CancellationToken.None
                 ).ConfigureAwait(false);
 

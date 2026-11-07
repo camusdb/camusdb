@@ -203,7 +203,7 @@ internal static class SchemaLoader
             () => kahuna.LocateAndTryGetValue(
                 tx.TransactionId, key, -1,
                 HLCTimestamp.Zero,
-                KeyValueDurability.Persistent, CancellationToken.None),
+                KeyValueDurability.Persistent, CancellationToken.None).AsTask(),
             CancellationToken.None).ConfigureAwait(false);
 
         if (type is KeyValueResponseType.Get or KeyValueResponseType.DoesNotExist)

@@ -82,7 +82,7 @@ public sealed class TestStorageCorruptAnswer
             _ =>
             {
                 calls++;
-                return Task.FromResult<(KeyValueResponseType, ReadOnlyKeyValueEntry?)>((KeyValueResponseType.StorageCorrupt, null));
+                return ValueTask.FromResult<(KeyValueResponseType, ReadOnlyKeyValueEntry?)>((KeyValueResponseType.StorageCorrupt, null));
             },
             0,
             CancellationToken.None))!;

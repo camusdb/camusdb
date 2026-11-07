@@ -316,11 +316,13 @@ internal sealed class KahunaRetryPolicy
     /// <paramref name="fn"/>: the per-read form of <see cref="RetryOnMustRetry(Func{Task{ValueTuple{KeyValueResponseType, ReadOnlyKeyValueEntry}}}, CancellationToken)"/>,
     /// with the same retry contract. A point read on a hot path then allocates no closure and no
     /// delegate per call, a read Kahuna answers synchronously (a published head record) completes
-    /// without a task object, and a read that suspends boxes one state machine here, not two: the
-    /// transport guard of <see cref="InvokeOrTransient{T}"/> is inlined around each attempt.
+    /// without a task object on either side (<paramref name="fn"/> returns the
+    /// <see cref="ValueTask{TResult}"/> of <see cref="IKahuna.LocateAndTryGetValue"/> as it is, awaited
+    /// once here), and a read that suspends boxes one state machine here, not two: the transport guard
+    /// of <see cref="InvokeOrTransient{T}"/> is inlined around each attempt.
     /// </summary>
     internal static async ValueTask<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> RetryOnMustRetry<TState>(
-        Func<TState, Task<(KeyValueResponseType, ReadOnlyKeyValueEntry?)>> fn,
+        Func<TState, ValueTask<(KeyValueResponseType, ReadOnlyKeyValueEntry?)>> fn,
         TState state,
         CancellationToken ct)
     {

@@ -52,14 +52,14 @@ public sealed class TestBranchCreateFaultInjection : BaseTest
         public AbortThenUnregisterFailsKahuna(IKahuna inner, string branchName)
             : base(inner) => failingDeleteKeySuffix = $"dbregistry/db:{branchName.ToLowerInvariant()}";
 
-        public override Task<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> LocateAndTryGetValue(
+        public override ValueTask<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> LocateAndTryGetValue(
             HLCTimestamp transactionId, string key, long revision, HLCTimestamp readTimestamp,
             KeyValueDurability durability, CancellationToken cancellationToken,
             string coordinatorKey = "", TransactionOperationId operationId = default, KeyValueReadMode readMode = KeyValueReadMode.Default)
         {
             // Any drop-intent read reports a present marker → branch-create aborts after publishing.
             if (key.Contains("dbregistry/drop-intent:", StringComparison.Ordinal))
-                return Task.FromResult<(KeyValueResponseType, ReadOnlyKeyValueEntry?)>(
+                return ValueTask.FromResult<(KeyValueResponseType, ReadOnlyKeyValueEntry?)>(
                     (KeyValueResponseType.Get, null));
 
             return base.LocateAndTryGetValue(transactionId, key, revision, readTimestamp, durability,
@@ -95,7 +95,7 @@ public sealed class TestBranchCreateFaultInjection : BaseTest
             this.throwInstead = throwInstead;
         }
 
-        public override Task<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> LocateAndTryGetValue(
+        public override ValueTask<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> LocateAndTryGetValue(
             HLCTimestamp transactionId, string key, long revision, HLCTimestamp readTimestamp,
             KeyValueDurability durability, CancellationToken cancellationToken,
             string coordinatorKey = "", TransactionOperationId operationId = default, KeyValueReadMode readMode = KeyValueReadMode.Default)
@@ -107,7 +107,7 @@ public sealed class TestBranchCreateFaultInjection : BaseTest
                     throw new InvalidOperationException("injected KV read failure");
 
                 KeyValueResponseType next = statuses.Count > 0 ? statuses.Dequeue() : KeyValueResponseType.MustRetry;
-                return Task.FromResult<(KeyValueResponseType, ReadOnlyKeyValueEntry?)>((next, null));
+                return ValueTask.FromResult<(KeyValueResponseType, ReadOnlyKeyValueEntry?)>((next, null));
             }
 
             return base.LocateAndTryGetValue(transactionId, key, revision, readTimestamp, durability,
@@ -884,13 +884,13 @@ public sealed class TestBranchCreateFaultInjection : BaseTest
                 flags, expiresMs, durability, cancellationToken, routedGeneration, coordinatorKey, operationId);
         }
 
-        public override Task<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> LocateAndTryGetValue(
+        public override ValueTask<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> LocateAndTryGetValue(
             HLCTimestamp transactionId, string key, long revision, HLCTimestamp readTimestamp,
             KeyValueDurability durability, CancellationToken cancellationToken,
             string coordinatorKey = "", TransactionOperationId operationId = default, KeyValueReadMode readMode = KeyValueReadMode.Default)
         {
             if (abortCreate && key.Contains("dbregistry/drop-intent:", StringComparison.Ordinal))
-                return Task.FromResult<(KeyValueResponseType, ReadOnlyKeyValueEntry?)>((KeyValueResponseType.Get, null));
+                return ValueTask.FromResult<(KeyValueResponseType, ReadOnlyKeyValueEntry?)>((KeyValueResponseType.Get, null));
 
             return base.LocateAndTryGetValue(transactionId, key, revision, readTimestamp, durability,
                 cancellationToken, coordinatorKey, operationId, readMode);
