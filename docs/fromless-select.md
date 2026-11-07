@@ -1,9 +1,9 @@
 # FROM-less SELECT
 
-CamusDB supports a top-level `SELECT` with **no `FROM` clause**. It evaluates a projection
-list against a single synthetic row and returns exactly one row (or zero, under `LIMIT 0` /
-`OFFSET`). This covers the common ORM "probe" and utility queries — arithmetic, scalar/regex/
-date functions, `CAST`, bound parameters, and existence checks — without a table.
+CamusDB supports a `SELECT` with **no `FROM` clause**, as a statement and inside a statement. It
+evaluates a projection list against a single synthetic row and returns exactly one row (or zero,
+under `LIMIT 0` / `OFFSET`). This covers the common ORM "probe" and utility queries — arithmetic,
+scalar/regex/date functions, `CAST`, bound parameters, and existence checks — without a table.
 
 ## Supported forms
 
@@ -71,6 +71,30 @@ as an operand of a set operation.
 A sequence call that runs in this form is refused (`CADB0547`), because a statement must know how many
 values it draws before it runs. `SELECT nextval('s') WHERE FALSE` returns no rows and draws nothing.
 
+## Inside a statement
+
+A `SELECT` with no `FROM` works as a subquery, as a derived table and as a stored view body. It runs over
+one row, and `WHERE`, `LIMIT` and `OFFSET` can remove that row.
+
+```sql
+SELECT (SELECT 1);                                     -- 1
+SELECT (SELECT 1 WHERE FALSE);                         -- NULL
+SELECT id FROM t WHERE id IN (SELECT 1);
+SELECT t.id, d.x FROM t JOIN (SELECT 1 AS x) d ON t.id = d.x;
+UPDATE t SET v = (SELECT 9) WHERE id = 1;
+CREATE VIEW five AS SELECT 5 AS x;
+```
+
+`CREATE VIEW` binds the body and does not evaluate it, so `CREATE VIEW v AS SELECT 1 / 0 AS x` succeeds and a
+read of `v` fails, as in PostgreSQL. A subquery in a view body is different: it runs when `CREATE VIEW` binds
+the body, also when the body has a `FROM`.
+
+The rejected shapes below apply in each of these positions. A sequence call is also refused there
+(`CADB0547`), because a statement must know how many values it draws before it runs.
+
+A subquery with no `FROM` cannot read a column of the statement around it yet. `SELECT x.id FROM t x WHERE
+EXISTS (SELECT 1 WHERE x.id = 1)` fails with `CADB0400`, and so do the scalar and `IN` forms.
+
 ## Rejected shapes
 
 | Query | Result |
@@ -80,7 +104,6 @@ values it draws before it runs. `SELECT nextval('s') WHERE FALSE` returns no row
 | `SELECT COUNT(*) WHERE …` and `SELECT * WHERE …` | `InvalidInput`, the same refusals as without `WHERE` |
 | `SELECT 1 GROUP BY …` / `HAVING` | Rejected at parse time — the FROM-less grammar admits only a projection list plus optional `WHERE`, `LIMIT` and `OFFSET` |
 | `SELECT 1 ORDER BY …` | `InvalidInput` — `ORDER BY` requires a `FROM` clause |
-| A FROM-less `SELECT` as a subquery, a derived table or a view body that is read | `InvalidInput` — `Invalid SELECT statement`, with or without `WHERE` |
 | `SELECT foo` (unresolved bare identifier) | Parses, then errors at execution with `UnknownColumn` (PostgreSQL-like) |
 
 ## EXPLAIN

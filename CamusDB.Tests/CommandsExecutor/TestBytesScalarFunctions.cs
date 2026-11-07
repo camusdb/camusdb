@@ -316,7 +316,7 @@ internal sealed class TestBytesScalarFunctions : SharedNodeBaseTest
         await AssertBytes(executor, db, "substring(X'01', 1, 1)", "01");
         await AssertNull(executor, db, "substring(CAST(NULL AS bytes), 1)");
         await AssertNull(executor, db, "substring(X'01', NULL)");
-        await AssertInvalid(executor, db, "substring(X'01', 0)", "1-based position");
+        await AssertBytes(executor, db, "substring(X'01', 0)", "01");
         await AssertInvalid(executor, db, "substring(X'01', 1, -1)", "non-negative length");
         await AssertInvalid(executor, db, "substring(5, 1)", "String or Bytes");
 

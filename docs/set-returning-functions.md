@@ -110,7 +110,7 @@ A view over a series survives a restart. `SHOW CREATE VIEW` prints the call as i
 | `unnest`, `generate_subscripts`, `regexp_matches`, `regexp_split_to_table` in `FROM` | error `CADB0533`: not supported in `FROM` yet |
 | A scalar function in `FROM`, such as `FROM upper('a')` | error `CADB0400`: it is a scalar function |
 | An unknown name, such as `FROM no_such_function(1)` | error `CADB0400` that names the function |
-| A correlated `EXISTS` whose subquery reads a function | error: a correlated `EXISTS` over a multi-source subquery is not supported yet (the function counts as a derived source) |
+| A correlated `EXISTS` whose subquery reads a function | error: a correlated `EXISTS` subquery must read one table (the function counts as a derived source) |
 
 An `INSERT ... SELECT` from a series writes all its rows in one transaction, so it is subject to the
 transaction mutation limit. See [`transaction-limits.md`](./transaction-limits.md).

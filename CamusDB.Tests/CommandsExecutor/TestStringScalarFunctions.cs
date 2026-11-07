@@ -373,18 +373,17 @@ public class TestStringScalarFunctions : SharedNodeBaseTest
 
     [Test]
     [NonParallelizable]
-    public async Task Substring_InvalidPosition_Throws()
+    public async Task Substring_PositionBelowOne_StartsAtTheFirstCharacter()
     {
         (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupBasicTable();
 
-        CamusDBException ex = await AssertSelectThrows(
+        List<QueryResultRow> result = await ExecuteSelect(
             executor,
             database,
             dbname,
             "SELECT substring(\"abc\", 0) FROM robots");
 
-        Assert.AreEqual(CamusDBErrorCodes.InvalidInput, ex.Code);
-        StringAssert.Contains("Function 'substring' expects argument 2 to be a 1-based position", ex.Message);
+        Assert.AreEqual("abc", result[0].Row["0"].StrValue);
     }
 
     [Test]

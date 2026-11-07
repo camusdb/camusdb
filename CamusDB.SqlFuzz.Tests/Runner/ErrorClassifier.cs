@@ -90,7 +90,6 @@ internal static class ErrorClassifier
     [
         new("CREATE TABLE without a primary key", "CADB0400: A primary key column is mandatory in the table"),
         new("COUNT(DISTINCT x), SUM(DISTINCT x)", "CADB0406: syntax error"),
-        new("substr(s, a, b)", "CADB0407: function not found; substring() is supported"),
         new("date + integer", "CADB0400: no matching signature"),
         new("t@{FORCE_INDEX=i} AS a (the hint before the alias)", "CADB0406: syntax error; write t AS a@{FORCE_INDEX=i}"),
         new("SELECT a.* (a qualified star)", "CADB0406: syntax error"),

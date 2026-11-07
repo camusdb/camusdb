@@ -282,10 +282,25 @@ public static class DecidedDivergences
             CamusDBErrorCodes.InvalidInput, "1",
             "An aggregate needs rows to read, and the forms with and without WHERE follow one rule."),
 
+        new("A FROM-less subquery has no aggregates", NoSetup,
+            "SELECT (SELECT COUNT(*))",
+            CamusDBErrorCodes.InvalidInput, "1",
+            "A subquery and a view body follow the rule of the statement, so one form of the rule covers each position."),
+
         new("A FROM-less SELECT has no ORDER BY", NoSetup,
             "SELECT 5 ORDER BY 1",
             CamusDBErrorCodes.InvalidInput, "5",
             "One row has no order, so the clause can only be a mistake."),
+
+        new("A FROM-less subquery has no ORDER BY", NoSetup,
+            "SELECT (SELECT 1 ORDER BY 1)",
+            CamusDBErrorCodes.InvalidInput, "1",
+            "A subquery and a view body follow the rule of the statement, so one form of the rule covers each position."),
+
+        new("A sequence call is refused in a FROM-less subquery", ["CREATE SEQUENCE sq"],
+            "SELECT (SELECT nextval('sq'))",
+            CamusDBErrorCodes.SequenceCallNotAllowedHere, "1",
+            "A statement must know how many values it draws before it runs, and a nested LIMIT 0, WHERE FALSE or discarded EXISTS list decides that only when it runs."),
 
         new("A sequence call is refused in a FROM-less SELECT with WHERE", ["CREATE SEQUENCE sq"],
             "SELECT nextval('sq') WHERE TRUE",

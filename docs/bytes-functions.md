@@ -67,7 +67,7 @@ values, both must have the same type: `contains(bytes, string)` is an error. To 
 | Function | Result for bytes | Notes |
 | --- | --- | --- |
 | `length(x)` | `int64` | The number of bytes. The same as `octet_length`. |
-| `substring(x, start [, count])` | `bytes` | `start` is 1-based. |
+| `substring(x, start [, count])`, `substr` | `bytes` | `start` is 1-based. See [the bounds](data-types.md#the-bounds-of-substring). |
 | `strpos(x, part)` | `int64` | The 1-based position of the first `part` in `x`, or `0`. An empty `part` gives `1`. |
 | `position(part IN x)` | `int64` | The SQL-standard form of `strpos(x, part)`. |
 | `trim(x [, set])`, `ltrim`, `rtrim` | `bytes` | Without `set`, remove `0x00` bytes. With `set`, remove each byte in `set`. |

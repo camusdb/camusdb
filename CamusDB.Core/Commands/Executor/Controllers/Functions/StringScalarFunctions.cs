@@ -36,14 +36,17 @@ internal static class StringScalarFunctions
         RegisterTrim(registry, "ltrim", TrimSide.Start);
         RegisterTrim(registry, "rtrim", TrimSide.End);
 
-        registry.Register(new ScalarFunctionDescriptor
+        foreach (string name in new[] { "substring", "substr" })
         {
-            Name = "substring",
-            MinArity = 2,
-            MaxArity = 3,
-            Evaluator = EvaluateSubstring,
-            InferReturnType = SameTypeAsFirstArgument,
-        });
+            registry.Register(new ScalarFunctionDescriptor
+            {
+                Name = name,
+                MinArity = 2,
+                MaxArity = 3,
+                Evaluator = EvaluateSubstring,
+                InferReturnType = SameTypeAsFirstArgument,
+            });
+        }
 
         registry.Register(new ScalarFunctionDescriptor
         {
@@ -273,6 +276,12 @@ internal static class StringScalarFunctions
         return text[start..end];
     }
 
+    /// <summary>
+    /// <c>substring</c> and <c>substr</c>, with the rule of PostgreSQL: the slice is the positions from
+    /// <c>start</c> to <c>start + count</c>, and only the positions from 1 up exist. So a start below 1 uses up
+    /// part of the count: <c>substring('abcde', -1, 3)</c> is <c>'a'</c>. A negative count is an error, even
+    /// when the start is past the end. A sum past the range of an integer runs to the end of the value.
+    /// </summary>
     private static ColumnValue EvaluateSubstring(string calledName, IReadOnlyList<ColumnValue> arguments)
     {
         if (PropagateNull(arguments) is ColumnValue nullResult)
@@ -281,28 +290,24 @@ internal static class StringScalarFunctions
         RequireStringOrBytes(calledName, 0, arguments[0]);
         RequireInteger(calledName, 1, arguments[1]);
 
-        long start = arguments[1].LongValue;
-
-        if (start < 1)
-        {
-            throw new CamusDBException(
-                CamusDBErrorCodes.InvalidInput,
-                $"Function '{calledName}' expects argument 2 to be a 1-based position greater than or equal to 1 but received {start}");
-        }
-
+        long position = arguments[1].LongValue;
+        long start = Math.Max(position, 1);
         long? length = null;
 
         if (arguments.Count == 3)
         {
             RequireInteger(calledName, 2, arguments[2]);
-            length = arguments[2].LongValue;
+            long count = arguments[2].LongValue;
 
-            if (length < 0)
+            if (count < 0)
             {
                 throw new CamusDBException(
                     CamusDBErrorCodes.InvalidInput,
-                    $"Function '{calledName}' expects argument 3 to be a non-negative length but received {length}");
+                    $"Function '{calledName}' expects argument 3 to be a non-negative length but received {count}");
             }
+
+            long end = position > long.MaxValue - count ? long.MaxValue : position + count;
+            length = end <= start ? 0 : end - start;
         }
 
         if (arguments[0].Type == ColumnType.Bytes)

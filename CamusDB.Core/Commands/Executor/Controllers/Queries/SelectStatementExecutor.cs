@@ -1545,14 +1545,23 @@ internal sealed class SelectStatementExecutor
     ///
     /// <para>The returned source's cursor is never opened by the caller; disposing it releases the
     /// binding without having scanned anything.</para>
+    ///
+    /// <para><b>A body with no FROM.</b> The statement path for that form evaluates its projections and
+    /// its subqueries at once, which would run the body here. So the body binds over one row, as it does
+    /// when a statement reads the view.</para>
     /// </summary>
     internal async Task<SelectRowSource> BuildViewSourceAsync(
         DatabaseDescriptor database, NodeAst bodyAst, ExecuteSQLTicket ticket)
     {
+        NodeAst expanded = ExpandViews(database, bodyAst);
+
+        if (expanded.nodeType == NodeType.Select && expanded.rightAst is null)
+            expanded = SelectQueryCreator.WithOneRowSource(expanded);
+
         // A stored body fails when a statement uses it, as in PostgreSQL. The statement that reads the
         // view binds this body again, with the check on.
         using (ConstantDivisionCheck.SuspendForStoredDefinition())
-            return await BuildSelectSourceAsync(database, ExpandViews(database, bodyAst), ticket, "CREATE VIEW").ConfigureAwait(false);
+            return await BuildSelectSourceAsync(database, expanded, ticket, "CREATE VIEW").ConfigureAwait(false);
     }
 
     /// <summary>

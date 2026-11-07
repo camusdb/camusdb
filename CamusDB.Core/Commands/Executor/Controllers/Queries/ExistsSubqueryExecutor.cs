@@ -59,7 +59,7 @@ internal sealed class ExistsSubqueryExecutor(SubqueryQueryExecutor? queryExecuto
         {
             throw new CamusDBException(
                 CamusDBErrorCodes.InvalidInput,
-                "Correlated EXISTS subqueries with multi-source inner queries are not supported yet");
+                "A correlated EXISTS subquery must read one table; a join, a derived table or a subquery with no FROM clause is not supported yet");
         }
 
         BoundTableSource innerSource = prepared.InnerBound.Sources[0];

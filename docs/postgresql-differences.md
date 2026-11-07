@@ -60,6 +60,9 @@ Text functions and a `CHAR(n)` limit count code points, as PostgreSQL does. See
 | `SELECT COUNT(*)` | `CADB0400` | `1` | An aggregate needs rows to read. |
 | `SELECT 5 ORDER BY 1` | `CADB0400` | One row | One row has no order, so the clause can only be a mistake. |
 | `SELECT nextval('s') WHERE TRUE` | `CADB0547` | One row | A statement must know how many values it draws before it runs. |
+| `SELECT (SELECT COUNT(*))` | `CADB0400` | `1` | A subquery, a derived table and a view body follow the rule of the statement. |
+| `SELECT (SELECT 1 ORDER BY 1)` | `CADB0400` | `1` | The same reason. |
+| `SELECT (SELECT nextval('s'))` | `CADB0547` | One row | A nested `LIMIT 0`, `WHERE FALSE` or discarded `EXISTS` list decides only when it runs whether the call runs. |
 
 See [FROM-less SELECT](fromless-select.md).
 

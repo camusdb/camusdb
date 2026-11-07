@@ -353,6 +353,25 @@ See [Large values: compression and out-of-line storage](storage-layout.md).
 ---
 
 
+## The bounds of `substring`
+
+`substr(x, start [, count])` is the same function as `substring(x, start [, count])`. Both take `string` or
+`bytes`, and both follow PostgreSQL. The slice is the positions from `start` to `start + count`, and only the
+positions from 1 up exist. So a `start` below 1 uses up part of the `count`.
+
+| Statement | Result |
+|---|---|
+| `substring('abcde', 2, 2)` | `bc` |
+| `substring('abcde', 0, 2)` | `a` |
+| `substring('abcde', -1, 3)` | `a` |
+| `substring('abcde', -5, 3)` | An empty string |
+| `substring('abcde', 0)` | `abcde` |
+| `substring('abcde', 6)` | An empty string |
+| `substring('abcde', 2, -1)` | `CADB0400`: a negative `count` is an error, also when `start` is past the end |
+
+A `NULL` argument gives `NULL`, also with a negative `count`. A `start` and `count` whose sum is past the
+range of `int64` run to the end of the value.
+
 ## Characters and code points
 
 Text functions count code points, as PostgreSQL does. A code point is one Unicode character, so `🙂` is one,

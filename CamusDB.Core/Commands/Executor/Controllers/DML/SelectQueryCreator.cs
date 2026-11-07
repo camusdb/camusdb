@@ -31,14 +31,33 @@ internal sealed class SelectQueryCreator
     /// cache relies on this: one execution's <see cref="SelectQuery"/> is reused verbatim by later
     /// executions with different parameter values. A change that makes this method consult a
     /// parameter value must also make the affected statement shape ineligible for that cache.</para>
+    ///
+    /// <para><b>A SELECT with no FROM.</b> Only a top-level statement runs on the path with no binding,
+    /// and that path never comes here. So a SELECT with no FROM that reaches this method is a subquery, a
+    /// derived table or a stored view body, and it runs over one row (see <see cref="WithOneRowSource"/>).</para>
+    ///
+    /// <para><b>A sequence call there is refused.</b> A statement with no FROM reserves one value for each
+    /// call site before it evaluates anything, and a nested <c>LIMIT 0</c>, <c>WHERE FALSE</c> or a discarded
+    /// <c>EXISTS</c> list can decide later that the call does not run. So the reservation could not know
+    /// how many values the statement draws.</para>
     /// </summary>
     public SelectQuery CreateSelectQuery(NodeAst ast)
     {
         if (ast.nodeType != NodeType.Select)
             throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Expected SELECT statement");
 
-        if (ast.leftAst is null || ast.rightAst is null)
+        if (ast.leftAst is null)
             throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Invalid SELECT statement");
+
+        if (ast.rightAst is null)
+        {
+            if (SequenceStatementBinder.ContainsSequenceCall(ast))
+                throw new CamusDBException(
+                    CamusDBErrorCodes.SequenceCallNotAllowedHere,
+                    "A sequence function cannot be used in a subquery with no FROM clause: the statement must know how many values it draws before it runs");
+
+            ast = WithOneRowSource(ast);
+        }
 
         (QuerySource source, BoundPredicate? where) = CreateFromClause(ast.rightAst, ast.extendedOne);
         IReadOnlyList<ProjectionItem> projections = CreateProjections(ast.leftAst);
@@ -327,11 +346,11 @@ internal sealed class SelectQueryCreator
     }
 
     /// <summary>
-    /// The planned form of each <c>SELECT … WHERE</c> with no FROM, per parse tree. The tree comes from
+    /// The planned form of each SELECT with no FROM that runs over one row, per parse tree. The tree comes from
     /// the parser cache, and the bound-query cache keys on the planned tree, so a repeat of the statement
     /// must get the same planned tree or it never hits that cache.
     /// </summary>
-    private static readonly ConditionalWeakTable<NodeAst, NodeAst> FromlessWhereSources = new();
+    private static readonly ConditionalWeakTable<NodeAst, NodeAst> OneRowSources = new();
 
     /// <summary>
     /// Gives a <c>SELECT … WHERE</c> with no FROM the one-row source that the set-operation operands use,
@@ -346,16 +365,27 @@ internal sealed class SelectQueryCreator
     /// and NULL drop it, and any other type is an error, as in PostgreSQL.</para>
     ///
     /// <para><b>A sequence call is refused in this form,</b> as it is in the projection of any relation:
-    /// a statement must know how many values it draws before the condition decides. The AST stays
-    /// FROM-less for everything that reads the statement as written, such as a stored view body, because
-    /// the one-row source has no SQL spelling.</para>
+    /// a statement must know how many values it draws before the condition decides.</para>
     /// </summary>
     internal static NodeAst BindFromlessWhere(NodeAst select)
     {
         if (select.nodeType != NodeType.Select || select.rightAst is not null || select.extendedOne is null)
             return select;
 
-        return FromlessWhereSources.GetValue(select, static fromless =>
+        return WithOneRowSource(select);
+    }
+
+    /// <summary>
+    /// The same SELECT with the one-row source as its FROM. The refusals here are the rule of the FROM-less
+    /// form, so a subquery, a view body and a statement with a WHERE follow one rule: <c>*</c> has nothing to
+    /// expand, and an aggregate is refused.
+    ///
+    /// <para>The AST of the parser stays FROM-less for everything that reads the statement as written, such
+    /// as a stored view body, because the one-row source has no SQL spelling. Only the planned form has it.</para>
+    /// </summary>
+    internal static NodeAst WithOneRowSource(NodeAst select)
+    {
+        return OneRowSources.GetValue(select, static fromless =>
         {
             List<ProjectionItem> projections = [];
             CollectProjectionItems(fromless.leftAst!, projections);
