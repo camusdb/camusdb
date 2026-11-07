@@ -100,13 +100,11 @@ differences that stay. `em` is an empty table.
 
 ## COALESCE and CASE
 
-`COALESCE`, `IFNULL` and `NVL` stop at the first argument that is not NULL, as in PostgreSQL. A `CASE` stops at the first `WHEN` that matches. A type that the statement shows is still checked before any row is read, for each argument and branch. `z` has one row with `v = 0` and `n` NULL, and `d` has two rows.
+`COALESCE`, `IFNULL` and `NVL` stop at the first argument that is not NULL, as in PostgreSQL. A `CASE` stops at the first `WHEN` that matches. A type that the statement shows is still checked before any row is read, for each argument and branch, as in PostgreSQL. A function call shows its declared type when the types of its arguments are known, so `COALESCE(1, upper('a'))` is refused and `COALESCE(n, sqrt(4.0))` is a `float64` in every row. A call with a parameter argument, and `json_value`, whose type comes from the document, are checked when the call returns a value. `z` has one row with `v = 0` and `n` NULL, and `d` has two rows.
 
 | Statement | CamusDB | PostgreSQL | Why |
 |---|---|---|---|
-| `SELECT COALESCE(1, upper('a')) FROM z` | `1` | Error | A function result shows its type when it runs, and an argument that does not run is not read. |
-| `SELECT CASE WHEN TRUE THEN 1 ELSE upper('a') END FROM z` | `1` | Error | The same reason. |
-| `SELECT COALESCE(1, sqrt(f)) FROM z` | An `int64` | A `double precision` | The same reason. The values are equal. So the type can differ by row: `COALESCE(n, sqrt(4.0))` is an `int64` in a row where `n` wins. |
+| `SELECT COALESCE(1, upper(x)) FROM (SELECT CAST(v AS STRING) AS x FROM d) q` | `1` | Error | A function call shows its declared type only when the type of each argument is known. A derived `STRING` column, like a parameter, shows its type only through its value, so the call is checked when it returns one. PostgreSQL also refuses `COALESCE(1, upper($1))` when it prepares the statement. |
 | `SELECT COALESCE(id, (SELECT 1 / b.v FROM z b)) FROM z` | `CADB0400` | Every row | A subquery runs before the row is evaluated, so the expression around it cannot stop it. |
 | `SELECT COALESCE(1, (SELECT id FROM d))` | `CADB0400` | `1` | The same reason. |
 | `SELECT CASE WHEN TRUE THEN 1 ELSE (SELECT 1 / b.v FROM z b) END FROM z` | `CADB0400` | `1` | The same reason. |

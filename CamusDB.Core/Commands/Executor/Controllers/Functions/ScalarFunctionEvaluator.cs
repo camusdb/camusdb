@@ -194,6 +194,51 @@ internal static class ScalarFunctionEvaluator
     }
 
     /// <summary>
+    /// The type that a call of <paramref name="functionName"/> with arguments of
+    /// <paramref name="argumentTypes"/> returns for every row, or null when the declaration does not
+    /// fix it. COALESCE, IFNULL, NVL, CASE and IF read it before any row is read
+    /// (<see cref="Queries.ConditionalResultTypes"/>). Null for:
+    /// <list type="bullet">
+    ///   <item>a name that is not a scalar function, such as an aggregate, whose value the aggregate
+    ///     path computes;</item>
+    ///   <item>a function that decides which arguments run (COALESCE has its own rule), and a function
+    ///     whose result type comes from its value (<see cref="ScalarFunctionDescriptor.ResultTypeFromValue"/>);</item>
+    ///   <item>an argument count the function does not accept, and argument types its declaration
+    ///     refuses: the call then fails when it runs, with the error of the function;</item>
+    ///   <item>an array whose element type the declaration does not fix.</item>
+    /// </list>
+    /// </summary>
+    /// <param name="builtInOnly">True to read only a built-in function. A type that is cached on a
+    /// parse tree must not depend on the extensions of one database, because the tree is shared
+    /// between databases.</param>
+    internal static ExpressionType? DeclaredResultType(string functionName, IReadOnlyList<ColumnType> argumentTypes, bool builtInOnly)
+    {
+        ScalarFunctionDescriptor? descriptor;
+        bool found = builtInOnly ? Registry.TryGet(functionName, out descriptor) : TryResolve(functionName, out descriptor);
+
+        if (!found || descriptor.LazyEvaluator is not null || descriptor.ResultTypeFromValue)
+            return null;
+
+        if (argumentTypes.Count < descriptor.MinArity || argumentTypes.Count > descriptor.MaxArity)
+            return null;
+
+        ColumnType type;
+        try
+        {
+            type = descriptor.InferReturnType(argumentTypes);
+        }
+        catch (CamusDBException)
+        {
+            return null;
+        }
+
+        if (type != ColumnType.Array)
+            return new ExpressionType(type);
+
+        return descriptor.ArrayElementType is { } element ? new ExpressionType(ColumnType.Array, element) : null;
+    }
+
+    /// <summary>
     /// The declared element type of an array-returning function
     /// (<see cref="ScalarFunctionDescriptor.ArrayElementType"/>), or null when the function is unknown,
     /// returns no array, or leaves the element type to its value.

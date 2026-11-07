@@ -280,6 +280,9 @@ fixed, as in Spanner. `array(numeric)` is refused too.
 Division by zero fails. An overflow anywhere fails with `CADB0417`.
 
 - `round(x, n)` and `trunc(x, n)` with `n` far left of the point (down to the minimum `int64`) give `0`.
+- `round(i, n)` with an `int64` `i` is `numeric` for every `n`, as in PostgreSQL, so `round(15, -1)` is
+  exactly `20` and `round(5, 0)` is the `numeric` `5`. `round(i)` stays `int64`, and `trunc(i, n)` stays
+  `int64`, because truncation of a whole number stays whole.
 - In a cluster, a `SUM` or `AVG` that can see a NUMERIC value is not split into a partial aggregate for
   each range. The node that runs the query adds the rows exactly, so a range total past the limit does
   not fail a query whose final result is in range.

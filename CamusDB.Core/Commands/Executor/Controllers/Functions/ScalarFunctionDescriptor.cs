@@ -90,7 +90,24 @@ internal sealed class ScalarFunctionDescriptor
     /// </summary>
     public ScalarLazyEvaluatorDelegate? LazyEvaluator { get; init; }
 
+    /// <summary>
+    /// The type of the result for the given argument types. A CTAS or a derived table declares a
+    /// column with it, and COALESCE, IFNULL, NVL, CASE and IF read it to type a call before any row is
+    /// read (<see cref="Queries.ConditionalResultTypes"/>). It must be the type of every value the
+    /// function returns for those argument types; a type that is only true for some values makes one
+    /// column hold two types, or refuses a correct statement. A function whose result type depends on
+    /// its value sets <see cref="ResultTypeFromValue"/> instead.
+    /// </summary>
     public required ScalarReturnTypeInferenceDelegate InferReturnType { get; init; }
+
+    /// <summary>
+    /// True for a function whose result type comes from the value it reads, and not from its argument
+    /// types: <c>json_value</c> returns an INT64, a FLOAT64, a BOOL or a STRING, as the JSON document
+    /// holds it. A static check then reads such a call as a type it does not know, as it reads a
+    /// parameter, and the value is checked when it is returned. <see cref="InferReturnType"/> still
+    /// gives the column type that a CTAS declares for it.
+    /// </summary>
+    public bool ResultTypeFromValue { get; init; }
 
     /// <summary>
     /// The element type of the result when <see cref="InferReturnType"/> reports

@@ -32,8 +32,9 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Functions;
 /// with an INT64) is InvalidInput. So the type must not depend on which argument won: COALESCE(int_col,
 /// 3.5) returns a Float64 even for a row where int_col is not NULL. For an argument that does not run,
 /// the type comes from what shows it without running it: the literal, the cast or the arithmetic over
-/// those, the value of a parameter or a column. A function result does not show its type this way, so
-/// COALESCE(1, sqrt(f)) is an INT64, as a CASE with such a branch is.</para>
+/// those, a function call by its declared type when its argument types show, and the value of a
+/// parameter or a column. So COALESCE(1, sqrt(4.0)) is a FLOAT64, as in PostgreSQL, also in a FROM-less
+/// SELECT, which has no binding to record the type.</para>
 ///
 /// <para>A NULL argument value has the type Null, so the values alone cannot show the declared type
 /// of a NULL column. The statement's binding therefore checks the declared types before any row is
@@ -149,7 +150,8 @@ internal static class NullScalarFunctions
     /// The type of an argument that must not run, or null when only running it shows the type. A parameter
     /// or a column is read, because a read has no effect and cannot fail for a reason the statement did not
     /// already have. Everything else comes from the syntax, so a division or a sequence call in it stays
-    /// unevaluated.
+    /// unevaluated. A function call has its declared type; an extension call is read too, because this runs
+    /// in the extension scope of the statement and nothing caches the type.
     /// </summary>
     private static ExpressionType? TypeWithoutRunning(
         NodeAst argument,
@@ -159,7 +161,7 @@ internal static class NullScalarFunctions
         ScalarFunctionArguments.EvaluateExpressionDelegate evaluateExpression)
     {
         if (argument.nodeType is not (NodeType.Placeholder or NodeType.Identifier))
-            return Queries.ConditionalResultTypes.TypeOf(argument, lookup: null);
+            return Queries.ConditionalResultTypes.TypeOf(argument, lookup: null, Queries.ConditionalResultTypes.CallTyping.All);
 
         ColumnValue value = evaluateExpression(argument, row, parameters, rowNameResolver);
 

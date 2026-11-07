@@ -60,7 +60,8 @@ internal static class JsonScalarFunctions
         RegisterUnary(registry, "json_valid", EvaluateJsonValid, _ => ColumnType.Bool);
         RegisterUnary(registry, "json_type", EvaluateJsonType, _ => ColumnType.String);
         RegisterBinary(registry, "json_extract", EvaluateJsonExtract, _ => ColumnType.String);
-        RegisterBinary(registry, "json_value", EvaluateJsonValue, _ => ColumnType.String);
+        // The result takes the type of the JSON scalar: INT64, FLOAT64, BOOL or STRING.
+        RegisterBinary(registry, "json_value", EvaluateJsonValue, _ => ColumnType.String, resultTypeFromValue: true);
         RegisterBinary(registry, "json_contains", EvaluateJsonContains, _ => ColumnType.Bool);
 
         registry.Register(new ScalarFunctionDescriptor
@@ -93,7 +94,8 @@ internal static class JsonScalarFunctions
         ScalarFunctionRegistry registry,
         string name,
         JsonEvaluatorDelegate evaluator,
-        ScalarReturnTypeInferenceDelegate inferReturnType)
+        ScalarReturnTypeInferenceDelegate inferReturnType,
+        bool resultTypeFromValue = false)
     {
         registry.Register(new ScalarFunctionDescriptor
         {
@@ -102,6 +104,7 @@ internal static class JsonScalarFunctions
             MaxArity = 2,
             Evaluator = AcceptDocuments(evaluator),
             InferReturnType = inferReturnType,
+            ResultTypeFromValue = resultTypeFromValue,
         });
     }
 

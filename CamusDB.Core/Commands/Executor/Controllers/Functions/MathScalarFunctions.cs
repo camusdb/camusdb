@@ -18,8 +18,8 @@ internal static class MathScalarFunctions
         RegisterUnary(registry, "abs", EvaluateAbs, InferAbsReturnType);
         RegisterUnary(registry, "ceil", EvaluateCeil, InferCeilFloorReturnType, aliases: ["ceiling"]);
         RegisterUnary(registry, "floor", EvaluateFloor, InferCeilFloorReturnType);
-        RegisterRound(registry, "round", EvaluateRound);
-        RegisterRound(registry, "trunc", EvaluateTrunc);
+        RegisterRound(registry, "round", EvaluateRound, InferRoundReturnType);
+        RegisterRound(registry, "trunc", EvaluateTrunc, InferTruncReturnType);
         RegisterUnary(registry, "sqrt", EvaluateSqrt, _ => ColumnType.Float64);
         RegisterBinary(registry, "pow", EvaluatePow, _ => ColumnType.Float64, aliases: ["power"]);
         RegisterUnary(registry, "ln", EvaluateLn, _ => ColumnType.Float64);
@@ -83,7 +83,11 @@ internal static class MathScalarFunctions
         });
     }
 
-    private static void RegisterRound(ScalarFunctionRegistry registry, string name, ScalarFunctionEvaluatorDelegate evaluator)
+    private static void RegisterRound(
+        ScalarFunctionRegistry registry,
+        string name,
+        ScalarFunctionEvaluatorDelegate evaluator,
+        ScalarReturnTypeInferenceDelegate inferReturnType)
     {
         registry.Register(new ScalarFunctionDescriptor
         {
@@ -91,7 +95,7 @@ internal static class MathScalarFunctions
             MinArity = 1,
             MaxArity = 2,
             Evaluator = evaluator,
-            InferReturnType = InferRoundReturnType,
+            InferReturnType = inferReturnType,
         });
     }
 
@@ -157,6 +161,18 @@ internal static class MathScalarFunctions
 
         if (arguments[0].Type == ColumnType.Numeric)
             return RoundNumeric(calledName, arguments, NumericRounding.HalfAwayFromZero);
+
+        // round(int, n) is NUMERIC for every n, as in PostgreSQL, where it resolves to
+        // round(numeric, int). An INT64 for n = 0 and a FLOAT64 for any other n gave one column two
+        // types, and the declared type was true for n = 0 only. NUMERIC holds every INT64, and the
+        // rounding is exact: round(15, -1) is 20.
+        if (arguments.Count == 2 && arguments[0].Type == ColumnType.Integer64)
+        {
+            ScalarFunctionArguments.RequireType(calledName, 1, arguments[1], ColumnType.Integer64);
+
+            return ColumnValue.FromNumeric(NumericMath.Round(
+                NumericMath.FromInt64(arguments[0].LongValue), arguments[1].LongValue, NumericRounding.HalfAwayFromZero, calledName));
+        }
 
         if (arguments.Count == 1)
         {
@@ -499,9 +515,6 @@ internal static class MathScalarFunctions
 
     private static ColumnValue RoundWithScale(ColumnValue value, int scale)
     {
-        if (scale == 0 && value.Type == ColumnType.Integer64)
-            return value;
-
         double number = ScalarFunctionArguments.ToDouble(value);
 
         return new ColumnValue(
@@ -589,6 +602,26 @@ internal static class MathScalarFunctions
             : ColumnType.Float64;
     }
 
+    /// <summary>
+    /// The type of <c>trunc</c>: NUMERIC for NUMERIC, INT64 for an INT64 at any scale (truncation of a
+    /// whole number stays whole), and FLOAT64 otherwise.
+    /// </summary>
+    private static ColumnType InferTruncReturnType(IReadOnlyList<ColumnType> argumentTypes)
+    {
+        if (argumentTypes.Count > 0 && argumentTypes[0] == ColumnType.Numeric)
+            return ColumnType.Numeric;
+
+        if (argumentTypes.Count is 1 or 2 && argumentTypes[0] == ColumnType.Integer64
+            && (argumentTypes.Count == 1 || argumentTypes[1] == ColumnType.Integer64))
+            return ColumnType.Integer64;
+
+        return ColumnType.Float64;
+    }
+
+    /// <summary>
+    /// The type of <c>round</c>: NUMERIC for NUMERIC and for <c>round(int, n)</c> (as in PostgreSQL),
+    /// INT64 for <c>round(int)</c>, and FLOAT64 otherwise.
+    /// </summary>
     private static ColumnType InferRoundReturnType(IReadOnlyList<ColumnType> argumentTypes)
     {
         if (argumentTypes.Count > 0 && argumentTypes[0] == ColumnType.Numeric)
@@ -597,12 +630,8 @@ internal static class MathScalarFunctions
         if (argumentTypes.Count == 1 && argumentTypes[0] == ColumnType.Integer64)
             return ColumnType.Integer64;
 
-        if (argumentTypes.Count == 2
-            && argumentTypes[0] == ColumnType.Integer64
-            && argumentTypes[1] == ColumnType.Integer64)
-        {
-            return ColumnType.Integer64;
-        }
+        if (argumentTypes.Count == 2 && argumentTypes[0] == ColumnType.Integer64)
+            return ColumnType.Numeric;
 
         return ColumnType.Float64;
     }

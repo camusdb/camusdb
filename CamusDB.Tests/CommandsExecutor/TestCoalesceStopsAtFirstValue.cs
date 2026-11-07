@@ -26,7 +26,7 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// <summary>
 /// COALESCE, IFNULL and NVL stop at the first argument that is not NULL, through the whole engine. Each
 /// expected result in a table was measured on PostgreSQL 16.11 in the C locale with the same rows, so the tables
-/// hold 205 statements that the two engines agree on. A NULL renders as an empty cell, cells join with
+/// hold 211 statements that the two engines agree on. A NULL renders as an empty cell, cells join with
 /// <c>|</c> and rows join with <c> ; </c>. An expected value that starts with <c>CADB</c> is the error code of
 /// CamusDB, where PostgreSQL also gave an error.
 ///
@@ -460,6 +460,12 @@ internal sealed class TestCoalesceStopsAtFirstValue : BaseTest
             "1|1 ; 2|1 ; 3|1"),
         ("SELECT id, COALESCE(1, floor(f)) FROM t ORDER BY id",
             "1|1 ; 2|1 ; 3|1"),
+        ("SELECT id, COALESCE(1, upper(s)) FROM t ORDER BY id",
+            "CADB0400"),
+        ("SELECT id, COALESCE(v, upper(s)) FROM t ORDER BY id",
+            "CADB0400"),
+        ("SELECT id, COALESCE(1, upper('a')) FROM t ORDER BY id",
+            "CADB0400"),
     ];
 
     private static readonly (string Sql, string Expected)[] Case =
@@ -471,6 +477,12 @@ internal sealed class TestCoalesceStopsAtFirstValue : BaseTest
         ("SELECT id, CASE WHEN id > 0 THEN 1 ELSE 2.5 END FROM t ORDER BY id",
             "1|1 ; 2|1 ; 3|1"),
         ("SELECT id, CASE WHEN TRUE THEN 1 ELSE (SELECT b.id FROM t b) END FROM t ORDER BY id",
+            "CADB0400"),
+        ("SELECT id, CASE WHEN TRUE THEN 1 ELSE upper('a') END FROM t ORDER BY id",
+            "CADB0400"),
+        ("SELECT id, CASE WHEN TRUE THEN 1 ELSE upper(s) END FROM t ORDER BY id",
+            "CADB0400"),
+        ("SELECT id, CASE WHEN id > 0 THEN 1 ELSE upper(s) END FROM t ORDER BY id",
             "CADB0400"),
     ];
 
@@ -521,24 +533,6 @@ internal sealed class TestCoalesceStopsAtFirstValue : BaseTest
         ("SELECT id, COALESCE(n, sqrt(4.0)) FROM t ORDER BY id",
             "1|2 ; 2|2 ; 3|5",
             "1|2.000000000000000 ; 2|2.000000000000000 ; 3|5"),
-        ("SELECT id, COALESCE(1, upper(s)) FROM t ORDER BY id",
-            "1|1 ; 2|1 ; 3|1",
-            "ERROR COALESCE types integer and text cannot be matched"),
-        ("SELECT id, COALESCE(v, upper(s)) FROM t ORDER BY id",
-            "1|0 ; 2|2 ; 3|0",
-            "ERROR COALESCE types bigint and text cannot be matched"),
-        ("SELECT id, COALESCE(1, upper('a')) FROM t ORDER BY id",
-            "1|1 ; 2|1 ; 3|1",
-            "ERROR COALESCE types integer and text cannot be matched"),
-        ("SELECT id, CASE WHEN TRUE THEN 1 ELSE upper('a') END FROM t ORDER BY id",
-            "1|1 ; 2|1 ; 3|1",
-            "ERROR CASE types text and integer cannot be matched"),
-        ("SELECT id, CASE WHEN TRUE THEN 1 ELSE upper(s) END FROM t ORDER BY id",
-            "1|1 ; 2|1 ; 3|1",
-            "ERROR CASE types text and integer cannot be matched"),
-        ("SELECT id, CASE WHEN id > 0 THEN 1 ELSE upper(s) END FROM t ORDER BY id",
-            "1|1 ; 2|1 ; 3|1",
-            "ERROR CASE types text and integer cannot be matched"),
         ("SELECT id, CASE WHEN TRUE THEN 1 ELSE (SELECT 1 / b.v FROM t b WHERE b.id = 1) END FROM t ORDER BY id",
             "CADB0400",
             "1|1 ; 2|1 ; 3|1"),
@@ -844,8 +838,8 @@ internal sealed class TestCoalesceStopsAtFirstValue : BaseTest
     }
 
     /// <summary>
-    /// A function result does not widen the row where an earlier argument wins, so the write converts it. PostgreSQL
-    /// 16.11 gives double precision in each row, with the values 1.58..., NULL and 5.
+    /// The declared type of sqrt widens the row where the INT64 argument wins, and the write stores a FLOAT64 in each
+    /// row. PostgreSQL 16.11 gives double precision in each row, with the values 1.58..., NULL and 5.
     /// </summary>
     [Test]
     public async Task InsertSelect_ConvertsTheValueThatWon()
@@ -866,7 +860,11 @@ internal sealed class TestCoalesceStopsAtFirstValue : BaseTest
         });
     }
 
-    /// <summary>A type that the statement shows widens the value, also when the argument that shows it does not run.</summary>
+    /// <summary>
+    /// A type that the statement shows widens the value, also when the argument that shows it does not run. A
+    /// function call shows its declared type, as in PostgreSQL, which gives double precision in each row for the
+    /// calls of sqrt and abs here.
+    /// </summary>
     [TestCase("COALESCE(1, 2.5)", ColumnType.Float64)]
     [TestCase("COALESCE(v, f)", ColumnType.Float64)]
     [TestCase("COALESCE(v, 2.5)", ColumnType.Float64)]
@@ -880,6 +878,10 @@ internal sealed class TestCoalesceStopsAtFirstValue : BaseTest
     [TestCase("COALESCE(1, 1 / v)", ColumnType.Integer64)]
     [TestCase("COALESCE(1, abs(v))", ColumnType.Integer64)]
     [TestCase("COALESCE('a', upper(s))", ColumnType.String)]
+    [TestCase("COALESCE(1, sqrt(f))", ColumnType.Float64)]
+    [TestCase("COALESCE(v, abs(f))", ColumnType.Float64)]
+    [TestCase("COALESCE(n, sqrt(4.0))", ColumnType.Float64)]
+    [TestCase("CASE WHEN TRUE THEN 1 ELSE sqrt(f) END", ColumnType.Float64)]
     public async Task ResultType_ComesFromEveryArgumentThatShowsIt(string expression, ColumnType expected)
     {
         (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateTables();
@@ -888,24 +890,6 @@ internal sealed class TestCoalesceStopsAtFirstValue : BaseTest
         await Run(database, executor, dbname, $"SELECT id, {expression} FROM t ORDER BY id", lastCellTypes: types);
 
         Assert.That(types, Is.EqualTo(new[] { expected, expected, expected }));
-    }
-
-    /// <summary>
-    /// A function result shows its type only when it runs, by decision, as a CASE branch does. PostgreSQL gives
-    /// double precision in each row here, and the values are equal.
-    /// </summary>
-    [TestCase("COALESCE(1, sqrt(f))", ColumnType.Integer64, ColumnType.Integer64, ColumnType.Integer64)]
-    [TestCase("COALESCE(v, abs(f))", ColumnType.Integer64, ColumnType.Integer64, ColumnType.Integer64)]
-    [TestCase("COALESCE(n, sqrt(4.0))", ColumnType.Float64, ColumnType.Float64, ColumnType.Integer64)]
-    [TestCase("CASE WHEN TRUE THEN 1 ELSE sqrt(f) END", ColumnType.Integer64, ColumnType.Integer64, ColumnType.Integer64)]
-    public async Task ResultType_OfAFunctionResultThatDoesNotRun_IsNotRead(string expression, ColumnType first, ColumnType second, ColumnType third)
-    {
-        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateTables();
-
-        List<ColumnType> types = [];
-        await Run(database, executor, dbname, $"SELECT id, {expression} FROM t ORDER BY id", lastCellTypes: types);
-
-        Assert.That(types, Is.EqualTo(new[] { first, second, third }));
     }
 
     // A pair that the statement shows has no common type before any row is read, as before this rule.

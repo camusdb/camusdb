@@ -81,6 +81,7 @@ public sealed class TestPostgreSqlDivergences : SharedNodeBaseTest
     {
         ColumnType.Bool => value.BoolValue.ToString(),
         ColumnType.Integer64 => value.LongValue.ToString(),
+        ColumnType.Float64 => value.FloatValue.ToString("R", System.Globalization.CultureInfo.InvariantCulture),
         _ => value.ToString() ?? "",
     };
 

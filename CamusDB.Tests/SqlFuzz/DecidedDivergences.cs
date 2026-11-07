@@ -70,9 +70,6 @@ public static class DecidedDivergences
         "INSERT INTO z (id, v, n) VALUES (1, 0, NULL)",
     ];
 
-    private const string FunctionResultType =
-        "A function result shows its type when it runs, and an argument or a branch that does not run is not read. A statement that shows both types is still refused before any row is read.";
-
     private const string RunsBeforeTheRow =
         "A subquery, an aggregate and a window function are computed before the row is evaluated, so the expression around them cannot stop them.";
 
@@ -322,15 +319,10 @@ public static class DecidedDivergences
             CamusDBErrorCodes.SequenceCallNotAllowedHere, "1",
             "A statement must know how many values it draws before it runs, and the condition decides that only when it runs."),
 
-        new("A function call in a COALESCE argument that does not run shows no type", ZeroTable,
-            "SELECT COALESCE(1, upper('a')) FROM z",
+        new("A call with an argument whose type the statement does not show has no static type", RowTable,
+            "SELECT COALESCE(1, upper(x)) FROM (SELECT CAST(v AS STRING) AS x FROM d) q",
             "1", "COALESCE types integer and text cannot be matched",
-            FunctionResultType),
-
-        new("A function call in a CASE branch that does not run shows no type", ZeroTable,
-            "SELECT CASE WHEN TRUE THEN 1 ELSE upper('a') END FROM z",
-            "1", "CASE types text and integer cannot be matched",
-            FunctionResultType),
+            "A function call shows its declared type only when the type of each argument is known. A derived STRING column, like a parameter, shows its type only through its value, so the call is checked when it returns one, as a CASE branch is."),
 
         new("A subquery in a COALESCE argument runs before the row", ZeroTable,
             "SELECT COALESCE(id, (SELECT 1 / b.v FROM z b)) FROM z",

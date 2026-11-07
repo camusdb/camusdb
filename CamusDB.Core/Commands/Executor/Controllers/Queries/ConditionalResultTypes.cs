@@ -25,16 +25,26 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 /// <list type="number">
 /// <item><b>When a statement is bound</b> (<see cref="Check"/>), every conditional expression in it
 ///   is typed from the statement: literals, casts, column references through a
-///   <see cref="ColumnTypeLookup"/>, arithmetic over those, and nested conditionals. A pair with no
+///   <see cref="ColumnTypeLookup"/>, arithmetic over those, nested conditionals, and a call of a
+///   function whose argument types are known, by its declared type
+///   (<see cref="ScalarFunctionEvaluator.DeclaredResultType"/>), as in PostgreSQL. A pair with no
 ///   common type is <see cref="CamusDBErrorCodes.InvalidInput"/>, even when the branch never runs and
 ///   over an empty table, as in GoogleSQL. The result type is recorded on the binding's
 ///   <see cref="QueryRowNameResolver"/> when there is one.</item>
 /// <item><b>When the expression is evaluated</b> (<see cref="Apply"/>), the value it returns is
 ///   combined with the recorded type, or, without a record, with the types of its literal inputs, and
 ///   converted to the result (<see cref="ResultTypeRule.Widen"/>). An input whose type the statement
-///   does not show (a parameter, a function call) is checked here, against the inputs whose types are
-///   known.</item>
+///   does not show (a parameter, a call with such an argument, a function whose type comes from its
+///   value) is checked here, against the inputs whose types are known.</item>
 /// </list>
+///
+/// <para><b>Why a call is typed here and not for an operator.</b> A later argument of COALESCE, or a
+/// branch of CASE that does not run, is never evaluated, so without its declared type a statement
+/// such as <c>CASE WHEN c THEN 1 ELSE upper(s) END</c> passed in every row where <c>c</c> was true,
+/// and one column could hold an INT64 in one row and a FLOAT64 in the next
+/// (<c>COALESCE(n, sqrt(4.0))</c>). An operator over a call runs the call first, so the per-row check
+/// already sees its value; <see cref="TypeOf"/> types a call for its other callers only when they ask
+/// for it.</para>
 ///
 /// <para><b>Why the binding holds the result type, and not the node.</b> The parse cache shares one
 /// tree between every execution of one SQL text, also on another database or after an ALTER, where a
@@ -246,7 +256,7 @@ internal static class ConditionalResultTypes
         if (!IsConditional(node))
             return FromOperands(node, left, right, lookup);
 
-        ExpressionType? resultType = Combine(node, lookup, throwOnConflict: true, out bool complete);
+        ExpressionType? resultType = Combine(node, lookup, throwOnConflict: true, out bool complete, builtInOnly: false);
 
         if (resultType is { } known)
             recorder?.RecordConditionalResultType(node, known);
@@ -399,7 +409,8 @@ internal static class ConditionalResultTypes
 
     /// <summary>
     /// The result type of <paramref name="node"/> from its inputs whose types the SQL text alone shows
-    /// (literals, casts, nested conditionals over those), or null when none does. Throws when two of
+    /// (literals, casts, calls of built-in functions over those, nested conditionals), or null when
+    /// none does. Throws when two of
     /// them have no common type, so a statement that no binding checked still fails whenever the
     /// expression runs. Cached per node, because the text decides it.
     /// </summary>
@@ -408,7 +419,9 @@ internal static class ConditionalResultTypes
         if (LiteralTypes.TryGetValue(node, out StrongBox<ExpressionType?>? cached))
             return cached.Value;
 
-        ExpressionType? type = Combine(node, lookup: null, throwOnConflict: true, out _);
+        // Built-in calls only: this type is cached on a parse tree that every database shares, and an
+        // extension function belongs to one database.
+        ExpressionType? type = Combine(node, lookup: null, throwOnConflict: true, out _, builtInOnly: true);
         LiteralTypes.AddOrUpdate(node, new StrongBox<ExpressionType?>(type));
         return type;
     }
@@ -419,10 +432,12 @@ internal static class ConditionalResultTypes
     /// Combines the known types of the result inputs of <paramref name="node"/>. Returns null when no
     /// input type is known. <paramref name="complete"/> is true when every input type is known. With
     /// <paramref name="throwOnConflict"/>, a pair with no common type throws; without it, the result is
-    /// null.
+    /// null. An input that is a function call has its declared type; with
+    /// <paramref name="builtInOnly"/>, only a call of a built-in function does.
     /// </summary>
-    private static ExpressionType? Combine(NodeAst node, ColumnTypeLookup? lookup, bool throwOnConflict, out bool complete)
+    private static ExpressionType? Combine(NodeAst node, ColumnTypeLookup? lookup, bool throwOnConflict, out bool complete, bool builtInOnly)
     {
+        CallTyping calls = builtInOnly ? CallTyping.BuiltIn : CallTyping.All;
         ExpressionType? result = null;
         bool allKnown = true;
         bool conflict = false;
@@ -432,7 +447,7 @@ internal static class ConditionalResultTypes
             if (input is null || conflict)
                 return;
 
-            if (TypeOf(input, lookup) is not { } type)
+            if (TypeOf(input, lookup, calls) is not { } type)
             {
                 allKnown = false;
                 return;
@@ -504,10 +519,25 @@ internal static class ConditionalResultTypes
         }
     }
 
+    /// <summary>Which function calls <see cref="TypeOf"/> gives a type.</summary>
+    internal enum CallTyping
+    {
+        /// <summary>No call: its type is the job of the per-row check.</summary>
+        None,
+
+        /// <summary>A call of a built-in function, by its declared type.</summary>
+        BuiltIn,
+
+        /// <summary>A call of a built-in function or of an extension function, by its declared type.</summary>
+        All,
+    }
+
     /// <summary>
     /// The static type of <paramref name="expression"/>, or null when the statement does not show it.
+    /// A function call has a type only with <paramref name="calls"/>, and only when the type of each of
+    /// its arguments is known.
     /// </summary>
-    internal static ExpressionType? TypeOf(NodeAst expression, ColumnTypeLookup? lookup)
+    internal static ExpressionType? TypeOf(NodeAst expression, ColumnTypeLookup? lookup, CallTyping calls = CallTyping.None)
     {
         NodeAst target = QueryExpressionClassifier.UnwrapAlias(expression);
 
@@ -517,19 +547,19 @@ internal static class ConditionalResultTypes
         switch (target.nodeType)
         {
             case NodeType.ExprSubscript or NodeType.ExprNegate or NodeType.ExprBitNot:
-                left = TypeOf(target.leftAst!, lookup);
+                left = TypeOf(target.leftAst!, lookup, calls);
                 break;
 
             case NodeType.ExprAdd or NodeType.ExprSub or NodeType.ExprMult or NodeType.ExprDiv
                 or NodeType.ExprConcat or NodeType.ExprBitAnd or NodeType.ExprBitOr or NodeType.ExprBitXor
                 or NodeType.ExprShiftLeft or NodeType.ExprShiftRight
                 when target.leftAst is not null && target.rightAst is not null:
-                left = TypeOf(target.leftAst, lookup);
-                right = TypeOf(target.rightAst, lookup);
+                left = TypeOf(target.leftAst, lookup, calls);
+                right = TypeOf(target.rightAst, lookup, calls);
                 break;
         }
 
-        return FromOperands(target, left, right, lookup);
+        return FromOperands(target, left, right, lookup, calls);
     }
 
     /// <summary>
@@ -537,7 +567,7 @@ internal static class ConditionalResultTypes
     /// one table both <see cref="TypeOf"/> and <see cref="Visit"/> read. A pair the evaluator refuses
     /// gives null here, because the refusal is the job of <see cref="StaticOperandRules"/>.
     /// </summary>
-    private static ExpressionType? FromOperands(NodeAst target, ExpressionType? left, ExpressionType? right, ColumnTypeLookup? lookup)
+    private static ExpressionType? FromOperands(NodeAst target, ExpressionType? left, ExpressionType? right, ColumnTypeLookup? lookup, CallTyping calls = CallTyping.None)
     {
         switch (target.nodeType)
         {
@@ -564,7 +594,7 @@ internal static class ConditionalResultTypes
                 }
 
             case NodeType.ArrayLiteral:
-                return new ExpressionType(ColumnType.Array, ArrayLiteralElementType(target.leftAst, lookup) ?? ColumnType.Null);
+                return new ExpressionType(ColumnType.Array, ArrayLiteralElementType(target.leftAst, lookup, calls) ?? ColumnType.Null);
 
             case NodeType.ExprSubscript:
                 return left is { Type: ColumnType.Array, ElementType: not ColumnType.Null } array
@@ -597,33 +627,59 @@ internal static class ConditionalResultTypes
 
             // A nested conditional is not a literal, even when all its inputs are, as in GoogleSQL.
             case NodeType.ExprCase:
-                return Combine(target, lookup, throwOnConflict: false, out bool caseComplete) is { } caseType && caseComplete
+                return Combine(target, lookup, throwOnConflict: false, out bool caseComplete, calls == CallTyping.BuiltIn) is { } caseType && caseComplete
                     ? caseType with { IsStringLiteral = false }
                     : null;
 
             case NodeType.ExprFuncCall when IsCoalesceCall(target):
-                return Combine(target, lookup, throwOnConflict: false, out bool callComplete) is { } callType && callComplete
+                return Combine(target, lookup, throwOnConflict: false, out bool callComplete, calls == CallTyping.BuiltIn) is { } callType && callComplete
                     ? callType with { IsStringLiteral = false }
                     : null;
+
+            case NodeType.ExprFuncCall when calls != CallTyping.None:
+                return DeclaredCallType(target, lookup, calls);
         }
 
         return DerivedTableSchemaBuilder.IsBooleanResult(target.nodeType) ? new ExpressionType(ColumnType.Bool) : null;
     }
 
     /// <summary>
+    /// The declared type of the call <paramref name="call"/> when the type of each of its arguments is
+    /// known, or null otherwise. A string literal argument reads as STRING, as the call receives it.
+    /// </summary>
+    private static ExpressionType? DeclaredCallType(NodeAst call, ColumnTypeLookup? lookup, CallTyping calls)
+    {
+        if (call.leftAst?.yytext is not { } name)
+            return null;
+
+        List<NodeAst> arguments = Arguments(call.rightAst);
+        ColumnType[] argumentTypes = arguments.Count == 0 ? [] : new ColumnType[arguments.Count];
+
+        for (int i = 0; i < arguments.Count; i++)
+        {
+            if (TypeOf(arguments[i], lookup, calls) is not { } argument)
+                return null;
+
+            argumentTypes[i] = argument.Type;
+        }
+
+        return ScalarFunctionEvaluator.DeclaredResultType(name.ToLowerInvariant(), argumentTypes, builtInOnly: calls == CallTyping.BuiltIn);
+    }
+
+    /// <summary>
     /// The element type of an <c>ARRAY[…]</c> literal: the type of its first element that is not a NULL
     /// literal, as evaluation decides it, or null when that element's type is not known.
     /// </summary>
-    private static ColumnType? ArrayLiteralElementType(NodeAst? list, ColumnTypeLookup? lookup)
+    private static ColumnType? ArrayLiteralElementType(NodeAst? list, ColumnTypeLookup? lookup, CallTyping calls = CallTyping.None)
     {
         if (list is null)
             return null;
 
         if (list.nodeType == NodeType.ExprList)
         {
-            ColumnType? left = ArrayLiteralElementType(list.leftAst, lookup);
+            ColumnType? left = ArrayLiteralElementType(list.leftAst, lookup, calls);
             if (left is not null)
-                return left == ColumnType.Null ? ArrayLiteralElementType(list.rightAst, lookup) : left;
+                return left == ColumnType.Null ? ArrayLiteralElementType(list.rightAst, lookup, calls) : left;
 
             // The first element is unknown, so the element type is unknown too.
             return null;
@@ -632,7 +688,7 @@ internal static class ConditionalResultTypes
         if (list.nodeType == NodeType.Null)
             return ColumnType.Null;
 
-        return TypeOf(list, lookup) is { } element && element.Type != ColumnType.Array ? element.Type : null;
+        return TypeOf(list, lookup, calls) is { } element && element.Type != ColumnType.Array ? element.Type : null;
     }
 
     /// <summary>The arguments of a function call, in order (an in-order walk of the argument list nodes).</summary>
