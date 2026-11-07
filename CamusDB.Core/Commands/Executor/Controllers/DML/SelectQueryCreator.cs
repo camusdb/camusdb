@@ -59,6 +59,11 @@ internal sealed class SelectQueryCreator
             ast = WithOneRowSource(ast);
         }
 
+        // The one-row rewrite above replaces ast, so the null checks made before it no longer
+        // apply to the new node. Check again on the node that is bound.
+        if (ast.leftAst is null || ast.rightAst is null)
+            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Invalid SELECT statement");
+
         (QuerySource source, BoundPredicate? where) = CreateFromClause(ast.rightAst, ast.extendedOne);
         IReadOnlyList<ProjectionItem> projections = CreateProjections(ast.leftAst);
 
