@@ -254,6 +254,53 @@ internal sealed class TestClusterAndAdminRouteAccess : BaseTest
 
     // ─── Closing a database ───────────────────────────────────────────────────
 
+    // ─── split-range: the fourth mutation, held to the same bar as leave ──────────────────────
+
+    [Test]
+    public async Task SplitRange_IsRefusedToANonSuperuser()
+    {
+        (CommandExecutor ex, _, string plain) = await SetupAsync();
+
+        JsonResult result = await WithBody(Cluster(ex, plain), "{\"database\":\"d\",\"table\":\"t\"}").SplitRange();
+
+        Assert.AreEqual(403, result.StatusCode);
+        ClusterSplitRangeResponse body = (ClusterSplitRangeResponse)result.Value!;
+        Assert.IsFalse(body.Success);
+        Assert.AreEqual("Refused", body.Status);
+        StringAssert.Contains("superuser", body.Reason);
+    }
+
+    [Test]
+    public async Task SplitRange_OverTheNetworkWithAuthenticationOff_IsRefused()
+    {
+        CamusDBOptions authOff = Options with { AuthenticationEnabled = false };
+        (CommandExecutor ex, _, _) = await SetupAsync(authOff);
+
+        JsonResult result = await WithBody(Cluster(ex, bearer: null, authOff, IPAddress.Parse("10.1.2.3")),
+            "{\"database\":\"d\",\"table\":\"t\"}").SplitRange();
+
+        Assert.AreEqual(403, result.StatusCode);
+        StringAssert.Contains("requires authentication", ((ClusterSplitRangeResponse)result.Value!).Reason);
+    }
+
+    [Test]
+    public async Task SplitRange_RejectsAMalformedRequestBeforeTouchingTheCatalog()
+    {
+        CamusDBOptions authOff = Options with { AuthenticationEnabled = false };
+        (CommandExecutor ex, _, _) = await SetupAsync(authOff);
+
+        foreach (string json in new[] { "", "{}", "{\"database\":\"d\"}", "{\"table\":\"t\"}", "{\"database\":\"d\",\"table\":\"t\",\"maxKeys\":1}" })
+        {
+            JsonResult result = await WithBody(Cluster(ex, bearer: null, authOff, IPAddress.Loopback), json).SplitRange();
+
+            Assert.AreEqual(400, result.StatusCode, json);
+            ClusterSplitRangeResponse body = (ClusterSplitRangeResponse)result.Value!;
+            Assert.IsFalse(body.Success, json);
+            Assert.AreEqual("Refused", body.Status, json);
+            Assert.IsNotNull(body.Reason, json);
+        }
+    }
+
     // ─── transfer-leadership: the third mutation, held to the same bar as leave ─────────────
 
     private static ClusterController WithBody(ClusterController controller, string json)

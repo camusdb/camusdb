@@ -177,6 +177,14 @@ internal sealed class ShowRangesReader
     /// <summary>True when the statement's target is a table's row space rather than an index.</summary>
     internal static bool TargetsRowSpace(string? indexName) => indexName is null;
 
+    /// <summary>
+    /// The key space a statement or an admin call names: the relation's row space, or one of its readable
+    /// indexes (the primary index's aliases accepted). Shared with the cluster API's manual range split so
+    /// that the space it divides is exactly the one <c>SHOW RANGES</c> reports under the same name.
+    /// </summary>
+    internal static string ResolveKeySpace(TableDescriptor table, string? indexName) =>
+        ResolveTarget(table, indexName).keySpace;
+
     // -----------------------------------------------------------------------
     // Target resolution
     // -----------------------------------------------------------------------

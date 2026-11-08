@@ -13,6 +13,9 @@ using Kommander.Data;
 using Kommander.System;
 using Kahuna;
 using Kahuna.Communication.External;
+using Kahuna.Shared.Communication.Rest;
+using CamusDB.Core.CommandsExecutor.Controllers.Queries;
+using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core;
 using CamusDB.Core.CommandsExecutor;
 using CamusDB.Core.CommandsExecutor.Models;
@@ -38,7 +41,7 @@ namespace CamusDB.App.Controllers;
 /// authentication is on. With authentication off they stay open, exactly as that statement does, since
 /// any client that reaches the port can already run every statement.</para>
 ///
-/// <para>The three mutations (leave, replication-factor, transfer-leadership) are held higher:
+/// <para>The four mutations (leave, replication-factor, transfer-leadership, split-range) are held higher:
 /// superuser when authentication is enabled, loopback-only otherwise, and never a credential over
 /// plaintext. Unlike a read, one unauthenticated call can take a node out of the cluster, or move a
 /// partition's leadership under a running workload.</para>
@@ -485,6 +488,151 @@ public sealed class ClusterController : CommandsController
             })
             {
                 // A malformed request is the caller's error (400); everything else follows the code's mapping.
+                StatusCode = e.Code == CamusDBErrorCodes.InvalidInput
+                    ? StatusCodes.Status400BadRequest
+                    : CamusDBErrorCodes.GetHttpStatus(e.Code),
+            };
+        }
+    }
+
+    /// <summary>
+    /// Divides one key space of a relation at its median key, through Kahuna's manual range split.
+    /// <c>database</c> and <c>table</c> name the relation; <c>index</c> null names its row space, a name
+    /// names one of its readable indexes. The split key is chosen here (<see cref="RangeSplitKeyChooser"/>):
+    /// a client cannot name a row key, because row keys are ordered by the stored row id and not by any
+    /// column.
+    ///
+    /// <para>Why this exists: a split's timing is otherwise a function of load and of the trigger's
+    /// settle windows. A fault-injection harness that must place a cutover at a chosen moment, such as
+    /// inside the window in which one node is down, needs a call that starts one now. The split itself
+    /// is the same quiesce, copy, hand-off and cutover the trigger runs; nothing about the split policy
+    /// is bypassed, so a split the trigger would refuse is refused here for the same reason.</para>
+    ///
+    /// <para>Kahuna runs a split only on the node that leads the partition owning the range map; any
+    /// other node answers <c>NotLeader</c> and names the leader when gossip knows it, so the caller tries
+    /// there. Refusals are reported as an outcome rather than a 500, with Kahuna's own status names; an
+    /// indeterminate status (<c>QuiesceFailed</c>, <c>TransferFailed</c>, <c>CutoverFailed</c>,
+    /// <c>ConcurrentSplit</c>) means the map may still change and the caller re-reads the ranges before
+    /// concluding anything. Held to the bar of the other mutations: superuser when authentication is
+    /// enabled, loopback-only otherwise.</para>
+    /// </summary>
+    [HttpPost]
+    [Route("/v1/cluster/split-range")]
+    public async Task<JsonResult> SplitRange()
+    {
+        Principal? principal = null;
+        ClusterSplitRangeRequest? request = null;
+        ClusterSplitRangeResponse response = new();
+
+        try
+        {
+            principal = await EnsureClusterAdminAllowedAsync().ConfigureAwait(false);
+
+            using StreamReader reader = new(Request.Body);
+            string body = await reader.ReadToEndAsync(HttpContext.RequestAborted).ConfigureAwait(false);
+
+            request = string.IsNullOrWhiteSpace(body)
+                ? null
+                : JsonSerializer.Deserialize<ClusterSplitRangeRequest>(body, jsonOptions);
+
+            if (request is null || string.IsNullOrWhiteSpace(request.Database) || string.IsNullOrWhiteSpace(request.Table))
+                throw new CamusDBException(
+                    CamusDBErrorCodes.InvalidInput,
+                    "'database' and 'table' must name the relation whose key space to split; 'index' names one of its indexes, or is omitted for the row space");
+
+            if (request.MaxKeys < 2)
+                throw new CamusDBException(
+                    CamusDBErrorCodes.InvalidInput,
+                    "'maxKeys' must be at least 2: a split needs a key on each side of the split key");
+
+            DatabaseDescriptor database = await executor.OpenDatabase(request.Database).ConfigureAwait(false);
+            TableDescriptor table = await executor
+                .OpenTableWithDescriptor(database, new OpenTableTicket(request.Database, request.Table))
+                .ConfigureAwait(false);
+
+            string keySpace = ShowRangesReader.ResolveKeySpace(table, request.Index);
+            response.KeySpace = keySpace;
+
+            // The node-local applied view of the space's ranges: how many there are, and where each
+            // starts, which the chooser needs so the split key is never a range's own start.
+            HashSet<string> rangeStarts = new(StringComparer.Ordinal);
+            int descriptors = 0;
+            string routingMode = "";
+
+            foreach (KahunaKeySpaceRangesResponse space in kahuna.Kahuna.GetRangeMap(keySpace).KeySpaces)
+            {
+                if (!string.Equals(space.KeySpace, keySpace, StringComparison.Ordinal))
+                    continue;
+
+                routingMode = space.RoutingMode;
+                descriptors = space.Descriptors.Count;
+
+                foreach (KahunaRangeDescriptorResponse descriptor in space.Descriptors)
+                {
+                    if (descriptor.StartKey is not null)
+                        rangeStarts.Add(descriptor.StartKey);
+                }
+            }
+
+            response.DescriptorsBefore = descriptors;
+
+            if (descriptors == 0 || !string.Equals(routingMode, "KeyRange", StringComparison.Ordinal))
+            {
+                response.Status = "NoRange";
+                response.Reason = $"Key space '{keySpace}' has no key-range descriptor on this node: the space is hash-routed, not yet seeded, or the node has not applied the range map yet";
+            }
+            else
+            {
+                RangeSplitKeyChooser.Choice choice = await RangeSplitKeyChooser
+                    .PickMedianAsync(kahuna.Kahuna, keySpace, rangeStarts, request.MaxKeys, HttpContext.RequestAborted)
+                    .ConfigureAwait(false);
+
+                response.KeysSeen = choice.KeysSeen;
+
+                if (choice.Truncated)
+                {
+                    response.Status = "Refused";
+                    response.Reason = $"Key space '{keySpace}' holds more than {request.MaxKeys} keys; raise 'maxKeys' to let the node scan it for a median";
+                }
+                else if (choice.SplitKey is null)
+                {
+                    response.Status = "BelowMinRangeSize";
+                    response.Reason = $"Key space '{keySpace}' holds {choice.KeysSeen} key(s) from its median up that are not already range starts; a split needs a key on each side";
+                }
+                else
+                {
+                    response.SplitKey = choice.SplitKey;
+
+                    KahunaSplitRangeResponse outcome = await kahuna.Kahuna
+                        .SplitRangeAtKeyWithOutcomeAsync(keySpace, choice.SplitKey, HttpContext.RequestAborted)
+                        .ConfigureAwait(false);
+
+                    response.Success = outcome.Success;
+                    response.Status = outcome.Status;
+                    response.Determinate = outcome.Determinate;
+                    response.NewPartitionId = outcome.NewPartitionId;
+                    response.LeaderHint = outcome.LeaderHint;
+                    response.Reason = outcome.Reason;
+                }
+            }
+
+            AuditCluster($"split-range:{keySpace}@{response.SplitKey ?? "-"}",
+                principal, response.Success ? "ok" : response.Status, failure: !response.Success);
+
+            return new JsonResult(response)
+            {
+                StatusCode = response.Success ? StatusCodes.Status200OK : StatusCodes.Status409Conflict,
+            };
+        }
+        catch (CamusDBException e)
+        {
+            AuditCluster("split-range", principal, e.Code, failure: true);
+            response.Success = false;
+            response.Status = "Refused";
+            response.Reason = e.Message;
+
+            return new JsonResult(response)
+            {
                 StatusCode = e.Code == CamusDBErrorCodes.InvalidInput
                     ? StatusCodes.Status400BadRequest
                     : CamusDBErrorCodes.GetHttpStatus(e.Code),
