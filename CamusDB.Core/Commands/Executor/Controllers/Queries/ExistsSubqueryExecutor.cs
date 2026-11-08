@@ -65,16 +65,7 @@ internal sealed class ExistsSubqueryExecutor(SubqueryQueryExecutor? queryExecuto
         BoundTableSource innerSource = prepared.InnerBound.Sources[0];
         TableDescriptor innerTable = innerSource.Table;
         HLCTimestamp txId = txnState.TransactionId;
-
-        List<BoundTableSource> combinedTableSources = [.. prepared.InnerBound.Sources, .. prepared.OuterSources];
-
-        List<BoundDerivedTableSource> combinedDerivedSources =
-        [
-            .. prepared.InnerBound.DerivedSources,
-            .. prepared.OuterDerivedSources,
-        ];
-
-        QueryRowNameResolver combinedResolver = new(combinedTableSources, combinedDerivedSources);
+        QueryRowNameResolver combinedResolver = prepared.RowNames;
 
         if (prepared.SeekPlan is not null)
         {

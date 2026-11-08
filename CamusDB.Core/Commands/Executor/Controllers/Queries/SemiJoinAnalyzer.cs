@@ -30,7 +30,7 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 ///     join is an existence test, so deduplicating the inner values cannot change membership
 ///     (<c>x IN (SELECT DISTINCT c)</c> ≡ <c>x IN (SELECT c)</c>), and the join probes the inner
 ///     index directly without re-running the inner query.</item>
-///   <item>RHS subquery is uncorrelated (<see cref="ExistsSubqueryAnalyzer.IsCorrelated"/> returns false).</item>
+///   <item>RHS subquery is uncorrelated: each name of its output and its WHERE is a column of its one table.</item>
 ///   <item>RHS subquery WHERE (if any) contains no nested subqueries.</item>
 ///   <item>RHS subquery WHERE (if any) reads only names its own scope resolves: a bare column, or
 ///     one qualified with the inner alias (the table name when there is no alias). The spec carries
@@ -167,9 +167,6 @@ internal sealed class SemiJoinAnalyzer
         if (projExpr.nodeType != NodeType.Identifier)
             return null;
 
-        if (ExistsSubqueryAnalyzer.IsCorrelated(innerQuery))
-            return null;
-
         if (innerQuery.Where is not null && ContainsSubquery(innerQuery.Where.Expression))
             return null;
 
@@ -228,6 +225,18 @@ internal sealed class SemiJoinAnalyzer
         QueryRowNameResolver innerResolver = new([new BoundTableSource(innerTableSource, innerTable, innerAlias)]);
         HashSet<string> innerRequired = new(StringComparer.OrdinalIgnoreCase) { innerColumn };
 
+        // The output must be a column of the inner table as well. A name that is not can resolve to the
+        // outer query, as o.x does in IN (SELECT o.x FROM s), and a probe of the inner index cannot read
+        // the outer row. The general path decides such a subquery.
+        try
+        {
+            innerResolver.ValidateColumnReference(projExpr.yytext ?? "");
+        }
+        catch (CamusDBException)
+        {
+            return null;
+        }
+
         if (innerFilter is not null)
         {
             HashSet<string> references = new(StringComparer.Ordinal);
@@ -242,8 +251,8 @@ internal sealed class SemiJoinAnalyzer
                 }
                 catch (CamusDBException)
                 {
-                    // An unknown column or alias: the general path binds the subquery and reports it
-                    // with its own message, so both paths refuse the statement the same way.
+                    // An unknown column or alias, or a name of the outer query: the general path binds
+                    // the subquery and decides it, so both paths treat the statement the same way.
                     return null;
                 }
 

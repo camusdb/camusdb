@@ -584,7 +584,7 @@ internal sealed class NonQueryStatementDispatcher
                         NodeAst rewrittenWhere;
                         using (StatementSnapshotScope.Open(ticket.TxnState, statementTimestamp))
                             rewrittenWhere = await subqueryRewriter
-                                .RewriteExpressionAsync(database, deleteTicket.Where, ticket, "the WHERE of a DELETE")
+                                .RewriteExpressionAsync(database, deleteTicket.Where, ticket, "the WHERE of a DELETE", new TableSource(deleteTicket.TableName))
                                 .ConfigureAwait(false);
 
                         if (!ReferenceEquals(rewrittenWhere, deleteTicket.Where))
@@ -868,11 +868,14 @@ internal sealed class NonQueryStatementDispatcher
 
         bool changed = false;
 
+        // A subquery of the WHERE or of a SET value can read the target table.
+        TableSource target = new(ticket.TableName);
+
         NodeAst? newWhere = ticket.Where;
         if (newWhere is not null)
         {
             newWhere = await subqueryRewriter
-                .RewriteExpressionAsync(database, newWhere, sqlTicket, $"the WHERE of {statementKind}")
+                .RewriteExpressionAsync(database, newWhere, sqlTicket, $"the WHERE of {statementKind}", target)
                 .ConfigureAwait(false);
             changed |= !ReferenceEquals(newWhere, ticket.Where);
         }
@@ -887,7 +890,7 @@ internal sealed class NonQueryStatementDispatcher
             foreach (KeyValuePair<string, NodeAst> entry in ticket.ExprValues)
             {
                 NodeAst resolved = await subqueryRewriter
-                    .RewriteExpressionAsync(database, entry.Value, sqlTicket, $"a SET value of {statementKind}")
+                    .RewriteExpressionAsync(database, entry.Value, sqlTicket, $"a SET value of {statementKind}", target)
                     .ConfigureAwait(false);
 
                 if (rewritten is not null)

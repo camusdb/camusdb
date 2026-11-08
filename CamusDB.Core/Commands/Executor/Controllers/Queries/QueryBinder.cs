@@ -136,6 +136,22 @@ internal sealed class QueryBinder
     }
 
     /// <summary>
+    /// The names that <paramref name="source"/> declares, for <see cref="SubqueryScopeAnalyzer"/>. The
+    /// sources bind for their schema only, as a view definition does: a table opens and a derived
+    /// table binds with no nested binder, so nothing runs and no row is read.
+    /// </summary>
+    internal async Task<NameScope> BindNameScopeAsync(DatabaseDescriptor database, QuerySource source)
+    {
+        List<BoundTableSource> sources = [];
+        List<BoundDerivedTableSource> derivedSources = [];
+        HashSet<string> aliases = new(StringComparer.OrdinalIgnoreCase);
+
+        await CollectBoundSourcesAsync(database, source, sources, derivedSources, aliases, nested: null).ConfigureAwait(false);
+
+        return new NameScope(sources, derivedSources);
+    }
+
+    /// <summary>
     /// Finds the statement mistakes in the output of an EXISTS body whose output
     /// <see cref="ExistsBody"/> discards. The same checks run as for any SELECT, except that a select
     /// list needs only grouped columns, not the exact group key: PostgreSQL accepts

@@ -421,20 +421,9 @@ internal static class RequiredColumnAnalyzer
         QueryRowNameResolver? rowNames,
         HashSet<string> required)
     {
-        if (prepared.InnerWhere is null)
-            return;
-
-        HashSet<string> innerAliases = ExistsSubqueryAnalyzer.CollectSourceAliases(prepared.InnerBound.Query.Source);
-        HashSet<string> references = new(StringComparer.OrdinalIgnoreCase);
-        QueryExpressionWalker.CollectColumnReferences(prepared.InnerWhere, references);
-
-        foreach (string reference in references)
-        {
-            if (!ExistsSubqueryAnalyzer.ReferencesOuterScope(reference, innerAliases))
-                continue;
-
+        // The prepared body lists the names that resolve to the outer query, bare names included.
+        foreach (string reference in prepared.OuterReferences)
             AddResolvedColumn(reference, rowNames, required);
-        }
     }
 
     private static void CollectOuterCorrelationColumnsForAlias(
@@ -443,18 +432,8 @@ internal static class RequiredColumnAnalyzer
         string alias,
         HashSet<string> required)
     {
-        if (prepared.InnerWhere is null)
-            return;
-
-        HashSet<string> innerAliases = ExistsSubqueryAnalyzer.CollectSourceAliases(prepared.InnerBound.Query.Source);
-        HashSet<string> references = new(StringComparer.OrdinalIgnoreCase);
-        QueryExpressionWalker.CollectColumnReferences(prepared.InnerWhere, references);
-
-        foreach (string reference in references)
+        foreach (string reference in prepared.OuterReferences)
         {
-            if (!ExistsSubqueryAnalyzer.ReferencesOuterScope(reference, innerAliases))
-                continue;
-
             if (TryResolveColumnForAlias(reference, rowNames, alias, out string columnName))
                 required.Add(columnName);
         }

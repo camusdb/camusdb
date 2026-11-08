@@ -21,17 +21,23 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 /// <see cref="ExistsSubqueryRegistry"/> for the per-row evaluator. A correlated EXISTS's inner query
 /// binds with the <see cref="NestedSelectBinder"/> the pipeline passes in, so a derived table in its
 /// FROM resolves its own subqueries like one anywhere else.
+///
+/// <para>A body is correlated when <see cref="SubqueryScopeAnalyzer"/> finds a name in it that resolves to
+/// the outer query. That includes a bare name that only the outer query has, such as <c>v</c> in
+/// <c>EXISTS (SELECT 1 FROM r2 WHERE w = v)</c>. A name that both queries have is the inner column.</para>
 /// </summary>
 internal sealed class ExistsSubqueryPreparer
 {
     private readonly ExistsSubqueryExecutor existsExecutor;
     private readonly QueryBinder queryBinder;
+    private readonly SubqueryScopeAnalyzer scopeAnalyzer;
     private readonly SelectQueryCreator selectQueryCreator = new();
 
-    public ExistsSubqueryPreparer(ExistsSubqueryExecutor existsExecutor, QueryBinder queryBinder)
+    public ExistsSubqueryPreparer(ExistsSubqueryExecutor existsExecutor, QueryBinder queryBinder, SubqueryScopeAnalyzer scopeAnalyzer)
     {
         this.existsExecutor = existsExecutor;
         this.queryBinder = queryBinder;
+        this.scopeAnalyzer = scopeAnalyzer;
     }
 
     public ValueTask<(SelectQuery Query, ExistsSubqueryRegistry? Registry)> PrepareAsync(
@@ -67,7 +73,7 @@ internal sealed class ExistsSubqueryPreparer
         ExecuteSQLTicket ticket,
         NestedSelectBinder nested)
     {
-        ExistsRewriteContext context = new(nested);
+        ExistsRewriteContext context = new(nested, OuterNameScope.Of(outerTableSources, outerDerivedSources));
         NodeAst rewritten = await RewriteExpressionAsync(
             database,
             query.Where!.Expression,
@@ -84,15 +90,19 @@ internal sealed class ExistsSubqueryPreparer
 
     private sealed class ExistsRewriteContext
     {
-        public ExistsRewriteContext(NestedSelectBinder nested)
+        public ExistsRewriteContext(NestedSelectBinder nested, OuterNameScope outerScope)
         {
             Nested = nested;
+            OuterScope = outerScope;
         }
 
         public ExistsSubqueryRegistry? Registry { get; set; }
 
         /// <summary>Binds the derived tables of a correlated EXISTS's inner FROM through the pipeline.</summary>
         public NestedSelectBinder Nested { get; }
+
+        /// <summary>The names of the outer query, which a body can read.</summary>
+        public OuterNameScope OuterScope { get; }
     }
 
     private async Task<NodeAst> RewriteExpressionAsync(
@@ -119,7 +129,11 @@ internal sealed class ExistsSubqueryPreparer
 
             SelectQuery innerQuery = selectQueryCreator.CreateSelectQuery(expr.leftAst);
 
-            if (!ExistsSubqueryAnalyzer.ExistsBodyReadsOuterRow(innerQuery))
+            IReadOnlyList<NodeAst> outerReferences = await scopeAnalyzer
+                .FindOuterReferencesAsync(database, innerQuery, context.OuterScope)
+                .ConfigureAwait(false);
+
+            if (outerReferences.Count == 0)
             {
                 bool exists = await existsExecutor.ExecuteUncorrelatedAsync(
                     database,
@@ -142,10 +156,19 @@ internal sealed class ExistsSubqueryPreparer
                     "A correlated EXISTS subquery with an aggregate, HAVING, OFFSET or a LIMIT that is not a positive constant or zero is not supported");
             }
 
+            // The correlated evaluator reads the WHERE row by row and cannot run a subquery in it.
+            if (innerQuery.Where is not null && SubqueryNodeScan.Contains(innerQuery.Where.Expression, SubqueryNodeKinds.Rewritable | SubqueryNodeKinds.Exists))
+            {
+                throw new CamusDBException(
+                    CamusDBErrorCodes.FeatureNotSupported,
+                    "A correlated EXISTS subquery with a subquery in its WHERE is not supported yet");
+            }
+
             PreparedExistsSubquery prepared = await PrepareCorrelatedAsync(
                 database,
                 innerQuery,
                 form,
+                outerReferences,
                 outerTableSources,
                 outerDerivedSources,
                 context.Nested).ConfigureAwait(false);
@@ -223,6 +246,7 @@ internal sealed class ExistsSubqueryPreparer
         DatabaseDescriptor database,
         SelectQuery innerQuery,
         ExistsBodyForm form,
+        IReadOnlyList<NodeAst> outerReferenceNodes,
         IReadOnlyList<BoundTableSource> outerTableSources,
         IReadOnlyList<BoundDerivedTableSource> outerDerivedSources,
         NestedSelectBinder nested)
@@ -247,10 +271,22 @@ internal sealed class ExistsSubqueryPreparer
         combinedDerivedSources.AddRange(innerBound.DerivedSources);
         combinedDerivedSources.AddRange(outerDerivedSources);
 
-        QueryRowNameResolver combinedResolver = new(combinedTableSources, combinedDerivedSources);
+        // A name resolves to the inner query first, so a column that both queries have is not ambiguous.
+        QueryRowNameResolver combinedResolver = new(
+            combinedTableSources,
+            combinedDerivedSources,
+            innerBound.Sources.Count,
+            innerBound.DerivedSources.Count);
 
         if (innerQuery.Where is not null)
             ValidateExpression(innerQuery.Where.Expression, combinedResolver);
+
+        // Each outer row evaluates the predicate with this one resolver, so it must not be written again.
+        combinedResolver.FreezeForSharedReuse();
+
+        HashSet<string> outerReferences = new(StringComparer.OrdinalIgnoreCase);
+        foreach (NodeAst node in outerReferenceNodes)
+            outerReferences.Add(node.yytext!);
 
         // Choose the inner access path once here rather than per outer row: it depends only on the
         // inner predicate and the inner table's indexes. Null keeps the full-scan fallback.
@@ -259,7 +295,8 @@ internal sealed class ExistsSubqueryPreparer
                 innerBound.Sources[0].Table,
                 innerQuery.Where?.Expression,
                 innerBound.Sources[0].Alias,
-                ExistsSubqueryAnalyzer.CollectSourceAliases(innerQuery.Source))
+                ExistsSubqueryAnalyzer.CollectSourceAliases(innerQuery.Source),
+                outerReferences)
             : null;
 
         return new PreparedExistsSubquery(
@@ -267,6 +304,8 @@ internal sealed class ExistsSubqueryPreparer
             innerBound,
             outerTableSources,
             outerDerivedSources,
+            combinedResolver,
+            [.. outerReferences],
             seekPlan);
     }
 

@@ -608,12 +608,14 @@ public sealed class CommandExecutor : IAsyncDisposable
                 : (ownerName, ownerId) => authService.TryLoadOwnerPrincipalAsync(ownerName, ownerId));
         SubqueryQueryExecutor subqueryQueryExecutor = new(queryExecutor);
         ExistsSubqueryExecutor existsSubqueryExecutor = new(subqueryQueryExecutor);
+        SubqueryScopeAnalyzer subqueryScopeAnalyzer = new(queryBinder);
         subqueryRewriter = new SubqueryRewriter(
             new ScalarSubqueryExecutor(subqueryQueryExecutor),
             new InSubqueryExecutor(subqueryQueryExecutor, statisticsManager),
-            existsSubqueryExecutor
+            existsSubqueryExecutor,
+            subqueryScopeAnalyzer
         );
-        existsSubqueryPreparer = new ExistsSubqueryPreparer(existsSubqueryExecutor, queryBinder);
+        existsSubqueryPreparer = new ExistsSubqueryPreparer(existsSubqueryExecutor, queryBinder, subqueryScopeAnalyzer);
         semiJoinAnalyzer = new SemiJoinAnalyzer(tableOpener);
         // The pipeline holds the rewriter and the rewriter's executors run nested SELECTs through the
         // pipeline, so the subquery executor receives it after both exist.

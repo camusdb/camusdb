@@ -491,9 +491,18 @@ INSERT INTO counters (name, value) VALUES ('users', (SELECT COUNT(*) FROM users)
 SELECT * FROM t WHERE CASE WHEN kind = 1 THEN x IN (SELECT x FROM allowed) ELSE x > 0 END;
 ```
 
-The rule that decides what runs where is **correlation**: a subquery is correlated when its `WHERE`
-reads a column of the enclosing query through a qualifier that is not one of its own sources
-(`outer.id` in `EXISTS (SELECT 1 FROM inner WHERE inner.id = outer.id)`).
+The rule that decides what runs where is **correlation**: a subquery is correlated when a name in it
+resolves to the enclosing query. A name resolves to the nearest query that has it, as in PostgreSQL:
+
+- A qualified name resolves to the nearest query whose `FROM` declares its qualifier, so `outer.id` in
+  `EXISTS (SELECT 1 FROM inner WHERE inner.id = outer.id)` reads the enclosing query.
+- A bare name resolves to the nearest query that has a column with that name. So `v` in
+  `SELECT id FROM r WHERE EXISTS (SELECT 1 FROM r2 WHERE w = v)` reads `r.v` when `r2` has no `v`, and a
+  column that both queries have is the column of the subquery, not an ambiguous name.
+- A name that no query has is an unknown column (`CADB0404`), as before.
+
+The names are read in every clause of the subquery and in the subqueries inside it. A name inside a
+derived table of a subquery is not read, so such a derived table cannot read the enclosing query yet.
 
 - An **uncorrelated** subquery runs once, before the statement reads its first row, and its result
   takes its place: a scalar subquery becomes its value, `EXISTS` becomes `true` or `false`, and
@@ -502,9 +511,10 @@ reads a column of the enclosing query through a qualifier that is not one of its
 - A **correlated `EXISTS`** is evaluated once per row. CamusDB supports it in the `WHERE` of a
   `SELECT` only, at any depth of the predicate. In every other position it is refused with
   `CADB0533` (`FeatureNotSupported`), because the position has no row to evaluate it against.
-- A **correlated `IN`**, `NOT IN` or quantified comparison is refused everywhere, as the
-  [quantified comparison](#quantified-comparisons-any-some-and-all) rule below says. A correlated
-  scalar subquery is refused as an unknown alias.
+  A correlated `EXISTS` with a subquery in its own `WHERE` is refused with `CADB0533` too.
+- A **correlated `IN`**, `NOT IN`, quantified comparison or scalar subquery is refused everywhere with
+  `CADB0533`, as the [quantified comparison](#quantified-comparisons-any-some-and-all) rule below says.
+  The message names the outer name that the subquery reads. PostgreSQL runs these forms.
 
 Two positions do not take a subquery at all: `ORDER BY` and `GROUP BY` refuse one with `CADB0400`.
 

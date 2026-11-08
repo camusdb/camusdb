@@ -528,7 +528,7 @@ internal sealed class TestCoalesceStopsAtFirstValue : BaseTest
             "CADB0400",
             "1 ; 1 ; 1"),
         ("SELECT id, COALESCE(id, (SELECT b.id FROM t b WHERE b.id = a.id + 100)) FROM t a ORDER BY id",
-            "CADB0400",
+            "CADB0533",
             "1|1 ; 2|2 ; 3|3"),
         ("SELECT id, COALESCE(n, sqrt(4.0)) FROM t ORDER BY id",
             "1|2 ; 2|2 ; 3|5",

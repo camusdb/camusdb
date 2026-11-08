@@ -80,6 +80,11 @@ public sealed class QueryRowNameResolver
     /// query's sources first and then the outer sources, and the first
     /// <paramref name="nestedSourceCount"/> and <paramref name="nestedDerivedCount"/> belong to the nested
     /// query. Row keys are always qualified, because more than one source is in scope.
+    ///
+    /// <para>An outer source whose alias the nested query also declares is hidden for a qualified name,
+    /// but not for a bare one: in <c>FROM r x WHERE EXISTS (SELECT 1 FROM r2 x WHERE s = 'a')</c> the
+    /// name <c>x.s</c> reads the inner <c>x</c>, and the bare <c>s</c>, which <c>r2</c> does not have,
+    /// reads the outer <c>x</c>. Its row key is <c>x.s</c> too, which the inner row does not hold.</para>
     /// </summary>
     internal QueryRowNameResolver(
         IReadOnlyList<BoundTableSource> sources,
@@ -100,10 +105,7 @@ public sealed class QueryRowNameResolver
 
         foreach (BoundTableSource source in sources.Skip(nestedSourceCount))
         {
-            if (nestedAliases.Contains(source.Alias))
-                continue;
-
-            if (!aliasToSource.TryAdd(source.Alias, source))
+            if (!nestedAliases.Contains(source.Alias) && !aliasToSource.TryAdd(source.Alias, source))
                 throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Duplicate alias '{source.Alias}'");
 
             foreach (TableColumnSchema column in source.Table.Schema.Columns ?? [])
@@ -113,10 +115,7 @@ public sealed class QueryRowNameResolver
 
         foreach (BoundDerivedTableSource source in derivedSources.Skip(nestedDerivedCount))
         {
-            if (nestedAliases.Contains(source.Alias))
-                continue;
-
-            if (!aliasToDerived.TryAdd(source.Alias, source))
+            if (!nestedAliases.Contains(source.Alias) && !aliasToDerived.TryAdd(source.Alias, source))
                 throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Duplicate alias '{source.Alias}'");
 
             foreach (DerivedColumnSchema column in source.Columns)

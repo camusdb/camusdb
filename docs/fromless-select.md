@@ -94,7 +94,8 @@ The rejected shapes below apply in each of these positions. A sequence call is a
 (`CADB0547`), because a statement must know how many values it draws before it runs.
 
 A subquery with no `FROM` cannot read a column of the statement around it yet. `SELECT x.id FROM t x WHERE
-EXISTS (SELECT 1 WHERE x.id = 1)` fails with `CADB0400`, and so do the scalar and `IN` forms.
+EXISTS (SELECT 1 WHERE x.id = 1)` fails with `CADB0400`. The scalar and `IN` forms, such as `SELECT id FROM t
+WHERE (SELECT v) = 10`, fail with `CADB0533`, and the message names the outer column.
 
 ## Rejected shapes
 

@@ -267,9 +267,10 @@ Binding, in order:
 
 **Stage 3b — EXISTS preparation (`ExistsSubqueryPreparer`).** Walks the `WHERE` for `EXISTS(...)`
 nodes, at any depth, and registers an executor per correlated subquery in an `ExistsSubqueryRegistry`
-threaded into `QueryTicket`. Uncorrelated `EXISTS` is evaluated once; correlated `EXISTS` is evaluated
-per outer row by `QueryFilterer`, with the outer row's qualified columns injected into the subquery
-scope. Under `AND`, `OR` and `NOT` the filterer evaluates it in place; under any other node (a `CASE`
+threaded into `QueryTicket`. `SubqueryScopeAnalyzer` decides whether a body is correlated: a name
+resolves to the subquery first and then to the outer query, so a bare outer name makes it correlated
+too. Uncorrelated `EXISTS` is evaluated once; correlated `EXISTS` is evaluated per outer row by
+`QueryFilterer`, with the outer row's columns injected into the subquery scope under inner keys first. Under `AND`, `OR` and `NOT` the filterer evaluates it in place; under any other node (a `CASE`
 branch, a comparison operand, an `IS NULL` test) it answers each correlated `EXISTS` for the row first
 and evaluates a copy of the subtree with the answers in place. A `WHERE` conjunct that holds a
 correlated `EXISTS` is never pushed to one table's scan in a join: the outer columns it reads are not

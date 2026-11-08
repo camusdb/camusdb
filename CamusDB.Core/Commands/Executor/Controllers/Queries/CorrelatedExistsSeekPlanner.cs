@@ -28,25 +28,32 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 /// </summary>
 internal static class CorrelatedExistsSeekPlanner
 {
+    private static readonly IReadOnlySet<string> EmptyNames = new HashSet<string>();
+
     /// <summary>
     /// Builds a seek plan for <paramref name="innerWhere"/> against <paramref name="innerTable"/>,
     /// or null when no readable index has its leading key column pinned by an eligible equality.
     ///
     /// <paramref name="innerAliases"/> are the aliases the inner query's own sources answer to; an
     /// identifier qualified with anything else is an outer reference, which is precisely the
-    /// correlation this plan exists to push into the seek.
+    /// correlation this plan exists to push into the seek. <paramref name="outerReferences"/> holds the
+    /// names of the predicate that resolve to the outer query; a bare name there is an outer column,
+    /// not an inner one.
     /// </summary>
     public static CorrelatedExistsSeekPlan? TryPlan(
         TableDescriptor innerTable,
         NodeAst? innerWhere,
         string innerAlias,
-        IReadOnlySet<string> innerAliases)
+        IReadOnlySet<string> innerAliases,
+        IReadOnlySet<string>? outerReferences = null)
     {
+        outerReferences ??= EmptyNames;
+
         if (innerWhere is null)
             return null;
 
         Dictionary<string, NodeAst> equalityByColumn = new(StringComparer.OrdinalIgnoreCase);
-        CollectEqualityBindings(innerWhere, innerAlias, innerAliases, equalityByColumn);
+        CollectEqualityBindings(innerWhere, innerAlias, innerAliases, outerReferences, equalityByColumn);
 
         if (equalityByColumn.Count == 0)
             return null;
@@ -113,15 +120,16 @@ internal static class CorrelatedExistsSeekPlanner
         NodeAst node,
         string innerAlias,
         IReadOnlySet<string> innerAliases,
+        IReadOnlySet<string> outerReferences,
         Dictionary<string, NodeAst> equalityByColumn)
     {
         switch (node.nodeType)
         {
             case NodeType.ExprAnd:
                 if (node.leftAst is not null)
-                    CollectEqualityBindings(node.leftAst, innerAlias, innerAliases, equalityByColumn);
+                    CollectEqualityBindings(node.leftAst, innerAlias, innerAliases, outerReferences, equalityByColumn);
                 if (node.rightAst is not null)
-                    CollectEqualityBindings(node.rightAst, innerAlias, innerAliases, equalityByColumn);
+                    CollectEqualityBindings(node.rightAst, innerAlias, innerAliases, outerReferences, equalityByColumn);
                 return;
 
             case NodeType.ExprEquals:
@@ -129,10 +137,10 @@ internal static class CorrelatedExistsSeekPlanner
                 if (node.leftAst is null || node.rightAst is null)
                     return;
 
-                if (TryBind(node.leftAst, node.rightAst, innerAlias, innerAliases, equalityByColumn))
+                if (TryBind(node.leftAst, node.rightAst, innerAlias, innerAliases, outerReferences, equalityByColumn))
                     return;
 
-                TryBind(node.rightAst, node.leftAst, innerAlias, innerAliases, equalityByColumn);
+                TryBind(node.rightAst, node.leftAst, innerAlias, innerAliases, outerReferences, equalityByColumn);
                 return;
             }
 
@@ -146,12 +154,13 @@ internal static class CorrelatedExistsSeekPlanner
         NodeAst valueSide,
         string innerAlias,
         IReadOnlySet<string> innerAliases,
+        IReadOnlySet<string> outerReferences,
         Dictionary<string, NodeAst> equalityByColumn)
     {
-        if (!TryGetInnerColumnName(columnSide, innerAlias, innerAliases, out string columnName))
+        if (!TryGetInnerColumnName(columnSide, innerAlias, innerAliases, outerReferences, out string columnName))
             return false;
 
-        if (!IsOuterOrConstant(valueSide, innerAliases))
+        if (!IsOuterOrConstant(valueSide, innerAliases, outerReferences))
             return false;
 
         if (!equalityByColumn.ContainsKey(columnName))
@@ -162,13 +171,15 @@ internal static class CorrelatedExistsSeekPlanner
 
     /// <summary>
     /// True when <paramref name="node"/> names a column of the inner table — either unqualified
-    /// (an unqualified name in a subquery binds to the subquery's own source) or qualified with the
-    /// inner source's alias.
+    /// (an unqualified name in a subquery binds to the subquery's own source, unless the inner table
+    /// does not have it and it is in <paramref name="outerReferences"/>) or qualified with the inner
+    /// source's alias.
     /// </summary>
     private static bool TryGetInnerColumnName(
         NodeAst node,
         string innerAlias,
         IReadOnlySet<string> innerAliases,
+        IReadOnlySet<string> outerReferences,
         out string columnName)
     {
         columnName = "";
@@ -180,6 +191,9 @@ internal static class CorrelatedExistsSeekPlanner
 
         if (dot <= 0)
         {
+            if (outerReferences.Contains(identifier))
+                return false;
+
             columnName = identifier;
             return true;
         }
@@ -201,11 +215,11 @@ internal static class CorrelatedExistsSeekPlanner
 
     /// <summary>
     /// True when <paramref name="node"/> can be evaluated with only the outer row and the query
-    /// parameters in hand. Restricted to literals, placeholders, and identifiers qualified with an
-    /// alias the inner query does not own — anything richer risks reaching an inner column, which
-    /// has no value at the time the seek key is built.
+    /// parameters in hand. Restricted to literals, placeholders, identifiers qualified with an alias
+    /// the inner query does not own, and bare names that resolve to the outer query — anything richer
+    /// risks reaching an inner column, which has no value at the time the seek key is built.
     /// </summary>
-    private static bool IsOuterOrConstant(NodeAst node, IReadOnlySet<string> innerAliases)
+    private static bool IsOuterOrConstant(NodeAst node, IReadOnlySet<string> innerAliases, IReadOnlySet<string> outerReferences)
     {
         switch (node.nodeType)
         {
@@ -224,7 +238,10 @@ internal static class CorrelatedExistsSeekPlanner
                     return false;
 
                 int dot = identifier.IndexOf('.');
-                if (dot <= 0 || dot >= identifier.Length - 1)
+                if (dot <= 0)
+                    return outerReferences.Contains(identifier);
+
+                if (dot >= identifier.Length - 1)
                     return false;
 
                 return !innerAliases.Contains(identifier[..dot]);

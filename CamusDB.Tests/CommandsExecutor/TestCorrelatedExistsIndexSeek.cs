@@ -146,6 +146,29 @@ public sealed class TestCorrelatedExistsIndexSeek : SharedNodeBaseTest
         Assert.IsTrue(plan.Unique);
     }
 
+    /// <summary>
+    /// A bare name that resolves to the outer query keys the seek, as a qualified outer name does. Without
+    /// that knowledge the planner reads the bare name as an inner column, which the index does not have.
+    /// </summary>
+    [Test]
+    public async Task Planner_PinsPkPrefix_WhenABareNameResolvesToTheOuterQuery()
+    {
+        (string dbname, _, CommandExecutor executor) = await SetupEavAsync();
+        TableDescriptor values = await GetTable(executor, dbname, "item_values");
+
+        NodeAst where = InnerWhereOf("SELECT * FROM item_values v WHERE item_id = id");
+        HashSet<string> innerAliases = new(new[] { "v" }, System.StringComparer.Ordinal);
+
+        CorrelatedExistsSeekPlan? plan = CorrelatedExistsSeekPlanner.TryPlan(
+            values, where, "v", innerAliases, new HashSet<string>(new[] { "id" }, System.StringComparer.OrdinalIgnoreCase));
+
+        Assert.IsNotNull(plan, "a bare outer name must key the seek");
+        Assert.AreEqual("~pk", plan!.Index.Name);
+        Assert.AreEqual(1, plan.PrefixBindings.Count);
+
+        Assert.IsNull(CorrelatedExistsSeekPlanner.TryPlan(values, where, "v", innerAliases));
+    }
+
     [Test]
     public async Task Planner_PinsFullPk_WhenCorrelationAndTagAreBothEqualities()
     {

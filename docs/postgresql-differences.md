@@ -174,6 +174,19 @@ A negative `LIMIT` or `OFFSET` fails with `CADB0400` and the message of PostgreS
 | `SELECT id FROM d o WHERE EXISTS (SELECT COUNT(*) FROM d i WHERE i.id = o.id HAVING COUNT(*) > 5)` | `CADB0533` | No rows | The same reason. |
 | `SELECT id FROM d o WHERE EXISTS (SELECT 1 FROM d i WHERE i.id = o.id OFFSET 1)` | `CADB0533` | No rows | The same reason. |
 
+## Correlated subqueries
+
+A name in a subquery resolves to the nearest query that has it, as in PostgreSQL, so a bare name can read the outer query. CamusDB runs a correlated `EXISTS` in the `WHERE` of a `SELECT`. It refuses the other correlated forms with `CADB0533`, and the message names the outer name, so no answer is wrong. `r` has the rows `(1, v = 0)`, `(2, 2)` and `(3, 0)`, and `r2` has `(1, w = 10)` and `(2, 20)`.
+
+| Statement | CamusDB | PostgreSQL |
+|---|---|---|
+| `SELECT id, (SELECT w FROM r2 WHERE r2.id = r.id) FROM r` | `CADB0533` | `10`, `20` and NULL |
+| `SELECT id FROM r o WHERE id IN (SELECT o.id FROM r2)` | `CADB0533` | Every row |
+| `SELECT id FROM r WHERE v < ANY (SELECT w FROM r2 WHERE w = v + 10)` | `CADB0533` | `1` and `3` |
+| `SELECT id, EXISTS (SELECT 1 FROM r2 WHERE w = v + 10) FROM r` | `CADB0533` | `t`, `f` and `t` |
+| `DELETE FROM r WHERE EXISTS (SELECT 1 FROM r2 WHERE w = v + 10)` | `CADB0533` | Deletes rows 1 and 3 |
+| `SELECT id FROM r WHERE EXISTS (SELECT 1 FROM r2 i WHERE i.id = r.id AND i.w IN (SELECT 10))` | `CADB0533` | `1` |
+
 ## Aggregates
 
 | Statement | CamusDB | PostgreSQL | Why |

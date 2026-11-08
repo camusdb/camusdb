@@ -12,6 +12,11 @@ using CamusDB.Core.CommandsExecutor.Models.Queries;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 
+/// <summary>
+/// Builds the row that the predicate of a correlated EXISTS reads: the inner row, under its bare and its
+/// qualified keys, and the outer columns. An inner key wins over an outer key with the same text, because
+/// a name resolves to the inner query first.
+/// </summary>
 internal static class CorrelatedRowMerger
 {
     public static Dictionary<string, ColumnValue> MergeForEvaluation(
@@ -81,8 +86,10 @@ internal static class CorrelatedRowMerger
             if (value is null)
                 continue;
 
-            merged[columnName] = value;
-            merged[QueryRowNameResolver.FormatQualifiedKey(alias, columnName)] = value;
+            // A name resolves to the inner query first, so an outer column never replaces an inner
+            // key: a bare inner column, or an inner source with the alias of an outer one.
+            merged.TryAdd(columnName, value);
+            merged.TryAdd(QueryRowNameResolver.FormatQualifiedKey(alias, columnName), value);
         }
     }
 

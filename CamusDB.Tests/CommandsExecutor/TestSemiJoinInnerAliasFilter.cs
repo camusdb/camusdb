@@ -190,7 +190,7 @@ internal sealed class TestSemiJoinInnerAliasFilter : BaseTest
 
         CamusDBException? ex = Assert.ThrowsAsync<CamusDBException>(async () =>
             await f.Db.Rows("SELECT a0.c0 FROM t0 AS a0 WHERE a0.c0 IN (SELECT s4.c0 FROM t0 AS s4 WHERE s4.c3 >= a0.c3)"));
-        Assert.That(ex!.Code, Is.EqualTo(CamusDBErrorCodes.InvalidInput));
-        Assert.That(ex.Message, Does.Contain("Correlated"));
+        Assert.That(ex!.Code, Is.EqualTo(CamusDBErrorCodes.FeatureNotSupported));
+        Assert.That(ex.Message, Does.Contain("correlated IN or NOT IN subquery is not supported yet: it reads 'a0.c3'"));
     }
 }

@@ -11,63 +11,13 @@ using CamusDB.Core.SQLParser;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 
+/// <summary>
+/// Syntax-only helpers over the aliases of a subquery. A qualified name whose alias the subquery does not
+/// declare reads an outer source. The full rule, which also reads bare names, is
+/// <see cref="SubqueryScopeAnalyzer"/>.
+/// </summary>
 internal static class ExistsSubqueryAnalyzer
 {
-    public static bool IsCorrelated(SelectQuery innerQuery)
-    {
-        HashSet<string> innerAliases = CollectSourceAliases(innerQuery.Source);
-
-        if (innerQuery.Where is null)
-            return false;
-
-        HashSet<string> references = new(StringComparer.Ordinal);
-        QueryExpressionWalker.CollectColumnReferences(innerQuery.Where.Expression, references);
-
-        foreach (string reference in references)
-        {
-            if (ReferencesOuterScope(reference, innerAliases))
-                return true;
-        }
-
-        return false;
-    }
-
-    /// <summary>
-    /// True when an EXISTS body reads the outer row in any clause. An IN subquery uses
-    /// <see cref="IsCorrelated"/>, because it returns its select list and refuses an outer column there.
-    /// An EXISTS discards its select list, so <c>EXISTS (SELECT o.v FROM r i)</c> is valid.
-    /// </summary>
-    public static bool ExistsBodyReadsOuterRow(SelectQuery innerQuery)
-    {
-        if (IsCorrelated(innerQuery))
-            return true;
-
-        HashSet<string> innerAliases = CollectSourceAliases(innerQuery.Source);
-        HashSet<string> references = new(StringComparer.Ordinal);
-
-        foreach (ProjectionItem projection in innerQuery.Projections)
-            QueryExpressionWalker.CollectColumnReferences(projection.Expression, references);
-
-        if (innerQuery.GroupBy is not null)
-            foreach (NodeAst expression in innerQuery.GroupBy)
-                QueryExpressionWalker.CollectColumnReferences(expression, references);
-
-        if (innerQuery.OrderBy is not null)
-            foreach (OrderByItem item in innerQuery.OrderBy)
-                QueryExpressionWalker.CollectColumnReferences(item.Expression, references);
-
-        if (innerQuery.Having is not null)
-            QueryExpressionWalker.CollectColumnReferences(innerQuery.Having.Expression, references);
-
-        foreach (string reference in references)
-        {
-            if (ReferencesOuterScope(reference, innerAliases))
-                return true;
-        }
-
-        return false;
-    }
-
     public static bool ReferencesOuterScope(string identifier, IReadOnlySet<string> innerAliases)
     {
         if (TrySplitQualified(identifier, out string alias, out _))

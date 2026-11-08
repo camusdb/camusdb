@@ -29,8 +29,13 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 /// the WHERE of a SELECT: there the rewriter leaves <c>EXISTS</c> alone and
 /// <see cref="ExistsSubqueryPreparer"/> binds it against the outer sources. In every other position
 /// a correlated <c>EXISTS</c> is refused with <see cref="CamusDBErrorCodes.FeatureNotSupported"/>,
-/// because folding it as if it were uncorrelated would return wrong rows. A correlated <c>IN</c> is
-/// refused the same way by <see cref="InSubqueryAnalyzer"/>.</para>
+/// because folding it as if it were uncorrelated would return wrong rows. A correlated scalar,
+/// <c>IN</c> or quantified subquery is refused the same way, in every position.</para>
+///
+/// <para>A subquery is correlated when <see cref="SubqueryScopeAnalyzer"/> finds a name in it that
+/// resolves to the query around it: the SELECT whose clauses are rewritten, or the table of an UPDATE or
+/// DELETE. A name resolves to the nearest query first, so a column of the subquery's own FROM never
+/// makes it correlated, and a bare name that only the outer query has does.</para>
 ///
 /// <para>The walk visits every child slot of a node, not only the left and right ones: a CASE keeps
 /// its ELSE result in <c>extendedOne</c> and a BETWEEN keeps its bounds in <c>extendedOne</c> and
@@ -39,18 +44,25 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 internal sealed class SubqueryRewriter
 {
     private readonly ScalarSubqueryExecutor scalarExecutor;
+
     private readonly InSubqueryExecutor inExecutor;
+
     private readonly ExistsSubqueryExecutor existsExecutor;
+
+    private readonly SubqueryScopeAnalyzer scopeAnalyzer;
+
     private readonly SelectQueryCreator selectQueryCreator = new();
 
     public SubqueryRewriter(
         ScalarSubqueryExecutor scalarExecutor,
         InSubqueryExecutor inExecutor,
-        ExistsSubqueryExecutor existsExecutor)
+        ExistsSubqueryExecutor existsExecutor,
+        SubqueryScopeAnalyzer scopeAnalyzer)
     {
         this.scalarExecutor = scalarExecutor;
         this.inExecutor = inExecutor;
         this.existsExecutor = existsExecutor;
+        this.scopeAnalyzer = scopeAnalyzer;
     }
 
     /// <summary>
@@ -72,16 +84,22 @@ internal sealed class SubqueryRewriter
     /// list, HAVING and JOIN ON of a SELECT. A correlated <c>EXISTS</c> is refused with
     /// <see cref="CamusDBErrorCodes.FeatureNotSupported"/>, and <paramref name="position"/> names
     /// the clause in that message ("the select list", "the WHERE of a DELETE"). Returns the same node
-    /// reference when nothing was rewritten.
+    /// reference when nothing was rewritten. <paramref name="outerSource"/> is the table that a subquery
+    /// of the expression can read, such as the table of an UPDATE or DELETE, or null when there is none.
     /// </summary>
     public ValueTask<NodeAst> RewriteExpressionAsync(
         DatabaseDescriptor database,
         NodeAst expr,
         ExecuteSQLTicket ticket,
-        string position)
+        string position,
+        QuerySource? outerSource = null)
         => ContainsSubqueryToRewrite(expr, includeExists: true)
-            ? new ValueTask<NodeAst>(RewriteCoreAsync(database, expr, ticket, position))
+            ? new ValueTask<NodeAst>(RewriteCoreAsync(database, expr, ticket, position, ScopeOf(database, outerSource)))
             : new ValueTask<NodeAst>(expr);
+
+    /// <summary>The names a subquery of a clause over <paramref name="source"/> can read.</summary>
+    private OuterNameScope ScopeOf(DatabaseDescriptor database, QuerySource? source) =>
+        source is null ? OuterNameScope.None : scopeAnalyzer.DeferredScope(database, source);
 
     /// <summary>
     /// Rewrites the subqueries of one SELECT. Its WHERE keeps <c>EXISTS</c> for
@@ -97,23 +115,27 @@ internal sealed class SubqueryRewriter
         SelectQuery query,
         ExecuteSQLTicket ticket)
     {
+        // The FROM of this query is what its subqueries can read. It binds for its names only when a
+        // subquery has a name that its own FROM does not have.
+        OuterNameScope outer = scopeAnalyzer.DeferredScope(database, query.Source);
+
         BoundPredicate? where = query.Where;
         if (where is not null && ContainsSubqueryToRewrite(where.Expression, includeExists: false))
         {
-            NodeAst rewritten = await RewriteCoreAsync(database, where.Expression, ticket, position: null).ConfigureAwait(false);
+            NodeAst rewritten = await RewriteCoreAsync(database, where.Expression, ticket, position: null, outer).ConfigureAwait(false);
             where = new BoundPredicate(rewritten);
         }
 
-        IReadOnlyList<ProjectionItem> projections = await RewriteProjectionsAsync(database, query.Projections, ticket).ConfigureAwait(false);
+        IReadOnlyList<ProjectionItem> projections = await RewriteProjectionsAsync(database, query.Projections, ticket, outer).ConfigureAwait(false);
 
         BoundPredicate? having = query.Having;
         if (having is not null && ContainsSubqueryToRewrite(having.Expression, includeExists: true))
         {
-            NodeAst rewritten = await RewriteCoreAsync(database, having.Expression, ticket, "HAVING").ConfigureAwait(false);
+            NodeAst rewritten = await RewriteCoreAsync(database, having.Expression, ticket, "HAVING", outer).ConfigureAwait(false);
             having = new BoundPredicate(rewritten);
         }
 
-        QuerySource source = await RewriteJoinPredicatesAsync(database, query.Source, ticket).ConfigureAwait(false);
+        QuerySource source = await RewriteJoinPredicatesAsync(database, query.Source, ticket, outer).ConfigureAwait(false);
 
         if (ReferenceEquals(where, query.Where)
             && ReferenceEquals(projections, query.Projections)
@@ -134,7 +156,8 @@ internal sealed class SubqueryRewriter
     private async ValueTask<IReadOnlyList<ProjectionItem>> RewriteProjectionsAsync(
         DatabaseDescriptor database,
         IReadOnlyList<ProjectionItem> projections,
-        ExecuteSQLTicket ticket)
+        ExecuteSQLTicket ticket,
+        OuterNameScope outer)
     {
         List<ProjectionItem>? rewritten = null;
 
@@ -148,7 +171,7 @@ internal sealed class SubqueryRewriter
                 continue;
             }
 
-            NodeAst expression = await RewriteCoreAsync(database, item.Expression, ticket, "the select list").ConfigureAwait(false);
+            NodeAst expression = await RewriteCoreAsync(database, item.Expression, ticket, "the select list", outer).ConfigureAwait(false);
 
             if (rewritten is null)
             {
@@ -171,14 +194,19 @@ internal sealed class SubqueryRewriter
     private async ValueTask<QuerySource> RewriteJoinPredicatesAsync(
         DatabaseDescriptor database,
         QuerySource source,
-        ExecuteSQLTicket ticket)
+        ExecuteSQLTicket ticket,
+        OuterNameScope outer)
     {
         if (source is not JoinSource join)
             return source;
 
-        QuerySource left = await RewriteJoinPredicatesAsync(database, join.Left, ticket).ConfigureAwait(false);
-        QuerySource right = await RewriteJoinPredicatesAsync(database, join.Right, ticket).ConfigureAwait(false);
-        NodeAst on = await RewriteExpressionAsync(database, join.OnPredicate, ticket, "a JOIN ON clause").ConfigureAwait(false);
+        QuerySource left = await RewriteJoinPredicatesAsync(database, join.Left, ticket, outer).ConfigureAwait(false);
+
+        QuerySource right = await RewriteJoinPredicatesAsync(database, join.Right, ticket, outer).ConfigureAwait(false);
+
+        NodeAst on = ContainsSubqueryToRewrite(join.OnPredicate, includeExists: true)
+            ? await RewriteCoreAsync(database, join.OnPredicate, ticket, "a JOIN ON clause", outer).ConfigureAwait(false)
+            : join.OnPredicate;
 
         if (ReferenceEquals(left, join.Left) && ReferenceEquals(right, join.Right) && ReferenceEquals(on, join.OnPredicate))
             return join;
@@ -189,18 +217,20 @@ internal sealed class SubqueryRewriter
     /// <summary>
     /// The recursive walk. <paramref name="position"/> is null for the WHERE of a SELECT, where an
     /// <c>EXISTS</c> is left for the preparer; otherwise it names the clause, an uncorrelated
-    /// <c>EXISTS</c> is folded and a correlated one is refused.
+    /// <c>EXISTS</c> is folded and a correlated one is refused. <paramref name="outer"/> holds the
+    /// names that a subquery of the expression can read.
     /// </summary>
     private async Task<NodeAst> RewriteCoreAsync(
         DatabaseDescriptor database,
         NodeAst expr,
         ExecuteSQLTicket ticket,
-        string? position)
+        string? position,
+        OuterNameScope outer)
     {
         // An async frame is large, and a deep predicate would overflow the stack; continue on a
         // fresh thread-pool stack instead. See StatementDepthGuard.HasStackHeadroom.
         if (!StatementDepthGuard.HasStackHeadroom())
-            return await Task.Run(() => RewriteCoreAsync(database, expr, ticket, position)).ConfigureAwait(false);
+            return await Task.Run(() => RewriteCoreAsync(database, expr, ticket, position, outer)).ConfigureAwait(false);
 
         switch (expr.nodeType)
         {
@@ -208,6 +238,8 @@ internal sealed class SubqueryRewriter
             {
                 if (expr.leftAst is null)
                     throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Invalid scalar subquery expression");
+
+                await EnsureUncorrelatedAsync(database, expr.leftAst, outer, "A correlated scalar subquery").ConfigureAwait(false);
 
                 SubqueryOutputType outputType = new();
 
@@ -220,52 +252,52 @@ internal sealed class SubqueryRewriter
             }
 
             case NodeType.ExprInSubquery:
-                return await RewriteInSubqueryAsync(database, expr, ticket, position, negated: false).ConfigureAwait(false);
+                return await RewriteInSubqueryAsync(database, expr, ticket, position, outer, negated: false).ConfigureAwait(false);
 
             case NodeType.ExprNotInSubquery:
-                return await RewriteInSubqueryAsync(database, expr, ticket, position, negated: true).ConfigureAwait(false);
+                return await RewriteInSubqueryAsync(database, expr, ticket, position, outer, negated: true).ConfigureAwait(false);
 
             case NodeType.ExprQuantifiedComparison when expr.rightAst?.nodeType == NodeType.ExprScalarSubquery:
-                return await RewriteQuantifiedSubqueryAsync(database, expr, ticket, position).ConfigureAwait(false);
+                return await RewriteQuantifiedSubqueryAsync(database, expr, ticket, position, outer).ConfigureAwait(false);
 
             case NodeType.ExprExistsSubquery when position is not null:
-                return await RewriteExistsAsync(database, expr, ticket, position).ConfigureAwait(false);
+                return await RewriteExistsAsync(database, expr, ticket, position, outer).ConfigureAwait(false);
         }
 
         NodeAst? left = expr.leftAst is not null
-            ? await RewriteCoreAsync(database, expr.leftAst, ticket, position).ConfigureAwait(false)
+            ? await RewriteCoreAsync(database, expr.leftAst, ticket, position, outer).ConfigureAwait(false)
             : null;
 
         NodeAst? right = expr.rightAst is not null
-            ? await RewriteCoreAsync(database, expr.rightAst, ticket, position).ConfigureAwait(false)
+            ? await RewriteCoreAsync(database, expr.rightAst, ticket, position, outer).ConfigureAwait(false)
             : null;
 
         NodeAst? one = expr.extendedOne is not null
-            ? await RewriteCoreAsync(database, expr.extendedOne, ticket, position).ConfigureAwait(false)
+            ? await RewriteCoreAsync(database, expr.extendedOne, ticket, position, outer).ConfigureAwait(false)
             : null;
 
         NodeAst? two = expr.extendedTwo is not null
-            ? await RewriteCoreAsync(database, expr.extendedTwo, ticket, position).ConfigureAwait(false)
+            ? await RewriteCoreAsync(database, expr.extendedTwo, ticket, position, outer).ConfigureAwait(false)
             : null;
 
         NodeAst? three = expr.extendedThree is not null
-            ? await RewriteCoreAsync(database, expr.extendedThree, ticket, position).ConfigureAwait(false)
+            ? await RewriteCoreAsync(database, expr.extendedThree, ticket, position, outer).ConfigureAwait(false)
             : null;
 
         NodeAst? four = expr.extendedFour is not null
-            ? await RewriteCoreAsync(database, expr.extendedFour, ticket, position).ConfigureAwait(false)
+            ? await RewriteCoreAsync(database, expr.extendedFour, ticket, position, outer).ConfigureAwait(false)
             : null;
 
         NodeAst? five = expr.extendedFive is not null
-            ? await RewriteCoreAsync(database, expr.extendedFive, ticket, position).ConfigureAwait(false)
+            ? await RewriteCoreAsync(database, expr.extendedFive, ticket, position, outer).ConfigureAwait(false)
             : null;
 
         NodeAst? six = expr.extendedSix is not null
-            ? await RewriteCoreAsync(database, expr.extendedSix, ticket, position).ConfigureAwait(false)
+            ? await RewriteCoreAsync(database, expr.extendedSix, ticket, position, outer).ConfigureAwait(false)
             : null;
 
         NodeAst? seven = expr.extendedSeven is not null
-            ? await RewriteCoreAsync(database, expr.extendedSeven, ticket, position).ConfigureAwait(false)
+            ? await RewriteCoreAsync(database, expr.extendedSeven, ticket, position, outer).ConfigureAwait(false)
             : null;
 
         if (ReferenceEquals(left, expr.leftAst)
@@ -293,14 +325,15 @@ internal sealed class SubqueryRewriter
         DatabaseDescriptor database,
         NodeAst expr,
         ExecuteSQLTicket ticket,
-        string position)
+        string position,
+        OuterNameScope outer)
     {
         if (expr.leftAst is null)
             throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Invalid EXISTS subquery expression");
 
         SelectQuery innerQuery = selectQueryCreator.CreateSelectQuery(expr.leftAst);
 
-        if (ExistsSubqueryAnalyzer.ExistsBodyReadsOuterRow(innerQuery))
+        if ((await scopeAnalyzer.FindOuterReferencesAsync(database, innerQuery, outer).ConfigureAwait(false)).Count > 0)
         {
             throw new CamusDBException(
                 CamusDBErrorCodes.FeatureNotSupported,
@@ -318,6 +351,7 @@ internal sealed class SubqueryRewriter
         NodeAst expr,
         ExecuteSQLTicket ticket,
         string? position,
+        OuterNameScope outer,
         bool negated)
     {
         if (expr.leftAst is null || expr.rightAst is null)
@@ -327,11 +361,14 @@ internal sealed class SubqueryRewriter
                 negated ? "Invalid NOT IN subquery expression" : "Invalid IN subquery expression");
         }
 
-        InSubqueryAnalyzer.EnsureUncorrelated(expr.rightAst, selectQueryCreator);
+        if (expr.rightAst.nodeType != NodeType.Select)
+            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "IN subquery must be a SELECT statement");
+
+        await EnsureUncorrelatedAsync(database, expr.rightAst, outer, "A correlated IN or NOT IN subquery").ConfigureAwait(false);
 
         // The tested value is rewritten with the rule of its enclosing clause, so an EXISTS on the left
         // of an IN keeps the treatment of its position.
-        NodeAst lhs = await RewriteCoreAsync(database, expr.leftAst, ticket, position).ConfigureAwait(false);
+        NodeAst lhs = await RewriteCoreAsync(database, expr.leftAst, ticket, position, outer).ConfigureAwait(false);
 
         await using InSubqueryMaterialization materialization = await inExecutor.MaterializeAsync(
             database,
@@ -355,13 +392,14 @@ internal sealed class SubqueryRewriter
     ///
     /// <para>The subquery must be uncorrelated, for the reason <c>IN</c> requires it: it is executed
     /// once, before the outer scan starts, so a reference to an outer column has no value to read.
-    /// The same analyzer reports it, so both forms reject the same statements.</para>
+    /// The same check reports it, so both forms reject the same statements.</para>
     /// </summary>
     private async Task<NodeAst> RewriteQuantifiedSubqueryAsync(
         DatabaseDescriptor database,
         NodeAst expr,
         ExecuteSQLTicket ticket,
-        string? position)
+        string? position,
+        OuterNameScope outer)
     {
         NodeAst? select = expr.rightAst?.leftAst;
 
@@ -372,9 +410,12 @@ internal sealed class SubqueryRewriter
                 "Invalid quantified comparison subquery expression");
         }
 
-        InSubqueryAnalyzer.EnsureUncorrelated(select, selectQueryCreator);
+        if (select.nodeType != NodeType.Select)
+            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "IN subquery must be a SELECT statement");
 
-        NodeAst lhs = await RewriteCoreAsync(database, expr.leftAst, ticket, position).ConfigureAwait(false);
+        await EnsureUncorrelatedAsync(database, select, outer, "A correlated subquery in an ANY, SOME or ALL comparison").ConfigureAwait(false);
+
+        NodeAst lhs = await RewriteCoreAsync(database, expr.leftAst, ticket, position, outer).ConfigureAwait(false);
 
         await using InSubqueryMaterialization materialization = await inExecutor.MaterializeAsync(
             database,
@@ -399,5 +440,29 @@ internal sealed class SubqueryRewriter
             expr.yytext,
             expr.extendedSix,
             expr.extendedSeven);
+    }
+
+    /// <summary>
+    /// Refuses a subquery that reads the query around it, because this stage runs it once for the
+    /// whole statement and an outer column has no value then. The message names the first outer name,
+    /// so the reader can see why a name that the subquery does not have is not an unknown column.
+    /// </summary>
+    private async ValueTask EnsureUncorrelatedAsync(
+        DatabaseDescriptor database,
+        NodeAst select,
+        OuterNameScope outer,
+        string form)
+    {
+        SelectQuery innerQuery = selectQueryCreator.CreateSelectQuery(select);
+        IReadOnlyList<NodeAst> outerReferences = await scopeAnalyzer
+            .FindOuterReferencesAsync(database, innerQuery, outer)
+            .ConfigureAwait(false);
+
+        if (outerReferences.Count > 0)
+        {
+            throw new CamusDBException(
+                CamusDBErrorCodes.FeatureNotSupported,
+                $"{form} is not supported yet: it reads '{outerReferences[0].yytext}' of the outer query");
+        }
     }
 }
