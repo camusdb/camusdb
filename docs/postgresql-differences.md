@@ -166,17 +166,11 @@ A negative `LIMIT` or `OFFSET` fails with `CADB0400` and the message of PostgreS
 
 ## EXISTS
 
-`EXISTS` does not evaluate a select list, `GROUP BY`, `DISTINCT` or `ORDER BY`, as in PostgreSQL. An unknown name or a known type mistake in those clauses still fails. An aggregate, `HAVING`, `OFFSET` and `LIMIT 0` can change the number of rows, so they keep their meaning. A correlated `EXISTS` reads the outer row, and it runs only its `FROM` and `WHERE` for each outer row, so these forms differ.
-
-| Statement | CamusDB | PostgreSQL | Why |
-|---|---|---|---|
-| `SELECT id FROM d o WHERE EXISTS (SELECT COUNT(*) FROM d i WHERE i.id = o.id + 100)` | `CADB0533` | Every row | The aggregate needs the whole body to run for each outer row. An error is better than a wrong answer. |
-| `SELECT id FROM d o WHERE EXISTS (SELECT COUNT(*) FROM d i WHERE i.id = o.id HAVING COUNT(*) > 5)` | `CADB0533` | No rows | The same reason. |
-| `SELECT id FROM d o WHERE EXISTS (SELECT 1 FROM d i WHERE i.id = o.id OFFSET 1)` | `CADB0533` | No rows | The same reason. |
+`EXISTS` does not evaluate a select list, `GROUP BY`, `DISTINCT` or `ORDER BY`, as in PostgreSQL. An unknown name or a known type mistake in those clauses still fails. An aggregate, `HAVING`, `OFFSET` and `LIMIT 0` can change the number of rows, so they keep their meaning. A correlated `EXISTS` runs its whole body for each outer row, so these clauses keep their meaning there too. No difference from PostgreSQL is known here.
 
 ## Correlated subqueries
 
-A name in a subquery resolves to the nearest query that has it, as in PostgreSQL, so a bare name can read the outer query. CamusDB runs a correlated `EXISTS` in the `WHERE` of a `SELECT`. It refuses the other correlated forms with `CADB0533`, and the message names the outer name, so no answer is wrong. `r` has the rows `(1, v = 0)`, `(2, 2)` and `(3, 0)`, and `r2` has `(1, w = 10)` and `(2, 20)`.
+A name in a subquery resolves to the nearest query that has it, as in PostgreSQL, so a bare name can read the outer query. CamusDB runs a correlated `EXISTS` in the `WHERE` of a `SELECT`, an `UPDATE` or a `DELETE`, with any body. It refuses the other correlated forms with `CADB0533`, and the message names the outer name, so no answer is wrong. `r` has the rows `(1, v = 0)`, `(2, 2)` and `(3, 0)`, and `r2` has `(1, w = 10)` and `(2, 20)`.
 
 | Statement | CamusDB | PostgreSQL |
 |---|---|---|
@@ -184,8 +178,7 @@ A name in a subquery resolves to the nearest query that has it, as in PostgreSQL
 | `SELECT id FROM r o WHERE id IN (SELECT o.id FROM r2)` | `CADB0533` | Every row |
 | `SELECT id FROM r WHERE v < ANY (SELECT w FROM r2 WHERE w = v + 10)` | `CADB0533` | `1` and `3` |
 | `SELECT id, EXISTS (SELECT 1 FROM r2 WHERE w = v + 10) FROM r` | `CADB0533` | `t`, `f` and `t` |
-| `DELETE FROM r WHERE EXISTS (SELECT 1 FROM r2 WHERE w = v + 10)` | `CADB0533` | Deletes rows 1 and 3 |
-| `SELECT id FROM r WHERE EXISTS (SELECT 1 FROM r2 i WHERE i.id = r.id AND i.w IN (SELECT 10))` | `CADB0533` | `1` |
+| `UPDATE r SET v = CASE WHEN EXISTS (SELECT 1 FROM r2 WHERE w = v + 10) THEN 1 ELSE 0 END WHERE id > 0` | `CADB0533` | Sets `v` to 1, 0 and 1 |
 
 ## Aggregates
 

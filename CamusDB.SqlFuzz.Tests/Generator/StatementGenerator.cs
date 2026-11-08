@@ -693,7 +693,7 @@ internal sealed class StatementGenerator
 
     /// <summary>
     /// A WHERE for UPDATE or DELETE. About one in twenty is <c>WHERE TRUE</c>, the full-table form. Its
-    /// subqueries are uncorrelated: an UPDATE or DELETE has no per-row EXISTS stage.
+    /// subqueries are uncorrelated: the generator does not make a correlated EXISTS for a write yet.
     /// </summary>
     public Expr DmlWhere(ExprScope scope) =>
         random.Chance(0.05) ? new LiteralExpr(FuzzValue.Of(true)) : expressions.Predicate(scope.ForUncorrelatedSubqueries());

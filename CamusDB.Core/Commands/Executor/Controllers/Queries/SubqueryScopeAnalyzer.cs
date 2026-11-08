@@ -111,8 +111,10 @@ internal sealed class OuterNameScope
 /// <para>A name that no level has and the outer query does not have either is not an outer reference.
 /// The bind of the subquery reports it, with the error that it always gave.</para>
 ///
-/// <para>The analyzer does not enter a derived table of a subquery, so an outer reference inside a
-/// derived table is not found. The bind of that derived table reports it as an unknown name.</para>
+/// <para>A derived table in the FROM of a level, and each operand of a set operation there, is a level
+/// too. Its scope is the levels around the query whose FROM holds it, not that query itself: a derived
+/// table cannot read the other items of its own FROM (that needs LATERAL), but it can read the outer
+/// query, as in PostgreSQL. A view is a table here, because its body is not part of the statement.</para>
 /// </summary>
 internal sealed class SubqueryScopeAnalyzer
 {
@@ -184,18 +186,23 @@ internal sealed class SubqueryScopeAnalyzer
     }
 
     /// <summary>
-    /// Returns the identifier nodes of <paramref name="subquery"/>, in any clause and in any subquery
-    /// inside it, that resolve to <paramref name="outer"/>. An empty list means that the subquery is not
-    /// correlated. The walk keeps its own stack, so a deep expression does not grow the call stack.
+    /// Returns the identifier nodes of the subquery <paramref name="select"/>, in any clause and in any
+    /// subquery inside it, that resolve to <paramref name="outer"/>. An empty list means that the subquery
+    /// is not correlated. The walk keeps its own stack, so a deep expression does not grow the call stack.
+    ///
+    /// <para>Each level is created without the window rewrite, which moves the window inputs into a derived
+    /// table that this walk does not enter. So an outer name in a window input is found, and each node in
+    /// the result is a node of <paramref name="select"/> itself: a caller can replace it in a copy of that
+    /// tree, see <see cref="NodeAstWalk.Replace"/>.</para>
     /// </summary>
     public async ValueTask<IReadOnlyList<NodeAst>> FindOuterReferencesAsync(
         DatabaseDescriptor database,
-        SelectQuery subquery,
+        NodeAst select,
         OuterNameScope outer)
     {
         List<NodeAst>? found = null;
         Stack<Level> levels = new();
-        levels.Push(new Level(subquery, parent: null));
+        levels.Push(new Level(selectQueryCreator.CreateSelectQuery(select, rewriteWindows: false), parent: null));
 
         List<(NodeAst Node, bool OutputNameIsLocal)> identifiers = [];
         List<NodeAst> nested = [];
@@ -223,11 +230,83 @@ internal sealed class SubqueryScopeAnalyzer
                     (found ??= []).Add(node);
             }
 
-            foreach (NodeAst select in nested)
-                levels.Push(new Level(selectQueryCreator.CreateSelectQuery(select), level));
+            foreach (NodeAst nestedSelect in nested)
+                PushLevels(levels, selectQueryCreator.CreateSelectQuery(nestedSelect, rewriteWindows: false), level);
+
+            PushDerivedLevels(levels, level);
         }
 
         return found ?? (IReadOnlyList<NodeAst>)[];
+    }
+
+    /// <summary>
+    /// Pushes the level of <paramref name="query"/>, or of each operand when the query is a set operation,
+    /// which declares no names of its own.
+    /// </summary>
+    private static void PushLevels(Stack<Level> levels, SelectQuery query, Level? parent)
+    {
+        Stack<SelectQuery> pending = new();
+        pending.Push(query);
+
+        while (pending.TryPop(out SelectQuery? current))
+        {
+            if (current.Source is SetOperationSource setOperation)
+            {
+                pending.Push(setOperation.Left);
+                pending.Push(setOperation.Right);
+                continue;
+            }
+
+            if (current.Source is DerivedTableSource { SetOperation: { } wrapped } && IsSetOperationShell(current))
+            {
+                pending.Push(wrapped.Left);
+                pending.Push(wrapped.Right);
+                continue;
+            }
+
+            if (current.Source is TableFunctionSource)
+                continue;
+
+            levels.Push(new Level(current, parent));
+        }
+    }
+
+    /// <summary>
+    /// True for the query that query creation makes around a set operation: it selects every column of the
+    /// operation and adds nothing that names a column.
+    /// </summary>
+    private static bool IsSetOperationShell(SelectQuery query) =>
+        query.Where is null
+        && query.GroupBy is null
+        && query.Having is null
+        && query.Projections.Count == 1
+        && query.Projections[0].Expression.nodeType == NodeType.ExprAllFields;
+
+    /// <summary>
+    /// Pushes a level for each derived table in the FROM of <paramref name="level"/>. Its scope is the
+    /// parent of <paramref name="level"/>, see the class summary.
+    /// </summary>
+    private static void PushDerivedLevels(Stack<Level> levels, Level level)
+    {
+        Stack<QuerySource> sources = new();
+        sources.Push(level.Query.Source);
+
+        while (sources.TryPop(out QuerySource? source))
+        {
+            switch (source)
+            {
+                case JoinSource join:
+                    sources.Push(join.Left);
+                    sources.Push(join.Right);
+                    break;
+
+                // A table function, such as a series or the one row of a SELECT with no FROM, is a
+                // derived table with no FROM of its own and no name to read.
+                case DerivedTableSource { Function: null } derived:
+                    PushLevels(levels, derived.Query, level.Parent);
+                    break;
+            }
+        }
     }
 
     /// <summary>

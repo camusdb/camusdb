@@ -441,7 +441,8 @@ public sealed class RowUpdater
             locateColumns: locateColumns,
             exclusivePredicateLocks: true,
             probe: ticket.Probe,
-            retryableAborts: state.RetryableAborts
+            retryableAborts: state.RetryableAborts,
+            existsSubqueries: ticket.ExistsSubqueries
         );
 
         // The locate scan reads at the statement timestamp, and the snapshot closes before the write

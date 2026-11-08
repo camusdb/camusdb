@@ -6,6 +6,7 @@
  * file that was distributed with this source code.
  */
 
+using CamusDB.Core.CommandsExecutor.Controllers.Queries;
 using CamusDB.Core.SQLParser;
 using CamusDB.Core.Transactions;
 
@@ -38,6 +39,13 @@ public sealed class UpdateTicket
     /// </summary>
     public Diagnostics.StatementProbe? Probe { get; }
 
+    /// <summary>
+    /// The correlated EXISTS subqueries of <see cref="Where"/>, prepared against the target table, or
+    /// null when it has none. The locate scan carries it on its query ticket, so the filter can evaluate
+    /// each one for each row of the table.
+    /// </summary>
+    public ExistsSubqueryRegistry? ExistsSubqueries { get; }
+
     public UpdateTicket(
         KvTransaction txnState,
         string databaseName,
@@ -48,7 +56,8 @@ public sealed class UpdateTicket
         List<QueryFilter>? filters,
         Dictionary<string, ColumnValue>? parameters,
         NodeAst? limit = null,
-        Diagnostics.StatementProbe? probe = null
+        Diagnostics.StatementProbe? probe = null,
+        ExistsSubqueryRegistry? existsSubqueries = null
     )
     {
         TxnState = txnState;
@@ -61,5 +70,6 @@ public sealed class UpdateTicket
         Parameters = parameters;
         Limit = limit;
         Probe = probe;
+        ExistsSubqueries = existsSubqueries;
     }
 }

@@ -29,7 +29,8 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// <c>CADB0404</c>, a name in both scopes failed as ambiguous, and <c>IN (SELECT o.id FROM r2)</c> could
 /// read <c>o.id</c> as the inner <c>id</c>. Each row result was measured on PostgreSQL 16.11 with the same
 /// rows. A correlated scalar, <c>IN</c> or quantified subquery, and a correlated EXISTS outside the WHERE
-/// of a SELECT, are refused with <c>CADB0533</c>: PostgreSQL runs them, and CamusDB does not run them yet.
+/// of a SELECT, an UPDATE or a DELETE, are refused with <c>CADB0533</c>: PostgreSQL runs them, and CamusDB
+/// does not run them yet.
 /// </summary>
 [TestFixture]
 [NonParallelizable]
@@ -147,7 +148,7 @@ internal sealed class TestSubqueryNameScope : BaseTest
     [TestCase("SELECT id, (SELECT w FROM r2 WHERE r2.id = r.id) FROM r", "A correlated scalar subquery is not supported yet: it reads 'r.id' of the outer query")]
     [TestCase("SELECT id FROM r WHERE (SELECT v) = 0", "A correlated scalar subquery is not supported yet: it reads 'v' of the outer query")]
     [TestCase("SELECT id FROM r WHERE v < ANY (SELECT w FROM r2 WHERE w = v + 10)", "A correlated subquery in an ANY, SOME or ALL comparison is not supported yet: it reads 'v' of the outer query")]
-    [TestCase("SELECT id, EXISTS (SELECT 1 FROM r2 WHERE w = v + 10) FROM r", "A correlated EXISTS subquery is not supported in the select list; it is supported in the WHERE clause of a SELECT")]
+    [TestCase("SELECT id, EXISTS (SELECT 1 FROM r2 WHERE w = v + 10) FROM r", "A correlated EXISTS subquery is not supported in the select list; it is supported in the WHERE clause of a SELECT, an UPDATE or a DELETE")]
     public async Task ACorrelatedFormThatDoesNotRunYet_IsRefused_AndNamesTheOuterName(string sql, string message)
     {
         (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateTables();
@@ -156,7 +157,7 @@ internal sealed class TestSubqueryNameScope : BaseTest
     }
 
     /// <summary>A subquery of an UPDATE or a DELETE reads the target table by its bare names too.</summary>
-    [TestCase("DELETE FROM r WHERE EXISTS (SELECT 1 FROM r2 WHERE w = v + 10)", "A correlated EXISTS subquery is not supported in the WHERE of a DELETE; it is supported in the WHERE clause of a SELECT")]
+    [TestCase("UPDATE r SET v = CASE WHEN EXISTS (SELECT 1 FROM r2 WHERE w = v + 10) THEN 1 ELSE 0 END WHERE id > 0", "A correlated EXISTS subquery is not supported in a SET value of an UPDATE; it is supported in the WHERE clause of a SELECT, an UPDATE or a DELETE")]
     [TestCase("UPDATE r SET v = (SELECT w FROM r2 WHERE r2.id = r.id) WHERE id = 1", "A correlated scalar subquery is not supported yet: it reads 'r.id' of the outer query")]
     [TestCase("UPDATE r SET v = 5 WHERE id IN (SELECT id FROM r2 WHERE w = v + 10)", "A correlated IN or NOT IN subquery is not supported yet: it reads 'v' of the outer query")]
     public async Task ACorrelatedSubqueryOfAWrite_IsRefused_AndWritesNothing(string sql, string message)
@@ -176,20 +177,17 @@ internal sealed class TestSubqueryNameScope : BaseTest
         Assert.AreEqual("written", await Write(database, executor, dbname, "UPDATE r SET v = (SELECT w FROM r2 WHERE id = 2) WHERE id IN (SELECT id FROM r2)"));
     }
     /// <summary>
-    /// The correlated evaluator reads the WHERE of the body row by row, and it cannot run a subquery in it.
-    /// Before, each form failed with the internal error <c>CADB0099</c>. PostgreSQL 16.11 gives
-    /// <c>1 ; 3</c>, <c>1</c> and <c>1</c>.
+    /// A correlated EXISTS with a subquery in the WHERE of its body runs the body for each outer row. The
+    /// first form reads the bare outer name <c>v</c> inside the nested subquery. Before, each form failed
+    /// with the internal error <c>CADB0099</c>. The rows were measured on PostgreSQL 16.11.
     /// </summary>
-    [TestCase("SELECT id FROM r WHERE EXISTS (SELECT 1 FROM r2 WHERE w IN (SELECT w FROM r2 WHERE w = v + 10))")]
-    [TestCase("SELECT id FROM r WHERE EXISTS (SELECT 1 FROM r2 i WHERE i.id = r.id AND i.w IN (SELECT 10))")]
-    [TestCase("SELECT id FROM r WHERE EXISTS (SELECT 1 FROM r2 i WHERE i.id = r.id AND i.w = (SELECT 10))")]
-    public async Task ACorrelatedExistsWithASubqueryInItsWhere_IsRefused(string sql)
+    [TestCase("SELECT id FROM r WHERE EXISTS (SELECT 1 FROM r2 WHERE w IN (SELECT w FROM r2 WHERE w = v + 10))", "1 ; 3")]
+    [TestCase("SELECT id FROM r WHERE EXISTS (SELECT 1 FROM r2 i WHERE i.id = r.id AND i.w IN (SELECT 10))", "1")]
+    [TestCase("SELECT id FROM r WHERE EXISTS (SELECT 1 FROM r2 i WHERE i.id = r.id AND i.w = (SELECT 10))", "1")]
+    public async Task ACorrelatedExistsWithASubqueryInItsWhere_Runs(string sql, string expected)
     {
         (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateTables();
 
-        Assert.AreEqual(
-            CamusDBErrorCodes.FeatureNotSupported + ": A correlated EXISTS subquery with a subquery in its WHERE is not supported yet",
-            await Query(database, executor, dbname, sql),
-            sql);
+        Assert.AreEqual(expected, await Query(database, executor, dbname, sql), sql);
     }
 }

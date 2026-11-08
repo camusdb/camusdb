@@ -18,7 +18,8 @@ using Kommander.Time;
 namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 
 /// <summary>
-/// Executes uncorrelated and correlated EXISTS subqueries.
+/// Executes uncorrelated and correlated EXISTS subqueries. A correlated one is prepared by
+/// <see cref="ExistsSubqueryPreparer"/> in one of two forms, see <see cref="PreparedExistsSubquery"/>.
 /// </summary>
 internal sealed class ExistsSubqueryExecutor(SubqueryQueryExecutor? queryExecutor = null)
 {
@@ -47,7 +48,12 @@ internal sealed class ExistsSubqueryExecutor(SubqueryQueryExecutor? queryExecuto
         return false;
     }
 
-    public async Task<bool> ExecuteCorrelatedAsync(
+    /// <summary>
+    /// True when the correlated body of <paramref name="prepared"/> returns a row for
+    /// <paramref name="outerRow"/>. The fast form reads the inner table here; every other body runs
+    /// through the whole pipeline with the outer values as hidden parameters.
+    /// </summary>
+    public Task<bool> ExecuteCorrelatedAsync(
         DatabaseDescriptor database,
         PreparedExistsSubquery prepared,
         IReadOnlyDictionary<string, ColumnValue> outerRow,
@@ -55,13 +61,36 @@ internal sealed class ExistsSubqueryExecutor(SubqueryQueryExecutor? queryExecuto
         Dictionary<string, ColumnValue>? parameters,
         CancellationToken cancellationToken = default)
     {
-        if (prepared.InnerBound.Sources.Count != 1)
-        {
-            throw new CamusDBException(
-                CamusDBErrorCodes.InvalidInput,
-                "A correlated EXISTS subquery must read one table; a join, a derived table or a subquery with no FROM clause is not supported yet");
-        }
+        if (prepared.Scan is { } scan)
+            return ScanAsync(scan, outerRow, txnState, parameters, cancellationToken);
 
+        return RunBodyAsync(database, prepared.Body!, outerRow, txnState, parameters, cancellationToken);
+    }
+
+    /// <summary>Runs the body for one outer row and stops at its first row.</summary>
+    private static async Task<bool> RunBodyAsync(
+        DatabaseDescriptor database,
+        CorrelatedSubqueryBody body,
+        IReadOnlyDictionary<string, ColumnValue> outerRow,
+        KvTransaction txnState,
+        Dictionary<string, ColumnValue>? parameters,
+        CancellationToken cancellationToken)
+    {
+        IAsyncEnumerable<QueryResultRow> rows = body.RunAsync(database, outerRow, txnState, parameters, cancellationToken);
+
+        await foreach (QueryResultRow _ in rows.WithCancellation(cancellationToken).ConfigureAwait(false))
+            return true;
+
+        return false;
+    }
+
+    private static async Task<bool> ScanAsync(
+        CorrelatedExistsScan prepared,
+        IReadOnlyDictionary<string, ColumnValue> outerRow,
+        KvTransaction txnState,
+        Dictionary<string, ColumnValue>? parameters,
+        CancellationToken cancellationToken)
+    {
         BoundTableSource innerSource = prepared.InnerBound.Sources[0];
         TableDescriptor innerTable = innerSource.Table;
         HLCTimestamp txId = txnState.TransactionId;
@@ -149,7 +178,7 @@ internal sealed class ExistsSubqueryExecutor(SubqueryQueryExecutor? queryExecuto
     /// </summary>
     private static async Task<(bool Seeked, bool Exists)> TrySeekAsync(
         CorrelatedExistsSeekPlan seekPlan,
-        PreparedExistsSubquery prepared,
+        CorrelatedExistsScan prepared,
         TableDescriptor innerTable,
         BoundTableSource innerSource,
         IReadOnlyDictionary<string, ColumnValue> outerRow,

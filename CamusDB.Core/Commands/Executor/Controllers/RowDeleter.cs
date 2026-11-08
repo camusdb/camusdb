@@ -313,7 +313,8 @@ internal sealed class RowDeleter
             parameters: ticket.Parameters,
             locateColumns: locateColumns,
             exclusivePredicateLocks: true,
-            probe: ticket.Probe
+            probe: ticket.Probe,
+            existsSubqueries: ticket.ExistsSubqueries
         );
 
         // The locate scan reads at the statement timestamp, and the snapshot closes before the write

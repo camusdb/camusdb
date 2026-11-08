@@ -93,9 +93,10 @@ read of `v` fails, as in PostgreSQL. A subquery in the body binds and does not r
 The rejected shapes below apply in each of these positions. A sequence call is also refused there
 (`CADB0547`), because a statement must know how many values it draws before it runs.
 
-A subquery with no `FROM` cannot read a column of the statement around it yet. `SELECT x.id FROM t x WHERE
-EXISTS (SELECT 1 WHERE x.id = 1)` fails with `CADB0400`. The scalar and `IN` forms, such as `SELECT id FROM t
-WHERE (SELECT v) = 10`, fail with `CADB0533`, and the message names the outer column.
+A correlated `EXISTS` with no `FROM` reads a column of the statement around it, as in PostgreSQL:
+`SELECT x.id FROM t x WHERE EXISTS (SELECT 1 WHERE x.id = 1)` returns `1`. The scalar and `IN` forms, such
+as `SELECT id FROM t WHERE (SELECT v) = 10`, cannot read the statement around them yet. They fail with
+`CADB0533`, and the message names the outer column.
 
 ## Rejected shapes
 

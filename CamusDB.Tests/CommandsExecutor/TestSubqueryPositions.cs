@@ -317,16 +317,16 @@ public sealed class TestSubqueryPositions : SharedNodeBaseTest
         CollectionAssert.AreEqual(new List<long>(), await Ids(database, executor, dbname, "SELECT c0 FROM t2"));
     }
 
+    /// <summary>The locate scan evaluates a correlated EXISTS for each row. PostgreSQL 16.11 deletes the one row.</summary>
     [Test]
-    public async Task Delete_CorrelatedExists_IsRefusedWithASpecificCode()
+    public async Task Delete_CorrelatedExists_IsEvaluatedForEachRow()
     {
         (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupAsync();
 
-        AssertRefused(CamusDBErrorCodes.FeatureNotSupported, "the WHERE of a DELETE", async () =>
-            await ExecNonQuery(database, executor, dbname,
-                "DELETE FROM t2 WHERE EXISTS (SELECT 1 FROM t0 AS s3 WHERE s3.c0 = t2.c0)"));
+        Assert.AreEqual(1, await ExecNonQuery(database, executor, dbname,
+            "DELETE FROM t2 WHERE EXISTS (SELECT 1 FROM t0 AS s3 WHERE s3.c0 = t2.c0)"));
 
-        CollectionAssert.AreEqual(new List<long> { 1 }, await Ids(database, executor, dbname, "SELECT c0 FROM t2"));
+        CollectionAssert.AreEqual(new List<long>(), await Ids(database, executor, dbname, "SELECT c0 FROM t2"));
     }
 
     [Test]
@@ -352,20 +352,25 @@ public sealed class TestSubqueryPositions : SharedNodeBaseTest
         CollectionAssert.AreEqual(new[] { "5", "6" }, await Column(database, executor, dbname, "SELECT c0, c1 FROM t1", "c1"));
     }
 
+    /// <summary>
+    /// A correlated EXISTS in the WHERE of an UPDATE is evaluated for each row; PostgreSQL 16.11 updates
+    /// row 1. In a SET value it is refused, and the refused statement writes nothing.
+    /// </summary>
     [Test]
-    public async Task Update_CorrelatedExists_IsRefusedWithASpecificCode()
+    public async Task Update_CorrelatedExists_RunsInTheWhere_AndIsRefusedInASetValue()
     {
         (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupAsync();
-
-        AssertRefused(CamusDBErrorCodes.FeatureNotSupported, "the WHERE of an UPDATE", async () =>
-            await ExecNonQuery(database, executor, dbname,
-                "UPDATE t1 SET c1 = 5 WHERE EXISTS (SELECT 1 FROM t2 AS s WHERE s.c0 = t1.c0)"));
 
         AssertRefused(CamusDBErrorCodes.FeatureNotSupported, "a SET value of an UPDATE", async () =>
             await ExecNonQuery(database, executor, dbname,
                 "UPDATE t1 SET c2 = EXISTS (SELECT 1 FROM t2 AS s WHERE s.c0 = t1.c0) WHERE c0 = 1"));
 
         CollectionAssert.AreEqual(new[] { "10", "99" }, await Column(database, executor, dbname, "SELECT c0, c1 FROM t1", "c1"));
+
+        Assert.AreEqual(1, await ExecNonQuery(database, executor, dbname,
+            "UPDATE t1 SET c1 = 5 WHERE EXISTS (SELECT 1 FROM t2 AS s WHERE s.c0 = t1.c0)"));
+
+        CollectionAssert.AreEqual(new[] { "5", "99" }, await Column(database, executor, dbname, "SELECT c0, c1 FROM t1", "c1"));
     }
 
     [Test]

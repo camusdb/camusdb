@@ -231,6 +231,9 @@ stage 3b. The select list, the `HAVING` and every `JOIN ON` predicate are rewrit
 refused with `FeatureNotSupported`. The walk visits every child slot of a node (a `CASE` keeps its
 `ELSE` in one, a `BETWEEN` its bounds), so a subquery at any depth is folded. The same rewriter
 serves `UPDATE`, `DELETE`, `INSERT VALUES` and `ON CONFLICT DO UPDATE`, which have no bind pipeline.
+In the `WHERE` of an `UPDATE` or `DELETE` it folds an uncorrelated `EXISTS` and leaves a correlated
+one, which `SelectBindPipeline.PrepareWriteWhereAsync` prepares as stage 3b does, with the target table
+as the outer query. The locate scan then evaluates it for each row, at the statement timestamp.
 *Note:* because this stage executes inner subqueries, a query with a subquery does touch storage during
 planning — relevant to `EXPLAIN` (see Part III).
 
@@ -270,7 +273,13 @@ nodes, at any depth, and registers an executor per correlated subquery in an `Ex
 threaded into `QueryTicket`. `SubqueryScopeAnalyzer` decides whether a body is correlated: a name
 resolves to the subquery first and then to the outer query, so a bare outer name makes it correlated
 too. Uncorrelated `EXISTS` is evaluated once; correlated `EXISTS` is evaluated per outer row by
-`QueryFilterer`, with the outer row's columns injected into the subquery scope under inner keys first. Under `AND`, `OR` and `NOT` the filterer evaluates it in place; under any other node (a `CASE`
+`QueryFilterer`. A body that reads one table and needs only its `FROM` and `WHERE` takes the fast form
+(`CorrelatedExistsScan`): the executor reads the inner table, with the outer row's columns injected into
+the subquery scope under inner keys first, and with an index seek when one fits. Every other body is a
+`CorrelatedSubqueryBody`: each outer name is replaced by a hidden placeholder that has the type of the
+outer column, and the body runs through the whole pipeline for each outer row with the outer values as
+parameters. Such a body binds once when no nested subquery reads an outer value, and once per row
+otherwise; it is always checked at prepare time, so an error does not depend on the outer rows. Under `AND`, `OR` and `NOT` the filterer evaluates it in place; under any other node (a `CASE`
 branch, a comparison operand, an `IS NULL` test) it answers each correlated `EXISTS` for the row first
 and evaluates a copy of the subtree with the answers in place. A `WHERE` conjunct that holds a
 correlated `EXISTS` is never pushed to one table's scan in a join: the outer columns it reads are not

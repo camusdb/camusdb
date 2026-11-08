@@ -27,9 +27,6 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// <c>r</c> has one row with <c>v = 0</c>, <c>em</c> has no rows, and <c>r2</c> has one row. A row of the form
 /// <c>SELECT id FROM r ...</c> expects <c>"1"</c> for the row and <c>""</c> for no rows. An expected
 /// value that starts with <c>CADB</c> is an error code.
-///
-/// <para>The exceptions are the refusals of a correlated body that must run, which are on
-/// <c>DecidedDivergences</c>.</para>
 /// </summary>
 [TestFixture]
 [NonParallelizable]
@@ -38,8 +35,6 @@ internal sealed class TestExistsBody : BaseTest
     private const string Invalid = CamusDBErrorCodes.InvalidInput;
 
     private const string UnknownColumn = CamusDBErrorCodes.UnknownColumn;
-
-    private const string NotSupported = CamusDBErrorCodes.FeatureNotSupported;
 
     private static async Task Commit(DatabaseDescriptor database, CommandExecutor executor, string dbname, string sql)
     {
@@ -355,18 +350,19 @@ internal sealed class TestExistsBody : BaseTest
     [TestCase("SELECT id FROM r o WHERE EXISTS (SELECT 1 FROM r i WHERE i.id = o.id + 100 AND 1 / 0 = 1)", Invalid, TestName = "CorrelatedMistake_WhereConstantDivisionNoInnerRow")]
     public Task CorrelatedMistake(string sql, string expected) => AssertResult(sql, expected);
 
-    // ── A correlated body that must run is refused: it once ignored these clauses ────────────────
+    // ── A correlated body that must run runs for each outer row: it once ignored these clauses, and
+    //    then it was refused ─────────────────────────────────────────────────────────────────────────
 
-    [TestCase("SELECT id FROM r o WHERE EXISTS (SELECT COUNT(*) FROM r i WHERE i.id = o.id + 100)", TestName = "Refused_Aggregate")]
-    [TestCase("SELECT id FROM r o WHERE NOT EXISTS (SELECT COUNT(*) FROM r i WHERE i.id = o.id + 100)", TestName = "Refused_AggregateInNotExists")]
-    [TestCase("SELECT id FROM r o WHERE EXISTS (SELECT COUNT(*) / 0 FROM r i WHERE i.id = o.id)", TestName = "Refused_AggregateDivision")]
-    [TestCase("SELECT id FROM em o WHERE EXISTS (SELECT COUNT(*) FROM r i WHERE i.id = o.id)", TestName = "Refused_AggregateNoOuterRow")]
-    [TestCase("SELECT id FROM r o WHERE EXISTS (SELECT 1 FROM r i WHERE i.id = o.id OFFSET 1)", TestName = "Refused_Offset")]
-    [TestCase("SELECT id FROM r o WHERE EXISTS (SELECT 1 FROM r i WHERE i.id = o.id OFFSET 0)", TestName = "Refused_OffsetZero")]
-    [TestCase("SELECT id FROM r o WHERE EXISTS (SELECT i.v FROM r i WHERE i.id = o.id GROUP BY i.v HAVING i.v = 99)", TestName = "Refused_GroupByHaving")]
-    [TestCase("SELECT id FROM r o WHERE EXISTS (SELECT COUNT(*) FROM r i WHERE i.id = o.id HAVING COUNT(*) > 5)", TestName = "Refused_Having")]
-    [TestCase("SELECT id FROM r o WHERE EXISTS (SELECT COUNT(*) FROM r i HAVING COUNT(*) > o.v)", TestName = "Refused_OuterColumnOnlyInHaving")]
-    public Task Refused(string sql) => AssertResult(sql, NotSupported);
+    [TestCase("SELECT id FROM r o WHERE EXISTS (SELECT COUNT(*) FROM r i WHERE i.id = o.id + 100)", "1", TestName = "CorrelatedMustRun_Aggregate")]
+    [TestCase("SELECT id FROM r o WHERE NOT EXISTS (SELECT COUNT(*) FROM r i WHERE i.id = o.id + 100)", "", TestName = "CorrelatedMustRun_AggregateInNotExists")]
+    [TestCase("SELECT id FROM r o WHERE EXISTS (SELECT COUNT(*) / 0 FROM r i WHERE i.id = o.id)", Invalid, TestName = "CorrelatedMustRun_AggregateDivision")]
+    [TestCase("SELECT id FROM em o WHERE EXISTS (SELECT COUNT(*) FROM r i WHERE i.id = o.id)", "", TestName = "CorrelatedMustRun_AggregateNoOuterRow")]
+    [TestCase("SELECT id FROM r o WHERE EXISTS (SELECT 1 FROM r i WHERE i.id = o.id OFFSET 1)", "", TestName = "CorrelatedMustRun_Offset")]
+    [TestCase("SELECT id FROM r o WHERE EXISTS (SELECT 1 FROM r i WHERE i.id = o.id OFFSET 0)", "1", TestName = "CorrelatedMustRun_OffsetZero")]
+    [TestCase("SELECT id FROM r o WHERE EXISTS (SELECT i.v FROM r i WHERE i.id = o.id GROUP BY i.v HAVING i.v = 99)", "", TestName = "CorrelatedMustRun_GroupByHaving")]
+    [TestCase("SELECT id FROM r o WHERE EXISTS (SELECT COUNT(*) FROM r i WHERE i.id = o.id HAVING COUNT(*) > 5)", "", TestName = "CorrelatedMustRun_Having")]
+    [TestCase("SELECT id FROM r o WHERE EXISTS (SELECT COUNT(*) FROM r i HAVING COUNT(*) > o.v)", "1", TestName = "CorrelatedMustRun_OuterColumnOnlyInHaving")]
+    public Task CorrelatedMustRun(string sql, string expected) => AssertResult(sql, expected);
 
     [Test]
     public async Task Correlated_EachOuterRowHasItsOwnAnswer()

@@ -501,17 +501,22 @@ resolves to the enclosing query. A name resolves to the nearest query that has i
   column that both queries have is the column of the subquery, not an ambiguous name.
 - A name that no query has is an unknown column (`CADB0404`), as before.
 
-The names are read in every clause of the subquery and in the subqueries inside it. A name inside a
-derived table of a subquery is not read, so such a derived table cannot read the enclosing query yet.
+The names are read in every clause of the subquery, in the subqueries inside it, and in its derived
+tables and set operations. A derived table cannot read the other items of its own `FROM` (that needs
+`LATERAL`, which CamusDB does not have), but it can read the enclosing query, as in PostgreSQL.
 
 - An **uncorrelated** subquery runs once, before the statement reads its first row, and its result
   takes its place: a scalar subquery becomes its value, `EXISTS` becomes `true` or `false`, and
   `IN`, `NOT IN` and a quantified comparison become a membership test over the rows it returned.
   This holds in every position listed above.
 - A **correlated `EXISTS`** is evaluated once per row. CamusDB supports it in the `WHERE` of a
-  `SELECT` only, at any depth of the predicate. In every other position it is refused with
+  `SELECT`, an `UPDATE` or a `DELETE`, at any depth of the predicate, and with any body: a join, a
+  derived table or a view, no `FROM`, an aggregate, `GROUP BY`, `HAVING`, `OFFSET`, a window function,
+  or another subquery. A body that reads one table and needs only its `FROM` and `WHERE` reads the
+  inner table directly, with an index seek when one fits. Every other body runs as a whole query for
+  each outer row. In an `UPDATE` or `DELETE`, the body reads the rows as the statement found them,
+  also when it reads the target table. In every other position a correlated `EXISTS` is refused with
   `CADB0533` (`FeatureNotSupported`), because the position has no row to evaluate it against.
-  A correlated `EXISTS` with a subquery in its own `WHERE` is refused with `CADB0533` too.
 - A **correlated `IN`**, `NOT IN`, quantified comparison or scalar subquery is refused everywhere with
   `CADB0533`, as the [quantified comparison](#quantified-comparisons-any-some-and-all) rule below says.
   The message names the outer name that the subquery reads. PostgreSQL runs these forms.

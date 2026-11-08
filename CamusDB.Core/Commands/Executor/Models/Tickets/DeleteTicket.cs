@@ -6,6 +6,7 @@
  * file that was distributed with this source code.
  */
 
+using CamusDB.Core.CommandsExecutor.Controllers.Queries;
 using CamusDB.Core.SQLParser;
 using CamusDB.Core.Transactions;
 
@@ -34,6 +35,13 @@ public readonly struct DeleteTicket
     /// </summary>
     public Diagnostics.StatementProbe? Probe { get; }
 
+    /// <summary>
+    /// The correlated EXISTS subqueries of <see cref="Where"/>, prepared against the target table, or
+    /// null when it has none. The locate scan carries it on its query ticket, so the filter can evaluate
+    /// each one for each row of the table.
+    /// </summary>
+    public ExistsSubqueryRegistry? ExistsSubqueries { get; }
+
     public DeleteTicket(
         KvTransaction txnState,
         string databaseName,
@@ -42,7 +50,8 @@ public readonly struct DeleteTicket
         List<QueryFilter>? filters,
         Dictionary<string, ColumnValue>? parameters = null,
         NodeAst? limit = null,
-        Diagnostics.StatementProbe? probe = null
+        Diagnostics.StatementProbe? probe = null,
+        ExistsSubqueryRegistry? existsSubqueries = null
     )
     {
         TxnState = txnState;
@@ -53,5 +62,6 @@ public readonly struct DeleteTicket
         Parameters = parameters;
         Limit = limit;
         Probe = probe;
+        ExistsSubqueries = existsSubqueries;
     }
 }

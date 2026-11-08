@@ -450,10 +450,26 @@ internal sealed class TestFromlessSubquery : BaseTest
     }
 
     /// <summary>
-    /// A correlated reference in a subquery with no FROM is not supported yet, and the error must say so and
+    /// A correlated EXISTS with no FROM runs its body for each outer row. PostgreSQL 16.11 gives <c>1</c>.
+    /// </summary>
+    [Test]
+    public async Task Correlated_ExistsWithNoFrom_Runs()
+    {
+        (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateTables();
+        KvTransaction tx = await database.Transactions.BeginAsync();
+
+        (_, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(
+            new ExecuteSQLTicket(tx, dbname, "SELECT x.id FROM t x WHERE EXISTS (SELECT 1 WHERE x.id = 1)", null));
+        List<QueryResultRow> rows = await cursor.ToListAsync();
+
+        await database.Transactions.RollbackAsync(tx);
+        Assert.That(rows.Select(r => r.Row.First().Value.LongValue), Is.EqualTo(new[] { 1L }));
+    }
+
+    /// <summary>
+    /// A correlated scalar or IN subquery with no FROM is not supported yet, and the error must say so and
     /// name the reference. The same scalar form with a FROM gives the same error.
     /// </summary>
-    [TestCase("SELECT x.id FROM t x WHERE EXISTS (SELECT 1 WHERE x.id = 1)", "no FROM clause")]
     [TestCase("SELECT x.id FROM t x WHERE x.id IN (SELECT 1 WHERE x.id = 1)", "correlated IN or NOT IN subquery is not supported yet: it reads 'x.id'")]
     [TestCase("SELECT x.id FROM t x WHERE (SELECT x.id) = 1", "correlated scalar subquery is not supported yet: it reads 'x.id'")]
     [TestCase("SELECT x.id FROM t x WHERE x.id IN (SELECT x.id)", "correlated IN or NOT IN subquery is not supported yet: it reads 'x.id'")]

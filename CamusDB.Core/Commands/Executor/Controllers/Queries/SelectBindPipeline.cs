@@ -9,6 +9,7 @@ using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Queries;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
+using CamusDB.Core.SQLParser;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 
@@ -128,6 +129,45 @@ internal sealed class SelectBindPipeline
         }
 
         return new SelectBindResult(boundQuery, existsRegistry, semiJoinSpecs);
+    }
+
+    /// <summary>
+    /// Prepares the WHERE of an UPDATE or DELETE on <paramref name="tableName"/> for the locate scan, which
+    /// evaluates it for each row of that table. Every scalar, IN and quantified subquery is folded to its
+    /// value, as for any other clause. An uncorrelated EXISTS folds too, and a correlated one is prepared
+    /// against the target table as its outer query, as in the WHERE of a SELECT. The locate scan must carry
+    /// the returned registry on its query ticket. The target table binds only when a correlated EXISTS is
+    /// left, so a WHERE without one opens nothing more than before.
+    ///
+    /// <para>The locate scan reads at the statement timestamp, before the first write, so a correlated
+    /// EXISTS reads the rows as the statement found them, also when it reads the target table. The check
+    /// of each row under its write lock keeps the answer of the locate scan for a conjunct with a subquery,
+    /// see <see cref="MutationRowRecheck"/>.</para>
+    /// </summary>
+    /// <param name="position">Names the clause in an error, such as "the WHERE of a DELETE".</param>
+    internal async ValueTask<(NodeAst Where, ExistsSubqueryRegistry? Registry)> PrepareWriteWhereAsync(
+        DatabaseDescriptor database,
+        NodeAst where,
+        string tableName,
+        ExecuteSQLTicket ticket,
+        string position)
+    {
+        TableSource target = new(tableName);
+
+        NodeAst rewritten = await subqueryRewriter
+            .RewriteKeepingCorrelatedExistsAsync(database, where, ticket, position, target)
+            .ConfigureAwait(false);
+
+        if (!SubqueryNodeScan.Contains(rewritten, SubqueryNodeKinds.Exists))
+            return (rewritten, null);
+
+        (IReadOnlyList<BoundTableSource> targets, IReadOnlyList<BoundDerivedTableSource> derived) = await queryBinder
+            .BindSourcesAsync(database, target)
+            .ConfigureAwait(false);
+
+        return await existsSubqueryPreparer
+            .PrepareExpressionAsync(database, rewritten, targets, derived, ticket, new NestedSelectBinder(this, ticket))
+            .ConfigureAwait(false);
     }
 }
 

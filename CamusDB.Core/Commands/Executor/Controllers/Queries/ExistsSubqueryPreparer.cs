@@ -22,6 +22,15 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 /// binds with the <see cref="NestedSelectBinder"/> the pipeline passes in, so a derived table in its
 /// FROM resolves its own subqueries like one anywhere else.
 ///
+/// <para>A correlated body that reads one table and needs only its FROM and WHERE gets the fast form,
+/// <see cref="CorrelatedExistsScan"/>. Every other body (a join, a derived table or a view, no FROM, an
+/// aggregate, HAVING, OFFSET, a LIMIT that is not a positive constant, a window function, a subquery in
+/// its WHERE) becomes a <see cref="CorrelatedSubqueryBody"/>, which runs through the whole pipeline for
+/// each outer row.</para>
+///
+/// <para>The outer query is a SELECT, or the table of an UPDATE or DELETE, see
+/// <see cref="PrepareExpressionAsync"/>.</para>
+///
 /// <para>A body is correlated when <see cref="SubqueryScopeAnalyzer"/> finds a name in it that resolves to
 /// the outer query. That includes a bare name that only the outer query has, such as <c>v</c> in
 /// <c>EXISTS (SELECT 1 FROM r2 WHERE w = v)</c>. A name that both queries have is the inner column.</para>
@@ -29,13 +38,23 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 internal sealed class ExistsSubqueryPreparer
 {
     private readonly ExistsSubqueryExecutor existsExecutor;
+
+    private readonly SubqueryQueryExecutor subqueryExecutor;
+
     private readonly QueryBinder queryBinder;
+
     private readonly SubqueryScopeAnalyzer scopeAnalyzer;
+
     private readonly SelectQueryCreator selectQueryCreator = new();
 
-    public ExistsSubqueryPreparer(ExistsSubqueryExecutor existsExecutor, QueryBinder queryBinder, SubqueryScopeAnalyzer scopeAnalyzer)
+    public ExistsSubqueryPreparer(
+        ExistsSubqueryExecutor existsExecutor,
+        SubqueryQueryExecutor subqueryExecutor,
+        QueryBinder queryBinder,
+        SubqueryScopeAnalyzer scopeAnalyzer)
     {
         this.existsExecutor = existsExecutor;
+        this.subqueryExecutor = subqueryExecutor;
         this.queryBinder = queryBinder;
         this.scopeAnalyzer = scopeAnalyzer;
     }
@@ -73,19 +92,47 @@ internal sealed class ExistsSubqueryPreparer
         ExecuteSQLTicket ticket,
         NestedSelectBinder nested)
     {
-        ExistsRewriteContext context = new(nested, OuterNameScope.Of(outerTableSources, outerDerivedSources));
-        NodeAst rewritten = await RewriteExpressionAsync(
+        (NodeAst rewritten, ExistsSubqueryRegistry? registry) = await PrepareExpressionAsync(
             database,
             query.Where!.Expression,
             outerTableSources,
             outerDerivedSources,
             ticket,
-            context).ConfigureAwait(false);
+            nested).ConfigureAwait(false);
 
-        if (ReferenceEquals(rewritten, query.Where!.Expression) && context.Registry is null)
+        if (ReferenceEquals(rewritten, query.Where!.Expression) && registry is null)
             return (query, null);
 
-        return (query with { Where = new BoundPredicate(rewritten) }, context.Registry);
+        return (query with { Where = new BoundPredicate(rewritten) }, registry);
+    }
+
+    /// <summary>
+    /// Folds each uncorrelated EXISTS of <paramref name="expr"/> to a literal and prepares each correlated
+    /// one against the outer sources. The caller evaluates the result with a query ticket that carries the
+    /// registry. Used for the WHERE of a SELECT and for the WHERE of an UPDATE or DELETE, whose one outer
+    /// source is the target table.
+    /// </summary>
+    internal async ValueTask<(NodeAst Expression, ExistsSubqueryRegistry? Registry)> PrepareExpressionAsync(
+        DatabaseDescriptor database,
+        NodeAst expr,
+        IReadOnlyList<BoundTableSource> outerTableSources,
+        IReadOnlyList<BoundDerivedTableSource> outerDerivedSources,
+        ExecuteSQLTicket ticket,
+        NestedSelectBinder nested)
+    {
+        if (!ContainsExistsSubquery(expr))
+            return (expr, null);
+
+        ExistsRewriteContext context = new(nested, OuterNameScope.Of(outerTableSources, outerDerivedSources));
+        NodeAst rewritten = await RewriteExpressionAsync(
+            database,
+            expr,
+            outerTableSources,
+            outerDerivedSources,
+            ticket,
+            context).ConfigureAwait(false);
+
+        return (rewritten, context.Registry);
     }
 
     private sealed class ExistsRewriteContext
@@ -127,10 +174,8 @@ internal sealed class ExistsSubqueryPreparer
                     "Invalid EXISTS subquery expression");
             }
 
-            SelectQuery innerQuery = selectQueryCreator.CreateSelectQuery(expr.leftAst);
-
             IReadOnlyList<NodeAst> outerReferences = await scopeAnalyzer
-                .FindOuterReferencesAsync(database, innerQuery, context.OuterScope)
+                .FindOuterReferencesAsync(database, expr.leftAst, context.OuterScope)
                 .ConfigureAwait(false);
 
             if (outerReferences.Count == 0)
@@ -145,32 +190,18 @@ internal sealed class ExistsSubqueryPreparer
                 return ColumnValueAstBuilder.FromColumnValue(ColumnValue.FromBool(exists));
             }
 
-            // The correlated evaluator reads only FROM and WHERE, so it cannot run a body that needs
-            // more. It once ignored those clauses, which gave a wrong answer with no error.
+            SelectQuery innerQuery = selectQueryCreator.CreateSelectQuery(expr.leftAst);
             ExistsBodyForm form = ExistsBody.Classify(innerQuery, ticket.Parameters);
-
-            if (form == ExistsBodyForm.MustRun)
-            {
-                throw new CamusDBException(
-                    CamusDBErrorCodes.FeatureNotSupported,
-                    "A correlated EXISTS subquery with an aggregate, HAVING, OFFSET or a LIMIT that is not a positive constant or zero is not supported");
-            }
-
-            // The correlated evaluator reads the WHERE row by row and cannot run a subquery in it.
-            if (innerQuery.Where is not null && SubqueryNodeScan.Contains(innerQuery.Where.Expression, SubqueryNodeKinds.Rewritable | SubqueryNodeKinds.Exists))
-            {
-                throw new CamusDBException(
-                    CamusDBErrorCodes.FeatureNotSupported,
-                    "A correlated EXISTS subquery with a subquery in its WHERE is not supported yet");
-            }
 
             PreparedExistsSubquery prepared = await PrepareCorrelatedAsync(
                 database,
+                expr.leftAst,
                 innerQuery,
                 form,
                 outerReferences,
                 outerTableSources,
                 outerDerivedSources,
+                ticket,
                 context.Nested).ConfigureAwait(false);
 
             if (form == ExistsBodyForm.NoRows)
@@ -242,19 +273,82 @@ internal sealed class ExistsSubqueryPreparer
         ExistsRewriteContext context)
         => await RewriteExpressionAsync(database, child, outerTableSources, outerDerivedSources, ticket, context).ConfigureAwait(false);
 
+    /// <summary>
+    /// Prepares a correlated body in the fast form when it fits, and as a <see cref="CorrelatedSubqueryBody"/>
+    /// otherwise. Both forms check the body here, so an error does not depend on the outer rows.
+    /// </summary>
     private async Task<PreparedExistsSubquery> PrepareCorrelatedAsync(
         DatabaseDescriptor database,
+        NodeAst select,
         SelectQuery innerQuery,
         ExistsBodyForm form,
         IReadOnlyList<NodeAst> outerReferenceNodes,
         IReadOnlyList<BoundTableSource> outerTableSources,
         IReadOnlyList<BoundDerivedTableSource> outerDerivedSources,
+        ExecuteSQLTicket ticket,
         NestedSelectBinder nested)
     {
+        HashSet<string> outerReferences = new(StringComparer.OrdinalIgnoreCase);
+        foreach (NodeAst node in outerReferenceNodes)
+            outerReferences.Add(node.yytext!);
+
+        CorrelatedExistsScan? scan = await TryPrepareScanAsync(
+            database,
+            innerQuery,
+            form,
+            outerReferences,
+            outerTableSources,
+            outerDerivedSources,
+            nested).ConfigureAwait(false);
+
+        if (scan is not null)
+            return new PreparedExistsSubquery([.. outerReferences], scan, Body: null);
+
+        CorrelatedSubqueryBody body = await CorrelatedSubqueryBody.PrepareAsync(
+            subqueryExecutor,
+            database,
+            select,
+            innerQuery,
+            outerReferenceNodes,
+            outerTableSources,
+            outerDerivedSources,
+            ticket,
+            isExistsBody: true).ConfigureAwait(false);
+
+        // A body that binds again for each row was checked in a flow that does not refuse a constant
+        // division, so the check runs here, by the rule of the fast form below.
+        ConstantDivisionCheck.CheckSelect(form == ExistsBodyForm.OutputDiscarded ? ExistsBody.DiscardOutput(innerQuery) : innerQuery);
+
+        return new PreparedExistsSubquery([.. outerReferences], Scan: null, body);
+    }
+
+    /// <summary>
+    /// The fast form, or null when the body needs more than the FROM and WHERE of one table: an aggregate,
+    /// HAVING, OFFSET or a LIMIT that the form must run, a source that is not one table (a view binds to a
+    /// derived table), or a subquery in the WHERE.
+    /// </summary>
+    private async Task<CorrelatedExistsScan?> TryPrepareScanAsync(
+        DatabaseDescriptor database,
+        SelectQuery innerQuery,
+        ExistsBodyForm form,
+        IReadOnlySet<string> outerReferences,
+        IReadOnlyList<BoundTableSource> outerTableSources,
+        IReadOnlyList<BoundDerivedTableSource> outerDerivedSources,
+        NestedSelectBinder nested)
+    {
+        if (form == ExistsBodyForm.MustRun || innerQuery.Source is not TableSource)
+            return null;
+
+        if (innerQuery.Where is not null && SubqueryNodeScan.Contains(innerQuery.Where.Expression, SubqueryNodeKinds.All))
+            return null;
+
         // The output can read the outer row, so it is not part of the shell and has its own check.
         SelectQuery shell = ExistsBody.DiscardOutput(innerQuery);
 
         BoundSelectQuery innerBound = await queryBinder.BindSubqueryAsync(database, shell, nested).ConfigureAwait(false);
+
+        if (innerBound.Sources.Count != 1 || innerBound.DerivedSources.Count != 0)
+            return null;
 
         if (ExistsBody.OutputNeedsCheck(innerQuery))
             await queryBinder.CheckDiscardedOutputAsync(database, innerQuery, outerTableSources, outerDerivedSources).ConfigureAwait(false);
@@ -284,28 +378,21 @@ internal sealed class ExistsSubqueryPreparer
         // Each outer row evaluates the predicate with this one resolver, so it must not be written again.
         combinedResolver.FreezeForSharedReuse();
 
-        HashSet<string> outerReferences = new(StringComparer.OrdinalIgnoreCase);
-        foreach (NodeAst node in outerReferenceNodes)
-            outerReferences.Add(node.yytext!);
-
         // Choose the inner access path once here rather than per outer row: it depends only on the
         // inner predicate and the inner table's indexes. Null keeps the full-scan fallback.
-        CorrelatedExistsSeekPlan? seekPlan = innerBound.Sources.Count == 1
-            ? CorrelatedExistsSeekPlanner.TryPlan(
-                innerBound.Sources[0].Table,
-                innerQuery.Where?.Expression,
-                innerBound.Sources[0].Alias,
-                ExistsSubqueryAnalyzer.CollectSourceAliases(innerQuery.Source),
-                outerReferences)
-            : null;
+        CorrelatedExistsSeekPlan? seekPlan = CorrelatedExistsSeekPlanner.TryPlan(
+            innerBound.Sources[0].Table,
+            innerQuery.Where?.Expression,
+            innerBound.Sources[0].Alias,
+            ExistsSubqueryAnalyzer.CollectSourceAliases(innerQuery.Source),
+            outerReferences);
 
-        return new PreparedExistsSubquery(
+        return new CorrelatedExistsScan(
             innerQuery.Where?.Expression,
             innerBound,
             outerTableSources,
             outerDerivedSources,
             combinedResolver,
-            [.. outerReferences],
             seekPlan);
     }
 

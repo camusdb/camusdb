@@ -152,6 +152,24 @@ internal sealed class QueryBinder
     }
 
     /// <summary>
+    /// Binds <paramref name="source"/> for its schema, as <see cref="BindNameScopeAsync"/> does, and returns
+    /// the bound sources. Used for the target table of an UPDATE or DELETE, which is the outer query of a
+    /// correlated EXISTS in its WHERE.
+    /// </summary>
+    internal async Task<(IReadOnlyList<BoundTableSource> Sources, IReadOnlyList<BoundDerivedTableSource> DerivedSources)> BindSourcesAsync(
+        DatabaseDescriptor database,
+        QuerySource source)
+    {
+        List<BoundTableSource> sources = [];
+        List<BoundDerivedTableSource> derivedSources = [];
+        HashSet<string> aliases = new(StringComparer.OrdinalIgnoreCase);
+
+        await CollectBoundSourcesAsync(database, source, sources, derivedSources, aliases, nested: null).ConfigureAwait(false);
+
+        return (sources, derivedSources);
+    }
+
+    /// <summary>
     /// Finds the statement mistakes in the output of an EXISTS body whose output
     /// <see cref="ExistsBody"/> discards. The same checks run as for any SELECT, except that a select
     /// list needs only grouped columns, not the exact group key: PostgreSQL accepts

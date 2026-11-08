@@ -86,6 +86,9 @@ internal sealed class NonQueryStatementDispatcher
 
     internal readonly SubqueryRewriter subqueryRewriter;
 
+    /// <summary>Prepares a correlated EXISTS in the WHERE of an UPDATE or DELETE, see <see cref="SelectBindPipeline.PrepareWriteWhereAsync"/>.</summary>
+    private readonly SelectBindPipeline bindPipeline;
+
     internal readonly MaterializedViewRefresher matViewRefresher;
 
     /// <summary>
@@ -113,6 +116,7 @@ internal sealed class NonQueryStatementDispatcher
         RowInsertSelector rowInsertSelector,
         QueryExecutor queryExecutor,
         SubqueryRewriter subqueryRewriter,
+        SelectBindPipeline bindPipeline,
         MaterializedViewRefresher matViewRefresher,
         Functions.SequenceStatementBinder sequenceBinder
     )
@@ -129,6 +133,7 @@ internal sealed class NonQueryStatementDispatcher
         ArgumentNullException.ThrowIfNull(schemaDdl);
         ArgumentNullException.ThrowIfNull(databaseLifecycle);
         ArgumentNullException.ThrowIfNull(userAdmin);
+        ArgumentNullException.ThrowIfNull(bindPipeline);
 
         this.context = context;
         this.catalogs = catalogs;
@@ -149,6 +154,7 @@ internal sealed class NonQueryStatementDispatcher
         rowUpserter = new RowUpserter(rowInserter, rowUpdater);
         this.queryExecutor = queryExecutor;
         this.subqueryRewriter = subqueryRewriter;
+        this.bindPipeline = bindPipeline;
         this.matViewRefresher = matViewRefresher;
         this.sequenceBinder = sequenceBinder;
     }
@@ -189,7 +195,7 @@ internal sealed class NonQueryStatementDispatcher
 
         HLCTimestamp? statementTimestamp = MintStatementTimestamp(database, ticket.TxnState);
         using (StatementSnapshotScope.Open(ticket.TxnState, statementTimestamp))
-            assignments = await RewriteUpdateSubqueriesAsync(database, assignments, ticket, "ON CONFLICT DO UPDATE").ConfigureAwait(false);
+            assignments = await RewriteUpdateSubqueriesAsync(database, assignments, ticket, "ON CONFLICT DO UPDATE", correlatedExistsInWhere: false).ConfigureAwait(false);
 
         bool subqueryLeft = assignments.Where is not null && RequiredColumnAnalyzer.ContainsSubqueryNode(assignments.Where);
         foreach (NodeAst expression in assignments.ExprValues!.Values)
@@ -510,7 +516,7 @@ internal sealed class NonQueryStatementDispatcher
                     // The subqueries and the locate scan read at one timestamp; see MintStatementTimestamp.
                     HLCTimestamp? statementTimestamp = MintStatementTimestamp(database, ticket.TxnState);
                     using (StatementSnapshotScope.Open(ticket.TxnState, statementTimestamp))
-                        updateTicket = await RewriteUpdateSubqueriesAsync(database, updateTicket, ticket, "an UPDATE").ConfigureAwait(false);
+                        updateTicket = await RewriteUpdateSubqueriesAsync(database, updateTicket, ticket, "an UPDATE", correlatedExistsInWhere: true).ConfigureAwait(false);
 
                     for (int fenceAttempt = 0; ; fenceAttempt++)
                     {
@@ -575,19 +581,20 @@ internal sealed class NonQueryStatementDispatcher
                     // The subqueries and the locate scan read at one timestamp; see MintStatementTimestamp.
                     HLCTimestamp? statementTimestamp = MintStatementTimestamp(database, ticket.TxnState);
 
-                    // Resolve any scalar / IN / NOT IN / EXISTS subquery in the WHERE clause to a
-                    // literal before evaluation (DELETE has no per-row EXISTS stage, unlike SELECT, so a
-                    // correlated EXISTS is refused). Done once here, outside the fence-retry loop, so
-                    // the inner query is not re-executed on each SchemaCatchingUp retry.
+                    // Resolve any scalar / IN / NOT IN / uncorrelated EXISTS subquery in the WHERE clause
+                    // to a literal before evaluation, and prepare each correlated EXISTS for the locate
+                    // scan, which evaluates it for each row. Done once here, outside the fence-retry loop,
+                    // so the inner query is not re-executed on each SchemaCatchingUp retry.
                     if (deleteTicket.Where is not null)
                     {
                         NodeAst rewrittenWhere;
+                        ExistsSubqueryRegistry? existsSubqueries;
                         using (StatementSnapshotScope.Open(ticket.TxnState, statementTimestamp))
-                            rewrittenWhere = await subqueryRewriter
-                                .RewriteExpressionAsync(database, deleteTicket.Where, ticket, "the WHERE of a DELETE", new TableSource(deleteTicket.TableName))
+                            (rewrittenWhere, existsSubqueries) = await bindPipeline
+                                .PrepareWriteWhereAsync(database, deleteTicket.Where, deleteTicket.TableName, ticket, "the WHERE of a DELETE")
                                 .ConfigureAwait(false);
 
-                        if (!ReferenceEquals(rewrittenWhere, deleteTicket.Where))
+                        if (!ReferenceEquals(rewrittenWhere, deleteTicket.Where) || existsSubqueries is not null)
                             deleteTicket = new DeleteTicket(
                                 txnState: deleteTicket.TxnState,
                                 databaseName: deleteTicket.DatabaseName,
@@ -596,7 +603,8 @@ internal sealed class NonQueryStatementDispatcher
                                 filters: deleteTicket.Filters,
                                 parameters: deleteTicket.Parameters,
                                 limit: deleteTicket.Limit,
-                                probe: deleteTicket.Probe);
+                                probe: deleteTicket.Probe,
+                                existsSubqueries: existsSubqueries);
                     }
 
                     for (int fenceAttempt = 0; ; fenceAttempt++)
@@ -850,14 +858,19 @@ internal sealed class NonQueryStatementDispatcher
     /// Pre-materializes uncorrelated scalar / <c>IN</c> / <c>NOT IN</c> / <c>EXISTS</c> subqueries in
     /// an <c>UPDATE</c>'s <c>WHERE</c> clause and each <c>SET</c> value into literals, mirroring the
     /// subquery rewrite that <c>SELECT</c> already performs, so the synchronous evaluator in
-    /// <see cref="RowUpdater"/> never sees an unresolved subquery node. A correlated <c>EXISTS</c>
-    /// is refused, because an UPDATE has no per-row EXISTS stage (see
-    /// <see cref="SubqueryRewriter.RewriteExpressionAsync"/>); <paramref name="statementKind"/>
-    /// names the statement in that refusal. Runs once before the fence-retry loop so inner queries
-    /// are not re-executed per retry. Rebuilds the ticket only when something actually changed.
+    /// <see cref="RowUpdater"/> never sees an unresolved subquery node. Runs once before the
+    /// fence-retry loop so inner queries are not re-executed per retry. Rebuilds the ticket only when
+    /// something actually changed.
+    ///
+    /// <para>With <paramref name="correlatedExistsInWhere"/>, a correlated <c>EXISTS</c> in the WHERE is
+    /// prepared against the target table and the locate scan evaluates it for each row, see
+    /// <see cref="SelectBindPipeline.PrepareWriteWhereAsync"/>. Without it (ON CONFLICT DO UPDATE, which has
+    /// no locate scan) and in a SET value, a correlated <c>EXISTS</c> is refused (see
+    /// <see cref="SubqueryRewriter.RewriteExpressionAsync"/>), and <paramref name="statementKind"/> names
+    /// the statement in that refusal.</para>
     /// </summary>
     internal async Task<UpdateTicket> RewriteUpdateSubqueriesAsync(
-        DatabaseDescriptor database, UpdateTicket ticket, ExecuteSQLTicket sqlTicket, string statementKind)
+        DatabaseDescriptor database, UpdateTicket ticket, ExecuteSQLTicket sqlTicket, string statementKind, bool correlatedExistsInWhere)
     {
         // Before the rewrite below, which turns a subquery into a literal.
         Queries.ConstantDivisionCheck.Check(ticket.Where);
@@ -872,7 +885,15 @@ internal sealed class NonQueryStatementDispatcher
         TableSource target = new(ticket.TableName);
 
         NodeAst? newWhere = ticket.Where;
-        if (newWhere is not null)
+        ExistsSubqueryRegistry? existsSubqueries = ticket.ExistsSubqueries;
+        if (newWhere is not null && correlatedExistsInWhere)
+        {
+            (newWhere, existsSubqueries) = await bindPipeline
+                .PrepareWriteWhereAsync(database, newWhere, ticket.TableName, sqlTicket, $"the WHERE of {statementKind}")
+                .ConfigureAwait(false);
+            changed |= !ReferenceEquals(newWhere, ticket.Where) || existsSubqueries is not null;
+        }
+        else if (newWhere is not null)
         {
             newWhere = await subqueryRewriter
                 .RewriteExpressionAsync(database, newWhere, sqlTicket, $"the WHERE of {statementKind}", target)
@@ -928,7 +949,8 @@ internal sealed class NonQueryStatementDispatcher
             filters: ticket.Filters,
             parameters: ticket.Parameters,
             limit: ticket.Limit,
-            probe: ticket.Probe);
+            probe: ticket.Probe,
+            existsSubqueries: existsSubqueries);
     }
 
     /// <summary>Maps a parsed statement's node type to the bounded <c>statement</c> metric family tag.</summary>

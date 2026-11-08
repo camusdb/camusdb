@@ -41,7 +41,10 @@ internal sealed class SelectQueryCreator
     /// <c>EXISTS</c> list can decide later that the call does not run. So the reservation could not know
     /// how many values the statement draws.</para>
     /// </summary>
-    public SelectQuery CreateSelectQuery(NodeAst ast)
+    /// <param name="rewriteWindows">False only for a scope analysis of the names of the query, see
+    /// <see cref="Queries.SubqueryScopeAnalyzer"/>. The window rewrite moves the window inputs into a
+    /// derived table, where such an analysis cannot see them. A query created without it must not bind.</param>
+    public SelectQuery CreateSelectQuery(NodeAst ast, bool rewriteWindows = true)
     {
         if (ast.nodeType != NodeType.Select)
             throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Expected SELECT statement");
@@ -80,7 +83,7 @@ internal sealed class SelectQueryCreator
         // A window call in the select list or ORDER BY turns the query into an ordinary query over a
         // derived table that runs the windows (see WindowQueryRewriter). Last, so the rewrite sees the
         // ordinals and GROUP BY positions already resolved against the select list as written.
-        return WindowQueryRewriter.Rewrite(new SelectQuery(
+        SelectQuery query = new(
             Source: source,
             Projections: projections,
             Where: where,
@@ -90,7 +93,9 @@ internal sealed class SelectQueryCreator
             Limit: ast.extendedThree,
             Offset: ast.extendedFour,
             IsDistinct: ast.yytext is not null,
-            CacheHint: cacheHint));
+            CacheHint: cacheHint);
+
+        return rewriteWindows ? WindowQueryRewriter.Rewrite(query) : query;
     }
 
     private (QuerySource Source, BoundPredicate? Where) CreateFromClause(NodeAst fromAst, NodeAst? whereAst)

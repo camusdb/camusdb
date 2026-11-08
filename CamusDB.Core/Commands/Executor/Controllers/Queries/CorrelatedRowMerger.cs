@@ -34,6 +34,31 @@ internal static class CorrelatedRowMerger
             merged[QueryRowNameResolver.FormatQualifiedKey(innerSource.Alias, entry.Key)] = entry.Value;
         }
 
+        MergeOuterRow(merged, outerRow, outerTableSources, outerDerivedSources);
+        return merged;
+    }
+
+    /// <summary>
+    /// The outer half of <see cref="MergeForEvaluation"/>: each outer column under its bare and its
+    /// qualified key. A correlated subquery that runs through the whole pipeline reads its outer values
+    /// from this row, see <see cref="CorrelatedSubqueryBody"/>.
+    /// </summary>
+    public static Dictionary<string, ColumnValue> MergeOuterForEvaluation(
+        IReadOnlyDictionary<string, ColumnValue> outerRow,
+        IReadOnlyList<BoundTableSource> outerTableSources,
+        IReadOnlyList<BoundDerivedTableSource> outerDerivedSources)
+    {
+        Dictionary<string, ColumnValue> merged = new(StringComparer.OrdinalIgnoreCase);
+        MergeOuterRow(merged, outerRow, outerTableSources, outerDerivedSources);
+        return merged;
+    }
+
+    private static void MergeOuterRow(
+        Dictionary<string, ColumnValue> merged,
+        IReadOnlyDictionary<string, ColumnValue> outerRow,
+        IReadOnlyList<BoundTableSource> outerTableSources,
+        IReadOnlyList<BoundDerivedTableSource> outerDerivedSources)
+    {
         bool useQualifiedOuterKeys = UsesQualifiedOuterKeys(outerTableSources, outerDerivedSources);
 
         foreach (BoundTableSource outerSource in outerTableSources)
@@ -48,8 +73,6 @@ internal static class CorrelatedRowMerger
 
             MergeOuterColumns(merged, outerRow, outerSource.Alias, columnNames, useQualifiedOuterKeys);
         }
-
-        return merged;
     }
 
     private static IEnumerable<string> GetTableColumnNames(BoundTableSource outerSource)

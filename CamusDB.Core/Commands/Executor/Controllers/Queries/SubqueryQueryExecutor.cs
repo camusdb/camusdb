@@ -96,6 +96,61 @@ internal sealed class SubqueryQueryExecutor
         CancellationToken cancellationToken = default) =>
         ExecuteSelectInternalAsync(database, selectAst, txnState, parameters, requireSingleColumn: false, outputType: null, isExistsBody: true, cancellationToken);
 
+    /// <summary>
+    /// Binds <paramref name="selectAst"/> through the pipeline under <paramref name="ticket"/>, for a
+    /// correlated body that then runs once for each outer row with <see cref="RunBoundAsync"/>. The caller
+    /// must make sure that no stage of the bind reads a value that changes between those runs: the bind
+    /// runs each uncorrelated subquery of the body, so a body with an outer value inside a nested subquery
+    /// must bind again for each run. See <see cref="CorrelatedSubqueryBody"/>.
+    /// </summary>
+    internal async ValueTask<SelectBindResult> BindForRunsAsync(
+        DatabaseDescriptor database,
+        NodeAst selectAst,
+        ExecuteSQLTicket ticket,
+        bool isExistsBody)
+    {
+        if (bindPipeline is null)
+        {
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInternalOperation,
+                "Subquery executor has no bind pipeline attached");
+        }
+
+        SelectQuery subquery = selectQueryCreator.CreateSelectQuery(selectAst);
+        return await bindPipeline.BindAsync(database, subquery, ticket, isExistsBody).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Runs a body that <see cref="BindForRunsAsync"/> bound, with the values of one run in
+    /// <paramref name="parameters"/>. Each run gets its own query ticket, because the ticket reads the
+    /// parameter values (an index seek on a parameter, for example). The bound query is shared by the runs
+    /// and is not frozen: the filter evaluates a correlated subquery for one outer row at a time, so two
+    /// runs never use it at once.
+    /// </summary>
+    internal IAsyncEnumerable<QueryResultRow> RunBoundAsync(
+        DatabaseDescriptor database,
+        SelectBindResult bound,
+        KvTransaction txnState,
+        Dictionary<string, ColumnValue>? parameters,
+        CancellationToken cancellationToken)
+    {
+        ExecuteSQLTicket runTicket = new(
+            txnState: txnState,
+            database: database.Name,
+            sql: "",
+            parameters: parameters,
+            cancellationToken: cancellationToken);
+
+        QueryTicket queryTicket = QueryTicketAdapter.ToQueryTicket(
+            bound.Bound, runTicket, bound.ExistsRegistry, bound.SemiJoinSpecsOrNull);
+
+        SelectStatementExecutor.PinSchemaVersions(database, bound.Bound.Sources, txnState);
+
+        return bound.Bound.IsMultiSource
+            ? queryJoinExecutor.ExecuteJoinQuery(database, bound.Bound, queryTicket)
+            : queryExecutor.Query(database, bound.Bound.PrimaryTable, queryTicket);
+    }
+
     private async IAsyncEnumerable<QueryResultRow> ExecuteSelectInternalAsync(
         DatabaseDescriptor database,
         NodeAst selectAst,

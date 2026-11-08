@@ -42,9 +42,6 @@ public sealed record DecidedDivergence(
 /// </summary>
 public static class DecidedDivergences
 {
-    private const string CorrelatedBodyMustRun =
-        "The evaluator of a correlated EXISTS reads only FROM and WHERE, once for each outer row. These clauses change the number of rows, so they need the whole body to run for each outer row. An error is better than the wrong answer that ignoring them gave.";
-
     private static readonly string[] NoSetup = [];
 
     private static readonly string[] RowTable =
@@ -249,21 +246,6 @@ public static class DecidedDivergences
             "SELECT 'É' ILIKE 'é'",
             "True", "false",
             "ILIKE uses ordinal case folding, which covers every cased letter. PostgreSQL in the C locale folds only ASCII, and a linguistic locale gives the same answer as CamusDB."),
-
-        new("A correlated EXISTS with an aggregate is refused", RowTable,
-            "SELECT id FROM d o WHERE EXISTS (SELECT COUNT(*) FROM d i WHERE i.id = o.id + 100) ORDER BY id",
-            CamusDBErrorCodes.FeatureNotSupported, "1",
-            CorrelatedBodyMustRun),
-
-        new("A correlated EXISTS with HAVING is refused", RowTable,
-            "SELECT id FROM d o WHERE EXISTS (SELECT COUNT(*) FROM d i WHERE i.id = o.id HAVING COUNT(*) > 5) ORDER BY id",
-            CamusDBErrorCodes.FeatureNotSupported, "no rows",
-            CorrelatedBodyMustRun),
-
-        new("A correlated EXISTS with OFFSET is refused", RowTable,
-            "SELECT id FROM d o WHERE EXISTS (SELECT 1 FROM d i WHERE i.id = o.id OFFSET 1) ORDER BY id",
-            CamusDBErrorCodes.FeatureNotSupported, "no rows",
-            CorrelatedBodyMustRun),
 
         new("A derived string column is checked when a row reaches the operator", EmptyTable,
             "SELECT d.id FROM (SELECT id, s FROM em) AS d WHERE d.id = d.s",

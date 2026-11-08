@@ -576,6 +576,10 @@ internal static class ConditionalResultTypes
             case NodeType.String: return ExpressionType.StringLiteral;
             case NodeType.Bool: return new(ColumnType.Bool);
             case NodeType.Null: return SubqueryResultTypes.TypeOf(target) ?? ExpressionType.Null;
+
+            // A statement parameter has no static type. The placeholder that stands for an outer column in
+            // a correlated subquery has the type of that column, see CorrelatedSubqueryBody.
+            case NodeType.Placeholder: return SubqueryResultTypes.TypeOf(target);
             case NodeType.BytesLiteral: return new(ColumnType.Bytes);
             case NodeType.ObjectIdLiteral: return new(ColumnType.Id);
 

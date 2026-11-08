@@ -615,7 +615,7 @@ public sealed class CommandExecutor : IAsyncDisposable
             existsSubqueryExecutor,
             subqueryScopeAnalyzer
         );
-        existsSubqueryPreparer = new ExistsSubqueryPreparer(existsSubqueryExecutor, queryBinder, subqueryScopeAnalyzer);
+        existsSubqueryPreparer = new ExistsSubqueryPreparer(existsSubqueryExecutor, subqueryQueryExecutor, queryBinder, subqueryScopeAnalyzer);
         semiJoinAnalyzer = new SemiJoinAnalyzer(tableOpener);
         // The pipeline holds the rewriter and the rewriter's executors run nested SELECTs through the
         // pipeline, so the subquery executor receives it after both exist.
@@ -814,6 +814,7 @@ public sealed class CommandExecutor : IAsyncDisposable
             rowInsertSelector,
             queryExecutor,
             subqueryRewriter,
+            selectBindPipeline,
             matViewRefresher,
             sequenceBinder
         );

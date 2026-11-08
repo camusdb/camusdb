@@ -64,6 +64,93 @@ internal static class NodeAstWalk
         return false;
     }
 
+    /// <summary>
+    /// Returns a copy of <paramref name="root"/> in which each node that is a key of
+    /// <paramref name="replacements"/> (by reference) is replaced by its value. A subtree that holds no
+    /// such node is shared with <paramref name="root"/>, not copied, and <paramref name="root"/> is not
+    /// changed: a parsed tree can be shared through the parser cache. Returns <paramref name="root"/>
+    /// itself when no node matched.
+    ///
+    /// <para>A node can occur in more than one place, because query creation shares one node between the
+    /// select list and a GROUP BY or ORDER BY position that names it. Each occurrence is replaced.</para>
+    /// </summary>
+    public static NodeAst Replace(NodeAst root, IReadOnlyDictionary<NodeAst, NodeAst> replacements)
+    {
+        if (replacements.Count == 0)
+            return root;
+
+        // A post-order walk with an explicit stack: a node is rebuilt after its children, from the
+        // results of those children. Each frame is visited twice, first to push the children and then
+        // to rebuild.
+        Dictionary<NodeAst, NodeAst> rebuilt = new(ReferenceEqualityComparer.Instance);
+        Stack<(NodeAst Node, bool ChildrenDone)> pending = new();
+        pending.Push((root, false));
+
+        while (pending.TryPop(out (NodeAst Node, bool ChildrenDone) frame))
+        {
+            NodeAst node = frame.Node;
+
+            if (rebuilt.ContainsKey(node))
+                continue;
+
+            if (replacements.TryGetValue(node, out NodeAst? replacement))
+            {
+                rebuilt[node] = replacement;
+                continue;
+            }
+
+            if (!frame.ChildrenDone)
+            {
+                pending.Push((node, true));
+                PushFrame(pending, node.leftAst);
+                PushFrame(pending, node.rightAst);
+                PushFrame(pending, node.extendedOne);
+                PushFrame(pending, node.extendedTwo);
+                PushFrame(pending, node.extendedThree);
+                PushFrame(pending, node.extendedFour);
+                PushFrame(pending, node.extendedFive);
+                PushFrame(pending, node.extendedSix);
+                PushFrame(pending, node.extendedSeven);
+                continue;
+            }
+
+            NodeAst? left = Rebuilt(rebuilt, node.leftAst);
+            NodeAst? right = Rebuilt(rebuilt, node.rightAst);
+            NodeAst? one = Rebuilt(rebuilt, node.extendedOne);
+            NodeAst? two = Rebuilt(rebuilt, node.extendedTwo);
+            NodeAst? three = Rebuilt(rebuilt, node.extendedThree);
+            NodeAst? four = Rebuilt(rebuilt, node.extendedFour);
+            NodeAst? five = Rebuilt(rebuilt, node.extendedFive);
+            NodeAst? six = Rebuilt(rebuilt, node.extendedSix);
+            NodeAst? seven = Rebuilt(rebuilt, node.extendedSeven);
+
+            bool same = ReferenceEquals(left, node.leftAst)
+                && ReferenceEquals(right, node.rightAst)
+                && ReferenceEquals(one, node.extendedOne)
+                && ReferenceEquals(two, node.extendedTwo)
+                && ReferenceEquals(three, node.extendedThree)
+                && ReferenceEquals(four, node.extendedFour)
+                && ReferenceEquals(five, node.extendedFive)
+                && ReferenceEquals(six, node.extendedSix)
+                && ReferenceEquals(seven, node.extendedSeven);
+
+            rebuilt[node] = same
+                ? node
+                : new NodeAst(node.nodeType, left, right, one, two, three, four, five, node.yytext, six, seven);
+        }
+
+        return rebuilt[root];
+    }
+
+    private static void PushFrame(Stack<(NodeAst, bool)> pending, NodeAst? child)
+    {
+        if (child is not null)
+            pending.Push((child, false));
+    }
+
+    private static NodeAst? Rebuilt(Dictionary<NodeAst, NodeAst> rebuilt, NodeAst? child) =>
+        child is null ? null : rebuilt[child];
+
     private static void Push(Stack<NodeAst> pending, NodeAst? child)
     {
         if (child is not null)
