@@ -24,7 +24,8 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// <summary>
 /// A subquery can stand in every expression position, at any depth. Each uncorrelated subquery is
 /// folded into its value before the statement reads its first row; a correlated EXISTS is evaluated
-/// per row in the WHERE of a SELECT, at any depth of the predicate, and refused with
+/// per row in the WHERE and the select list of a SELECT, at any depth of the predicate, in the WHERE of an
+/// UPDATE or a DELETE and in the SET values of an UPDATE, and refused with
 /// <see cref="CamusDBErrorCodes.FeatureNotSupported"/> everywhere else.
 ///
 /// <para>Before this held, a subquery outside a WHERE conjunct of a SELECT reached the per-row
@@ -275,14 +276,14 @@ public sealed class TestSubqueryPositions : SharedNodeBaseTest
         Assert.IsTrue(plan.Count > 0);
     }
 
+    /// <summary>A correlated EXISTS in the select list runs for each row; PostgreSQL 16.11 gives true, false, false.</summary>
     [Test]
-    public async Task SelectList_CorrelatedExists_IsRefusedWithASpecificCode()
+    public async Task SelectList_CorrelatedExists_IsEvaluatedForEachRow()
     {
         (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupAsync();
 
-        AssertRefused(CamusDBErrorCodes.FeatureNotSupported, "select list", async () =>
-            await ExecQuery(database, executor, dbname,
-                "SELECT a0.c0, EXISTS (SELECT 1 FROM t1 AS s WHERE s.c1 = a0.c1) AS f FROM t0 AS a0"));
+        CollectionAssert.AreEqual(new[] { "true", "false", "false" }, await Column(database, executor, dbname,
+            "SELECT a0.c0, EXISTS (SELECT 1 FROM t1 AS s WHERE s.c1 = a0.c1) AS f FROM t0 AS a0", "f"));
     }
 
     [Test]
@@ -353,19 +354,18 @@ public sealed class TestSubqueryPositions : SharedNodeBaseTest
     }
 
     /// <summary>
-    /// A correlated EXISTS in the WHERE of an UPDATE is evaluated for each row; PostgreSQL 16.11 updates
-    /// row 1. In a SET value it is refused, and the refused statement writes nothing.
+    /// A correlated EXISTS in the WHERE of an UPDATE and in a SET value is evaluated for each row; PostgreSQL 16.11
+    /// sets c2 to true and false, and the WHERE form updates row 1.
     /// </summary>
     [Test]
-    public async Task Update_CorrelatedExists_RunsInTheWhere_AndIsRefusedInASetValue()
+    public async Task Update_CorrelatedExists_RunsInTheWhere_AndInASetValue()
     {
         (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await SetupAsync();
 
-        AssertRefused(CamusDBErrorCodes.FeatureNotSupported, "a SET value of an UPDATE", async () =>
-            await ExecNonQuery(database, executor, dbname,
-                "UPDATE t1 SET c2 = EXISTS (SELECT 1 FROM t2 AS s WHERE s.c0 = t1.c0) WHERE c0 = 1"));
+        Assert.AreEqual(2, await ExecNonQuery(database, executor, dbname,
+            "UPDATE t1 SET c2 = EXISTS (SELECT 1 FROM t2 AS s WHERE s.c0 = t1.c0) WHERE c0 >= 1"));
 
-        CollectionAssert.AreEqual(new[] { "10", "99" }, await Column(database, executor, dbname, "SELECT c0, c1 FROM t1", "c1"));
+        CollectionAssert.AreEqual(new[] { "true", "false" }, await Column(database, executor, dbname, "SELECT c0, c2 FROM t1", "c2"));
 
         Assert.AreEqual(1, await ExecNonQuery(database, executor, dbname,
             "UPDATE t1 SET c1 = 5 WHERE EXISTS (SELECT 1 FROM t2 AS s WHERE s.c0 = t1.c0)"));

@@ -186,7 +186,6 @@ These forms give an error that names them:
 | `SELECT … FOR UPDATE` with a window | InvalidInput |
 | `SELECT DISTINCT * … ORDER BY <window call>` | InvalidInput |
 
-Two limits come from older restrictions on subqueries, not from windows. A scalar subquery in the
-select list cannot read from a derived table, and a correlated `EXISTS` subquery cannot have a
-multi-source inner query. A subquery that holds a window call is a query over a derived table, so
-both limits apply to it. An uncorrelated `IN`, `EXISTS` or scalar subquery in `WHERE` works.
+A subquery can hold a window call, correlated or not, in the `WHERE` and in the select list: the window
+is computed over the rows the subquery reads for each outer row. A correlated subquery can also stand in
+the select list of a query with a window, or in the `ORDER BY` of a window.

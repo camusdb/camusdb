@@ -217,14 +217,23 @@ internal static class StaticOperandRules
     }
 
     /// <summary>
+    /// <c>x IN (SELECT …)</c> whose subquery is still a node: a correlated one, which runs for each row. The
+    /// tested value must compare with the type of the subquery's column, which the preparer recorded on the
+    /// node, as for the membership test of an uncorrelated <c>IN</c>.
+    /// </summary>
+    internal static void CheckSubqueryMembership(NodeAst node, ExpressionType? left) =>
+        RequireComparable("IN", node.leftAst, left, null, SubqueryResultTypes.TypeOf(node));
+
+    /// <summary>
     /// The right operand of <c>x &lt; ANY (a)</c> must be an array, and each element must compare with
     /// <c>x</c>. A subquery operand is a value set, and the type of the subquery's column is what compares.
+    /// A correlated subquery keeps its subquery node, which records that type.
     /// </summary>
     private static void CheckQuantified(NodeAst node, ExpressionType? left, ExpressionType? right)
     {
         NodeType op = QuantifiedComparison.OperatorOf(node);
 
-        if (QuantifiedComparisonEvaluator.HasValueSet(node))
+        if (QuantifiedComparisonEvaluator.HasValueSet(node) || node.rightAst?.nodeType == NodeType.ExprScalarSubquery)
         {
             RequireComparable(SQLExecutorBaseCreator.ComparisonSymbol(op), node.leftAst, left, null, SubqueryResultTypes.TypeOf(node.rightAst!));
             return;

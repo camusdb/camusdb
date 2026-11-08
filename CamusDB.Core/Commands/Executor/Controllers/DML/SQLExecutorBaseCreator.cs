@@ -682,9 +682,17 @@ internal abstract class SQLExecutorBaseCreator
                 return EvalMembershipNode(expr, row, parameters, rowNameResolver, queryRow);
 
             case NodeType.ExprQuantifiedComparison:
+                // A correlated subquery operand ran for this row before the evaluation, see CorrelatedSubqueryValues.
+                if (CorrelatedSubqueryValues.TryRead(expr, parameters, out ColumnValue quantified))
+                    return quantified;
+
                 return EvalQuantifiedComparisonNode(expr, row, parameters, rowNameResolver, queryRow);
 
             default:
+                // A correlated subquery ran for this row before the evaluation, see CorrelatedSubqueryValues.
+                if (CorrelatedSubqueryValues.TryRead(expr, parameters, out ColumnValue correlated))
+                    return correlated;
+
                 throw UnevaluableExpression(expr.nodeType);
         }
     }

@@ -56,7 +56,7 @@ internal sealed class QueryExecutor
 
     private readonly QueryPlanner queryPlanner;
 
-    private readonly QueryFilterer queryFilterer = new(new ExistsSubqueryExecutor());
+    private readonly QueryFilterer queryFilterer = new();
 
     private readonly QuerySorter querySorter = new();
 
@@ -638,7 +638,7 @@ internal sealed class QueryExecutor
 
             case ProjectNode:
                 Trace(QueryPlanStepType.ReduceToProjections);
-                cursor = queryProjector.ProjectResultset(plan.Ticket, RequireInput(input));
+                cursor = queryProjector.ProjectResultset(plan.Ticket, RequireInput(input), plan.Database);
                 break;
 
             case LimitNode:

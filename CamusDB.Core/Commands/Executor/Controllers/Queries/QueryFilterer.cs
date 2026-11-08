@@ -20,23 +20,16 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 
 internal sealed class QueryFilterer
 {
-    private readonly ExistsSubqueryExecutor existsSubqueryExecutor;
-
-    // Memoizes, per predicate AST, whether evaluating it can suspend (contains a correlated EXISTS).
+    // Memoizes, per predicate AST, whether evaluating it can suspend (contains a correlated subquery).
     // Keyed by AST identity via a weak table so cached decisions never keep a parsed query alive.
     private readonly ConditionalWeakTable<NodeAst, object> predicateNeedsAsyncCache = new();
-
-    public QueryFilterer(ExistsSubqueryExecutor existsSubqueryExecutor)
-    {
-        this.existsSubqueryExecutor = existsSubqueryExecutor;
-    }
 
     /// <summary>
     /// Evaluates a plan's execution filter against a row. Returns a <b>completed</b>
     /// <see cref="ValueTask{T}"/> synchronously for the common case — a predicate with no correlated
-    /// EXISTS subquery evaluates through the fully synchronous <see cref="EvaluatePredicate"/>, so the
+    /// subquery evaluates through the fully synchronous <see cref="EvaluatePredicate"/>, so the
     /// per-row hot path allocates no async state machine. Only a predicate that can suspend (a correlated
-    /// EXISTS reaches out to the KV store per row) falls through to the async path.
+    /// subquery reaches out to the KV store per row) falls through to the async path.
     /// </summary>
     internal ValueTask<bool> MeetPlanFilterAsync(
         QueryPlan plan,
@@ -64,7 +57,7 @@ internal sealed class QueryFilterer
 
     /// <summary>
     /// Evaluates a WHERE / join predicate against a row. Synchronous (completed <see cref="ValueTask{T}"/>,
-    /// no state-machine allocation) unless the predicate contains a correlated EXISTS subquery — see
+    /// no state-machine allocation) unless the predicate contains a correlated subquery — see
     /// <see cref="MeetPlanFilterAsync"/>.
     /// </summary>
     internal ValueTask<bool> MeetWhereAsync(
@@ -92,22 +85,20 @@ internal sealed class QueryFilterer
 
     /// <summary>
     /// True when <paramref name="predicate"/> can suspend during evaluation — i.e. it contains a
-    /// correlated EXISTS anywhere in its tree (the only node the filter evaluates asynchronously). The
-    /// result is a property of the AST, so it is memoized per predicate rather than recomputed per row.
+    /// correlated subquery anywhere in its tree (the only nodes the filter evaluates asynchronously, see
+    /// <see cref="CorrelatedSubqueryValues"/>). The result is a property of the AST, so it is memoized per
+    /// predicate rather than recomputed per row.
     /// </summary>
     private bool PredicateNeedsAsync(NodeAst predicate)
     {
         if (predicateNeedsAsyncCache.TryGetValue(predicate, out object? cached))
             return (bool)cached;
 
-        bool needsAsync = ContainsCorrelatedExists(predicate);
+        bool needsAsync = CorrelatedSubqueryValues.Contains(predicate);
         // AddOrUpdate: a benign race just recomputes and stores the same value.
         predicateNeedsAsyncCache.AddOrUpdate(predicate, needsAsync);
         return needsAsync;
     }
-
-    private static bool ContainsCorrelatedExists(NodeAst node) =>
-        SubqueryNodeScan.Contains(node, SubqueryNodeKinds.ExistsCorrelated);
 
     /// <summary>
     /// Synchronous twin of <see cref="EvaluatePredicateAsync"/> for predicates that cannot suspend
@@ -273,7 +264,7 @@ internal sealed class QueryFilterer
                         "Correlated EXISTS subquery was not prepared");
                 }
 
-                bool exists = await existsSubqueryExecutor.ExecuteCorrelatedAsync(
+                bool exists = await ExistsSubqueryExecutor.ExecuteCorrelatedAsync(
                     database,
                     prepared,
                     row,
@@ -286,7 +277,9 @@ internal sealed class QueryFilterer
 
             case NodeType.ExprInMembership:
             {
-                if (ticket.PreparedInSets is not null && ticket.PreparedInSets.TryGetValue(expr, out PreparedInSet? prepared))
+                // A correlated subquery in the tested value needs the default path, which runs it first.
+                if (ticket.PreparedInSets is not null && ticket.PreparedInSets.TryGetValue(expr, out PreparedInSet? prepared)
+                    && !PredicateNeedsAsync(expr))
                 {
                     ColumnValue lhs = row is QueryRow qrIn
                         ? SqlExecutor.EvalExpr(expr.leftAst!, qrIn, ticket.Parameters, ticket.RowNameResolver)
@@ -334,78 +327,26 @@ internal sealed class QueryFilterer
             }
 
             default:
-                // A correlated EXISTS below a node that is not AND, OR or NOT (a CASE branch, a
-                // comparison operand, an IS NULL test, a BETWEEN bound) cannot be run by the
-                // synchronous evaluator. Each one is answered for this row first, and the answers
-                // take their places in a copy of the subtree the evaluator then sees.
+                // A correlated subquery below a node that is not AND, OR or NOT (a comparison operand,
+                // a CASE branch, an IS NULL test, a BETWEEN bound) cannot be run by the synchronous
+                // evaluator. Each one runs for this row first, and the evaluator reads its value from a
+                // copy of the parameters, see CorrelatedSubqueryValues. The tree is not copied.
+                Dictionary<string, ColumnValue>? parameters = ticket.Parameters;
+
                 if (PredicateNeedsAsync(expr))
-                    expr = await ResolveCorrelatedExistsAsync(expr, row, ticket, database).ConfigureAwait(false);
+                {
+                    parameters = CorrelatedSubqueryValues.NewRowParameters(ticket);
+                    await CorrelatedSubqueryValues.AddForRowAsync(expr, row, ticket, database, parameters).ConfigureAwait(false);
+                }
 
                 // Use ordinal fast path when the row is a QueryRow (emitted by the scanner
                 // via RowEncoder.DecodeToQueryRowAsync). Falls back to the dictionary overload
                 // for intermediate rows produced by joins or aggregation.
                 return row is QueryRow qr
-                    ? SqlExecutor.EvalExpr(expr, qr, ticket.Parameters, ticket.RowNameResolver)
-                    : SqlExecutor.EvalExpr(expr, row, ticket.Parameters, ticket.RowNameResolver);
+                    ? SqlExecutor.EvalExpr(expr, qr, parameters, ticket.RowNameResolver)
+                    : SqlExecutor.EvalExpr(expr, row, parameters, ticket.RowNameResolver);
         }
     }
-
-    /// <summary>
-    /// Returns <paramref name="expr"/> with every correlated EXISTS below it replaced by the literal
-    /// it evaluates to for <paramref name="row"/>. Only the nodes on a path to a correlated EXISTS are
-    /// copied; a subtree without one is shared with the original predicate, so the copy costs a few
-    /// nodes per row, and only for the rare predicate that puts an EXISTS under a non-boolean node.
-    /// The original AST is never modified: it is shared across executions of the same SQL text.
-    /// </summary>
-    private async ValueTask<NodeAst> ResolveCorrelatedExistsAsync(
-        NodeAst expr,
-        IReadOnlyDictionary<string, ColumnValue> row,
-        QueryTicket ticket,
-        DatabaseDescriptor database)
-    {
-        // An async frame is large, and a deep predicate would overflow the stack; continue on a
-        // fresh thread-pool stack instead. See StatementDepthGuard.HasStackHeadroom.
-        if (!StatementDepthGuard.HasStackHeadroom())
-            return await Task.Run(() => ResolveCorrelatedExistsAsync(expr, row, ticket, database).AsTask()).ConfigureAwait(false);
-
-        if (expr.nodeType == NodeType.ExprExistsCorrelated)
-        {
-            ColumnValue exists = await EvaluatePredicateAsync(expr, row, ticket, database).ConfigureAwait(false);
-            return exists.BoolValue ? NodeAst.True : NodeAst.False;
-        }
-
-        if (!PredicateNeedsAsync(expr))
-            return expr;
-
-        NodeAst? left = await ResolveChildAsync(expr.leftAst, row, ticket, database).ConfigureAwait(false);
-        NodeAst? right = await ResolveChildAsync(expr.rightAst, row, ticket, database).ConfigureAwait(false);
-        NodeAst? one = await ResolveChildAsync(expr.extendedOne, row, ticket, database).ConfigureAwait(false);
-        NodeAst? two = await ResolveChildAsync(expr.extendedTwo, row, ticket, database).ConfigureAwait(false);
-        NodeAst? three = await ResolveChildAsync(expr.extendedThree, row, ticket, database).ConfigureAwait(false);
-        NodeAst? four = await ResolveChildAsync(expr.extendedFour, row, ticket, database).ConfigureAwait(false);
-        NodeAst? five = await ResolveChildAsync(expr.extendedFive, row, ticket, database).ConfigureAwait(false);
-
-        return new NodeAst(expr.nodeType, left, right, one, two, three, four, five, expr.yytext, expr.extendedSix, expr.extendedSeven);
-    }
-
-    private ValueTask<NodeAst?> ResolveChildAsync(
-        NodeAst? child,
-        IReadOnlyDictionary<string, ColumnValue> row,
-        QueryTicket ticket,
-        DatabaseDescriptor database)
-    {
-        if (child is null || !PredicateNeedsAsync(child))
-            return new ValueTask<NodeAst?>(child);
-
-        return ResolveChildCoreAsync(child, row, ticket, database);
-    }
-
-    private async ValueTask<NodeAst?> ResolveChildCoreAsync(
-        NodeAst child,
-        IReadOnlyDictionary<string, ColumnValue> row,
-        QueryTicket ticket,
-        DatabaseDescriptor database)
-        => await ResolveCorrelatedExistsAsync(child, row, ticket, database).ConfigureAwait(false);
 
     /// <summary>
     /// Negates a predicate operand using SQL three-valued logic, matching

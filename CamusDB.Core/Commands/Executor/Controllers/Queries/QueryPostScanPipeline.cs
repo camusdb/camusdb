@@ -48,7 +48,7 @@ internal static class QueryPostScanPipeline
                 cursor = querySorter.SortResultset(ticket, cursor, context);
 
             if (ticket.Projection is not null && ticket.Projection.Count > 0 && !IsFullProjection(ticket))
-                cursor = queryProjector.ProjectResultset(ticket, cursor);
+                cursor = queryProjector.ProjectResultset(ticket, cursor, database);
 
             if (ticket.Limit is not null || ticket.Offset is not null)
                 cursor = queryLimiter.LimitResultset(ticket, cursor);
@@ -68,7 +68,7 @@ internal static class QueryPostScanPipeline
                 }
 
                 if (!IsFullProjection(ticket))
-                    cursor = queryProjector.ProjectResultset(ticket, cursor);
+                    cursor = queryProjector.ProjectResultset(ticket, cursor, database);
             }
 
             cursor = queryDistincter.DistinctResultset(ticket, cursor, context);
@@ -102,7 +102,7 @@ internal static class QueryPostScanPipeline
             }
 
             if (!IsFullProjection(ticket))
-                cursor = queryProjector.ProjectResultset(ticket, cursor);
+                cursor = queryProjector.ProjectResultset(ticket, cursor, database);
         }
 
         // Limit runs above the aggregate: LIMIT/OFFSET restricts the query's output

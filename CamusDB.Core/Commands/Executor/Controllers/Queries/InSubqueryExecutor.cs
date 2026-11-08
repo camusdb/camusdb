@@ -47,14 +47,33 @@ internal sealed class InSubqueryExecutor
         QueryExecutionContext context = QueryExecutionContext.For(database, cancellationToken);
         SubqueryOutputType outputType = new();
 
+        InSubqueryMaterialization materialization = await MaterializeRowsAsync(
+            queryExecutor.ExecuteSelectAsync(database, selectAst, txnState, parameters, cancellationToken, outputType),
+            context).ConfigureAwait(false);
+
+        if (materialization.Values.IsSpilled && stats is not null)
+            stats.InSubqueryValueListSpillCount++;
+
+        return materialization with { OutputType = outputType.Type };
+    }
+
+    /// <summary>
+    /// Collects the one column of <paramref name="rows"/> as a value set. A NULL value is not kept: the set
+    /// records that it saw one, and that it saw no row at all, because <c>IN</c> and <c>NOT IN</c> answer
+    /// UNKNOWN or a constant from those facts. A correlated subquery runs this once for each outer row,
+    /// see <see cref="CorrelatedSubqueryValues"/>.
+    /// </summary>
+    internal static async Task<InSubqueryMaterialization> MaterializeRowsAsync(
+        IAsyncEnumerable<QueryResultRow> rows,
+        QueryExecutionContext context)
+    {
         SpillableValueList valueList = new(context);
         bool containsNull = false;
         bool anyRow = false;
 
         try
         {
-            await foreach (QueryResultRow row in queryExecutor.ExecuteSelectAsync(
-                database, selectAst, txnState, parameters, cancellationToken, outputType).ConfigureAwait(false))
+            await foreach (QueryResultRow row in rows.ConfigureAwait(false))
             {
                 anyRow = true;
                 ColumnValue value = SubqueryQueryExecutor.ExtractSingleColumnValue(row);
@@ -77,16 +96,13 @@ internal sealed class InSubqueryExecutor
             throw;
         }
 
-        if (valueList.IsSpilled && stats is not null)
-            stats.InSubqueryValueListSpillCount++;
-
         if (!anyRow)
         {
             await valueList.DisposeAsync().ConfigureAwait(false);
-            return new InSubqueryMaterialization(new SpillableValueList(context), ContainsNull: false, IsEmpty: true) { OutputType = outputType.Type };
+            return new InSubqueryMaterialization(new SpillableValueList(context), ContainsNull: false, IsEmpty: true);
         }
 
-        return new InSubqueryMaterialization(valueList, containsNull, IsEmpty: false) { OutputType = outputType.Type };
+        return new InSubqueryMaterialization(valueList, containsNull, IsEmpty: false);
     }
 
     public async Task<IAsyncEnumerable<ColumnValue>> ExecuteAsync(

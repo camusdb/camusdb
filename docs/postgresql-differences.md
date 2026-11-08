@@ -170,15 +170,25 @@ A negative `LIMIT` or `OFFSET` fails with `CADB0400` and the message of PostgreS
 
 ## Correlated subqueries
 
-A name in a subquery resolves to the nearest query that has it, as in PostgreSQL, so a bare name can read the outer query. CamusDB runs a correlated `EXISTS` in the `WHERE` of a `SELECT`, an `UPDATE` or a `DELETE`, with any body. It refuses the other correlated forms with `CADB0533`, and the message names the outer name, so no answer is wrong. `r` has the rows `(1, v = 0)`, `(2, 2)` and `(3, 0)`, and `r2` has `(1, w = 10)` and `(2, 20)`.
+A name in a subquery resolves to the nearest query that has it, as in PostgreSQL, so a bare name can read the outer query. CamusDB runs a correlated `EXISTS`, scalar, `IN`, `NOT IN` and `ANY`, `SOME` or `ALL` subquery, with any body, in these clauses:
+
+- The `WHERE` and the select list of a `SELECT`.
+- The `WHERE` of an `UPDATE` or a `DELETE`.
+- The `SET` values of an `UPDATE`.
+
+A subquery of an `UPDATE` or a `DELETE` reads the rows as the statement found them, also when it reads the target table, as in PostgreSQL. A subquery in a `CASE` branch that does not run, or in a `COALESCE` argument after the first value, still runs, so it costs time, but its error does not appear, as in PostgreSQL.
+
+A select list that has a window function runs a correlated subquery too, but a window that orders by a NULL can rank the rows in another order, see [window functions](window-functions.md).
+
+The clauses below have no stage that runs once for each row. CamusDB refuses a correlated subquery there with `CADB0533`, and the message names the clause and the outer name, so no answer is wrong. `r` has the rows `(1, v = 0)`, `(2, 2)` and `(3, 0)`, `r2` has `(1, w = 10)` and `(2, 20)`, and `d` has `(1, v = 1)`, `(2, 2)` and `(3, 3)`.
 
 | Statement | CamusDB | PostgreSQL |
 |---|---|---|
-| `SELECT id, (SELECT w FROM r2 WHERE r2.id = r.id) FROM r` | `CADB0533` | `10`, `20` and NULL |
-| `SELECT id FROM r o WHERE id IN (SELECT o.id FROM r2)` | `CADB0533` | Every row |
-| `SELECT id FROM r WHERE v < ANY (SELECT w FROM r2 WHERE w = v + 10)` | `CADB0533` | `1` and `3` |
-| `SELECT id, EXISTS (SELECT 1 FROM r2 WHERE w = v + 10) FROM r` | `CADB0533` | `t`, `f` and `t` |
-| `UPDATE r SET v = CASE WHEN EXISTS (SELECT 1 FROM r2 WHERE w = v + 10) THEN 1 ELSE 0 END WHERE id > 0` | `CADB0533` | Sets `v` to 1, 0 and 1 |
+| `SELECT v FROM r GROUP BY v HAVING (SELECT COUNT(*) FROM d WHERE d.v > r.v) > 0` | `CADB0533` | `0` and `2` |
+| `SELECT a.id FROM r a JOIN d b ON b.id = (SELECT MIN(r2.id) FROM r2 WHERE r2.w > a.v * 6)` | `CADB0533` | Every row |
+| `SELECT v, (SELECT COUNT(*) FROM d WHERE d.v > r.v) FROM r GROUP BY v` | `CADB0533` | `0, 3` and `2, 1` |
+| `SELECT COUNT(*), (SELECT COUNT(*) FROM d WHERE d.v > MAX(r.v)) FROM r` | `CADB0533` | `3, 1` |
+| `INSERT INTO r (id, v, s) VALUES (1, 5, 'z') ON CONFLICT (id) DO UPDATE SET v = (SELECT w FROM r2 WHERE r2.id = r.id)` | `CADB0533` | Sets `v` of row 1 to `10` |
 
 ## Aggregates
 

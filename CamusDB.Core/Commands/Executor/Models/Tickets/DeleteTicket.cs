@@ -36,9 +36,9 @@ public readonly struct DeleteTicket
     public Diagnostics.StatementProbe? Probe { get; }
 
     /// <summary>
-    /// The correlated EXISTS subqueries of <see cref="Where"/>, prepared against the target table, or
-    /// null when it has none. The locate scan carries it on its query ticket, so the filter can evaluate
-    /// each one for each row of the table.
+    /// The correlated subqueries of <see cref="Where"/>, prepared against the target table, or null when it
+    /// has none. The locate scan carries it on its query ticket, so the filter can evaluate each one for
+    /// each row of the table.
     /// </summary>
     public ExistsSubqueryRegistry? ExistsSubqueries { get; }
 

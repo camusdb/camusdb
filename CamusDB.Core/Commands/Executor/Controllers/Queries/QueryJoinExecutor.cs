@@ -80,7 +80,7 @@ internal sealed class QueryJoinExecutor : IJoinNodeExecutor
     {
         services = new JoinExecutionServices(options)
         {
-            Filterer = new QueryFilterer(new ExistsSubqueryExecutor()),
+            Filterer = new QueryFilterer(),
             Sorter = new QuerySorter(),
             Statistics = stats,
             Logger = logger,

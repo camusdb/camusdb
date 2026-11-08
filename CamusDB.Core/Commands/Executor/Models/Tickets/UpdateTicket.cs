@@ -40,9 +40,10 @@ public sealed class UpdateTicket
     public Diagnostics.StatementProbe? Probe { get; }
 
     /// <summary>
-    /// The correlated EXISTS subqueries of <see cref="Where"/>, prepared against the target table, or
-    /// null when it has none. The locate scan carries it on its query ticket, so the filter can evaluate
-    /// each one for each row of the table.
+    /// The correlated subqueries of <see cref="Where"/> and of the SET values, prepared against the target
+    /// table, or null when there are none. The locate scan carries it on its query ticket, so the filter can
+    /// evaluate each one of the WHERE for each row of the table, and the scan runs each one of a SET value
+    /// for each located row.
     /// </summary>
     public ExistsSubqueryRegistry? ExistsSubqueries { get; }
 

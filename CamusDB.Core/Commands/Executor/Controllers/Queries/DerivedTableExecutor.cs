@@ -33,7 +33,7 @@ internal sealed class DerivedTableExecutor
 {
     private readonly QueryExecutor queryExecutor;
     private readonly QueryJoinExecutor queryJoinExecutor;
-    private readonly QueryFilterer queryFilterer = new(new ExistsSubqueryExecutor());
+    private readonly QueryFilterer queryFilterer = new();
 
     private readonly QuerySorter querySorter = new();
 

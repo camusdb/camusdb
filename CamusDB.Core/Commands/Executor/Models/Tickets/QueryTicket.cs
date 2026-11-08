@@ -64,7 +64,7 @@ public sealed class QueryTicket
     /// <summary>Predicate analysis for <see cref="Where"/>; populated at ticket creation.</summary>
     public PredicateAnalysis? AnalyzedWhere { get; }
 
-    /// <summary>Prepared correlated EXISTS subqueries keyed by rewritten AST nodes.</summary>
+    /// <summary>Prepared correlated subqueries keyed by rewritten AST nodes, see <see cref="ExistsSubqueryRegistry"/>.</summary>
     internal ExistsSubqueryRegistry? ExistsSubqueries { get; }
 
     /// <summary>

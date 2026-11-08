@@ -147,9 +147,9 @@ internal sealed class TestFromlessSubquery : BaseTest
     [TestCase("SELECT * FROM (SELECT *) d", "CADB0400")]
     [TestCase("SELECT EXISTS (SELECT *)", "CADB0400")]
     [TestCase("SELECT 1 IN (SELECT *)", "CADB0400")]
-    // PostgreSQL gives the id of each row. The subquery reads the outer row, which CamusDB does not run yet.
-    [TestCase("SELECT id, (SELECT t.id) FROM t ORDER BY id", "CADB0533")]
-    [TestCase("SELECT id, (SELECT id) FROM t ORDER BY id", "CADB0533")]
+    // The subquery reads the outer row and runs for each row. PostgreSQL gives the id of each row.
+    [TestCase("SELECT id, (SELECT t.id) FROM t ORDER BY 1", "1|1 ; 2|2 ; 3|3")]
+    [TestCase("SELECT id, (SELECT id) FROM t ORDER BY 1", "1|1 ; 2|2 ; 3|3")]
     [TestCase("SELECT (SELECT nosuch)", "CADB0404")]
     [TestCase("SELECT EXISTS (SELECT nosuch)", "CADB0404")]
     [TestCase("SELECT x FROM (SELECT nosuch AS x) d", "CADB0404")]
@@ -207,8 +207,8 @@ internal sealed class TestFromlessSubquery : BaseTest
     [TestCase("SELECT id FROM t WHERE id IN (SELECT 1 WHERE EXISTS (SELECT 1 FROM t))", "1")]
     [TestCase("SELECT (SELECT 1 WHERE EXISTS (SELECT 1 FROM em))", "")]
     [TestCase("SELECT x.id FROM t x WHERE EXISTS (SELECT 1 FROM t y WHERE y.id = x.id AND x.id = 1)", "1")]
-    // PostgreSQL gives 1 ; 2 ; 3. The subquery reads the outer x, which CamusDB does not run yet.
-    [TestCase("SELECT x.id FROM t x WHERE x.id IN (SELECT x.id FROM t y)", "CADB0533")]
+    // The subquery reads the outer x and runs for each row, as in PostgreSQL.
+    [TestCase("SELECT x.id FROM t x WHERE x.id IN (SELECT x.id FROM t y)", "1 ; 2 ; 3")]
     [TestCase("SELECT id FROM em WHERE EXISTS (SELECT 1 WHERE em.id = 1)", "")]
     public async Task Statement(string sql, string expected)
     {
@@ -467,26 +467,18 @@ internal sealed class TestFromlessSubquery : BaseTest
     }
 
     /// <summary>
-    /// A correlated scalar or IN subquery with no FROM is not supported yet, and the error must say so and
-    /// name the reference. The same scalar form with a FROM gives the same error.
+    /// A correlated scalar or IN subquery with no FROM runs for each outer row, with the rows of PostgreSQL
+    /// 16.11. A bare name that only the outer query has reads the outer row too.
     /// </summary>
-    [TestCase("SELECT x.id FROM t x WHERE x.id IN (SELECT 1 WHERE x.id = 1)", "correlated IN or NOT IN subquery is not supported yet: it reads 'x.id'")]
-    [TestCase("SELECT x.id FROM t x WHERE (SELECT x.id) = 1", "correlated scalar subquery is not supported yet: it reads 'x.id'")]
-    [TestCase("SELECT x.id FROM t x WHERE x.id IN (SELECT x.id)", "correlated IN or NOT IN subquery is not supported yet: it reads 'x.id'")]
-    [TestCase("SELECT id FROM t WHERE (SELECT v) = 10", "correlated scalar subquery is not supported yet: it reads 'v'")]
-    public async Task Correlated_InASubqueryWithNoFrom_NamesTheProblem(string sql, string message)
+    [TestCase("SELECT x.id FROM t x WHERE x.id IN (SELECT 1 WHERE x.id = 1)", "1")]
+    [TestCase("SELECT x.id FROM t x WHERE (SELECT x.id) = 1", "1")]
+    [TestCase("SELECT x.id FROM t x WHERE x.id IN (SELECT x.id)", "1 ; 2 ; 3")]
+    [TestCase("SELECT id FROM t WHERE (SELECT v) = 10", "1")]
+    public async Task Correlated_InASubqueryWithNoFrom_Runs(string sql, string expected)
     {
         (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateTables();
-        KvTransaction tx = await database.Transactions.BeginAsync();
 
-        CamusDBException? error = Assert.CatchAsync<CamusDBException>(async () =>
-        {
-            (_, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(new ExecuteSQLTicket(tx, dbname, sql, null));
-            await cursor.ToListAsync();
-        });
-
-        await database.Transactions.RollbackAsync(tx);
-        Assert.That(error!.Message, Does.Contain(message));
+        Assert.That(await Run(database, executor, dbname, sql), Is.EqualTo(expected));
     }
 
     /// <summary>The join operators read a one-row source through different paths, and each must give the same rows.</summary>

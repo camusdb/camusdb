@@ -51,9 +51,10 @@ internal sealed class ExistsSubqueryExecutor(SubqueryQueryExecutor? queryExecuto
     /// <summary>
     /// True when the correlated body of <paramref name="prepared"/> returns a row for
     /// <paramref name="outerRow"/>. The fast form reads the inner table here; every other body runs
-    /// through the whole pipeline with the outer values as hidden parameters.
+    /// through the whole pipeline with the outer values as hidden parameters. It reads no state of an
+    /// executor, so a stage that has none (the projector, the locate scan of an UPDATE) calls it too.
     /// </summary>
-    public Task<bool> ExecuteCorrelatedAsync(
+    public static Task<bool> ExecuteCorrelatedAsync(
         DatabaseDescriptor database,
         PreparedExistsSubquery prepared,
         IReadOnlyDictionary<string, ColumnValue> outerRow,

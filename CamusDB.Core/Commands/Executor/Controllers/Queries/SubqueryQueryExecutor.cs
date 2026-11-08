@@ -124,8 +124,8 @@ internal sealed class SubqueryQueryExecutor
     /// Runs a body that <see cref="BindForRunsAsync"/> bound, with the values of one run in
     /// <paramref name="parameters"/>. Each run gets its own query ticket, because the ticket reads the
     /// parameter values (an index seek on a parameter, for example). The bound query is shared by the runs
-    /// and is not frozen: the filter evaluates a correlated subquery for one outer row at a time, so two
-    /// runs never use it at once.
+    /// and is not frozen: each stage that evaluates a correlated subquery (the filter, the projector, the
+    /// locate scan of an UPDATE) runs it for one outer row at a time, so two runs never use it at once.
     /// </summary>
     internal IAsyncEnumerable<QueryResultRow> RunBoundAsync(
         DatabaseDescriptor database,

@@ -459,8 +459,8 @@ Two rules differ from PostgreSQL:
 
 - All non-`NULL` elements must have the same type. PostgreSQL finds a common type, so it accepts
   `ARRAY[1, 2.5]` and `ARRAY[1, '2']`. CamusDB rejects both. Cast the elements to one type.
-- A scalar subquery in an element must be uncorrelated, as every subquery outside a `WHERE` must
-  be. See [Subqueries in expressions](#subqueries-in-expressions).
+- A scalar subquery in an element follows the rule of its clause: it can be correlated where a
+  correlated subquery runs. See [Subqueries in expressions](#subqueries-in-expressions).
 
 See also [Data types → Arrays](data-types.md#arrays).
 
@@ -509,17 +509,25 @@ tables and set operations. A derived table cannot read the other items of its ow
   takes its place: a scalar subquery becomes its value, `EXISTS` becomes `true` or `false`, and
   `IN`, `NOT IN` and a quantified comparison become a membership test over the rows it returned.
   This holds in every position listed above.
-- A **correlated `EXISTS`** is evaluated once per row. CamusDB supports it in the `WHERE` of a
-  `SELECT`, an `UPDATE` or a `DELETE`, at any depth of the predicate, and with any body: a join, a
-  derived table or a view, no `FROM`, an aggregate, `GROUP BY`, `HAVING`, `OFFSET`, a window function,
-  or another subquery. A body that reads one table and needs only its `FROM` and `WHERE` reads the
-  inner table directly, with an index seek when one fits. Every other body runs as a whole query for
-  each outer row. In an `UPDATE` or `DELETE`, the body reads the rows as the statement found them,
-  also when it reads the target table. In every other position a correlated `EXISTS` is refused with
-  `CADB0533` (`FeatureNotSupported`), because the position has no row to evaluate it against.
-- A **correlated `IN`**, `NOT IN`, quantified comparison or scalar subquery is refused everywhere with
-  `CADB0533`, as the [quantified comparison](#quantified-comparisons-any-some-and-all) rule below says.
-  The message names the outer name that the subquery reads. PostgreSQL runs these forms.
+- A **correlated** subquery (`EXISTS`, a scalar subquery, `IN`, `NOT IN` or a quantified comparison) is
+  evaluated once per row. CamusDB supports it in the `WHERE` and the select list of a `SELECT`, in the
+  `WHERE` of an `UPDATE` or a `DELETE`, and in the `SET` values of an `UPDATE`, at any depth of the
+  expression, and with any body: a join, a derived table or a view, no `FROM`, an aggregate,
+  `GROUP BY`, `HAVING`, `OFFSET`, a window function, or another subquery. A correlated `EXISTS` whose
+  body reads one table and needs only its `FROM` and `WHERE` reads the inner table directly, with an
+  index seek when one fits. Every other body runs as a whole query for each outer row.
+- A scalar subquery gives NULL for no row and fails with `CADB0400` for a second row. `IN`, `NOT IN`
+  and a quantified comparison follow the same three-valued rules as their uncorrelated forms.
+- In an `UPDATE` or `DELETE`, the subquery reads the rows as the statement found them, also when it
+  reads the target table, as in PostgreSQL. A subquery of a `SET` value runs when the statement finds
+  the row, before the first write.
+- A subquery in a `CASE` branch that does not run, or in a `COALESCE` argument after the first value,
+  still runs. Its error does not appear, as in PostgreSQL, but it costs time.
+- The `HAVING`, a `JOIN ON`, the select list of a query that groups or aggregates, and
+  `ON CONFLICT DO UPDATE` refuse a correlated subquery with `CADB0533` (`FeatureNotSupported`), because
+  they have no stage that runs once for each row. The message names the clause and the outer name that
+  the subquery reads. PostgreSQL runs these forms; see
+  [differences from PostgreSQL](postgresql-differences.md#correlated-subqueries).
 
 Two positions do not take a subquery at all: `ORDER BY` and `GROUP BY` refuse one with `CADB0400`.
 

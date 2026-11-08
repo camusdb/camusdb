@@ -227,13 +227,16 @@ materializes its result, and replaces the subquery AST with a constant or a `Sub
 membership node. This lets the downstream filterer treat `IN` as a plain value-list check.
 `NOT IN` carries three-valued (NULL-aware) semantics. In the `WHERE`, `EXISTS` is left in place for
 stage 3b. The select list, the `HAVING` and every `JOIN ON` predicate are rewritten the same way,
-`EXISTS` included, because those positions have no per-row stage; a correlated `EXISTS` there is
-refused with `FeatureNotSupported`. The walk visits every child slot of a node (a `CASE` keeps its
-`ELSE` in one, a `BETWEEN` its bounds), so a subquery at any depth is folded. The same rewriter
-serves `UPDATE`, `DELETE`, `INSERT VALUES` and `ON CONFLICT DO UPDATE`, which have no bind pipeline.
-In the `WHERE` of an `UPDATE` or `DELETE` it folds an uncorrelated `EXISTS` and leaves a correlated
-one, which `SelectBindPipeline.PrepareWriteWhereAsync` prepares as stage 3b does, with the target table
-as the outer query. The locate scan then evaluates it for each row, at the statement timestamp.
+`EXISTS` included. Each **correlated** subquery of the `WHERE` and of the select list is left in place
+for stage 3b; one in the `HAVING`, a `JOIN ON` or the select list of a query that groups or aggregates is
+refused with `FeatureNotSupported`, because those positions have no per-row stage. The walk visits every
+child slot of a node (a `CASE` keeps its `ELSE` in one, a `BETWEEN` its bounds), so a subquery at any depth
+is folded. The same rewriter serves `UPDATE`, `DELETE`, `INSERT VALUES` and `ON CONFLICT DO UPDATE`,
+which have no bind pipeline. In the `WHERE` of an `UPDATE` or `DELETE` and in the `SET` values of an
+`UPDATE` it folds each uncorrelated subquery and leaves each correlated one, which
+`SelectBindPipeline.PrepareWriteClausesAsync` prepares as stage 3b does, with the target table as the
+outer query. The locate scan then evaluates it for each row, at the statement timestamp; a `SET` value
+reads the value that the locate scan computed for its row.
 *Note:* because this stage executes inner subqueries, a query with a subquery does touch storage during
 planning — relevant to `EXPLAIN` (see Part III).
 
@@ -268,22 +271,29 @@ Binding, in order:
    in `GROUP BY`.
 6. **Validate JOIN `ON` predicates** — column references must resolve to the joined sources.
 
-**Stage 3b — EXISTS preparation (`ExistsSubqueryPreparer`).** Walks the `WHERE` for `EXISTS(...)`
-nodes, at any depth, and registers an executor per correlated subquery in an `ExistsSubqueryRegistry`
-threaded into `QueryTicket`. `SubqueryScopeAnalyzer` decides whether a body is correlated: a name
-resolves to the subquery first and then to the outer query, so a bare outer name makes it correlated
-too. Uncorrelated `EXISTS` is evaluated once; correlated `EXISTS` is evaluated per outer row by
-`QueryFilterer`. A body that reads one table and needs only its `FROM` and `WHERE` takes the fast form
+**Stage 3b — Correlated subquery preparation (`ExistsSubqueryPreparer`).** Walks the `WHERE` and the
+select list for `EXISTS(...)` nodes and correlated scalar, `IN`, `NOT IN` and quantified subqueries, at any
+depth, and registers each correlated subquery in an `ExistsSubqueryRegistry` threaded into `QueryTicket`.
+Each one becomes a new node with a hidden name, so the parsed tree is never changed. `SubqueryScopeAnalyzer`
+decides whether a body is correlated: a name resolves to the subquery first and then to the outer query,
+so a bare outer name makes it correlated too. Uncorrelated `EXISTS` is evaluated once; a correlated
+subquery is evaluated per outer row by `QueryFilterer` in the `WHERE` and by `QueryProjector` in the select
+list. A correlated scalar subquery records the type of its column, and the pipeline runs the statement
+checks again after this stage, so a type mistake fails with no outer row. A correlated `EXISTS` whose body
+reads one table and needs only its `FROM` and `WHERE` takes the fast form
 (`CorrelatedExistsScan`): the executor reads the inner table, with the outer row's columns injected into
 the subquery scope under inner keys first, and with an index seek when one fits. Every other body is a
 `CorrelatedSubqueryBody`: each outer name is replaced by a hidden placeholder that has the type of the
 outer column, and the body runs through the whole pipeline for each outer row with the outer values as
 parameters. Such a body binds once when no nested subquery reads an outer value, and once per row
-otherwise; it is always checked at prepare time, so an error does not depend on the outer rows. Under `AND`, `OR` and `NOT` the filterer evaluates it in place; under any other node (a `CASE`
-branch, a comparison operand, an `IS NULL` test) it answers each correlated `EXISTS` for the row first
-and evaluates a copy of the subtree with the answers in place. A `WHERE` conjunct that holds a
-correlated `EXISTS` is never pushed to one table's scan in a join: the outer columns it reads are not
-visible in the predicate, so it is evaluated after the join, where every column is present.
+otherwise; it is always checked at prepare time, so an error does not depend on the outer rows. Under `AND`, `OR` and `NOT` the filterer evaluates a correlated `EXISTS` in place; under any other node (a `CASE`
+branch, a comparison operand, an `IS NULL` test) `CorrelatedSubqueryValues` runs each correlated subquery
+of the subtree for the row first and puts its value in a per-row copy of the parameters, under the node's
+hidden name, where the evaluator reads it. The tree is not copied, because the binding records the result
+type of a `COALESCE` or a `CASE` by node identity. An error of a subquery is kept with its value and thrown
+only when the evaluator reads it, so a `CASE` branch that does not run does not fail. A `WHERE` conjunct
+that holds a correlated subquery is never pushed to one table's scan in a join: the outer columns it reads
+are not visible in the predicate, so it is evaluated after the join, where every column is present.
 
 ## Stage 4 — Physical Planning
 

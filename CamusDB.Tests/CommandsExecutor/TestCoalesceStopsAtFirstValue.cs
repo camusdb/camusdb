@@ -342,6 +342,8 @@ internal sealed class TestCoalesceStopsAtFirstValue : BaseTest
             "CADB0400"),
         ("SELECT id, COALESCE(n, (SELECT b.id FROM t b)) FROM t ORDER BY id",
             "CADB0400"),
+        ("SELECT id, COALESCE(id, (SELECT b.id FROM t b WHERE b.id = a.id + 100)) FROM t a ORDER BY id",
+            "1|1 ; 2|2 ; 3|3"),
     ];
 
     private static readonly (string Sql, string Expected)[] Writes =
@@ -527,9 +529,6 @@ internal sealed class TestCoalesceStopsAtFirstValue : BaseTest
         ("SELECT COALESCE(1, (SELECT id FROM t)) FROM t ORDER BY id",
             "CADB0400",
             "1 ; 1 ; 1"),
-        ("SELECT id, COALESCE(id, (SELECT b.id FROM t b WHERE b.id = a.id + 100)) FROM t a ORDER BY id",
-            "CADB0533",
-            "1|1 ; 2|2 ; 3|3"),
         ("SELECT id, COALESCE(n, sqrt(4.0)) FROM t ORDER BY id",
             "1|2 ; 2|2 ; 3|5",
             "1|2.000000000000000 ; 2|2.000000000000000 ; 3|5"),

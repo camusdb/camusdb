@@ -227,6 +227,12 @@ internal static class ConditionalResultTypes
         if (node is null)
             return null;
 
+        // The tested value of an IN subquery is an expression of this scope. A correlated IN keeps its node to
+        // the end, and the type of its body's column is recorded on it, so the comparison is checked here, as
+        // the membership test of an uncorrelated IN is.
+        if (node.nodeType is NodeType.ExprInSubquery or NodeType.ExprNotInSubquery)
+            StaticOperandRules.CheckSubqueryMembership(node, Visit(node.leftAst, lookup, recorder, allowAggregates));
+
         if (IsSubquery(node.nodeType))
             return FromOperands(node, null, null, lookup);
 
@@ -580,6 +586,9 @@ internal static class ConditionalResultTypes
             // A statement parameter has no static type. The placeholder that stands for an outer column in
             // a correlated subquery has the type of that column, see CorrelatedSubqueryBody.
             case NodeType.Placeholder: return SubqueryResultTypes.TypeOf(target);
+
+            // A correlated scalar subquery keeps its node, with the type of its column, see ExistsSubqueryPreparer.
+            case NodeType.ExprScalarSubquery: return SubqueryResultTypes.TypeOf(target);
             case NodeType.BytesLiteral: return new(ColumnType.Bytes);
             case NodeType.ObjectIdLiteral: return new(ColumnType.Id);
 

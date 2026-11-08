@@ -96,7 +96,6 @@ internal static class ErrorClassifier
         new("FULL [OUTER] JOIN, NATURAL JOIN, JOIN … USING", "CADB0533 or a syntax error"),
         new("a RIGHT JOIN after another join", "CADB0533"),
         new("an IN-list item other than a literal, a parameter or a name (a CAST, an expression)", "CADB0406: syntax error; the item is a simple_expr"),
-        new("a correlated IN or NOT IN subquery", "CADB0400"),
         new("an integer literal in ORDER BY", "a column position, not a value"),
     ];
 

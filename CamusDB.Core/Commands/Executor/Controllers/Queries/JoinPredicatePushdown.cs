@@ -66,10 +66,10 @@ internal static class JoinPredicatePushdown
 
             foreach (NodeAst conjunct in conjuncts)
             {
-                // A correlated EXISTS reads outer columns that are not visible in this tree: it was
-                // replaced by a marker node whose inner query lives in the ticket's registry. The
-                // aliases the walk sees are then only the other operands of the conjunct, and a scan
-                // of that one alias would evaluate the EXISTS on a row without the columns it reads.
+                // A correlated subquery reads outer columns that are not visible in this tree: its node
+                // keeps its inner query in the ticket's registry. The aliases the walk sees are then
+                // only the other operands of the conjunct, and a scan of that one alias would evaluate
+                // the subquery on a row without the columns it reads.
                 // Such a conjunct stays after the join, where every column is present.
                 if (QueryTicketAdapter.ContainsSubquery(conjunct))
                 {

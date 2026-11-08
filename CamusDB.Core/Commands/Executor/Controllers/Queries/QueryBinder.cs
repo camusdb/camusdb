@@ -139,16 +139,81 @@ internal sealed class QueryBinder
     /// The names that <paramref name="source"/> declares, for <see cref="SubqueryScopeAnalyzer"/>. The
     /// sources bind for their schema only, as a view definition does: a table opens and a derived
     /// table binds with no nested binder, so nothing runs and no row is read.
+    ///
+    /// <para>A derived table inside a subquery can read the query around the subquery, which this bind
+    /// does not have, so its bind alone can fail with an unknown alias. Then its names come from its select
+    /// list (<see cref="DeclaredNamesAsync"/>). The bind of the subquery itself checks it later, with the
+    /// outer names in scope.</para>
     /// </summary>
     internal async Task<NameScope> BindNameScopeAsync(DatabaseDescriptor database, QuerySource source)
     {
         List<BoundTableSource> sources = [];
         List<BoundDerivedTableSource> derivedSources = [];
         HashSet<string> aliases = new(StringComparer.OrdinalIgnoreCase);
+        List<(string Alias, IReadOnlyCollection<string> Columns)> declared = [];
 
-        await CollectBoundSourcesAsync(database, source, sources, derivedSources, aliases, nested: null).ConfigureAwait(false);
+        Stack<QuerySource> pending = new();
+        pending.Push(source);
 
-        return new NameScope(sources, derivedSources);
+        while (pending.TryPop(out QuerySource? current))
+        {
+            if (current is JoinSource join)
+            {
+                pending.Push(join.Right);
+                pending.Push(join.Left);
+                continue;
+            }
+
+            if (current is not DerivedTableSource { Function: null } derived)
+            {
+                await CollectBoundSourcesAsync(database, current, sources, derivedSources, aliases, nested: null).ConfigureAwait(false);
+                continue;
+            }
+
+            try
+            {
+                await CollectBoundSourcesAsync(database, derived, sources, derivedSources, aliases, nested: null).ConfigureAwait(false);
+            }
+            catch (CamusDBException)
+            {
+                declared.Add((derived.Alias, await DeclaredNamesAsync(database, derived.Query).ConfigureAwait(false)));
+            }
+        }
+
+        return new NameScope(sources, derivedSources, declared);
+    }
+
+    /// <summary>
+    /// The output names of <paramref name="query"/>, read from its select list: an alias, or the column part of
+    /// a name, and for a <c>*</c> every column that its FROM declares. A set operation takes the names of its
+    /// first operand. An expression with no alias has no name that a statement can write.
+    ///
+    /// <para>Used only where the query cannot bind alone. The names can be more than the query gives (a
+    /// <c>t.*</c> adds the columns of every source), never fewer: a name that the subquery has must not be read
+    /// as a name of the outer query, because that would give another answer. A name too many in the scope only
+    /// makes a mistake fail as an unknown column.</para>
+    /// </summary>
+    private async Task<IReadOnlyCollection<string>> DeclaredNamesAsync(DatabaseDescriptor database, SelectQuery query)
+    {
+        while (query.Source is SetOperationSource setOperation)
+            query = setOperation.Left;
+
+        HashSet<string> names = new(StringComparer.OrdinalIgnoreCase);
+
+        foreach (ProjectionItem item in query.Projections)
+        {
+            if (QueryExpressionClassifier.UnwrapAlias(item.Expression).nodeType == NodeType.ExprAllFields)
+            {
+                NameScope inner = await BindNameScopeAsync(database, query.Source).ConfigureAwait(false);
+                names.UnionWith(inner.ColumnNames);
+                continue;
+            }
+
+            if (item.OutputName is { } name)
+                names.Add(name[(name.LastIndexOf('.') + 1)..]);
+        }
+
+        return names;
     }
 
     /// <summary>

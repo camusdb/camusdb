@@ -17,9 +17,9 @@ internal sealed record ScopeColumn(string? Source, string Column, FuzzType Type)
 /// <para><see cref="AllowSubqueries"/> is true for the positions where CamusDB evaluates a subquery:
 /// a WHERE, an ON clause, a select list and an oracle predicate, at any depth of the expression (a
 /// CASE branch, a comparison operand, an IS NULL test). <see cref="AllowCorrelation"/> is true only
-/// for the WHERE of a SELECT: that is the one position where CamusDB evaluates a correlated EXISTS
-/// per row. In every other position a correlated EXISTS is refused with CADB0533, and a correlated
-/// IN is refused everywhere, so the generator writes only uncorrelated subqueries there.</para>
+/// for the WHERE of a SELECT, where the generator writes a correlated EXISTS or IN. CamusDB also runs a
+/// correlated subquery in a plain select list and in a write, but the generator does not write one
+/// there yet, and a HAVING or an ON clause refuses one with CADB0533.</para>
 /// </summary>
 internal sealed record ExprScope(IReadOnlyList<ScopeColumn> Columns, IReadOnlyList<TableDef> Tables, ExprScope? Outer = null, int SubqueryDepth = 0, bool AllowSubqueries = false, bool AllowCorrelation = false)
 {
@@ -277,9 +277,9 @@ internal sealed class ExpressionGenerator
         if (!profile.Allows(ExprFeature.InSubquery) || !scope.AllowSubqueries || scope.SubqueryDepth >= 1 || scope.Tables.Count == 0)
             return null;
 
-        // CamusDB does not support a correlated IN subquery, so the IN subquery is uncorrelated.
+        // The WHERE of the subquery may read the outer columns where the position allows correlation.
         FuzzType type = PickComparableType(scope);
-        (SelectStmt sub, bool ok) = Subquery(scope, correlated: false, items: s =>
+        (SelectStmt sub, bool ok) = Subquery(scope, items: s =>
         {
             List<ScopeColumn> columns = s.OfType(type).ToList();
             if (columns.Count == 0)
@@ -297,14 +297,14 @@ internal sealed class ExpressionGenerator
     /// columns when the position allows correlation (<see cref="ExprScope.AllowCorrelation"/>) and
     /// the profile allows it.
     /// </summary>
-    private (SelectStmt Query, bool Ok) Subquery(ExprScope scope, Func<ExprScope, IReadOnlyList<SelectItem>?> items, bool correlated = true)
+    private (SelectStmt Query, bool Ok) Subquery(ExprScope scope, Func<ExprScope, IReadOnlyList<SelectItem>?> items)
     {
         TableDef table = random.Pick(scope.Tables);
         string alias = "s" + subqueryAliasCounter++;
         ExprScope inner = new(
             table.Columns.Select(c => new ScopeColumn(alias, c.Name, c.Type)).ToList(),
             scope.Tables,
-            correlated && scope.AllowCorrelation && profile.Allows(ExprFeature.CorrelatedSubquery) ? scope : null,
+            scope.AllowCorrelation && profile.Allows(ExprFeature.CorrelatedSubquery) ? scope : null,
             scope.SubqueryDepth + 1);
 
         IReadOnlyList<SelectItem>? list = items(inner);

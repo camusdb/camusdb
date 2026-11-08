@@ -440,18 +440,25 @@ public sealed class TestOrderedQuantifiedComparisons : SharedNodeBaseTest
     }
 
     /// <summary>
-    /// A correlated subquery is rejected, for the reason <c>IN</c> rejects one: the subquery runs
-    /// once, before the outer scan, so an outer column has no value to read.
+    /// A correlated subquery runs for each outer row, so each row compares against its own set. The
+    /// expected ids are the rows PostgreSQL returns. Row 4 has a NULL <c>x</c> and an empty set: ANY
+    /// over an empty set is FALSE and ALL over an empty set is TRUE, whatever the tested value is.
     /// </summary>
     [Test]
-    public async Task CorrelatedSubquery_IsRejected()
+    public async Task CorrelatedSubquery_ComparesEachRowWithItsOwnSet()
     {
         (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
         await Seed(database, executor, dbname);
 
-        Assert.ThrowsAsync<CamusDBException>(async () =>
-            await ExecQuery(database, executor, dbname,
-                "SELECT id FROM vals WHERE x < ANY (SELECT y FROM allowed WHERE y = vals.x)"));
+        CollectionAssert.AreEqual(new long[] { 1, 2 }, await Ids(database, executor, dbname,
+            "SELECT id FROM vals WHERE x < ANY (SELECT y FROM allowed WHERE y > vals.x) ORDER BY id"));
+
+        CollectionAssert.AreEqual(new long[] { 1, 4 }, await Ids(database, executor, dbname,
+            "SELECT id FROM vals WHERE x < ALL (SELECT y FROM allowed WHERE y <> vals.x) ORDER BY id"));
+
+        // Each set holds only values equal to x, so x < ANY never holds.
+        CollectionAssert.IsEmpty(await Ids(database, executor, dbname,
+            "SELECT id FROM vals WHERE x < ANY (SELECT y FROM allowed WHERE y = vals.x) ORDER BY id"));
     }
 
     // ── stored text: a CHECK constraint and a view body ─────────────────────

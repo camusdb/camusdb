@@ -25,7 +25,12 @@ internal sealed class NameScope
 
     private readonly HashSet<string> columns = new(StringComparer.OrdinalIgnoreCase);
 
-    public NameScope(IReadOnlyList<BoundTableSource> tables, IReadOnlyList<BoundDerivedTableSource> derived)
+    /// <param name="declared">The derived tables that could not bind alone, with the names their select
+    /// lists declare, see <see cref="QueryBinder.BindNameScopeAsync"/>.</param>
+    public NameScope(
+        IReadOnlyList<BoundTableSource> tables,
+        IReadOnlyList<BoundDerivedTableSource> derived,
+        IReadOnlyList<(string Alias, IReadOnlyCollection<string> Columns)>? declared = null)
     {
         foreach (BoundTableSource source in tables)
         {
@@ -43,7 +48,16 @@ internal sealed class NameScope
             foreach (DerivedColumnSchema column in source.Columns)
                 columns.Add(column.Name);
         }
+
+        foreach ((string alias, IReadOnlyCollection<string> names) in declared ?? [])
+        {
+            aliases.Add(alias);
+            columns.UnionWith(names);
+        }
     }
+
+    /// <summary>The column names of every source of the level.</summary>
+    public IEnumerable<string> ColumnNames => columns;
 
     public bool HasAlias(string alias) => aliases.Contains(alias);
 

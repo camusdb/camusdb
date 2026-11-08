@@ -33,6 +33,12 @@ internal enum SubqueryNodeKinds
     /// <summary>The kinds <see cref="SubqueryRewriter"/> folds in the WHERE of a SELECT, where <c>EXISTS</c> belongs to the preparer.</summary>
     Rewritable = Scalar | In | NotIn,
 
+    /// <summary>
+    /// The nodes a prepared clause can still hold. The rewriter folds every uncorrelated subquery, so each
+    /// one left is correlated, and the preparer registered it: see <see cref="CorrelatedSubqueryValues"/>.
+    /// </summary>
+    Correlated = Scalar | In | NotIn | ExistsCorrelated,
+
     All = Scalar | In | NotIn | Exists | ExistsCorrelated,
 }
 

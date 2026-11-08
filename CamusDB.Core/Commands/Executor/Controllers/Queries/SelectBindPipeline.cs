@@ -22,11 +22,13 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 /// materialize those subqueries into value lists.</item>
 /// <item><see cref="SubqueryRewriter"/> executes the remaining uncorrelated scalar / <c>IN</c> /
 /// <c>NOT IN</c> subqueries of the WHERE and folds their results in as literals. It does the same for
-/// every subquery of the select list, the HAVING and the JOIN ON predicates, <c>EXISTS</c> included,
-/// because those positions have no per-row stage: a correlated <c>EXISTS</c> there is refused.</item>
+/// every uncorrelated subquery of the select list, the HAVING and the JOIN ON predicates, <c>EXISTS</c>
+/// included. It leaves each correlated subquery of the WHERE and of the select list for the last stage,
+/// and refuses one in the HAVING or a JOIN ON, which have no per-row stage.</item>
 /// <item><see cref="QueryBinder"/> opens the sources and resolves names.</item>
-/// <item><see cref="ExistsSubqueryPreparer"/> prepares the EXISTS subqueries of the WHERE. It runs
-/// last because a correlated EXISTS binds against the outer sources the previous stage produced.</item>
+/// <item><see cref="ExistsSubqueryPreparer"/> prepares the EXISTS subqueries of the WHERE and every
+/// correlated subquery of the WHERE and the select list. It runs last because a correlated subquery binds
+/// against the outer sources the previous stage produced.</item>
 /// </list>
 ///
 /// <para>
@@ -128,46 +130,95 @@ internal sealed class SelectBindPipeline
                 boundQuery.DerivedSources);
         }
 
+        // A prepared scalar, IN or quantified subquery now shows the type of its column, which the checks of
+        // the bind could not see. They run again, so a type mistake fails with no outer row too. They also
+        // record the result type of each conditional node that the preparer rebuilt.
+        if (existsRegistry is { HasValueSubqueries: true })
+            ConditionalResultTypes.CheckQuery(boundQuery);
+
         return new SelectBindResult(boundQuery, existsRegistry, semiJoinSpecs);
     }
 
     /// <summary>
-    /// Prepares the WHERE of an UPDATE or DELETE on <paramref name="tableName"/> for the locate scan, which
-    /// evaluates it for each row of that table. Every scalar, IN and quantified subquery is folded to its
-    /// value, as for any other clause. An uncorrelated EXISTS folds too, and a correlated one is prepared
-    /// against the target table as its outer query, as in the WHERE of a SELECT. The locate scan must carry
-    /// the returned registry on its query ticket. The target table binds only when a correlated EXISTS is
-    /// left, so a WHERE without one opens nothing more than before.
+    /// Prepares the WHERE and the SET values of an UPDATE, or the WHERE of a DELETE, on
+    /// <paramref name="tableName"/>, whose rows are the outer query of each subquery. Every uncorrelated
+    /// subquery folds to its value, as for any other clause. Each correlated one is prepared against the target
+    /// table, as in a SELECT, and all of them go in one registry, which the locate scan carries on its query
+    /// ticket. The target table binds only when a correlated subquery is left, so a statement without one
+    /// opens nothing more than before.
     ///
-    /// <para>The locate scan reads at the statement timestamp, before the first write, so a correlated
-    /// EXISTS reads the rows as the statement found them, also when it reads the target table. The check
-    /// of each row under its write lock keeps the answer of the locate scan for a conjunct with a subquery,
-    /// see <see cref="MutationRowRecheck"/>.</para>
+    /// <para>The locate scan reads at the statement timestamp, before the first write, so a correlated subquery
+    /// reads the rows as the statement found them, also when it reads the target table. A correlated subquery
+    /// of a SET value runs there too, for each located row, and the write phase reads its value, see
+    /// <c>RowUpdater</c>. The check of each row under its write lock keeps the answer of the locate scan for
+    /// a conjunct with a subquery, see <see cref="MutationRowRecheck"/>.</para>
     /// </summary>
-    /// <param name="position">Names the clause in an error, such as "the WHERE of a DELETE".</param>
-    internal async ValueTask<(NodeAst Where, ExistsSubqueryRegistry? Registry)> PrepareWriteWhereAsync(
+    /// <param name="setValues">The SET values of an UPDATE, or null for a DELETE.</param>
+    /// <param name="statementKind">Names the statement in an error, such as "a DELETE".</param>
+    /// <returns>The prepared clauses; <c>SetValues</c> is the same dictionary when no value changed.</returns>
+    internal async ValueTask<(NodeAst? Where, Dictionary<string, NodeAst>? SetValues, ExistsSubqueryRegistry? Registry)> PrepareWriteClausesAsync(
         DatabaseDescriptor database,
-        NodeAst where,
         string tableName,
+        NodeAst? where,
+        Dictionary<string, NodeAst>? setValues,
         ExecuteSQLTicket ticket,
-        string position)
+        string statementKind)
     {
         TableSource target = new(tableName);
 
-        NodeAst rewritten = await subqueryRewriter
-            .RewriteKeepingCorrelatedExistsAsync(database, where, ticket, position, target)
-            .ConfigureAwait(false);
+        if (where is not null)
+        {
+            where = await subqueryRewriter
+                .RewriteKeepingCorrelatedAsync(database, where, ticket, $"the WHERE of {statementKind}", target)
+                .ConfigureAwait(false);
+        }
 
-        if (!SubqueryNodeScan.Contains(rewritten, SubqueryNodeKinds.Exists))
-            return (rewritten, null);
+        Dictionary<string, NodeAst>? rewrittenValues = null;
+
+        if (setValues is not null)
+        {
+            foreach (KeyValuePair<string, NodeAst> entry in setValues)
+            {
+                NodeAst value = await subqueryRewriter
+                    .RewriteKeepingCorrelatedAsync(database, entry.Value, ticket, $"a SET value of {statementKind}", target)
+                    .ConfigureAwait(false);
+
+                if (ReferenceEquals(value, entry.Value) && rewrittenValues is null)
+                    continue;
+
+                rewrittenValues ??= new Dictionary<string, NodeAst>(setValues, setValues.Comparer);
+                rewrittenValues[entry.Key] = value;
+            }
+        }
+
+        bool correlated = where is not null && ExistsSubqueryPreparer.ContainsSubqueryToPrepare(where);
+
+        foreach (NodeAst value in (rewrittenValues ?? setValues)?.Values ?? Enumerable.Empty<NodeAst>())
+            correlated |= ExistsSubqueryPreparer.ContainsSubqueryToPrepare(value);
+
+        if (!correlated)
+            return (where, rewrittenValues ?? setValues, null);
 
         (IReadOnlyList<BoundTableSource> targets, IReadOnlyList<BoundDerivedTableSource> derived) = await queryBinder
             .BindSourcesAsync(database, target)
             .ConfigureAwait(false);
 
-        return await existsSubqueryPreparer
-            .PrepareExpressionAsync(database, rewritten, targets, derived, ticket, new NestedSelectBinder(this, ticket))
-            .ConfigureAwait(false);
+        CorrelatedPreparation preparation = new(new NestedSelectBinder(this, ticket), targets, derived);
+
+        if (where is not null)
+            where = await existsSubqueryPreparer.PrepareExpressionAsync(database, where, preparation, ticket).ConfigureAwait(false);
+
+        if ((rewrittenValues ?? setValues) is { } values)
+        {
+            Dictionary<string, NodeAst> prepared = new(values, values.Comparer);
+
+            foreach (KeyValuePair<string, NodeAst> entry in values)
+                prepared[entry.Key] = await existsSubqueryPreparer.PrepareExpressionAsync(database, entry.Value, preparation, ticket).ConfigureAwait(false);
+
+            rewrittenValues = prepared;
+        }
+
+        return (where, rewrittenValues ?? setValues, preparation.Registry);
     }
 }
 
@@ -204,7 +255,7 @@ internal readonly struct NestedSelectBinder
 /// </summary>
 /// <param name="Bound">The bound query. Its <see cref="BoundSelectQuery.Query"/> is the same
 /// instance the caller passed in only when no stage changed the statement.</param>
-/// <param name="ExistsRegistry">Prepared EXISTS subqueries, or null when the WHERE has none.</param>
+/// <param name="ExistsRegistry">Prepared correlated subqueries, or null when the WHERE and the select list have none.</param>
 /// <param name="SemiJoinSpecs">Semi/anti-join specs lifted out of the WHERE; empty when none.</param>
 internal readonly record struct SelectBindResult(
     BoundSelectQuery Bound,
@@ -229,7 +280,7 @@ internal readonly record struct SelectBindResult(
 /// such a SELECT may still hold unresolved subquery nodes, and the evaluator refuses them with
 /// <c>InvalidInternalOperation</c> if it ever runs.</para>
 /// </summary>
-/// <param name="ExistsRegistry">The prepared correlated EXISTS subqueries of the SELECT's WHERE, or null.</param>
+/// <param name="ExistsRegistry">The prepared correlated subqueries of the SELECT's WHERE and select list, or null.</param>
 /// <param name="SemiJoinSpecs">The semi/anti-join specs lifted out of the SELECT's WHERE, or null.</param>
 internal readonly record struct SubqueryBindProducts(
     ExistsSubqueryRegistry? ExistsRegistry,

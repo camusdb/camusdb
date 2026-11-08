@@ -570,6 +570,9 @@ internal static class DerivedTableSchemaBuilder
         if (innerBound.RowNames.TryGetConditionalResultType(target, out ExpressionType conditional))
             return conditional is { Type: ColumnType.Array, ElementType: not ColumnType.Null } ? conditional.ElementType : null;
 
+        if (RecordedSubqueryType(target) is { } recorded)
+            return recorded is { Type: ColumnType.Array, ElementType: not ColumnType.Null } ? recorded.ElementType : null;
+
         // A function that declares its element type (an extension function or aggregate returning
         // IReadOnlyList<long>) types its column without a value.
         if (target.nodeType == NodeType.ExprFuncCall && target.leftAst?.yytext is { } functionName)
@@ -708,6 +711,20 @@ internal static class DerivedTableSchemaBuilder
         return columns;
     }
 
+    /// <summary>
+    /// The declared type of the column of a scalar subquery, recorded by <see cref="SubqueryResultTypes"/>,
+    /// or null for any other node. Two nodes carry it:
+    /// <list type="bullet">
+    /// <item>The NULL that replaces an uncorrelated scalar subquery with no value. A stored definition binds
+    /// every uncorrelated scalar subquery to such a NULL.</item>
+    /// <item>The <see cref="NodeType.ExprScalarSubquery"/> that stays in the tree for a correlated subquery,
+    /// which runs for each outer row. Without it, <c>CREATE TABLE … AS SELECT</c> and a materialized view
+    /// declared a String column for an Int64 value and then refused to store the value.</item>
+    /// </list>
+    /// </summary>
+    private static ExpressionType? RecordedSubqueryType(NodeAst target) =>
+        target.nodeType is NodeType.Null or NodeType.ExprScalarSubquery ? SubqueryResultTypes.TypeOf(target) : null;
+
     private static ColumnType InferType(
         NodeAst expression,
         BoundSelectQuery innerBound,
@@ -723,10 +740,9 @@ internal static class DerivedTableSchemaBuilder
         if (target.nodeType == NodeType.BytesLiteral)
             return ColumnType.Bytes;
 
-        // The NULL that replaces a scalar subquery with no value keeps the declared type of the
-        // subquery column (SubqueryResultTypes), so the column has that type and not the String
-        // fallback of a NULL literal. A stored definition binds every scalar subquery to such a NULL.
-        if (target.nodeType == NodeType.Null && SubqueryResultTypes.TypeOf(target) is { } recorded)
+        // A scalar subquery keeps the declared type of its column, so the column has that type and not
+        // the String fallback. See RecordedSubqueryType.
+        if (RecordedSubqueryType(target) is { } recorded)
             return recorded.Type;
 
         // A literal has the type its value evaluates to. `SELECT 1 FROM t` used to declare a String
@@ -1204,8 +1220,7 @@ internal static class DerivedTableSchemaBuilder
             NodeType.Float      => ColumnType.Float64,
             NodeType.String     => ColumnType.String,
             NodeType.Bool       => ColumnType.Bool,
-            NodeType.Null       => SubqueryResultTypes.TypeOf(arg)?.Type ?? ColumnType.Null,
-            NodeType.Identifier => arg.yytext is not null
+            NodeType.Null       => SubqueryResultTypes.TypeOf(arg)?.Type ?? ColumnType.Null,            NodeType.Identifier => arg.yytext is not null
                 ? ResolveColumnType(innerBound, innerResolver.ResolveRowLookupKey(arg.yytext), arg.yytext)
                 : ColumnType.String,
             // All other nodes (bare aggregates, compounds, scalar funcs, casts) go through

@@ -65,6 +65,13 @@ internal sealed class CorrelatedSubqueryBody
     /// <summary>The body bound for all its runs, or null when it binds again for each row.</summary>
     public SelectBindResult? Bound { get; }
 
+    /// <summary>
+    /// The static type of the one output column of a body that is not an EXISTS body, or null when the
+    /// statement does not show it. The statement checks compare it as they compare the column of an
+    /// uncorrelated subquery, see <see cref="SubqueryResultTypes"/>.
+    /// </summary>
+    public Models.ExpressionType? OutputType { get; }
+
     /// <summary>One outer name and the placeholder that stands for it.</summary>
     private readonly record struct OuterValue(string Parameter, NodeAst Name);
 
@@ -73,6 +80,7 @@ internal sealed class CorrelatedSubqueryBody
         bool isExistsBody,
         NodeAst select,
         SelectBindResult? bound,
+        Models.ExpressionType? outputType,
         OuterValue[] values,
         IReadOnlyList<BoundTableSource> outerSources,
         IReadOnlyList<BoundDerivedTableSource> outerDerivedSources,
@@ -82,6 +90,7 @@ internal sealed class CorrelatedSubqueryBody
         this.isExistsBody = isExistsBody;
         Select = select;
         Bound = bound;
+        OutputType = outputType;
         this.values = values;
         this.outerSources = outerSources;
         this.outerDerivedSources = outerDerivedSources;
@@ -138,19 +147,38 @@ internal sealed class CorrelatedSubqueryBody
         }
 
         NodeAst substituted = NodeAstWalk.Replace(select, replacements);
+        SelectBindResult checkedBind;
         SelectBindResult? bound = null;
+
+        // A value body returns one column, as an uncorrelated subquery must. A set operation shows its
+        // column count only once its operands are bound.
+        bool isSetOperation = bodyQuery.Source is DerivedTableSource { SetOperation: not null };
+
+        if (!isExistsBody && !isSetOperation)
+            SubqueryQueryExecutor.ValidateSingleColumnProjection(bodyQuery);
 
         if (NestedSubqueryReadsOuterValue(substituted))
         {
             using (StoredDefinitionBind.Enter())
-                await executor.BindForRunsAsync(database, substituted, ticket, isExistsBody).ConfigureAwait(false);
+                checkedBind = await executor.BindForRunsAsync(database, substituted, ticket, isExistsBody).ConfigureAwait(false);
         }
         else
         {
-            bound = await executor.BindForRunsAsync(database, substituted, ticket, isExistsBody).ConfigureAwait(false);
+            checkedBind = await executor.BindForRunsAsync(database, substituted, ticket, isExistsBody).ConfigureAwait(false);
+            bound = checkedBind;
         }
 
-        return new CorrelatedSubqueryBody(executor, isExistsBody, substituted, bound, [.. values], outerSources, outerDerivedSources, outerRowNames);
+        Models.ExpressionType? outputType = null;
+
+        if (!isExistsBody)
+        {
+            if (isSetOperation && checkedBind.Bound.DerivedSources[0].Columns.Count != 1)
+                throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Subquery must return exactly one column");
+
+            outputType = SubqueryResultTypes.OutputTypeOf(checkedBind.Bound);
+        }
+
+        return new CorrelatedSubqueryBody(executor, isExistsBody, substituted, bound, outputType, [.. values], outerSources, outerDerivedSources, outerRowNames);
     }
 
     /// <summary>

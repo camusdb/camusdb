@@ -422,9 +422,11 @@ public sealed class RowUpdater
         // Restrict scan-time decode to the columns the WHERE filter needs. The SET expressions are
         // evaluated in the write phase, on the row it reads after it locks the row, so their columns
         // are not needed here. Returns null when the WHERE contains subquery nodes — fall back to
-        // full decode.
-        IReadOnlySet<string>? locateColumns = RequiredColumnAnalyzer.ComputeForLocate(
-            ticket.Where, ticket.Filters, exprValues: null);
+        // full decode. A correlated subquery of a SET value runs here, so it decodes every column too.
+        bool setSubqueries = HasCorrelatedSetValues(ticket);
+        IReadOnlySet<string>? locateColumns = setSubqueries
+            ? null
+            : RequiredColumnAnalyzer.ComputeForLocate(ticket.Where, ticket.Filters, exprValues: null);
 
         QueryTicket queryTicket = new(
             txnState: ticket.TxnState,
@@ -469,8 +471,18 @@ public sealed class RowUpdater
         // limit). Either way the spill files the list wrote must be deleted.
         state.RowsToUpdate = rowList;
 
+        // A correlated subquery of a SET value runs here, for the row as the statement found it, so it reads
+        // at the statement timestamp and before the first write, as a subquery of the WHERE does: a row this
+        // statement changes is still as it was for the subquery of a later row. The buffer keeps only the
+        // values of those subqueries, which the write phase reads (see GetNewUpdatedRow).
         await foreach (QueryResultRow row in cursor.ConfigureAwait(false))
-            await rowList.AddAsync(new(row.RowId, QueryResultRow.EmptyRow)).ConfigureAwait(false);
+        {
+            IReadOnlyDictionary<string, ColumnValue> cells = setSubqueries
+                ? await SetSubqueryCellsAsync(ticket, row.Row, queryTicket, state.Database).ConfigureAwait(false)
+                : QueryResultRow.EmptyRow;
+
+            await rowList.AddAsync(new(row.RowId, cells)).ConfigureAwait(false);
+        }
 
         // A scan that recorded an abort ended early: what it located is not the match set.
         if (state.RetryableAborts is { HasAbort: true })
@@ -583,6 +595,39 @@ public sealed class RowUpdater
         }
     }
 
+    /// <summary>True when a SET value of <paramref name="ticket"/> holds a correlated subquery.</summary>
+    private static bool HasCorrelatedSetValues(UpdateTicket ticket)
+    {
+        if (ticket.ExistsSubqueries is null || ticket.ExprValues is null)
+            return false;
+
+        foreach (NodeAst value in ticket.ExprValues.Values)
+        {
+            if (CorrelatedSubqueryValues.Contains(value))
+                return true;
+        }
+
+        return false;
+    }
+
+    /// <summary>The value of each correlated subquery of the SET values for one located row, as buffer cells.</summary>
+    private static async ValueTask<IReadOnlyDictionary<string, ColumnValue>> SetSubqueryCellsAsync(
+        UpdateTicket ticket,
+        IReadOnlyDictionary<string, ColumnValue> row,
+        QueryTicket locateTicket,
+        DatabaseDescriptor database)
+    {
+        Dictionary<string, ColumnValue> parameters = CorrelatedSubqueryValues.NewRowParameters(locateTicket);
+
+        foreach (NodeAst value in ticket.ExprValues!.Values)
+        {
+            if (CorrelatedSubqueryValues.Contains(value))
+                await CorrelatedSubqueryValues.AddForRowAsync(value, row, locateTicket, database, parameters).ConfigureAwait(false);
+        }
+
+        return CorrelatedSubqueryValues.ToStoredCells(parameters);
+    }
+
     /// <summary>
     /// Builds the new image of a row. Every SET expression is evaluated against
     /// <paramref name="currentRow"/>, the row the write phase read after it locked the row, and never
@@ -590,10 +635,17 @@ public sealed class RowUpdater
     /// transaction that committed between the two reads would otherwise be overwritten by a value
     /// computed from the older row: <c>SET v = concat(v, 'x')</c> would drop the other append.
     /// Expressions read the old image only, so <c>SET a = b, b = a</c> swaps the two values.
+    ///
+    /// <para>A correlated subquery of a SET value is the one exception: it ran in the locate scan, for the
+    /// row as the statement found it, and <paramref name="subqueryCells"/> holds its value. It reads the
+    /// statement's snapshot, as in PostgreSQL. When a concurrent commit changes the row between the two
+    /// reads, the subquery keeps the value it computed from the older row, as the check of a WHERE subquery
+    /// keeps its answer (see <see cref="MutationRowRecheck"/>).</para>
     /// </summary>
     private static Dictionary<string, ColumnValue> GetNewUpdatedRow(
         Dictionary<string, ColumnValue> currentRow,
-        UpdateTicket ticket
+        UpdateTicket ticket,
+        IReadOnlyDictionary<string, ColumnValue>? subqueryCells = null
     )
     {
         // Keyed case-insensitively so a SET clause written in a different case than the schema
@@ -613,8 +665,19 @@ public sealed class RowUpdater
 
         if (ticket.ExprValues is not null)
         {
+            Dictionary<string, ColumnValue>? parameters = ticket.Parameters;
+
+            if (subqueryCells is { Count: > 0 })
+            {
+                parameters = ticket.Parameters is { } statement
+                    ? new Dictionary<string, ColumnValue>(statement, statement.Comparer)
+                    : new Dictionary<string, ColumnValue>();
+
+                CorrelatedSubqueryValues.AddStoredCells(subqueryCells, parameters);
+            }
+
             foreach (KeyValuePair<string, NodeAst> keyValuePair in ticket.ExprValues)
-                rowValues[keyValuePair.Key] = SqlExecutor.EvalExpr(keyValuePair.Value, currentRow, ticket.Parameters);
+                rowValues[keyValuePair.Key] = SqlExecutor.EvalExpr(keyValuePair.Value, currentRow, parameters);
 
             return rowValues;
         }
@@ -660,6 +723,10 @@ public sealed class RowUpdater
         // One description of the write step for the whole statement: the statement's predicate is
         // re-checked on each locked read, and every SET expression is evaluated against it.
         QueryTicket locateTicket = state.LocateTicket;
+
+        // The values of the correlated subqueries of the SET values, aligned with the row ids of a chunk.
+        List<IReadOnlyDictionary<string, ColumnValue>>? chunkCells = HasCorrelatedSetValues(ticket) ? [] : null;
+
         LocatedRowUpdate update = new()
         {
             Database = state.Database,
@@ -670,14 +737,14 @@ public sealed class RowUpdater
             ForeignKeys = state.ForeignKeys,
             Triggers = state.Triggers,
             RetryableAborts = state.RetryableAborts,
-            ComputeNewRow = async (_, oldRow) =>
+            ComputeNewRow = async (position, oldRow) =>
             {
                 // A concurrent commit changed the row after the locate scan chose it, and it no longer
                 // matches the statement's predicate.
                 if (!recheck.IsEmpty && !await recheck.MatchesAsync(state.QueryExecutor, state.Database, locateTicket, oldRow).ConfigureAwait(false))
                     return null;
 
-                return GetNewUpdatedRow(oldRow, ticket);
+                return GetNewUpdatedRow(oldRow, ticket, chunkCells?[position]);
             }
         };
 
@@ -695,6 +762,7 @@ public sealed class RowUpdater
                 _stats.DmlLocateBufferMaxColumnsSeen = queryRow.Row.Count;
 
             chunkRowIds.Add(queryRow.RowId);
+            chunkCells?.Add(queryRow.Row);
 
             if (chunkRowIds.Count >= chunkSize)
             {
@@ -703,6 +771,7 @@ public sealed class RowUpdater
                     return FluxAction.Abort;
 
                 chunkRowIds.Clear();
+                chunkCells?.Clear();
             }
         }
 

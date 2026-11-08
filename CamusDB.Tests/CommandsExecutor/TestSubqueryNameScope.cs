@@ -28,9 +28,7 @@ namespace CamusDB.Tests.CommandsExecutor;
 /// queries have is the column of the subquery. Before this rule a bare outer name failed with
 /// <c>CADB0404</c>, a name in both scopes failed as ambiguous, and <c>IN (SELECT o.id FROM r2)</c> could
 /// read <c>o.id</c> as the inner <c>id</c>. Each row result was measured on PostgreSQL 16.11 with the same
-/// rows. A correlated scalar, <c>IN</c> or quantified subquery, and a correlated EXISTS outside the WHERE
-/// of a SELECT, an UPDATE or a DELETE, are refused with <c>CADB0533</c>: PostgreSQL runs them, and CamusDB
-/// does not run them yet.
+/// rows. A correlated scalar, <c>IN</c> or quantified subquery reads the outer name by the same rule.
 /// </summary>
 [TestFixture]
 [NonParallelizable]
@@ -67,12 +65,40 @@ internal sealed class TestSubqueryNameScope : BaseTest
 
         try
         {
-            (_, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(new ExecuteSQLTicket(tx, dbname, sql, null));
-            List<QueryResultRow> rows = await cursor.ToListAsync();
+            return await ReadFirstColumn(executor, tx, dbname, sql);
+        }
+        catch (CamusDBException e)
+        {
+            return e.Code + ": " + e.Message;
+        }
+        finally
+        {
+            await database.Transactions.RollbackAsync(tx);
+        }
+    }
 
-            return string.Join(" ; ", rows
-                .Select(r => r.Row.First().Value.LongValue.ToString(CultureInfo.InvariantCulture))
-                .OrderBy(r => r, StringComparer.Ordinal));
+    private static async Task<string> ReadFirstColumn(CommandExecutor executor, KvTransaction tx, string dbname, string sql)
+    {
+        (_, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(new ExecuteSQLTicket(tx, dbname, sql, null));
+        List<QueryResultRow> rows = await cursor.ToListAsync();
+
+        return string.Join(" ; ", rows
+            .Select(r => r.Row.First().Value.LongValue.ToString(CultureInfo.InvariantCulture))
+            .OrderBy(r => r, StringComparer.Ordinal));
+    }
+
+    /// <summary>
+    /// Runs a write and then a read in one transaction, and rolls back. Returns the first column of the read,
+    /// as <see cref="Query"/> does, or the code and message of the error.
+    /// </summary>
+    private static async Task<string> WriteThenRead(DatabaseDescriptor database, CommandExecutor executor, string dbname, string write, string read)
+    {
+        KvTransaction tx = await database.Transactions.BeginAsync();
+
+        try
+        {
+            _ = await executor.ExecuteNonSQLQuery(new ExecuteSQLTicket(tx, dbname, write, null));
+            return await ReadFirstColumn(executor, tx, dbname, read);
         }
         catch (CamusDBException e)
         {
@@ -137,35 +163,31 @@ internal sealed class TestSubqueryNameScope : BaseTest
     }
 
     /// <summary>
-    /// PostgreSQL runs each of these forms. CamusDB finds the outer name now and refuses the form with
-    /// <c>CADB0533</c>, and the message names the outer reference. Before, each one failed with an unknown
-    /// alias or column, and the <c>IN</c> form over a table with an index could read <c>o.id</c> as the
-    /// inner <c>id</c>. PostgreSQL 16.11 gives <c>1 ; 2 ; 3</c> for that form.
+    /// A correlated <c>IN</c>, <c>NOT IN</c>, scalar or quantified subquery reads the outer name by the nearest
+    /// rule, and runs for each outer row. Before the rule each form failed with an unknown alias or column, and
+    /// the <c>IN</c> form over a table with an index could read <c>o.id</c> as the inner <c>id</c>.
     /// </summary>
-    [TestCase("SELECT id FROM r o WHERE id IN (SELECT o.id FROM r2)", "A correlated IN or NOT IN subquery is not supported yet: it reads 'o.id' of the outer query")]
-    [TestCase("SELECT x.id FROM r x WHERE x.id IN (SELECT x.id)", "A correlated IN or NOT IN subquery is not supported yet: it reads 'x.id' of the outer query")]
-    [TestCase("SELECT id FROM r WHERE id NOT IN (SELECT id FROM r2 WHERE w = v + 10)", "A correlated IN or NOT IN subquery is not supported yet: it reads 'v' of the outer query")]
-    [TestCase("SELECT id, (SELECT w FROM r2 WHERE r2.id = r.id) FROM r", "A correlated scalar subquery is not supported yet: it reads 'r.id' of the outer query")]
-    [TestCase("SELECT id FROM r WHERE (SELECT v) = 0", "A correlated scalar subquery is not supported yet: it reads 'v' of the outer query")]
-    [TestCase("SELECT id FROM r WHERE v < ANY (SELECT w FROM r2 WHERE w = v + 10)", "A correlated subquery in an ANY, SOME or ALL comparison is not supported yet: it reads 'v' of the outer query")]
-    [TestCase("SELECT id, EXISTS (SELECT 1 FROM r2 WHERE w = v + 10) FROM r", "A correlated EXISTS subquery is not supported in the select list; it is supported in the WHERE clause of a SELECT, an UPDATE or a DELETE")]
-    public async Task ACorrelatedFormThatDoesNotRunYet_IsRefused_AndNamesTheOuterName(string sql, string message)
+    [TestCase("SELECT id FROM r o WHERE id IN (SELECT o.id FROM r2)", "1 ; 2 ; 3")]
+    [TestCase("SELECT x.id FROM r x WHERE x.id IN (SELECT x.id)", "1 ; 2 ; 3")]
+    [TestCase("SELECT id FROM r WHERE id NOT IN (SELECT id FROM r2 WHERE w = v + 10)", "2 ; 3")]
+    [TestCase("SELECT id FROM r WHERE (SELECT v) = 0", "1 ; 3")]
+    [TestCase("SELECT id FROM r WHERE v < ANY (SELECT w FROM r2 WHERE w = v + 10)", "1 ; 3")]
+    public async Task ACorrelatedForm_ReadsTheOuterName(string sql, string expected)
     {
         (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateTables();
 
-        Assert.AreEqual(CamusDBErrorCodes.FeatureNotSupported + ": " + message, await Query(database, executor, dbname, sql), sql);
+        Assert.AreEqual(expected, await Query(database, executor, dbname, sql), sql);
     }
 
-    /// <summary>A subquery of an UPDATE or a DELETE reads the target table by its bare names too.</summary>
-    [TestCase("UPDATE r SET v = CASE WHEN EXISTS (SELECT 1 FROM r2 WHERE w = v + 10) THEN 1 ELSE 0 END WHERE id > 0", "A correlated EXISTS subquery is not supported in a SET value of an UPDATE; it is supported in the WHERE clause of a SELECT, an UPDATE or a DELETE")]
-    [TestCase("UPDATE r SET v = (SELECT w FROM r2 WHERE r2.id = r.id) WHERE id = 1", "A correlated scalar subquery is not supported yet: it reads 'r.id' of the outer query")]
-    [TestCase("UPDATE r SET v = 5 WHERE id IN (SELECT id FROM r2 WHERE w = v + 10)", "A correlated IN or NOT IN subquery is not supported yet: it reads 'v' of the outer query")]
-    public async Task ACorrelatedSubqueryOfAWrite_IsRefused_AndWritesNothing(string sql, string message)
+    /// <summary>A subquery of an UPDATE reads the target table by its bare names too, in the WHERE and in a SET value.</summary>
+    [TestCase("UPDATE r SET v = CASE WHEN EXISTS (SELECT 1 FROM r2 WHERE w = v + 10) THEN 1 ELSE 0 END WHERE id > 0", "0 ; 1 ; 1")]
+    [TestCase("UPDATE r SET v = (SELECT w FROM r2 WHERE r2.id = r.id) WHERE id = 1", "0 ; 10 ; 2")]
+    [TestCase("UPDATE r SET v = 5 WHERE id IN (SELECT id FROM r2 WHERE w = v + 10)", "0 ; 2 ; 5")]
+    public async Task ACorrelatedSubqueryOfAWrite_ReadsTheTargetRow(string write, string expected)
     {
         (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateTables();
 
-        Assert.AreEqual(CamusDBErrorCodes.FeatureNotSupported + ": " + message, await Write(database, executor, dbname, sql), sql);
-        Assert.AreEqual("1 ; 2 ; 3", await Query(database, executor, dbname, "SELECT id FROM r WHERE v IN (0, 2)"));
+        Assert.AreEqual(expected, await WriteThenRead(database, executor, dbname, write, "SELECT v FROM r"), write);
     }
 
     /// <summary>An uncorrelated subquery that writes a name of the outer query only in its own scope still runs once.</summary>

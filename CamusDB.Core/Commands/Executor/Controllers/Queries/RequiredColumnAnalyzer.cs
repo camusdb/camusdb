@@ -385,16 +385,17 @@ internal static class RequiredColumnAnalyzer
         HashSet<string> required,
         string? alias)
     {
-        if (expression.nodeType == NodeType.ExprExistsCorrelated
-            && ticket.ExistsSubqueries?.TryGet(expression, out PreparedExistsSubquery prepared) == true)
+        // Each correlated subquery node (an EXISTS marker, a scalar, an IN or a quantified comparison) reads
+        // the outer columns its body names. The column walker does not enter a subquery, so they are added here.
+        if (ticket.ExistsSubqueries?.TryGetOuterReferences(expression, out IReadOnlyList<string> outerReferences) == true)
         {
             if (alias is null)
-                CollectOuterCorrelationColumns(prepared, rowNames, required);
+                CollectOuterCorrelationColumns(outerReferences, rowNames, required);
             else
-                CollectOuterCorrelationColumnsForAlias(prepared, rowNames!, alias, required);
+                CollectOuterCorrelationColumnsForAlias(outerReferences, rowNames!, alias, required);
         }
 
-        // Every child slot: a correlated EXISTS can sit in a CASE's ELSE result (extendedOne) or a
+        // Every child slot: a correlated subquery can sit in a CASE's ELSE result (extendedOne) or a
         // BETWEEN bound, not only under a boolean connective.
         CollectCorrelatedExistsOuterColumnsOf(expression.leftAst, ticket, rowNames, required, alias);
         CollectCorrelatedExistsOuterColumnsOf(expression.rightAst, ticket, rowNames, required, alias);
@@ -412,27 +413,28 @@ internal static class RequiredColumnAnalyzer
         HashSet<string> required,
         string? alias)
     {
-        if (child is not null)
+        // A nested SELECT is the body of a subquery, another scope.
+        if (child is not null && child.nodeType != NodeType.Select)
             CollectCorrelatedExistsOuterColumns(child, ticket, rowNames, required, alias);
     }
 
     private static void CollectOuterCorrelationColumns(
-        PreparedExistsSubquery prepared,
+        IReadOnlyList<string> outerReferences,
         QueryRowNameResolver? rowNames,
         HashSet<string> required)
     {
         // The prepared body lists the names that resolve to the outer query, bare names included.
-        foreach (string reference in prepared.OuterReferences)
+        foreach (string reference in outerReferences)
             AddResolvedColumn(reference, rowNames, required);
     }
 
     private static void CollectOuterCorrelationColumnsForAlias(
-        PreparedExistsSubquery prepared,
+        IReadOnlyList<string> outerReferences,
         QueryRowNameResolver rowNames,
         string alias,
         HashSet<string> required)
     {
-        foreach (string reference in prepared.OuterReferences)
+        foreach (string reference in outerReferences)
         {
             if (TryResolveColumnForAlias(reference, rowNames, alias, out string columnName))
                 required.Add(columnName);

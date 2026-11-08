@@ -25,14 +25,14 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 /// predicates, the WHERE and SET values of UPDATE and DELETE, INSERT VALUES, and ON CONFLICT DO
 /// UPDATE.
 ///
-/// <para>The one subquery that is evaluated per row is a <b>correlated</b> <c>EXISTS</c>, and only in
-/// the WHERE of a SELECT, an UPDATE or a DELETE. In the WHERE of a SELECT the rewriter leaves every
-/// <c>EXISTS</c> alone, and <see cref="ExistsSubqueryPreparer"/> binds it against the outer sources. In
-/// the WHERE of an UPDATE or DELETE the rewriter folds an uncorrelated <c>EXISTS</c> and leaves a
-/// correlated one for the preparer (<see cref="RewriteKeepingCorrelatedExistsAsync"/>). In every other
-/// position a correlated <c>EXISTS</c> is refused with <see cref="CamusDBErrorCodes.FeatureNotSupported"/>,
-/// because folding it as if it were uncorrelated would return wrong rows. A correlated scalar,
-/// <c>IN</c> or quantified subquery is refused the same way, in every position.</para>
+/// <para>A <b>correlated</b> subquery is evaluated for each outer row instead, and only in some clauses:
+/// the WHERE and the select list of a SELECT, the WHERE of an UPDATE or a DELETE, and the SET values of an
+/// UPDATE. The rewriter leaves each one there for <see cref="ExistsSubqueryPreparer"/>, which binds it against
+/// the outer sources (<see cref="RewriteKeepingCorrelatedAsync"/>). In the WHERE of a SELECT it also leaves
+/// every uncorrelated <c>EXISTS</c>, which the preparer folds. A select list of a query that groups, aggregates
+/// or has a window function, the HAVING, a JOIN ON, ON CONFLICT DO UPDATE and every other clause refuse a
+/// correlated subquery with <see cref="CamusDBErrorCodes.FeatureNotSupported"/>, because folding it as if it
+/// were uncorrelated would return wrong rows.</para>
 ///
 /// <para>A subquery is correlated when <see cref="SubqueryScopeAnalyzer"/> finds a name in it that
 /// resolves to the query around it: the SELECT whose clauses are rewritten, or the table of an UPDATE or
@@ -79,11 +79,10 @@ internal sealed class SubqueryRewriter
 
     /// <summary>
     /// Replaces every uncorrelated subquery of <paramref name="expr"/>, <c>EXISTS</c> included, with
-    /// its value. Used for every expression position that has no per-row EXISTS stage: a FROM-less
-    /// select list, the SET values of an UPDATE, INSERT VALUES, ON CONFLICT DO UPDATE, and the select
-    /// list, HAVING and JOIN ON of a SELECT. A correlated <c>EXISTS</c> is refused with
+    /// its value. Used for every expression position that has no per-row stage: a FROM-less select list,
+    /// INSERT VALUES, and ON CONFLICT DO UPDATE. A correlated subquery is refused with
     /// <see cref="CamusDBErrorCodes.FeatureNotSupported"/>, and <paramref name="position"/> names
-    /// the clause in that message ("the select list", "the WHERE of a DELETE"). Returns the same node
+    /// the clause in that message ("a SET value of ON CONFLICT DO UPDATE"). Returns the same node
     /// reference when nothing was rewritten. <paramref name="outerSource"/> is the table that a subquery
     /// of the expression can read, such as the table of an UPDATE or DELETE, or null when there is none.
     /// </summary>
@@ -99,11 +98,11 @@ internal sealed class SubqueryRewriter
 
     /// <summary>
     /// Rewrites <paramref name="expr"/> as <see cref="RewriteExpressionAsync"/> does, an uncorrelated
-    /// <c>EXISTS</c> included, but leaves each correlated <c>EXISTS</c> for
-    /// <see cref="ExistsSubqueryPreparer"/>. Used for the WHERE of an UPDATE or DELETE, whose locate scan
-    /// evaluates a correlated <c>EXISTS</c> for each row of <paramref name="outerSource"/>.
+    /// <c>EXISTS</c> included, but leaves each correlated subquery for <see cref="ExistsSubqueryPreparer"/>.
+    /// Used for the WHERE and the SET values of an UPDATE and the WHERE of a DELETE, whose locate scan
+    /// evaluates a correlated subquery for each row of <paramref name="outerSource"/>.
     /// </summary>
-    public ValueTask<NodeAst> RewriteKeepingCorrelatedExistsAsync(
+    public ValueTask<NodeAst> RewriteKeepingCorrelatedAsync(
         DatabaseDescriptor database,
         NodeAst expr,
         ExecuteSQLTicket ticket,
@@ -111,27 +110,31 @@ internal sealed class SubqueryRewriter
         QuerySource outerSource)
     {
         return ContainsSubqueryToRewrite(expr, includeExists: true)
-            ? new ValueTask<NodeAst>(RewriteCoreAsync(database, expr, ticket, new ClausePosition(position, KeepCorrelatedExists: true), ScopeOf(database, outerSource)))
+            ? new ValueTask<NodeAst>(RewriteCoreAsync(database, expr, ticket, new ClausePosition(position, KeepCorrelated: true), ScopeOf(database, outerSource)))
             : new ValueTask<NodeAst>(expr);
     }
 
     /// <summary>
-    /// How a clause treats an <c>EXISTS</c>. A null <see cref="Name"/> is the WHERE of a SELECT, where every
-    /// <c>EXISTS</c> is left for <see cref="ExistsSubqueryPreparer"/>. Any other clause folds an uncorrelated
-    /// <c>EXISTS</c>, and refuses a correlated one, with <see cref="Name"/> in the message, unless
-    /// <see cref="KeepCorrelatedExists"/> leaves it for the preparer.
+    /// How a clause treats a subquery. Every clause folds an uncorrelated subquery, except that
+    /// <see cref="LeaveExists"/> (the WHERE of a SELECT) leaves every <c>EXISTS</c> for
+    /// <see cref="ExistsSubqueryPreparer"/>. <see cref="KeepCorrelated"/> leaves a correlated subquery for the
+    /// preparer; without it a correlated subquery is refused, with <see cref="Name"/> in the message.
     /// </summary>
-    private readonly record struct ClausePosition(string? Name, bool KeepCorrelatedExists = false);
+    private readonly record struct ClausePosition(string Name, bool KeepCorrelated = false, bool LeaveExists = false);
+
+    /// <summary>The WHERE of a SELECT.</summary>
+    private static readonly ClausePosition SelectWhere = new("the WHERE clause", KeepCorrelated: true, LeaveExists: true);
 
     /// <summary>The names a subquery of a clause over <paramref name="source"/> can read.</summary>
     private OuterNameScope ScopeOf(DatabaseDescriptor database, QuerySource? source) =>
         source is null ? OuterNameScope.None : scopeAnalyzer.DeferredScope(database, source);
 
     /// <summary>
-    /// Rewrites the subqueries of one SELECT. Its WHERE keeps <c>EXISTS</c> for
-    /// <see cref="ExistsSubqueryPreparer"/>, which runs after binding and handles the correlated form.
-    /// Its select list, HAVING and JOIN ON predicates have no per-row EXISTS stage, so every subquery
-    /// there is folded now, and a correlated <c>EXISTS</c> is refused. The derived tables of the
+    /// Rewrites the subqueries of one SELECT. Its WHERE keeps <c>EXISTS</c> and each correlated subquery for
+    /// <see cref="ExistsSubqueryPreparer"/>, which runs after binding. Its select list keeps a correlated
+    /// subquery too, unless the query groups, aggregates or has a window function (see
+    /// <see cref="SelectListPosition"/>). Its HAVING and JOIN ON predicates have no per-row stage, so a
+    /// correlated subquery there is refused. Every uncorrelated subquery is folded now. The derived tables of the
     /// source tree are not entered: each nested SELECT runs this stage for itself when the binder
     /// binds it through the pipeline. Returns the same query instance when nothing was rewritten;
     /// callers that cache a binding rely on that.
@@ -148,11 +151,11 @@ internal sealed class SubqueryRewriter
         BoundPredicate? where = query.Where;
         if (where is not null && ContainsSubqueryToRewrite(where.Expression, includeExists: false))
         {
-            NodeAst rewritten = await RewriteCoreAsync(database, where.Expression, ticket, default, outer).ConfigureAwait(false);
+            NodeAst rewritten = await RewriteCoreAsync(database, where.Expression, ticket, SelectWhere, outer).ConfigureAwait(false);
             where = new BoundPredicate(rewritten);
         }
 
-        IReadOnlyList<ProjectionItem> projections = await RewriteProjectionsAsync(database, query.Projections, ticket, outer).ConfigureAwait(false);
+        IReadOnlyList<ProjectionItem> projections = await RewriteProjectionsAsync(database, query.Projections, ticket, SelectListPosition(query), outer).ConfigureAwait(false);
 
         BoundPredicate? having = query.Having;
         if (having is not null && ContainsSubqueryToRewrite(having.Expression, includeExists: true))
@@ -175,14 +178,41 @@ internal sealed class SubqueryRewriter
     }
 
     /// <summary>
-    /// Rewrites the subqueries of the select list. A projection subquery runs once for the whole
-    /// statement, not once per row, which is exactly the meaning of an uncorrelated subquery. The
-    /// list instance is kept when no item changed.
+    /// How the select list of <paramref name="query"/> treats a correlated subquery. The projector runs one
+    /// for each row of a plain SELECT. A query that groups or aggregates computes its select list in the
+    /// aggregator, and a query with a window function reads its rows from the derived table that the window
+    /// rewrite built, so neither has a per-row stage for it, and both refuse it.
+    /// </summary>
+    private static ClausePosition SelectListPosition(SelectQuery query)
+    {
+        if (query.Source is DerivedTableSource { Windows: not null })
+            return new ClausePosition("the select list of a query with a window function");
+
+        if (query.GroupBy is { Count: > 0 })
+            return new ClausePosition("the select list of a query that groups or aggregates");
+
+        foreach (ProjectionItem item in query.Projections)
+        {
+            if (QueryExpressionClassifier.IsAggregateProjection(item.Expression)
+                || QueryExpressionClassifier.IsCompoundAggregateProjection(item.Expression))
+            {
+                return new ClausePosition("the select list of a query that groups or aggregates");
+            }
+        }
+
+        return new ClausePosition("the select list", KeepCorrelated: true);
+    }
+
+    /// <summary>
+    /// Rewrites the subqueries of the select list. An uncorrelated projection subquery runs once for the
+    /// whole statement, not once per row, which is exactly its meaning. A correlated one is left for the
+    /// preparer when <paramref name="position"/> keeps it. The list instance is kept when no item changed.
     /// </summary>
     private async ValueTask<IReadOnlyList<ProjectionItem>> RewriteProjectionsAsync(
         DatabaseDescriptor database,
         IReadOnlyList<ProjectionItem> projections,
         ExecuteSQLTicket ticket,
+        ClausePosition position,
         OuterNameScope outer)
     {
         List<ProjectionItem>? rewritten = null;
@@ -197,7 +227,7 @@ internal sealed class SubqueryRewriter
                 continue;
             }
 
-            NodeAst expression = await RewriteCoreAsync(database, item.Expression, ticket, new ClausePosition("the select list"), outer).ConfigureAwait(false);
+            NodeAst expression = await RewriteCoreAsync(database, item.Expression, ticket, position, outer).ConfigureAwait(false);
 
             if (rewritten is null)
             {
@@ -264,7 +294,8 @@ internal sealed class SubqueryRewriter
                 if (expr.leftAst is null)
                     throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Invalid scalar subquery expression");
 
-                await EnsureUncorrelatedAsync(database, expr.leftAst, outer, "A correlated scalar subquery").ConfigureAwait(false);
+                if (await IsCorrelatedAsync(database, expr.leftAst, outer, position, "A correlated scalar subquery").ConfigureAwait(false))
+                    return expr;
 
                 SubqueryOutputType outputType = new();
 
@@ -285,7 +316,7 @@ internal sealed class SubqueryRewriter
             case NodeType.ExprQuantifiedComparison when expr.rightAst?.nodeType == NodeType.ExprScalarSubquery:
                 return await RewriteQuantifiedSubqueryAsync(database, expr, ticket, position, outer).ConfigureAwait(false);
 
-            case NodeType.ExprExistsSubquery when position.Name is not null:
+            case NodeType.ExprExistsSubquery when !position.LeaveExists:
                 return await RewriteExistsAsync(database, expr, ticket, position, outer).ConfigureAwait(false);
         }
 
@@ -344,8 +375,8 @@ internal sealed class SubqueryRewriter
     /// <summary>
     /// Folds an <c>EXISTS</c> that sits outside the WHERE of a SELECT. Only the uncorrelated form can
     /// be folded: it runs once and its answer holds for every row. A correlated form needs the outer
-    /// row. In the WHERE of an UPDATE or DELETE it stays for the preparer; in any other position it is
-    /// refused rather than answered wrongly.
+    /// row. Where the clause keeps it, it stays for the preparer; in any other position it is refused
+    /// rather than answered wrongly.
     /// </summary>
     private async Task<NodeAst> RewriteExistsAsync(
         DatabaseDescriptor database,
@@ -357,15 +388,8 @@ internal sealed class SubqueryRewriter
         if (expr.leftAst is null)
             throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Invalid EXISTS subquery expression");
 
-        if ((await scopeAnalyzer.FindOuterReferencesAsync(database, expr.leftAst, outer).ConfigureAwait(false)).Count > 0)
-        {
-            if (position.KeepCorrelatedExists)
-                return expr;
-
-            throw new CamusDBException(
-                CamusDBErrorCodes.FeatureNotSupported,
-                $"A correlated EXISTS subquery is not supported in {position.Name}; it is supported in the WHERE clause of a SELECT, an UPDATE or a DELETE");
-        }
+        if (await IsCorrelatedAsync(database, expr.leftAst, outer, position, "A correlated EXISTS subquery").ConfigureAwait(false))
+            return expr;
 
         bool exists = await existsExecutor.ExecuteUncorrelatedAsync(
             database, expr.leftAst, ticket.TxnState, ticket.Parameters, ticket.CancellationToken).ConfigureAwait(false);
@@ -391,11 +415,15 @@ internal sealed class SubqueryRewriter
         if (expr.rightAst.nodeType != NodeType.Select)
             throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "IN subquery must be a SELECT statement");
 
-        await EnsureUncorrelatedAsync(database, expr.rightAst, outer, "A correlated IN or NOT IN subquery").ConfigureAwait(false);
+        bool correlated = await IsCorrelatedAsync(database, expr.rightAst, outer, position, "A correlated IN or NOT IN subquery").ConfigureAwait(false);
 
         // The tested value is rewritten with the rule of its enclosing clause, so an EXISTS on the left
         // of an IN keeps the treatment of its position.
         NodeAst lhs = await RewriteCoreAsync(database, expr.leftAst, ticket, position, outer).ConfigureAwait(false);
+
+        // The preparer runs a correlated subquery for each row; the tested value is part of the test.
+        if (correlated)
+            return ReferenceEquals(lhs, expr.leftAst) ? expr : WithLeft(expr, lhs);
 
         await using InSubqueryMaterialization materialization = await inExecutor.MaterializeAsync(
             database,
@@ -417,9 +445,9 @@ internal sealed class SubqueryRewriter
     /// synchronous per-row evaluator can fold over it. The operator marker and the quantifier word
     /// are carried over unchanged; only the right operand changes.
     ///
-    /// <para>The subquery must be uncorrelated, for the reason <c>IN</c> requires it: it is executed
-    /// once, before the outer scan starts, so a reference to an outer column has no value to read.
-    /// The same check reports it, so both forms reject the same statements.</para>
+    /// <para>A correlated subquery is left for the preparer where the clause keeps it, as an <c>IN</c> is,
+    /// and refused elsewhere: this stage runs a subquery once, before the outer scan starts, so a
+    /// reference to an outer column has no value to read here.</para>
     /// </summary>
     private async Task<NodeAst> RewriteQuantifiedSubqueryAsync(
         DatabaseDescriptor database,
@@ -440,9 +468,12 @@ internal sealed class SubqueryRewriter
         if (select.nodeType != NodeType.Select)
             throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "IN subquery must be a SELECT statement");
 
-        await EnsureUncorrelatedAsync(database, select, outer, "A correlated subquery in an ANY, SOME or ALL comparison").ConfigureAwait(false);
+        bool correlated = await IsCorrelatedAsync(database, select, outer, position, "A correlated subquery in an ANY, SOME or ALL comparison").ConfigureAwait(false);
 
         NodeAst lhs = await RewriteCoreAsync(database, expr.leftAst, ticket, position, outer).ConfigureAwait(false);
+
+        if (correlated)
+            return ReferenceEquals(lhs, expr.leftAst) ? expr : WithLeft(expr, lhs);
 
         await using InSubqueryMaterialization materialization = await inExecutor.MaterializeAsync(
             database,
@@ -470,25 +501,36 @@ internal sealed class SubqueryRewriter
     }
 
     /// <summary>
-    /// Refuses a subquery that reads the query around it, because this stage runs it once for the
-    /// whole statement and an outer column has no value then. The message names the first outer name,
-    /// so the reader can see why a name that the subquery does not have is not an unknown column.
+    /// True when <paramref name="select"/> reads the query around it and <paramref name="position"/> keeps such
+    /// a subquery for the preparer. A subquery that reads the outer query in any other clause is refused,
+    /// because this stage runs it once for the whole statement and an outer column has no value then. The
+    /// message names the clause and the first outer name, so the reader can see why a name that the
+    /// subquery does not have is not an unknown column.
     /// </summary>
-    private async ValueTask EnsureUncorrelatedAsync(
+    private async ValueTask<bool> IsCorrelatedAsync(
         DatabaseDescriptor database,
         NodeAst select,
         OuterNameScope outer,
+        ClausePosition position,
         string form)
     {
         IReadOnlyList<NodeAst> outerReferences = await scopeAnalyzer
             .FindOuterReferencesAsync(database, select, outer)
             .ConfigureAwait(false);
 
-        if (outerReferences.Count > 0)
-        {
-            throw new CamusDBException(
-                CamusDBErrorCodes.FeatureNotSupported,
-                $"{form} is not supported yet: it reads '{outerReferences[0].yytext}' of the outer query");
-        }
+        if (outerReferences.Count == 0)
+            return false;
+
+        if (position.KeepCorrelated)
+            return true;
+
+        throw new CamusDBException(
+            CamusDBErrorCodes.FeatureNotSupported,
+            $"{form} is not supported in {position.Name} yet: it reads '{outerReferences[0].yytext}' of the outer query");
     }
+
+    /// <summary>A copy of <paramref name="expr"/> with <paramref name="left"/> as its tested value.</summary>
+    private static NodeAst WithLeft(NodeAst expr, NodeAst left) =>
+        new(expr.nodeType, left, expr.rightAst, expr.extendedOne, expr.extendedTwo, expr.extendedThree,
+            expr.extendedFour, expr.extendedFive, expr.yytext, expr.extendedSix, expr.extendedSeven);
 }

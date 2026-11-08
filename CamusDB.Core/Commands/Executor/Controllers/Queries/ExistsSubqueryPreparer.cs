@@ -16,20 +16,28 @@ using CamusDB.Core.SQLParser;
 namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 
 /// <summary>
-/// Rewrites EXISTS subqueries before ticket creation: an uncorrelated EXISTS runs once and folds to
-/// a literal, a correlated one is bound against the outer sources and registered in an
-/// <see cref="ExistsSubqueryRegistry"/> for the per-row evaluator. A correlated EXISTS's inner query
-/// binds with the <see cref="NestedSelectBinder"/> the pipeline passes in, so a derived table in its
-/// FROM resolves its own subqueries like one anywhere else.
+/// Prepares the correlated subqueries of a clause before ticket creation, and folds an uncorrelated
+/// EXISTS of the WHERE of a SELECT to a literal. A correlated subquery is bound against the outer sources
+/// and registered in an <see cref="ExistsSubqueryRegistry"/>; the per-row stages run it for each outer row,
+/// see <see cref="CorrelatedSubqueryValues"/>. Its inner query binds with the <see cref="NestedSelectBinder"/>
+/// the pipeline passes in, so a derived table in its FROM resolves its own subqueries like one anywhere else.
 ///
-/// <para>A correlated body that reads one table and needs only its FROM and WHERE gets the fast form,
-/// <see cref="CorrelatedExistsScan"/>. Every other body (a join, a derived table or a view, no FROM, an
-/// aggregate, HAVING, OFFSET, a LIMIT that is not a positive constant, a window function, a subquery in
-/// its WHERE) becomes a <see cref="CorrelatedSubqueryBody"/>, which runs through the whole pipeline for
-/// each outer row.</para>
+/// <para>A correlated EXISTS whose body reads one table and needs only its FROM and WHERE gets the fast
+/// form, <see cref="CorrelatedExistsScan"/>. Every other EXISTS body (a join, a derived table or a view, no
+/// FROM, an aggregate, HAVING, OFFSET, a LIMIT that is not a positive constant, a window function, a subquery
+/// in its WHERE), and the body of every correlated scalar, <c>IN</c>, <c>NOT IN</c> and quantified subquery,
+/// becomes a <see cref="CorrelatedSubqueryBody"/>, which runs through the whole pipeline for each outer
+/// row.</para>
 ///
-/// <para>The outer query is a SELECT, or the table of an UPDATE or DELETE, see
-/// <see cref="PrepareExpressionAsync"/>.</para>
+/// <para>The clauses are the WHERE and the select list of a SELECT, and the WHERE and the SET values of an
+/// UPDATE or the WHERE of a DELETE, whose outer query is the target table. <see cref="SubqueryRewriter"/>
+/// runs first and folds each uncorrelated scalar, <c>IN</c> and quantified subquery, so each one left here is
+/// correlated. It refuses a correlated subquery in every other clause.</para>
+///
+/// <para>Each prepared node is a new node with a hidden name, so the parsed tree, which the parser cache
+/// shares, is never changed and never registered. A scalar node records the type of its column
+/// (<see cref="SubqueryResultTypes"/>), and the caller runs the statement checks again over the prepared
+/// clauses, so a type mistake fails with no outer row, as in PostgreSQL.</para>
 ///
 /// <para>A body is correlated when <see cref="SubqueryScopeAnalyzer"/> finds a name in it that resolves to
 /// the outer query. That includes a bare name that only the outer query has, such as <c>v</c> in
@@ -59,32 +67,12 @@ internal sealed class ExistsSubqueryPreparer
         this.scopeAnalyzer = scopeAnalyzer;
     }
 
-    public ValueTask<(SelectQuery Query, ExistsSubqueryRegistry? Registry)> PrepareAsync(
-        DatabaseDescriptor database,
-        SelectQuery query,
-        IReadOnlyList<BoundTableSource> outerTableSources,
-        IReadOnlyList<BoundDerivedTableSource> outerDerivedSources,
-        ExecuteSQLTicket ticket,
-        NestedSelectBinder nested)
-    {
-        // No EXISTS anywhere in the WHERE (or no WHERE): the rewrite walk would traverse every node
-        // — allocating a Task and a state-machine box per node per statement execution — only to
-        // return the same references. The scan mirrors the walk's own traversal of every child slot,
-        // so an expression it clears is one the walk would have left untouched.
-        if (query.Where is null || !ContainsExistsSubquery(query.Where.Expression))
-            return new ValueTask<(SelectQuery, ExistsSubqueryRegistry?)>((query, null));
-
-        return PrepareCoreAsync(database, query, outerTableSources, outerDerivedSources, ticket, nested);
-    }
-
     /// <summary>
-    /// Returns true when <paramref name="expr"/> or any descendant is an EXISTS subquery. Every child
-    /// slot is visited: a CASE keeps its ELSE result in <c>extendedOne</c>, and an EXISTS there must
-    /// be prepared like one under a comparison.
+    /// Prepares the WHERE and the select list of <paramref name="query"/>, whose FROM bound to
+    /// <paramref name="outerTableSources"/> and <paramref name="outerDerivedSources"/>. Returns the same
+    /// query instance and no registry when neither clause holds a subquery to prepare.
     /// </summary>
-    private static bool ContainsExistsSubquery(NodeAst expr) => SubqueryNodeScan.Contains(expr, SubqueryNodeKinds.Exists);
-
-    private async ValueTask<(SelectQuery Query, ExistsSubqueryRegistry? Registry)> PrepareCoreAsync(
+    public async ValueTask<(SelectQuery Query, ExistsSubqueryRegistry? Registry)> PrepareAsync(
         DatabaseDescriptor database,
         SelectQuery query,
         IReadOnlyList<BoundTableSource> outerTableSources,
@@ -92,78 +80,104 @@ internal sealed class ExistsSubqueryPreparer
         ExecuteSQLTicket ticket,
         NestedSelectBinder nested)
     {
-        (NodeAst rewritten, ExistsSubqueryRegistry? registry) = await PrepareExpressionAsync(
-            database,
-            query.Where!.Expression,
-            outerTableSources,
-            outerDerivedSources,
-            ticket,
-            nested).ConfigureAwait(false);
+        // No subquery to prepare: the rewrite walk would traverse every node — allocating a Task and a
+        // state-machine box per node per statement execution — only to return the same references. The
+        // scan mirrors the walk's own traversal of every child slot, so an expression it clears is one the
+        // walk would have left untouched.
+        bool where = query.Where is not null && ContainsSubqueryToPrepare(query.Where.Expression);
+        bool projections = false;
 
-        if (ReferenceEquals(rewritten, query.Where!.Expression) && registry is null)
+        foreach (ProjectionItem item in query.Projections)
+            projections |= ContainsSubqueryToPrepare(item.Expression);
+
+        if (!where && !projections)
             return (query, null);
 
-        return (query with { Where = new BoundPredicate(rewritten) }, registry);
+        CorrelatedPreparation preparation = new(nested, outerTableSources, outerDerivedSources);
+        BoundPredicate? preparedWhere = query.Where;
+
+        if (where)
+        {
+            NodeAst rewritten = await PrepareExpressionAsync(database, query.Where!.Expression, preparation, ticket).ConfigureAwait(false);
+
+            if (!ReferenceEquals(rewritten, query.Where!.Expression))
+                preparedWhere = new BoundPredicate(rewritten);
+        }
+
+        IReadOnlyList<ProjectionItem> preparedProjections = query.Projections;
+
+        if (projections)
+        {
+            List<ProjectionItem> items = new(query.Projections.Count);
+
+            foreach (ProjectionItem item in query.Projections)
+            {
+                items.Add(ContainsSubqueryToPrepare(item.Expression)
+                    ? item with { Expression = await PrepareExpressionAsync(database, item.Expression, preparation, ticket).ConfigureAwait(false) }
+                    : item);
+            }
+
+            preparedProjections = items;
+        }
+
+        if (ReferenceEquals(preparedWhere, query.Where) && ReferenceEquals(preparedProjections, query.Projections) && preparation.Registry is null)
+            return (query, null);
+
+        return (query with { Where = preparedWhere, Projections = preparedProjections }, preparation.Registry);
     }
 
     /// <summary>
-    /// Folds each uncorrelated EXISTS of <paramref name="expr"/> to a literal and prepares each correlated
-    /// one against the outer sources. The caller evaluates the result with a query ticket that carries the
-    /// registry. Used for the WHERE of a SELECT and for the WHERE of an UPDATE or DELETE, whose one outer
-    /// source is the target table.
+    /// Returns true when <paramref name="expr"/> or any descendant is a subquery this stage prepares. Every
+    /// child slot is visited: a CASE keeps its ELSE result in <c>extendedOne</c>, and a subquery there must be
+    /// prepared like one under a comparison.
     /// </summary>
-    internal async ValueTask<(NodeAst Expression, ExistsSubqueryRegistry? Registry)> PrepareExpressionAsync(
+    internal static bool ContainsSubqueryToPrepare(NodeAst expr) =>
+        SubqueryNodeScan.Contains(expr, SubqueryNodeKinds.Exists | SubqueryNodeKinds.Rewritable);
+
+    /// <summary>
+    /// Prepares each correlated subquery of <paramref name="expr"/> against the outer sources of
+    /// <paramref name="preparation"/>, and folds each uncorrelated EXISTS to a literal. Every clause of one
+    /// query level goes through one <paramref name="preparation"/>, so its registry holds them all; the caller
+    /// evaluates each clause with a query ticket that carries that registry. Returns the same node when
+    /// nothing changed.
+    /// </summary>
+    internal async ValueTask<NodeAst> PrepareExpressionAsync(
         DatabaseDescriptor database,
         NodeAst expr,
-        IReadOnlyList<BoundTableSource> outerTableSources,
-        IReadOnlyList<BoundDerivedTableSource> outerDerivedSources,
-        ExecuteSQLTicket ticket,
-        NestedSelectBinder nested)
+        CorrelatedPreparation preparation,
+        ExecuteSQLTicket ticket)
     {
-        if (!ContainsExistsSubquery(expr))
-            return (expr, null);
+        if (!ContainsSubqueryToPrepare(expr))
+            return expr;
 
-        ExistsRewriteContext context = new(nested, OuterNameScope.Of(outerTableSources, outerDerivedSources));
-        NodeAst rewritten = await RewriteExpressionAsync(
-            database,
-            expr,
-            outerTableSources,
-            outerDerivedSources,
-            ticket,
-            context).ConfigureAwait(false);
-
-        return (rewritten, context.Registry);
-    }
-
-    private sealed class ExistsRewriteContext
-    {
-        public ExistsRewriteContext(NestedSelectBinder nested, OuterNameScope outerScope)
-        {
-            Nested = nested;
-            OuterScope = outerScope;
-        }
-
-        public ExistsSubqueryRegistry? Registry { get; set; }
-
-        /// <summary>Binds the derived tables of a correlated EXISTS's inner FROM through the pipeline.</summary>
-        public NestedSelectBinder Nested { get; }
-
-        /// <summary>The names of the outer query, which a body can read.</summary>
-        public OuterNameScope OuterScope { get; }
+        return await RewriteExpressionAsync(database, expr, ticket, preparation).ConfigureAwait(false);
     }
 
     private async Task<NodeAst> RewriteExpressionAsync(
         DatabaseDescriptor database,
         NodeAst expr,
-        IReadOnlyList<BoundTableSource> outerTableSources,
-        IReadOnlyList<BoundDerivedTableSource> outerDerivedSources,
         ExecuteSQLTicket ticket,
-        ExistsRewriteContext context)
+        CorrelatedPreparation context)
     {
         // An async frame is large, and a deep predicate would overflow the stack; continue on a
         // fresh thread-pool stack instead. See StatementDepthGuard.HasStackHeadroom.
         if (!StatementDepthGuard.HasStackHeadroom())
-            return await Task.Run(() => RewriteExpressionAsync(database, expr, outerTableSources, outerDerivedSources, ticket, context)).ConfigureAwait(false);
+            return await Task.Run(() => RewriteExpressionAsync(database, expr, ticket, context)).ConfigureAwait(false);
+
+        IReadOnlyList<BoundTableSource> outerTableSources = context.OuterTables;
+        IReadOnlyList<BoundDerivedTableSource> outerDerivedSources = context.OuterDerived;
+
+        switch (expr.nodeType)
+        {
+            case NodeType.ExprScalarSubquery when expr.leftAst is not null:
+                return await PrepareScalarAsync(database, expr.leftAst, ticket, context).ConfigureAwait(false);
+
+            case NodeType.ExprInSubquery or NodeType.ExprNotInSubquery when expr.leftAst is not null && expr.rightAst is not null:
+                return await PrepareInAsync(database, expr, ticket, context).ConfigureAwait(false);
+
+            case NodeType.ExprQuantifiedComparison when expr.leftAst is not null && expr.rightAst is { nodeType: NodeType.ExprScalarSubquery, leftAst: not null }:
+                return await PrepareQuantifiedAsync(database, expr, ticket, context).ConfigureAwait(false);
+        }
 
         if (expr.nodeType == NodeType.ExprExistsSubquery)
         {
@@ -207,6 +221,8 @@ internal sealed class ExistsSubqueryPreparer
             if (form == ExistsBodyForm.NoRows)
                 return ColumnValueAstBuilder.FromColumnValue(ColumnValue.FromBool(false));
 
+            ExistsSubqueryRegistry registry = context.Registry ??= new ExistsSubqueryRegistry();
+
             NodeAst correlatedNode = new(
                 NodeType.ExprExistsCorrelated,
                 leftAst: null,
@@ -216,22 +232,21 @@ internal sealed class ExistsSubqueryPreparer
                 extendedThree: null,
                 extendedFour: null,
                 extendedFive: null,
-                yytext: null);
+                yytext: registry.NextHiddenName());
 
-            context.Registry ??= new ExistsSubqueryRegistry();
-            context.Registry.Register(correlatedNode, prepared);
+            registry.Register(correlatedNode, prepared);
             return correlatedNode;
         }
 
-        NodeAst? left = await RewriteChildAsync(database, expr.leftAst, outerTableSources, outerDerivedSources, ticket, context).ConfigureAwait(false);
-        NodeAst? right = await RewriteChildAsync(database, expr.rightAst, outerTableSources, outerDerivedSources, ticket, context).ConfigureAwait(false);
-        NodeAst? one = await RewriteChildAsync(database, expr.extendedOne, outerTableSources, outerDerivedSources, ticket, context).ConfigureAwait(false);
-        NodeAst? two = await RewriteChildAsync(database, expr.extendedTwo, outerTableSources, outerDerivedSources, ticket, context).ConfigureAwait(false);
-        NodeAst? three = await RewriteChildAsync(database, expr.extendedThree, outerTableSources, outerDerivedSources, ticket, context).ConfigureAwait(false);
-        NodeAst? four = await RewriteChildAsync(database, expr.extendedFour, outerTableSources, outerDerivedSources, ticket, context).ConfigureAwait(false);
-        NodeAst? five = await RewriteChildAsync(database, expr.extendedFive, outerTableSources, outerDerivedSources, ticket, context).ConfigureAwait(false);
-        NodeAst? six = await RewriteChildAsync(database, expr.extendedSix, outerTableSources, outerDerivedSources, ticket, context).ConfigureAwait(false);
-        NodeAst? seven = await RewriteChildAsync(database, expr.extendedSeven, outerTableSources, outerDerivedSources, ticket, context).ConfigureAwait(false);
+        NodeAst? left = await RewriteChildAsync(database, expr.leftAst, ticket, context).ConfigureAwait(false);
+        NodeAst? right = await RewriteChildAsync(database, expr.rightAst, ticket, context).ConfigureAwait(false);
+        NodeAst? one = await RewriteChildAsync(database, expr.extendedOne, ticket, context).ConfigureAwait(false);
+        NodeAst? two = await RewriteChildAsync(database, expr.extendedTwo, ticket, context).ConfigureAwait(false);
+        NodeAst? three = await RewriteChildAsync(database, expr.extendedThree, ticket, context).ConfigureAwait(false);
+        NodeAst? four = await RewriteChildAsync(database, expr.extendedFour, ticket, context).ConfigureAwait(false);
+        NodeAst? five = await RewriteChildAsync(database, expr.extendedFive, ticket, context).ConfigureAwait(false);
+        NodeAst? six = await RewriteChildAsync(database, expr.extendedSix, ticket, context).ConfigureAwait(false);
+        NodeAst? seven = await RewriteChildAsync(database, expr.extendedSeven, ticket, context).ConfigureAwait(false);
 
         if (ReferenceEquals(left, expr.leftAst)
             && ReferenceEquals(right, expr.rightAst)
@@ -253,25 +268,150 @@ internal sealed class ExistsSubqueryPreparer
     private ValueTask<NodeAst?> RewriteChildAsync(
         DatabaseDescriptor database,
         NodeAst? child,
-        IReadOnlyList<BoundTableSource> outerTableSources,
-        IReadOnlyList<BoundDerivedTableSource> outerDerivedSources,
         ExecuteSQLTicket ticket,
-        ExistsRewriteContext context)
+        CorrelatedPreparation context)
     {
         if (child is null)
             return new ValueTask<NodeAst?>((NodeAst?)null);
 
-        return RewriteChildCoreAsync(database, child, outerTableSources, outerDerivedSources, ticket, context);
+        return RewriteChildCoreAsync(database, child, ticket, context);
     }
 
     private async ValueTask<NodeAst?> RewriteChildCoreAsync(
         DatabaseDescriptor database,
         NodeAst child,
-        IReadOnlyList<BoundTableSource> outerTableSources,
-        IReadOnlyList<BoundDerivedTableSource> outerDerivedSources,
         ExecuteSQLTicket ticket,
-        ExistsRewriteContext context)
-        => await RewriteExpressionAsync(database, child, outerTableSources, outerDerivedSources, ticket, context).ConfigureAwait(false);
+        CorrelatedPreparation context)
+        => await RewriteExpressionAsync(database, child, ticket, context).ConfigureAwait(false);
+
+    /// <summary>
+    /// A new scalar subquery node for the correlated body <paramref name="select"/>, with a hidden name and the
+    /// type of its column. The rewriter folded every uncorrelated scalar subquery, so this one reads the
+    /// outer query.
+    /// </summary>
+    private async Task<NodeAst> PrepareScalarAsync(
+        DatabaseDescriptor database,
+        NodeAst select,
+        ExecuteSQLTicket ticket,
+        CorrelatedPreparation context)
+    {
+        (ExistsSubqueryRegistry registry, PreparedValueSubquery prepared) = await PrepareValueBodyAsync(database, select, ticket, context).ConfigureAwait(false);
+
+        NodeAst node = SubqueryResultTypes.Remember(
+            new NodeAst(NodeType.ExprScalarSubquery, select, null, null, null, null, null, null, registry.NextHiddenName()),
+            prepared.Body.OutputType);
+
+        registry.RegisterValue(node, prepared);
+        return node;
+    }
+
+    /// <summary>
+    /// A new <c>IN</c> or <c>NOT IN</c> node for a correlated body, with a hidden name and the type of the body's
+    /// column, which the statement checks compare with the tested value. A subquery in the tested value is
+    /// prepared too.
+    /// </summary>
+    private async Task<NodeAst> PrepareInAsync(
+        DatabaseDescriptor database,
+        NodeAst expr,
+        ExecuteSQLTicket ticket,
+        CorrelatedPreparation context)
+    {
+        NodeAst tested = await RewriteExpressionAsync(database, expr.leftAst!, ticket, context).ConfigureAwait(false);
+
+        (ExistsSubqueryRegistry registry, PreparedValueSubquery prepared) = await PrepareValueBodyAsync(database, expr.rightAst!, ticket, context).ConfigureAwait(false);
+
+        NodeAst node = SubqueryResultTypes.Remember(
+            new NodeAst(expr.nodeType, tested, expr.rightAst, null, null, null, null, null, registry.NextHiddenName()),
+            prepared.Body.OutputType);
+
+        registry.RegisterValue(node, prepared);
+        return node;
+    }
+
+    /// <summary>
+    /// A new quantified comparison (<c>x &lt; ALL (SELECT …)</c>) for a correlated body. The comparison keeps its
+    /// quantifier word in its own text, so the hidden name and the type of the body's column go on a new
+    /// subquery node in its right operand.
+    /// </summary>
+    private async Task<NodeAst> PrepareQuantifiedAsync(
+        DatabaseDescriptor database,
+        NodeAst expr,
+        ExecuteSQLTicket ticket,
+        CorrelatedPreparation context)
+    {
+        NodeAst tested = await RewriteExpressionAsync(database, expr.leftAst!, ticket, context).ConfigureAwait(false);
+        NodeAst select = expr.rightAst!.leftAst!;
+
+        (ExistsSubqueryRegistry registry, PreparedValueSubquery prepared) = await PrepareValueBodyAsync(database, select, ticket, context).ConfigureAwait(false);
+
+        NodeAst operand = SubqueryResultTypes.Remember(
+            new NodeAst(NodeType.ExprScalarSubquery, select, null, null, null, null, null, null, registry.NextHiddenName()),
+            prepared.Body.OutputType);
+
+        NodeAst node = new(
+            expr.nodeType,
+            tested,
+            operand,
+            expr.extendedOne,
+            expr.extendedTwo,
+            expr.extendedThree,
+            expr.extendedFour,
+            expr.extendedFive,
+            expr.yytext,
+            expr.extendedSix,
+            expr.extendedSeven);
+
+        registry.RegisterValue(node, prepared);
+        return node;
+    }
+
+    /// <summary>
+    /// Prepares the one-column body <paramref name="select"/> of a correlated scalar, <c>IN</c> or quantified
+    /// subquery. It runs through the whole pipeline for each outer row, so every form of SELECT can be the body.
+    /// </summary>
+    private async Task<(ExistsSubqueryRegistry Registry, PreparedValueSubquery Prepared)> PrepareValueBodyAsync(
+        DatabaseDescriptor database,
+        NodeAst select,
+        ExecuteSQLTicket ticket,
+        CorrelatedPreparation context)
+    {
+        if (select.nodeType != NodeType.Select)
+            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Subquery must be a SELECT statement");
+
+        IReadOnlyList<NodeAst> outerReferences = await scopeAnalyzer
+            .FindOuterReferencesAsync(database, select, context.OuterScope)
+            .ConfigureAwait(false);
+
+        // The rewriter runs before this stage and folds every subquery that does not read the outer query.
+        if (outerReferences.Count == 0)
+        {
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInternalOperation,
+                "An uncorrelated subquery reached the correlated subquery preparer");
+        }
+
+        SelectQuery innerQuery = selectQueryCreator.CreateSelectQuery(select);
+
+        CorrelatedSubqueryBody body = await CorrelatedSubqueryBody.PrepareAsync(
+            subqueryExecutor,
+            database,
+            select,
+            innerQuery,
+            outerReferences,
+            context.OuterTables,
+            context.OuterDerived,
+            ticket,
+            isExistsBody: false).ConfigureAwait(false);
+
+        // A body that binds again for each row was checked in a flow that does not refuse a constant division.
+        ConstantDivisionCheck.CheckSelect(innerQuery);
+
+        HashSet<string> names = new(StringComparer.OrdinalIgnoreCase);
+        foreach (NodeAst reference in outerReferences)
+            names.Add(reference.yytext!);
+
+        return (context.Registry ??= new ExistsSubqueryRegistry(), new PreparedValueSubquery([.. names], body));
+    }
 
     /// <summary>
     /// Prepares a correlated body in the fast form when it fits, and as a <see cref="CorrelatedSubqueryBody"/>
