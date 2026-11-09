@@ -13,7 +13,7 @@ that each database installs with `CREATE EXTENSION`.
     <Nullable>enable</Nullable>
   </PropertyGroup>
   <ItemGroup>
-    <PackageReference Include="CamusDB.Extensions.Abstractions" Version="0.16.*" />
+    <PackageReference Include="CamusDB.Extensions.Abstractions" Version="0.18.*" />
   </ItemGroup>
 </Project>
 ```
