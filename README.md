@@ -158,7 +158,19 @@ EXPLAIN (ANALYZE) SELECT role, COUNT(*) FROM app_users GROUP BY role;
 
 Installing
 ----------
-CamusDB ships as a .NET global tool. With the [.NET 10 runtime or SDK](https://dotnet.microsoft.com/download)
+On macOS or Linux, install with [Homebrew](https://brew.sh). The package carries its own .NET
+runtime, so you do not need to install .NET:
+
+```bash
+brew install camusdb/tap/camusdb
+brew services start camusdb   # run a node in the background, and again at login
+```
+
+The service keeps its configuration in `$(brew --prefix)/var/camusdb/config.yml` and its data in
+`$(brew --prefix)/var/camusdb/data`. Its log is `$(brew --prefix)/var/log/camusdb.log`. You can
+also run `camusdb` in a shell, as described below.
+
+CamusDB also ships as a .NET global tool. With the [.NET 10 runtime or SDK](https://dotnet.microsoft.com/download)
 installed:
 
 ```bash
