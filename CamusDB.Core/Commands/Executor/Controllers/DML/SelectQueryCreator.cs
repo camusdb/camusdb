@@ -638,7 +638,30 @@ internal sealed class SelectQueryCreator
             return;
         }
 
-        projections.Add(new ProjectionItem(ast, TryGetProjectionOutputName(ast)));
+        NodeAst item = NameScalarSubquery(ast);
+        projections.Add(new ProjectionItem(item, TryGetProjectionOutputName(item)));
+    }
+
+    /// <summary>
+    /// Gives a select-list item that is a bare scalar subquery the name of its single column, as an
+    /// alias: <c>SELECT (SELECT 5 AS id)</c> reads as <c>SELECT (SELECT 5 AS id) AS id</c>, as in
+    /// PostgreSQL (<see cref="QueryProjectionResolver.ScalarSubqueryColumnName"/>). The name must be an
+    /// alias here, because the subquery rewrite replaces the subquery node with its value before the
+    /// output is named, and an alias over the value keeps the name. An item whose subquery column has no
+    /// name stays as it is and keeps its position as its name. The parse tree is shared and is not
+    /// changed: the alias is a new node over the same subquery node.
+    /// </summary>
+    private static NodeAst NameScalarSubquery(NodeAst ast)
+    {
+        if (ast.nodeType != NodeType.ExprScalarSubquery
+            || QueryProjectionResolver.ScalarSubqueryColumnName(ast) is not { } name)
+            return ast;
+
+        return new NodeAst(
+            NodeType.ExprAlias,
+            ast,
+            new NodeAst(NodeType.Identifier, null, null, null, null, null, null, null, name),
+            null, null, null, null, null, null);
     }
 
     private static string? TryGetProjectionOutputName(NodeAst ast)

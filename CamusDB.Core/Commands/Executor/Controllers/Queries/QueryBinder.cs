@@ -817,6 +817,12 @@ internal sealed class QueryBinder
 
         foreach (OrderByItem orderBy in query.OrderBy)
         {
+            QueryProjectionResolver.RejectAmbiguousOrderName(
+                orderBy.Expression,
+                query.Projections,
+                (first, other) => SameOrderTarget(first, other, rowNames),
+                name => StarColumnOf(name, rowNames));
+
             QueryExpressionClassifier.ValidateNoNestedAggregate(orderBy.Expression);
 
             if (ungroupedAggregate)
@@ -853,6 +859,51 @@ internal sealed class QueryBinder
                     : orderBy.Expression;
 
             ValidateExpression(validated, rowNames);
+        }
+    }
+
+    /// <summary>
+    /// True when two select-list expressions that an ORDER BY name matches are one meaning: the same tree,
+    /// or two column references to the same input column (<c>r.id</c> and <c>id</c> over one table). A
+    /// reference that does not resolve is never the same as another one; its own error comes later.
+    /// </summary>
+    private static bool SameOrderTarget(NodeAst first, NodeAst other, QueryRowNameResolver rowNames)
+    {
+        if (QueryAstComparer.AreEquivalent(first, other))
+            return true;
+
+        if (first.nodeType != NodeType.Identifier || other.nodeType != NodeType.Identifier
+            || first.yytext is null || other.yytext is null)
+            return false;
+
+        return TryLookupKey(first.yytext, rowNames) is { } firstKey
+            && string.Equals(firstKey, TryLookupKey(other.yytext, rowNames), StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The input column that a <c>*</c> item puts out under <paramref name="name"/>, as a column reference,
+    /// or null when no input column has the name or the name is ambiguous among the inputs (its own error
+    /// comes later).
+    /// </summary>
+    private static NodeAst? StarColumnOf(string name, QueryRowNameResolver rowNames) =>
+        TryLookupKey(name, rowNames) is null
+            ? null
+            : new NodeAst(NodeType.Identifier, null, null, null, null, null, null, null, name);
+
+    /// <summary>
+    /// The row key of a column reference, or null when it does not resolve. Only the ORDER BY ambiguity
+    /// check calls it, at bind time, for a name that two select-list items have or that a <c>*</c> item
+    /// may put out, so the exception path costs nothing on the execution of a bound query.
+    /// </summary>
+    private static string? TryLookupKey(string identifier, QueryRowNameResolver rowNames)
+    {
+        try
+        {
+            return rowNames.ResolveRowLookupKey(identifier);
+        }
+        catch (CamusDBException)
+        {
+            return null;
         }
     }
 

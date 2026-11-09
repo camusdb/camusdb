@@ -538,8 +538,31 @@ tables and set operations. A derived table cannot read the other items of its ow
 
 Two positions do not take a subquery at all: `ORDER BY` and `GROUP BY` refuse one with `CADB0400`.
 
+A scalar subquery in a select list names its output column after its single inner column, as in
+PostgreSQL. That name is the alias, the column name, or the name of a nested scalar subquery, so
+`SELECT (SELECT 5 AS id)` has the column `id`. When the inner column is another expression, the
+subquery column has its position as its name, as any expression column has. PostgreSQL names it
+`?column?`, or after its function.
+
 `EXPLAIN` runs the uncorrelated subqueries of a statement, because folding them is part of
 preparing the plan; see [EXPLAIN](./explain.md).
+
+## Names in ORDER BY
+
+A bare name in `ORDER BY` matches the output names of the select list first, and a column of the
+`FROM` clause only when no output has that name, as in PostgreSQL. An output name is an alias, the
+column name of a column reference without its table name, or the name of a scalar subquery column.
+So `SELECT v AS id FROM r ORDER BY id` sorts by `v`, and `SELECT a.id FROM r a JOIN r b ON a.id = b.id
+ORDER BY id` sorts by `a.id`.
+
+- A name that two outputs with different expressions have fails with `CADB0400`
+  (`ORDER BY "id" is ambiguous`). Examples are `SELECT id, v AS id FROM r ORDER BY id`,
+  `SELECT id, (SELECT 5 AS id) FROM r ORDER BY id`, and `SELECT *, v AS id FROM r ORDER BY id`, where
+  `*` puts out `id` too.
+- Two outputs with the same expression are one meaning: `SELECT id, id FROM r ORDER BY id` and
+  `SELECT r.id, id FROM r ORDER BY id` sort by `id`.
+- A position (`ORDER BY 2`), a qualified name (`ORDER BY r.id`) and an expression (`ORDER BY id + 0`)
+  are not output names, so they are never ambiguous.
 
 ## Quantified comparisons: `ANY`, `SOME` and `ALL`
 

@@ -414,6 +414,11 @@ public static class DecidedDivergences
             CamusDBErrorCodes.UnknownColumn, "10",
             NotSupportedYet),
 
+        new("A grouped select list cannot hold an uncorrelated scalar subquery", RowTable,
+            "SELECT id, (SELECT 5) FROM d GROUP BY id ORDER BY id",
+            CamusDBErrorCodes.InvalidInput, "1",
+            NotSupportedYet),
+
         new("ORDER BY cannot hold an aggregate that the select list does not hold", RowTable,
             "SELECT v FROM d GROUP BY v ORDER BY COUNT(*), v",
             CamusDBErrorCodes.InvalidInput, "10",

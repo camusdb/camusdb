@@ -7,6 +7,7 @@
  */
 
 using CamusDB.Core.Catalogs.Models;
+using CamusDB.Core.CommandsExecutor.Controllers.Queries;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Queries;
 using CamusDB.Core.SQLParser;
@@ -224,6 +225,12 @@ internal static class ViewDefinitionBuilder
             // A qualified reference (o.id) publishes the unqualified column name, as in PostgreSQL.
             case NodeType.Identifier when projection.yytext is { Length: > 0 } identifier:
                 return StripQualifier(identifier)!;
+
+            // A scalar subquery publishes the name of its single column, as in PostgreSQL; the select
+            // list builder gives it the same name, so the stored column and the read agree.
+            case NodeType.ExprScalarSubquery
+                when QueryProjectionResolver.ScalarSubqueryColumnName(projection) is { Length: > 0 } inner:
+                return inner;
 
             default:
                 throw new CamusDBException(

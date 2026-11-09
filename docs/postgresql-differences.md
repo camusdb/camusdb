@@ -205,6 +205,7 @@ CamusDB refuses these forms with a clear error, so no answer is wrong. `d` has t
 | `SELECT v + 1 FROM d GROUP BY v` | `CADB0400` | `11`, `21` |
 | `SELECT id, v FROM d GROUP BY id`, where `id` is the primary key | `CADB0400` | Both rows |
 | `SELECT v AS q FROM d GROUP BY q` | `CADB0404` | `10`, `20` |
+| `SELECT id, (SELECT 5) FROM d GROUP BY id` | `CADB0400` | Both rows |
 | `SELECT v FROM d GROUP BY v ORDER BY COUNT(*), v` | `CADB0400` | `10`, `20` |
 | `SELECT 1 FROM em HAVING COUNT(*) = 0` | `CADB0400` | `1` |
 | `SELECT id FROM d LIMIT NULL` | `CADB0406` | Both rows |
