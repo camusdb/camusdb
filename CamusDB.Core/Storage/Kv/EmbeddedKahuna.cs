@@ -725,8 +725,9 @@ public sealed class EmbeddedKahuna : IAsyncDisposable
         {
             EnsureWalIsEmpty();
 
+            // Kahuna reads the chain from the node's own backup storage, which it opens under
+            // Options.BackupDir, so the call names no directory.
             await node.Kahuna.BootstrapFromPitrBackupAsync(
-                Options.BackupDir,
                 leafBackupId,
                 PitrTargetResolver.FromUnixMilliseconds(targetTimeMs),
                 node.Raft.WalAdapter,

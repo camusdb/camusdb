@@ -149,7 +149,8 @@ internal abstract class DelegatingKahuna : IKahuna
         public virtual Task<bool> OnLeaderChanged(int partitionId, string node) => inner.OnLeaderChanged(partitionId, node);
         public virtual Task OnLeadershipLost(int partitionId, long term) => inner.OnLeadershipLost(partitionId, term);
         public virtual Task FlushPersistenceAsync() => inner.FlushPersistenceAsync();
-        public virtual Task BootstrapFromPitrBackupAsync(string backupDir, Guid leafBackupId, HLCTimestamp targetTime, IWAL walAdapter, TimeSpan pitrWindow, TimeSpan baseSnapshotInterval) => inner.BootstrapFromPitrBackupAsync(backupDir, leafBackupId, targetTime, walAdapter, pitrWindow, baseSnapshotInterval);
+        public virtual Task BootstrapFromPitrBackupAsync(Guid leafBackupId, HLCTimestamp targetTime, IWAL walAdapter, TimeSpan pitrWindow, TimeSpan baseSnapshotInterval) => inner.BootstrapFromPitrBackupAsync(leafBackupId, targetTime, walAdapter, pitrWindow, baseSnapshotInterval);
+        public virtual Task StartBackupsAsync(CancellationToken ct = default) => inner.StartBackupsAsync(ct);
         public virtual void RegisterKeyRange(string keySpace) => inner.RegisterKeyRange(keySpace);
         public virtual Task<bool> RegisterKeyRangeAsync(string keySpace, CancellationToken cancellationToken = default) => inner.RegisterKeyRangeAsync(keySpace, cancellationToken);
         public virtual Task<KahunaRegisterKeyRangeResponse> RegisterKeyRangeWithOutcomeAsync(string keySpace, CancellationToken cancellationToken = default) => inner.RegisterKeyRangeWithOutcomeAsync(keySpace, cancellationToken);
