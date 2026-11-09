@@ -240,6 +240,17 @@ FROM open_orders v INNER JOIN customers c ON v.customer = c.name;
 There is no "view scan" node in `EXPLAIN` — the plan shows what actually runs, which is the expanded
 query.
 
+A view is also a source for a statement that writes rows somewhere else: `CREATE TABLE … AS SELECT`
+(also `WITH NO DATA`), `INSERT … SELECT` and a materialized view body read it in the same way. Each
+column of the new table has the type that a `SELECT` of the view reports, also for a subquery column.
+A write *to* the view is still refused with `CADB0525` (see [Updatable views](#divergences-from-postgresql)).
+
+```sql
+CREATE TABLE open_copy AS SELECT id, customer FROM open_orders;           -- OK
+INSERT INTO archive (id, customer) SELECT id, customer FROM open_orders; -- OK
+INSERT INTO open_orders (id, customer) VALUES (9, 'acme');               -- ERROR (CADB0525)
+```
+
 A subquery in the body's `WHERE` — `IN (SELECT …)`, `NOT IN`, a scalar subquery, `EXISTS` and
 `NOT EXISTS`, correlated or not — runs as it would in a top-level statement, and so does one in a
 derived table the statement writes itself: `SELECT COUNT(*) FROM (SELECT … WHERE EXISTS (…)) AS sub`.

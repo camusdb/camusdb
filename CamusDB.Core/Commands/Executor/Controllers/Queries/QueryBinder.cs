@@ -483,8 +483,12 @@ internal sealed class QueryBinder
                 (BoundSelectQuery innerBound, SubqueryBindProducts innerSubqueries) =
                     await BindNestedAsync(database, derivedSource.Query, nested).ConfigureAwait(false);
 
+                // The columns come from the bound query, which the derived-table executor runs: there the
+                // pipeline folded each uncorrelated subquery into its value, or into a NULL that keeps the
+                // subquery's column type. The query as written still holds the subquery node, which has
+                // no type, so its column fell back to String and a CTAS refused the Int64 value.
                 IReadOnlyList<DerivedColumnSchema> columns =
-                    DerivedTableSchemaBuilder.Build(derivedSource.Query, innerBound);
+                    DerivedTableSchemaBuilder.Build(innerBound.Query, innerBound);
 
                 // A windowed SELECT's derived table also holds one result column per window call,
                 // which the window operator adds to each row after the inner query ran.
@@ -553,8 +557,10 @@ internal sealed class QueryBinder
         (BoundSelectQuery right, SubqueryBindProducts rightSubqueries) =
             await BindNestedAsync(database, setOperation.Right, nested).ConfigureAwait(false);
 
-        IReadOnlyList<DerivedColumnSchema> leftColumns = DerivedTableSchemaBuilder.Build(setOperation.Left, left);
-        IReadOnlyList<DerivedColumnSchema> rightColumns = DerivedTableSchemaBuilder.Build(setOperation.Right, right);
+        // The columns come from each bound operand, as for a derived table above: there each
+        // uncorrelated subquery is folded into its value, or into a NULL that keeps its column type.
+        IReadOnlyList<DerivedColumnSchema> leftColumns = DerivedTableSchemaBuilder.Build(left.Query, left);
+        IReadOnlyList<DerivedColumnSchema> rightColumns = DerivedTableSchemaBuilder.Build(right.Query, right);
 
         (IReadOnlyList<DerivedColumnSchema> columns, IReadOnlyList<bool> untyped) =
             SetOperationSchema.Resolve(setOperation, left, leftColumns, right, rightColumns);

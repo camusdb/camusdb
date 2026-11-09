@@ -1458,6 +1458,17 @@ internal sealed class SelectStatementExecutor
             ? queryExecutor.ExecuteJoinQuery(database, bound, queryTicket)
             : queryExecutor.Query(database, bound.PrimaryTable, queryTicket, metaOut);
 
+    /// <summary>
+    /// Binds the source query of a statement that writes rows (<c>CREATE TABLE … AS SELECT</c>,
+    /// <c>INSERT … SELECT</c>, a materialized-view refresh) or that derives columns from a body
+    /// (<c>CREATE VIEW</c>), and returns its output schema and an unopened row cursor.
+    ///
+    /// <para><b>The views are expanded here.</b> Each caller hands over the parsed tree, and this method
+    /// replaces each view in it with a derived table over the view's body (<see cref="ExpandViews"/>),
+    /// as the SELECT path does. A view that reached the binder would resolve against the table map, where
+    /// a view is not, and the table-open path answers that with "is a view and cannot be written to",
+    /// although the statement only reads the view.</para>
+    /// </summary>
     internal async Task<SelectRowSource> BuildSelectSourceAsync(
         DatabaseDescriptor database,
         NodeAst sourceAst,
@@ -1465,8 +1476,9 @@ internal sealed class SelectStatementExecutor
         string statementName,
         HLCTimestamp? explicitSnapshot = null)
     {
-        // The source AST is a view/CTAS/INSERT…SELECT body that reached here already expanded, so it
-        // may call a session or clock function the outer statement never named.
+        sourceAst = ExpandViews(database, sourceAst);
+
+        // The expanded source may call a session or clock function that the outer statement never named.
         ticket = StatementScopedValues.Attach(ticket, sourceAst);
 
         sourceAst = SelectQueryCreator.BindFromlessWhere(sourceAst);
@@ -1558,13 +1570,13 @@ internal sealed class SelectStatementExecutor
     internal async Task<SelectRowSource> BuildViewSourceAsync(
         DatabaseDescriptor database, NodeAst bodyAst, ExecuteSQLTicket ticket)
     {
-        NodeAst expanded = ExpandViews(database, bodyAst);
-
-        if (expanded.nodeType == NodeType.Select && expanded.rightAst is null)
-            expanded = SelectQueryCreator.WithOneRowSource(expanded);
+        // A view adds no FROM to the outer query, so this check needs no expanded tree;
+        // BuildSelectSourceAsync expands the views.
+        if (bodyAst.nodeType == NodeType.Select && bodyAst.rightAst is null)
+            bodyAst = SelectQueryCreator.WithOneRowSource(bodyAst);
 
         using (StoredDefinitionBind.Enter())
-            return await BuildSelectSourceAsync(database, expanded, ticket, "CREATE VIEW").ConfigureAwait(false);
+            return await BuildSelectSourceAsync(database, bodyAst, ticket, "CREATE VIEW").ConfigureAwait(false);
     }
 
     /// <summary>
@@ -1579,8 +1591,7 @@ internal sealed class SelectStatementExecutor
     /// </summary>
     internal Task<SelectRowSource> BuildMaterializedViewSourceAsync(
         DatabaseDescriptor database, NodeAst bodyAst, ExecuteSQLTicket ticket, HLCTimestamp snapshot)
-        => BuildSelectSourceAsync(
-            database, ExpandViews(database, bodyAst), ticket, "REFRESH MATERIALIZED VIEW", snapshot);
+        => BuildSelectSourceAsync(database, bodyAst, ticket, "REFRESH MATERIALIZED VIEW", snapshot);
 
     /// <summary>
     /// Resolves an <c>AS OF SYSTEM TIME</c> source clause into a read-only snapshot transaction the
@@ -1685,6 +1696,7 @@ internal sealed class SelectStatementExecutor
 
         Dictionary<string, ColumnValue> emptyRow = new();
         Dictionary<string, ColumnValue> projected = new(projections.Count, StringComparer.OrdinalIgnoreCase);
+        NodeAst[] resolvedProjections = new NodeAst[projections.Count];
         string[] rowKeys = QueryProjectionResolver.GetRowKeys(projections);
 
         for (int i = 0; i < projections.Count; i++)
@@ -1712,6 +1724,7 @@ internal sealed class SelectStatementExecutor
             ConditionalResultTypes.Check(resolved, lookup: null, recorder: null);
             ConstantDivisionCheck.Check(valueExpr);
 
+            resolvedProjections[i] = resolved;
             projected[rowKeys[i]] = SQLExecutorBaseCreator.EvalExpr(resolved, emptyRow, ticket.Parameters);
         }
 
@@ -1721,7 +1734,7 @@ internal sealed class SelectStatementExecutor
         Functions.SequenceStatementBinder.RecordDrawnValues(ticket.Parameters, ticket.TxnState);
 
         if (schemaOut is not null)
-            schemaOut.Schema = DerivedTableSchemaBuilder.BuildFromless(projections, projected);
+            schemaOut.Schema = DerivedTableSchemaBuilder.BuildFromless(projections, projected, resolvedProjections);
 
         // A single constant row: apply OFFSET (any offset >= 1 skips it) then LIMIT (0 drops it).
         if (offset >= 1 || limit == 0)

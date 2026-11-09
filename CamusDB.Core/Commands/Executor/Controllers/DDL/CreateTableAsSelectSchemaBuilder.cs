@@ -120,7 +120,7 @@ internal static class CreateTableAsSelectSchemaBuilder
 
             // A NULL that stands for a scalar subquery keeps the declared type of the subquery column,
             // so it is not the bare NULL literal this refuses.
-            if (target.nodeType == NodeType.Null && SubqueryResultTypes.TypeOf(target) is null)
+            if (target.nodeType == NodeType.Null && SubqueryResultTypes.DeclaredTypeOf(target) is null)
                 throw new CamusDBException(
                     CamusDBErrorCodes.InvalidInput,
                     $"Cannot determine a column type for output column {i + 1} of {statementName} " +

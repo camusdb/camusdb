@@ -303,7 +303,7 @@ internal sealed class SubqueryRewriter
                     database, expr.leftAst, ticket.TxnState, ticket.Parameters, outputType).ConfigureAwait(false);
 
                 return value.Type == ColumnType.Null
-                    ? SubqueryResultTypes.NullOf(outputType.Type)
+                    ? SubqueryResultTypes.NullOf(outputType.Type, outputType.DeclaredType)
                     : ColumnValueAstBuilder.FromColumnValue(value);
             }
 

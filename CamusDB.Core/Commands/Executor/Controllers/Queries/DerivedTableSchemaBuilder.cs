@@ -679,13 +679,19 @@ internal static class DerivedTableSchemaBuilder
     }
 
     /// <summary>
-    /// Builds the output schema for a FROM-less SELECT from its projection AST nodes.
-    /// Each projection's inferred type is derived using the same rules as <see cref="InferType"/>
-    /// with an empty bound query (no table sources).
+    /// Builds the output schema for a FROM-less SELECT from its projection AST nodes and its one
+    /// evaluated row. A column has the type of its value.
+    ///
+    /// <para>A NULL value has no type of its own. Then the column takes the static type of the evaluated
+    /// expression in <paramref name="resolvedProjections"/>, where each uncorrelated subquery is already
+    /// folded: a scalar subquery with no row is a NULL that keeps the type of the subquery column, so
+    /// <c>SELECT (SELECT v FROM em WHERE id = 1)</c> declares the type of <c>v</c>, as in PostgreSQL. A NULL
+    /// literal has no static type and keeps the String fallback.</para>
     /// </summary>
     public static IReadOnlyList<DerivedColumnSchema> BuildFromless(
         IReadOnlyList<NodeAst> projections,
-        IReadOnlyDictionary<string, ColumnValue> evaluatedRow)
+        IReadOnlyDictionary<string, ColumnValue> evaluatedRow,
+        IReadOnlyList<NodeAst>? resolvedProjections = null)
     {
         List<DerivedColumnSchema> columns = new(projections.Count);
         string[] rowKeys = QueryProjectionResolver.GetRowKeys(projections);
@@ -695,21 +701,51 @@ internal static class DerivedTableSchemaBuilder
             NodeAst projection = projections[i];
             string name = QueryProjectionResolver.GetOutputNameFromProjectionExpression(projection, i);
 
-            // Infer from the evaluated value where possible; fall back to String for unknowns.
-            ColumnType type = evaluatedRow.TryGetValue(rowKeys[i], out ColumnValue? val)
-                ? (val.Type == ColumnType.Null ? ColumnType.String : val.Type)
-                : ColumnType.String;
+            evaluatedRow.TryGetValue(rowKeys[i], out ColumnValue? val);
 
-            // The one row is already evaluated, so an array's element type is known from its value.
+            ColumnType type;
+            ColumnType? elementType = null;
+
+            if (val is not null && val.Type != ColumnType.Null)
+            {
+                type = val.Type;
+
+                // The one row is already evaluated, so an array's element type is known from its value.
+                if (type == ColumnType.Array)
+                    elementType = val.ArrayElementType;
+            }
+            else if (resolvedProjections?[i] is { } resolved
+                && DeclaredFromlessType(resolved) is { Type: not ColumnType.Null } declared)
+            {
+                type = declared.Type;
+
+                if (type == ColumnType.Array && declared.ElementType != ColumnType.Null)
+                    elementType = declared.ElementType;
+            }
+            else
+            {
+                type = ColumnType.String;
+            }
+
             columns.Add(new DerivedColumnSchema(name, type)
             {
                 RowKey = rowKeys[i],
-                ElementType = type == ColumnType.Array ? val!.ArrayElementType : null,
+                ElementType = elementType,
             });
         }
 
         return columns;
     }
+
+    /// <summary>
+    /// The static type of an evaluated FROM-less projection. A NULL that replaces a scalar subquery gives
+    /// the declared type of the subquery column, which the static rules can lack (an aggregate); any other
+    /// expression gives its type under the static rules.
+    /// </summary>
+    private static ExpressionType? DeclaredFromlessType(NodeAst resolved) =>
+        QueryExpressionClassifier.UnwrapAlias(resolved) is { nodeType: NodeType.Null } target
+            ? SubqueryResultTypes.DeclaredTypeOf(target)
+            : ConditionalResultTypes.TypeOf(resolved, lookup: null);
 
     /// <summary>
     /// The declared type of the column of a scalar subquery, recorded by <see cref="SubqueryResultTypes"/>,
@@ -723,7 +759,7 @@ internal static class DerivedTableSchemaBuilder
     /// </list>
     /// </summary>
     private static ExpressionType? RecordedSubqueryType(NodeAst target) =>
-        target.nodeType is NodeType.Null or NodeType.ExprScalarSubquery ? SubqueryResultTypes.TypeOf(target) : null;
+        target.nodeType is NodeType.Null or NodeType.ExprScalarSubquery ? SubqueryResultTypes.DeclaredTypeOf(target) : null;
 
     private static ColumnType InferType(
         NodeAst expression,
@@ -1220,7 +1256,8 @@ internal static class DerivedTableSchemaBuilder
             NodeType.Float      => ColumnType.Float64,
             NodeType.String     => ColumnType.String,
             NodeType.Bool       => ColumnType.Bool,
-            NodeType.Null       => SubqueryResultTypes.TypeOf(arg)?.Type ?? ColumnType.Null,            NodeType.Identifier => arg.yytext is not null
+            NodeType.Null       => SubqueryResultTypes.DeclaredTypeOf(arg)?.Type ?? ColumnType.Null,
+            NodeType.Identifier => arg.yytext is not null
                 ? ResolveColumnType(innerBound, innerResolver.ResolveRowLookupKey(arg.yytext), arg.yytext)
                 : ColumnType.String,
             // All other nodes (bare aggregates, compounds, scalar funcs, casts) go through

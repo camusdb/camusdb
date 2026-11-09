@@ -200,8 +200,22 @@ internal sealed class SubqueryQueryExecutor
                 CamusDBErrorCodes.InvalidInput,
                 "Subquery must return exactly one column");
 
+        // A type that the static rules do not show (an aggregate such as MAX(v)) comes from the schema
+        // builder, which types the column as CREATE TABLE AS does: the column of (SELECT MAX(v) FROM t) is
+        // the type of v. A stored column needs it when no row gives a value, so that the NULL that replaces
+        // the subquery keeps the column type, as in PostgreSQL. The builder falls back to String for a node
+        // it cannot type (a parameter, for example), so that type is only the declared type, and the
+        // statement checks do not compare it. The result must not depend on the rows.
         if (outputType is not null)
+        {
             outputType.Type = SubqueryResultTypes.OutputTypeOf(bound.Bound);
+            outputType.DeclaredType = outputType.Type ?? DeclaredColumnType(bound.Bound);
+
+            // A stored definition reads no row, so no value shows the type, and its checks compare the
+            // declared type, as they did before.
+            if (StoredDefinitionBind.IsActive)
+                outputType.Type ??= outputType.DeclaredType;
+        }
 
         QueryTicket queryTicket = QueryTicketAdapter.ToQueryTicket(
             bound.Bound, executeTicket, bound.ExistsRegistry, bound.SemiJoinSpecsOrNull);
@@ -211,16 +225,9 @@ internal sealed class SubqueryQueryExecutor
         SelectStatementExecutor.PinSchemaVersions(database, bound.Bound.Sources, txnState);
 
         // A stored definition binds its subqueries and reads no row of them: its result must not
-        // depend on the data. See StoredDefinitionBind. No value shows the type of the column then, so
-        // a type the static rules do not show comes from the schema builder, which types an aggregate
-        // as CREATE TABLE AS does: the column of (SELECT MAX(v) FROM t) is the type of v.
+        // depend on the data. See StoredDefinitionBind.
         if (StoredDefinitionBind.IsActive)
-        {
-            if (outputType is not null && outputType.Type is null)
-                outputType.Type = DeclaredColumnType(bound.Bound);
-
             yield break;
-        }
 
         IAsyncEnumerable<QueryResultRow> cursor = bound.Bound.IsMultiSource
             ? queryJoinExecutor.ExecuteJoinQuery(database, bound.Bound, queryTicket)
@@ -232,7 +239,8 @@ internal sealed class SubqueryQueryExecutor
 
     /// <summary>
     /// The type of the one output column of <paramref name="bound"/> as the schema builder derives it,
-    /// or null when the builder gives NULL. Used only while a stored definition binds.
+    /// or null when the builder gives NULL. Used when the static rules show no type for the column. See
+    /// <see cref="SubqueryOutputType.DeclaredType"/>.
     /// </summary>
     private static ExpressionType? DeclaredColumnType(BoundSelectQuery bound)
     {
