@@ -653,11 +653,13 @@ public sealed class TestViews : SharedNodeBaseTest
     }
 
     /// <summary>
-    /// The counterpart to the test above: a real join does key its rows <c>alias.column</c>, so the
-    /// schema must keep qualifying there. Both shapes reach this code through <c>IsMultiSource</c>.
+    /// The counterpart to the test above: a real join keys its rows <c>alias.column</c>, so the row key
+    /// of each column must keep the qualifier while its name is bare, as in PostgreSQL. The columns
+    /// come in the order that the FROM clause writes the sources. Both shapes reach this code through
+    /// <c>IsMultiSource</c>.
     /// </summary>
     [Test]
-    public async Task StarOverAJoinedViewKeepsQualifiedColumnNames()
+    public async Task StarOverAJoinedViewGivesBareNamesThatResolveAgainstTheRows()
     {
         (string dbname, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
         await SeedOrders(database, executor, dbname);
@@ -676,14 +678,17 @@ public sealed class TestViews : SharedNodeBaseTest
             schema);
 
         Assert.AreEqual(3, rows.Count);
-        CollectionAssert.AreEquivalent(
-            new[] { "c.name", "c.region", "v.id", "v.customer" },
+        CollectionAssert.AreEqual(
+            new[] { "id", "customer", "name", "region" },
             schema.Schema.Select(c => c.Name).ToList());
+        CollectionAssert.AreEqual(
+            new[] { "v.id", "v.customer", "c.name", "c.region" },
+            schema.Schema.Select(c => c.RowKey).ToList());
 
         foreach (QueryResultRow row in rows)
         {
             foreach (DerivedColumnSchema column in schema.Schema)
-                Assert.IsTrue(row.Row.ContainsKey(column.Name), $"output column '{column.Name}' is missing from the row");
+                Assert.IsTrue(row.Row.ContainsKey(column.RowKey), $"output column '{column.RowKey}' is missing from the row");
         }
     }
 

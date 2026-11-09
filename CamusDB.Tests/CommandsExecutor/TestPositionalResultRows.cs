@@ -189,7 +189,7 @@ public sealed class TestPositionalResultRows : SharedNodeBaseTest
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // SELECT * over a JOIN — schema names must match the qualified row keys
+    // SELECT * over a JOIN — bare names, cells read by the qualified row keys
     // ─────────────────────────────────────────────────────────────────────────
 
     [Test]
@@ -214,14 +214,17 @@ public sealed class TestPositionalResultRows : SharedNodeBaseTest
 
         Assert.AreEqual(1, rows.Count);
 
-        // Join columns are qualified so a.id and b.id are distinct positions (not a collapsed "id").
+        // The columns have bare names, as in PostgreSQL, so a.id and b.id are two positions with one
+        // name, not one collapsed "id".
         Assert.AreEqual(3, schema.Count);
-        Assert.AreEqual("a.id", schema[0].Name);
-        Assert.AreEqual("b.id", schema[1].Name);
-        Assert.AreEqual("b.aid", schema[2].Name);
+        Assert.AreEqual("id", schema[0].Name);
+        Assert.AreEqual("id", schema[1].Name);
+        Assert.AreEqual("aid", schema[2].Name);
+        Assert.AreEqual("a.id", schema[0].RowKey);
+        Assert.AreEqual("b.id", schema[1].RowKey);
 
-        // Every schema name must resolve in the qualified-keyed join row — the regression this guards
-        // against encoded all-null values because the schema used bare names.
+        // The encoder reads each cell by its row key, not by its name; an encoder that read by name
+        // would give both id columns the same value, or null.
         object?[] encoded = CompactRowEncoder.EncodeRow(rows[0].Row, schema);
         CollectionAssert.AreEqual(new object?[] { 1L, 10L, 1L }, encoded);
     }

@@ -68,8 +68,10 @@ internal static class CorrelatedRowMerger
         {
             List<string> columnNames = new(outerSource.Columns.Count);
 
+            // A derived row keeps each cell under its row key, which differs from the column name for a
+            // * over a join; the resolver reads a derived column through that key too.
             foreach (DerivedColumnSchema column in outerSource.Columns)
-                columnNames.Add(column.Name);
+                columnNames.Add(column.RowKey);
 
             MergeOuterColumns(merged, outerRow, outerSource.Alias, columnNames, useQualifiedOuterKeys);
         }

@@ -374,7 +374,7 @@ public sealed class TestCreateTableAsSelect : SharedNodeBaseTest
                 "CREATE TABLE bad AS SELECT * FROM src s JOIN labels l ON s.year = l.year"));
 
         Assert.AreEqual(CamusDBErrorCodes.InvalidInput, ex!.Code);
-        StringAssert.Contains("join", ex.Message);
+        StringAssert.Contains("more than one output column named 'id'", ex.Message);
 
         await database.Transactions.RollbackAsync(txn);
     }

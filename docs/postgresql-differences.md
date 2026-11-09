@@ -224,6 +224,9 @@ CamusDB refuses these forms with a clear error, so no answer is wrong. `d` has t
 | `SELECT 1 FROM em HAVING COUNT(*) = 0` | `CADB0400` | `1` |
 | `SELECT id FROM d LIMIT NULL` | `CADB0406` | Both rows |
 | `SELECT d.* FROM d` | `CADB0406` | Both rows |
+| `SELECT * FROM d a JOIN d b USING (id)` | `CADB0406` | Both rows, with one `id` column |
+| `SELECT * FROM d a NATURAL JOIN d b` | `CADB0406` | Both rows, with one column for each common name |
+| `SELECT * FROM d a FULL JOIN d b ON a.id = b.id` | `CADB0533`; use `LEFT JOIN` or `RIGHT JOIN` | Both rows |
 | `WITH c AS (SELECT 5 AS x) SELECT x FROM c` | `CADB0406` | `5` |
 | `SELECT NULL IS UNKNOWN`, and `IS NOT UNKNOWN` | `CADB0406` | `true` |
 | `SELECT 1 IS DISTINCT FROM 2`, and `IS NOT DISTINCT FROM` | `CADB0406` | `true` |

@@ -124,7 +124,7 @@ explanation:
 | --- | --- | --- |
 | `SELECT year + 1 FROM t` | an unaliased expression has no name (it would be called `0`) | `SELECT year + 1 AS next_year` |
 | `SELECT NULL AS x` | no type to declare | `SELECT CAST(NULL AS INT64) AS x` |
-| `SELECT * FROM a JOIN b …` | `*` over a join yields qualified names like `a.id` | list the columns with aliases |
+| `SELECT * FROM a JOIN b …`, where `a` and `b` both have `id` | `*` over a join gives two columns named `id` | list the columns with aliases |
 
 ### Schema and data are not committed together
 

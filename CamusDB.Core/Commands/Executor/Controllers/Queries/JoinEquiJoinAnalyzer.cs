@@ -97,7 +97,14 @@ internal static class JoinEquiJoinAnalyzer
         if (!KeyTypesAgree(leftLookup, RightColumnType(rightSource, rightColumn), bound))
             return false;
 
-        pair = new JoinEquiKeyPair(leftLookup, rightColumn);
+        // The build side reads the key from its own rows. A derived table keeps a cell under its row
+        // key, which differs from the column name for a * over a join.
+        string rightKey = rightColumn;
+
+        if (rightSource.Derived is { } derivedRight && !derivedRight.TryGetRowKey(rightColumn, out rightKey))
+            return false;
+
+        pair = new JoinEquiKeyPair(leftLookup, rightKey);
         return true;
     }
 
@@ -125,8 +132,8 @@ internal static class JoinEquiJoinAnalyzer
             foreach (BoundDerivedTableSource source in bound.DerivedSources)
             {
                 if (source.Alias != alias) continue;
-                if (!source.HasColumn(columnName)) return false;
-                leftLookupColumn = QueryRowNameResolver.FormatQualifiedKey(alias, columnName);
+                if (!source.TryGetRowKey(columnName, out string rowKey)) return false;
+                leftLookupColumn = QueryRowNameResolver.FormatQualifiedKey(alias, rowKey);
                 return true;
             }
 
@@ -280,10 +287,10 @@ internal static class JoinEquiJoinAnalyzer
                 if (!string.Equals(source.Alias, alias, StringComparison.OrdinalIgnoreCase))
                     continue;
 
-                if (!source.HasColumn(columnName))
+                if (!source.TryGetRowKey(columnName, out string rowKey))
                     return false;
 
-                leftLookupColumn = QueryRowNameResolver.FormatQualifiedKey(alias, columnName);
+                leftLookupColumn = QueryRowNameResolver.FormatQualifiedKey(alias, rowKey);
                 return true;
             }
 

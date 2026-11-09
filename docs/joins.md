@@ -65,16 +65,33 @@ cell is NULL.
 ## RIGHT JOIN
 
 A right join is executed as a left join with the operands swapped: `A RIGHT JOIN B ON p` and
-`B LEFT JOIN A ON p` return the same multiset of rows. Two consequences follow from the rewrite:
+`B LEFT JOIN A ON p` return the same multiset of rows. The swap does not change the columns:
+`SELECT * FROM a RIGHT JOIN b ON ...` lists the columns of `a` first, as the `FROM` clause writes
+them and as PostgreSQL does.
 
-- **`SELECT *` lists the preserved table's columns first.** The row layout follows the executed
-  order, so `SELECT * FROM a RIGHT JOIN b ON ...` lists `b`'s columns before `a`'s. An explicit
-  column list is unaffected.
+One limit follows from the rewrite:
+
 - **A `RIGHT JOIN` whose left operand is itself a join is not supported.** The right operand of
   a join must be one table or one derived table, so there is nowhere to put the joined subtree
   after the swap. `A JOIN B ON p RIGHT JOIN C ON q` is refused with `CADB0533`. Rewrite it with
   the preserved table on the left: `C LEFT JOIN (...)` through a derived table, or reorder the
   chain.
+
+## Output column names
+
+A join names its output columns as PostgreSQL does:
+
+- `SELECT *` gives each column its bare name, in the order that the `FROM` clause writes the
+  tables: `SELECT * FROM a JOIN b ON a.id = b.id` has the columns `id, v, id, w`.
+- An explicit list gives each column reference its bare name: `SELECT a.v, b.v` has the columns
+  `v, v`.
+- Two columns can therefore have one name. A client reads the columns by position; the HTTP and
+  gRPC results carry every column, in order, with its type.
+- An outer query that reads a derived table with two columns of one name refuses that name as
+  ambiguous (`CADB0400`), also when it is qualified: `SELECT d.v FROM (SELECT a.v, b.v FROM a JOIN b
+  ON ...) d`. Give the columns different names with `AS`.
+- `CREATE TABLE ... AS`, `CREATE VIEW` and `CREATE MATERIALIZED VIEW` refuse two columns of one
+  name. A `*` over a join whose tables share no column name is accepted.
 
 ## CROSS JOIN
 
@@ -121,6 +138,10 @@ remote probe span returns matched rows only and cannot pad.
 - A `WHERE` conjunct on the null-extended side runs after the join, even when it is
   null-rejecting and the join could have been simplified to an inner join.
 - A `RIGHT JOIN` after another join is not supported (see above).
+- An `ON` equality between columns of two types (`INT64 = FLOAT64`, `INT64 = NUMERIC`) is not a key
+  for a hash join, a merge join or an index probe, so that join always runs as a nested loop. The
+  rows are correct: `1 = 1.0` matches and `2 = 2.5` does not. See
+  [`query-planner.md`](./query-planner.md) for the reason.
 - A join leaf whose pushed filter no index serves is a table scan with a residual filter. Under
   Serializable read-write that leaf holds a shared lock over the whole table until the transaction
   ends, so every writer into that table is held back meanwhile; an index leaf (a literal or a

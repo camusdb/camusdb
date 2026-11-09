@@ -266,7 +266,22 @@ public sealed class TestWindowFunctionsIntegration : WindowFunctionsTestBase
 
         Assert.AreEqual(plainSchema.Select(c => c.Name).Append("rn").ToArray(), windowSchema.Select(c => c.Name).ToArray());
         Assert.AreEqual(plainRows.Count, windowRows.Count);
-        CollectionAssert.AreEquivalent(plainRows[0].Row.Keys.Append("rn").ToArray(), windowRows[0].Row.Keys.ToArray());
+
+        // The two queries key their cells differently (the window runs over a derived table), so each
+        // value is read through the row key of its column and compared by position.
+        for (int r = 0; r < plainRows.Count; r++)
+        {
+            for (int c = 0; c < plainSchema.Count; c++)
+            {
+                ColumnValue plain = plainRows[r].Row[plainSchema[c].RowKey];
+                ColumnValue windowed = windowRows[r].Row[windowSchema[c].RowKey];
+                string at = $"row {r}, column {c} ({plainSchema[c].Name})";
+
+                Assert.AreEqual(plain.Type, windowed.Type, at);
+                Assert.AreEqual(0, plain.CompareTo(windowed), at);
+            }
+        }
+
         Assert.AreEqual(new long?[] { 1, 2, 3, 4, 5, 6 }, windowRows.Select(r => L(r, "rn")).ToArray());
     }
 

@@ -601,10 +601,12 @@ internal static class DerivedTableSchemaBuilder
 
         foreach (BoundDerivedTableSource source in innerBound.DerivedSources)
         {
+            if (source.FindColumnByLookupKey(lookupKey) is { } keyed)
+                return keyed.ElementType;
+
             foreach (DerivedColumnSchema column in source.Columns)
             {
-                if (string.Equals(column.Name, lookupKey, StringComparison.OrdinalIgnoreCase)
-                    || (isQualified && string.Equals(column.Name, bareName, StringComparison.OrdinalIgnoreCase)))
+                if (isQualified && string.Equals(column.Name, bareName, StringComparison.OrdinalIgnoreCase))
                     return column.ElementType;
             }
         }
@@ -616,47 +618,59 @@ internal static class DerivedTableSchemaBuilder
     /// Expands a <c>SELECT *</c> into one output column per readable source column, matching the
     /// exact keys the row cursor produces so positional encoding can look each value up by row key.
     /// <para>
-    /// A single-source query streams rows keyed by bare column name, so columns stay bare. A
-    /// multi-source query (any join, or extra table alongside a derived/subquery source) is emitted by
-    /// the join executor, which qualifies every column as <c>{alias}.{column}</c> via
-    /// <see cref="QueryRowNameResolver.FormatQualifiedKey"/>; the schema must qualify identically or
-    /// a by-name lookup against the qualified row keys would silently miss and encode null.
-    /// </para>
+    /// <b>Names.</b> Each column has its bare name, as in PostgreSQL, also over a join:
+    /// <c>SELECT * FROM a JOIN b ON …</c> gives <c>id, v, id, w</c>. Two sources can therefore give
+    /// two columns one name. A client reads the columns by position, and each column keeps a distinct
+    /// <see cref="DerivedColumnSchema.RowKey"/>, so no cell is lost.</para>
+    /// <para>
+    /// <b>Row keys.</b> A single-source query streams rows keyed by bare column name, so the key is the
+    /// name. A multi-source query (any join, or extra table alongside a derived/subquery source) is
+    /// emitted by the join executor, which keys every cell as <c>{alias}.{column}</c> via
+    /// <see cref="QueryRowNameResolver.FormatQualifiedKey"/>; the row key must be that key or a lookup
+    /// would silently miss and encode null. Such a column also records its
+    /// <see cref="DerivedColumnSchema.SourceAlias"/>, and a derived table over it maps a reference to the
+    /// row key through <see cref="BoundDerivedTableSource.RowKeyOf"/>.</para>
     /// <para>
     /// The discriminator is <see cref="QueryRowNameResolver.UsesQualifiedRowKeys"/> — the convention the
     /// rows are actually keyed by — and deliberately not <see cref="BoundSelectQuery.IsMultiSource"/>,
     /// which routes execution to the join path but is also true for the single-derived-source shape a
-    /// view expands into. That shape keys its rows bare, so qualifying its schema named columns no row
+    /// view expands into. That shape keys its rows bare, so qualifying its row keys named cells no row
     /// had and sent every cell of <c>SELECT * FROM a_view</c> as null over the wire while the in-process
-    /// cursor was correct. Derived sources are included either way so their columns are not dropped
-    /// from a join's output schema.
+    /// cursor was correct.
     /// </para>
-    /// Column order follows source declaration order (table sources first, then derived sources),
-    /// which matches the left-to-right merge order of a left-deep join; value correctness does not
-    /// depend on this order because encoding resolves each column by name.
+    /// <para>
+    /// <b>Order.</b> The columns follow the sources in the order the FROM clause writes them, as in
+    /// PostgreSQL (see <see cref="SourcesInWrittenOrder"/>). The bound source lists cannot give that order:
+    /// a <c>RIGHT JOIN</c> is bound with its operands swapped, and tables and derived tables are bound
+    /// into two separate lists.</para>
     /// </summary>
     private static void ExpandAllFields(
         BoundSelectQuery innerBound, QueryRowNameResolver resolver, List<DerivedColumnSchema> columns)
     {
         bool qualify = resolver.UsesQualifiedRowKeys();
 
-        foreach (BoundTableSource source in innerBound.Sources)
+        foreach (object source in SourcesInWrittenOrder(innerBound))
         {
-            foreach (TableColumnSchema col in source.Table.Schema.Columns ?? [])
+            if (source is BoundTableSource table)
             {
-                if (!SchemaElementStateRules.IsReadable(col))
-                    continue;
+                foreach (TableColumnSchema col in table.Table.Schema.Columns ?? [])
+                {
+                    if (!SchemaElementStateRules.IsReadable(col))
+                        continue;
 
-                string name = qualify
-                    ? QueryRowNameResolver.FormatQualifiedKey(source.Alias, col.Name)
-                    : col.Name;
+                    columns.Add(new DerivedColumnSchema(col.Name, col.Type)
+                    {
+                        RowKey = qualify ? QueryRowNameResolver.FormatQualifiedKey(table.Alias, col.Name) : col.Name,
+                        SourceAlias = qualify ? table.Alias : null,
+                        ElementType = col.ArrayElementType,
+                    });
+                }
 
-                columns.Add(new DerivedColumnSchema(name, col.Type) { ElementType = col.ArrayElementType });
+                continue;
             }
-        }
 
-        foreach (BoundDerivedTableSource derived in innerBound.DerivedSources)
-        {
+            BoundDerivedTableSource derived = (BoundDerivedTableSource)source;
+
             // A derived table may itself declare two columns with one name; its rows tell them apart
             // by row key, so the expansion carries the key through rather than the shared name.
             foreach (DerivedColumnSchema col in derived.Columns)
@@ -665,17 +679,162 @@ internal static class DerivedTableSchemaBuilder
                 if (col.Hidden)
                     continue;
 
-                string name = qualify
-                    ? QueryRowNameResolver.FormatQualifiedKey(derived.Alias, col.Name)
-                    : col.Name;
-
-                string rowKey = qualify
-                    ? QueryRowNameResolver.FormatQualifiedKey(derived.Alias, col.RowKey)
-                    : col.RowKey;
-
-                columns.Add(new DerivedColumnSchema(name, col.Type) { RowKey = rowKey, ElementType = col.ElementType });
+                columns.Add(new DerivedColumnSchema(col.Name, col.Type)
+                {
+                    RowKey = qualify ? QueryRowNameResolver.FormatQualifiedKey(derived.Alias, col.RowKey) : col.RowKey,
+                    SourceAlias = qualify ? derived.Alias : null,
+                    ElementType = col.ElementType,
+                });
             }
         }
+    }
+
+    /// <summary>
+    /// Gives each column of a derived table a row key with no <c>.</c> in it, and returns in
+    /// <paramref name="innerRowKeys"/> the renames from the old keys, or null when no key changes (every
+    /// derived table except one over a <c>*</c> of a join).
+    ///
+    /// <para><b>Why.</b> A <c>*</c> over a join keys each cell of its rows as <c>{alias}.{column}</c>.
+    /// A join that reads the derived table qualifies a key only when the key has no <c>.</c> (see
+    /// <see cref="QueryRowMerger.BuildQualifiedLayout"/>), so such a cell kept the key of the inner
+    /// source: the outer query looked for <c>x.j1.id</c> and found nothing, and a table of the outer
+    /// join with the alias <c>j1</c> could overwrite the cell. With a plain key the derived table acts
+    /// like any other.</para>
+    ///
+    /// <para>A column keeps its name as its key when no other column has that key; otherwise it gets
+    /// <c>{name}$dup{ordinal}</c>, as <see cref="QueryProjectionResolver.GetRowKeys"/> does for a select
+    /// list. A key with no <c>.</c> never changes, so a derived table of any other shape is unchanged.</para>
+    /// </summary>
+    internal static IReadOnlyList<DerivedColumnSchema> WithPlainRowKeys(
+        IReadOnlyList<DerivedColumnSchema> columns,
+        out (string InnerKey, string RowKey)[]? innerRowKeys)
+    {
+        innerRowKeys = null;
+        int qualified = 0;
+
+        foreach (DerivedColumnSchema column in columns)
+        {
+            if (column.RowKey.Contains('.'))
+                qualified++;
+        }
+
+        if (qualified == 0)
+            return columns;
+
+        HashSet<string> taken = new(columns.Count, StringComparer.OrdinalIgnoreCase);
+
+        foreach (DerivedColumnSchema column in columns)
+        {
+            if (!column.RowKey.Contains('.'))
+                taken.Add(column.RowKey);
+        }
+
+        List<DerivedColumnSchema> renamed = new(columns.Count);
+        (string InnerKey, string RowKey)[] renames = new (string, string)[qualified];
+        int next = 0;
+
+        for (int i = 0; i < columns.Count; i++)
+        {
+            DerivedColumnSchema column = columns[i];
+
+            if (!column.RowKey.Contains('.'))
+            {
+                renamed.Add(column);
+                continue;
+            }
+
+            string rowKey = column.Name;
+
+            if (!taken.Add(rowKey))
+            {
+                rowKey = $"{column.Name}$dup{i}";
+
+                while (!taken.Add(rowKey))
+                    rowKey += "_";
+            }
+
+            renames[next++] = (column.RowKey, rowKey);
+            renamed.Add(column with { RowKey = rowKey, SourceAlias = null });
+        }
+
+        innerRowKeys = renames;
+        return renamed;
+    }
+
+    /// <summary>
+    /// The bound sources of <paramref name="innerBound"/> in the order that its FROM clause writes them.
+    /// The walk follows <see cref="SelectQuery.Source"/>, and visits the operands of a join that was
+    /// written as a <c>RIGHT JOIN</c> (<see cref="JoinSource.OperandsSwapped"/>) right first. Each leaf is
+    /// matched to its bound source by reference. A bound source that the walk does not reach keeps its
+    /// place after the others, tables before derived tables, so no column is ever dropped.
+    ///
+    /// <para>The walk uses a stack, not recursion, because the depth of a join tree is the number of
+    /// its sources.</para>
+    /// </summary>
+    private static List<object> SourcesInWrittenOrder(BoundSelectQuery innerBound)
+    {
+        int count = innerBound.Sources.Count + innerBound.DerivedSources.Count;
+        List<object> ordered = new(count);
+        HashSet<object> placed = new(ReferenceEqualityComparer.Instance);
+
+        Stack<QuerySource> pending = new();
+        pending.Push(innerBound.Query.Source);
+
+        while (pending.Count > 0)
+        {
+            QuerySource current = pending.Pop();
+
+            if (current is JoinSource join)
+            {
+                // Pushed in reverse, so the operand written first is visited first.
+                pending.Push(join.OperandsSwapped ? join.Left : join.Right);
+                pending.Push(join.OperandsSwapped ? join.Right : join.Left);
+                continue;
+            }
+
+            object? bound = null;
+
+            foreach (BoundTableSource table in innerBound.Sources)
+            {
+                if (ReferenceEquals(table.Source, current))
+                {
+                    bound = table;
+                    break;
+                }
+            }
+
+            if (bound is null)
+            {
+                foreach (BoundDerivedTableSource derived in innerBound.DerivedSources)
+                {
+                    if (ReferenceEquals(derived.Source, current))
+                    {
+                        bound = derived;
+                        break;
+                    }
+                }
+            }
+
+            if (bound is not null && placed.Add(bound))
+                ordered.Add(bound);
+        }
+
+        if (ordered.Count == count)
+            return ordered;
+
+        foreach (BoundTableSource table in innerBound.Sources)
+        {
+            if (placed.Add(table))
+                ordered.Add(table);
+        }
+
+        foreach (BoundDerivedTableSource derived in innerBound.DerivedSources)
+        {
+            if (placed.Add(derived))
+                ordered.Add(derived);
+        }
+
+        return ordered;
     }
 
     /// <summary>
@@ -1309,8 +1468,8 @@ internal static class DerivedTableSchemaBuilder
 
             foreach (BoundDerivedTableSource source in innerBound.DerivedSources)
             {
-                if (source.HasColumn(lookupKey))
-                    return source.GetColumnType(lookupKey);
+                if (source.FindColumnByLookupKey(lookupKey) is { } column)
+                    return column.Type;
 
                 if (isQualified && source.HasColumn(bareName))
                     return source.GetColumnType(bareName);

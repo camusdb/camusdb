@@ -329,10 +329,12 @@ internal static class ConditionalResultTypes
                 if (qualifier is not null && !string.Equals(source.Alias, qualifier, StringComparison.OrdinalIgnoreCase))
                     continue;
 
+                DerivedColumnSchema? keyed = source.FindColumnByLookupKey(lookupKey);
+
                 foreach (DerivedColumnSchema column in source.Columns)
                 {
-                    if (string.Equals(column.Name, lookupKey, StringComparison.OrdinalIgnoreCase)
-                        || string.Equals(column.Name, bareName, StringComparison.OrdinalIgnoreCase))
+                    if (ReferenceEquals(column, keyed)
+                        || (keyed is null && string.Equals(column.Name, bareName, StringComparison.OrdinalIgnoreCase)))
                         return column.Type == ColumnType.String
                             ? null
                             : new ExpressionType(column.Type, column.ElementType ?? ColumnType.Null);

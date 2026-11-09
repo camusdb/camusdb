@@ -442,6 +442,21 @@ public static class DecidedDivergences
             CamusDBErrorCodes.SqlSyntaxError, "1",
             NotSupportedYet),
 
+        new("JOIN ... USING is not supported", RowTable,
+            "SELECT * FROM d a JOIN d b USING (id) ORDER BY id",
+            CamusDBErrorCodes.SqlSyntaxError, "1",
+            NotSupportedYet),
+
+        new("NATURAL JOIN is not supported", RowTable,
+            "SELECT * FROM d a NATURAL JOIN d b ORDER BY id",
+            CamusDBErrorCodes.SqlSyntaxError, "1",
+            NotSupportedYet),
+
+        new("FULL OUTER JOIN is not supported", RowTable,
+            "SELECT * FROM d FULL JOIN d b ON d.id = b.id ORDER BY d.id",
+            CamusDBErrorCodes.FeatureNotSupported, "1",
+            NotSupportedYet),
+
         new("WITH is not supported", NoSetup,
             "WITH c AS (SELECT 5 AS x) SELECT x FROM c",
             CamusDBErrorCodes.SqlSyntaxError, "5",

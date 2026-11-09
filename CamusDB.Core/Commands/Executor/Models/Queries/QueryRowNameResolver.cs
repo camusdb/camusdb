@@ -238,14 +238,11 @@ public sealed class QueryRowNameResolver
 
         if (aliasToDerived.TryGetValue(alias, out BoundDerivedTableSource? derived))
         {
-            if (!derived.HasColumn(columnName))
-            {
-                throw new CamusDBException(
-                    CamusDBErrorCodes.UnknownColumn,
-                    $"Unknown column: {originalIdentifier}");
-            }
+            // A derived column can keep its cell under a key that is not its name (a * over a join
+            // keeps the qualified key of the source column), so the key comes from the column.
+            string rowKey = derived.RowKeyOf(columnName, originalIdentifier);
 
-            return QualifiedLookupKey(columnName, originalIdentifier);
+            return UsesQualifiedRowKeys() ? FormatQualifiedKey(alias, rowKey) : rowKey;
         }
 
         throw new CamusDBException(
@@ -280,7 +277,12 @@ public sealed class QueryRowNameResolver
                 $"Ambiguous column: {columnName}");
         }
 
-        return FormatLookupKey(aliases[0], columnName);
+        string alias = aliases[0];
+
+        if (!aliasToSource.ContainsKey(alias) && aliasToDerived.TryGetValue(alias, out BoundDerivedTableSource? derived))
+            return FormatLookupKey(alias, derived.RowKeyOf(columnName, columnName));
+
+        return FormatLookupKey(alias, columnName);
     }
 
     private string FormatLookupKey(string alias, string columnName)

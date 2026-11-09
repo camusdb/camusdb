@@ -189,7 +189,10 @@ internal sealed class SelectQueryCreator
                     joinAst.extendedOne!);
 
             case JoinAstKind.Kind.Right:
-                if (leftAst.nodeType is not (NodeType.TableReference or NodeType.DerivedTableReference or NodeType.TableFunctionReference))
+                // A bare identifier is a table leaf too: the parser never builds one here, but the stored
+                // body of a view does, because it drops an alias that repeats the table's name.
+                if (leftAst.nodeType is not (NodeType.TableReference or NodeType.DerivedTableReference or NodeType.TableFunctionReference
+                        or NodeType.Identifier or NodeType.IdentifierWithOpts))
                 {
                     throw new CamusDBException(
                         CamusDBErrorCodes.FeatureNotSupported,
@@ -201,7 +204,8 @@ internal sealed class SelectQueryCreator
                     CreateQuerySource(rightAst),
                     CreateQuerySource(leftAst),
                     JoinKind.LeftOuter,
-                    joinAst.extendedOne!);
+                    joinAst.extendedOne!,
+                    OperandsSwapped: true);
 
             case JoinAstKind.Kind.Cross:
                 return new JoinSource(

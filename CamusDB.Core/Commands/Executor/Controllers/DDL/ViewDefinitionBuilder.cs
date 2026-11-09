@@ -499,7 +499,13 @@ internal static class ViewDefinitionBuilder
         NodeAst? list = null;
         foreach (DerivedColumnSchema column in derived)
         {
-            NodeAst identifier = new(NodeType.Identifier, null, null, null, null, null, null, null, column.Name);
+            // A * over a join names its columns bare, and two sources can share a name; the source alias
+            // writes the reference that reads this column and no other.
+            string reference = column.SourceAlias is { } sourceAlias
+                ? QueryRowNameResolver.FormatQualifiedKey(sourceAlias, column.Name)
+                : column.Name;
+
+            NodeAst identifier = new(NodeType.Identifier, null, null, null, null, null, null, null, reference);
             list = list is null
                 ? identifier
                 : new NodeAst(NodeType.IdentifierList, list, identifier, null, null, null, null, null, null);

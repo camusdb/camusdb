@@ -261,13 +261,12 @@ public sealed class TestDuplicateOutputColumnNames : SharedNodeBaseTest
             database, executor, dbname,
             "SELECT u.id, *, s.id FROM sessions AS s INNER JOIN users AS u ON s.usersid = u.id WHERE s.id = 20");
 
+        // The * gives bare names, as PostgreSQL does, so four columns are named id; each one
+        // still carries the value of its own table at its own position.
         Assert.AreEqual(1, rows.Count);
-        Assert.AreEqual("id", columns[0]);
-        Assert.AreEqual("id", columns[^1]);
-        Assert.AreEqual(2L, rows[0][0]);
-        Assert.AreEqual(20L, rows[0][^1]);
-        Assert.AreEqual(20L, rows[0][System.Array.IndexOf(columns, "s.id")]);
-        Assert.AreEqual(2L, rows[0][System.Array.IndexOf(columns, "u.id")]);
+        Assert.AreEqual(
+            new[] { "id", "id", "usersid", "device", "updated", "id", "name", "updated", "id" }, columns);
+        Assert.AreEqual(new object?[] { 2L, 20L, 2L, "tablet", 2020L, 2L, "bob", 1002L, 20L }, rows[0]);
     }
 
     /// <summary>Row keys compare case-insensitively, so names that differ only in case collide too.</summary>
@@ -380,7 +379,7 @@ public sealed class TestDuplicateOutputColumnNames : SharedNodeBaseTest
             "SELECT u.name AS label, * FROM sessions AS s INNER JOIN users AS u ON s.usersid = u.id WHERE s.id = 20");
 
         Assert.AreEqual(
-            new[] { "label", "s.id", "s.usersid", "s.device", "s.updated", "u.id", "u.name", "u.updated" }, columns);
+            new[] { "label", "id", "usersid", "device", "updated", "id", "name", "updated" }, columns);
         Assert.AreEqual(new object?[] { "bob", 20L, 2L, "tablet", 2020L, 2L, "bob", 1002L }, rows[0]);
     }
 

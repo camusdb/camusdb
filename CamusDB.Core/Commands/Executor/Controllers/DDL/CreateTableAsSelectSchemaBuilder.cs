@@ -140,8 +140,10 @@ internal static class CreateTableAsSelectSchemaBuilder
     }
 
     /// <summary>
-    /// A <c>SELECT *</c> over more than one source produces <c>{alias}.{column}</c> output names,
-    /// which are not usable column names. The user has to list the columns and alias them.
+    /// An output name with a dot is not a usable column name. A <c>*</c> over a join and a qualified
+    /// column reference give bare names (two of them can share a name, which
+    /// <see cref="RejectDuplicateNames"/> refuses), so this refuses only a name that holds a dot
+    /// itself. The user has to list the columns and alias them.
     /// </summary>
     private static void RejectQualifiedNames(IReadOnlyList<DerivedColumnSchema> derived)
     {
@@ -150,8 +152,8 @@ internal static class CreateTableAsSelectSchemaBuilder
             if (column.Name.Contains('.'))
                 throw new CamusDBException(
                     CamusDBErrorCodes.InvalidInput,
-                    "CREATE TABLE ... AS SELECT * is not supported over a join because the output " +
-                    $"column '{column.Name}' is qualified; list the columns explicitly with aliases");
+                    $"CREATE TABLE ... AS SELECT output column '{column.Name}' is qualified; " +
+                    "list the columns explicitly with aliases");
         }
     }
 

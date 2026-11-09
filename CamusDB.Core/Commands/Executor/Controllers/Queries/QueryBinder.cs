@@ -487,8 +487,9 @@ internal sealed class QueryBinder
                 // pipeline folded each uncorrelated subquery into its value, or into a NULL that keeps the
                 // subquery's column type. The query as written still holds the subquery node, which has
                 // no type, so its column fell back to String and a CTAS refused the Int64 value.
-                IReadOnlyList<DerivedColumnSchema> columns =
-                    DerivedTableSchemaBuilder.Build(innerBound.Query, innerBound);
+                IReadOnlyList<DerivedColumnSchema> columns = DerivedTableSchemaBuilder.WithPlainRowKeys(
+                    DerivedTableSchemaBuilder.Build(innerBound.Query, innerBound),
+                    out (string InnerKey, string RowKey)[]? innerRowKeys);
 
                 // A windowed SELECT's derived table also holds one result column per window call,
                 // which the window operator adds to each row after the inner query ran.
@@ -502,6 +503,7 @@ internal sealed class QueryBinder
                     innerBound)
                 {
                     InnerSubqueries = innerSubqueries,
+                    InnerRowKeys = innerRowKeys,
                 });
                 return;
             }

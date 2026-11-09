@@ -26,8 +26,14 @@ namespace CamusDB.Core.CommandsExecutor.Models.Queries;
 /// Parsed <c>ON</c> predicate, evaluated after row merge and before any outer-join padding. A
 /// cross join carries the literal true here.
 /// </param>
+/// <param name="OperandsSwapped">
+/// True when the statement writes <see cref="Right"/> before <see cref="Left"/>: a <c>RIGHT JOIN</c>,
+/// which becomes a left outer join with its operands swapped. Execution ignores it. A <c>*</c> reads
+/// it, because its columns follow the order of the FROM clause, not the order of the join.
+/// </param>
 public sealed record JoinSource(
     QuerySource Left,
     QuerySource Right,
     JoinKind Kind,
-    NodeAst OnPredicate) : QuerySource;
+    NodeAst OnPredicate,
+    bool OperandsSwapped = false) : QuerySource;

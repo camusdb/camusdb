@@ -28,6 +28,14 @@ public sealed record DerivedColumnSchema(string Name, ColumnType Type)
     public string RowKey { get; init; } = Name;
 
     /// <summary>
+    /// The alias of the source that a <c>*</c> over a join took this column from, or null for any other
+    /// column. A <c>*</c> over a join names each column by its bare name, as PostgreSQL does, so two
+    /// sources can give two columns one name; the alias keeps the reference that reads this column and
+    /// no other (<c>{alias}.{Name}</c>), which a view body uses when it writes the <c>*</c> out.
+    /// </summary>
+    public string? SourceAlias { get; init; }
+
+    /// <summary>
     /// True for an internal column that a <c>*</c> over this derived table must not expand to: the
     /// window inputs (<c>~win_in{k}</c>) and window results (<c>~win{n}</c>) of a windowed SELECT's
     /// derived table. The outer query of that SELECT still reads them by name. With them left out, the

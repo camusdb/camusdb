@@ -127,6 +127,11 @@ internal sealed class DerivedTableExecutor
                 ? queryJoinExecutor.ExecuteJoinQuery(database, innerBound, innerTicket)
                 : queryExecutor.Query(database, innerBound.PrimaryTable, innerTicket);
 
+            // A * over a join keys its cells as {alias}.{column}; the derived table reads them under
+            // the plain keys its columns declare, before the window operator and any filter run.
+            if (source.InnerRowKeys is { } renames)
+                cursor = RenameInnerRowKeys(cursor, renames);
+
             // A windowed SELECT's derived table: the inner query computed every window input, and the
             // window operator adds the results. It runs before the filter below, so a filter on a
             // window result (WHERE rn <= 3 over this derived table) sees whole partitions.
@@ -170,6 +175,53 @@ internal sealed class DerivedTableExecutor
             }
 
             yield return row;
+        }
+    }
+
+    /// <summary>
+    /// Renames the cell keys of each inner row by <paramref name="renames"/> (see
+    /// <see cref="BoundDerivedTableSource.InnerRowKeys"/>). A slot-backed row keeps its values and gets
+    /// a renamed layout, built once for each distinct inner layout, so no cell is copied; any other row
+    /// is copied into a dictionary under the new keys.
+    /// </summary>
+    private static async IAsyncEnumerable<QueryResultRow> RenameInnerRowKeys(
+        IAsyncEnumerable<QueryResultRow> cursor,
+        (string InnerKey, string RowKey)[] renames)
+    {
+        Dictionary<string, string> byInnerKey = new(renames.Length, StringComparer.OrdinalIgnoreCase);
+
+        foreach ((string innerKey, string rowKey) in renames)
+            byInnerKey[innerKey] = rowKey;
+
+        RowLayout? innerLayout = null;
+        RowLayout? renamedLayout = null;
+
+        await foreach (QueryResultRow row in cursor.ConfigureAwait(false))
+        {
+            if (row.Row is QueryRow queryRow)
+            {
+                if (!ReferenceEquals(queryRow.Layout, innerLayout))
+                {
+                    innerLayout = queryRow.Layout;
+                    string[] names = innerLayout.OutputNames;
+                    string[] renamedNames = new string[names.Length];
+
+                    for (int i = 0; i < names.Length; i++)
+                        renamedNames[i] = byInnerKey.TryGetValue(names[i], out string? rowKey) ? rowKey : names[i];
+
+                    renamedLayout = RowLayout.ForColumns(renamedNames);
+                }
+
+                yield return new QueryResultRow(row.RowId, queryRow.WithLayout(renamedLayout!));
+                continue;
+            }
+
+            Dictionary<string, ColumnValue> copy = new(row.Row.Count, StringComparer.OrdinalIgnoreCase);
+
+            foreach (KeyValuePair<string, ColumnValue> cell in row.Row)
+                copy[byInnerKey.TryGetValue(cell.Key, out string? rowKey) ? rowKey : cell.Key] = cell.Value;
+
+            yield return new QueryResultRow(row.RowId, copy);
         }
     }
 }
