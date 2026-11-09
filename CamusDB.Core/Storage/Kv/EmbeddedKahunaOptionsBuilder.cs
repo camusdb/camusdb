@@ -331,6 +331,12 @@ public static class EmbeddedKahunaOptionsBuilder
                 ? Kommander.LostAcknowledgedEntriesPolicy.AcceptAndLog
                 : Kommander.LostAcknowledgedEntriesPolicy.Quarantine;
 
+        if (kahuna.RaftSnapshotMaxPendingBytes is long snapshotMaxPendingBytes)
+            baseline.RaftSnapshotMaxPendingBytes = snapshotMaxPendingBytes;
+
+        if (kahuna.RaftSnapshotTransferStepTimeoutMs is int snapshotStepTimeoutMs)
+            baseline.RaftSnapshotTransferStepTimeout = TimeSpan.FromMilliseconds(snapshotStepTimeoutMs);
+
         RegisterStorageExtensions(baseline, kahuna);
 
         if (kahuna.WalSyncWrites is bool walSync)

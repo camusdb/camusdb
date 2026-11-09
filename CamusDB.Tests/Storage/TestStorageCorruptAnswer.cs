@@ -304,6 +304,59 @@ public sealed class TestStorageCorruptAnswer
         Assert.That(options.RaftLostAcknowledgedEntriesPolicy, Is.Null);
     }
 
+    [Test]
+    public void TheSnapshotReceiveCap_IsReadAndReachesTheNode()
+    {
+        ConfigDefinition config = new ConfigReader().Read("kahuna:\n  raft_snapshot_max_pending_bytes: 8589934592");
+        Assert.That(config.Kahuna!.RaftSnapshotMaxPendingBytes, Is.EqualTo(8589934592L));
+
+        EmbeddedKahunaOptions options = EmbeddedKahunaOptionsBuilder.BuildStandaloneRocksDb(
+            "/tmp/camusdb-policy-absent", config.Kahuna, CamusDBOptions.Default);
+
+        Assert.That(options.RaftSnapshotMaxPendingBytes, Is.EqualTo(8589934592L));
+    }
+
+    [Test]
+    public void TheSnapshotStepTimeout_IsReadAndReachesTheNode()
+    {
+        ConfigDefinition config = new ConfigReader().Read("kahuna:\n  raft_snapshot_transfer_step_timeout_ms: 600000");
+        Assert.That(config.Kahuna!.RaftSnapshotTransferStepTimeoutMs, Is.EqualTo(600000));
+
+        EmbeddedKahunaOptions options = EmbeddedKahunaOptionsBuilder.BuildStandaloneRocksDb(
+            "/tmp/camusdb-policy-absent", config.Kahuna, CamusDBOptions.Default);
+
+        Assert.That(options.RaftSnapshotTransferStepTimeout, Is.EqualTo(TimeSpan.FromMinutes(10)));
+    }
+
+    [Test]
+    public void TheSnapshotStepTimeout_MustBePositive()
+    {
+        CamusDBException ex = Assert.Throws<CamusDBException>(
+            () => new ConfigReader().Read("kahuna:\n  raft_snapshot_transfer_step_timeout_ms: 0"))!;
+
+        Assert.That(ex.Code, Is.EqualTo(CamusDBErrorCodes.InvalidConfig));
+    }
+
+    [Test]
+    public void TheSnapshotReceiveCap_DefaultsToKahunas()
+    {
+        EmbeddedKahunaOptions options = EmbeddedKahunaOptionsBuilder.BuildStandaloneRocksDb(
+            "/tmp/camusdb-policy-absent", new KahunaOptionsConfig(), CamusDBOptions.Default);
+
+        Assert.That(options.RaftSnapshotMaxPendingBytes, Is.Null);
+    }
+
+    [TestCase("0")]
+    [TestCase("-1")]
+    public void TheSnapshotReceiveCap_MustBePositive(string value)
+    {
+        CamusDBException ex = Assert.Throws<CamusDBException>(
+            () => new ConfigReader().Read($"kahuna:\n  raft_snapshot_max_pending_bytes: {value}"))!;
+
+        Assert.That(ex.Code, Is.EqualTo(CamusDBErrorCodes.InvalidConfig));
+        Assert.That(ex.Message, Does.Contain("'kahuna.raft_snapshot_max_pending_bytes'"));
+    }
+
     /// <summary>
     /// The whole path, with real damage: rows in a RocksDB SST, one byte flipped on disk, and a SQL read
     /// that reaches it. The statement must fail with the non-retryable code, not return the rows around the

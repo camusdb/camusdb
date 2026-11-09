@@ -73,6 +73,8 @@ public sealed class KahunaOptionsConfig
         "storage_max_background_compactions",
         "solarium_environment",
         "raft_lost_acknowledged_entries_policy",
+        "raft_snapshot_max_pending_bytes",
+        "raft_snapshot_transfer_step_timeout_ms",
         "key_value_write_max_in_flight_batches_per_partition",
         "key_value_write_linger_ms",
         "key_value_write_post_completion_hold_ms",
@@ -157,6 +159,25 @@ public sealed class KahunaOptionsConfig
     /// and otherwise stays leaderless. Read once at start, so a change needs a restart.
     /// </summary>
     public string? RaftLostAcknowledgedEntriesPolicy { get; set; }
+
+    /// <summary>
+    /// Cap on the snapshot bytes this node stages across every snapshot it is receiving, on disk and in memory
+    /// together. A snapshot larger than this can never be staged, so a replica that needs that partition's
+    /// snapshot, such as a new one replacing a node, cannot be seeded. Set it on every node, to about twice the
+    /// largest whole-partition snapshot. Null keeps Kahuna's default. Maps to
+    /// <see cref="Kahuna.EmbeddedKahunaOptions.RaftSnapshotMaxPendingBytes"/>. Read once at start, so a change
+    /// needs a restart.
+    /// </summary>
+    public long? RaftSnapshotMaxPendingBytes { get; set; }
+
+    /// <summary>
+    /// How long, in <b>milliseconds</b>, one step of an outbound snapshot transfer may make no progress. Building the
+    /// whole export is one step, and it takes longer with the partition's size and with branches that hold
+    /// many distinct revisions. Set it on every node, above the longest export it logs. Null keeps Kahuna's default.
+    /// Maps to <see cref="Kahuna.EmbeddedKahunaOptions.RaftSnapshotTransferStepTimeout"/>. Read once at start, so a
+    /// change needs a restart.
+    /// </summary>
+    public int? RaftSnapshotTransferStepTimeoutMs { get; set; }
 
     public string? WalRevision { get; set; }
 
@@ -1098,6 +1119,12 @@ public sealed class KahunaOptionsConfig
 
         if (RaftLostAcknowledgedEntriesPolicy is not (null or "quarantine" or "accept_and_log"))
             throw InvalidConfig($"'kahuna.raft_lost_acknowledged_entries_policy' must be 'quarantine' or 'accept_and_log', got '{RaftLostAcknowledgedEntriesPolicy}'");
+
+        if (RaftSnapshotTransferStepTimeoutMs is <= 0)
+            throw InvalidConfig($"'kahuna.raft_snapshot_transfer_step_timeout_ms' must be > 0, got {RaftSnapshotTransferStepTimeoutMs}");
+
+        if (RaftSnapshotMaxPendingBytes is <= 0)
+            throw InvalidConfig($"'kahuna.raft_snapshot_max_pending_bytes' must be > 0, got {RaftSnapshotMaxPendingBytes}");
 
         if (StorageCompactionRateMbps is < 0)
             throw InvalidConfig($"'kahuna.storage_compaction_rate_mbps' must be >= 0, got {StorageCompactionRateMbps}");

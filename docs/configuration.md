@@ -257,6 +257,15 @@ finds its log lost entries it had acknowledged:
 
 A change to this key needs a restart.
 
+`kahuna.raft_snapshot_max_pending_bytes` caps the snapshot bytes a node stages while receiving, on disk and in
+memory together. A partition whose snapshot is larger cannot seed a new replica, so replacing a node never
+finishes. Set it on every node to about twice the largest partition's snapshot, and restart. The node logs a
+warning naming both sizes when it exports a snapshot above its cap.
+
+`kahuna.raft_snapshot_transfer_step_timeout_ms` bounds one step of sending a snapshot, and building the whole export is
+one step. Exports take longer with a partition's size and with branches that hold many distinct revisions, and a node
+logs a warning with the time and size of any export of 30 s or more. Set it on every node above the longest one, and restart.
+
 These protections do not yet cover `solarium`: a Solarium node has block and record checksums, but it
 does not fail-stop on damage, and it reports no storage fault in the health response.
 
@@ -661,6 +670,8 @@ combination silently.
 | Unknown `kahuna.storage` / `kahuna.wal_storage` | `InvalidConfig` |
 | `kahuna.solarium_environment` other than `default` / `io_uring` | `InvalidConfig` |
 | `kahuna.raft_lost_acknowledged_entries_policy` other than `quarantine` / `accept_and_log` | `InvalidConfig` |
+| `kahuna.raft_snapshot_max_pending_bytes` ≤ 0 | `InvalidConfig` |
+| `kahuna.raft_snapshot_transfer_step_timeout_ms` ≤ 0 | `InvalidConfig` |
 | Negative `kahuna.storage_compaction_rate_mbps` / `kahuna.storage_max_background_compactions` | `InvalidConfig` |
 | `kahuna.start_election_timeout_ms` ≥ `kahuna.end_election_timeout_ms` | `InvalidConfig` |
 | `kahuna.staged_base_fence_retention_ms` ≤ 0 | `InvalidConfig` |
