@@ -53,8 +53,12 @@ internal sealed class ExistsSubqueryExecutor(SubqueryQueryExecutor? queryExecuto
     /// <paramref name="outerRow"/>. The fast form reads the inner table here; every other body runs
     /// through the whole pipeline with the outer values as hidden parameters. It reads no state of an
     /// executor, so a stage that has none (the projector, the locate scan of an UPDATE) calls it too.
+    ///
+    /// <para>When the prepared subquery has a result cache, an outer row with the same outer values as an
+    /// earlier row gets the earlier answer, and the body does not run; see
+    /// <see cref="CorrelatedResultCache{T}"/>.</para>
     /// </summary>
-    public static Task<bool> ExecuteCorrelatedAsync(
+    public static async Task<bool> ExecuteCorrelatedAsync(
         DatabaseDescriptor database,
         PreparedExistsSubquery prepared,
         IReadOnlyDictionary<string, ColumnValue> outerRow,
@@ -62,23 +66,50 @@ internal sealed class ExistsSubqueryExecutor(SubqueryQueryExecutor? queryExecuto
         Dictionary<string, ColumnValue>? parameters,
         CancellationToken cancellationToken = default)
     {
-        if (prepared.Scan is { } scan)
-            return ScanAsync(scan, outerRow, txnState, parameters, cancellationToken);
+        ColumnValue[]? key = null;
 
-        return RunBodyAsync(database, prepared.Body!, outerRow, txnState, parameters, cancellationToken);
+        if (prepared.Results is { } results)
+        {
+            ColumnValue[] outerValues = results.Outer.For(outerRow, parameters);
+
+            if (CorrelatedResultCache<bool>.TryKey(outerValues))
+            {
+                if (results.TryGet(outerValues, out bool kept))
+                {
+                    CorrelatedRunProbe.CountHit();
+                    return kept;
+                }
+
+                key = outerValues;
+            }
+        }
+
+        bool found;
+
+        if (prepared.Scan is { } scan)
+        {
+            CorrelatedRunProbe.CountRun();
+            found = await ScanAsync(scan, outerRow, txnState, parameters, cancellationToken).ConfigureAwait(false);
+        }
+        else
+        {
+            // The key holds the values that the body reads, in its order, so the row is not read again.
+            IAsyncEnumerable<QueryResultRow> rows = key is not null
+                ? prepared.Body!.RunAsync(database, key, txnState, parameters, cancellationToken)
+                : prepared.Body!.RunAsync(database, outerRow, txnState, parameters, cancellationToken);
+
+            found = await FirstRowAsync(rows, cancellationToken).ConfigureAwait(false);
+        }
+
+        if (key is not null)
+            prepared.Results!.Add(key, found);
+
+        return found;
     }
 
-    /// <summary>Runs the body for one outer row and stops at its first row.</summary>
-    private static async Task<bool> RunBodyAsync(
-        DatabaseDescriptor database,
-        CorrelatedSubqueryBody body,
-        IReadOnlyDictionary<string, ColumnValue> outerRow,
-        KvTransaction txnState,
-        Dictionary<string, ColumnValue>? parameters,
-        CancellationToken cancellationToken)
+    /// <summary>True when the body gives a row; stops at its first row.</summary>
+    private static async Task<bool> FirstRowAsync(IAsyncEnumerable<QueryResultRow> rows, CancellationToken cancellationToken)
     {
-        IAsyncEnumerable<QueryResultRow> rows = body.RunAsync(database, outerRow, txnState, parameters, cancellationToken);
-
         await foreach (QueryResultRow _ in rows.WithCancellation(cancellationToken).ConfigureAwait(false))
             return true;
 

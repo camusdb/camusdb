@@ -21,8 +21,9 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 /// <para><b>How the outer row reaches the body.</b> Each name of the body that resolves to the outer query
 /// is replaced, in a copy of the body tree, by a hidden placeholder (<see cref="ParameterPrefix"/> and a
 /// number). The lexer accepts only letters, digits and underscores after <c>@</c>, so no statement can name
-/// such a placeholder. For each outer row, <see cref="ParametersFor"/> reads the outer values and adds them
-/// to the statement parameters, and the body runs with those parameters. One placeholder stands for one
+/// such a placeholder. For each outer row, <see cref="Outer"/> reads the outer values, <see cref="ParametersFor"/>
+/// adds them to the statement parameters, and the body runs with those parameters. The same values key the
+/// result cache of the caller (<see cref="CorrelatedResultCache{T}"/>). One placeholder stands for one
 /// outer name, wherever the body writes it. A placeholder has the type of its outer column
 /// (<see cref="SubqueryResultTypes.Remember"/>), so the static checks of the body see that type, as they
 /// see the type of a column.</para>
@@ -51,16 +52,21 @@ internal sealed class CorrelatedSubqueryBody
 
     private readonly bool isExistsBody;
 
-    private readonly OuterValue[] values;
-
-    private readonly IReadOnlyList<BoundTableSource> outerSources;
-
-    private readonly IReadOnlyList<BoundDerivedTableSource> outerDerivedSources;
-
-    private readonly QueryRowNameResolver outerRowNames;
+    /// <summary>The hidden placeholder name of each outer value, in the order of <see cref="Outer"/>.</summary>
+    private readonly string[] parameterNames;
 
     /// <summary>The body, with a hidden placeholder for each outer name.</summary>
     public NodeAst Select { get; }
+
+    /// <summary>Reads the outer values of the body from an outer row; see <see cref="CorrelatedResultCache{T}"/>.</summary>
+    public CorrelatedOuterValues Outer { get; }
+
+    /// <summary>
+    /// True when two runs with the same outer values give the same result, so a
+    /// <see cref="CorrelatedResultCache{T}"/> can keep it: the body has no volatile function and reads no hidden
+    /// value of an enclosing query level.
+    /// </summary>
+    public bool ResultsCanBeKept { get; }
 
     /// <summary>The body bound for all its runs, or null when it binds again for each row.</summary>
     public SelectBindResult? Bound { get; }
@@ -72,29 +78,24 @@ internal sealed class CorrelatedSubqueryBody
     /// </summary>
     public Models.ExpressionType? OutputType { get; }
 
-    /// <summary>One outer name and the placeholder that stands for it.</summary>
-    private readonly record struct OuterValue(string Parameter, NodeAst Name);
-
     private CorrelatedSubqueryBody(
         SubqueryQueryExecutor executor,
         bool isExistsBody,
         NodeAst select,
         SelectBindResult? bound,
         Models.ExpressionType? outputType,
-        OuterValue[] values,
-        IReadOnlyList<BoundTableSource> outerSources,
-        IReadOnlyList<BoundDerivedTableSource> outerDerivedSources,
-        QueryRowNameResolver outerRowNames)
+        string[] parameterNames,
+        CorrelatedOuterValues outer,
+        bool resultsCanBeKept)
     {
         this.executor = executor;
         this.isExistsBody = isExistsBody;
         Select = select;
         Bound = bound;
         OutputType = outputType;
-        this.values = values;
-        this.outerSources = outerSources;
-        this.outerDerivedSources = outerDerivedSources;
-        this.outerRowNames = outerRowNames;
+        this.parameterNames = parameterNames;
+        Outer = outer;
+        ResultsCanBeKept = resultsCanBeKept;
     }
 
     /// <summary>
@@ -121,32 +122,31 @@ internal sealed class CorrelatedSubqueryBody
             new BoundSelectQuery(bodyQuery, outerSources, outerRowNames, outerDerivedSources),
             excludeOutputAliases: false);
 
+        // One value for each distinct outer name, in the order of the reader; the placeholder of value i is
+        // named ParameterPrefix + i.
+        CorrelatedOuterValues outer = CorrelatedOuterValues.Create(outerReferences, outerSources, outerDerivedSources, outerRowNames);
+
         Dictionary<string, NodeAst> placeholders = new(StringComparer.OrdinalIgnoreCase);
         Dictionary<NodeAst, NodeAst> replacements = new(ReferenceEqualityComparer.Instance);
-        List<OuterValue> values = [];
+        string[] parameterNames = new string[outer.Names.Count];
 
-        foreach (NodeAst reference in outerReferences)
+        for (int i = 0; i < outer.Names.Count; i++)
         {
-            string name = reference.yytext!;
+            string name = outer.Names[i].yytext!;
 
-            if (!placeholders.TryGetValue(name, out NodeAst? placeholder))
-            {
-                // Also fills the memo of the resolver, which each row then reads.
-                outerRowNames.ValidateColumnReference(name);
-
-                string parameter = ParameterPrefix + values.Count.ToString(System.Globalization.CultureInfo.InvariantCulture);
-                placeholder = SubqueryResultTypes.Remember(
-                    new NodeAst(NodeType.Placeholder, null, null, null, null, null, null, null, parameter),
-                    outerTypes(name));
-
-                placeholders[name] = placeholder;
-                values.Add(new OuterValue(parameter, reference));
-            }
-
-            replacements[reference] = placeholder;
+            parameterNames[i] = ParameterPrefix + i.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            placeholders[name] = SubqueryResultTypes.Remember(
+                new NodeAst(NodeType.Placeholder, null, null, null, null, null, null, null, parameterNames[i]),
+                outerTypes(name));
         }
 
+        foreach (NodeAst reference in outerReferences)
+            replacements[reference] = placeholders[reference.yytext!];
+
         NodeAst substituted = NodeAstWalk.Replace(select, replacements);
+
+        bool resultsCanBeKept = CorrelatedResultCache<bool>.CanKeepResultsOf(
+            substituted, new HashSet<NodeAst>(placeholders.Values, ReferenceEqualityComparer.Instance));
         SelectBindResult checkedBind;
         SelectBindResult? bound = null;
 
@@ -178,7 +178,7 @@ internal sealed class CorrelatedSubqueryBody
             outputType = SubqueryResultTypes.OutputTypeOf(checkedBind.Bound);
         }
 
-        return new CorrelatedSubqueryBody(executor, isExistsBody, substituted, bound, outputType, [.. values], outerSources, outerDerivedSources, outerRowNames);
+        return new CorrelatedSubqueryBody(executor, isExistsBody, substituted, bound, outputType, parameterNames, outer, resultsCanBeKept);
     }
 
     /// <summary>
@@ -192,9 +192,24 @@ internal sealed class CorrelatedSubqueryBody
         IReadOnlyDictionary<string, ColumnValue> outerRow,
         KvTransaction txnState,
         Dictionary<string, ColumnValue>? statementParameters,
+        CancellationToken cancellationToken) =>
+        RunAsync(database, Outer.For(outerRow, statementParameters), txnState, statementParameters, cancellationToken);
+
+    /// <summary>
+    /// The rows of the body for the outer values <paramref name="outerValues"/>, which <see cref="Outer"/> read
+    /// from one outer row. A caller that keyed a <see cref="CorrelatedResultCache{T}"/> with them passes them
+    /// here, so the row is read once.
+    /// </summary>
+    public IAsyncEnumerable<QueryResultRow> RunAsync(
+        DatabaseDescriptor database,
+        ColumnValue[] outerValues,
+        KvTransaction txnState,
+        Dictionary<string, ColumnValue>? statementParameters,
         CancellationToken cancellationToken)
     {
-        Dictionary<string, ColumnValue> parameters = ParametersFor(outerRow, statementParameters);
+        CorrelatedRunProbe.CountRun();
+
+        Dictionary<string, ColumnValue> parameters = ParametersFor(outerValues, statementParameters);
 
         if (Bound is { } bound)
             return executor.RunBoundAsync(database, bound, txnState, parameters, cancellationToken);
@@ -205,22 +220,19 @@ internal sealed class CorrelatedSubqueryBody
     }
 
     /// <summary>
-    /// The statement parameters and the outer values of <paramref name="outerRow"/>, under their hidden
-    /// placeholder names. A new dictionary for each row: the statement parameters are not changed.
+    /// The statement parameters and <paramref name="outerValues"/>, under their hidden placeholder names. A new
+    /// dictionary for each row: the statement parameters are not changed.
     /// </summary>
     private Dictionary<string, ColumnValue> ParametersFor(
-        IReadOnlyDictionary<string, ColumnValue> outerRow,
+        ColumnValue[] outerValues,
         Dictionary<string, ColumnValue>? statementParameters)
     {
-        Dictionary<string, ColumnValue> outerValues = CorrelatedRowMerger.MergeOuterForEvaluation(
-            outerRow, outerSources, outerDerivedSources);
-
         Dictionary<string, ColumnValue> parameters = statementParameters is null
-            ? new(values.Length)
+            ? new(parameterNames.Length)
             : new(statementParameters, statementParameters.Comparer);
 
-        foreach (OuterValue value in values)
-            parameters[value.Parameter] = SqlExecutor.EvalExpr(value.Name, outerValues, statementParameters, outerRowNames);
+        for (int i = 0; i < parameterNames.Length; i++)
+            parameters[parameterNames[i]] = outerValues[i];
 
         return parameters;
     }

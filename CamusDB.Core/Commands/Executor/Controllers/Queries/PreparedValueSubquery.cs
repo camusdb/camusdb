@@ -5,6 +5,9 @@
  * file that was distributed with this source code.
  */
 
+using CamusDB.Core.CommandsExecutor.Models;
+using CamusDB.Core.SQLParser;
+
 namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 
 /// <summary>
@@ -16,7 +19,19 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 ///
 /// <para><see cref="OuterReferences"/> holds the names of the body that resolve to the outer query, bare
 /// names included, so the outer scan decodes those columns.</para>
+///
+/// <para><see cref="Results"/> keeps the result for each distinct set of outer values, for this execution,
+/// or is null when a kept result could be wrong; see <see cref="CorrelatedResultCache{T}"/>.</para>
 /// </summary>
 internal sealed record PreparedValueSubquery(
     IReadOnlyList<string> OuterReferences,
-    CorrelatedSubqueryBody Body);
+    CorrelatedSubqueryBody Body,
+    CorrelatedResultCache<KeptSubqueryResult>? Results = null);
+
+/// <summary>
+/// The kept result of one run of a correlated value subquery. A scalar subquery keeps its <see cref="Value"/>.
+/// An <c>IN</c>, <c>NOT IN</c> or quantified subquery keeps its <see cref="Test"/>: the membership or value-set
+/// node built from the rows of the body, which holds its own copy of the values and which each outer row
+/// evaluates with its own tested value.
+/// </summary>
+internal readonly record struct KeptSubqueryResult(ColumnValue? Value, NodeAst? Test);

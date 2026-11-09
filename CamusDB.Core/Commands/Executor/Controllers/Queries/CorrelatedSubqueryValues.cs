@@ -44,6 +44,11 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 ///
 /// <para>The body of each subquery runs with the statement parameters, not with this copy, so a hidden name of
 /// this level never reaches a body, which numbers its own nodes from zero.</para>
+///
+/// <para><b>Kept results.</b> A row with the same outer values as an earlier row gets the earlier result of the
+/// body, when the prepared subquery has a <see cref="CorrelatedResultCache{T}"/>: the value of a scalar subquery,
+/// or the test node of an <c>IN</c>, <c>NOT IN</c> or quantified subquery, which the row then evaluates with its
+/// own tested value. An error is not kept.</para>
 /// </summary>
 internal static class CorrelatedSubqueryValues
 {
@@ -252,11 +257,29 @@ internal static class CorrelatedSubqueryValues
 
         registry.TryGetValue(node, out PreparedValueSubquery prepared);
 
+        // The outer values key the result cache and are the input of the run, so the row is read once.
+        ColumnValue[] outerValues = prepared.Body.Outer.For(row, ticket.Parameters);
+        CorrelatedResultCache<KeptSubqueryResult>? results =
+            prepared.Results is { } cache && CorrelatedResultCache<KeptSubqueryResult>.TryKey(outerValues) ? cache : null;
+
+        if (results is not null && results.TryGet(outerValues, out KeptSubqueryResult kept))
+        {
+            CorrelatedRunProbe.CountHit();
+
+            return kept.Test is { } keptTest
+                ? SqlExecutor.EvalExpr(keptTest, row, rowParameters, ticket.RowNameResolver)
+                : kept.Value!;
+        }
+
         IAsyncEnumerable<QueryResultRow> rows = prepared.Body.RunAsync(
-            database, row, ticket.TxnState, ticket.Parameters, ticket.CancellationToken);
+            database, outerValues, ticket.TxnState, ticket.Parameters, ticket.CancellationToken);
 
         if (node.nodeType == NodeType.ExprScalarSubquery)
-            return await SingleValueAsync(rows, ticket.CancellationToken).ConfigureAwait(false);
+        {
+            ColumnValue value = await SingleValueAsync(rows, ticket.CancellationToken).ConfigureAwait(false);
+            results?.Add(outerValues, new KeptSubqueryResult(value, null));
+            return value;
+        }
 
         await using InSubqueryMaterialization materialization = await InSubqueryExecutor.MaterializeRowsAsync(
             rows, QueryExecutionContext.For(database, ticket.CancellationToken)).ConfigureAwait(false);
@@ -278,6 +301,11 @@ internal static class CorrelatedSubqueryValues
                 node.extendedSix,
                 node.extendedSeven),
         };
+
+        // The test node holds its own copy of the values, so it outlives the materialization. A list that
+        // spilled to disk is too large to keep in memory for later rows.
+        if (results is not null && !materialization.Values.IsSpilled)
+            results.Add(outerValues, new KeptSubqueryResult(null, test), materialization.Values.Count);
 
         return SqlExecutor.EvalExpr(test, row, rowParameters, ticket.RowNameResolver);
     }

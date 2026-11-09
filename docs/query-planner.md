@@ -286,7 +286,12 @@ the subquery scope under inner keys first, and with an index seek when one fits.
 `CorrelatedSubqueryBody`: each outer name is replaced by a hidden placeholder that has the type of the
 outer column, and the body runs through the whole pipeline for each outer row with the outer values as
 parameters. Such a body binds once when no nested subquery reads an outer value, and once per row
-otherwise; it is always checked at prepare time, so an error does not depend on the outer rows. Under `AND`, `OR` and `NOT` the filterer evaluates a correlated `EXISTS` in place; under any other node (a `CASE`
+otherwise; it is always checked at prepare time, so an error does not depend on the outer rows. Each
+prepared subquery can have a `CorrelatedResultCache`, which keeps the result for each distinct set of
+outer values for the rest of the execution: the boolean of an `EXISTS`, the value of a scalar subquery, or
+the membership node of an `IN`, `NOT IN` or quantified subquery. The key is the outer values that the body
+reads, compared field by field. There is no cache for a body with a volatile function, for a body that
+reads a hidden value of an enclosing level, or for a fast-form `EXISTS` with an index seek. Under `AND`, `OR` and `NOT` the filterer evaluates a correlated `EXISTS` in place; under any other node (a `CASE`
 branch, a comparison operand, an `IS NULL` test) `CorrelatedSubqueryValues` runs each correlated subquery
 of the subtree for the row first and puts its value in a per-row copy of the parameters, under the node's
 hidden name, where the evaluator reads it. The tree is not copied, because the binding records the result

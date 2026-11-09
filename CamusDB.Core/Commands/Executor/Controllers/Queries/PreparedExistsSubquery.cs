@@ -21,11 +21,16 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 ///
 /// <para><see cref="OuterReferences"/> holds the names of the body that resolve to the outer query, bare
 /// names included, so the outer scan decodes those columns.</para>
+///
+/// <para><see cref="Results"/> keeps the answer for each distinct set of outer values, for this execution,
+/// or is null when a kept answer could be wrong or would save nothing; see
+/// <see cref="CorrelatedResultCache{T}"/>.</para>
 /// </summary>
 internal sealed record PreparedExistsSubquery(
     IReadOnlyList<string> OuterReferences,
     CorrelatedExistsScan? Scan,
-    CorrelatedSubqueryBody? Body);
+    CorrelatedSubqueryBody? Body,
+    CorrelatedResultCache<bool>? Results = null);
 
 /// <summary>
 /// The fast form of a correlated EXISTS: one table, and only its FROM and WHERE run.

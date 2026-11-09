@@ -516,6 +516,13 @@ tables and set operations. A derived table cannot read the other items of its ow
   `GROUP BY`, `HAVING`, `OFFSET`, a window function, or another subquery. A correlated `EXISTS` whose
   body reads one table and needs only its `FROM` and `WHERE` reads the inner table directly, with an
   index seek when one fits. Every other body runs as a whole query for each outer row.
+- Within one statement, an outer row with the same outer values as an earlier row gets the earlier
+  result, and the body does not run again. So a correlated subquery under a join, which sees each value
+  of the outer table many times, runs once for each distinct value. The values compare exactly: `'A'`
+  and `'a'` are two values, and so are `0.0` and `-0.0`. A body with a volatile function (`random()`,
+  `nextval`, `clock_timestamp()` and the others) runs for each row. So does a body that reads a
+  value of a query two or more levels up, and a fast-form `EXISTS` with an index seek. An error is not
+  kept, and the kept results have a fixed size limit for each subquery.
 - A scalar subquery gives NULL for no row and fails with `CADB0400` for a second row. `IN`, `NOT IN`
   and a quantified comparison follow the same three-valued rules as their uncorrelated forms.
 - In an `UPDATE` or `DELETE`, the subquery reads the rows as the statement found them, also when it

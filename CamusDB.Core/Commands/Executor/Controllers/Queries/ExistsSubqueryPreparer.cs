@@ -410,7 +410,11 @@ internal sealed class ExistsSubqueryPreparer
         foreach (NodeAst reference in outerReferences)
             names.Add(reference.yytext!);
 
-        return (context.Registry ??= new ExistsSubqueryRegistry(), new PreparedValueSubquery([.. names], body));
+        CorrelatedResultCache<KeptSubqueryResult>? results = body.ResultsCanBeKept
+            ? new CorrelatedResultCache<KeptSubqueryResult>(body.Outer)
+            : null;
+
+        return (context.Registry ??= new ExistsSubqueryRegistry(), new PreparedValueSubquery([.. names], body, results));
     }
 
     /// <summary>
@@ -442,7 +446,7 @@ internal sealed class ExistsSubqueryPreparer
             nested).ConfigureAwait(false);
 
         if (scan is not null)
-            return new PreparedExistsSubquery([.. outerReferences], scan, Body: null);
+            return new PreparedExistsSubquery([.. outerReferences], scan, Body: null, ScanResults(scan, outerReferenceNodes));
 
         CorrelatedSubqueryBody body = await CorrelatedSubqueryBody.PrepareAsync(
             subqueryExecutor,
@@ -459,8 +463,32 @@ internal sealed class ExistsSubqueryPreparer
         // division, so the check runs here, by the rule of the fast form below.
         ConstantDivisionCheck.CheckSelect(form == ExistsBodyForm.OutputDiscarded ? ExistsBody.DiscardOutput(innerQuery) : innerQuery);
 
-        return new PreparedExistsSubquery([.. outerReferences], Scan: null, body);
+        return new PreparedExistsSubquery(
+            [.. outerReferences],
+            Scan: null,
+            body,
+            body.ResultsCanBeKept ? new CorrelatedResultCache<bool>(body.Outer) : null);
     }
+
+    /// <summary>
+    /// The result cache of a fast-form EXISTS, or null. A form with an index seek reads a few inner rows for
+    /// each outer row, so a kept answer would save little and the key would cost a read of the outer row; only
+    /// the form that scans the whole inner table for each outer row gets a cache. See
+    /// <see cref="CorrelatedResultCache{T}"/> for the other rules.
+    /// </summary>
+    private static CorrelatedResultCache<bool>? ScanResults(CorrelatedExistsScan scan, IReadOnlyList<NodeAst> outerReferenceNodes)
+    {
+        if (scan.SeekPlan is not null || !CorrelatedResultCache<bool>.CanKeepResultsOf(scan.InnerWhere, EmptyPlaceholders))
+            return null;
+
+        // The key reads each outer name as the body form does: through a resolver of the outer sources only.
+        QueryRowNameResolver outerRowNames = new(scan.OuterSources, scan.OuterDerivedSources);
+
+        return new CorrelatedResultCache<bool>(
+            CorrelatedOuterValues.Create(outerReferenceNodes, scan.OuterSources, scan.OuterDerivedSources, outerRowNames));
+    }
+
+    private static readonly IReadOnlySet<NodeAst> EmptyPlaceholders = new HashSet<NodeAst>(ReferenceEqualityComparer.Instance);
 
     /// <summary>
     /// The fast form, or null when the body needs more than the FROM and WHERE of one table: an aggregate,
