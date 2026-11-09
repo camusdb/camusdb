@@ -94,6 +94,9 @@ public static class DecidedDivergences
     private const string NegativeCountAtBind =
         "A negative LIMIT or OFFSET literal is a statement mistake, so it is refused when the statement binds, before any row is read. PostgreSQL reads the clause only when its node runs.";
 
+    private const string ExpressionColumnName =
+        "An expression column that has no alias takes its position in the select list as its name, starting at 0. PostgreSQL takes the name of the function, or ?column?. Write AS to give the column a name.";
+
     private static readonly string[] TwoRowZeroTable =
     [
         "CREATE TABLE t (id INT64 PRIMARY KEY, v INT64)",
@@ -600,5 +603,20 @@ public static class DecidedDivergences
             "SELECT id FROM em o WHERE EXISTS (SELECT 1 FROM em i WHERE i.id = o.id LIMIT -1)",
             CamusDBErrorCodes.InvalidInput, "no rows",
             NegativeCountAtBind),
+
+        new("An aggregate column has its position as its name", RowTable,
+            "SELECT max FROM (SELECT MAX(v) FROM d) q",
+            CamusDBErrorCodes.UnknownColumn, "20",
+            ExpressionColumnName),
+
+        new("A function column has its position as its name", RowTable,
+            "SELECT abs FROM (SELECT abs(v) FROM d) q ORDER BY 1",
+            CamusDBErrorCodes.UnknownColumn, "10",
+            ExpressionColumnName),
+
+        new("A scalar subquery over an expression has its position as its name", RowTable,
+            "SELECT id, (SELECT MAX(v) FROM d) FROM d ORDER BY max, id",
+            CamusDBErrorCodes.UnknownColumn, "1",
+            ExpressionColumnName),
     ];
 }
