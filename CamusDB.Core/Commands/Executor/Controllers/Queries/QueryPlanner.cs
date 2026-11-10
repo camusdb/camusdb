@@ -14,6 +14,7 @@ using CamusDB.Core.CommandsExecutor.Models.Plans;
 using CamusDB.Core.CommandsExecutor.Models.Predicates;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.SQLParser;
+using CamusDB.Core.Storage.Kv;
 using CamusDB.Core.Statistics;
 
 namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
@@ -494,6 +495,14 @@ public sealed class QueryPlanner
         // extension install or update lands is then filed under the stamp it was built with.
         long extensionStamp = database.Schema.CallableStamp;
 
+        // A statement whose scan holds predicate locks plans under another rule (see
+        // ScanHoldsPredicateLocks): it keeps a bounded index scan that a lock-free statement of the
+        // same shape gives up for a table scan. The two must not replay each other's decision, so
+        // each has its own cache entry.
+        string? cacheShapeId = shapeId is not null && ScanHoldsPredicateLocks(ticket)
+            ? shapeId + LockingShapeSuffix
+            : shapeId;
+
         bool fromCache = false;
         PhysicalPlanNode scanNode;
         QueryPlanStep? scanStep;
@@ -501,7 +510,7 @@ public sealed class QueryPlanner
 
         if (shapeId is not null
             && planCacheEnabled
-            && _cache!.TryGet(database.Id, shapeId, cacheDeps!, out PlanCacheEntry? cached, extensionStamp)
+            && _cache!.TryGet(database.Id, cacheShapeId!, cacheDeps!, out PlanCacheEntry? cached, extensionStamp)
             && cached!.SingleTable is { } cachedDecision
             && !EstimateMovedFromCachedDecision(database, table, ticket, analysis, cachedDecision))
         {
@@ -829,13 +838,14 @@ public sealed class QueryPlanner
         {
             bool guarded = s0.Type != QueryPlanStepType.QueryFromIndex;
 
-            _cache!.Put(database.Id, shapeId,
+            _cache!.Put(database.Id, cacheShapeId!,
                 new PlanCacheEntry(cacheDeps!,
                     SingleTable: new SingleTableDecision(
                         s0.Index?.Name,
                         ClassifyDecision(s0),
                         guarded ? TryEstimateSelectivityForCache(database, table, analysis) : null,
-                        guarded ? TryComputeRowDemand(ticket) : null),
+                        guarded ? TryComputeRowDemand(ticket) : null,
+                        guarded ? _stats?.GetRowCountEstimate(database, table) : null),
                     JoinAliasOrder: null),
                 extensionStamp);
         }
@@ -947,13 +957,19 @@ public sealed class QueryPlanner
     /// about <c>(limit + offset) / selectivity</c> entries, never more than the table holds. Without a
     /// LIMIT that candidate reads every entry plus a row fetch each and loses to the full scan, as
     /// before.</para>
+    ///
+    /// <para><b><paramref name="keepBoundedScan"/>.</b> For a statement whose scan holds predicate
+    /// locks (<see cref="ScanHoldsPredicateLocks"/>). A step that <see cref="KeepsBoundedScan"/>
+    /// protects beats the full table scan at any cost, and once an index step is chosen the
+    /// unbounded ORDER BY index scan cannot replace it, because it locks the whole index range.</para>
     /// </summary>
     private (PhysicalPlanNode Node, QueryPlanStep? Step) PickCheapestIndexOrFullScan(
         DatabaseDescriptor database,
         TableDescriptor table,
         QueryTicket ticket,
         PredicateAnalysis analysis,
-        long tableRowCount)
+        long tableRowCount,
+        bool keepBoundedScan = false)
     {
         bool hasOrderBy = ticket.OrderBy is { Count: > 0 };
         IReadOnlySet<string>? constantColumns = hasOrderBy ? IndexScanSelector.ConstantColumns(analysis) : null;
@@ -995,7 +1011,10 @@ public sealed class QueryPlanner
             //      across nodes) — a strict `<` would then pick different equal-cost plans on
             //      different nodes.
             int boundColumns = IndexScanSelector.BoundColumnCount(step);
+            // With keepBoundedScan the full-scan baseline loses to a protected step at any cost
+            // (KeepsBoundedScan); the index steps then compete as usual.
             bool wins = cost < bestCost
+                || (keepBoundedScan && bestStep is null && KeepsBoundedScan(BoundEqualityColumns(step), tableRowCount, _options))
                 || (cost == bestCost
                     && (covers && !bestCovers
                         || covers == bestCovers
@@ -1017,7 +1036,10 @@ public sealed class QueryPlanner
 
         // The index that delivers the ORDER BY order, costed for the rows the LIMIT needs. It must
         // satisfy the whole ORDER BY, or a sort would still read everything it returns.
+        // Not with keepBoundedScan when a predicate step exists: this scan has no bounds, so it
+        // locks the whole index range.
         if (rowDemand is { } demand
+            && !(keepBoundedScan && bestStep is not null)
             && IndexScanSelector.TrySelectOrderByScan(table, ticket.OrderBy) is { } orderStep
             && IndexScanSelector.ScanSatisfiesOrderBy(table, orderStep, ticket.OrderBy, constantColumns))
         {
@@ -1031,6 +1053,58 @@ public sealed class QueryPlanner
 
         return (bestNode, bestStep);
     }
+
+    /// <summary>
+    /// The plan-cache key suffix of a statement whose scan holds predicate locks. A shape id is a
+    /// hash in hexadecimal, so the suffix cannot collide with one.
+    /// </summary>
+    private const string LockingShapeSuffix = "#locks";
+
+    /// <summary>
+    /// True when the scan of this statement holds predicate locks until its transaction ends: the
+    /// locate scan of an UPDATE or DELETE (exclusive), and every scan of a Serializable read-write
+    /// transaction (shared; see <see cref="KvRangeLockManager.IsSerializableReadWrite"/>).
+    ///
+    /// <para>For such a statement the lock footprint of the access path matters more than its read
+    /// cost. A bounded index scan locks the range it reads. A table scan locks the whole row range
+    /// of the table, so the statement conflicts with every write to the table by another
+    /// transaction, whatever row that write touches. The cost model prices reads only: on a small
+    /// table it finds the table scan as cheap as the index, and the statement then fails or makes
+    /// other transactions fail for no reason a user can see. So for such a statement the planner
+    /// does not give up a bounded index scan that <see cref="KeepsBoundedScan"/> protects. The rule
+    /// is absolute, not a cost term: a cost term can lose to a row estimate, and the estimate is
+    /// the part that is wrong on a table that grows or whose statistics are old.</para>
+    /// </summary>
+    internal static bool ScanHoldsPredicateLocks(QueryTicket ticket)
+        => ticket.ExclusivePredicateLocks || KvRangeLockManager.IsSerializableReadWrite(ticket.TxnState);
+
+    /// <summary>
+    /// For a statement whose scan holds predicate locks: true when a bounded index scan must not
+    /// lose to the table scan. Two cases, and the join leaves use the same two
+    /// (<see cref="JoinLeafAccess"/>):
+    /// <list type="bullet">
+    ///   <item>The scan pins at least one leading key column by equality
+    ///     (<paramref name="equalityPrefixLength"/> &gt; 0). Such a read names its rows (one
+    ///     player, one order), and its lock must cover those rows only, whatever the statistics
+    ///     say about how many there are.</item>
+    ///   <item>The table holds no more rows than <see cref="CamusDBOptions.LockEscalationThreshold"/>.
+    ///     No bounded scan of it can read enough rows to escalate its row locks, so the index is
+    ///     always the smaller lock, and the read cost of so few rows does not matter.</item>
+    /// </list>
+    /// A pure range on a larger table (<c>year &gt; 2000</c>) is not protected: it can read a large
+    /// share of the table, its row locks then escalate to the whole row range in any plan, and the
+    /// index would only add a row fetch for each entry. It keeps the cost comparison.
+    /// </summary>
+    internal static bool KeepsBoundedScan(int equalityPrefixLength, long tableRowCount, CamusDBOptions options)
+        => equalityPrefixLength > 0 || tableRowCount <= options.LockEscalationThreshold;
+
+    /// <summary>
+    /// The number of leading key columns a step pins by equality: every column of a unique lookup,
+    /// the equality prefix of a range scan.
+    /// </summary>
+    private static int BoundEqualityColumns(in QueryPlanStep step) => step.Type == QueryPlanStepType.QueryFromIndex
+        ? IndexScanSelector.BoundColumnCount(step)
+        : step.EqualityPrefixLength;
 
     /// <summary>Lower bound on an estimated selectivity, so a division by it stays finite.</summary>
     private const double MinimumSelectivity = 1e-9;
@@ -1087,6 +1161,16 @@ public sealed class QueryPlanner
                 ({ } cachedDemand, { } demand) => MovedByFactor(Math.Max(1, cachedDemand), Math.Max(1, demand)),
                 _ => true,
             };
+        }
+
+        // The choice between an index and the table scan depends on the size of the table, with
+        // or without analyzed statistics. A decision made when the table held one or two rows
+        // (where the table scan is the cheapest read) must not serve the table after it grew.
+        if (!moved
+            && decision.TableRows is { } cachedRows
+            && _stats?.GetRowCountEstimate(database, table) is { } currentRows)
+        {
+            moved = MovedByFactor(Math.Max(1, cachedRows), Math.Max(1, currentRows));
         }
 
         if (moved)
@@ -1311,6 +1395,10 @@ public sealed class QueryPlanner
         // chosen scan node's own ordering, so a cost-picked order-satisfying index still elides
         // the sort, and a non-satisfying pick correctly retains it. (Folding sort cost into the
         // candidate comparison — "interesting orders" — is a future enhancement, not a correctness need.)
+        // A Serializable read-write SELECT takes the cost-based path too, but without the full
+        // scan as a candidate when an index can bound the scan (see ScanHoldsPredicateLocks).
+        bool holdsPredicateLocks = ScanHoldsPredicateLocks(ticket);
+
         if (_options.CostBasedAccessPathEnabled
             && _stats is not null
             && analysis.IndexableComparisons.Count > 0
@@ -1321,7 +1409,7 @@ public sealed class QueryPlanner
                 && _stats.HasAnalyzedStatistics(database, table))
             {
                 (PhysicalPlanNode bestNode, QueryPlanStep? bestStep) =
-                    PickCheapestIndexOrFullScan(database, table, ticket, analysis, tableRowCount);
+                    PickCheapestIndexOrFullScan(database, table, ticket, analysis, tableRowCount, keepBoundedScan: holdsPredicateLocks);
 
                 // If the chosen path is a predicate-driven range scan, still check whether an
                 // IN-list scan would be even cheaper (same competition as the rule-based path).
@@ -1348,7 +1436,7 @@ public sealed class QueryPlanner
                 // If cost-based chose the full scan, check whether an IN-list is even cheaper.
                 if (bestStep is null && analysis.InListComparisons is { Count: > 0 })
                 {
-                    IndexInListScanNode? inListNode = TryBuildInListScanNode(database, table, analysis.InListComparisons);
+                    IndexInListScanNode? inListNode = TryBuildInListScanNode(database, table, analysis.InListComparisons, holdsPredicateLocks);
                     if (inListNode is not null)
                     {
                         NodeAst? absorbed = analysis.InListComparisons
@@ -1376,8 +1464,9 @@ public sealed class QueryPlanner
         //      Skip ORDER BY-driven unbounded scans to preserve sort elision.
         //   3. The scan is not already a unique point lookup (those always win).
         //   4. The scan does not hold exclusive predicate locks (UPDATE/DELETE path) — widening to a
-        //      full-table exclusive row range lock would block all concurrent writes on disjoint ranges,
-        //      defeating key-range concurrency. Shared-lock SELECTs are safe to promote to table scan.
+        //      full-table exclusive row range lock would block all concurrent writes on disjoint
+        //      ranges. A Serializable read-write SELECT would widen its shared lock the same way,
+        //      so it keeps the scans that KeepsBoundedScan protects.
         //   5. The scan is not covering. A covered scan (index key + INCLUDE columns supply every needed
         //      column) fetches zero primary rows, so it is at least as cheap as a full table scan for
         //      any table size; downgrading it would defeat the covering-index optimization — most
@@ -1389,7 +1478,8 @@ public sealed class QueryPlanner
             && !ScanCoversProjection(step, ticket))
         {
             long? tableRowCount = _stats.GetRowCountEstimate(database, table);
-            if (tableRowCount is { } trc && trc > 0)
+            if (tableRowCount is { } trc && trc > 0
+                && !(holdsPredicateLocks && KeepsBoundedScan(step.EqualityPrefixLength, trc, _options)))
             {
                 var tempRangeNode = (IndexRangeScanNode)ToScanNode(scanStep.Value);
                 if (CostEstimator.ShouldPreferFullScan(tempRangeNode, trc, _options, _stats, database, table))
@@ -1429,7 +1519,7 @@ public sealed class QueryPlanner
         // Only attempted when there are IN-list comparisons in the predicate analysis.
         if (analysis.InListComparisons is { Count: > 0 })
         {
-            IndexInListScanNode? inListNode = TryBuildInListScanNode(database, table, analysis.InListComparisons);
+            IndexInListScanNode? inListNode = TryBuildInListScanNode(database, table, analysis.InListComparisons, holdsPredicateLocks);
             if (inListNode is not null)
             {
                 NodeAst? absorbed = analysis.InListComparisons
@@ -1492,9 +1582,12 @@ public sealed class QueryPlanner
     ///   • With stats: prefer seeks when <c>2·N &lt; tableRowCount</c>
     ///     (each seek = 1 index read + 1 row fetch).
     ///   • Without stats: allow up to <c>MaxInListSizeWithoutStats</c> values (1000).
+    ///   • No gate when <paramref name="holdsPredicateLocks"/>: the list always seeks.
     ///
-    /// Unique indexes support all column types via <c>LookupUnique</c>.
-    /// Non-unique indexes use an equality-as-range scan: types with a computable successor
+    /// The index comes from <see cref="IndexScanSelector.TryPickInListIndex"/>. A unique index of
+    /// one column supports all column types via <c>LookupUnique</c>. A non-unique index, and a
+    /// unique index of several columns that leads with the list column (a composite primary key),
+    /// use an equality-as-range scan for each value: types with a computable successor
     /// (Integer64, Float64, Bool) use <c>[v, successor(v))</c>; String and Id use an
     /// exact-match scan <c>[v, v]</c> inclusive — <see cref="KvTableStore.ScanIndex"/> appends
     /// a high sentinel for non-unique, so all <c>encode(v)+rowIdHex</c> entries are captured
@@ -1503,7 +1596,8 @@ public sealed class QueryPlanner
     private IndexInListScanNode? TryBuildInListScanNode(
         DatabaseDescriptor database,
         TableDescriptor table,
-        IReadOnlyList<AnalyzedInList> inListComparisons)
+        IReadOnlyList<AnalyzedInList> inListComparisons,
+        bool holdsPredicateLocks)
     {
         const int MaxInListSizeWithoutStats = 1000;
 
@@ -1512,41 +1606,19 @@ public sealed class QueryPlanner
             if (inList.Values.Count == 0)
                 continue;
 
-            TableIndexSchema? bestIndex = null;
-            bool bestIsUnique = false;
-
-            foreach (TableIndexSchema index in table.Indexes.Values)
-            {
-                if (!SchemaElementStateRules.IsReadableIndex(table.Schema, index))
-                    continue;
-
-                if (index.Columns.Length == 0
-                    || !string.Equals(index.Columns[0], inList.ColumnName, StringComparison.OrdinalIgnoreCase))
-                    continue;
-
-                bool isUnique = index.Type == IndexType.Unique;
-
-                // Unique index: requires all key columns for LookupUnique — only single-column unique
-                // indexes are eligible (a composite unique index needs a full composite key to resolve
-                // to a single row, and a partial key would silently find nothing).
-                if (isUnique && index.Columns.Length != 1)
-                    continue;
-
-                // Prefer unique single-column over non-unique; among equals pick first.
-                if (bestIndex is null || (isUnique && !bestIsUnique))
-                {
-                    bestIndex = index;
-                    bestIsUnique = isUnique;
-                }
-            }
+            TableIndexSchema? bestIndex = IndexScanSelector.TryPickInListIndex(
+                table, inList.ColumnName, StringComparison.OrdinalIgnoreCase, out bool bestIsUnique);
 
             if (bestIndex is null)
                 continue;
 
             int n = inList.Values.Count;
 
-            // Cost gate: for non-unique indexes use estimated fan-out (NDV/histogram), not n.
-            if (_stats is not null)
+            // Cost gate: a seek over the range of each value uses the estimated fan-out
+            // (NDV/histogram), not n.
+            // The gate does not apply to a scan that holds predicate locks: the seeks lock the
+            // list values, the table scan locks the whole table (see ScanHoldsPredicateLocks).
+            if (!holdsPredicateLocks && _stats is not null)
             {
                 long? tableRowCount = _stats.GetRowCountEstimate(database, table);
                 if (tableRowCount is { } trc && trc > 0)
@@ -1557,7 +1629,7 @@ public sealed class QueryPlanner
                         continue; // full scan is cheaper
                 }
             }
-            else if (n > MaxInListSizeWithoutStats)
+            else if (!holdsPredicateLocks && n > MaxInListSizeWithoutStats)
             {
                 continue;
             }
@@ -1571,9 +1643,9 @@ public sealed class QueryPlanner
     /// <summary>
     /// Attempts to find an IN-list scan that is cheaper than an already-selected range scan.
     ///
-    /// With stats: both unique and non-unique single-column indexes compete, priced via
-    /// <see cref="CardinalityEstimator.EstimateInListRows"/> (NDV/histogram fan-out for
-    /// non-unique; min(n, trc) for unique).
+    /// With stats: every index that <see cref="IndexScanSelector.TryPickInListIndex"/> accepts
+    /// competes, priced via <see cref="CardinalityEstimator.EstimateInListRows"/> (min(n, trc) for
+    /// a point lookup; NDV/histogram fan-out for a seek over the range of each value).
     ///
     /// Without stats: unique single-column only (cost exactly 2·N; bounded and predictable),
     /// compete only when N ≤ <c>MaxCompetingInListSizeWithoutStats</c>.
@@ -1595,25 +1667,9 @@ public sealed class QueryPlanner
 
             if (_stats is not null)
             {
-                // With stats: unique and non-unique may both compete; price via EstimateInListRows.
-                TableIndexSchema? bestIndex = null;
-                bool bestIsUnique = false;
-                foreach (TableIndexSchema index in table.Indexes.Values)
-                {
-                    if (!SchemaElementStateRules.IsReadableIndex(table.Schema, index))
-                        continue;
-                    if (index.Columns.Length == 0 ||
-                        !string.Equals(index.Columns[0], inList.ColumnName, StringComparison.OrdinalIgnoreCase))
-                        continue;
-                    bool isUnique = index.Type == IndexType.Unique;
-                    if (isUnique && index.Columns.Length != 1)
-                        continue;
-                    if (bestIndex is null || (isUnique && !bestIsUnique))
-                    {
-                        bestIndex = index;
-                        bestIsUnique = isUnique;
-                    }
-                }
+                // With stats: point lookups and range seeks may both compete; price via EstimateInListRows.
+                TableIndexSchema? bestIndex = IndexScanSelector.TryPickInListIndex(
+                    table, inList.ColumnName, StringComparison.OrdinalIgnoreCase, out bool bestIsUnique);
 
                 if (bestIndex is null)
                     continue;

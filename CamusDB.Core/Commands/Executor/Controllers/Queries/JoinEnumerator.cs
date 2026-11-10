@@ -289,7 +289,8 @@ internal static class JoinEnumerator
         CamusDBOptions options,
         Dictionary<string, ColumnValue>? leafParameters = null,
         IReadOnlyDictionary<string, PlanTimeLeafKeys>? leafKeys = null,
-        bool traceEstimates = false)
+        bool traceEstimates = false,
+        bool keepBoundedLeaves = false)
     {
         JoinGraph? graph = JoinGraph.TryBuild(root, bound, pushdown.PostJoinConjuncts);
 
@@ -303,7 +304,7 @@ internal static class JoinEnumerator
             return JoinOrderOptimizer.ChooseWithGraph(root, bound, pushdown, graph);
 
         CostInputs inputs = ComputeCostInputs(graph, bound, pushdown, database, stats, options, leafParameters,
-            denseSubsets: graph.LeafCount <= MaxTablesForDenseEstimates, leafKeys: leafKeys, traceEstimates: traceEstimates);
+            denseSubsets: graph.LeafCount <= MaxTablesForDenseEstimates, leafKeys: leafKeys, traceEstimates: traceEstimates, keepBoundedLeaves: keepBoundedLeaves);
         long budget = stats.JoinSearchStepBudgetForTesting ?? MaxCostedStepsForEnumeration;
         int[]? order = FindCheapestOrder(graph, inputs, budget, out long costedSteps, out bool overBudget);
         bool greedy = false;
@@ -351,9 +352,10 @@ internal static class JoinEnumerator
         Dictionary<string, ColumnValue>? leafParameters = null,
         IReadOnlyDictionary<string, PlanTimeLeafKeys>? leafKeys = null,
         IReadOnlyList<double>? keyRowsBounds = null,
-        bool traceEstimates = false) =>
+        bool traceEstimates = false,
+        bool keepBoundedLeaves = false) =>
         EstimateSteps(graph, order, tree,
-            ComputeCostInputs(graph, bound, pushdown, database, stats, options, leafParameters, denseSubsets: false, leafKeys: leafKeys, traceEstimates: traceEstimates),
+            ComputeCostInputs(graph, bound, pushdown, database, stats, options, leafParameters, denseSubsets: false, leafKeys: leafKeys, traceEstimates: traceEstimates, keepBoundedLeaves: keepBoundedLeaves),
             keyRowsBounds);
 
     /// <param name="keyRowsBounds">
@@ -546,7 +548,8 @@ internal static class JoinEnumerator
         Dictionary<string, ColumnValue>? leafParameters = null,
         bool denseSubsets = true,
         IReadOnlyDictionary<string, PlanTimeLeafKeys>? leafKeys = null,
-        bool traceEstimates = false)
+        bool traceEstimates = false,
+        bool keepBoundedLeaves = false)
     {
         int n = graph.LeafCount;
 
@@ -559,7 +562,7 @@ internal static class JoinEnumerator
         {
             string alias = graph.Leaves[i].Alias;
             EstimateTrace? leafTrace = traceEstimates ? new EstimateTrace() : null;
-            EstimateLeaf(alias, pushdown, bound, database, stats, out firstLeafCost[i], out long rows, options, leafParameters, leafTrace);
+            EstimateLeaf(alias, pushdown, bound, database, stats, out firstLeafCost[i], out long rows, options, leafParameters, leafTrace, keepBoundedLeaves);
 
             // The rows a plan-time lookup counted are the rows; the scan still costs its read.
             if (leafKeys is not null && leafKeys.TryGetValue(alias, out PlanTimeLeafKeys? known))
@@ -1445,7 +1448,8 @@ internal static class JoinEnumerator
         out long card,
         CamusDBOptions options,
         Dictionary<string, ColumnValue>? leafParameters,
-        EstimateTrace? trace = null)
+        EstimateTrace? trace = null,
+        bool keepBoundedLeaves = false)
     {
         TableDescriptor? table = FindTableDescriptor(alias, bound);
 
@@ -1491,7 +1495,7 @@ internal static class JoinEnumerator
                     // Breakeven veto through the SAME decision the builder (TryBuildIndexLeaf)
                     // uses — a hand-rolled copy of the comparison can drift and make the DP cost
                     // a plan shape the builder then refuses to build.
-                    if (!CostEstimator.ShouldPreferFullScan(candidate, tableRows, options, stats, database, table))
+                    if (!JoinLeafAccess.PrefersFullScan(candidate, tableRows, keepBoundedLeaves, options, stats, database, table))
                     {
                         long rangeRows = CostEstimator.EstimateRangeScanRows(candidate, tableRows, options, stats, database, table, trace);
                         cost = rangeRows * 2.0; // index entry + row fetch
@@ -1514,22 +1518,8 @@ internal static class JoinEnumerator
                 {
                     if (inList.Values.Count == 0) continue;
 
-                    TableIndexSchema? bestIndex = null;
-                    bool bestIsUnique = false;
-                    foreach (TableIndexSchema tidx in table.Indexes.Values)
-                    {
-                        if (!SchemaElementStateRules.IsReadableIndex(table.Schema, tidx)) continue;
-                        if (tidx.Columns.Length == 0 ||
-                            !string.Equals(tidx.Columns[0], inList.ColumnName, StringComparison.Ordinal))
-                            continue;
-                        bool isUnique = tidx.Type == IndexType.Unique;
-                        if (isUnique && tidx.Columns.Length != 1) continue;
-                        if (bestIndex is null || (isUnique && !bestIsUnique))
-                        {
-                            bestIndex = tidx;
-                            bestIsUnique = isUnique;
-                        }
-                    }
+                    TableIndexSchema? bestIndex = IndexScanSelector.TryPickInListIndex(
+                        table, inList.ColumnName, StringComparison.Ordinal, out bool bestIsUnique);
 
                     if (bestIndex is null) continue;
 
@@ -1538,7 +1528,7 @@ internal static class JoinEnumerator
                     long inListRows = CardinalityEstimator.EstimateInListRows(
                         inList.ColumnName, inList.Values, bestIsUnique, tableRows, database, table, stats);
                     long inListBreakeven = (long)Math.Ceiling(tableRows * CostEstimator.BreakevenFraction);
-                    if (inListRows >= inListBreakeven) continue;
+                    if (JoinLeafAccess.ListPrefersFullScan(inListRows, inListBreakeven, keepBoundedLeaves)) continue;
 
                     if (trace is not null)
                         CardinalityEstimator.EstimateInListRows(inList.ColumnName, inList.Values, bestIsUnique, tableRows, database, table, stats, trace);

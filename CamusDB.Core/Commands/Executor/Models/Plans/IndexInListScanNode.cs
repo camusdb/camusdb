@@ -14,8 +14,10 @@ namespace CamusDB.Core.CommandsExecutor.Models.Plans;
 
 /// <summary>
 /// Drives N index seeks for <c>column IN (v1, v2, …)</c> and unions the results.
-/// For a unique index each value becomes one <c>LookupUnique</c> point lookup;
-/// for a non-unique index each value becomes one equality range scan.
+/// For a unique index of one column each value becomes one <c>LookupUnique</c> point lookup
+/// (<see cref="IsPointLookup"/>). For every other index each value becomes one equality range
+/// scan over the entries that share that leading value: a non-unique index, and a unique index of
+/// several columns whose leading column is the list column, such as a composite primary key.
 /// Duplicate row IDs (from a repeated value or overlapping non-unique entries)
 /// are suppressed so every matched row is emitted at most once.
 /// </summary>
@@ -34,6 +36,13 @@ public sealed class IndexInListScanNode : PhysicalPlanNode
 
     /// <summary>Residual filter applied to fetched rows after the IN-list scan; null means no additional filter.</summary>
     public NodeAst? ExecutionFilter { get; init; }
+
+    /// <summary>
+    /// True when each value is one point lookup, false when each value is a range seek. The index
+    /// type alone does not decide this: a unique index of several columns holds many entries for
+    /// one leading value, and a point lookup of that partial key finds nothing.
+    /// </summary>
+    public bool IsPointLookup => Index.Type == IndexType.Unique && Index.Columns.Length == 1;
 
     public override bool CanDecomposeToLocalPlusMerge => true;
 

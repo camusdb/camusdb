@@ -128,8 +128,13 @@ internal static class QueryTicketAdapter
             analysis.InListComparisons.Count,
             ReferenceEqualityComparer.Instance);
 
+        // A list analyzed from an OR chain of equalities has no IN node: the filter evaluates the
+        // chain itself and never asks for a set.
         foreach (AnalyzedInList inList in analysis.InListComparisons)
-            sets[inList.Conjunct] = new PreparedInSet(inList.Values, inList.ContainsNull);
+        {
+            if (inList.Conjunct.nodeType == NodeType.ExprInMembership)
+                sets[inList.Conjunct] = new PreparedInSet(inList.Values, inList.ContainsNull);
+        }
 
         return sets;
     }

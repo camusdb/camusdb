@@ -223,7 +223,22 @@ non-unique index inside an index nested-loop join (one lock per probed key, coll
 whole-index lock past the escalation threshold of §6.3). A join leaf resolves the statement's
 parameters as a single-table scan does, so `JOIN … WHERE j.k = @k` reads `j` through its index and
 locks that one key, present or absent; only a leaf filter no index serves reads the whole table and
-locks its whole row range. They fire in two situations:
+locks its whole row range.
+
+An `IN`-list scan locks one range for each list value, and not the span from the smallest to the
+largest value. So `WHERE k IN ('a', 'z')` fences `'a'` and `'z'`, present or absent, and a write to
+`'m'` does not conflict with it. This holds for a non-unique index and for the first column of a
+unique index of several columns (a composite primary key); a unique index of one column locks the
+point of each value. When the list holds more values than the escalation threshold of §6.3 allows
+for the index, the scan takes one lock over the span of its values instead, which is still narrower
+than the whole index. `x = v1 OR x = v2` is the same list and takes the same locks.
+
+Because a table scan locks the whole row range, the planner keeps an index scan for a statement that
+holds these locks when its predicate names rows by equality or by an `IN` list, or when the table is at
+or below the escalation threshold of §6.3, even where a table scan would read fewer keys. See "The lock
+of a table scan" in `docs/query-planner.md`.
+
+They fire in two situations:
 
 - **For a Serializable read-write transaction** (see §9), on *any* configuration including the default
   single-node hash setup — a serializable scan needs phantom protection to be correct, so the lock is

@@ -52,7 +52,7 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 /// <para><b>Locks:</b> every leaf takes the predicate lock a single-table scan of the same shape takes,
 /// before it reads (see <c>docs/transactions-locking-and-isolation.md</c> §6.2): a shared lock over the
 /// whole row range for a table scan, over the whole index range for an index walk, over the bounded
-/// range for an index range scan, and over the value span for an IN-list scan. The lock fires only for
+/// range for an index range scan, and over the range of each value for an IN-list scan (see <see cref="InListSeekLocks"/>). The lock fires only for
 /// a Serializable read-write transaction, where it is the phantom fence of strict two-phase locking:
 /// without it a key the join read as absent could be inserted by another transaction before this one
 /// ends, and a second read of the same join in the same transaction would see it. The rows a leaf
@@ -300,7 +300,8 @@ internal sealed class JoinLeafScanner
 
     /// <summary>
     /// Executes an IN-list index scan for a join leaf node.
-    /// Unique indexes perform one <c>LookupUnique</c> per value; non-unique indexes perform one
+    /// A unique index of one column performs one <c>LookupUnique</c> per value; every other index
+    /// (non-unique, or a unique index of several columns led by the list column) performs one
     /// equality range scan per value. Duplicate row IDs are suppressed across all values, on the
     /// index side, before a row id is buffered. The surviving ids are fetched one page at a time
     /// (see <see cref="JoinLeafRowPage"/>) and the residual
@@ -316,7 +317,10 @@ internal sealed class JoinLeafScanner
         BoundTableSource source = inListNode.BoundSource!;
         TableDescriptor table = source.Table;
         ColumnType[] keyTypes = JoinAliasMetadata.GetIndexColumnTypes(table, inListNode.Index);
-        bool isUnique = inListNode.Index.Type == IndexType.Unique;
+        // isUnique selects the point-lookup arm. A unique index of several columns takes the range
+        // arm: a point lookup of its leading column alone finds nothing.
+        bool isUnique = inListNode.IsPointLookup;
+        bool uniqueEntries = inListNode.Index.Type == IndexType.Unique;
         HashSet<ObjectIdValue> seen = new();
         QueryDependencyCollector? deps = plan.DepCollector;
 
@@ -327,27 +331,12 @@ internal sealed class JoinLeafScanner
         using CancellationTokenSource? linked = JoinCancellation.Link(plan, cancellationToken);
         CancellationToken scanToken = linked?.Token ?? plan.Ticket.CancellationToken;
 
-        // Phantom fence, as the single-table IN-list scan takes it: a unique index is probed with
-        // LookupUnique, whose point lock covers each value, present or absent; a non-unique index is
-        // covered by one shared lock over [min, max] of the values, encoded in the index's own key
-        // order, so on a descending leading column the largest value is the start bound.
-        if (!isUnique)
-        {
-            CompositeColumnValue? minVal = null, maxVal = null;
-            foreach (ColumnValue v in inListNode.Values)
-            {
-                CompositeColumnValue cv = new(v);
-                if (minVal is null || cv.CompareTo(minVal) < 0) minVal = cv;
-                if (maxVal is null || cv.CompareTo(maxVal) > 0) maxVal = cv;
-            }
-            bool leadingDescending = inListNode.Index.DirectionAt(0) == OrderType.Descending;
-            await table.Store.AcquireBoundedIndexRangeLockAsync(
-                plan.Ticket.TxnState, inListNode.Index.KvId,
-                leadingDescending ? maxVal : minVal, true,
-                leadingDescending ? minVal : maxVal, true,
-                unique: false, exclusive: plan.Ticket.ExclusivePredicateLocks,
-                cancellationToken: scanToken).ConfigureAwait(false);
-        }
+        // Phantom fence, as the single-table IN-list scan takes it: a point lookup locks its own
+        // key in LookupUnique, present or absent; a range seek locks the range of each value, or one
+        // span over all the values when the list is too long for one lock each (see InListSeekLocks).
+        bool lockEachValue = !isUnique && await InListSeekLocks.BeginAsync(
+            table, inListNode.Index, inListNode.Values, plan.Ticket.TxnState,
+            plan.Ticket.ExclusivePredicateLocks, scanToken).ConfigureAwait(false);
 
         // One page spans the whole IN list: ids are appended in list order (and, per value, in index
         // order), so a page can hold the tail of one value's matches and the head of the next. Order
@@ -389,13 +378,20 @@ internal sealed class JoinLeafScanner
             }
             else
             {
-                // Non-unique equality scan over one IN value. The helper picks a range that is
-                // non-empty in the index's own key order, which a descending column reverses.
+                // Equality scan over one IN value: every entry whose leading column holds the value.
+                // The helper picks a range that is non-empty in the index's own key order, which a
+                // descending column reverses. On a unique index of several columns the key is a
+                // prefix bound, and ScanIndex extends it over the columns that follow.
                 (CompositeColumnValue toBound, bool toInclusive) = IndexScanSelector.EqualitySeekUpperBound(table, inListNode.Index, lookupKey);
+
+                if (lockEachValue)
+                    await InListSeekLocks.AcquireValueAsync(
+                        table, inListNode.Index, lookupKey, toBound, toInclusive, plan.Ticket.TxnState,
+                        plan.Ticket.ExclusivePredicateLocks, scanToken).ConfigureAwait(false);
 
                 await foreach ((CompositeColumnValue entryKey, ObjectIdValue rowId, ReadOnlyMemory<byte> _) in Diagnostics.TableIndexUsage.CountInto(usage, table.Store.ScanIndex(
                     plan.Ticket.TxnState, inListNode.Index.KvId, keyTypes,
-                    lookupKey, toBound, unique: false,
+                    lookupKey, toBound, unique: uniqueEntries,
                     fromInclusive: true, toInclusive: toInclusive,
                     maxRows: null, cancellationToken: scanToken)).ConfigureAwait(false))
                 {

@@ -351,6 +351,33 @@ internal sealed class KvRangeLockManager
     }
 
     /// <summary>
+    /// Decides the lock granularity of an IN-list scan that seeks one range for each of
+    /// <paramref name="valueCount"/> values. True means each value takes its own bounded lock, so
+    /// the scan fences only the values it reads and a write to a key between two list values does
+    /// not conflict. False means the caller takes one lock over the span from the smallest to the
+    /// largest value instead (or no lock at all, when the transaction takes no predicate lock).
+    ///
+    /// <para>The per-value form is bounded by <see cref="CamusDBOptions.LockEscalationThreshold"/>,
+    /// counted with the range locks the transaction already holds on the index: each lock is one
+    /// acquire and one entry the coordinator renews. A longer list falls back to the span lock,
+    /// which is one lock of any size and still narrower than the whole index. A transaction that
+    /// holds the whole-bucket lock needs no more locks, so it also reports false; the span acquire
+    /// is then covered and costs nothing.</para>
+    /// </summary>
+    internal bool InListLocksEachValue(KvTransaction tx, string indexId, int valueCount)
+    {
+        if (!ScanTakesPredicateLock(tx))
+            return false;
+
+        string bucketPrefix = keys.BuildIndexBucketPrefix(indexId);
+
+        if (tx.HasWholeBucketLock(bucketPrefix))
+            return false;
+
+        return (long)tx.CountRangeLocksForBucket(bucketPrefix) + valueCount <= options.LockEscalationThreshold;
+    }
+
+    /// <summary>
     /// Core range-lock implementation used by both the whole-bucket and bounded variants.
     /// Acquires a range lock of the given <paramref name="mode"/> (default <c>Shared</c>),
     /// retrying on <c>MustRetry</c>; tracks the acquired lock on the transaction for release

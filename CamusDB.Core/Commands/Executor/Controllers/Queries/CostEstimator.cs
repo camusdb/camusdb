@@ -343,8 +343,10 @@ internal static class CostEstimator
 
             case IndexInListScanNode inListNode:
             {
-                bool isUnique = inListNode.Index.Type == CamusDB.Core.Catalogs.Models.IndexType.Unique;
-                // Use NDV/histogram to estimate fan-out for non-unique indexes; unique stays min(n, trc).
+                // A point lookup finds at most one row per value: min(n, trc). A range seek (a
+                // non-unique index, or the leading column of a unique index of several columns)
+                // uses NDV/histogram to estimate the fan-out.
+                bool isUnique = inListNode.IsPointLookup;
                 long rows = CardinalityEstimator.EstimateInListRows(
                     inListNode.ColumnName, inListNode.Values, isUnique,
                     trc, database, resolvedTable ?? primaryTable, stats, trace);
@@ -353,7 +355,7 @@ internal static class CostEstimator
                 {
                     EstimatedRows        = rows,
                     KvPointLookups       = isUnique ? n : 0,
-                    KvRangeScanEntries   = isUnique ? 0 : rows,  // non-unique: entries scanned ≈ matched rows
+                    KvRangeScanEntries   = isUnique ? 0 : rows,  // range seek: entries scanned ≈ matched rows
                     RowFetchesAfterIndex = rows,
                     NetworkFactor        = ComputeNetworkFactor(node, rows, resolvedTable, database, options),
                 });

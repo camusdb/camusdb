@@ -139,7 +139,9 @@ public sealed class TestPlanRenderer
     [Test]
     public void Render_ScanPlusFilter()
     {
-        QueryPlan plan = Plan("SELECT * FROM robots WHERE year = 2000 OR year = 2001");
+        // An OR over two columns: no index answers it. (An OR chain of equalities on one column
+        // is an IN list and seeks the index.)
+        QueryPlan plan = Plan("SELECT * FROM robots WHERE year = 2000 OR name = 'x'");
         string rendered = PlanRenderer.Render(plan);
         StringAssert.StartsWith("filter(", rendered);
         Assert.That(rendered, Does.Contain("table-scan(table=robots)"));

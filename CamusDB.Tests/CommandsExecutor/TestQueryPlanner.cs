@@ -251,7 +251,7 @@ public class TestQueryPlanner
     public void PlanFallsBackToFullScanWhenOrPreventsIndexUse()
     {
         QueryTicket ticket = CreateQueryTicketFromSelectSql(
-            "SELECT * FROM robots WHERE year = 2000 OR year = 2001");
+            "SELECT * FROM robots WHERE year = 2000 OR name = 'x'");
 
         QueryPlan plan = queryPlanner.GetPlan(context!.Database, context.Table, ticket);
 
@@ -725,11 +725,29 @@ public class TestQueryPlanner
         Assert.AreEqual(7, plan.ScanRowLimit);
     }
 
+    /// <summary>
+    /// An OR chain of equalities on one column names its rows as an IN list does, so it seeks the
+    /// index of that column and the scan absorbs the whole chain.
+    /// </summary>
+    [Test]
+    public void PlanSeeksTheIndexForAnOrChainOfEqualitiesOnOneColumn()
+    {
+        QueryTicket ticket = CreateQueryTicketFromSelectSql(
+            "SELECT * FROM robots WHERE year = 2000 OR year = 2001 OR 2002 = year");
+
+        QueryPlan plan = queryPlanner.GetPlan(context!.Database, context.Table, ticket);
+
+        IndexInListScanNode node = (IndexInListScanNode)ScanRoot(plan);
+        Assert.AreEqual("year_idx", node.Index.Name);
+        Assert.AreEqual(new long[] { 2000, 2001, 2002 }, node.Values.Select(v => v.LongValue).ToArray());
+        Assert.IsNull(plan.ExecutionFilter);
+    }
+
     [Test]
     public void PlanDoesNotPushLimitWhenResidualFilterExists()
     {
         QueryTicket ticket = CreateQueryTicketFromSelectSql(
-            "SELECT * FROM robots WHERE year = 2000 OR year = 2001 LIMIT 2");
+            "SELECT * FROM robots WHERE year = 2000 OR name = 'x' LIMIT 2");
 
         QueryPlan plan = queryPlanner.GetPlan(context!.Database, context.Table, ticket);
 

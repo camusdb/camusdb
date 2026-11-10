@@ -327,12 +327,19 @@ internal sealed record PlanCacheEntry(
 /// re-plans when either moved by more than a fixed factor; the fresh decision replaces the entry.
 /// Null means not guarded: no statistics to estimate from, or a unique point lookup, whose cost does
 /// not depend on the literal.</para>
+///
+/// <para><b>The table size the decision was made for.</b> <paramref name="TableRows"/> is the row
+/// count estimate of the table at that time. An index against the table scan is a question of
+/// size, and on a table of one or two rows the table scan wins. Row counts follow DML and bump no
+/// generation, so without this guard that decision would serve the table after it grew to any
+/// size. On a hit the planner re-plans when the count moved by more than the same factor.</para>
 /// </summary>
 internal sealed record SingleTableDecision(
     string? IndexName,
     ScanDecisionKind Kind,
     double? Selectivity = null,
-    long? RowDemand = null);
+    long? RowDemand = null,
+    long? TableRows = null);
 
 /// <summary>How a cached single-table decision used its index. See <see cref="SingleTableDecision"/>.</summary>
 internal enum ScanDecisionKind

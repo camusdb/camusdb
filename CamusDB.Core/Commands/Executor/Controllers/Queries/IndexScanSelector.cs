@@ -420,6 +420,66 @@ internal static class IndexScanSelector
         return true;
     }
 
+    /// <summary>
+    /// True when an IN list on the leading column of <paramref name="index"/> resolves each value
+    /// with one point lookup: a unique index of exactly one column. Every other usable index (a
+    /// non-unique index, or a unique index of several columns such as a composite primary key) holds
+    /// any number of entries for one leading value, so each value is a seek over the range of that
+    /// value. The planner, the cost model and both IN-list executors must agree on this, so all of
+    /// them ask here.
+    /// </summary>
+    internal static bool IsInListPointLookup(TableIndexSchema index)
+        => index.Type == IndexType.Unique && index.Columns.Length == 1;
+
+    /// <summary>
+    /// Picks the index that serves <c>column IN (...)</c> with one seek for each value, or null when
+    /// no readable index leads with <paramref name="columnName"/>. This is the single rule behind the
+    /// single-table planner, the join-leaf builder and the join-leaf cost, so the three cannot
+    /// disagree about which lists can seek.
+    /// <para>A unique index of several columns is usable through its leading column, as a
+    /// non-unique index is: each value becomes a seek over the entries that share that leading
+    /// value. A composite primary key is the common case. The completeness rule of
+    /// <see cref="UniqueIndexHoldsEveryQualifyingRow"/> applies: a unique index has no entry for a
+    /// row with NULL in a key column, so the columns after the leading one must be NOT NULL, or the
+    /// seek loses rows that satisfy the list.</para>
+    /// <para>Preference: a point lookup (<see cref="IsInListPointLookup"/>) first, because its cost
+    /// is exact; then the index with the fewest key columns, whose entries are the shortest; then
+    /// the first one found.</para>
+    /// </summary>
+    internal static TableIndexSchema? TryPickInListIndex(
+        TableDescriptor table,
+        string columnName,
+        StringComparison columnComparison,
+        out bool pointLookup)
+    {
+        TableIndexSchema? best = null;
+        pointLookup = false;
+
+        foreach (TableIndexSchema index in table.Indexes.Values)
+        {
+            if (!SchemaElementStateRules.IsReadableIndex(table.Schema, index))
+                continue;
+
+            if (index.Columns.Length == 0 || !string.Equals(index.Columns[0], columnName, columnComparison))
+                continue;
+
+            bool isPoint = IsInListPointLookup(index);
+
+            if (!isPoint && !UniqueIndexHoldsEveryQualifyingRow(table, index, byColumn: null, constrainedPrefixLength: 1))
+                continue;
+
+            if (best is null
+                || (isPoint && !pointLookup)
+                || (isPoint == pointLookup && index.Columns.Length < best.Columns.Length))
+            {
+                best = index;
+                pointLookup = isPoint;
+            }
+        }
+
+        return best;
+    }
+
     private static bool HasAbsorbableComparison(Dictionary<string, List<AnalyzedComparison>> byColumn, string column)
     {
         if (!byColumn.TryGetValue(column, out List<AnalyzedComparison>? comparisons))

@@ -1066,6 +1066,37 @@ It engages only when the flag is on, stats and a row count exist, and the query 
 (those keep the heuristic to avoid widening exclusive row-range locks). IN-list competition runs after the
 cost pick, exactly as in the heuristic path.
 
+**The lock of a table scan** (`QueryPlanner.ScanHoldsPredicateLocks`, `KeepsBoundedScan`). The cost model
+prices reads only. For a statement whose scan holds predicate locks until its transaction ends, the lock
+matters more: a bounded index scan locks the range it reads, and a table scan locks the whole row range of
+the table, so the statement conflicts with every write to that table. Such statements are every scan of a
+Serializable read-write transaction and the locate scan of an `UPDATE` or `DELETE`. For them the planner
+does not give up a bounded index scan for a table scan in two cases, whatever the estimates say:
+
+- the scan pins at least one leading key column by equality (`WHERE usersId = @p`), or the predicate is an
+  IN list on the first column of an index;
+- the table holds no more rows than `lock_escalation_threshold` (50 by default).
+
+Without this rule the plan follows the statistics of the moment. On a table of one or two rows the table
+scan is as cheap as the index. After `ANALYZE`, a filter that selects most rows of a table (one tenant that
+owns every row) makes the table scan cheaper at any size. A pure range on a larger table (`year > 2000`)
+keeps the cost comparison: it can read a large share of the table, and its row locks then escalate to the
+whole row range in any plan. Join leaves follow the same rule (`JoinLeafAccess`), and the join-order search
+costs the leaves the builder makes. With the plan cache on, a locking statement and a lock-free statement of
+one shape have separate entries, and a cached decision is planned again when the row count of the table
+moved by more than 4 times.
+
+**Which index an IN list can seek** (`IndexScanSelector.TryPickInListIndex`). The list column must be the
+first column of a readable index. A unique index of one column answers each value with a point lookup. A
+non-unique index, and a unique index of several columns (a composite primary key), answer each value with a
+seek over the entries that start with it. A unique index of several columns qualifies only when its later
+columns are `NOT NULL`: a unique index holds no entry for a row with a NULL key column, so the seek would
+lose rows. An OR chain of equalities on one column (`k = 'a' OR k = 'b'`) is analyzed as the list
+`k IN ('a', 'b')` and takes the same path. The list gate needs column statistics to price a long list:
+without them each value counts as a tenth of the table, so a list of five or more values on a table that was
+never analyzed reads the whole table, unless the scan holds predicate locks (see above): then the
+list always seeks.
+
 **How an index range scan is priced** (`CostEstimator.EstimateRangeScanRows`). The equality prefix of the
 step (`EqualityPrefixLength`) is priced by distinct count: `KeyNdv` of the prefix tuple, else the column's
 NDV, else the product of the column NDVs. A prefix with no distinct count at all (a `bool` column, a

@@ -42,7 +42,8 @@ public static class PredicateAnalyzer
                 continue;
             }
 
-            if (TryAnalyzeInMembership(conjunct, parameters, out AnalyzedInList? inList))
+            if (TryAnalyzeInMembership(conjunct, parameters, out AnalyzedInList? inList)
+                || TryAnalyzeEqualityDisjunction(conjunct, parameters, out inList))
             {
                 inListComparisons.Add(inList!);
                 continue;
@@ -815,6 +816,55 @@ public static class PredicateAnalyzer
         // An all-NULL list still has an empty non-null values list — valid but zero seeks.
         string columnName = conjunct.leftAst.yytext;
         result = new AnalyzedInList(columnName, values, conjunct, containsNull);
+        return true;
+    }
+
+    /// <summary>
+    /// Recognizes <c>column = v1 OR column = v2 OR …</c>: an OR chain in which every operand is an
+    /// equality between the same bare column and a constant or resolved parameter. As a WHERE
+    /// conjunct it keeps exactly the rows of <c>column IN (v1, v2, …)</c>, so it is analyzed as
+    /// that list and can drive the same index seeks. Without this the chain is a residual
+    /// conjunct, and the statement reads the whole table for a predicate that names its rows.
+    /// <para>The conjunct of the result is the OR chain itself. A scan that absorbs the list drops
+    /// it from the filter; every other plan evaluates it unchanged. An operand of any other shape
+    /// (another column, another operator, a NULL constant, an expression) leaves the whole chain
+    /// residual. The equivalence holds for a conjunct only: under NOT the two forms differ on
+    /// NULL, and the analyzer never looks below a conjunct.</para>
+    /// </summary>
+    private static bool TryAnalyzeEqualityDisjunction(
+        NodeAst conjunct,
+        Dictionary<string, ColumnValue>? parameters,
+        out AnalyzedInList? result)
+    {
+        result = null;
+
+        if (conjunct.nodeType != NodeType.ExprOr)
+            return false;
+
+        List<NodeAst> leaves = [];
+        ExpressionChains.Flatten(conjunct, NodeType.ExprOr, leaves);
+
+        string? column = null;
+        List<ColumnValue> values = new(leaves.Count);
+
+        foreach (NodeAst leaf in leaves)
+        {
+            if (leaf.nodeType != NodeType.ExprEquals
+                || !TryAnalyzeColumnConstantComparison(leaf, parameters, out AnalyzedComparison? equality))
+                return false;
+
+            if (column is null)
+                column = equality!.ColumnName;
+            else if (!string.Equals(column, equality!.ColumnName, StringComparison.OrdinalIgnoreCase))
+                return false;
+
+            values.Add(equality.Constant);
+        }
+
+        if (column is null)
+            return false;
+
+        result = new AnalyzedInList(column, values, conjunct);
         return true;
     }
 

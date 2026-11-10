@@ -770,7 +770,9 @@ public class TestIndexInListScan : BaseTest
             = await CreateStatusTable(trc: 10_000, ndv: 2);
 
         QueryPlanner planner = new(Options, executor.Statistics);
-        KvTransaction txn = await database.Transactions.BeginAsync();
+        // Read Committed: the list cost gate applies to a scan that holds no predicate locks. A
+        // Serializable read-write list always seeks, because a table scan locks the whole table.
+        KvTransaction txn = await database.Transactions.BeginAsync(CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite);
 
         ExecuteSQLTicket execTicket = new(txnState: txn, database: dbname,
             sql: "SELECT id FROM items WHERE status IN (1, 2)", parameters: null);

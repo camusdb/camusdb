@@ -316,6 +316,10 @@ public sealed partial class KvTableStore
         int keyColumnCount = 0)
         => locks.AcquireBoundedIndexRangeLockAsync(tx, indexId, fromBound, fromInclusive, toBound, toInclusive, unique, exclusive, cancellationToken, keyColumnCount);
 
+    /// <inheritdoc cref="KvRangeLockManager.InListLocksEachValue"/>
+    public bool InListLocksEachValue(KvTransaction tx, string indexId, int valueCount)
+        => locks.InListLocksEachValue(tx, indexId, valueCount);
+
     /// <inheritdoc cref="KvRangeLockManager.AcquireIndexEqualityLockAsync"/>
     public Task AcquireIndexEqualityLockAsync(
         KvTransaction tx,

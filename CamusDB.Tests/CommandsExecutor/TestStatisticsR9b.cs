@@ -101,7 +101,10 @@ public sealed class TestStatisticsR9b : BaseTest
     private static async Task<List<QueryResultRow>> ExplainAsync(
         CommandExecutor executor, DatabaseDescriptor database, string dbname, string sql)
     {
-        KvTransaction txn = await database.Transactions.BeginAsync();
+        // Read Committed: the scan holds no predicate locks, so the plan is the cost model's own
+        // choice. In a Serializable read-write transaction the planner also weighs the lock of a
+        // table scan and keeps some index scans the cost model gives up.
+        KvTransaction txn = await database.Transactions.BeginAsync(CamusIsolationLevel.ReadCommitted, CamusTransactionMode.ReadWrite);
         ExecuteSQLTicket ticket = new(txnState: txn, database: dbname, sql: sql, parameters: null);
         (DatabaseDescriptor _, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(ticket);
         List<QueryResultRow> rows = await cursor.ToListAsync();

@@ -1528,7 +1528,10 @@ internal sealed class QueryExecutor
         QueryTicket ticket = plan.Ticket;
         HLCTimestamp txId = ticket.TxnState.TransactionId;
         TableIndexSchema index = inListNode.Index;
-        bool isUnique = index.Type == IndexType.Unique;
+        // isUnique selects the point-lookup arm. A unique index of several columns takes the range
+        // arm: a point lookup of its leading column alone finds nothing.
+        bool isUnique = inListNode.IsPointLookup;
+        bool uniqueEntries = index.Type == IndexType.Unique;
         ColumnType[] keyTypes = GetIndexColumnTypes(table, index);
         QueryDependencyCollector? deps = plan.DepCollector;
         CancellationToken cancellationToken = ticket.CancellationToken;
@@ -1555,28 +1558,13 @@ internal sealed class QueryExecutor
         IReadOnlySet<string>? requiredColumns = IndexEntryCheck.RequiredColumns(plan.ScanRequiredColumns, index);
         LargeValueFetch? largeValues = LargeValueFetch.Columns(table.Schema, requiredColumns);
 
-        // For a non-unique IN-list scan, acquire a range lock covering [min, max] of the IN values.
-        // Shared for SELECT; Exclusive for UPDATE/DELETE. Unique IN-list uses per-key point
-        // lookups (LookupUnique), so no range lock is needed. The lock bounds are encoded in the
-        // index's key order: on a descending leading column the largest value encodes first, so
-        // it must be the start bound or the lock covers an inverted, empty range.
-        if (!isUnique)
-        {
-            CompositeColumnValue? minVal = null, maxVal = null;
-            foreach (ColumnValue v in inListNode.Values)
-            {
-                CompositeColumnValue cv = new(v);
-                if (minVal is null || cv.CompareTo(minVal) < 0) minVal = cv;
-                if (maxVal is null || cv.CompareTo(maxVal) > 0) maxVal = cv;
-            }
-            bool leadingDescending = index.DirectionAt(0) == OrderType.Descending;
-            await table.Store.AcquireBoundedIndexRangeLockAsync(
-                ticket.TxnState, index.KvId,
-                leadingDescending ? maxVal : minVal, true,
-                leadingDescending ? minVal : maxVal, true,
-                unique: false, exclusive: plan.Ticket.ExclusivePredicateLocks,
-                cancellationToken: cancellationToken).ConfigureAwait(false);
-        }
+        // Predicate locks. A point lookup locks its own key in LookupUnique, present or absent. A
+        // range seek locks the range of each value, or one span over all the values when the list
+        // is too long for one lock each (see InListSeekLocks). Shared for SELECT; Exclusive for
+        // UPDATE/DELETE.
+        bool lockEachValue = !isUnique && await InListSeekLocks.BeginAsync(
+            table, index, inListNode.Values, ticket.TxnState,
+            plan.Ticket.ExclusivePredicateLocks, cancellationToken).ConfigureAwait(false);
 
         // One seek per IN value: the check belongs here as well as in the inner loops, so a list
         // of many values whose seeks each return nothing still stops on a cancel.
@@ -1620,13 +1608,20 @@ internal sealed class QueryExecutor
             }
             else
             {
-                // Non-unique equality scan over one IN value. The helper picks a range that is
-                // non-empty in the index's own key order, which a descending column reverses.
+                // Equality scan over one IN value: every entry whose leading column holds the value.
+                // The helper picks a range that is non-empty in the index's own key order, which a
+                // descending column reverses. On a unique index of several columns the key is a
+                // prefix bound, and ScanIndex extends it over the columns that follow.
                 (CompositeColumnValue toBound, bool toInclusive) = IndexScanSelector.EqualitySeekUpperBound(table, index, lookupKey);
+
+                if (lockEachValue)
+                    await InListSeekLocks.AcquireValueAsync(
+                        table, index, lookupKey, toBound, toInclusive, ticket.TxnState,
+                        plan.Ticket.ExclusivePredicateLocks, cancellationToken).ConfigureAwait(false);
 
                 await foreach ((CompositeColumnValue entryKey, ObjectIdValue rowId, ReadOnlyMemory<byte> _) in CamusDB.Core.Diagnostics.TableIndexUsage.CountInto(usage, table.Store.ScanIndex(
                     ticket.TxnState, index.KvId, keyTypes,
-                    lookupKey, toBound, unique: false,
+                    lookupKey, toBound, unique: uniqueEntries,
                     fromInclusive: true, toInclusive: toInclusive,
                     maxRows: null, cancellationToken: cancellationToken)).ConfigureAwait(false))
                 {

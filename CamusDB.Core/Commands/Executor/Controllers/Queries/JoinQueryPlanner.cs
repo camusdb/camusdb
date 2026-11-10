@@ -123,6 +123,11 @@ internal sealed class JoinQueryPlanner
         // value is never frozen into a cached leaf.
         Dictionary<string, ColumnValue>? leafParameters = ticket.Parameters;
 
+        // A join leaf whose scan holds predicate locks keeps its bounded index scan at any table
+        // size, as a single-table scan does (QueryPlanner.ScanHoldsPredicateLocks). The order search
+        // and the tree builder get the same flag, so the search costs the leaves the builder makes.
+        bool keepBoundedLeaves = QueryPlanner.ScanHoldsPredicateLocks(ticket);
+
         JoinOrderChoice? choice = null;
         // Read once, before the lookup, and used again for the store: a plan built while an
         // extension install or update lands is then filed under the stamp it was built with.
@@ -136,7 +141,7 @@ internal sealed class JoinQueryPlanner
         {
             // Re-apply the cached ordering to the CURRENT bound.Query.Source so that ON-predicate
             // literals from this query are used (not frozen from the first query of this shape).
-            choice = ReplayCachedOrder(database, bound, pushdown, cachedAliasOrder, cached.JoinBuild, cached.JoinKeyRowsBounds, leafParameters, leafKeys);
+            choice = ReplayCachedOrder(database, bound, pushdown, cachedAliasOrder, cached.JoinBuild, cached.JoinKeyRowsBounds, leafParameters, leafKeys, keepBoundedLeaves);
 
             if (choice is not null)
                 fromCache = true;
@@ -147,7 +152,7 @@ internal sealed class JoinQueryPlanner
         // A miss, or a hit whose order cannot be rebuilt over the current query: plan from the start.
         choice ??= _options.CostBasedJoinOrderEnabled && _stats is not null
                 && AllBaseTableEstimatesLoaded(database, bound)
-            ? JoinEnumerator.Enumerate(bound.Query.Source, bound, pushdown, database, _stats, _options, leafParameters, leafKeys, _traceEstimates)
+            ? JoinEnumerator.Enumerate(bound.Query.Source, bound, pushdown, database, _stats, _options, leafParameters, leafKeys, _traceEstimates, keepBoundedLeaves)
             : JoinOrderOptimizer.Choose(bound.Query.Source, bound, pushdown);
 
         QuerySource orderedSource = choice.Source;
@@ -162,7 +167,7 @@ internal sealed class JoinQueryPlanner
         // The filter that goes with the tree: a conjunct-mode tree already evaluates the WHERE
         // conjuncts it moved into its joins.
         plan.ExecutionFilter = choice.PostJoinFilter;
-        plan.Root = BuildJoinTree(orderedSource, bound, pushdown, database, _stats, choice.StepEstimates, leafParameters);
+        plan.Root = BuildJoinTree(orderedSource, bound, pushdown, database, _stats, choice.StepEstimates, leafParameters, keepBoundedLeaves);
 
         plan.JoinOrderSearch = new JoinOrderSearchSummary(
             fromCache ? "cached" : choice.Mode != JoinBuildMode.CostBased ? "heuristic" : choice.Greedy ? "greedy" : "cost-based",
@@ -214,7 +219,8 @@ internal sealed class JoinQueryPlanner
         JoinBuildMode mode,
         IReadOnlyList<double>? keyRowsBounds,
         Dictionary<string, ColumnValue>? leafParameters,
-        IReadOnlyDictionary<string, PlanTimeLeafKeys>? leafKeys)
+        IReadOnlyDictionary<string, PlanTimeLeafKeys>? leafKeys,
+        bool keepBoundedLeaves)
     {
         if (mode == JoinBuildMode.WholePredicate)
             return JoinOrderChoice.WholePredicate(
@@ -240,7 +246,7 @@ internal sealed class JoinQueryPlanner
 
         // A replay runs no search, so it costs no step.
         return JoinOrderChoice.CostBased(tree, graph,
-            JoinEnumerator.EstimateSteps(graph, order, tree, bound, pushdown, database, _stats, _options, leafParameters, leafKeys, keyRowsBounds, _traceEstimates),
+            JoinEnumerator.EstimateSteps(graph, order, tree, bound, pushdown, database, _stats, _options, leafParameters, leafKeys, keyRowsBounds, _traceEstimates, keepBoundedLeaves),
             costedJoinSteps: 0);
     }
 
@@ -353,7 +359,8 @@ internal sealed class JoinQueryPlanner
         DatabaseDescriptor database,
         StatisticsManager? stats,
         IReadOnlyDictionary<JoinSource, JoinStepEstimate>? steps = null,
-        Dictionary<string, ColumnValue>? leafParameters = null)
+        Dictionary<string, ColumnValue>? leafParameters = null,
+        bool keepBoundedLeaves = false)
     {
         switch (source)
         {
@@ -368,7 +375,7 @@ internal sealed class JoinQueryPlanner
                     && scanFilter is not null)
                 {
                     PhysicalPlanNode? indexLeaf = TryBuildIndexLeaf(
-                        scanFilter, boundSource, database, stats, leafParameters);
+                        scanFilter, boundSource, database, stats, leafParameters, keepBoundedLeaves);
                     if (indexLeaf is not null)
                         return indexLeaf;
                 }
@@ -395,13 +402,13 @@ internal sealed class JoinQueryPlanner
 
             case JoinSource joinSource:
             {
-                PhysicalPlanNode left = BuildJoinTree(joinSource.Left, bound, pushdown, database, stats, steps, leafParameters);
+                PhysicalPlanNode left = BuildJoinTree(joinSource.Left, bound, pushdown, database, stats, steps, leafParameters, keepBoundedLeaves);
                 JoinStepEstimate? step = steps is not null && steps.TryGetValue(joinSource, out JoinStepEstimate found)
                     ? found
                     : null;
 
                 PhysicalPlanNode joinNode = BuildJoinNode(joinSource, left, step, bound, pushdown, database, stats);
-                AttachRightAccessPath(joinNode, database, stats, leafParameters);
+                AttachRightAccessPath(joinNode, database, stats, leafParameters, keepBoundedLeaves);
 
                 // Kept beside the annotated estimate, not in place of it: EXPLAIN (ANALYZE) prints both,
                 // so a reader can see which of the two models was closer to the rows the join produced.
@@ -434,7 +441,8 @@ internal sealed class JoinQueryPlanner
         PhysicalPlanNode joinNode,
         DatabaseDescriptor database,
         StatisticsManager? stats,
-        Dictionary<string, ColumnValue>? leafParameters)
+        Dictionary<string, ColumnValue>? leafParameters,
+        bool keepBoundedLeaves)
     {
         if (!_options.CostBasedAccessPathEnabled || stats is null)
             return;
@@ -442,11 +450,11 @@ internal sealed class JoinQueryPlanner
         switch (joinNode)
         {
             case HashJoinNode { BuildSource.Table: { } table, BuildExecutionFilter: { } filter } hash:
-                hash.RightPhysicalNode = TryBuildIndexLeaf(filter, table, database, stats, leafParameters);
+                hash.RightPhysicalNode = TryBuildIndexLeaf(filter, table, database, stats, leafParameters, keepBoundedLeaves);
                 break;
 
             case NestedLoopJoinNode { RightSource.Table: { } table, RightExecutionFilter: { } filter } nestedLoop:
-                nestedLoop.RightPhysicalNode = TryBuildIndexLeaf(filter, table, database, stats, leafParameters);
+                nestedLoop.RightPhysicalNode = TryBuildIndexLeaf(filter, table, database, stats, leafParameters, keepBoundedLeaves);
                 break;
         }
     }
@@ -1130,14 +1138,17 @@ internal sealed class JoinQueryPlanner
     ///
     /// Gated on <see cref="CamusDBOptions.CostBasedAccessPathEnabled"/>. Falls back
     /// (returns null) when no usable index is found, the chosen step is a full scan,
-    /// or the range-scan cost exceeds the full-scan breakeven threshold.
+    /// or the range-scan cost exceeds the full-scan breakeven threshold. With
+    /// <paramref name="keepBoundedLeaves"/> the breakeven threshold does not apply
+    /// (<see cref="JoinLeafAccess"/>).
     /// </summary>
     private PhysicalPlanNode? TryBuildIndexLeaf(
         NodeAst scanFilter,
         BoundTableSource boundSource,
         DatabaseDescriptor database,
         StatisticsManager stats,
-        Dictionary<string, ColumnValue>? leafParameters)
+        Dictionary<string, ColumnValue>? leafParameters,
+        bool keepBoundedLeaves)
     {
         // The statement's parameters, clock values included: a placeholder or a clock call becomes a
         // bound at its value, which equals what the residual filter reads.
@@ -1164,9 +1175,9 @@ internal sealed class JoinQueryPlanner
             {
                 long? tableRows = stats.GetRowCountEstimate(database, boundSource.Table);
                 bool breakeven = tableRows is { } trc && trc > 0
-                    && CostEstimator.ShouldPreferFullScan(
+                    && JoinLeafAccess.PrefersFullScan(
                         (IndexRangeScanNode)QueryPlanner.ToScanNode(step.Value),
-                        trc, _options, stats, database, boundSource.Table);
+                        trc, keepBoundedLeaves, _options, stats, database, boundSource.Table);
 
                 if (!breakeven)
                 {
@@ -1220,26 +1231,8 @@ internal sealed class JoinQueryPlanner
             {
                 if (inList.Values.Count == 0) continue;
 
-                TableIndexSchema? bestIndex = null;
-                bool bestIsUnique = false;
-                foreach (TableIndexSchema idx in boundSource.Table.Indexes.Values)
-                {
-                    if (!SchemaElementStateRules.IsReadableIndex(boundSource.Table.Schema, idx)) 
-                        continue;
-
-                    if (idx.Columns.Length == 0 || !string.Equals(idx.Columns[0], inList.ColumnName, StringComparison.Ordinal))
-                        continue;
-                        
-                    bool isUnique = idx.Type == IndexType.Unique;
-                    if (isUnique && idx.Columns.Length != 1) 
-                        continue;
-
-                    if (bestIndex is null || (isUnique && !bestIsUnique))
-                    {
-                        bestIndex = idx;
-                        bestIsUnique = isUnique;
-                    }
-                }
+                TableIndexSchema? bestIndex = IndexScanSelector.TryPickInListIndex(
+                    boundSource.Table, inList.ColumnName, StringComparison.Ordinal, out bool bestIsUnique);
 
                 if (bestIndex is null) 
                     continue;
@@ -1249,7 +1242,7 @@ internal sealed class JoinQueryPlanner
                     trc, database, boundSource.Table, stats);
 
                 long breakeven = (long)Math.Ceiling(trc * CostEstimator.BreakevenFraction);
-                if (inListRows >= breakeven) 
+                if (JoinLeafAccess.ListPrefersFullScan(inListRows, breakeven, keepBoundedLeaves))
                     continue;
 
                 NodeAst? residual = PredicateAnalyzer.BuildExecutionFilter(

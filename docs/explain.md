@@ -209,7 +209,7 @@ One row is emitted per physical plan node, in depth-first order (parent before c
 | `table-scan`             | Full table scan or forced-index scan | `table=<name>` (forced-index adds `, forced-index=<name>`) |
 | `index-lookup`           | Equality on a **unique** index | `index=<name>, key=<value>` |
 | `index-range-scan`       | Range predicate (`<`, `>`, `BETWEEN`), or equality on a **non-unique** index | `index=<name>, from>=<val>, to<<val>` |
-| `index-in-list`          | `x IN (v1, v2, …)` on an indexed column — one index seek per distinct value, results unioned | `index=<name>, values=<n>` (count of seek values) |
+| `index-in-list`          | `x IN (v1, v2, …)`, or `x = v1 OR x = v2 OR …`, where `x` is the first column of an index — one index seek per distinct value, results unioned. The index can be a unique index of several columns, such as a composite primary key: each value then seeks every entry that starts with it | `index=<name>, values=<n>` (count of seek values) |
 | `filter`                 | Residual predicate not satisfied by the chosen index | `<expr>` |
 | `aggregate`              | `GROUP BY` or aggregate functions | `group=[<exprs>], aggs=[<calls>]` |
 | `having-filter`          | `HAVING` clause applied after aggregation | `<expr>` |

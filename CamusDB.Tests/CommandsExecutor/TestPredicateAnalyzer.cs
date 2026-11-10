@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading.Tasks;
 using NUnit.Framework;
 
@@ -77,13 +78,43 @@ public class TestPredicateAnalyzer
     [Test]
     public void Analyze_OrExpression_keepsWholePredicateAsResidual()
     {
-        NodeAst where = SQLParserProcessor.Parse("SELECT * FROM robots WHERE year = 2000 OR year = 2001").extendedOne!;
+        NodeAst where = SQLParserProcessor.Parse("SELECT * FROM robots WHERE year = 2000 OR name = 'x'").extendedOne!;
 
         PredicateAnalysis analysis = PredicateAnalyzer.Analyze(where, parameters: null);
 
         Assert.AreEqual(0, analysis.IndexableComparisons.Count);
+        Assert.AreEqual(0, analysis.InListComparisons.Count);
         Assert.AreEqual(1, analysis.ResidualConjuncts.Count);
         Assert.AreEqual(NodeType.ExprOr, analysis.ResidualConjuncts[0].nodeType);
+    }
+
+    [Test]
+    public void Analyze_OrChainOfEqualitiesOnOneColumn_isAnInList()
+    {
+        NodeAst where = SQLParserProcessor.Parse("SELECT * FROM robots WHERE (year = 2000 OR 2001 = year OR year = 2002) AND name = 'x'").extendedOne!;
+
+        PredicateAnalysis analysis = PredicateAnalyzer.Analyze(where, parameters: null);
+
+        Assert.AreEqual(1, analysis.IndexableComparisons.Count);
+        Assert.AreEqual(0, analysis.ResidualConjuncts.Count);
+        Assert.AreEqual(1, analysis.InListComparisons.Count);
+        Assert.AreEqual("year", analysis.InListComparisons[0].ColumnName);
+        Assert.AreEqual(new long[] { 2000, 2001, 2002 }, analysis.InListComparisons[0].Values.Select(v => v.LongValue).ToArray());
+        Assert.AreEqual(NodeType.ExprOr, analysis.InListComparisons[0].Conjunct.nodeType);
+    }
+
+    [TestCase("year = 2000 OR year > 2001")]
+    [TestCase("year = 2000 OR year = NULL")]
+    [TestCase("year = 2000 OR year = year")]
+    [TestCase("year = 2000 OR (year = 2001 AND name = 'x')")]
+    public void Analyze_OrChainWithAnOperandThatIsNotAColumnEquality_staysResidual(string predicate)
+    {
+        NodeAst where = SQLParserProcessor.Parse("SELECT * FROM robots WHERE " + predicate).extendedOne!;
+
+        PredicateAnalysis analysis = PredicateAnalyzer.Analyze(where, parameters: null);
+
+        Assert.AreEqual(0, analysis.InListComparisons.Count);
+        Assert.AreEqual(1, analysis.ResidualConjuncts.Count);
     }
 
     [Test]

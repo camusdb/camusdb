@@ -243,23 +243,53 @@ internal sealed class TestDescendingIndexSeeks : SharedNodeBaseTest
             "CREATE INDEX v_idx ON t (v DESC)", expected, node);
     }
 
-    // ── Serializable range lock of an IN-list scan ────────────────────────────────────────
+    // ── Serializable range locks of an IN-list scan ────────────────────────────────────────
 
     /// <summary>
-    /// A Serializable read-write IN-list scan locks the index range between its smallest and
-    /// largest value. On a descending index the largest value encodes first; if the bounds stay in
-    /// value order the lock covers an inverted range and fences nothing. An insert inside the range
-    /// must be refused, and one outside it must succeed, which shows the lock is bounded.
+    /// A Serializable read-write IN-list scan locks the range of each list value. On a descending
+    /// index the range of one value must still be non-empty in the index's own key order, or the
+    /// lock fences nothing. An insert of a list value must be refused, and an insert between two
+    /// list values, or outside them, must succeed.
     /// </summary>
     [Test, NonParallelizable]
     [TestCase("DESC")]
     [TestCase("ASC")]
-    public async Task SerializableInListScan_LocksTheRangeBetweenItsValues(string direction)
+    public async Task SerializableInListScan_LocksEachOfItsValues(string direction)
     {
         (string dbname, DatabaseDescriptor db, CommandExecutor executor) = await Setup("int64", unique: false);
         await IndexDifferentialProbe.ExecDDL(executor, db, dbname, $"CREATE INDEX v_idx ON t (v {direction})");
 
-        string query = "SELECT id FROM t WHERE v IN (5, 12)";
+        await AssertInListLocks(executor, db, dbname, "SELECT id FROM t WHERE v IN (5, 12)", refused: [5, 12], allowed: [8, 17]);
+    }
+
+    /// <summary>
+    /// A list with more values than the lock escalation threshold takes one lock over the span from
+    /// its smallest to its largest value. On a descending index the largest value encodes first; if
+    /// the bounds stay in value order the lock covers an inverted range and fences nothing. An
+    /// insert inside the span must be refused, and one outside it must succeed, which shows the
+    /// lock is bounded.
+    /// </summary>
+    [Test, NonParallelizable]
+    [TestCase("DESC")]
+    [TestCase("ASC")]
+    public async Task SerializableLongInListScan_LocksTheSpanOfItsValues(string direction)
+    {
+        (string dbname, DatabaseDescriptor db, CommandExecutor executor) = await Setup("int64", unique: false);
+        await IndexDifferentialProbe.ExecDDL(executor, db, dbname, $"CREATE INDEX v_idx ON t (v {direction})");
+
+        // A long list needs a distinct count to pass the list cost gate.
+        TableDescriptor t = await executor.OpenTable(new OpenTableTicket(dbname, "t"));
+        await executor.Statistics.SetNdvAsync(db, t, columnNdv: new Dictionary<string, long> { ["v"] = 5_000 }, keyNdv: null);
+
+        int absentValues = CamusDBOptions.Default.LockEscalationThreshold + 10;
+        string list = "5, 12, " + string.Join(", ", Enumerable.Range(1000, absentValues));
+
+        await AssertInListLocks(executor, db, dbname, $"SELECT id FROM t WHERE v IN ({list})", refused: [8, 500], allowed: [3, 2000]);
+    }
+
+    private static async Task AssertInListLocks(
+        CommandExecutor executor, DatabaseDescriptor db, string dbname, string query, long[] refused, long[] allowed)
+    {
         string[] nodes = await IndexDifferentialProbe.ExplainNodes(executor, db, dbname, query);
         Assert.IsTrue(nodes.Any(n => n.StartsWith("index-in-list", StringComparison.Ordinal)),
             $"Expected an index-in-list plan; got: {string.Join(", ", nodes)}");
@@ -268,19 +298,25 @@ internal sealed class TestDescendingIndexSeeks : SharedNodeBaseTest
         try
         {
             (_, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(new ExecuteSQLTicket(scanner, dbname, query, null));
-            Assert.AreEqual(4, (await cursor.ToListAsync()).Count, "Pre-check: the scan must see both values");
+            Assert.AreEqual(4, (await cursor.ToListAsync()).Count, "Pre-check: the scan must see both stored values");
 
-            KvTransaction inside = await db.Transactions.BeginAsync();
-            CamusDBException? ex = Assert.ThrowsAsync<CamusDBException>(() => executor.ExecuteNonSQLQuery(
-                new ExecuteSQLTicket(inside, dbname, "INSERT INTO t (id, v, w) VALUES (gen_id(), 8, 1000)", null)));
-            Assert.AreEqual(CamusDBErrorCodes.TransactionMustRetry, ex?.Code,
-                "An insert between the IN values must be refused while the Serializable scan holds its range lock");
-            await db.Transactions.RollbackAsync(inside);
+            foreach (long value in refused)
+            {
+                KvTransaction inside = await db.Transactions.BeginAsync();
+                CamusDBException? ex = Assert.ThrowsAsync<CamusDBException>(() => executor.ExecuteNonSQLQuery(
+                    new ExecuteSQLTicket(inside, dbname, $"INSERT INTO t (id, v, w) VALUES (gen_id(), {value}, 1000)", null)));
+                Assert.AreEqual(CamusDBErrorCodes.TransactionMustRetry, ex?.Code,
+                    $"An insert of v = {value} must be refused while the Serializable scan holds its lock");
+                await db.Transactions.RollbackAsync(inside);
+            }
 
-            KvTransaction outside = await db.Transactions.BeginAsync();
-            await executor.ExecuteNonSQLQuery(
-                new ExecuteSQLTicket(outside, dbname, "INSERT INTO t (id, v, w) VALUES (gen_id(), 17, 1001)", null));
-            await db.Transactions.CommitAsync(outside);
+            foreach (long value in allowed)
+            {
+                KvTransaction outside = await db.Transactions.BeginAsync();
+                await executor.ExecuteNonSQLQuery(
+                    new ExecuteSQLTicket(outside, dbname, $"INSERT INTO t (id, v, w) VALUES (gen_id(), {value}, 1001)", null));
+                await db.Transactions.CommitAsync(outside);
+            }
         }
         finally
         {
