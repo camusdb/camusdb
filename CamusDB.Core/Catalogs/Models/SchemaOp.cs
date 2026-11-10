@@ -266,5 +266,38 @@ public enum SchemaOp
     /// from <c>DROP EXTENSION</c>. The proposer refused the statement while any object depended on
     /// the extension.
     /// </summary>
-    DropExtension = 33
+    DropExtension = 33,
+
+    /// <summary>
+    /// Add an inline SQL function to the database (payload: <c>SchemaFunctionPayload</c>), from
+    /// <c>CREATE FUNCTION ... LANGUAGE csharp</c>. The payload carries the source text of the body and
+    /// its hash, never compiled code: the proposer compiled the body to check it, and every node
+    /// compiles it again at its first call. The apply stores the record only, so it never runs the
+    /// compiler inside the commit pipeline. Touches no relation, so it bumps no
+    /// <c>TableSchema.Version</c> and fences no writer.
+    /// </summary>
+    CreateFunction = 34,
+
+    /// <summary>
+    /// Replace the record of an inline function with another body or signature (payload:
+    /// <c>SchemaFunctionPayload</c>), from <c>CREATE OR REPLACE FUNCTION</c>. The function keeps its
+    /// creation time and its owner, and its generation goes up by one. Every object that calls the
+    /// function sees the new body at its next evaluation.
+    /// </summary>
+    ReplaceFunction = 35,
+
+    /// <summary>
+    /// Remove an inline function from the database (payload: <c>SchemaDropFunctionPayload</c>), from
+    /// <c>DROP FUNCTION</c>. The proposer refused the statement while a default, a CHECK constraint, a
+    /// view or a materialized view called the function.
+    /// </summary>
+    DropFunction = 36,
+
+    /// <summary>
+    /// Give an inline function to another owner (payload: <c>SchemaSetFunctionOwnerPayload</c>), from
+    /// <c>ALTER FUNCTION ... OWNER TO</c>. Changes who may replace and drop the function, and nothing
+    /// about what it computes.
+    /// </summary>
+    SetFunctionOwner = 37
 }
+

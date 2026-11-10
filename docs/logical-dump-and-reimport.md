@@ -87,6 +87,25 @@ the dump also writes `DROP EXTENSION IF EXISTS` for each one, after the tables a
 a target server of this release or later. Triggers are not carried
 (see the table below). See [csharp-extensions.md](csharp-extensions.md#installing-an-extension-in-a-database).
 
+**Inline functions.** The dump writes the `CREATE FUNCTION ... LANGUAGE csharp AS $$ ... $$` statement
+of each inline function of the database, as `SHOW CREATE FUNCTION` prints it, after the extensions and
+before the first table, so the CHECK constraints and column defaults that call a function resolve when
+they are created. The source of a function is in the database, so the dump carries the whole function;
+the target server compiles it again. Three things follow:
+
+- The target server must accept the statement: set `inline_functions_enabled: true` on every node
+  before you load the dump (see [csharp-extensions.md](csharp-extensions.md#inline-functions)).
+- The user who loads the dump owns the functions it creates. For a function whose owner was another
+  user, the dump also writes `ALTER FUNCTION name OWNER TO user`. That statement needs the user to
+  exist on the target, which is why the users are restored first, and the loading user to be a
+  superuser.
+- A function body is between dollar quotes and holds semicolons. Load the dump with a client that
+  reads the text between two equal dollar quotes as one statement.
+
+Reading the functions needs `SHOW FUNCTIONS`, which requires `SELECT` or `CREATE` on the database; a
+dump taken by a user with neither carries no functions and says so. With `--add-drop-table` the dump
+also writes `DROP FUNCTION IF EXISTS` for each one, after the tables are dropped.
+
 **Foreign keys and the load order.** A `CREATE TABLE` with a foreign key fails when its parent table
 does not exist yet, and a child `INSERT` fails when its parent row is not loaded yet. The
 `WITHOUT INDEXES` form, which `--defer-indexes` uses, keeps the foreign keys too. Load a dump with

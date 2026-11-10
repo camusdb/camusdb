@@ -12,6 +12,7 @@ using System.Linq;
 using CamusDB.Core;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.Catalogs.Replication;
+using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.Serializer;
 
 using Kommander.Time;
@@ -42,6 +43,24 @@ public sealed class TestSchemaChangeLogEntryCodec
         ],
         InstalledAt = new HLCTimestamp(1, 2, 3),
         UpdatedAt = new HLCTimestamp(4, 5, 6),
+    };
+
+    private static InlineFunctionDefinition FunctionRecord() => new()
+    {
+        Name = "slugify",
+        Parameters = [new InlineFunctionParameter { Name = "s", Type = ColumnType.String }, new InlineFunctionParameter { Name = "tags", Type = ColumnType.Array, ElementType = ColumnType.String }],
+        ReturnType = ColumnType.Array,
+        ReturnElementType = ColumnType.String,
+        NullInput = InlineFunctionNullInput.Called,
+        Source = "return s.Split('-');",
+        SourceSha256 = "ab12",
+        LanguageVersion = "CSharp12",
+        RuleRevision = 1,
+        Owner = "root",
+        OwnerId = "u-1",
+        CreatedAt = new HLCTimestamp(1, 2, 3),
+        UpdatedAt = new HLCTimestamp(4, 5, 6),
+        Generation = 3,
     };
 
     private static IEnumerable<TestCaseData> EveryOp()
@@ -180,6 +199,17 @@ public sealed class TestSchemaChangeLogEntryCodec
         yield return (SchemaOp.CreateExtension, new SchemaExtensionPayload { Extension = ExtensionRecord() });
         yield return (SchemaOp.UpdateExtension, new SchemaExtensionPayload { Extension = ExtensionRecord(), FromVersion = "0.9.0" });
         yield return (SchemaOp.DropExtension, new SchemaDropExtensionPayload { ExtensionName = "geo", Version = "1.2.0", InstalledAt = new HLCTimestamp(1, 2, 3) });
+        yield return (SchemaOp.CreateFunction, new SchemaFunctionPayload { Function = FunctionRecord() });
+        yield return (SchemaOp.ReplaceFunction, new SchemaFunctionPayload { Function = FunctionRecord(), FromGeneration = 2 });
+        yield return (SchemaOp.DropFunction, new SchemaDropFunctionPayload { FunctionName = "slugify", CreatedAt = new HLCTimestamp(1, 2, 3) });
+        yield return (SchemaOp.SetFunctionOwner, new SchemaSetFunctionOwnerPayload
+        {
+            FunctionName = "slugify",
+            CreatedAt = new HLCTimestamp(1, 2, 3),
+            Owner = "analyst",
+            OwnerId = "u-7",
+            UpdatedAt = new HLCTimestamp(4, 5, 6),
+        });
         yield return (SchemaOp.AlterSequence, new SchemaAlterSequencePayload
         {
             SequenceId = "A2",

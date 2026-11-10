@@ -145,6 +145,11 @@ internal sealed class SchemaCheckpointWriter
             {
                 await SchemaMetaStore.PersistSchemaExtensionAsync(database, ExtensionDeltaApplier.GetExtensionName(entry), tx).ConfigureAwait(false);
             }
+            // Function ops write the function meta key family, and are checked first for the same reason.
+            else if (InlineFunctionDeltaApplier.IsFunctionOp(entry.Op))
+            {
+                await SchemaMetaStore.PersistSchemaFunctionAsync(database, InlineFunctionDeltaApplier.GetFunctionName(entry), tx).ConfigureAwait(false);
+            }
             else if (entry.Op is SchemaOp.CreateSequence or SchemaOp.RenameSequence or SchemaOp.AlterSequence)
             {
                 SequenceSchema? sequenceSchema = ResolveEntrySequence(database, entry);
@@ -411,9 +416,12 @@ internal sealed class SchemaCheckpointWriter
             // reopen reads. A record on disk that memory no longer holds is deleted: a replayed drop
             // whose proposer never checkpointed it would otherwise come back as installed on reopen,
             // and the log, which resumes after this checkpoint's version, would never remove it again.
+            // Inline functions follow the same rule, for the same reason, in the same scan.
             IReadOnlyDictionary<string, ExtensionDefinition> installed = database.Schema.Extensions;
+            IReadOnlyDictionary<string, InlineFunctionDefinition> functions = database.Schema.Functions;
             List<string> staleExtensionKeys = [];
             string extensionKeyPrefix = MetaKeys.ExtensionKeyPrefix(database.Id);
+            string functionKeyPrefix = MetaKeys.FunctionKeyPrefix(database.Id);
 
             // A plain read of the latest committed keys, outside the write transaction (no transaction
             // id), so the scan adds nothing to what that transaction reads or locks.
@@ -423,6 +431,10 @@ internal sealed class SchemaCheckpointWriter
             {
                 if (stored.Value is not null && key.StartsWith(extensionKeyPrefix, StringComparison.Ordinal) &&
                     !installed.ContainsKey(key[extensionKeyPrefix.Length..]))
+                    staleExtensionKeys.Add(key);
+
+                if (stored.Value is not null && key.StartsWith(functionKeyPrefix, StringComparison.Ordinal) &&
+                    !functions.ContainsKey(key[functionKeyPrefix.Length..]))
                     staleExtensionKeys.Add(key);
             }
 
@@ -434,6 +446,13 @@ internal sealed class SchemaCheckpointWriter
                 byte[] extensionBytes = MetaJsonSerializer.Serialize(extension, MetaJsonContext.Default.ExtensionDefinition);
                 await MetaKeyWriter.WriteMetaKey(kahuna, tx, MetaKeys.ExtensionKey(database.Id, extension.Name), extensionBytes).ConfigureAwait(false);
             }
+
+            foreach (InlineFunctionDefinition function in functions.Values)
+            {
+                byte[] functionBytes = MetaJsonSerializer.Serialize(function, MetaJsonContext.Default.InlineFunctionDefinition);
+                await MetaKeyWriter.WriteMetaKey(kahuna, tx, MetaKeys.FunctionKey(database.Id, function.Name), functionBytes).ConfigureAwait(false);
+            }
+
 
             // Reconciled here, in the transaction that also rewrites the table blobs, and before any
             // of those blobs can overwrite a pre-swap table meta. A replay that recreated the live

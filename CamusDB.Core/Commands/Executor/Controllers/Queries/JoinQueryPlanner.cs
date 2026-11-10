@@ -126,7 +126,7 @@ internal sealed class JoinQueryPlanner
         JoinOrderChoice? choice = null;
         // Read once, before the lookup, and used again for the store: a plan built while an
         // extension install or update lands is then filed under the stamp it was built with.
-        long extensionStamp = database.Schema.ExtensionCatalog.Stamp;
+        long extensionStamp = database.Schema.CallableStamp;
 
         bool fromCache = false;
 

@@ -6,6 +6,7 @@
 %option stack, minimize, parser, verbose, persistbuffer, noembedbuffers, unicode
 
 %x BLOCKCOMMENT
+%x DOLLARQUOTE
 
 TDatabases      (D|d)(A|a)(T|t)(A|a)(B|b)(A|a)(S|s)(E|e)(S|s)
 TDatabase       (D|d)(A|a)(T|t)(A|a)(B|b)(A|a)(S|s)(E|e)
@@ -175,6 +176,9 @@ EscString       (E|e)\"({StrChs}|{EscChr}|{OctEsc}|{HexEsc}|{UniEsc}|{UNIESC}|\"
 EscStringSingle (E|e)\'({StrChs2}|{EscChr}|{OctEsc}|{HexEsc}|{UniEsc}|{UNIESC}|\'\')*\'
 BytesLiteral    (X|x)\'{HexDig}*\'
 Identifier      [a-zA-Z_][a-zA-Z0-9_]*
+/* The quote of a dollar-quoted text: $$ or $tag$. The text between two equal quotes is raw: no
+   escape, and it may hold quotes, semicolons, comments and line breaks. */
+DollarQuote     \$([a-zA-Z_][a-zA-Z0-9_]*)?\$
 EscIdentifier   (`)[a-zA-Z_][a-zA-Z0-9_]*(`)
 Placeholder     (@)([a-zA-Z0-9_]+)
 IndexNamePart   (~)?{Identifier}
@@ -499,7 +503,17 @@ TSequence       (S|s)(E|e)(Q|q)(U|u)(E|e)(N|n)(C|c)(E|e)
 
 {TAdd} { return (int)Token.TADD; }
 
+/* Dollar-quoted text, as in CREATE FUNCTION ... AS $$ body $$. The opening quote starts the state and
+   the same quote ends it. Inside, a quote with another tag is text; only its last '$' is given back
+   to the scanner, because that '$' can start the closing quote ("$a$$" holds "$a" and then "$$").
+   The catch-all rule at the end does not apply in this state, so every character is kept. */
+{DollarQuote}               { BeginDollarQuote(yytext); yy_push_state(DOLLARQUOTE); }
+<DOLLARQUOTE>{DollarQuote}  { if (EndsDollarQuote(yytext)) { yy_pop_state(); yylval.s = TakeDollarQuote(); return (int)Token.TDOLLARQUOTED; } AppendDollarQuote(yytext.Substring(0, yyleng - 1)); yyless(yyleng - 1); }
+<DOLLARQUOTE>[^$]+          { AppendDollarQuote(yytext); }
+<DOLLARQUOTE>"$"            { AppendDollarQuote(yytext); }
+
 "/*"                        { yy_push_state(BLOCKCOMMENT); }
+
 <BLOCKCOMMENT>"*/"          { yy_pop_state(); }
 <BLOCKCOMMENT>[^*\n]+       { /* skip block comment body */ }
 <BLOCKCOMMENT>"*"           { /* lone star, not followed by slash */ }

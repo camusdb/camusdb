@@ -450,6 +450,13 @@ public sealed class CommandExecutor : IAsyncDisposable
     internal CamusDB.Core.Extensions.ExtensionScopeFrames ExtensionScopes { get; }
 
     /// <summary>
+    /// What this engine needs to run inline SQL functions (<c>CREATE FUNCTION ... LANGUAGE csharp</c>):
+    /// the compiler, the compiled code, and the per-call budgets it was built with. Built once in the
+    /// constructor from restart-class options, and disposed with the engine, which unloads the code.
+    /// </summary>
+    internal CamusDB.Core.Extensions.Inline.InlineFunctionRuntime InlineFunctions { get; }
+
+    /// <summary>
     /// Makes the frame of <paramref name="databaseName"/> on this engine the function scope of the
     /// current flow, and returns it. Called first thing in each entry point that can evaluate an
     /// expression, in the method's synchronous part, so the scope also reaches the caller that later
@@ -470,7 +477,7 @@ public sealed class CommandExecutor : IAsyncDisposable
     internal CamusDB.Core.Extensions.ExtensionScopeFrame EnterExtensionScope(DatabaseDescriptor database)
     {
         CamusDB.Core.Extensions.ExtensionScopeFrame frame = ExtensionScopes.For(database.Name);
-        frame.Attach(database.Name, database.Schema.ExtensionCatalog);
+        frame.Attach(database.Name, database.Schema.ExtensionCatalog, database.Schema.FunctionCatalog);
         CamusDB.Core.Extensions.ExtensionFunctionScope.Enter(frame);
         return frame;
     }
@@ -500,7 +507,8 @@ public sealed class CommandExecutor : IAsyncDisposable
         // First, before any background work starts: a node told to load extensions refuses to start
         // without them, and a refusal here leaves nothing half-running.
         Extensions = CamusDB.Core.Extensions.ExtensionLoader.Load(options, logger);
-        ExtensionScopes = new CamusDB.Core.Extensions.ExtensionScopeFrames(Extensions, logger);
+        InlineFunctions = new CamusDB.Core.Extensions.Inline.InlineFunctionRuntime(options, logger);
+        ExtensionScopes = new CamusDB.Core.Extensions.ExtensionScopeFrames(Extensions, InlineFunctions, logger);
         this.schemaDdlForwarder = schemaDdlForwarder;
         this.isClusterMode = isClusterMode;
         this.sharedNode = sharedNode;
@@ -1999,6 +2007,10 @@ public sealed class CommandExecutor : IAsyncDisposable
 
         await databaseCloser.DisposeAsync();
         await sqlParserCache.DisposeAsync().ConfigureAwait(false);
+
+        // After the databases closed, so nothing can call a function whose code is asked to unload.
+        InlineFunctions.Dispose();
+
 
         // The Kommander/Kahuna meters are static, so a listener that outlived its engine would keep
         // observing for the life of the process — which the test suite, building many engines, would

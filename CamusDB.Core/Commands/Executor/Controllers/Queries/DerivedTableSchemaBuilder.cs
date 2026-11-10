@@ -430,7 +430,34 @@ internal static class DerivedTableSchemaBuilder
         new("signatures", ColumnType.String),
     ];
 
+    // SHOW FUNCTIONS: one row per inline function of the current database, plus one row per unit of
+    // compiled code that this node asked to unload and that is still in memory. state is what this
+    // node did with the function: "not compiled" (no statement here called it yet), "compiled",
+    // "failed: <reason>" (this node cannot run it), or "unloading" for the code of a function that
+    // was dropped or replaced and that a running statement still holds. Every column but name and
+    // state is NULL for an unloading row.
+    internal static readonly IReadOnlyList<DerivedColumnSchema> ShowFunctionsSchema =
+    [
+        new("name",          ColumnType.String),
+        new("arguments",     ColumnType.String),
+        new("returns",       ColumnType.String),
+        new("null_input",    ColumnType.String),
+        new("language",      ColumnType.String),
+        new("owner",         ColumnType.String),
+        new("generation",    ColumnType.Integer64),
+        new("source_sha256", ColumnType.String),
+        new("rule_revision", ColumnType.Integer64),
+        new("state",         ColumnType.String),
+    ];
+
+    internal static readonly IReadOnlyList<DerivedColumnSchema> ShowCreateFunctionSchema =
+    [
+        new("function", ColumnType.String),
+        new("create function", ColumnType.String),
+    ];
+
     // SHOW CLUSTER SETTINGS: one row per overlay entry the cluster currently carries — the keys a
+
     // SET CLUSTER SETTING changed and no RESET has dropped. Values are the scalar text the overlay
     // stores (the same spelling config.yml would use); each key's effective per-node value, with
     // provenance, is SHOW VARIABLES' job.

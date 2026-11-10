@@ -15,6 +15,33 @@ internal partial class sqlScanner
 {
 	public string? YYError { get; set; }    
 
+	/// <summary>The opening quote of the dollar-quoted text the scanner is inside, such as <c>$$</c> or <c>$fn$</c>.</summary>
+	private string? dollarQuote;
+
+	/// <summary>The raw text read so far between the dollar quotes.</summary>
+	private System.Text.StringBuilder? dollarText;
+
+	/// <summary>Starts a dollar-quoted text: remembers the quote that must close it.</summary>
+	private void BeginDollarQuote(string quote)
+	{
+		dollarQuote = quote;
+		dollarText = new System.Text.StringBuilder();
+	}
+
+	/// <summary>True when <paramref name="quote"/> is the quote that opened the text. Tags compare exactly: <c>$A$</c> does not close <c>$a$</c>.</summary>
+	private bool EndsDollarQuote(string quote) => string.Equals(quote, dollarQuote, StringComparison.Ordinal);
+
+	private void AppendDollarQuote(string text) => dollarText!.Append(text);
+
+	/// <summary>Returns the text between the quotes, exactly as written, and leaves the state clean for the next token.</summary>
+	private string TakeDollarQuote()
+	{
+		string text = dollarText!.ToString();
+		dollarQuote = null;
+		dollarText = null;
+		return text;
+	}
+
 	/// <summary>
 	/// Intercepts the yyerror method. Uses first-error-wins: if <see cref="YYError"/> is already
 	/// set (e.g. by <see cref="yywrap"/> detecting an unterminated block comment), the subsequent
@@ -81,6 +108,9 @@ internal partial class sqlScanner
 	{
 		if (currentScOrd == BLOCKCOMMENT)
 			yyerror("unterminated block comment");
+		else if (currentScOrd == DOLLARQUOTE)
+			yyerror("dollar-quoted text starting with " + dollarQuote + " does not close");
 		return true;
 	}
+
 }

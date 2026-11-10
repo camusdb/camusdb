@@ -62,6 +62,13 @@ internal static class ExtensionFunctionScope
     public static InstalledExtensionSet? CurrentInstalled => current.Value?.Installed;
 
     /// <summary>
+    /// The inline SQL functions of the database the current statement runs in, or <c>null</c> with no
+    /// frame. A flow with no frame, or a frame with no database, resolves no inline function, so a
+    /// missing scope fails closed here too.
+    /// </summary>
+    public static Inline.InlineFunctionSet? CurrentInline => current.Value?.Inline;
+
+    /// <summary>
     /// Makes <paramref name="frame"/> the scope of this flow. Skips the write when the flow already
     /// holds the same frame, so repeated entries from one request cost nothing.
     /// </summary>
@@ -74,21 +81,28 @@ internal static class ExtensionFunctionScope
 
 /// <summary>
 /// The function scope of a statement: the engine's <see cref="ExtensionRegistry"/> and, once the
-/// database is open, that database's <see cref="InstalledExtensionCatalog"/>. Created by
-/// <see cref="ExtensionScopeFrames"/>; see <see cref="ExtensionFunctionScope"/> for how it travels.
+/// database is open, that database's <see cref="InstalledExtensionCatalog"/> and its
+/// <see cref="Inline.InlineFunctionCatalog"/>. Created by <see cref="ExtensionScopeFrames"/>; see
+/// <see cref="ExtensionFunctionScope"/> for how it travels.
 ///
-/// <para>Holds the small catalog object, not the database descriptor, so a frame that outlives its
+/// <para>Holds the small catalog objects, not the database descriptor, so a frame that outlives its
 /// database pins no tables or storage.</para>
 /// </summary>
 internal sealed class ExtensionScopeFrame
 {
     private readonly ExtensionScopeFrames? owner;
 
+    private readonly Inline.InlineFunctionRuntime? inlineRuntime;
+
     private volatile InstalledExtensionCatalog? catalog;
 
-    internal ExtensionScopeFrame(ExtensionScopeFrames? owner, ExtensionRegistry registry, string? databaseName, ILogger? logger)
+    private volatile Inline.InlineFunctionCatalog? functions;
+
+    internal ExtensionScopeFrame(
+        ExtensionScopeFrames? owner, ExtensionRegistry registry, Inline.InlineFunctionRuntime? inlineRuntime, string? databaseName, ILogger? logger)
     {
         this.owner = owner;
+        this.inlineRuntime = inlineRuntime;
         Registry = registry;
         DatabaseName = databaseName;
         Logger = logger;
@@ -107,17 +121,29 @@ internal sealed class ExtensionScopeFrame
         catalog?.Resolve(Registry, DatabaseName, Logger) ?? InstalledExtensionSet.Empty;
 
     /// <summary>
+    /// The inline functions of the attached database, bound for this engine. Empty before a database
+    /// is attached and for an engine built without an inline-function runtime.
+    /// </summary>
+    public Inline.InlineFunctionSet Inline =>
+        inlineRuntime is { } runtime && functions is { } attached
+            ? attached.Resolve(runtime, DatabaseName)
+            : CamusDB.Core.Extensions.Inline.InlineFunctionSet.Empty;
+
+    /// <summary>
     /// Attaches the opened database. A no-op unless <paramref name="databaseName"/> is the database
     /// this frame was entered for, so opening another database inside a statement does not change the
     /// statement's scope. The first attach also keeps the frame for reuse by later statements.
     /// </summary>
-    public void Attach(string databaseName, InstalledExtensionCatalog databaseCatalog)
+    public void Attach(string databaseName, InstalledExtensionCatalog databaseCatalog, Inline.InlineFunctionCatalog functionCatalog)
     {
         if (!string.Equals(DatabaseName, databaseName, StringComparison.OrdinalIgnoreCase))
             return;
 
         if (!ReferenceEquals(catalog, databaseCatalog))
             catalog = databaseCatalog;
+
+        if (!ReferenceEquals(functions, functionCatalog))
+            functions = functionCatalog;
 
         owner?.Keep(this);
     }
@@ -138,12 +164,19 @@ internal sealed class ExtensionScopeFrames
 
     private readonly ExtensionScopeFrame noDatabase;
 
-    public ExtensionScopeFrames(ExtensionRegistry registry, ILogger? logger)
+    public ExtensionScopeFrames(ExtensionRegistry registry, Inline.InlineFunctionRuntime? inlineFunctions, ILogger? logger)
     {
         this.registry = registry;
         this.logger = logger;
-        noDatabase = new ExtensionScopeFrame(null, registry, null, logger);
+        InlineFunctions = inlineFunctions;
+        noDatabase = new ExtensionScopeFrame(null, registry, inlineFunctions, null, logger);
     }
+
+    /// <summary>
+    /// The engine's runtime for inline SQL functions: its compiler, its compiled units and the limits
+    /// it was built with. Null only for a frame set built without one (a test of extensions alone).
+    /// </summary>
+    public Inline.InlineFunctionRuntime? InlineFunctions { get; }
 
     /// <summary>The frame for a statement on <paramref name="databaseName"/>; a new, not yet kept frame for a name not seen before.</summary>
     public ExtensionScopeFrame For(string? databaseName)
@@ -153,8 +186,18 @@ internal sealed class ExtensionScopeFrames
 
         return frames.TryGetValue(databaseName, out ExtensionScopeFrame? frame)
             ? frame
-            : new ExtensionScopeFrame(this, registry, databaseName, logger);
+            : new ExtensionScopeFrame(this, registry, InlineFunctions, databaseName, logger);
     }
+
+    /// <summary>
+    /// The inline functions of <paramref name="database"/> bound for this engine, for code that holds
+    /// the database and needs no ambient scope (function DDL, <c>SHOW FUNCTIONS</c>).
+    /// </summary>
+    public Inline.InlineFunctionSet ResolveInline(CommandsExecutor.Models.DatabaseDescriptor database) =>
+        InlineFunctions is { } runtime
+            ? database.Schema.FunctionCatalog.Resolve(runtime, database.Name)
+            : CamusDB.Core.Extensions.Inline.InlineFunctionSet.Empty;
+
 
     /// <summary>
     /// The installed extensions of <paramref name="database"/> resolved for this engine, for code that

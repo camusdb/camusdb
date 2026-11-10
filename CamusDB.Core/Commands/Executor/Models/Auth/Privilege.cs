@@ -47,8 +47,13 @@ public enum Privilege
     /// <summary><c>INDEX</c> — create/drop indexes in scope.</summary>
     Index = 1 << 7,
 
-    /// <summary><c>CREATE</c> — database-level create (e.g. create the scoped database's objects).</summary>
+    /// <summary>
+    /// <c>CREATE</c> — create the objects of the scoped database that are not relations. Today that
+    /// is <c>CREATE FUNCTION</c> (an inline SQL function). Tables, views and sequences need
+    /// <see cref="CreateTable"/>.
+    /// </summary>
     Create = 1 << 8,
+
 
     /// <summary>
     /// The union of every object privilege above. Frozen at compile time — see the type remarks for

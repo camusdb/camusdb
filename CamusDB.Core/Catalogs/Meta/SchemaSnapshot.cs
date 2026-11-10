@@ -41,6 +41,10 @@ internal sealed class SchemaSnapshot
     /// <summary>Installed C# extensions keyed by name, case-insensitive, matching <see cref="Schema.Extensions"/>.</summary>
     public Dictionary<string, ExtensionDefinition> Extensions = new(StringComparer.OrdinalIgnoreCase);
 
+    /// <summary>Inline SQL functions keyed by name, case-insensitive, matching <see cref="Schema.Functions"/>.</summary>
+    public Dictionary<string, InlineFunctionDefinition> Functions = new(StringComparer.OrdinalIgnoreCase);
+
+
     /// <summary>The legacy system blob, or null when the key is absent.</summary>
     public SystemSchema? System;
 }

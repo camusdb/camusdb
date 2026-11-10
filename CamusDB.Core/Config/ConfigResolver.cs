@@ -227,6 +227,16 @@ public static class ConfigResolver
         ExtensionAssemblies = [.. config.ExtensionAssemblies],
         UnsafeExtensionAssemblies = [.. config.UnsafeExtensionAssemblies],
 
+        InlineFunctionsEnabled = config.InlineFunctionsEnabled,
+        InlineFunctionCallTimeoutMs = config.InlineFunctionCallTimeoutMs,
+        InlineFunctionAllocationLimitBytes = config.InlineFunctionAllocationLimitBytes,
+        InlineFunctionArrayLimit = config.InlineFunctionArrayLimit,
+        InlineFunctionSourceLimitBytes = config.InlineFunctionSourceLimitBytes,
+        InlineFunctionCompileTimeoutMs = config.InlineFunctionCompileTimeoutMs,
+        InlineFunctionCompileConcurrency = config.InlineFunctionCompileConcurrency,
+        MaxInlineFunctionsPerDatabase = config.MaxInlineFunctionsPerDatabase,
+
+
         StatsFlushIntervalMs = config.StatsFlushIntervalMs,
         StatsAnalyzeSampleRows = config.StatsAnalyzeSampleRows,
         StatsHistogramBuckets = config.StatsHistogramBuckets,

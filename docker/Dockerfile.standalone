@@ -17,6 +17,7 @@ ARG TARGETARCH
 
 RUN rm -fr /src && mkdir -p /src
 COPY CamusDB.Extensions.Abstractions /src/CamusDB.Extensions.Abstractions/
+COPY CamusDB.Extensions.Inline /src/CamusDB.Extensions.Inline/
 COPY CamusDB.Core /src/CamusDB.Core/
 COPY CamusDB.Grpc.Contracts /src/CamusDB.Grpc.Contracts/
 COPY CamusDB /src/CamusDB/

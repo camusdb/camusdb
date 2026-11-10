@@ -734,7 +734,72 @@ internal static class SchemaChangeEntryFactory
         };
     }
 
+    /// <summary>Adds an inline function: the complete record the proposer built and compiled.</summary>
+    internal static SchemaChangeLogEntry CreateFunctionEntry(DatabaseDescriptor database, InlineFunctionDefinition function)
+    {
+        return new()
+        {
+            Database = database.Id,
+            FromVersion = database.Schema.SchemaVersion,
+            ToVersion = database.Schema.SchemaVersion + 1,
+            Op = SchemaOp.CreateFunction,
+            Payload = SchemaChangeLogEntryCodec.EncodePayload(new SchemaFunctionPayload { Function = function })
+        };
+    }
+
+    /// <summary>Replaces the record of an inline function that is at <paramref name="fromGeneration"/>.</summary>
+    internal static SchemaChangeLogEntry ReplaceFunctionEntry(DatabaseDescriptor database, InlineFunctionDefinition function, long fromGeneration)
+    {
+        return new()
+        {
+            Database = database.Id,
+            FromVersion = database.Schema.SchemaVersion,
+            ToVersion = database.Schema.SchemaVersion + 1,
+            Op = SchemaOp.ReplaceFunction,
+            Payload = SchemaChangeLogEntryCodec.EncodePayload(new SchemaFunctionPayload { Function = function, FromGeneration = fromGeneration })
+        };
+    }
+
+    /// <summary>Removes an inline function, identified by the record the proposer saw.</summary>
+    internal static SchemaChangeLogEntry DropFunctionEntry(DatabaseDescriptor database, InlineFunctionDefinition function)
+    {
+        return new()
+        {
+            Database = database.Id,
+            FromVersion = database.Schema.SchemaVersion,
+            ToVersion = database.Schema.SchemaVersion + 1,
+            Op = SchemaOp.DropFunction,
+            Payload = SchemaChangeLogEntryCodec.EncodePayload(new SchemaDropFunctionPayload
+            {
+                FunctionName = function.Name,
+                CreatedAt = function.CreatedAt
+            })
+        };
+    }
+
+    /// <summary>Gives an inline function to another owner.</summary>
+    internal static SchemaChangeLogEntry SetFunctionOwnerEntry(
+        DatabaseDescriptor database, InlineFunctionDefinition function, string? owner, string? ownerId, HLCTimestamp updatedAt)
+    {
+        return new()
+        {
+            Database = database.Id,
+            FromVersion = database.Schema.SchemaVersion,
+            ToVersion = database.Schema.SchemaVersion + 1,
+            Op = SchemaOp.SetFunctionOwner,
+            Payload = SchemaChangeLogEntryCodec.EncodePayload(new SchemaSetFunctionOwnerPayload
+            {
+                FunctionName = function.Name,
+                CreatedAt = function.CreatedAt,
+                Owner = owner,
+                OwnerId = ownerId,
+                UpdatedAt = updatedAt
+            })
+        };
+    }
+
     /// <summary>Removes a row trigger from a table, by name.</summary>
+
     internal static SchemaChangeLogEntry DropTriggerEntry(DatabaseDescriptor database, TableSchema table, string triggerName)
     {
         return new()

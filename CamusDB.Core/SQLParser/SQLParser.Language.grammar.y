@@ -122,6 +122,8 @@
 /* One unquoted "table@index" pair, produced by a single scanner rule so the '@' never reaches the
    parser as a placeholder. Accepted only in the SHOW ... FROM INDEX productions and split there. */
 %token TQUALIFIED_INDEX
+/* Raw text between dollar quotes ($$ ... $$ or $tag$ ... $tag$): the body of CREATE FUNCTION. */
+%token TDOLLARQUOTED
 
 %%
 
@@ -183,6 +185,8 @@ stat    : select_stmt { $$.n = $1.n; }
         | create_extension_stmt { $$.n = $1.n; }
         | alter_extension_stmt { $$.n = $1.n; }
         | drop_extension_stmt { $$.n = $1.n; }
+        | create_function_stmt { $$.n = $1.n; }
+        | alter_function_stmt { $$.n = $1.n; }
         ;
 
 /* SELECT … FOR UPDATE [OF t] [NOWAIT | SKIP LOCKED], and FOR NO KEY UPDATE as its synonym. Accepted
@@ -1146,6 +1150,9 @@ show_stmt : TSHOW TCOLUMNS TFROM any_identifier { $$.n = new(NodeType.ShowColumn
           | TSHOW TSEQUENCES { $$.n = new(NodeType.ShowSequences, null, null, null, null, null, null, null, null); }
           | TSHOW TSEQUENCES TLIKE string { $$.n = new(NodeType.ShowSequences, $4.n, null, null, null, null, null, null, null); }
           | TSHOW TCREATE TSEQUENCE any_identifier { $$.n = new(NodeType.ShowCreateSequence, $4.n, null, null, null, null, null, null, null); }
+          /* SHOW CREATE FUNCTION <name>. FUNCTION is a plain identifier that ShowCreateFunctionStatement
+             checks; the other SHOW CREATE forms each name a keyword token, so the shapes cannot collide. */
+          | TSHOW TCREATE TIDENTIFIER any_identifier { $$.n = ShowCreateFunctionStatement($3.s, $4.n); }
           | TSHOW TDATABASE { $$.n = NodeAst.ShowDatabase; }
           | TSHOW TDATABASES { $$.n = NodeAst.ShowDatabases; }
           | TSHOW TDATABASES TLIKE string { $$.n = new(NodeType.ShowDatabases, $4.n, null, null, null, null, null, null, null); }
@@ -1270,10 +1277,12 @@ show_stmt : TSHOW TCOLUMNS TFROM any_identifier { $$.n = new(NodeType.ShowColumn
                 $$.n = new(NodeType.ShowConnections, null, null, null, null, null, null, null, null);
             else if (string.Equals($2.s, "extensions", System.StringComparison.OrdinalIgnoreCase))
                 $$.n = new(NodeType.ShowExtensions, null, null, null, null, null, null, null, null);
+            else if (string.Equals($2.s, "functions", System.StringComparison.OrdinalIgnoreCase))
+                $$.n = new(NodeType.ShowFunctions, null, null, null, null, null, null, null, null);
             else
                 throw new CamusDB.Core.CamusDBException(
                     CamusDB.Core.CamusDBErrorCodes.InvalidInput,
-                    "Expected: SHOW VARIABLES [LIKE '<pattern>'], SHOW USERS [LIKE '<pattern>'], SHOW QUERIES [LIKE '<pattern>'], SHOW CONNECTIONS or SHOW EXTENSIONS");
+                    "Expected: SHOW VARIABLES [LIKE '<pattern>'], SHOW USERS [LIKE '<pattern>'], SHOW QUERIES [LIKE '<pattern>'], SHOW CONNECTIONS, SHOW EXTENSIONS or SHOW FUNCTIONS");
           }
           | TSHOW TIDENTIFIER TLIKE string
           {
@@ -1435,6 +1444,48 @@ drop_extension_stmt : TDROP TIDENTIFIER any_identifier
                     | TDROP TIDENTIFIER TIF TEXISTS any_identifier
                       { $$.n = DropExtensionStatement($2.s, $5.n, true); }
                     ;
+
+/* CREATE [OR REPLACE] FUNCTION <name>([<param> <type>, ...]) RETURNS <type>
+       [RETURNS NULL ON NULL INPUT | CALLED ON NULL INPUT] LANGUAGE csharp AS $$ <body> $$
+   and ALTER FUNCTION <name> OWNER TO <user>. DROP FUNCTION [IF EXISTS] <name> shares the two
+   productions of drop_extension_stmt, which dispatch on the word after DROP.
+
+   No word is reserved: FUNCTION, REPLACE, RETURNS, CALLED, INPUT, LANGUAGE, OWNER and the language
+   name are plain identifiers that the helper methods check, so each stays usable as a table or
+   column name. CREATE FUNCTION shares the TCREATE TIDENTIFIER any_identifier prefix with the
+   extension and trigger statements; the opening parenthesis after the name tells it apart on one
+   token of lookahead. The three forms of function_returns differ on the token after the type's
+   following word: an identifier (the language name), NULL, or ON. */
+create_function_stmt : TCREATE TIDENTIFIER any_identifier LPAREN function_params RPAREN function_returns TAS TDOLLARQUOTED
+                       { $$.n = CreateFunctionStatement($2.s, null, $3.n, $5.n, $7.n, $9.s); }
+                     | TCREATE TOR TIDENTIFIER TIDENTIFIER any_identifier LPAREN function_params RPAREN function_returns TAS TDOLLARQUOTED
+                       { $$.n = CreateFunctionStatement($4.s, $3.s, $5.n, $7.n, $9.n, $11.s); }
+                     ;
+
+function_params : function_param_list { $$.n = $1.n; }
+                | { $$.n = null; }
+                ;
+
+function_param_list : function_param_list TCOMMA function_param { $$.n = new(NodeType.FunctionParameterList, $1.n, $3.n, null, null, null, null, null, null); }
+                    | function_param { $$.n = $1.n; }
+                    ;
+
+function_param : identifier field_type { $$.n = new(NodeType.FunctionParameter, $1.n, $2.n, null, null, null, null, null, null); }
+               | escaped_identifier field_type { $$.n = new(NodeType.FunctionParameter, $1.n, $2.n, null, null, null, null, null, null); }
+               ;
+
+function_returns : TIDENTIFIER field_type TIDENTIFIER TIDENTIFIER
+                   { $$.n = FunctionReturns($1.s, $2.n, null, null, $3.s, $4.s); }
+                 | TIDENTIFIER field_type TIDENTIFIER TNULL TON TNULL TIDENTIFIER TIDENTIFIER TIDENTIFIER
+                   { $$.n = FunctionReturns($1.s, $2.n, $3.s, $7.s, $8.s, $9.s); }
+                 | TIDENTIFIER field_type TIDENTIFIER TON TNULL TIDENTIFIER TIDENTIFIER TIDENTIFIER
+                   { $$.n = FunctionReturns($1.s, $2.n, $3.s, $6.s, $7.s, $8.s); }
+                 ;
+
+alter_function_stmt : TALTER TIDENTIFIER any_identifier TIDENTIFIER TTO any_identifier
+                      { $$.n = AlterFunctionOwnerStatement($2.s, $3.n, $4.s, $6.n); }
+                    ;
+
 
 /* CALL <procedure>(<args>). CALL is a plain identifier checked in CallStatement, like FLUSH and
    CANCEL. The procedure name is a bare TIDENTIFIER, not any_identifier: after two identifiers the

@@ -75,7 +75,10 @@ public static class PreparedStatementBinder
         NodeType.ShowIndexUsage or
         NodeType.ShowVariables or
         NodeType.ShowExtensions or
+        NodeType.ShowFunctions or
+        NodeType.ShowCreateFunction or
         NodeType.ShowClusterSettings or
+
         NodeType.ShowQueries or NodeType.ShowClusterQueries or
         NodeType.ShowConnections or NodeType.ShowClusterConnections or
         // Preparable specifically so FOR ROW (@id) can be: the value list is an ordinary expression

@@ -104,7 +104,8 @@ internal static class ScalarFunctionEvaluator
     public static bool IsRegisteredScalarFunction(string functionName)
     {
         return Registry.IsRegisteredScalarFunction(functionName) ||
-               (Extensions.ExtensionFunctionScope.CurrentInstalled?.HasFunction(functionName) ?? false);
+               (Extensions.ExtensionFunctionScope.CurrentInstalled?.HasFunction(functionName) ?? false) ||
+               (Extensions.ExtensionFunctionScope.CurrentInline?.HasFunction(functionName) ?? false);
     }
 
     /// <summary>
@@ -120,21 +121,30 @@ internal static class ScalarFunctionEvaluator
     /// <summary>
     /// Resolves a function name: the built-in table first, then the functions of the extensions
     /// installed in the database whose statement this flow runs, as this engine loaded them
-    /// (<see cref="Extensions.ExtensionFunctionScope"/>). A name may be qualified with its extension
-    /// (<c>geo.distance</c>). The loader refuses an extension name that collides with a built-in, so the
+    /// (<see cref="Extensions.ExtensionFunctionScope"/>), then the inline functions of that database
+    /// (<c>CREATE FUNCTION ... LANGUAGE csharp</c>). A name may be qualified with its extension
+    /// (<c>geo.distance</c>). The loader refuses an extension name that collides with a built-in, and
+    /// <c>CREATE FUNCTION</c> and <c>CREATE EXTENSION</c> refuse a name the other kind has, so the
     /// order never changes which function a name means; it keeps a built-in lookup exactly as cheap as
     /// before. A flow with no scope resolves built-ins only, so a missing scope fails closed ("Function
     /// not found"). A member of an installed extension this node does not load throws
-    /// <see cref="CamusDBErrorCodes.ExtensionNotLoadedOnNode"/>.
+    /// <see cref="CamusDBErrorCodes.ExtensionNotLoadedOnNode"/>. Resolving an inline function compiles
+    /// nothing: its descriptor compiles the body at the first call.
     /// </summary>
     private static bool TryResolve(string functionName, out ScalarFunctionDescriptor descriptor)
     {
         if (Registry.TryGet(functionName, out descriptor))
             return true;
 
-        Extensions.InstalledExtensionSet? installed = Extensions.ExtensionFunctionScope.CurrentInstalled;
-        return installed is not null && installed.TryGetFunction(functionName, out descriptor);
+        Extensions.ExtensionScopeFrame? frame = Extensions.ExtensionFunctionScope.Current;
+
+        if (frame is null)
+            return false;
+
+        return frame.Installed.TryGetFunction(functionName, out descriptor) ||
+               frame.Inline.TryGetFunction(functionName, out descriptor);
     }
+
 
     /// <summary>
     /// Returns <c>true</c> if <paramref name="ast"/> or any descendant calls a function that reports

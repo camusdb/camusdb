@@ -98,6 +98,18 @@ internal sealed class TestConfigSettingClassification
             nameof(CamusDBOptions.ForceSpillThresholdRows),
             nameof(CamusDBOptions.ExtensionAssemblies),
             nameof(CamusDBOptions.UnsafeExtensionAssemblies),
+
+            // The engine reads these once, when it builds its inline-function runtime, and the guard of
+            // each compiled function keeps the budgets it was built with.
+            nameof(CamusDBOptions.InlineFunctionsEnabled),
+            nameof(CamusDBOptions.InlineFunctionCallTimeoutMs),
+            nameof(CamusDBOptions.InlineFunctionAllocationLimitBytes),
+            nameof(CamusDBOptions.InlineFunctionArrayLimit),
+            nameof(CamusDBOptions.InlineFunctionSourceLimitBytes),
+            nameof(CamusDBOptions.InlineFunctionCompileTimeoutMs),
+            nameof(CamusDBOptions.InlineFunctionCompileConcurrency),
+            nameof(CamusDBOptions.MaxInlineFunctionsPerDatabase),
+
         ];
 
         foreach (string name in restartBound)

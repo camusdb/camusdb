@@ -297,6 +297,20 @@ initial_partitions: 1      # Raft partition count (>= 1). Unset, it is 1 in stan
 #   with CADB0536. Reads, DDL and internal transactions are still admitted. Default 64 MiB.
 # min_free_disk_bytes: 67108864
 
+# ── Inline functions ──────────────────────────────────────────────────────────
+# CREATE FUNCTION ... LANGUAGE csharp AS $$ body $$: a SQL function whose body is C# source, compiled
+# in memory by the server. A user with the CREATE privilege on a database can create one. Off by
+# default. All of these are restart settings; give the first five and the last one the same value
+# on every node. See docs/csharp-extensions.md, "Inline functions".
+# inline_functions_enabled: false
+# inline_function_call_timeout_ms: 1000              # longest one call may run (CADB0840); <= 0 disables
+# inline_function_allocation_limit_bytes: 16777216   # managed memory one call may allocate (CADB0840); <= 0 disables
+# inline_function_array_limit: 1048576               # elements of one array a body creates (CADB0840); <= 0 disables
+# inline_function_source_limit_bytes: 65536          # largest body, UTF-8 bytes (CADB0839)
+# inline_function_compile_timeout_ms: 10000          # longest one compile may take (CADB0838)
+# inline_function_compile_concurrency: 2             # functions this node compiles at the same time
+# max_inline_functions_per_database: 256             # <= 0 disables
+
 # ── Request resource limits ───────────────────────────────────────────────────
 # Caps that stop one client from exhausting the node with cheap inputs. For every limit below,
 # <= 0 disables it. All are runtime settings. See docs/request-resource-limits.md.

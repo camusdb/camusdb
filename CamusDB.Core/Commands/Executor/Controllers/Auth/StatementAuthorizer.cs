@@ -238,6 +238,39 @@ internal sealed class StatementAuthorizer
             return;
         }
 
+        // CREATE FUNCTION needs the CREATE privilege at database scope, or a superuser. The body is C#
+        // source from the caller, and the server compiles it only when every member it names is on a
+        // list of members that cannot reach outside the call, so this statement does not need the
+        // superuser bar that an operator's extension has. Replacing a function that exists also needs
+        // its owner; that check needs the record, and the function DDL service makes it under the
+        // schema lock.
+        if (ast.nodeType is NodeType.CreateFunction or NodeType.CreateOrReplaceFunction)
+        {
+            await RequireDatabasePrivilegeAsync(ticket, principal, Privilege.Create, "function", contextDatabaseId).ConfigureAwait(false);
+            return;
+        }
+
+        // Dropping a function and giving it away need its owner or a superuser, and no grant replaces
+        // that: the function DDL service checks it against the record, under the schema lock. The
+        // visibility gate at the top already ran, so a caller with no grant on the database got the
+        // "does not exist" answer.
+        if (ast.nodeType is NodeType.DropFunction or NodeType.AlterFunctionOwnerTo)
+            return;
+
+        // The list of functions and the source of one: a caller who may read the database (SELECT at
+        // database scope) or who may create functions in it.
+        if (ast.nodeType is NodeType.ShowFunctions or NodeType.ShowCreateFunction)
+        {
+            if (!principal.IsSuperuser && contextDatabaseId is not null &&
+                !principal.HasPrivilege(Privilege.Select, contextDatabaseId, tableId: null) &&
+                !principal.HasPrivilege(Privilege.Create, contextDatabaseId, tableId: null))
+                throw new CamusDBException(
+                    CamusDBErrorCodes.InsufficientPrivilege,
+                    $"Missing Select or Create privilege on database '{ticket.DatabaseName}' to list its functions");
+
+            return;
+        }
+
         // The loaded extensions are held to the same bar: file paths, hashes and the trust level of
         // the code running inside the server are deployment detail that no per-database grant scopes
         // down.
@@ -543,7 +576,41 @@ internal sealed class StatementAuthorizer
             $"Only a superuser or the current owner may change the owner of view '{database.Name}.{viewName}'");
     }
 
+    /// <summary>
+    /// Requires that the caller may <paramref name="action"/> the inline function
+    /// <paramref name="function"/>: a superuser, or its owner. Called under the schema lock by the
+    /// function DDL service, with the record the statement is about to change, so the check and the
+    /// change see the same owner.
+    /// </summary>
+    /// <remarks>
+    /// The owner is matched by its immutable id. A function whose owner was dropped, or that was
+    /// created while authentication was off, has no owner a caller can match, so only a superuser can
+    /// change it. With authentication off there is no caller to check.
+    /// </remarks>
+    internal void RequireFunctionOwnership(
+        DatabaseDescriptor database, Catalogs.Models.InlineFunctionDefinition function, ExecuteSQLTicket ticket, string action)
+    {
+        if (!options.AuthenticationEnabled)
+            return;
+
+        Principal? caller = ticket.Principal;
+
+        if (caller is null)
+            throw new CamusDBException(CamusDBErrorCodes.InsufficientPrivilege, "Authentication is required");
+
+        if (caller.IsSuperuser)
+            return;
+
+        if (function.OwnerId is { Length: > 0 } ownerId && string.Equals(caller.UserId, ownerId, StringComparison.Ordinal))
+            return;
+
+        throw new CamusDBException(
+            CamusDBErrorCodes.InsufficientPrivilege,
+            $"Only a superuser or the owner may {action} function '{database.Name}.{function.Name}'");
+    }
+
     /// <summary>Maps an in-database statement to the privilege it requires, or null when it needs none.</summary>
+
     internal static Privilege? MapRequiredPrivilege(NodeType nodeType) => nodeType switch
     {
         NodeType.Select => Privilege.Select,

@@ -30,6 +30,13 @@ namespace CamusDB.Core.Extensions;
 /// order. It never runs in the replicated apply: a follower's loaded files must not decide whether a
 /// committed delta applies.</para>
 ///
+/// <para><b>Inline functions.</b> The same race exists with <c>DROP FUNCTION</c>, and with a
+/// <c>CREATE OR REPLACE FUNCTION</c> that changes the number of parameters. A call to a name that the
+/// database's function catalog saw removed, and that nothing else defines now, is refused with
+/// <see cref="CamusDBErrorCodes.FunctionNotFound"/>. A call to an inline function with another number of
+/// arguments than the function has now is refused too. The catalog remembers removed names for the
+/// life of the process, which is longer than any statement.</para>
+///
 /// <para><b>Which names it checks.</b> Only a name that is not a built-in and that one of this engine's
 /// loaded extensions defines (plain or qualified) as a function, an aggregate or a table function; a
 /// view body can call all three. Every other name (built-in aggregates, sequence functions, built-in
@@ -48,8 +55,10 @@ internal static class ExtensionReferenceGuard
     public static void Check(Schema schema, SchemaChangeLogEntry entry)
     {
         ExtensionRegistry? registry = ExtensionFunctionScope.Current?.Registry;
+        bool extensions = registry is not null && !registry.IsEmpty;
 
-        if (registry is null || registry.IsEmpty)
+        // Nothing to check against: no loaded extension, and no inline function that exists or was removed.
+        if (!extensions && schema.Functions.Count == 0 && !schema.FunctionCatalog.HasRemovedNames)
             return;
 
         List<string>? defaults = null;
@@ -115,39 +124,63 @@ internal static class ExtensionReferenceGuard
         if (defaults is null && expressions is null && statements is null)
             return;
 
-        InstalledExtensionSet installed = InstalledExtensionSet.Build(schema.Extensions, registry);
+        InstalledExtensionSet installed = extensions ? InstalledExtensionSet.Build(schema.Extensions, registry!) : InstalledExtensionSet.Empty;
 
-        void Require(string name)
+        void Require(string name, int? argumentCount)
         {
             string lowered = name.ToLowerInvariant();
 
-            if (ScalarFunctionEvaluator.IsBuiltInScalarFunction(lowered) || !IsExtensionFunction(registry, lowered))
+            if (ScalarFunctionEvaluator.IsBuiltInScalarFunction(lowered))
                 return;
 
-            if (installed.HasFunction(lowered) || installed.HasAggregate(lowered) || installed.HasTableFunction(lowered))
-                return;
+            if (schema.Functions.TryGetValue(lowered, out InlineFunctionDefinition? function))
+            {
+                if (argumentCount is { } count && count != function.Parameters.Count)
+                    throw new CamusDBException(
+                        CamusDBErrorCodes.FunctionNotFound,
+                        $"Function '{name}' takes {function.Parameters.Count} arguments now, and the statement calls it with {count}; the function was replaced while the statement ran");
 
-            throw new CamusDBException(
-                CamusDBErrorCodes.ExtensionNotInstalled,
-                $"Function '{name}' belongs to an extension that is no longer installed in this database; the extension was dropped while the statement ran");
+                return;
+            }
+
+            if (extensions && IsExtensionFunction(registry!, lowered))
+            {
+                if (installed.HasFunction(lowered) || installed.HasAggregate(lowered) || installed.HasTableFunction(lowered))
+                    return;
+
+                throw new CamusDBException(
+                    CamusDBErrorCodes.ExtensionNotInstalled,
+                    $"Function '{name}' belongs to an extension that is no longer installed in this database; the extension was dropped while the statement ran");
+            }
+
+            if (schema.FunctionCatalog.WasRemoved(lowered))
+                throw new CamusDBException(
+                    CamusDBErrorCodes.FunctionNotFound,
+                    $"Function '{name}' does not exist in this database any more; it was dropped while the statement ran");
         }
 
         if (defaults is not null)
         {
             foreach (string function in defaults)
-                Require(function);
+                Require(function, argumentCount: null);
         }
 
         void RequireAll(NodeAst? ast)
         {
             NodeAstWalk.Any(ast, node =>
             {
-                if (node.nodeType is NodeType.ExprFuncCall or NodeType.TableFunctionReference && node.leftAst?.yytext is { } name)
-                    Require(name);
+                if (node.leftAst?.yytext is { } name)
+                {
+                    if (node.nodeType == NodeType.ExprFuncCall)
+                        Require(name, CommandsExecutor.Controllers.Queries.ConditionalResultTypes.Arguments(node.rightAst).Count);
+                    else if (node.nodeType == NodeType.TableFunctionReference)
+                        Require(name, argumentCount: null);
+                }
 
                 return false;
             });
         }
+
 
         if (expressions is not null)
         {

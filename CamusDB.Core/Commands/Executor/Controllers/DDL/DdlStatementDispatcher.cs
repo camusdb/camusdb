@@ -45,6 +45,8 @@ internal sealed class DdlStatementDispatcher
 
     private readonly ExtensionDdlService extensionDdl;
 
+    private readonly FunctionDdlService functionDdl;
+
     private readonly SqlExecutor sqlExecutor;
 
     private readonly SqlParserCache sqlParserCache;
@@ -140,6 +142,7 @@ internal sealed class DdlStatementDispatcher
         this.sqlExecutor = sqlExecutor;
         this.sqlParserCache = sqlParserCache;
         this.statementAuthorizer = statementAuthorizer;
+        functionDdl = new FunctionDdlService(context, catalogs, sqlParserCache, statementAuthorizer, authService);
         this.userAdmin = userAdmin;
         this.serverLevelDispatcher = serverLevelDispatcher;
         this.databaseLifecycle = databaseLifecycle;
@@ -657,6 +660,26 @@ internal sealed class DdlStatementDispatcher
                     await extensionDdl.DropAsync(database, ast).ConfigureAwait(false);
                     return new ExecuteDDLSQLResult(database, true);
                 }
+
+            case NodeType.CreateFunction:
+            case NodeType.CreateOrReplaceFunction:
+                {
+                    await functionDdl.CreateAsync(database, ast, ticket).ConfigureAwait(false);
+                    return new ExecuteDDLSQLResult(database, true);
+                }
+
+            case NodeType.DropFunction:
+                {
+                    await functionDdl.DropAsync(database, ast, ticket).ConfigureAwait(false);
+                    return new ExecuteDDLSQLResult(database, true);
+                }
+
+            case NodeType.AlterFunctionOwnerTo:
+                {
+                    await functionDdl.AlterOwnerAsync(database, ast, ticket).ConfigureAwait(false);
+                    return new ExecuteDDLSQLResult(database, true);
+                }
+
 
             case NodeType.CommentOnSequence:
                 {

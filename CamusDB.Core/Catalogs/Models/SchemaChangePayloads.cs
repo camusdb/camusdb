@@ -612,7 +612,54 @@ public sealed class SchemaDropExtensionPayload
 }
 
 /// <summary>
+/// Payload for <see cref="SchemaOp.CreateFunction"/> and <see cref="SchemaOp.ReplaceFunction"/>: the
+/// complete record of the function, as the proposer built it. A replace carries the generation it
+/// replaces, so a re-delivered replace is recognized by the record it left behind, and a replace
+/// proposed against a generation that is no longer current applies as a no-op.
+/// </summary>
+public sealed class SchemaFunctionPayload
+{
+    public InlineFunctionDefinition? Function { get; set; }
+
+    /// <summary>For a replace, the generation of the record when the statement was proposed; null for a create.</summary>
+    public long? FromGeneration { get; set; }
+}
+
+/// <summary>
+/// Payload for <see cref="SchemaOp.DropFunction"/>: the function name and the creation time of the
+/// record the proposer saw, so a re-delivered drop cannot remove a later function of the same name.
+/// </summary>
+public sealed class SchemaDropFunctionPayload
+{
+    public string FunctionName { get; set; } = "";
+
+    /// <summary>The creation time of the record, which tells two functions of one name apart.</summary>
+    public HLCTimestamp CreatedAt { get; set; }
+}
+
+/// <summary>
+/// Payload for <see cref="SchemaOp.SetFunctionOwner"/>: the function, by name and creation time, and
+/// its new owner. <see cref="UpdatedAt"/> is the time of this change; the apply stores it on the record,
+/// and a re-delivered delta is recognized by it.
+/// </summary>
+public sealed class SchemaSetFunctionOwnerPayload
+{
+    public string FunctionName { get; set; } = "";
+
+    public HLCTimestamp CreatedAt { get; set; }
+
+    /// <summary>The name of the new owner, for display.</summary>
+    public string? Owner { get; set; }
+
+    /// <summary>The immutable id of the new owner, which the ownership check compares.</summary>
+    public string? OwnerId { get; set; }
+
+    public HLCTimestamp UpdatedAt { get; set; }
+}
+
+/// <summary>
 /// Payload for <see cref="SchemaOp.SetColumnStorage"/>: the target column and its new storage
+
 /// strategy. The column is matched by name, case-insensitively, like every other column delta.
 /// </summary>
 public sealed class SchemaSetColumnStoragePayload

@@ -35,6 +35,8 @@ internal sealed class InstalledExtensionCatalog
 
     private long stamp;
 
+    private long lastPublished;
+
     private volatile ResolvedSet? resolved;
 
     /// <summary>The installed records keyed by extension name (case-insensitive).</summary>
@@ -50,6 +52,14 @@ internal sealed class InstalledExtensionCatalog
     public long Stamp => Interlocked.Read(ref stamp);
 
     /// <summary>
+    /// The schema version of the last publish, also when that publish left nothing installed.
+    /// <see cref="Stamp"/> returns to 0 then, which is right for this catalog alone, but the caches key
+    /// on one value for extensions and inline functions together, and that value must move when the
+    /// last extension goes while a function stays. See <c>Schema.CallableStamp</c>.
+    /// </summary>
+    public long LastPublished => Interlocked.Read(ref lastPublished);
+
+    /// <summary>
     /// Replaces the installed records. Called by the schema apply (under the schema lock, with the
     /// delta's target version as the stamp) and by the schema load. The map must not be changed after
     /// it is published.
@@ -58,6 +68,8 @@ internal sealed class InstalledExtensionCatalog
     {
         installed = extensions;
         Interlocked.Exchange(ref stamp, extensions.Count == 0 ? 0 : newStamp);
+        Interlocked.Exchange(ref lastPublished, newStamp);
+
 
         if (extensions.Count > 0)
             ExtensionRegistry.MarkLoaded();

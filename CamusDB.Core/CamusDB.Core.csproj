@@ -15,6 +15,9 @@
          Kahuna.Core. The generated scanner references CodePageHandling under the unicode
          option, and the compiler correctly prefers our source copy; the clash is benign. -->
     <NoWarn>$(NoWarn);NU1903;CS0436</NoWarn>
+    <!-- The C# compiler ships its messages in 13 languages, one resource assembly each. The server
+         reports compiler diagnostics in English only, so the others are left out of the output. -->
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
   </PropertyGroup>
   <PropertyGroup Condition="$(TargetFramework.EndsWith('-browser'))">
     <DefineConstants>$(DefineConstants);CAMUSDB_BROWSER</DefineConstants>
@@ -93,6 +96,8 @@
   <ItemGroup>
     <!-- The netstandard2.0 contract that C# extensions compile against. -->
     <ProjectReference Include="..\CamusDB.Extensions.Abstractions\CamusDB.Extensions.Abstractions.csproj" />
+    <!-- The budget checks that the server links into every inline SQL function. -->
+    <ProjectReference Include="..\CamusDB.Extensions.Inline\CamusDB.Extensions.Inline.csproj" />
   </ItemGroup>
 
   <ItemGroup>
@@ -111,5 +116,12 @@
        have, so the browser target leaves it out. -->
   <ItemGroup Condition="!$(TargetFramework.EndsWith('-browser'))">
     <PackageReference Include="SolariumDb.Kahuna" Version="0.1.8" />
+  </ItemGroup>
+
+  <!-- The C# compiler, for inline SQL functions (CREATE FUNCTION ... LANGUAGE csharp): the server
+       compiles the body of a function in memory. The browser target leaves it out, because the
+       compiler adds about 10 MB and the browser build refuses the statement. -->
+  <ItemGroup Condition="!$(TargetFramework.EndsWith('-browser'))">
+    <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="5.0.0" />
   </ItemGroup>
 </Project>

@@ -1097,6 +1097,68 @@ public static class CamusDBErrorCodes
     public const string StorageCorrupted = "CADB0837";
 
     /// <summary>
+    /// The body of an inline function (<c>CREATE FUNCTION ... LANGUAGE csharp</c>) does not compile:
+    /// the C# compiler reported errors, or the compile ran longer than
+    /// <see cref="CamusDBOptions.InlineFunctionCompileTimeoutMs"/>. The message lists the compiler's
+    /// diagnostics with their position in the body. Only the author of the statement gets them. Maps to
+    /// HTTP 400.
+    /// </summary>
+    public const string InlineFunctionCompileFailed = "CADB0838";
+
+    /// <summary>
+    /// The body of an inline function uses a language form, a type or a member that an inline function
+    /// may not use, or its signature names a type or a parameter name that is not accepted. The message
+    /// lists every finding with its position in the body. Maps to HTTP 400.
+    /// </summary>
+    public const string InlineFunctionRefused = "CADB0839";
+
+    /// <summary>
+    /// A call of an inline function went over one of its budgets and was stopped: the time of one call
+    /// (<see cref="CamusDBOptions.InlineFunctionCallTimeoutMs"/>), the memory it may allocate
+    /// (<see cref="CamusDBOptions.InlineFunctionAllocationLimitBytes"/>), the size of one array
+    /// (<see cref="CamusDBOptions.InlineFunctionArrayLimit"/>), the depth of its own calls, or the
+    /// memory of the process. The statement fails and the node goes on. Maps to HTTP 400.
+    /// </summary>
+    public const string InlineFunctionBudgetExceeded = "CADB0840";
+
+    /// <summary>
+    /// <c>CREATE FUNCTION</c> was refused because <see cref="CamusDBOptions.InlineFunctionsEnabled"/> is
+    /// off on this node, or because this build of the server has no compiler (the browser build).
+    /// Functions that exist still run. Maps to HTTP 400.
+    /// </summary>
+    public const string InlineFunctionsDisabled = "CADB0841";
+
+    /// <summary>
+    /// <c>CREATE FUNCTION</c> names a function that exists (use <c>CREATE OR REPLACE</c>), or a name
+    /// that a built-in function, an aggregate, a table function or a member of an installed extension
+    /// has. Functions of every kind share one name space. Maps to HTTP 409.
+    /// </summary>
+    public const string FunctionAlreadyExists = "CADB0842";
+
+    /// <summary>
+    /// <c>DROP FUNCTION</c>, <c>ALTER FUNCTION</c> or <c>SHOW CREATE FUNCTION</c> names an inline
+    /// function that the database does not have. A call of a name that no function has keeps its own
+    /// error. Maps to HTTP 404.
+    /// </summary>
+    public const string FunctionNotFound = "CADB0843";
+
+    /// <summary>
+    /// <c>DROP FUNCTION</c>, or a <c>CREATE OR REPLACE FUNCTION</c> that changes the parameter types or
+    /// the result type, was refused because a column default, a CHECK constraint, a view or a
+    /// materialized view calls the function. The message lists them. Maps to HTTP 409.
+    /// </summary>
+    public const string FunctionHasDependents = "CADB0844";
+
+    /// <summary>
+    /// A statement called an inline function that this node cannot run: the node compiles the source of
+    /// a function itself, at the first call, and that compile failed here. The usual cause is a node on
+    /// an older build, whose rules refuse a member the proposing node accepted. The message carries the
+    /// reason. Other nodes are not affected, so the statement can run on one of them. The owner fixes it
+    /// for every node with <c>CREATE OR REPLACE FUNCTION</c>. Maps to HTTP 503.
+    /// </summary>
+    public const string InlineFunctionUnavailableOnNode = "CADB0845";
+
+    /// <summary>
     /// Returns the HTTP status code that should be used when surfacing <paramref name="code"/>
     /// to an API caller. Client errors (permanent, non-retryable caller mistakes) map to 400;
     /// all other codes map to 500.
@@ -1226,6 +1288,15 @@ public static class CamusDBErrorCodes
         ExtensionNotLoadedOnNode => 503,
         ExtensionClusterMismatch => 409,
         TriggerRowMappingInvalid => 400,
+        InlineFunctionCompileFailed => 400,
+        InlineFunctionRefused => 400,
+        InlineFunctionBudgetExceeded => 400,
+        InlineFunctionsDisabled => 400,
+        FunctionAlreadyExists => 409,
+        FunctionNotFound => 404,
+        FunctionHasDependents => 409,
+        InlineFunctionUnavailableOnNode => 503,
         _ => 500
+
     };
 }

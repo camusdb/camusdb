@@ -65,6 +65,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Fixture.CrossKindDuplicate"
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "CamusDB.SqlFuzz.Tests", "CamusDB.SqlFuzz.Tests\CamusDB.SqlFuzz.Tests.csproj", "{3066E1F1-471A-4022-A5F1-76A316165E8B}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "CamusDB.Extensions.Inline", "CamusDB.Extensions.Inline\CamusDB.Extensions.Inline.csproj", "{7474869E-F2AB-4715-8B14-196A57CA3A26}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -435,6 +437,18 @@ Global
 		{3066E1F1-471A-4022-A5F1-76A316165E8B}.Release|x64.Build.0 = Release|Any CPU
 		{3066E1F1-471A-4022-A5F1-76A316165E8B}.Release|x86.ActiveCfg = Release|Any CPU
 		{3066E1F1-471A-4022-A5F1-76A316165E8B}.Release|x86.Build.0 = Release|Any CPU
+		{7474869E-F2AB-4715-8B14-196A57CA3A26}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{7474869E-F2AB-4715-8B14-196A57CA3A26}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{7474869E-F2AB-4715-8B14-196A57CA3A26}.Debug|x64.ActiveCfg = Debug|Any CPU
+		{7474869E-F2AB-4715-8B14-196A57CA3A26}.Debug|x64.Build.0 = Debug|Any CPU
+		{7474869E-F2AB-4715-8B14-196A57CA3A26}.Debug|x86.ActiveCfg = Debug|Any CPU
+		{7474869E-F2AB-4715-8B14-196A57CA3A26}.Debug|x86.Build.0 = Debug|Any CPU
+		{7474869E-F2AB-4715-8B14-196A57CA3A26}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{7474869E-F2AB-4715-8B14-196A57CA3A26}.Release|Any CPU.Build.0 = Release|Any CPU
+		{7474869E-F2AB-4715-8B14-196A57CA3A26}.Release|x64.ActiveCfg = Release|Any CPU
+		{7474869E-F2AB-4715-8B14-196A57CA3A26}.Release|x64.Build.0 = Release|Any CPU
+		{7474869E-F2AB-4715-8B14-196A57CA3A26}.Release|x86.ActiveCfg = Release|Any CPU
+		{7474869E-F2AB-4715-8B14-196A57CA3A26}.Release|x86.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE

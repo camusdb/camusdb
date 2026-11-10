@@ -119,6 +119,14 @@ Example: YAML `mode: cluster` with `--mode standalone` starts in standalone mode
 | `max_buffered_result_bytes` | — | `268435456` |
 | `max_open_explicit_transactions` | — | `10000` |
 | `max_client_connections` | — | `10000` |
+| `inline_functions_enabled` | — | `false` (accept `CREATE FUNCTION ... LANGUAGE csharp`; see [Inline functions](#inline-functions)) |
+| `inline_function_call_timeout_ms` | — | `1000` |
+| `inline_function_allocation_limit_bytes` | — | `16777216` |
+| `inline_function_array_limit` | — | `1048576` |
+| `inline_function_source_limit_bytes` | — | `65536` |
+| `inline_function_compile_timeout_ms` | — | `10000` |
+| `inline_function_compile_concurrency` | — | `2` |
+| `max_inline_functions_per_database` | — | `256` |
 | `kahuna.*` | — | mode-specific baseline |
 
 The table covers every key with a CLI flag plus a selection of YAML-only keys. `config.yml` documents
@@ -193,6 +201,35 @@ raft_peer_ca: /etc/camusdb/tls/ca.crt
 carry no user token, so with authentication on a verified peer certificate is the only credential
 they can show. A node with `CAMUSDB_AUTH_ENABLED=true`, at least one entry in `peers`, and this
 setting off refuses to start. A single-node cluster is not affected.
+
+### Inline functions
+
+An inline function is a SQL function whose body is C# source in a `CREATE FUNCTION` statement; the
+server compiles it in memory. [csharp-extensions.md](csharp-extensions.md#inline-functions) has the
+whole description. These settings are all restart-class: change the file on the node and restart it.
+
+| Key | Default | Scope | Meaning |
+| --- | --- | --- | --- |
+| `inline_functions_enabled` | `false` | cluster | Accept `CREATE FUNCTION`. With `false` the statement is refused with `CADB0841`; functions that exist still run, so a restart with the setting off does not break a view that calls one. |
+| `inline_function_call_timeout_ms` | `1000` | cluster | The longest one call may run. `0` or less disables the limit. |
+| `inline_function_allocation_limit_bytes` | `16777216` | cluster | The managed memory one call may allocate, counted from the start of the call. `0` or less disables the limit. |
+| `inline_function_array_limit` | `1048576` | cluster | The largest array, in elements, a body may create with `new T[n]`. `0` or less disables the limit. |
+| `inline_function_source_limit_bytes` | `65536` | cluster | The largest body, in UTF-8 bytes. Must be greater than 0. |
+| `inline_function_compile_timeout_ms` | `10000` | node | The longest one compile may take, the wait for a compile slot included. Must be greater than 0. |
+| `inline_function_compile_concurrency` | `2` | node | How many functions the node compiles at the same time. Each compile uses one core. Must be greater than 0. |
+| `max_inline_functions_per_database` | `256` | cluster | The most inline functions in one database. `0` or less disables the limit. |
+
+Give the cluster-scope settings the same value on every node: a statement must pass or fail the
+same way wherever it runs. A call over its time, memory or array limit fails its statement with
+`CADB0840`.
+
+**The heap hard limit is the backstop for memory.** The memory limit is checked between two
+framework calls, so one call can go over it before the next check. Run the server with
+`DOTNET_GCHeapHardLimit` or `DOTNET_GCHeapHardLimitPercent` (a container memory limit gives a
+default of 75%, see [Memory-proportional cache defaults](#memory-proportional-cache-defaults)).
+Under a hard limit, a call that asks for more memory than the process may have fails with an error
+the server catches, and the statement fails with `CADB0840`. With no hard limit, the operating
+system can stop the process instead.
 
 ## Kahuna engine section
 

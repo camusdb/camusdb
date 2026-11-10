@@ -4,6 +4,9 @@ CamusDB can run your own C# code as SQL scalar functions, as aggregate functions
 functions in `FROM`, as row triggers, and as stored procedures. The code ships as a .NET assembly (a DLL) that the operator deploys next to the server
 and lists in the configuration. The server loads it when it starts.
 
+A scalar function can also be written in SQL, with C# source in the statement and no file to
+deploy: see [Inline functions](#inline-functions). That form does not need a superuser.
+
 The DLL is **never stored in the database** and never replicated between nodes. Each node loads
 the files its own configuration names, which makes the extension **available** on that node. A
 database uses an extension only after `CREATE EXTENSION` **installs** it there; the installed record
@@ -24,6 +27,7 @@ statements that need it (see [Installing an extension in a database](#installing
 - [Installing an extension in a database](#installing-an-extension-in-a-database)
 - [Deployment](#deployment)
 - [SAFE and UNSAFE assemblies](#safe-and-unsafe-assemblies)
+- [Inline functions](#inline-functions)
 - [Transactions, retries and side effects](#transactions-retries-and-side-effects)
 - [Limits and guardrails](#limits-and-guardrails)
 - [Observability](#observability)
@@ -645,6 +649,221 @@ API and gives a reviewer a short list to read; it does not stop code that loops 
 without limit. Deploy only code you have reviewed. Your control over which files the server loads is
 the real security boundary.
 
+## Inline functions
+
+An inline function is a SQL scalar function whose body is C# source text in the statement that
+creates it. No file is deployed, and the user who creates it does not have to be a superuser:
+
+```sql
+CREATE FUNCTION slugify(s STRING) RETURNS STRING LANGUAGE csharp AS $$
+    return s.Trim().ToLowerInvariant().Replace(' ', '-');
+$$;
+
+SELECT slugify(title) FROM posts;
+DROP FUNCTION slugify;
+```
+
+The server compiles the body in memory. It can do that for a user it does not trust because the
+check is the opposite of the SAFE check above. SAFE refuses a list of dangerous APIs and allows
+everything else, which is a guardrail for code an operator reviewed. An inline function body
+compiles only when **every** type and member it uses is on a list of allowed ones, and every loop
+and recursion in it runs under a time, memory and stack budget.
+
+The feature is off by default. Set `inline_functions_enabled: true` on every node and restart them.
+With the setting off, `CREATE FUNCTION` is refused with `CADB0841`; functions that exist still run.
+
+### The statements
+
+```
+CREATE [OR REPLACE] FUNCTION name ( [parameter TYPE [, ...]] )
+    RETURNS TYPE
+    [RETURNS NULL ON NULL INPUT | CALLED ON NULL INPUT]
+    LANGUAGE csharp
+    AS $$ body $$
+
+DROP FUNCTION [IF EXISTS] name
+ALTER FUNCTION name OWNER TO user
+SHOW FUNCTIONS
+SHOW CREATE FUNCTION name
+```
+
+- **The name** is a plain identifier, case-insensitive. Functions of every kind share one name
+  space: a name that a built-in function, an aggregate, a table function or a member of a loaded
+  extension has is refused (`CADB0842`). There are no overloads: one name, one signature.
+- **Types.** A parameter and the result have one of `INT64`, `FLOAT64`, `FLOAT32`, `BOOL`, `STRING`,
+  `UUID`, `BYTES`, `DATETIME` and `NUMERIC`, or `ARRAY(E)` of one of them except `BYTES`. The body
+  sees them as `long`, `double`, `float`, `bool`, `string`, `Guid`, `byte[]`, `DateTime`, `decimal`
+  and `IReadOnlyList<T?>`. An array element is always nullable, because any element of a SQL array
+  can be NULL.
+- **NULL.** The default is `RETURNS NULL ON NULL INPUT`: a NULL argument makes the result NULL and
+  the body does not run. With `CALLED ON NULL INPUT` every parameter has its nullable type
+  (`string?`, `long?`) and the body sees `null`. The result type is always nullable, and
+  `return null;` is SQL NULL.
+- **The body** is the statements of one C# method. The parameters have the names the statement
+  gave them, in the same letter case. These namespaces are imported: `System`,
+  `System.Collections.Generic`, `System.Globalization`, `System.Linq`, `System.Text` and
+  `System.Text.RegularExpressions`. The language is C# 12.
+- **The dollar quote.** The text between `$$` and `$$` is raw: quotes, semicolons and comments in
+  it are text. A body that holds `$$` takes a quote with a tag, as in `$fn$ ... $fn$`.
+- **`CREATE OR REPLACE`** keeps the function's owner and the objects that call it. It is refused
+  while a view, a materialized view or a CHECK constraint calls the function **and** the parameter
+  types or the result type change (`CADB0844`). A change of the body alone is allowed, and those
+  objects see the new body at their next evaluation.
+- **`DROP FUNCTION`** is refused while a view, a materialized view or a CHECK constraint calls the
+  function (`CADB0844`). A column default is not in that list: an inline function is deterministic,
+  so the default is computed once when the table is created and the table keeps the value.
+
+An exception from the body fails the statement with `CADB0809` and the exception's message, as for
+an extension function. A compiler error fails `CREATE FUNCTION` with `CADB0838` and the compiler's
+messages, with the line and the column in the body.
+
+### What a body can use
+
+Local variables, loops, `if` and `switch`, pattern matching, lambdas and local functions,
+`try`/`catch`/`finally`, `throw`, `checked`, string interpolation, tuples, arrays and collection
+expressions, and these types:
+
+| Area | Types |
+| --- | --- |
+| Values | `bool`, the integer types, `char`, `float`, `double`, `decimal`, `string`, `Guid`, `DateTime`, `TimeSpan`, `DateOnly`, `TimeOnly`, `DayOfWeek`, `Nullable<T>`, tuples, `Math`, `MathF`, `Convert`, `BitConverter` |
+| Text | `StringBuilder`, `StringComparison`, `StringComparer.Ordinal` and `OrdinalIgnoreCase`, `CultureInfo.InvariantCulture`, `Regex` and its match types |
+| Collections | arrays, `List<T>`, `Dictionary<K,V>`, `HashSet<T>`, `SortedDictionary<K,V>`, `SortedSet<T>`, `Queue<T>`, `Stack<T>`, and LINQ (`Enumerable`) |
+| Delegates | `Func<...>`, `Action<...>`, `Predicate<T>`, `Comparison<T>` |
+| Exceptions | `Exception`, `ArgumentException`, `ArgumentNullException`, `ArgumentOutOfRangeException`, `InvalidOperationException`, `FormatException`, `OverflowException`, `DivideByZeroException`, `KeyNotFoundException`, `IndexOutOfRangeException`, `NullReferenceException`, `RegexMatchTimeoutException`: construction, `Message`, and `catch` |
+
+A type or a member that is not on the list is refused with `CADB0839`, and the message names each
+one with its position in the body. The list is the rule: a member that a newer .NET adds is refused
+until a server release adds it.
+
+### What a body cannot use, and why
+
+| Refused | Why |
+| --- | --- |
+| Files, the network, processes, the environment, threads, tasks, `Type` and all of reflection, `Span<T>`, pointers, `unsafe`, `stackalloc`, attributes, `extern` | A body gets its arguments and nothing else. `typeof` and `GetType()` are refused because they are the door to reflection, which reaches every other API. |
+| `DateTime.Now`, `UtcNow`, `Today`, `Random`, `Guid.NewGuid`, `GetHashCode`, `Environment`, `DateTime.Parse`, `ToLocalTime`, the `z` and `U` date formats | The result of a function depends on its arguments only, so every node computes the same value. The hash of a string changes between processes, and the last three read the time zone of the machine. |
+| `new string(c, n)`, `PadLeft`, `PadRight`, `string.Format`, a capacity argument (`new List<int>(n)`), `Enumerable.Range` and `Repeat`, `Array.Resize`, a `ToString` format that is not a constant | Each makes memory that the size of the arguments does not bound. .NET accepts a format precision of 999,999,999, which is a 1 GB string. A constant format of at most 64 characters with a precision of at most 2 digits is allowed, and an interpolation alignment of at most 1,024. |
+| `await`, `async`, `yield`, `lock`, `using`, `goto` and labels | A body runs on one thread from start to end, and a jump would make a loop that no budget check sees. |
+| Query expressions (`from x in xs select ...`) | Use the method form, `xs.Where(...).Select(...)`. |
+| Keeping a lazy sequence: `var q = xs.Where(...)`, or an `IEnumerable<T>` parameter of a local function | A loop that wraps a stored sequence again and again builds a chain deeper than the stack. End the expression with `ToList()` or `ToArray()`. A LINQ chain inside one expression is allowed. |
+| `object` as an element or a type argument (`List<object>`, `object[]`, a tuple with an `object`) | A value inside a value inside a value, to any depth, overflows the stack when the framework prints or compares it. |
+| A cast to an interface (`(IList<int>)x`, `x as IEnumerable<int>`), generic local functions, `const string`, anonymous types, ranges (`a..b`) and `^n` | Each is a way around one of the rules above, or needs a compiler helper that is not allowed. |
+| `ex.ToString()`, an exception in a string, an exception in a list | The text of an exception holds the server's stack. Read `ex.Message`. |
+| A `Regex` with no match timeout | Use the constructor and the static methods that take a `matchTimeout`. The server limits the timeout to the time the call has left. The result of `Matches` can be read with `foreach` only. |
+| A type of more than 256 type names or more than 32 levels (`Dictionary<string, List<long>>` is 4 names and 3 levels), a value type larger than 1,024 bytes (a tuple of more than 128 numbers) | A value tuple lives on the stack. `var t1 = (n, n); var t2 = (t1, t1);` and thirteen more lines make a local of half a megabyte, and the method that holds it overflows the stack when it is entered, before any budget check can run. A type nested a thousand levels deep does the same inside the framework's `Equals` and `ToString`. Keep large or deep data in a list, an array or a dictionary. |
+| A method, lambda or local function that works with more than 32 KiB of values at one time | The estimate counts every local and every operation that makes a value larger than a register: 1,000 `decimal` operations, or 4,000 `long` locals, in one body. Move a part of the work to a local function, which has a frame of its own. |
+| Lambdas nested more than four levels deep inside calls, or hundreds of lambdas nested two or three levels deep | The compiler binds a lambda once for each overload of the method it is given to, and a lambda inside it once for each of those: `xs.Sum(a => xs.Sum(b => xs.Sum(c => ...)))` costs about seven times more with each level, and ten levels hold a compile thread for hours. A local function is bound one time wherever it is called from, so `long Inner(long a) => xs.Sum(b => ...)` is the way to nest. |
+| An inferred type that can grow with each line or each call: `var t2 = (t1, t1)` thirty times, `xs.Select(a => (a, a)).Select(b => (b, b))` thirty times, `ToDictionary(k => d, v => d)` of a dictionary thirty times | The compiler walks a type element by element, and such a type has billions of elements. The server bounds the size of every inferred type from the syntax before it compiles, with a generous limit that real code does not reach; a body that reaches it gets the remedy in the message: write the type of the local or of the lambda parameter. |
+
+`sb.Append($"...")` is refused, because it binds to an overload that takes a string handler. Write
+`sb.Append(x)` for each part, or build the text first: `string text = $"..."; sb.Append(text);`.
+
+### Budgets
+
+A call that goes over a budget fails its statement with `CADB0840`. The node goes on.
+
+| Budget | Setting | Default |
+| --- | --- | --- |
+| Time of one call | `inline_function_call_timeout_ms` | 1000 |
+| Managed memory one call allocates | `inline_function_allocation_limit_bytes` | 16777216 (16 MiB) |
+| Elements of one array made with `new T[n]` | `inline_function_array_limit` | 1048576 |
+| Depth of the body's own calls | none: the free stack of the thread | |
+
+The server compiles a check into the start of every loop body, lambda and local function. An
+endless loop ends at the time limit, and a recursion with no end fails with `CADB0840` before the
+stack overflows, where the same code in an extension DLL ends the server process. A `catch` in the
+body cannot catch these errors.
+
+The checks run between two framework calls, not inside one. A single call (a sort, a `Replace`)
+finishes first, which is why the allowed members are the ones whose cost the size of their inputs
+bounds. For memory, run the server with a heap hard limit (`DOTNET_GCHeapHardLimit` or
+`DOTNET_GCHeapHardLimitPercent`, see [configuration.md](configuration.md#memory-proportional-cache-defaults)):
+under it, a call that asks for too much fails with a catchable error and `CADB0840`, and the
+operating system does not have to stop the process.
+
+The limits of the compiler are `inline_function_source_limit_bytes` (64 KiB for one body),
+`inline_function_compile_timeout_ms` (10 s), `inline_function_compile_concurrency` (2 compiles at a
+time on a node) and `max_inline_functions_per_database` (256). A body may be nested at most 128
+levels deep. A compile that goes over a limit fails its statement, never the node.
+
+The compiler looks at its time limit between its stages, not inside them, so the server does not
+rely on the limit alone. The two shapes of body that make a compiler work for hours (lambdas nested
+in calls of overloaded methods, and inferred types that double with each step) are refused from the
+syntax, before the compiler sees them (see the table above). Each compile runs on a thread of its
+own, with a stack large enough for the deepest type a body of the largest size can make; the
+statement stops waiting at the time limit and fails with `CADB0838`. A compile that does not stop
+even then keeps its compile slot until it ends, is counted, and is logged with the function's name
+and source hash, so a body that finds a new way to be slow can hold at most
+`inline_function_compile_concurrency` cores, never the node.
+
+
+### Deterministic by construction
+
+An inline function has no volatility flag, because it has no way to be volatile. A view, a
+materialized view and a CHECK constraint can call it, a column default that calls it is stored as a
+constant, and the result cache keeps a query that calls it. The caches hold no result of an older
+body: a replace or a drop changes the stamp they key on.
+
+Text is formatted and parsed with the invariant culture on every node, whatever the culture of the
+process. A `DateTime` that the body builds has no time zone; it is stored digit for digit as UTC.
+
+Two things still follow the host, so run every node of a cluster on the same server build, with the
+same globalization mode (the server image uses the invariant mode):
+
+- a comparison that follows the culture, such as `s.CompareTo(t)`, `list.Sort()` on strings and
+  `StartsWith` with no `StringComparison`. Pass `StringComparison.Ordinal` for an order that is the
+  same everywhere.
+- the last bit of a `Math` function such as `Sin` or `Pow`, which follows the platform's math
+  library, as it does for the built-in functions.
+
+### Privileges and ownership
+
+- `CREATE FUNCTION` needs the `CREATE` privilege on the database (`GRANT CREATE ON db.* TO user`;
+  `ALL PRIVILEGES` on the database includes it), or a superuser.
+- The user who creates a function owns it. `CREATE OR REPLACE`, `DROP FUNCTION` and
+  `ALTER FUNCTION ... OWNER TO` need the owner or a superuser: a replace changes what every view
+  and CHECK that calls the function means, so a grant is not enough. When the owner's account is
+  dropped, only a superuser can change the function.
+- A function does not run with its owner's rights. It reads no table and no setting, so any user
+  who can run a statement can call a function in it.
+- `SHOW FUNCTIONS` and `SHOW CREATE FUNCTION` need `SELECT` or `CREATE` on the database.
+
+### In a cluster
+
+`CREATE FUNCTION` runs on the schema leader of the database. That node compiles the body to check
+it, and the schema log carries the **source text** and its hash, never compiled code. Every node,
+the proposing node too, compiles a function at its **first call** and keeps the code in memory. A
+node that never calls a function never compiles it. Two functions with the same source and
+signature share one compiled unit.
+
+`SHOW FUNCTIONS` lists the functions of the current database: `name`, `arguments`, `returns`,
+`null_input`, `language`, `owner`, `generation` (how many times the function was replaced),
+`source_sha256`, `rule_revision` and `state`. The state is per node: `not compiled`, `compiled`, or
+`failed:` with the reason. A row with the state `unloading` is the code of a dropped or replaced
+function that a running statement still holds; it goes away when that statement ends.
+
+A node that cannot compile a function fails the statements that call it with `CADB0845`; the other
+nodes are not affected. This can happen in a rolling upgrade, when a function uses a member that the
+older build does not allow yet: upgrade every node before you create functions that need the new
+build, or replace the function. Each function record holds the revision of the rules it was
+accepted under.
+
+`SHOW CREATE FUNCTION name` returns the statement that creates the function again, with a tagged
+dollar quote when the body needs one. Use it to copy a function to another database. A logical dump
+carries the functions and their owners the same way; see
+[logical-dump-and-reimport.md](logical-dump-and-reimport.md).
+
+**Memory.** A loaded function takes about 5 to 10 KB on a node. The code of a dropped or replaced
+function leaves the process when the last statement that runs it ends. The compiler keeps caches of
+its own, of a fixed size: a node that compiled many different functions holds up to about 45 MB for
+them, and no more after that.
+
+### Not in this version
+
+Overloads, default parameter values, aggregate and table-valued inline functions, a call from the
+body to SQL or to another SQL function, `DATE` and `JSONB` parameters, text encodings
+(`Encoding.UTF8`), and the cancellation of a running call by `CANCEL QUERY` (the time limit ends
+it).
+
 ## Transactions, retries and side effects
 
 - What your code writes **through `context.Sql`** is part of the statement's transaction. It commits
@@ -669,8 +888,10 @@ the real security boundary.
 - **Cancellation is cooperative.** The contexts carry a `CancellationToken`. A statement that writes
   is not cancellable once it starts writing, so the token does not fire in this version; observe it
   anyway.
-- **Runaway code cannot be stopped.** A loop that never returns holds its statement forever, and a
-  stack overflow ends the server process. Neither can be caught.
+- **Runaway code in an extension cannot be stopped.** A loop that never returns holds its statement
+  forever, and a stack overflow ends the server process. Neither can be caught. An
+  [inline function](#inline-functions) is different: the server compiles budget checks into its
+  body.
 - **Not supported in this version:** window functions, `DISTINCT` inside an aggregate call, table
   functions with more than one column, and the distributed partial aggregation of an extension
   aggregate.
@@ -733,3 +954,11 @@ and its members at startup.
 | `CADB0834` | The database installed an extension build that this node does not load (HTTP 503) |
 | `CADB0835` | A live node does not load the target build of `CREATE` or `ALTER EXTENSION` (HTTP 409) |
 | `CADB0836` | A typed trigger's row class does not fit the table; the message lists every problem (HTTP 400) |
+| `CADB0838` | The body of an inline function does not compile, or the compile ran out of time; the message lists the compiler's errors (HTTP 400) |
+| `CADB0839` | The body or the signature of an inline function uses something an inline function may not use; the message lists every finding (HTTP 400) |
+| `CADB0840` | A call of an inline function went over its time, memory, array or stack budget (HTTP 400) |
+| `CADB0841` | `CREATE FUNCTION` while `inline_functions_enabled` is off, or on a build with no compiler (HTTP 400) |
+| `CADB0842` | The function exists, or another function, aggregate, table function or extension member has the name (HTTP 409) |
+| `CADB0843` | `DROP FUNCTION`, `ALTER FUNCTION` or `SHOW CREATE FUNCTION` named a function the database does not have (HTTP 404) |
+| `CADB0844` | A view, a materialized view or a CHECK constraint calls the function; the message lists them (HTTP 409) |
+| `CADB0845` | This node could not compile an inline function that a statement called (HTTP 503) |

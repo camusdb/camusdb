@@ -136,6 +136,17 @@ internal static class ExtensionDeltaApplier
                     $"Extension '{extension.Name}' {extension.Version} requires extension '{required}', which is not installed in this database");
         }
 
+        // An inline function of the database has the same name space as the functions, aggregates and
+        // table functions of its extensions.
+        foreach (ExtensionMemberDefinition member in extension.Members)
+        {
+            if (ExtensionMemberKinds.IsCallable(member.Kind) && schema.Functions.ContainsKey(member.Name))
+                throw new CamusDBException(
+                    CamusDBErrorCodes.ExtensionMemberConflict,
+                    $"Extension '{extension.Name}' defines {ExtensionMemberKinds.Describe(member.Kind)} '{member.Name}', " +
+                    "and this database has an inline function of that name; drop the function first");
+        }
+
         foreach (ExtensionDefinition other in schema.Extensions.Values)
         {
             if (string.Equals(other.Name, extension.Name, StringComparison.OrdinalIgnoreCase))
@@ -143,6 +154,7 @@ internal static class ExtensionDeltaApplier
 
             foreach (ExtensionMemberDefinition member in extension.Members)
             {
+
                 if (member.Kind == ExtensionMemberKind.Procedure && other.HasMember(member.Kind, member.Name))
                     throw new CamusDBException(
                         CamusDBErrorCodes.ExtensionMemberConflict,

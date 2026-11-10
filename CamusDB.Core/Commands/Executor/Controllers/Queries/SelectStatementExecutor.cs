@@ -732,7 +732,37 @@ internal sealed class SelectStatementExecutor
                         database, UnquoteLikePattern(ast.leftAst?.yytext)));
                 }
 
+            case NodeType.ShowFunctions:
+                {
+                    if (schemaOut is not null)
+                        schemaOut.Schema = DerivedTableSchemaBuilder.ShowFunctionsSchema;
+
+                    return (database, schemaQuerier.ShowFunctions(
+                        database, context.ExtensionScopes.ResolveInline(database), context.ExtensionScopes.InlineFunctions));
+                }
+
+            case NodeType.ShowCreateFunction:
+                {
+                    string shownFunctionName = ast.leftAst!.yytext!;
+
+                    if (!database.Schema.Functions.TryGetValue(shownFunctionName, out InlineFunctionDefinition? shownFunction))
+                        throw new CamusDBException(
+                            CamusDBErrorCodes.FunctionNotFound, $"Function '{shownFunctionName}' does not exist in database '{database.Name}'");
+
+                    if (schemaOut is not null)
+                        schemaOut.Schema = DerivedTableSchemaBuilder.ShowCreateFunctionSchema;
+
+                    return (database, QueryResultStream.FromRow(new QueryResultRow(
+                        default,
+                        new Dictionary<string, ColumnValue>(StringComparer.OrdinalIgnoreCase)
+                        {
+                            { "function", new ColumnValue(ColumnType.String, shownFunction.Name) },
+                            { "create function", new ColumnValue(ColumnType.String, CamusDB.Core.Extensions.Inline.InlineFunctionSignature.RenderCreate(shownFunction)) },
+                        })));
+                }
+
             case NodeType.ShowCreateSequence:
+
                 {
                     string shownSequenceName = ast.leftAst!.yytext!;
 
@@ -1308,7 +1338,7 @@ internal sealed class SelectStatementExecutor
 
         // The installed-extension stamp joins the schema stamp: a binding resolves function calls,
         // and an install, update or drop changes what a call means.
-        long stampExtensions = database.Schema.ExtensionCatalog.Stamp;
+        long stampExtensions = database.Schema.CallableStamp;
 
         if (cacheCandidate)
         {
@@ -1381,7 +1411,7 @@ internal sealed class SelectStatementExecutor
         if (!ReferenceEquals(table, slot.Table)
             || table.Schema.Version != slot.SchemaVersion
             || table.Schema.ContentsGeneration != slot.ContentsGeneration
-            || database.Schema.ExtensionCatalog.Stamp != slot.ExtensionStamp)
+            || database.Schema.CallableStamp != slot.ExtensionStamp)
             return null;
 
         MaterializedViewAccessGuard.RequireReadable(table);
@@ -1433,7 +1463,7 @@ internal sealed class SelectStatementExecutor
         if (!ReferenceEquals(boundQuery.Sources[0].Table, stampTable)
             || stampTable!.Schema.Version != stampVersion
             || stampTable.Schema.ContentsGeneration != stampGeneration
-            || database.Schema.ExtensionCatalog.Stamp != stampExtensions)
+            || database.Schema.CallableStamp != stampExtensions)
             return null;
 
         boundQuery.RowNames.FreezeForSharedReuse();

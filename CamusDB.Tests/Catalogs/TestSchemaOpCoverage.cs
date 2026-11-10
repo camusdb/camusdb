@@ -228,7 +228,9 @@ public sealed class TestSchemaOpCoverage
             // Answered from the table's trigger list: a trigger change does not move TableSchema.Version.
             SchemaOp.CreateTrigger, SchemaOp.DropTrigger,
             // Answered from the installed-extension records: an extension touches no relation.
-            SchemaOp.CreateExtension, SchemaOp.UpdateExtension, SchemaOp.DropExtension
+            SchemaOp.CreateExtension, SchemaOp.UpdateExtension, SchemaOp.DropExtension,
+            // Answered from the inline function records, by name, creation time and generation.
+            SchemaOp.CreateFunction, SchemaOp.ReplaceFunction, SchemaOp.DropFunction, SchemaOp.SetFunctionOwner
         ];
 
         // A structurally checked op answers "not applied" against an empty schema even when the

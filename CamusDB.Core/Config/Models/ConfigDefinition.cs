@@ -102,6 +102,38 @@ public class ConfigDefinition
     /// <c>CamusDBOptions.UnsafeExtensionAssemblies</c>.</summary>
     public List<string> UnsafeExtensionAssemblies { get; set; } = [];
 
+    /// <summary>Accept <c>CREATE FUNCTION ... LANGUAGE csharp</c>. Maps to
+    /// <c>CamusDBOptions.InlineFunctionsEnabled</c>. Default false.</summary>
+    public bool InlineFunctionsEnabled { get; set; }
+
+    /// <summary>Longest call of an inline function, in milliseconds. &lt;= 0 disables. Maps to
+    /// <c>CamusDBOptions.InlineFunctionCallTimeoutMs</c>. Default 1000.</summary>
+    public int InlineFunctionCallTimeoutMs { get; set; } = 1000;
+
+    /// <summary>Managed bytes one call of an inline function may allocate. &lt;= 0 disables. Maps to
+    /// <c>CamusDBOptions.InlineFunctionAllocationLimitBytes</c>. Default 16 MiB.</summary>
+    public long InlineFunctionAllocationLimitBytes { get; set; } = 16L * 1024 * 1024;
+
+    /// <summary>Largest array, in elements, an inline function may create. &lt;= 0 disables. Maps to
+    /// <c>CamusDBOptions.InlineFunctionArrayLimit</c>. Default 1 048 576.</summary>
+    public int InlineFunctionArrayLimit { get; set; } = 1_048_576;
+
+    /// <summary>Largest body of an inline function, in UTF-8 bytes. Must be &gt; 0. Maps to
+    /// <c>CamusDBOptions.InlineFunctionSourceLimitBytes</c>. Default 64 KiB.</summary>
+    public int InlineFunctionSourceLimitBytes { get; set; } = 64 * 1024;
+
+    /// <summary>Longest compile of an inline function, in milliseconds. Must be &gt; 0. Maps to
+    /// <c>CamusDBOptions.InlineFunctionCompileTimeoutMs</c>. Default 10 000.</summary>
+    public int InlineFunctionCompileTimeoutMs { get; set; } = 10_000;
+
+    /// <summary>Inline functions compiled at the same time on this node. Must be &gt; 0. Maps to
+    /// <c>CamusDBOptions.InlineFunctionCompileConcurrency</c>. Default 2.</summary>
+    public int InlineFunctionCompileConcurrency { get; set; } = 2;
+
+    /// <summary>Most inline functions per database. &lt;= 0 disables. Maps to
+    /// <c>CamusDBOptions.MaxInlineFunctionsPerDatabase</c>. Default 256.</summary>
+    public int MaxInlineFunctionsPerDatabase { get; set; } = 256;
+
     /// <summary>
     /// Join a <b>running</b> cluster as a new member instead of bootstrapping one, using
     /// <see cref="Peers"/> as the seed list. The node enters the committed roster as a learner and
@@ -1490,6 +1522,19 @@ public class ConfigDefinition
         if (RegexMatchTimeoutMs <= 0)
             throw Invalid(
                 $"'regex_match_timeout_ms' must be > 0, got {RegexMatchTimeoutMs}");
+
+        if (InlineFunctionSourceLimitBytes <= 0)
+            throw Invalid(
+                $"'inline_function_source_limit_bytes' must be > 0, got {InlineFunctionSourceLimitBytes}");
+
+        if (InlineFunctionCompileTimeoutMs <= 0)
+            throw Invalid(
+                $"'inline_function_compile_timeout_ms' must be > 0, got {InlineFunctionCompileTimeoutMs}");
+
+        if (InlineFunctionCompileConcurrency <= 0)
+            throw Invalid(
+                $"'inline_function_compile_concurrency' must be > 0, got {InlineFunctionCompileConcurrency}");
+
 
         if (RegexCacheMaxEntries < 0)
             throw Invalid(

@@ -63,6 +63,33 @@ public sealed class Schema : IDisposable
     /// <summary>The installed extensions keyed by name (case-insensitive). An immutable snapshot.</summary>
     public IReadOnlyDictionary<string, ExtensionDefinition> Extensions => ExtensionCatalog.Installed;
 
+    /// <summary>
+    /// The inline SQL functions of this database (<c>CREATE FUNCTION ... LANGUAGE csharp</c>), with the
+    /// per-node bindings that run them. Owned by this schema instance and never replaced; its content is
+    /// published as immutable snapshots. See <see cref="CamusDB.Core.Extensions.Inline.InlineFunctionCatalog"/>.
+    /// </summary>
+    internal CamusDB.Core.Extensions.Inline.InlineFunctionCatalog FunctionCatalog { get; } = new();
+
+    /// <summary>The inline functions keyed by name (case-insensitive). An immutable snapshot.</summary>
+    public IReadOnlyDictionary<string, InlineFunctionDefinition> Functions => FunctionCatalog.Functions;
+
+    /// <summary>
+    /// One value that changes whenever the set of functions a statement of this database can call
+    /// changes: the installed extensions or the inline functions. The result cache, the bound-query
+    /// cache and the plan cache key on it, so none serves work that an older function set computed.
+    ///
+    /// <para>0 while the database has no extension and no inline function, so the caches key exactly as
+    /// they did before either existed. Otherwise it is the schema version of the last change to either
+    /// set, which only grows. The version of a change that emptied one set counts too: the value must
+    /// move when the last extension is dropped while a function stays, and the other way round. Going
+    /// back to 0 when both are empty is safe, because a result computed then used neither.</para>
+    /// </summary>
+    internal long CallableStamp =>
+        ExtensionCatalog.Stamp == 0 && FunctionCatalog.Stamp == 0
+            ? 0
+            : Math.Max(ExtensionCatalog.LastPublished, FunctionCatalog.LastPublished);
+
+
     // Published as one finished dictionary that is never mutated after publication, for the same
     // reason relationNamesById is: the map it indexes is mutated in place by an applying delta,
     // and enumerating one while it is being written throws.
@@ -415,6 +442,9 @@ public sealed class Schema : IDisposable
 
     public void Dispose()
     {
+        // Gives the compiled code of this database's inline functions back to the engine.
+        FunctionCatalog.Dispose();
         Semaphore?.Dispose();
     }
+
 }

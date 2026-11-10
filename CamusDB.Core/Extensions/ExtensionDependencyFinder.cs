@@ -62,6 +62,34 @@ internal static class ExtensionDependencyFinder
                 triggerTypes.Add(member.Name);
         }
 
+        return FindUsers(schema, functionNames, tableFunctionNames, extension.Name, triggerTypes, parseStatement);
+    }
+
+    /// <summary>
+    /// Describes each object that calls the function <paramref name="functionName"/>: a column default,
+    /// a CHECK constraint, a view or a materialized view. <c>DROP FUNCTION</c> refuses while the list
+    /// is not empty, and so does a <c>CREATE OR REPLACE FUNCTION</c> that changes the function's
+    /// parameter types or result type. An inline function has no qualified name and no trigger.
+    /// </summary>
+    public static List<string> FindCallers(Schema schema, string functionName, Func<string, NodeAst> parseStatement)
+    {
+        HashSet<string> functionNames = new(StringComparer.OrdinalIgnoreCase) { functionName };
+        return FindUsers(schema, functionNames, new HashSet<string>(StringComparer.OrdinalIgnoreCase), null, new HashSet<string>(StringComparer.Ordinal), parseStatement);
+    }
+
+    /// <summary>
+    /// The scan behind <see cref="Find"/> and <see cref="FindCallers"/>: every default, CHECK, view and
+    /// materialized view that calls one of the names, and every trigger of
+    /// <paramref name="extensionName"/> whose type is one of <paramref name="triggerTypes"/>.
+    /// </summary>
+    private static List<string> FindUsers(
+        Schema schema,
+        HashSet<string> functionNames,
+        HashSet<string> tableFunctionNames,
+        string? extensionName,
+        HashSet<string> triggerTypes,
+        Func<string, NodeAst> parseStatement)
+    {
         List<string> dependents = [];
 
         if (functionNames.Count == 0 && tableFunctionNames.Count == 0 && triggerTypes.Count == 0)
@@ -108,8 +136,9 @@ internal static class ExtensionDependencyFinder
             {
                 foreach (TriggerDefinition trigger in triggers)
                 {
-                    if (string.Equals(trigger.ExtensionName, extension.Name, StringComparison.OrdinalIgnoreCase) &&
+                    if (extensionName is not null && string.Equals(trigger.ExtensionName, extensionName, StringComparison.OrdinalIgnoreCase) &&
                         triggerTypes.Contains(trigger.TypeName))
+
                         dependents.Add($"trigger {trigger.Name} on table {table.Name}");
                 }
             }

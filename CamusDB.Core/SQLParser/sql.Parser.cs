@@ -237,16 +237,99 @@ internal partial class sqlParser
     }
 
     /// <summary>
-    /// Builds a <see cref="NodeType.DropExtension"/> node after checking the word EXTENSION.
-    /// <c>yytext</c> is "if exists" for the IF EXISTS form.
+    /// Builds a <see cref="NodeType.DropExtension"/> node for the word EXTENSION, or a
+    /// <see cref="NodeType.DropFunction"/> node for the word FUNCTION: the two statements have the same
+    /// tokens, so one production parses both. <c>yytext</c> is "if exists" for the IF EXISTS form.
     /// </summary>
-    private static NodeAst DropExtensionStatement(string? extensionWord, NodeAst name, bool ifExists)
+    private static NodeAst DropExtensionStatement(string? word, NodeAst name, bool ifExists)
     {
-        if (!string.Equals(extensionWord, "extension", StringComparison.OrdinalIgnoreCase))
-            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, ExtensionGuidance);
+        if (string.Equals(word, "function", StringComparison.OrdinalIgnoreCase))
+            return new NodeAst(NodeType.DropFunction, name, null, null, null, null, null, null, ifExists ? "if exists" : null);
+
+        if (!string.Equals(word, "extension", StringComparison.OrdinalIgnoreCase))
+            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, ExtensionGuidance + ", or DROP FUNCTION [IF EXISTS] <name>");
 
         return new NodeAst(NodeType.DropExtension, name, null, null, null, null, null, null, ifExists ? "if exists" : null);
     }
+
+    private const string FunctionGuidance =
+        "Expected: CREATE [OR REPLACE] FUNCTION <name>([<parameter> <type>, ...]) RETURNS <type> " +
+        "[RETURNS NULL ON NULL INPUT | CALLED ON NULL INPUT] LANGUAGE csharp AS $$ <body> $$";
+
+    /// <summary>The <c>yytext</c> of a <see cref="NodeType.CreateFunction"/> node whose body is called with NULL arguments.</summary>
+    internal const string FunctionCalledOnNull = "called";
+
+    /// <summary>
+    /// Builds a <see cref="NodeType.CreateFunction"/> or <see cref="NodeType.CreateOrReplaceFunction"/>
+    /// node after checking the plain-identifier words FUNCTION and REPLACE. <paramref name="returns"/>
+    /// is the node <see cref="FunctionReturns"/> built: its slots move into the statement node.
+    /// </summary>
+    private static NodeAst CreateFunctionStatement(
+        string? functionWord, string? replaceWord, NodeAst name, NodeAst? parameters, NodeAst returns, string? body)
+    {
+        if (!string.Equals(functionWord, "function", StringComparison.OrdinalIgnoreCase) ||
+            (replaceWord is not null && !string.Equals(replaceWord, "replace", StringComparison.OrdinalIgnoreCase)))
+            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, FunctionGuidance);
+
+        NodeAst bodyNode = new(NodeType.FunctionBody, null, null, null, null, null, null, null, body ?? "");
+
+        return new NodeAst(
+            replaceWord is null ? NodeType.CreateFunction : NodeType.CreateOrReplaceFunction,
+            name, parameters, returns.leftAst, bodyNode, returns.rightAst, null, null, returns.yytext);
+    }
+
+    /// <summary>
+    /// Checks the words of the clauses between the parameter list and <c>AS</c>, and returns a holder
+    /// node: <c>leftAst</c> = the result type, <c>rightAst</c> = an identifier node with the language
+    /// name, <c>yytext</c> = <see cref="FunctionCalledOnNull"/> for <c>CALLED ON NULL INPUT</c>.
+    /// <paramref name="nullWord"/> is the first word of the NULL rule (RETURNS or CALLED), or null when
+    /// the statement has none; the tokens NULL and ON between it and INPUT are checked by the grammar.
+    /// </summary>
+    private static NodeAst FunctionReturns(
+        string? returnsWord, NodeAst type, string? nullWord, string? inputWord, string? languageWord, string? language)
+    {
+        if (!string.Equals(returnsWord, "returns", StringComparison.OrdinalIgnoreCase) ||
+            !string.Equals(languageWord, "language", StringComparison.OrdinalIgnoreCase))
+            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, FunctionGuidance);
+
+        string? nullRule = null;
+
+        if (nullWord is not null)
+        {
+            if (!string.Equals(inputWord, "input", StringComparison.OrdinalIgnoreCase))
+                throw new CamusDBException(CamusDBErrorCodes.InvalidInput, FunctionGuidance);
+
+            if (string.Equals(nullWord, "called", StringComparison.OrdinalIgnoreCase))
+                nullRule = FunctionCalledOnNull;
+            else if (!string.Equals(nullWord, "returns", StringComparison.OrdinalIgnoreCase))
+                throw new CamusDBException(CamusDBErrorCodes.InvalidInput, FunctionGuidance);
+        }
+
+        NodeAst languageNode = new(NodeType.Identifier, null, null, null, null, null, null, null, language);
+        return new NodeAst(NodeType.FunctionParameterList, type, languageNode, null, null, null, null, null, nullRule);
+    }
+
+    /// <summary>Builds a <see cref="NodeType.AlterFunctionOwnerTo"/> node after checking the words FUNCTION and OWNER.</summary>
+    private static NodeAst AlterFunctionOwnerStatement(string? functionWord, NodeAst name, string? ownerWord, NodeAst owner)
+    {
+        if (!string.Equals(functionWord, "function", StringComparison.OrdinalIgnoreCase) ||
+            !string.Equals(ownerWord, "owner", StringComparison.OrdinalIgnoreCase))
+            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Expected: ALTER FUNCTION <name> OWNER TO <user>");
+
+        return new NodeAst(NodeType.AlterFunctionOwnerTo, name, owner, null, null, null, null, null, null);
+    }
+
+    /// <summary>Builds a <see cref="NodeType.ShowCreateFunction"/> node after checking the word FUNCTION.</summary>
+    private static NodeAst ShowCreateFunctionStatement(string? functionWord, NodeAst name)
+    {
+        if (!string.Equals(functionWord, "function", StringComparison.OrdinalIgnoreCase))
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInput,
+                "Expected: SHOW CREATE TABLE, SHOW CREATE VIEW, SHOW CREATE MATERIALIZED VIEW, SHOW CREATE SEQUENCE or SHOW CREATE FUNCTION");
+
+        return new NodeAst(NodeType.ShowCreateFunction, name, null, null, null, null, null, null, null);
+    }
+
 
     /// <summary>
     /// Builds a <see cref="NodeType.Call"/> node after checking the word CALL. <c>leftAst</c> is the

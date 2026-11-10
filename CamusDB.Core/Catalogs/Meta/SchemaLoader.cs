@@ -62,6 +62,7 @@ internal static class SchemaLoader
                 database.Schema.Views = snapshot.Views;
                 database.Schema.Sequences = snapshot.Sequences;
                 database.Schema.ExtensionCatalog.Publish(snapshot.Extensions, snapshot.SchemaVersion);
+                database.Schema.FunctionCatalog.Publish(snapshot.Functions, snapshot.SchemaVersion);
             }
 
             // Both maps were replaced wholesale above, so the id index has to be built from them
@@ -175,7 +176,7 @@ internal static class SchemaLoader
                 // nothing decodes against it, so it needs no ordering of its own — and a third
                 // pass over the bucket would add a scan to every database open for a family most
                 // databases do not have.
-                (snapshot.Views, snapshot.Sequences, snapshot.Extensions) = await LoadViewsAndSequencesAsync(database, tx).ConfigureAwait(false);
+                (snapshot.Views, snapshot.Sequences, snapshot.Extensions, snapshot.Functions) = await LoadViewsAndSequencesAsync(database, tx).ConfigureAwait(false);
             }
 
             (KeyValueResponseType systemType, ReadOnlyKeyValueEntry? systemEntry) =
@@ -291,17 +292,23 @@ internal static class SchemaLoader
     /// <para>Both are read in one pass rather than two because neither depends on the other, and a
     /// pass costs a full walk of the bucket on every database open.</para>
     /// </remarks>
-    private static async Task<(Dictionary<string, ViewSchema> Views, Dictionary<string, SequenceSchema> Sequences, Dictionary<string, ExtensionDefinition> Extensions)>
+    private static async Task<(
+        Dictionary<string, ViewSchema> Views,
+        Dictionary<string, SequenceSchema> Sequences,
+        Dictionary<string, ExtensionDefinition> Extensions,
+        Dictionary<string, InlineFunctionDefinition> Functions)>
         LoadViewsAndSequencesAsync(DatabaseDescriptor database, KvTransaction tx)
     {
         Dictionary<string, ViewSchema> views = new(StringComparer.OrdinalIgnoreCase);
         Dictionary<string, SequenceSchema> sequences = new(StringComparer.OrdinalIgnoreCase);
         Dictionary<string, ExtensionDefinition> extensions = new(StringComparer.OrdinalIgnoreCase);
+        Dictionary<string, InlineFunctionDefinition> functions = new(StringComparer.OrdinalIgnoreCase);
 
         IKahuna kahuna = database.Kahuna.Kahuna;
         string viewKeyPrefix = MetaKeys.ViewKeyPrefix(database.Id);
         string sequenceKeyPrefix = MetaKeys.SequenceKeyPrefix(database.Id);
         string extensionKeyPrefix = MetaKeys.ExtensionKeyPrefix(database.Id);
+        string functionKeyPrefix = MetaKeys.FunctionKeyPrefix(database.Id);
 
         string versionKey = MetaKeys.VersionKey(database.Id);
         bool sawVersionKey = false;
@@ -351,8 +358,25 @@ internal static class SchemaLoader
                 continue;
             }
 
+            // An inline function's record: the source text only. Read in the same pass, for the same
+            // reason: most databases have none. Nothing is compiled at load; a function is compiled at
+            // its first call.
+            if (key.StartsWith(functionKeyPrefix, StringComparison.Ordinal))
+            {
+                InlineFunctionDefinition function = MetaJsonSerializer.Deserialize(entry.Value, MetaJsonContext.Default.InlineFunctionDefinition);
+
+                if (string.IsNullOrWhiteSpace(function.Name))
+                    throw new CamusDBException(
+                        CamusDBErrorCodes.SystemSpaceCorrupt,
+                        $"Function meta key '{key}' decoded without a name");
+
+                functions[function.Name] = function;
+                continue;
+            }
+
             if (!key.StartsWith(sequenceKeyPrefix, StringComparison.Ordinal))
                 continue;
+
 
             // The catalog record only. The counter behind it lives in Kahuna's reserved sequencer
             // namespace and is deliberately not read at open: that is a routed round trip per
@@ -368,9 +392,10 @@ internal static class SchemaLoader
             sequences[sequence.Name!] = sequence;
         }
 
-        RequireCompleteMetaScan(database, sawVersionKey, "views, sequences and extensions");
+        RequireCompleteMetaScan(database, sawVersionKey, "views, sequences, extensions and functions");
 
-        return (views, sequences, extensions);
+        return (views, sequences, extensions, functions);
+
     }
 
     /// <summary>

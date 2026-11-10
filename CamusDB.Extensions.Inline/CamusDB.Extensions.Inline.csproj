@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!-- The run-time support that the server links into every inline SQL function (CREATE FUNCTION
+         ... LANGUAGE csharp): the per-call budget checks. It is a separate assembly, with no package
+         reference, for two reasons. The extension contract targets netstandard2.0, which has no
+         per-thread allocation counter, so the checks cannot live there. And the load context of a
+         compiled function resolves exactly two assemblies outside the framework, so the smaller this
+         one is, the smaller the surface a compiled function can reach. -->
+    <TargetFramework>net10.0</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <RootNamespace>CamusDB.Extensions.Inline</RootNamespace>
+    <IsPackable>false</IsPackable>
+    <Deterministic>true</Deterministic>
+  </PropertyGroup>
+
+</Project>

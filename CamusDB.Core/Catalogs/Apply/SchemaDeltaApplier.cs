@@ -98,6 +98,10 @@ internal static class SchemaDeltaApplier
             SchemaOp.CreateExtension => ExtensionDeltaApplier.ApplyCreateExtension(schema, SchemaDeltaApplier.DecodePayload<SchemaExtensionPayload>(entry), entry.ToVersion),
             SchemaOp.UpdateExtension => ExtensionDeltaApplier.ApplyUpdateExtension(schema, SchemaDeltaApplier.DecodePayload<SchemaExtensionPayload>(entry), entry.ToVersion),
             SchemaOp.DropExtension => ExtensionDeltaApplier.ApplyDropExtension(schema, SchemaDeltaApplier.DecodePayload<SchemaDropExtensionPayload>(entry), entry.ToVersion),
+            SchemaOp.CreateFunction => InlineFunctionDeltaApplier.ApplyCreateFunction(schema, SchemaDeltaApplier.DecodePayload<SchemaFunctionPayload>(entry), entry.ToVersion),
+            SchemaOp.ReplaceFunction => InlineFunctionDeltaApplier.ApplyReplaceFunction(schema, SchemaDeltaApplier.DecodePayload<SchemaFunctionPayload>(entry), entry.ToVersion),
+            SchemaOp.DropFunction => InlineFunctionDeltaApplier.ApplyDropFunction(schema, SchemaDeltaApplier.DecodePayload<SchemaDropFunctionPayload>(entry), entry.ToVersion),
+            SchemaOp.SetFunctionOwner => InlineFunctionDeltaApplier.ApplySetFunctionOwner(schema, SchemaDeltaApplier.DecodePayload<SchemaSetFunctionOwnerPayload>(entry), entry.ToVersion),
             _ => throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Unknown schema operation '{entry.Op}'")
         };
 
@@ -221,7 +225,13 @@ internal static class SchemaDeltaApplier
             SchemaOp.CreateExtension => ExtensionDeltaApplier.WasCreateApplied(schema, DecodePayload<SchemaExtensionPayload>(entry)),
             SchemaOp.UpdateExtension => ExtensionDeltaApplier.WasUpdateApplied(schema, DecodePayload<SchemaExtensionPayload>(entry)),
             SchemaOp.DropExtension => ExtensionDeltaApplier.WasDropApplied(schema, DecodePayload<SchemaDropExtensionPayload>(entry)),
+            // Function ops touch no relation either; the function record is the proof.
+            SchemaOp.CreateFunction => InlineFunctionDeltaApplier.WasCreateApplied(schema, DecodePayload<SchemaFunctionPayload>(entry)),
+            SchemaOp.ReplaceFunction => InlineFunctionDeltaApplier.WasReplaceApplied(schema, DecodePayload<SchemaFunctionPayload>(entry)),
+            SchemaOp.DropFunction => InlineFunctionDeltaApplier.WasDropApplied(schema, DecodePayload<SchemaDropFunctionPayload>(entry)),
+            SchemaOp.SetFunctionOwner => InlineFunctionDeltaApplier.WasSetOwnerApplied(schema, DecodePayload<SchemaSetFunctionOwnerPayload>(entry)),
             _ => schema.SchemaVersion >= entry.ToVersion
+
         };
     }
 

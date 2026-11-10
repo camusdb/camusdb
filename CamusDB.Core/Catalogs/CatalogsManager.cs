@@ -82,6 +82,8 @@ public sealed class CatalogsManager
 
     private readonly ExtensionCatalog extensions;
 
+    private readonly InlineFunctionProposals functions;
+
     /// <summary>
     /// Test hook, written through to <see cref="SchemaCheckpointWriter"/>: when non-null, every
     /// checkpoint persist throws it instead of writing, so a test can drive the exhausted-retry path
@@ -103,6 +105,7 @@ public sealed class CatalogsManager
         views = new(publisher);
         sequences = new(publisher);
         extensions = new(publisher);
+        functions = new(publisher);
     }
 
     // -----------------------------------------------------------------------
@@ -427,7 +430,26 @@ public sealed class CatalogsManager
         DatabaseDescriptor database, string extensionName, Action<Schema, ExtensionDefinition> checkDependents)
         => await extensions.DropExtensionAsync(database, extensionName, checkDependents).ConfigureAwait(false);
 
+    /// <summary>Proposes <c>CREATE [OR REPLACE] FUNCTION</c>; see <see cref="InlineFunctionProposals.CreateOrReplaceAsync"/>.</summary>
+    internal async Task<bool> CreateOrReplaceFunctionAsync(
+        DatabaseDescriptor database,
+        InlineFunctionDefinition function,
+        bool replace,
+        Action<Schema> checkNew,
+        Action<Schema, InlineFunctionDefinition, InlineFunctionDefinition> checkReplace)
+        => await functions.CreateOrReplaceAsync(database, function, replace, checkNew, checkReplace).ConfigureAwait(false);
+
+    /// <summary>Proposes <c>DROP FUNCTION</c>; see <see cref="InlineFunctionProposals.DropAsync"/>.</summary>
+    internal async Task DropFunctionAsync(DatabaseDescriptor database, string functionName, Action<Schema, InlineFunctionDefinition> check)
+        => await functions.DropAsync(database, functionName, check).ConfigureAwait(false);
+
+    /// <summary>Proposes <c>ALTER FUNCTION ... OWNER TO</c>; see <see cref="InlineFunctionProposals.SetOwnerAsync"/>.</summary>
+    internal async Task SetFunctionOwnerAsync(
+        DatabaseDescriptor database, string functionName, string? owner, string? ownerId, HLCTimestamp now, Action<Schema, InlineFunctionDefinition> check)
+        => await functions.SetOwnerAsync(database, functionName, owner, ownerId, now, check).ConfigureAwait(false);
+
     /// <summary>Proposes <c>DROP TRIGGER</c>; see <c>SchemaElementReplicator.ReplicateDropTriggerAsync</c>.</summary>
+
     internal async Task ReplicateDropTriggerAsync(DatabaseDescriptor database, string tableName, string triggerName)
         => await elements.ReplicateDropTriggerAsync(database, tableName, triggerName).ConfigureAwait(false);
 

@@ -236,7 +236,42 @@ public sealed class TestConfigResolver
     }
 
     [Test]
+    public void Resolve_InlineFunctionKnobsRoundTrip()
+    {
+        string yml =
+            "inline_functions_enabled: true\n" +
+            "inline_function_call_timeout_ms: 250\n" +
+            "inline_function_allocation_limit_bytes: 8388608\n" +
+            "inline_function_array_limit: 4096\n" +
+            "inline_function_source_limit_bytes: 2048\n" +
+            "inline_function_compile_timeout_ms: 3000\n" +
+            "inline_function_compile_concurrency: 4\n" +
+            "max_inline_functions_per_database: 12";
+
+        CamusDBOptions resolved = ConfigResolver.Resolve(new ConfigReader().Read(yml));
+
+        Assert.That(resolved.InlineFunctionsEnabled, Is.True);
+        Assert.That(resolved.InlineFunctionCallTimeoutMs, Is.EqualTo(250));
+        Assert.That(resolved.InlineFunctionAllocationLimitBytes, Is.EqualTo(8_388_608L));
+        Assert.That(resolved.InlineFunctionArrayLimit, Is.EqualTo(4096));
+        Assert.That(resolved.InlineFunctionSourceLimitBytes, Is.EqualTo(2048));
+        Assert.That(resolved.InlineFunctionCompileTimeoutMs, Is.EqualTo(3000));
+        Assert.That(resolved.InlineFunctionCompileConcurrency, Is.EqualTo(4));
+        Assert.That(resolved.MaxInlineFunctionsPerDatabase, Is.EqualTo(12));
+    }
+
+    [TestCase("inline_function_source_limit_bytes")]
+    [TestCase("inline_function_compile_timeout_ms")]
+    [TestCase("inline_function_compile_concurrency")]
+    public void InlineFunctionCompileLimit_NonPositive_Rejected(string key)
+    {
+        CamusDBException ex = Assert.Throws<CamusDBException>(() => new ConfigReader().Read(key + ": 0"))!;
+        Assert.That(ex.Message, Does.Contain(key));
+    }
+
+    [Test]
     public void RegexMatchTimeout_NonPositive_Rejected()
+
     {
         CamusDBException ex = Assert.Throws<CamusDBException>(() =>
             new ConfigReader().Read("regex_match_timeout_ms: 0"))!;

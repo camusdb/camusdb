@@ -1735,6 +1735,64 @@ internal sealed class SchemaQuerier
     private static List<string> Members(ExtensionDefinition record, ExtensionMemberKind kind) =>
         record.Members.Where(m => m.Kind == kind).Select(m => m.Name).ToList();
 
+    /// <summary>
+    /// Lists the inline functions of a database with what this node did with each, then the compiled
+    /// code of dropped or replaced functions of this database that is still in memory. See
+    /// <c>DerivedTableSchemaBuilder.ShowFunctionsSchema</c>. Node-local in its last column: each node
+    /// compiles a function at its own first call.
+    /// </summary>
+    internal async IAsyncEnumerable<QueryResultRow> ShowFunctions(
+        DatabaseDescriptor database, Extensions.Inline.InlineFunctionSet bound, Extensions.Inline.InlineFunctionRuntime? runtime)
+    {
+        await Task.CompletedTask;
+
+        foreach (InlineFunctionDefinition function in database.Schema.Functions.Values.OrderBy(f => f.Name, StringComparer.OrdinalIgnoreCase))
+        {
+            System.Text.StringBuilder arguments = new();
+            Extensions.Inline.InlineFunctionSignature.AppendParameters(arguments, function);
+
+            yield return new QueryResultRow(default, new Dictionary<string, ColumnValue>(StringComparer.OrdinalIgnoreCase)
+            {
+                { "name",          new ColumnValue(ColumnType.String, function.Name) },
+                { "arguments",     new ColumnValue(ColumnType.String, arguments.ToString()) },
+                { "returns",       new ColumnValue(ColumnType.String, Extensions.Inline.InlineFunctionSignature.SqlTypeName(function.ReturnType, function.ReturnElementType)) },
+                { "null_input",    new ColumnValue(ColumnType.String, function.NullInput == InlineFunctionNullInput.Called ? "called" : "returns null") },
+                { "language",      new ColumnValue(ColumnType.String, function.Language) },
+                { "owner",         Text(function.Owner) },
+                { "generation",    new ColumnValue(ColumnType.Integer64, function.Generation) },
+                { "source_sha256", new ColumnValue(ColumnType.String, function.SourceSha256) },
+                { "rule_revision", new ColumnValue(ColumnType.Integer64, function.RuleRevision) },
+                { "state",         new ColumnValue(ColumnType.String, bound.Find(function.Name)?.CompileState ?? "not compiled") },
+            });
+        }
+
+        if (runtime is null)
+            yield break;
+
+        string prefix = database.Name + ".";
+
+        foreach (string label in runtime.Unloading())
+        {
+            if (!label.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+                continue;
+
+            yield return new QueryResultRow(default, new Dictionary<string, ColumnValue>(StringComparer.OrdinalIgnoreCase)
+            {
+                { "name",          new ColumnValue(ColumnType.String, label[prefix.Length..]) },
+                { "arguments",     ColumnValue.Null },
+                { "returns",       ColumnValue.Null },
+                { "null_input",    ColumnValue.Null },
+                { "language",      ColumnValue.Null },
+                { "owner",         ColumnValue.Null },
+                { "generation",    ColumnValue.Null },
+                { "source_sha256", ColumnValue.Null },
+                { "rule_revision", ColumnValue.Null },
+                { "state",         new ColumnValue(ColumnType.String, "unloading") },
+            });
+        }
+    }
+
+
     private static QueryResultRow ExtensionRow(
         string name, string version, string status, ColumnValue path, string sha256, ColumnValue trust,
         IEnumerable<string> requires, IEnumerable<string> functions, IEnumerable<string> triggers, IEnumerable<string> procedures,

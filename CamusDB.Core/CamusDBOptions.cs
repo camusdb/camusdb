@@ -2110,6 +2110,104 @@ public sealed record CamusDBOptions
     public IReadOnlyList<string> UnsafeExtensionAssemblies { get; init; } = [];
 
     /// <summary>
+    /// When true, <c>CREATE FUNCTION ... LANGUAGE csharp</c> is accepted: a user with the
+    /// <c>CREATE</c> privilege on a database can define a SQL function whose body is C# source, which
+    /// the server compiles in memory. Off by default. With it off the statement is refused with
+    /// <c>CADB0841</c>; functions that exist still run, so a restart with the setting off does not
+    /// break a view or a CHECK constraint that calls one.
+    ///
+    /// <para>Restart-class: the engine builds its compiler, and warms it, once in the constructor.
+    /// Cluster scope: a function created on one node must be accepted by all of them.</para>
+    ///
+    /// <para>Set via <c>inline_functions_enabled</c> in <c>config.yml</c>. Default: <c>false</c>.</para>
+    /// </summary>
+    [ConfigSetting(ConfigMutability.Restart, ConfigScope.Cluster)]
+    public bool InlineFunctionsEnabled { get; init; }
+
+    /// <summary>
+    /// The longest one call of an inline function may run, in milliseconds. The body checks it at the
+    /// start of every loop body, lambda and local function, so a call ends at most one framework call
+    /// after the limit, with <c>CADB0840</c>. Zero or less disables the limit.
+    ///
+    /// <para>Restart-class: each compiled function's adapter keeps the value it was built with.
+    /// Cluster scope: a statement must fail or pass the same on every node.</para>
+    ///
+    /// <para>Set via <c>inline_function_call_timeout_ms</c> in <c>config.yml</c>. Default: <c>1000</c>.</para>
+    /// </summary>
+    [ConfigSetting(ConfigMutability.Restart, ConfigScope.Cluster)]
+    public int InlineFunctionCallTimeoutMs { get; init; } = 1000;
+
+    /// <summary>
+    /// The managed memory one call of an inline function may allocate, in bytes, counted on the
+    /// calling thread from the start of the call. The count includes memory the call already gave
+    /// back, so it bounds work as well as size. A single framework call can go over it before the
+    /// next check; the heap hard limit of the process is the backstop for that. Zero or less disables
+    /// the limit. Restart-class and cluster scope for the reasons given on
+    /// <see cref="InlineFunctionCallTimeoutMs"/>.
+    ///
+    /// <para>Set via <c>inline_function_allocation_limit_bytes</c> in <c>config.yml</c>. Default:
+    /// <c>16777216</c> (16 MiB).</para>
+    /// </summary>
+    [ConfigSetting(ConfigMutability.Restart, ConfigScope.Cluster)]
+    public long InlineFunctionAllocationLimitBytes { get; init; } = 16L * 1024 * 1024;
+
+    /// <summary>
+    /// The largest array, in elements, that the body of an inline function may create with
+    /// <c>new T[n]</c>. Zero or less disables the limit. Restart-class and cluster scope for the
+    /// reasons given on <see cref="InlineFunctionCallTimeoutMs"/>.
+    ///
+    /// <para>Set via <c>inline_function_array_limit</c> in <c>config.yml</c>. Default:
+    /// <c>1048576</c>.</para>
+    /// </summary>
+    [ConfigSetting(ConfigMutability.Restart, ConfigScope.Cluster)]
+    public int InlineFunctionArrayLimit { get; init; } = 1_048_576;
+
+    /// <summary>
+    /// The largest body of an inline function, in UTF-8 bytes. A longer body is refused before the
+    /// compiler reads it. Restart-class; cluster scope, because a body one node accepts must compile on
+    /// the others.
+    ///
+    /// <para>Set via <c>inline_function_source_limit_bytes</c> in <c>config.yml</c>. Default:
+    /// <c>65536</c> (64 KiB).</para>
+    /// </summary>
+    [ConfigSetting(ConfigMutability.Restart, ConfigScope.Cluster)]
+    public int InlineFunctionSourceLimitBytes { get; init; } = 64 * 1024;
+
+    /// <summary>
+    /// The longest one compile of an inline function may take, in milliseconds, the wait for a compile
+    /// slot included. A compile that takes longer fails the statement with <c>CADB0838</c>, never the
+    /// node. Restart-class; node scope, because it protects this node's cores.
+    ///
+    /// <para>Set via <c>inline_function_compile_timeout_ms</c> in <c>config.yml</c>. Default:
+    /// <c>10000</c>.</para>
+    /// </summary>
+    [ConfigSetting(ConfigMutability.Restart, ConfigScope.Node)]
+    public int InlineFunctionCompileTimeoutMs { get; init; } = 10_000;
+
+    /// <summary>
+    /// How many inline functions this node compiles at the same time. Each compile uses one core, so
+    /// this is the number of cores that <c>CREATE FUNCTION</c> statements, and first calls after a
+    /// restart, can take together. Restart-class; node scope, because nodes can differ in size.
+    ///
+    /// <para>Set via <c>inline_function_compile_concurrency</c> in <c>config.yml</c>. Default:
+    /// <c>2</c>.</para>
+    /// </summary>
+    [ConfigSetting(ConfigMutability.Restart, ConfigScope.Node)]
+    public int InlineFunctionCompileConcurrency { get; init; } = 2;
+
+    /// <summary>
+    /// The most inline functions one database may hold. Each function is compiled code in the memory
+    /// of every node that calls it. Zero or less disables the limit. Restart-class; cluster scope,
+    /// because the node that runs <c>CREATE FUNCTION</c> decides for all.
+    ///
+    /// <para>Set via <c>max_inline_functions_per_database</c> in <c>config.yml</c>. Default:
+    /// <c>256</c>.</para>
+    /// </summary>
+    [ConfigSetting(ConfigMutability.Restart, ConfigScope.Cluster)]
+    public int MaxInlineFunctionsPerDatabase { get; init; } = 256;
+
+
+    /// <summary>
     /// Resolved Kahuna engine overrides from <c>config.yml</c>. Applied when constructing embedded
     /// nodes in cluster and standalone modes.
     /// </summary>

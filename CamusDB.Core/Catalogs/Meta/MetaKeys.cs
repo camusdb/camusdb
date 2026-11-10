@@ -94,7 +94,18 @@ internal static class MetaKeys
     /// </summary>
     internal static string ExtensionKey(string dbId, string extensionName) => $"{ExtensionKeyPrefix(dbId)}{extensionName.ToLowerInvariant()}";
 
+    internal static string FunctionKeyPrefix(string dbId) => $"{dbId}/meta/function:";
+
+    /// <summary>
+    /// Holds one inline SQL function (<c>InlineFunctionDefinition</c>), keyed by the function name in
+    /// lower case. A function has no rename, and a new function of the same name after a drop writes
+    /// the same key again. The record holds the source text of the body; compiled code is never
+    /// stored.
+    /// </summary>
+    internal static string FunctionKey(string dbId, string functionName) => $"{FunctionKeyPrefix(dbId)}{functionName.ToLowerInvariant()}";
+
     internal static string CoordinatorKeyPrefix(string dbId) => $"{dbId}/meta/coordinator:";
+
 
     /// <summary>
     /// Holds one persisted schema-change coordinator job. The key embeds the immutable table id,

@@ -294,6 +294,12 @@ public sealed class SchemaReplicator
         if (entry.Op is SchemaOp.CreateExtension or SchemaOp.UpdateExtension or SchemaOp.DropExtension)
             database.Cache?.InvalidateDatabase(database.Id);
 
+        // The same for the inline functions: a new, replaced or dropped function changes what a call
+        // means, and the result cache keys on the stamp that moved with it. An owner change does not
+        // change a result, but it moves the stamp as well, so its entries are unreachable too.
+        if (InlineFunctionDeltaApplier.IsFunctionOp(entry.Op))
+            database.Cache?.InvalidateDatabase(database.Id);
+
         // A new constraint can take ownership of an index, which changes that index's entry.
         if (entry.Op == SchemaOp.AddForeignKey)
             database.TableDescriptors.TryRemove(DecodePayload<SchemaAddForeignKeyPayload>(entry).TableName, out _);
@@ -557,6 +563,10 @@ public sealed class SchemaReplicator
             SchemaOp.CreateExtension => ExtensionDeltaApplier.WasCreateApplied(schema, DecodePayload<SchemaExtensionPayload>(entry)),
             SchemaOp.UpdateExtension => ExtensionDeltaApplier.WasUpdateApplied(schema, DecodePayload<SchemaExtensionPayload>(entry)),
             SchemaOp.DropExtension => ExtensionDeltaApplier.WasDropApplied(schema, DecodePayload<SchemaDropExtensionPayload>(entry)),
+            SchemaOp.CreateFunction => InlineFunctionDeltaApplier.WasCreateApplied(schema, DecodePayload<SchemaFunctionPayload>(entry)),
+            SchemaOp.ReplaceFunction => InlineFunctionDeltaApplier.WasReplaceApplied(schema, DecodePayload<SchemaFunctionPayload>(entry)),
+            SchemaOp.DropFunction => InlineFunctionDeltaApplier.WasDropApplied(schema, DecodePayload<SchemaDropFunctionPayload>(entry)),
+            SchemaOp.SetFunctionOwner => InlineFunctionDeltaApplier.WasSetOwnerApplied(schema, DecodePayload<SchemaSetFunctionOwnerPayload>(entry)),
             _ => schema.SchemaVersion >= entry.ToVersion
         };
     }
@@ -669,6 +679,11 @@ public sealed class SchemaReplicator
         // The installed-extension map is an immutable snapshot, so the clone shares it; the dry-run
         // apply publishes a new map into the clone's own catalog and never touches the live one.
         clone.ExtensionCatalog.Publish(schema.Extensions, schema.ExtensionCatalog.Stamp);
+
+        // The function map is an immutable snapshot too. The copy also takes the names the live
+        // catalog saw removed, which the proposer-side reference check reads from the clone.
+        clone.FunctionCatalog.CopyFrom(schema.FunctionCatalog);
+
 
         return clone;
     }

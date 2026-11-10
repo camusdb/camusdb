@@ -94,7 +94,8 @@ public static class StatementScope
         NodeType.DropSequence or NodeType.DropSequenceIfExists or
         NodeType.AlterSequence or NodeType.AlterSequenceRenameTo or
         NodeType.CreateTrigger or NodeType.DropTrigger or
-        NodeType.CreateExtension or NodeType.AlterExtensionUpdate or NodeType.DropExtension;
+        NodeType.CreateExtension or NodeType.AlterExtensionUpdate or NodeType.DropExtension or
+        NodeType.CreateFunction or NodeType.CreateOrReplaceFunction or NodeType.DropFunction or NodeType.AlterFunctionOwnerTo;
 
     /// <summary>
     /// True for the row-returning statements the query executor answers <b>before</b> opening a
@@ -161,7 +162,9 @@ public static class StatementScope
         NodeType.ShowViews or NodeType.ShowMaterializedViews or
         NodeType.ShowCreateView or NodeType.ShowCreateMaterializedView or
         NodeType.ShowSequences or NodeType.ShowCreateSequence or
+        NodeType.ShowFunctions or NodeType.ShowCreateFunction or
         NodeType.ShowOrphanTables or NodeType.ShowIndexUsage ||
+
         IsServerLevelQuery(nodeType);
 
     /// <summary>

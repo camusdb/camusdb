@@ -73,6 +73,8 @@ public static class GrpcErrorMapper
         CamusDBErrorCodes.InvalidForeignKeyDefinition => StatusCode.InvalidArgument,
         CamusDBErrorCodes.ForeignKeyCycle => StatusCode.InvalidArgument,
         CamusDBErrorCodes.ExtensionFunctionFailed => StatusCode.InvalidArgument,
+        CamusDBErrorCodes.InlineFunctionCompileFailed => StatusCode.InvalidArgument,
+        CamusDBErrorCodes.InlineFunctionRefused => StatusCode.InvalidArgument,
         CamusDBErrorCodes.TriggerTypeNotFound => StatusCode.InvalidArgument,
         CamusDBErrorCodes.TriggerTypeAmbiguous => StatusCode.InvalidArgument,
         CamusDBErrorCodes.TriggerTypeInvalid => StatusCode.InvalidArgument,
@@ -102,6 +104,7 @@ public static class GrpcErrorMapper
         CamusDBErrorCodes.TriggerNotFound     => StatusCode.NotFound,
         CamusDBErrorCodes.ProcedureNotFound   => StatusCode.NotFound,
         CamusDBErrorCodes.ExtensionNotInstalled => StatusCode.NotFound,
+        CamusDBErrorCodes.FunctionNotFound => StatusCode.NotFound,
 
         // Already exists
         CamusDBErrorCodes.DuplicateUniqueKeyValue => StatusCode.AlreadyExists,
@@ -110,6 +113,8 @@ public static class GrpcErrorMapper
         CamusDBErrorCodes.TableAlreadyExists      => StatusCode.AlreadyExists,
         CamusDBErrorCodes.TriggerAlreadyExists    => StatusCode.AlreadyExists,
         CamusDBErrorCodes.ExtensionAlreadyInstalled => StatusCode.AlreadyExists,
+        CamusDBErrorCodes.FunctionAlreadyExists => StatusCode.AlreadyExists,
+
 
         // Failed precondition (non-retryable transaction state)
         CamusDBErrorCodes.TransactionAlreadyCompleted => StatusCode.FailedPrecondition,
@@ -131,6 +136,9 @@ public static class GrpcErrorMapper
         CamusDBErrorCodes.TriggerBindingMismatch => StatusCode.Unavailable,
         CamusDBErrorCodes.ExtensionNotLoadedOnNode => StatusCode.Unavailable,
 
+        // This node could not compile the function's source; another node can run the statement.
+        CamusDBErrorCodes.InlineFunctionUnavailableOnNode => StatusCode.Unavailable,
+
         // Refused because of what the data or the schema holds right now, not because of the
         // statement text: the same statement succeeds once the dependent rows or objects are gone.
         CamusDBErrorCodes.ForeignKeyViolation      => StatusCode.FailedPrecondition,
@@ -141,6 +149,8 @@ public static class GrpcErrorMapper
         CamusDBErrorCodes.TriggerMutationConflict  => StatusCode.FailedPrecondition,
         CamusDBErrorCodes.ExtensionMemberConflict  => StatusCode.FailedPrecondition,
         CamusDBErrorCodes.ExtensionHasDependents   => StatusCode.FailedPrecondition,
+        CamusDBErrorCodes.FunctionHasDependents    => StatusCode.FailedPrecondition,
+        CamusDBErrorCodes.InlineFunctionsDisabled  => StatusCode.FailedPrecondition,
         CamusDBErrorCodes.ExtensionClusterMismatch => StatusCode.FailedPrecondition,
 
         // Retryable transaction conflicts → ABORTED (trailer code disambiguates)
@@ -163,6 +173,8 @@ public static class GrpcErrorMapper
         CamusDBErrorCodes.InsufficientDiskSpace             => StatusCode.ResourceExhausted,
         CamusDBErrorCodes.ResultSetTooLarge                 => StatusCode.ResourceExhausted,
         CamusDBErrorCodes.ConcurrencyLimitExceeded          => StatusCode.ResourceExhausted,
+        CamusDBErrorCodes.InlineFunctionBudgetExceeded      => StatusCode.ResourceExhausted,
+
         CamusDBErrorCodes.StatementTooLarge                 => StatusCode.InvalidArgument,
 
         // The node's store is damaged. Not retryable, and not an ordinary internal error: a client must

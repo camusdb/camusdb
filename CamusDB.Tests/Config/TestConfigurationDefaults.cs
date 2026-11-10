@@ -141,6 +141,15 @@ public class TestConfigurationDefaults
         Assert.AreEqual(false, CamusDBOptions.Default.QueryTracingEnabled, nameof(CamusDBOptions.Default.QueryTracingEnabled));
         Assert.AreEqual(250, CamusDBOptions.Default.RegexMatchTimeoutMs, nameof(CamusDBOptions.Default.RegexMatchTimeoutMs));
         Assert.AreEqual(1024, CamusDBOptions.Default.RegexCacheMaxEntries, nameof(CamusDBOptions.Default.RegexCacheMaxEntries));
+        Assert.AreEqual(false, CamusDBOptions.Default.InlineFunctionsEnabled, nameof(CamusDBOptions.Default.InlineFunctionsEnabled));
+        Assert.AreEqual(1000, CamusDBOptions.Default.InlineFunctionCallTimeoutMs, nameof(CamusDBOptions.Default.InlineFunctionCallTimeoutMs));
+        Assert.AreEqual(16L * 1024 * 1024, CamusDBOptions.Default.InlineFunctionAllocationLimitBytes, nameof(CamusDBOptions.Default.InlineFunctionAllocationLimitBytes));
+        Assert.AreEqual(1_048_576, CamusDBOptions.Default.InlineFunctionArrayLimit, nameof(CamusDBOptions.Default.InlineFunctionArrayLimit));
+        Assert.AreEqual(64 * 1024, CamusDBOptions.Default.InlineFunctionSourceLimitBytes, nameof(CamusDBOptions.Default.InlineFunctionSourceLimitBytes));
+        Assert.AreEqual(10_000, CamusDBOptions.Default.InlineFunctionCompileTimeoutMs, nameof(CamusDBOptions.Default.InlineFunctionCompileTimeoutMs));
+        Assert.AreEqual(2, CamusDBOptions.Default.InlineFunctionCompileConcurrency, nameof(CamusDBOptions.Default.InlineFunctionCompileConcurrency));
+        Assert.AreEqual(256, CamusDBOptions.Default.MaxInlineFunctionsPerDatabase, nameof(CamusDBOptions.Default.MaxInlineFunctionsPerDatabase));
+
         Assert.AreEqual(true, CamusDBOptions.Default.QueryResultCacheEnabled, nameof(CamusDBOptions.Default.QueryResultCacheEnabled));
         Assert.AreEqual(5_000, CamusDBOptions.Default.QueryResultCacheDefaultTtlMs, nameof(CamusDBOptions.Default.QueryResultCacheDefaultTtlMs));
         Assert.AreEqual(1_024, CamusDBOptions.Default.QueryResultCacheMaxEntries, nameof(CamusDBOptions.Default.QueryResultCacheMaxEntries));

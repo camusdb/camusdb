@@ -8,6 +8,9 @@
     <ServerGarbageCollection>true</ServerGarbageCollection>
     <Version>0.18.0</Version>
     <InvariantGlobalization>true</InvariantGlobalization>
+    <!-- English resources only: the C# compiler that CamusDB.Core references for inline SQL functions
+         ships 13 resource assemblies, and the server reports its diagnostics in English. -->
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
     <NoWarn>$(NoWarn);NU1903</NoWarn>
   </PropertyGroup>
 

@@ -12,12 +12,16 @@ using CamusDB.MicroBenchmarks;
 // `probe <name>` runs the one-shot restore measurements in InsertRestoreProbes instead of a
 // BenchmarkDotNet job, and `probe exprscan` runs the statement-depth measurements in
 // ExpressionDepthProbes, and `probe jsonbsize <dir>` prints the jsonb space table of
-// JsonbCodecBenchmarks; everything else is handed to the switcher unchanged.
+// JsonbCodecBenchmarks, and `probe inlinefn` prints the compile times and the retained memory of
+// InlineFunctionBenchmarks; everything else is handed to the switcher unchanged.
 if (args.Length > 0 && args[0] == "probe" && args.Length > 1 && args[1] is "exprscan" or "exprchild")
     return await ExpressionDepthProbes.RunAsync(args);
 
 if (args.Length > 2 && args[0] == "probe" && args[1] == "jsonbsize")
     return JsonbCodecBenchmarks.RunSizeProbe(args[2]);
+
+if (args.Length > 1 && args[0] == "probe" && args[1] == "inlinefn")
+    return InlineFunctionBenchmarks.RunProbe();
 
 if (args.Length > 0 && args[0] == "probe")
     return await InsertRestoreProbes.RunAsync(args);

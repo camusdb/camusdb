@@ -184,7 +184,8 @@ internal sealed class DatabaseOpener
         // the database now, so its extension calls resolve against what this database installed. The
         // frame object is shared with the caller's flow, so the write reaches it (see
         // ExtensionFunctionScope). A frame entered for another database ignores this.
-        Extensions.ExtensionFunctionScope.Current?.Attach(name, descriptor.Schema.ExtensionCatalog);
+        Extensions.ExtensionFunctionScope.Current?.Attach(name, descriptor.Schema.ExtensionCatalog, descriptor.Schema.FunctionCatalog);
+
 
         return descriptor;
     }

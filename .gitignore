@@ -65,6 +65,8 @@ CamusDB.Tests.Extensions/Fixture.Rich/bin
 CamusDB.Tests.Extensions/Fixture.Rich/obj
 CamusDB.Tests.Extensions/Fixture.CrossKindDuplicate/bin
 CamusDB.Tests.Extensions/Fixture.CrossKindDuplicate/obj
+CamusDB.Extensions.Inline/obj
+CamusDB.Extensions.Inline/bin
 BenchmarkDotNet.Artifacts/
 .vs/
 .idea/

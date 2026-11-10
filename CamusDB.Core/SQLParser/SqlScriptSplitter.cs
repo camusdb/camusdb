@@ -21,7 +21,10 @@ namespace CamusDB.Core.SQLParser;
 /// <item><c>E'…'</c> and <c>E"…"</c> strings, where a backslash also escapes the next character, so
 /// <c>E'\''</c> is one quote;</item>
 /// <item><c>`…`</c> quoted identifiers;</item>
-/// <item><c>-- …</c> comments to the end of the line, and <c>/* … */</c> comments, which do not nest.</item>
+/// <item><c>-- …</c> comments to the end of the line, and <c>/* … */</c> comments, which do not nest;</item>
+/// <item><c>$$ … $$</c> and <c>$tag$ … $tag$</c> dollar-quoted text, the body of <c>CREATE
+/// FUNCTION</c>, which is raw up to the same quote: it holds semicolons, quotes and comments as
+/// text.</item>
 /// </list>
 ///
 /// <para>The <c>E</c> prefix counts only when it starts a token: in <c>name'x'</c> the quote follows
@@ -85,6 +88,14 @@ public static class SqlScriptSplitter
                         backslashEscapes = c != '`' && StartsEscapeString(script, i);
                         hasCode = true;
                     }
+                    else if (c == '$' && DollarQuoteAt(script, i) is { } dollarQuote)
+                    {
+                        // Raw text up to the same quote. With no closing quote the rest of the script
+                        // is in it, and the parser reports that.
+                        int close = script.IndexOf(dollarQuote, i + dollarQuote.Length, StringComparison.Ordinal);
+                        i = close < 0 ? script.Length : close + dollarQuote.Length - 1;
+                        hasCode = true;
+                    }
                     else if (!char.IsWhiteSpace(c))
                     {
                         hasCode = true;
@@ -125,6 +136,24 @@ public static class SqlScriptSplitter
     }
 
     private static char Next(string script, int i) => i + 1 < script.Length ? script[i + 1] : '\0';
+
+    /// <summary>
+    /// The dollar quote that starts at <paramref name="start"/>: <c>$$</c>, or <c>$</c>, an identifier
+    /// and <c>$</c>. Null when the <c>$</c> there starts no quote.
+    /// </summary>
+    private static string? DollarQuoteAt(string script, int start)
+    {
+        int i = start + 1;
+
+        if (i < script.Length && (char.IsAsciiLetter(script[i]) || script[i] == '_'))
+        {
+            while (i < script.Length && (char.IsAsciiLetterOrDigit(script[i]) || script[i] == '_'))
+                i++;
+        }
+
+        return i < script.Length && script[i] == '$' ? script[start..(i + 1)] : null;
+    }
+
 
     /// <summary>
     /// True when the quote at <paramref name="quoteIndex"/> opens an <c>E'…'</c> or <c>E"…"</c> string:

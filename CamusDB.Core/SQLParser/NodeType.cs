@@ -1198,4 +1198,51 @@ public enum NodeType
     /// reason given on <see cref="TypeBytesSized"/>.
     /// </summary>
     TypeInteger32,
+
+    /// <summary>
+    /// <c>CREATE FUNCTION name(params) RETURNS type [null rule] LANGUAGE csharp AS $$ body $$</c>: adds
+    /// an inline SQL function to the current database. <c>leftAst</c> = the function name identifier,
+    /// <c>rightAst</c> = the parameters (a <see cref="FunctionParameter"/>, a
+    /// <see cref="FunctionParameterList"/>, or null for none), <c>extendedOne</c> = the result type
+    /// node, <c>extendedTwo</c> = a <see cref="FunctionBody"/> node, <c>extendedThree</c> = an
+    /// identifier node with the language name, <c>yytext</c> = "called" for
+    /// <c>CALLED ON NULL INPUT</c> and null for the default, <c>RETURNS NULL ON NULL INPUT</c>. Schema
+    /// DDL that replicates through the schema log. Appended at the end for the reason given on
+    /// <see cref="TypeBytesSized"/>, as are the node types after it.
+    /// </summary>
+    CreateFunction,
+
+    /// <summary><c>CREATE OR REPLACE FUNCTION ...</c>. The same slots as <see cref="CreateFunction"/>.</summary>
+    CreateOrReplaceFunction,
+
+    /// <summary>
+    /// <c>DROP FUNCTION [IF EXISTS] name</c>. <c>leftAst</c> = the function name identifier,
+    /// <c>yytext</c> = "if exists" for that form.
+    /// </summary>
+    DropFunction,
+
+    /// <summary>
+    /// <c>ALTER FUNCTION name OWNER TO user</c>. <c>leftAst</c> = the function name identifier,
+    /// <c>rightAst</c> = the new owner's name.
+    /// </summary>
+    AlterFunctionOwnerTo,
+
+    /// <summary><c>SHOW FUNCTIONS</c>: the inline functions of the current database, with their state on this node.</summary>
+    ShowFunctions,
+
+    /// <summary><c>SHOW CREATE FUNCTION name</c>. <c>leftAst</c> = the function name identifier.</summary>
+    ShowCreateFunction,
+
+    /// <summary>One parameter of <c>CREATE FUNCTION</c>. <c>leftAst</c> = the name identifier, <c>rightAst</c> = the type node.</summary>
+    FunctionParameter,
+
+    /// <summary>Two or more parameters of <c>CREATE FUNCTION</c>, left-deep: <c>leftAst</c> = the parameters before, <c>rightAst</c> = the last one.</summary>
+    FunctionParameterList,
+
+    /// <summary>
+    /// The body of <c>CREATE FUNCTION</c>. <c>yytext</c> = the text between the dollar quotes, exactly
+    /// as written. It is not a string literal: nothing in it is escaped or unescaped.
+    /// </summary>
+    FunctionBody,
 }
+

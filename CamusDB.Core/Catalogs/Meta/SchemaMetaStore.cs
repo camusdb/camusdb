@@ -181,8 +181,36 @@ internal static class SchemaMetaStore
             await MetaKeyWriter.DeleteMetaKey(kahuna, tx, MetaKeys.ExtensionKey(database.Id, extensionName)).ConfigureAwait(false);
     }
 
+    /// <summary>
+    /// Brings the record of one inline function on disk in line with memory, in the caller's
+    /// transaction, and advances the persisted schema version: the record is written when the
+    /// function exists now, and its key is deleted when it does not. It reads the current state and
+    /// not the delta, for the reason given on <see cref="PersistSchemaExtensionAsync"/>.
+    /// </summary>
+    internal static async Task PersistSchemaFunctionAsync(DatabaseDescriptor database, string functionName, KvTransaction tx)
+    {
+        System.Diagnostics.Debug.Assert(
+            !database.Schema.IsHeldByCurrentFlow,
+            $"PersistSchemaFunctionAsync called while Schema lock is held on database '{database.Name}' — no replicated write may run under a schema lock"
+        );
+
+        IKahuna kahuna = database.Kahuna.Kahuna;
+
+        byte[] versionBytes = MetaJsonSerializer.Serialize(database.Schema.SchemaVersion, MetaJsonContext.Default.Int64);
+        await MetaKeyWriter.WriteMetaKey(kahuna, tx, MetaKeys.VersionKey(database.Id), versionBytes).ConfigureAwait(false);
+
+        if (database.Schema.Functions.TryGetValue(functionName, out InlineFunctionDefinition? function))
+        {
+            byte[] functionBytes = MetaJsonSerializer.Serialize(function, MetaJsonContext.Default.InlineFunctionDefinition);
+            await MetaKeyWriter.WriteMetaKey(kahuna, tx, MetaKeys.FunctionKey(database.Id, function.Name), functionBytes).ConfigureAwait(false);
+        }
+        else
+            await MetaKeyWriter.DeleteMetaKey(kahuna, tx, MetaKeys.FunctionKey(database.Id, functionName)).ConfigureAwait(false);
+    }
+
     internal static async Task PersistSchemaTableAsync(DatabaseDescriptor database, TableSchema tableSchema, KvTransaction tx)
         => await PersistSchemaTableAsync(database, tableSchema, database.Schema.SchemaVersion, tx).ConfigureAwait(false);
+
 
     internal static async Task PersistSchemaTableAsync(DatabaseDescriptor database, TableSchema tableSchema, long schemaVersion, KvTransaction tx)
     {
