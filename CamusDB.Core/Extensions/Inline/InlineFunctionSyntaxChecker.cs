@@ -95,23 +95,46 @@ internal static class InlineFunctionSyntaxChecker
     /// <summary>
     /// Parses <paramref name="body"/> as one block. Returns the block, or null with the reasons in
     /// <paramref name="errors"/> when the text is not exactly one complete block.
+    ///
+    /// <para>A trigger body (<paramref name="async"/>) is parsed as the body of an async method. The
+    /// parser reads <c>await</c> as a keyword only there: outside an async method, <c>await t;</c>
+    /// is a declaration of a local <c>t</c> of a type named <c>await</c>, and the body would not
+    /// compile.</para>
     /// </summary>
-    public static BlockSyntax? Parse(string body, CSharpParseOptions options, List<InlineFunctionFinding> errors)
+    public static BlockSyntax? Parse(string body, CSharpParseOptions options, List<InlineFunctionFinding> errors, bool async = false)
     {
         // The line breaks keep a "//" comment on the last line of the body from taking the closing
-        // brace, and make line 1 of the body line 1 of the text after the opening brace.
-        string text = "{\n" + body + "\n}";
+        // brace, and make line 1 of the body line 1 of the text after the opening brace. The method
+        // head of the async form is on the line of the brace, so the lines are the same in both forms.
+        string head = async ? "async System.Threading.Tasks.Task " + ReservedPrefix + "_body() " : "";
+        string text = head + "{\n" + body + "\n}";
 
-        StatementSyntax statement = SyntaxFactory.ParseStatement(text, offset: 0, options, consumeFullText: true);
+        SyntaxNode? parsed = async
+            ? SyntaxFactory.ParseMemberDeclaration(text, offset: 0, options, consumeFullText: true)
+            : SyntaxFactory.ParseStatement(text, offset: 0, options, consumeFullText: true);
 
-        foreach (Diagnostic diagnostic in statement.GetDiagnostics())
+        if (parsed is null)
         {
-            if (diagnostic.Severity == DiagnosticSeverity.Error)
-                errors.Add(At(diagnostic.Location, statement.SyntaxTree, diagnostic.GetMessage(CultureInfo.InvariantCulture)));
+            errors.Add(new InlineFunctionFinding(1, 1, "the body is not one complete block of statements; check for a brace, a string or a comment that does not close"));
+            return null;
         }
 
-        if (statement is not BlockSyntax block || block.CloseBraceToken.IsMissing ||
-            block.CloseBraceToken.SpanStart != text.Length - 1 || block.FullSpan.Length != text.Length)
+        foreach (Diagnostic diagnostic in parsed.GetDiagnostics())
+        {
+            if (diagnostic.Severity == DiagnosticSeverity.Error)
+                errors.Add(At(diagnostic.Location, parsed.SyntaxTree, diagnostic.GetMessage(CultureInfo.InvariantCulture)));
+        }
+
+        BlockSyntax? found = parsed switch
+        {
+            BlockSyntax plain when !async => plain,
+            MethodDeclarationSyntax method when async => method.Body,
+            _ => null,
+        };
+
+        if (found is not { } block || block.CloseBraceToken.IsMissing ||
+            block.CloseBraceToken.SpanStart != text.Length - 1 || block.FullSpan.Length != text.Length - head.Length ||
+            parsed.FullSpan.Length != text.Length)
         {
             if (errors.Count == 0)
                 errors.Add(new InlineFunctionFinding(1, 1, "the body is not one complete block of statements; check for a brace, a string or a comment that does not close"));
@@ -122,8 +145,21 @@ internal static class InlineFunctionSyntaxChecker
         return errors.Count == 0 ? block : null;
     }
 
+    /// <summary>True when <paramref name="node"/> is inside a lambda, an anonymous method or a local function of <paramref name="block"/>.</summary>
+    private static bool IsInsideFunction(SyntaxNode node, BlockSyntax block)
+    {
+        for (SyntaxNode? current = node.Parent; current is not null && current != block; current = current.Parent)
+        {
+            if (current is AnonymousFunctionExpressionSyntax or LocalFunctionStatementSyntax)
+                return true;
+        }
+
+        return false;
+    }
+
     /// <summary>
     /// The nesting depth of <paramref name="root"/>, counted with an explicit stack. Stops and
+
     /// returns a value above <paramref name="limit"/> as soon as the depth passes it.
     /// </summary>
     public static int MeasureDepth(SyntaxNode root, int limit)
@@ -197,7 +233,14 @@ internal static class InlineFunctionSyntaxChecker
     /// the walk can recurse.
     /// </summary>
 
-    public static List<InlineFunctionFinding> Check(BlockSyntax block)
+    public static List<InlineFunctionFinding> Check(BlockSyntax block) => Check(block, InlineUnitKind.Function);
+
+    /// <summary>
+    /// The refused forms for a body of <paramref name="kind"/>. A trigger body may <c>await</c> in its
+    /// own statements, where the server's asynchronous wrapper carries the budget object; not inside a
+    /// lambda or a local function, which would need an <c>async</c> of its own.
+    /// </summary>
+    public static List<InlineFunctionFinding> Check(BlockSyntax block, InlineUnitKind kind)
     {
         List<InlineFunctionFinding> findings = [];
         SyntaxTree tree = block.SyntaxTree;
@@ -235,8 +278,12 @@ internal static class InlineFunctionSyntaxChecker
                     Refuse(node, "stackalloc is not allowed; use an array");
                     break;
 
-                case AwaitExpressionSyntax:
+                case AwaitExpressionSyntax when kind != InlineUnitKind.Trigger:
                     Refuse(node, "await is not allowed: a body runs on one thread from start to end");
+                    break;
+
+                case AwaitExpressionSyntax when IsInsideFunction(node, block):
+                    Refuse(node, "await is allowed in the statements of the trigger body only, not inside a lambda or a local function");
                     break;
 
                 case YieldStatementSyntax:

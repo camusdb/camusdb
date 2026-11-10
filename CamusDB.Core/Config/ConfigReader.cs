@@ -33,6 +33,8 @@ public class ConfigReader
         "extension_assemblies",
         "unsafe_extension_assemblies",
         "inline_functions_enabled",
+        "inline_triggers_enabled",
+
         "inline_function_call_timeout_ms",
         "inline_function_allocation_limit_bytes",
         "inline_function_array_limit",

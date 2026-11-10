@@ -32,6 +32,9 @@ internal sealed class InlineFunctionLoadContext : AssemblyLoadContext
 {
     private static readonly Assembly BudgetAssembly = typeof(CallBudget).Assembly;
 
+    private static readonly Assembly ContractAssembly = typeof(CamusDB.Extensions.ITriggerContext).Assembly;
+
+
     private readonly string unitName;
 
     public InlineFunctionLoadContext(string unitName)
@@ -47,7 +50,12 @@ internal sealed class InlineFunctionLoadContext : AssemblyLoadContext
         if (string.Equals(name, InlineFunctionImageVerifier.BudgetAssemblyName, StringComparison.OrdinalIgnoreCase))
             return BudgetAssembly;
 
-        if (name is null || !InlineFunctionImageVerifier.AllowedAssemblies.Contains(name))
+        // The trigger contract: the row and context interfaces that a trigger wrapper implements
+        // against. The server's own copy, so that the types are the ones the engine passes in.
+        if (string.Equals(name, InlineFunctionImageVerifier.ContractAssemblyName, StringComparison.OrdinalIgnoreCase))
+            return ContractAssembly;
+
+        if (name is null || !InlineFunctionImageVerifier.AllowedAssemblies.Contains(name) && !InlineFunctionImageVerifier.TriggerAssemblies.Contains(name))
             throw new CamusDBException(
                 CamusDBErrorCodes.ExtensionAssemblyRefused,
                 $"Inline function code '{unitName}' tried to load assembly '{assemblyName.FullName}', which an inline function may not use");

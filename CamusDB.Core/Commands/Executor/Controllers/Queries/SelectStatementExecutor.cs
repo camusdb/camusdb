@@ -761,6 +761,39 @@ internal sealed class SelectStatementExecutor
                         })));
                 }
 
+            case NodeType.ShowTriggers:
+                {
+                    if (schemaOut is not null)
+                        schemaOut.Schema = DerivedTableSchemaBuilder.ShowTriggersSchema;
+
+                    return (database, schemaQuerier.ShowTriggers(database, ast.leftAst?.yytext));
+                }
+
+            case NodeType.ShowCreateTrigger:
+                {
+                    string shownTriggerName = ast.leftAst!.yytext!;
+                    string shownTableName = ast.rightAst!.yytext!;
+
+                    if (!database.Schema.Tables.TryGetValue(shownTableName, out TableSchema? shownTable))
+                        throw new CamusDBException(CamusDBErrorCodes.TableDoesntExist, $"Table '{shownTableName}' does not exist");
+
+                    TriggerDefinition shownTrigger = CamusDB.Core.Catalogs.Apply.TriggerDeltaApplier.Find(shownTable, shownTriggerName)
+                        ?? throw new CamusDBException(
+                            CamusDBErrorCodes.TriggerNotFound, $"Table '{shownTable.Name}' has no trigger named '{shownTriggerName}'");
+
+                    if (schemaOut is not null)
+                        schemaOut.Schema = DerivedTableSchemaBuilder.ShowCreateTriggerSchema;
+
+                    return (database, QueryResultStream.FromRow(new QueryResultRow(
+                        default,
+                        new Dictionary<string, ColumnValue>(StringComparer.OrdinalIgnoreCase)
+                        {
+                            { "trigger", new ColumnValue(ColumnType.String, shownTrigger.Name) },
+                            { "table", new ColumnValue(ColumnType.String, shownTable.Name ?? shownTableName) },
+                            { "create trigger", new ColumnValue(ColumnType.String, CamusDB.Core.Extensions.TriggerStatementRenderer.RenderCreate(shownTrigger, shownTable.Name ?? shownTableName)) },
+                        })));
+                }
+
             case NodeType.ShowCreateSequence:
 
                 {

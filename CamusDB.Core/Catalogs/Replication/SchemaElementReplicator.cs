@@ -268,7 +268,14 @@ internal sealed class SchemaElementReplicator
     /// trigger the table does not have is refused here, under the schema lock, with
     /// <see cref="CamusDBErrorCodes.TriggerNotFound"/>.
     /// </summary>
-    internal async Task ReplicateDropTriggerAsync(DatabaseDescriptor database, string tableName, string triggerName)
+    /// <param name="check">
+    /// Runs under the schema lock with the table and the trigger record the delta removes, so a
+    /// privilege decision that depends on the record (its owner) sees the record that is dropped, and
+    /// not one that a concurrent <c>DROP TRIGGER</c> and <c>CREATE TRIGGER</c> of the same name put in
+    /// its place. It throws to refuse.
+    /// </param>
+    internal async Task ReplicateDropTriggerAsync(
+        DatabaseDescriptor database, string tableName, string triggerName, Action<TableSchema, TriggerDefinition>? check = null)
     {
         SchemaChangeLogEntry entry;
 
@@ -278,10 +285,12 @@ internal sealed class SchemaElementReplicator
             if (!database.Schema.Tables.TryGetValue(tableName, out TableSchema? table))
                 throw new CamusDBException(CamusDBErrorCodes.TableDoesntExist, $"Table '{tableName}' does not exist");
 
-            if (TriggerDeltaApplier.Find(table, triggerName) is null)
+            if (TriggerDeltaApplier.Find(table, triggerName) is not { } trigger)
                 throw new CamusDBException(
                     CamusDBErrorCodes.TriggerNotFound,
                     $"Table '{tableName}' has no trigger named '{triggerName}'");
+
+            check?.Invoke(table, trigger);
 
             entry = SchemaChangeEntryFactory.DropTriggerEntry(database, table, triggerName);
             SchemaDeltaApplier.ValidateSchemaDelta(database, entry);

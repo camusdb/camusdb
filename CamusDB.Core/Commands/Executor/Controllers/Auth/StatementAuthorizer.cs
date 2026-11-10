@@ -271,6 +271,20 @@ internal sealed class StatementAuthorizer
             return;
         }
 
+        // The triggers and their bodies: a caller who may read the database (SELECT at database scope)
+        // or who may alter its tables, which is what CREATE TRIGGER needs.
+        if (ast.nodeType is NodeType.ShowTriggers or NodeType.ShowCreateTrigger)
+        {
+            if (!principal.IsSuperuser && contextDatabaseId is not null &&
+                !principal.HasPrivilege(Privilege.Select, contextDatabaseId, tableId: null) &&
+                !principal.HasPrivilege(Privilege.Alter, contextDatabaseId, tableId: null))
+                throw new CamusDBException(
+                    CamusDBErrorCodes.InsufficientPrivilege,
+                    $"Missing Select or Alter privilege on database '{ticket.DatabaseName}' to list its triggers");
+
+            return;
+        }
+
         // The loaded extensions are held to the same bar: file paths, hashes and the trust level of
         // the code running inside the server are deployment detail that no per-database grant scopes
         // down.

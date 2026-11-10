@@ -450,8 +450,9 @@ public sealed class CatalogsManager
 
     /// <summary>Proposes <c>DROP TRIGGER</c>; see <c>SchemaElementReplicator.ReplicateDropTriggerAsync</c>.</summary>
 
-    internal async Task ReplicateDropTriggerAsync(DatabaseDescriptor database, string tableName, string triggerName)
-        => await elements.ReplicateDropTriggerAsync(database, tableName, triggerName).ConfigureAwait(false);
+    internal async Task ReplicateDropTriggerAsync(
+        DatabaseDescriptor database, string tableName, string triggerName, Action<TableSchema, TriggerDefinition>? check = null)
+        => await elements.ReplicateDropTriggerAsync(database, tableName, triggerName, check).ConfigureAwait(false);
 
     public async Task ReplicateSetColumnStorageAsync(
         DatabaseDescriptor database,

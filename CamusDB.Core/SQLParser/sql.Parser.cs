@@ -197,8 +197,48 @@ internal partial class sqlParser
         return new NodeAst(NodeType.CreateTrigger, name, table, eventNode, externalName, null, null, null, normalizedTiming);
     }
 
+    /// <summary>
+    /// Builds a <see cref="NodeType.CreateTrigger"/> node for the inline form, <c>LANGUAGE csharp AS
+    /// $$ body $$</c>: the same node as the DLL form, with the body as a <see cref="NodeType.FunctionBody"/>
+    /// node in <c>extendedTwo</c> in place of the EXTERNAL NAME literal, and the language as an
+    /// identifier node in <c>extendedThree</c>. The executor tells the two forms apart by the node type
+    /// of <c>extendedTwo</c>.
+    /// </summary>
+    private static NodeAst CreateInlineTriggerStatement(
+        string? triggerWord, NodeAst name, NodeAst table, string? timing, string events,
+        string? languageWord, string? language, string? body)
+    {
+        const string guidance =
+            "Expected: CREATE TRIGGER <name> ON <table> {BEFORE|AFTER} {INSERT|UPDATE|DELETE}[, ...] LANGUAGE csharp AS $$ <body> $$";
+
+        if (!string.Equals(triggerWord, "trigger", StringComparison.OrdinalIgnoreCase) ||
+            !string.Equals(languageWord, "language", StringComparison.OrdinalIgnoreCase))
+            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, guidance);
+
+        if (!string.Equals(language, "csharp", StringComparison.OrdinalIgnoreCase))
+            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"The language '{language}' is not supported; the only language is csharp");
+
+        string normalizedTiming;
+        if (string.Equals(timing, "before", StringComparison.OrdinalIgnoreCase))
+            normalizedTiming = "before";
+        else if (string.Equals(timing, "after", StringComparison.OrdinalIgnoreCase))
+            normalizedTiming = "after";
+        else
+            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, guidance);
+
+        string[] parts = events.Split(',');
+        if (parts.Distinct(StringComparer.Ordinal).Count() != parts.Length)
+            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "CREATE TRIGGER names an event more than once");
+
+        NodeAst eventNode = new(NodeType.String, null, null, null, null, null, null, null, events);
+        NodeAst bodyNode = new(NodeType.FunctionBody, null, null, null, null, null, null, null, body ?? "");
+        NodeAst languageNode = new(NodeType.Identifier, null, null, null, null, null, null, null, language);
+        return new NodeAst(NodeType.CreateTrigger, name, table, eventNode, bodyNode, languageNode, null, null, normalizedTiming);
+    }
+
     /// <summary>Builds a <see cref="NodeType.DropTrigger"/> node after checking the word TRIGGER.</summary>
     private static NodeAst DropTriggerStatement(string? triggerWord, NodeAst name, NodeAst table)
+
     {
         if (!string.Equals(triggerWord, "trigger", StringComparison.OrdinalIgnoreCase))
             throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Expected: DROP TRIGGER <name> ON <table>");
@@ -328,6 +368,24 @@ internal partial class sqlParser
                 "Expected: SHOW CREATE TABLE, SHOW CREATE VIEW, SHOW CREATE MATERIALIZED VIEW, SHOW CREATE SEQUENCE or SHOW CREATE FUNCTION");
 
         return new NodeAst(NodeType.ShowCreateFunction, name, null, null, null, null, null, null, null);
+    }
+
+    /// <summary>Builds a <see cref="NodeType.ShowCreateTrigger"/> node after checking the word TRIGGER.</summary>
+    private static NodeAst ShowCreateTriggerStatement(string? triggerWord, NodeAst name, NodeAst table)
+    {
+        if (!string.Equals(triggerWord, "trigger", StringComparison.OrdinalIgnoreCase))
+            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Expected: SHOW CREATE TRIGGER <name> ON <table>");
+
+        return new NodeAst(NodeType.ShowCreateTrigger, name, table, null, null, null, null, null, null);
+    }
+
+    /// <summary>Builds a <see cref="NodeType.ShowTriggers"/> node for one table after checking the word TRIGGERS.</summary>
+    private static NodeAst ShowTriggersOnStatement(string? triggersWord, NodeAst table)
+    {
+        if (!string.Equals(triggersWord, "triggers", StringComparison.OrdinalIgnoreCase))
+            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Expected: SHOW TRIGGERS [ON <table>]");
+
+        return new NodeAst(NodeType.ShowTriggers, table, null, null, null, null, null, null, null);
     }
 
 

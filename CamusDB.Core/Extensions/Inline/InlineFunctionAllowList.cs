@@ -91,11 +91,20 @@ internal static class InlineFunctionAllowList
 
     private static readonly FrozenDictionary<string, TypeRule> Types = Build();
 
+    private static readonly FrozenDictionary<string, TypeRule> TriggerTypes = BuildTrigger();
+
     /// <summary>The rule of a listed type, by its full metadata name (<c>System.Collections.Generic.List`1</c>).</summary>
     public static bool TryGetRule(string typeName, out TypeRule rule) => Types.TryGetValue(typeName, out rule!);
 
+    /// <summary>The rule of a type for a body of the given kind: a trigger body sees a few more types and members.</summary>
+    public static bool TryGetRule(string typeName, InlineUnitKind kind, out TypeRule rule) =>
+        (kind == InlineUnitKind.Trigger ? TriggerTypes : Types).TryGetValue(typeName, out rule!);
+
     /// <summary>True when the type is listed.</summary>
     public static bool IsListed(string typeName) => Types.ContainsKey(typeName);
+
+    public static bool IsListed(string typeName, InlineUnitKind kind) =>
+        (kind == InlineUnitKind.Trigger ? TriggerTypes : Types).ContainsKey(typeName);
 
     /// <summary>Every listed type name, for the image check and the tests.</summary>
     public static IEnumerable<string> ListedTypes => Types.Keys;
@@ -349,7 +358,48 @@ internal static class InlineFunctionAllowList
         return types.ToFrozenDictionary(StringComparer.Ordinal);
     }
 
+    /// <summary>
+    /// The list of a trigger body: the function list, plus the types a trigger works with, plus two
+    /// members that a function cannot have. A trigger is not cached and has side effects by nature, so
+    /// the clock and a fresh id are no risk to it; <c>UtcNow</c> and not <c>Now</c>, because the local
+    /// time of a node is still a value another node does not share. <c>Task</c> is listed with no
+    /// member: the body can await a task the session gives it and nothing else.
+    /// </summary>
+    private static FrozenDictionary<string, TypeRule> BuildTrigger()
+    {
+        Dictionary<string, TypeRule> types = new(Types, StringComparer.Ordinal);
+
+        foreach (string name in Split(
+            "CamusDB.Extensions.ITriggerContext CamusDB.Extensions.IRow CamusDB.Extensions.IWritableRow " +
+            "CamusDB.Extensions.TriggerTiming CamusDB.Extensions.TriggerOperation CamusDB.Extensions.Inline.InlineSqlSession"))
+            types.Add(name, new TypeRule { AllMembers = true });
+
+        types.Add("System.Threading.Tasks.Task", new TypeRule());
+        types.Add("System.Threading.Tasks.Task`1", new TypeRule());
+
+        types["System.DateTime"] = WithMembers(types["System.DateTime"], "UtcNow");
+        types["System.Guid"] = WithMembers(types["System.Guid"], "NewGuid");
+
+        return types.ToFrozenDictionary(StringComparer.Ordinal);
+    }
+
+    private static TypeRule WithMembers(TypeRule rule, string names)
+    {
+        HashSet<string> allowed = new(rule.Allowed, StringComparer.Ordinal);
+        allowed.UnionWith(Split(names));
+
+        return new TypeRule
+        {
+            AllMembers = rule.AllMembers,
+            Allowed = allowed.ToFrozenSet(StringComparer.Ordinal),
+            Denied = rule.Denied,
+            IsException = rule.IsException,
+            RequiresMatchTimeout = rule.RequiresMatchTimeout,
+        };
+    }
+
     private static string[] Split(string names) => names.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+
 
     private static FrozenSet<string> Set(string names) =>
         names.Length == 0 ? FrozenSet<string>.Empty : Split(names).ToFrozenSet(StringComparer.Ordinal);

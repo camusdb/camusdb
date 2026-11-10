@@ -456,6 +456,31 @@ internal static class DerivedTableSchemaBuilder
         new("create function", ColumnType.String),
     ];
 
+    // SHOW TRIGGERS [ON table]: one row per row trigger of the current database, both forms, ordered
+    // by table and then creation order (the order the triggers of one timing fire in). form is
+    // "csharp" for an inline body and "extension" for a type of an installed extension; type_name and
+    // extension are NULL for the inline form, owner and source_sha256 for the extension form.
+    internal static readonly IReadOnlyList<DerivedColumnSchema> ShowTriggersSchema =
+    [
+        new("name",          ColumnType.String),
+        new("table",         ColumnType.String),
+        new("timing",        ColumnType.String),
+        new("events",        ColumnType.String),
+        new("form",          ColumnType.String),
+        new("type_name",     ColumnType.String),
+        new("extension",     ColumnType.String),
+        new("owner",         ColumnType.String),
+        new("source_sha256", ColumnType.String),
+        new("created_at",    ColumnType.String),
+    ];
+
+    internal static readonly IReadOnlyList<DerivedColumnSchema> ShowCreateTriggerSchema =
+    [
+        new("trigger", ColumnType.String),
+        new("table", ColumnType.String),
+        new("create trigger", ColumnType.String),
+    ];
+
     // SHOW CLUSTER SETTINGS: one row per overlay entry the cluster currently carries — the keys a
 
     // SET CLUSTER SETTING changed and no RESET has dropped. Values are the scalar text the overlay

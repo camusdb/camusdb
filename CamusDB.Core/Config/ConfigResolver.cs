@@ -228,6 +228,8 @@ public static class ConfigResolver
         UnsafeExtensionAssemblies = [.. config.UnsafeExtensionAssemblies],
 
         InlineFunctionsEnabled = config.InlineFunctionsEnabled,
+        InlineTriggersEnabled = config.InlineTriggersEnabled,
+
         InlineFunctionCallTimeoutMs = config.InlineFunctionCallTimeoutMs,
         InlineFunctionAllocationLimitBytes = config.InlineFunctionAllocationLimitBytes,
         InlineFunctionArrayLimit = config.InlineFunctionArrayLimit,

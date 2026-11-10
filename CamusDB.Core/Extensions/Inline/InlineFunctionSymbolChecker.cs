@@ -126,6 +126,11 @@ internal sealed class InlineFunctionSymbolChecker
 
     private readonly BlockSyntax bodyBlock;
 
+    private readonly InlineUnitKind kind;
+
+    /// <summary>The server-written class that holds the body; its own members pass for a trigger body (see <see cref="IsGenerated(ISymbol)"/>).</summary>
+    private readonly INamedTypeSymbol wrapper;
+
     private readonly int bodyStartLine;
 
     private readonly int arrayLimit;
@@ -147,11 +152,13 @@ internal sealed class InlineFunctionSymbolChecker
     private int suppressed;
 
     private InlineFunctionSymbolChecker(
-        SemanticModel model, IMethodSymbol bodyMethod, BlockSyntax bodyBlock, int bodyStartLine, int arrayLimit, CancellationToken cancellation)
+        SemanticModel model, IMethodSymbol bodyMethod, BlockSyntax bodyBlock, int bodyStartLine, int arrayLimit, CancellationToken cancellation, InlineUnitKind kind)
     {
         this.model = model;
         this.bodyMethod = bodyMethod;
         this.bodyBlock = bodyBlock;
+        this.kind = kind;
+        wrapper = bodyMethod.ContainingType;
         this.bodyStartLine = bodyStartLine;
         this.arrayLimit = arrayLimit;
         this.cancellation = cancellation;
@@ -164,13 +171,22 @@ internal sealed class InlineFunctionSymbolChecker
     /// one dimension; the budget rewrite checks every other sized array at run time.
     /// </summary>
     public static InlineFunctionSymbolReport Check(
-        SemanticModel model, MethodDeclarationSyntax method, int arrayLimit, CancellationToken cancellation)
+        SemanticModel model, MethodDeclarationSyntax method, int arrayLimit, CancellationToken cancellation) =>
+        Check(model, method, arrayLimit, cancellation, InlineUnitKind.Function);
+
+    /// <summary>
+    /// The check for a body of <paramref name="kind"/>. A trigger body may use the members the server
+    /// wrote into its class (the row objects, the session, the function stubs), the implicit instance
+    /// they hang on, and <c>await</c> on the session's tasks.
+    /// </summary>
+    public static InlineFunctionSymbolReport Check(
+        SemanticModel model, MethodDeclarationSyntax method, int arrayLimit, CancellationToken cancellation, InlineUnitKind kind)
     {
         BlockSyntax block = method.Body!;
         IMethodSymbol symbol = model.GetDeclaredSymbol(method, cancellation)!;
         int startLine = block.SyntaxTree.GetLineSpan(block.OpenBraceToken.Span).StartLinePosition.Line;
 
-        InlineFunctionSymbolChecker checker = new(model, symbol, block, startLine, arrayLimit, cancellation);
+        InlineFunctionSymbolChecker checker = new(model, symbol, block, startLine, arrayLimit, cancellation, kind);
 
 
         // First, alone: reading a constant string below makes the compiler build it, and a chain of
@@ -579,9 +595,15 @@ internal sealed class InlineFunctionSymbolChecker
                 break;
 
             case IInstanceReferenceOperation instance:
-                if (instance.ReferenceKind is not (InstanceReferenceKind.ImplicitReceiver or InstanceReferenceKind.PatternInput))
+                // A trigger body hangs on an instance the server made: NEW, OLD and Sql are its fields.
+                if (kind != InlineUnitKind.Trigger &&
+                    instance.ReferenceKind is not (InstanceReferenceKind.ImplicitReceiver or InstanceReferenceKind.PatternInput))
                     Refuse(where, "'this' is not allowed");
 
+                break;
+
+            case IAwaitOperation:
+                // The syntax check refused await outside a trigger body and inside its lambdas.
                 break;
 
             case IBranchOperation branch:
@@ -850,7 +872,15 @@ internal sealed class InlineFunctionSymbolChecker
 
         if (SymbolEqualityComparer.Default.Equals(method.ContainingAssembly, ownAssembly))
         {
+            // The function stubs and the row accessors of a trigger class are the server's.
+            if (IsGenerated(method))
+            {
+                CheckTypeArguments(method.ContainingType, where);
+                return;
+            }
+
             Refuse(where, "a body cannot call the function it defines; use a local function for a recursion");
+
             return;
         }
 
@@ -871,7 +901,7 @@ internal sealed class InlineFunctionSymbolChecker
 
         CheckTypeArguments(target.ContainingType, where);
 
-        if (target.ContainingType is { } containing && InlineFunctionAllowList.TryGetRule(TypeKey(containing.OriginalDefinition), out InlineFunctionAllowList.TypeRule? rule))
+        if (target.ContainingType is { } containing && InlineFunctionAllowList.TryGetRule(TypeKey(containing.OriginalDefinition), kind, out InlineFunctionAllowList.TypeRule? rule))
         {
             if (rule.RequiresMatchTimeout && (target.IsStatic || target.MethodKind == MethodKind.Constructor) &&
                 MatchTimeoutMembers.Contains(definition.Name) && !HasParameter(definition, "matchTimeout"))
@@ -925,12 +955,15 @@ internal sealed class InlineFunctionSymbolChecker
 
         if (SymbolEqualityComparer.Default.Equals(containing.ContainingAssembly, ownAssembly))
         {
+            if (IsGenerated(member))
+                return;
+
             Refuse(where, $"{shown} is not allowed: a body can use its own locals, parameters and local functions only");
             return;
         }
 
         // The same text as the type check gives, so one use of an unlisted type is one finding.
-        if (!InlineFunctionAllowList.TryGetRule(typeName, out InlineFunctionAllowList.TypeRule? rule))
+        if (!InlineFunctionAllowList.TryGetRule(typeName, kind, out InlineFunctionAllowList.TypeRule? rule))
         {
             Refuse(where, $"the type {Display(member.ContainingType)} is not on the list of allowed types");
             return;
@@ -1064,11 +1097,14 @@ internal sealed class InlineFunctionSymbolChecker
             case INamedTypeSymbol named:
                 if (named.IsAnonymousType || SymbolEqualityComparer.Default.Equals(named.ContainingAssembly, ownAssembly))
                 {
+                    if (!named.IsAnonymousType && IsGenerated(named))
+                        return;
+
                     Refuse(where, $"the type {Display(type)} is not allowed");
                     return;
                 }
 
-                if (!InlineFunctionAllowList.IsListed(TypeKey(named.OriginalDefinition)))
+                if (!InlineFunctionAllowList.IsListed(TypeKey(named.OriginalDefinition), kind))
                 {
                     Refuse(where, $"the type {Display(type)} is not on the list of allowed types");
                     return;
@@ -1134,7 +1170,7 @@ internal sealed class InlineFunctionSymbolChecker
     /// True when every type in <paramref name="type"/>, a type of a member's definition, is listed.
     /// A type parameter passes: the arguments given for it are checked where the member is used.
     /// </summary>
-    private static bool IsListedSignatureType(ITypeSymbol type) => type switch
+    private bool IsListedSignatureType(ITypeSymbol type) => type switch
     {
         IArrayTypeSymbol array => array.ElementType.SpecialType != SpecialType.System_Object && IsListedSignatureType(array.ElementType),
         ITypeParameterSymbol => true,
@@ -1142,9 +1178,12 @@ internal sealed class InlineFunctionSymbolChecker
         _ => false,
     };
 
-    private static bool IsListedNamedSignatureType(INamedTypeSymbol named)
+    private bool IsListedNamedSignatureType(INamedTypeSymbol named)
     {
-        if (!InlineFunctionAllowList.IsListed(TypeKey(named.OriginalDefinition)))
+        if (IsGenerated(named))
+            return true;
+
+        if (!InlineFunctionAllowList.IsListed(TypeKey(named.OriginalDefinition), kind))
             return false;
 
         for (INamedTypeSymbol? current = named; current is not null; current = current.ContainingType)
@@ -1293,8 +1332,37 @@ internal sealed class InlineFunctionSymbolChecker
         _ => member.Name,
     };
 
+    /// <summary>
+    /// True for a symbol the server wrote into the class of a trigger body: the class itself and its
+    /// nested row classes, and their members apart from the two methods that run the body and the
+    /// constructors. The body cannot declare a member, so everything else of the class is the server's.
+    /// A function body has no such members: its class holds the two methods only.
+    /// </summary>
+    private bool IsGenerated(ISymbol symbol)
+    {
+        if (kind != InlineUnitKind.Trigger)
+            return false;
+
+        INamedTypeSymbol? type = symbol as INamedTypeSymbol ?? symbol.ContainingType;
+
+        for (INamedTypeSymbol? current = type?.OriginalDefinition; current is not null; current = current.ContainingType)
+        {
+            if (!SymbolEqualityComparer.Default.Equals(current, wrapper.OriginalDefinition))
+                continue;
+
+            if (symbol is IMethodSymbol method &&
+                (method.MethodKind == MethodKind.Constructor || method.Name is "Body" or "Run"))
+                return false;
+
+            return true;
+        }
+
+        return false;
+    }
+
     private void Refuse(SyntaxNode where, string message)
     {
+
         LinePosition start = where.SyntaxTree.GetLineSpan(where.Span).StartLinePosition;
         int line = Math.Max(1, start.Line - bodyStartLine);
         int column = start.Character + 1;

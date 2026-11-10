@@ -84,8 +84,8 @@ list them in `extension_assemblies`, and restart it before you load the dump; a 
 the named version refuses the statement. Reading the installed extensions needs `SHOW EXTENSIONS`, which
 requires a superuser; a dump taken by another user carries none and says so. With `--add-drop-table`
 the dump also writes `DROP EXTENSION IF EXISTS` for each one, after the tables are dropped; that form needs
-a target server of this release or later. Triggers are not carried
-(see the table below). See [csharp-extensions.md](csharp-extensions.md#installing-an-extension-in-a-database).
+a target server of this release or later. See
+[csharp-extensions.md](csharp-extensions.md#installing-an-extension-in-a-database).
 
 **Inline functions.** The dump writes the `CREATE FUNCTION ... LANGUAGE csharp AS $$ ... $$` statement
 of each inline function of the database, as `SHOW CREATE FUNCTION` prints it, after the extensions and
@@ -105,6 +105,25 @@ the target server compiles it again. Three things follow:
 Reading the functions needs `SHOW FUNCTIONS`, which requires `SELECT` or `CREATE` on the database; a
 dump taken by a user with neither carries no functions and says so. With `--add-drop-table` the dump
 also writes `DROP FUNCTION IF EXISTS` for each one, after the tables are dropped.
+
+**Triggers.** The dump writes the `CREATE TRIGGER` statement of each row trigger of the dumped
+tables, as `SHOW CREATE TRIGGER` prints it, after the last table and its rows. A trigger that existed
+while the rows load would fire for each one, and its SQL can write a table that comes later in the
+dump. Both forms are carried: a trigger of an extension as `EXTERNAL NAME '...'`, which needs the same
+extension on the target (the dump installs it), and an inline trigger as
+`LANGUAGE csharp AS $$ ... $$` with its whole body. The triggers of one table keep their creation
+order, which is the order they fire in. Two things follow for the inline form:
+
+- The target server must accept the statement: set `inline_triggers_enabled: true` on every node
+  before you load the dump (see [csharp-extensions.md](csharp-extensions.md#triggers-in-c)).
+- The SQL of an inline trigger runs with its owner's rights, and the user who loads the dump owns the
+  triggers it creates. No statement gives a trigger to another user, so a trigger whose owner was
+  another user changes owner, and the dump warns about it. Load the dump as the user whose rights the
+  triggers should have, or create those triggers again as their owner.
+
+Reading the triggers needs `SHOW TRIGGERS`, which requires `SELECT` or `ALTER` on the database; a dump
+taken by a user with neither carries no triggers and says so. `--add-drop-table` writes no
+`DROP TRIGGER`: a trigger goes with its table.
 
 **Foreign keys and the load order.** A `CREATE TABLE` with a foreign key fails when its parent table
 does not exist yet, and a child `INSERT` fails when its parent row is not loaded yet. The
@@ -142,7 +161,7 @@ statements shown, and recreate them after the reimport.
 | Materialized views | `SHOW MATERIALIZED VIEWS;` then `SHOW CREATE MATERIALIZED VIEW name;` | Run the printed statement, then `REFRESH MATERIALIZED VIEW name;` |
 | Users | `SHOW USERS;` as a superuser; passwords cannot be exported | `CREATE USER name IDENTIFIED BY '…';` |
 | Grants | `SHOW GRANTS FOR *;` as a superuser | `GRANT … ON … TO name;` |
-| Triggers | Keep the `CREATE TRIGGER` statements you ran; deploy the same extension files on the new server (see [csharp-extensions.md](csharp-extensions.md)). The dump installs the extensions themselves | Run each `CREATE TRIGGER` after the rows are loaded, so the reimport fires no trigger |
+| Triggers of a table the dump leaves out | `SHOW TRIGGERS ON table;` then `SHOW CREATE TRIGGER name ON table;` per trigger. The triggers of the dumped tables are in the dump | Run each printed `CREATE TRIGGER` after the rows are loaded, so the reimport fires no trigger |
 | Cluster settings | `SHOW VARIABLES LIKE '%';` and keep the rows whose source is not the default | `SET CLUSTER SETTING name = value;` |
 | Table statistics | Nothing to record | `ANALYZE table;` per table after the rows are loaded |
 | Database branches | `SHOW BRANCHES FROM parent;` | See the note below |

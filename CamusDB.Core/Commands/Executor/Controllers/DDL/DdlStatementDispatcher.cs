@@ -633,7 +633,8 @@ internal sealed class DdlStatementDispatcher
 
             case NodeType.CreateTrigger:
                 {
-                    await triggerDdl.CreateAsync(database, ast).ConfigureAwait(false);
+                    await triggerDdl.CreateAsync(database, ast, ticket).ConfigureAwait(false);
+
                     return new ExecuteDDLSQLResult(database, true);
                 }
 

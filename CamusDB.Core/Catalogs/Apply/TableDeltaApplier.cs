@@ -227,6 +227,9 @@ internal static class TableDeltaApplier
         ViewDependencyRules.RequireNotReadByViews(schema, tableSchema);
 
         schema.Tables.Remove(payload.TableName);
+
+        // The compiled code of the table's inline triggers goes back to the engine with the table.
+        CamusDB.Core.Extensions.TriggerRuntime.RetireAll(tableSchema);
         return tableSchema;
     }
 

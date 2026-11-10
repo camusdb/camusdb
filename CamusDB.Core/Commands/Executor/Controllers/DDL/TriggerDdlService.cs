@@ -6,9 +6,12 @@
  */
 
 using CamusDB.Core.Catalogs;
+using CamusDB.Core.Catalogs.Apply;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
+using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.Extensions;
+using CamusDB.Core.Extensions.Inline;
 using CamusDB.Core.SQLParser;
 using Kommander.Time;
 
@@ -39,7 +42,8 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.DDL;
 ///
 /// <para><b>Privileges.</b> The table is opened through <see cref="TableOpener"/>, which is where the
 /// per-table check of the ambient required privilege (<c>Alter</c>, mapped by the statement
-/// authorizer) runs, so trigger DDL needs the same grant as <c>ALTER TABLE</c>.</para>
+/// authorizer) runs, so trigger DDL needs the same grant as <c>ALTER TABLE</c>. One exception: the
+/// owner of an inline trigger drops it without that grant (see <see cref="DropAsync"/>).</para>
 /// </summary>
 internal sealed class TriggerDdlService
 {
@@ -53,16 +57,25 @@ internal sealed class TriggerDdlService
         this.catalogs = catalogs;
     }
 
-    public async Task CreateAsync(DatabaseDescriptor database, NodeAst ast)
+    public async Task CreateAsync(DatabaseDescriptor database, NodeAst ast, ExecuteSQLTicket ticket)
     {
         string triggerName = RequireSimpleName(ast.leftAst?.yytext, "trigger");
         string tableName = ast.rightAst?.yytext ?? "";
-        string typeName = SqlStringLiteral.Decode(ast.extendedTwo?.yytext ?? "");
 
         TriggerFireTiming timing = ast.yytext == "before" ? TriggerFireTiming.Before : TriggerFireTiming.After;
         TriggerEventSet events = ParseEvents(ast.extendedOne?.yytext ?? "");
 
         TableDescriptor table = await OpenTargetAsync(database, tableName).ConfigureAwait(false);
+
+        // The inline form: the body is compiled and checked here, on the proposing node, before the
+        // record goes to the schema log. Every node compiles it again at its first fire.
+        if (ast.extendedTwo?.nodeType == NodeType.FunctionBody)
+        {
+            await CreateInlineAsync(database, table, triggerName, timing, events, ast.extendedTwo.yytext ?? "", ticket).ConfigureAwait(false);
+            return;
+        }
+
+        string typeName = SqlStringLiteral.Decode(ast.extendedTwo?.yytext ?? "");
 
         ExtensionTriggerType type = FindInstalledTriggerType(database, typeName);
 
@@ -84,15 +97,101 @@ internal sealed class TriggerDdlService
         await catalogs.ReplicateCreateTriggerAsync(database, table.Name, table.Id, trigger).ConfigureAwait(false);
     }
 
+    private async Task CreateInlineAsync(
+        DatabaseDescriptor database, TableDescriptor table, string triggerName, TriggerFireTiming timing, TriggerEventSet events,
+        string body, ExecuteSQLTicket ticket)
+    {
+        InlineFunctionRuntime runtime = context.ExtensionScopes.InlineFunctions
+            ?? throw new CamusDBException(CamusDBErrorCodes.InlineFunctionsDisabled, "This engine was built without support for inline C# code");
+
+        if (!runtime.TriggersEnabled)
+            throw new CamusDBException(
+                CamusDBErrorCodes.InlineFunctionsDisabled,
+                "CREATE TRIGGER ... LANGUAGE csharp is not enabled on this node: set inline_triggers_enabled: true in config.yml and restart");
+
+        InlineTriggerSource source = InlineTriggerSources.For(database, table, triggerName, body);
+        runtime.ValidateTrigger(source, ticket.CancellationToken);
+
+        await RequireSchemaLeaderAsync(database, "CREATE TRIGGER").ConfigureAwait(false);
+
+        TriggerDefinition trigger = new()
+        {
+            Name = triggerName,
+            Timing = timing,
+            Events = events,
+            Language = InlineFunctionDefinition.CSharp,
+            Source = body,
+            SourceSha256 = InlineFunctionRuntime.SourceHash(body),
+            LanguageVersion = InlineFunctionRuntime.LanguageVersion,
+            RuleRevision = InlineFunctionAllowList.Revision,
+            Owner = ticket.Principal?.UserName,
+            OwnerId = ticket.Principal?.UserId,
+            CreatedAt = Now(),
+        };
+
+        await catalogs.ReplicateCreateTriggerAsync(database, table.Name, table.Id, trigger).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Runs <c>DROP TRIGGER</c>. The caller needs <c>ALTER</c> on the table, or is a superuser, or owns
+    /// the trigger: the owner of an inline trigger drops it without <c>ALTER</c>, also after that grant
+    /// was revoked.
+    /// </summary>
+    /// <remarks>
+    /// <para>The table open is the per-table check of <c>ALTER</c>. For the owner that check is
+    /// suspended, because the open only resolves the table and reads no row. The owner is first found
+    /// with a read outside the schema lock, and that read only picks which open to make. The decision
+    /// itself runs again under the schema lock against the record that the delta removes, so a trigger
+    /// that another user put in place under the same name is not dropped by the old owner.</para>
+    ///
+    /// <para>The owner is matched by its immutable id. A trigger of the DLL form, or one created while
+    /// authentication was off, has no owner id, so only <c>ALTER</c> or a superuser drops it. A caller
+    /// with no grant at all on the database is refused earlier, by the visibility gate, which reports
+    /// the database as missing.</para>
+    /// </remarks>
     public async Task DropAsync(DatabaseDescriptor database, NodeAst ast)
     {
         string triggerName = ast.leftAst?.yytext ?? "";
         string tableName = ast.rightAst?.yytext ?? "";
 
-        TableDescriptor table = await OpenTargetAsync(database, tableName).ConfigureAwait(false);
+        // Engine work and an engine with authentication off carry no caller, and are not checked.
+        Principal? caller = database.Options.AuthenticationEnabled ? AuthorizationContext.Current.Principal : null;
+
+        TableDescriptor table;
+
+        if (caller is not null && !caller.IsSuperuser && Owns(caller, FindTrigger(database, tableName, triggerName)))
+        {
+            using (AuthorizationContext.SuspendTableCheck())
+                table = await OpenTargetAsync(database, tableName).ConfigureAwait(false);
+        }
+        else
+            table = await OpenTargetAsync(database, tableName).ConfigureAwait(false);
 
         await RequireSchemaLeaderAsync(database, "DROP TRIGGER").ConfigureAwait(false);
-        await catalogs.ReplicateDropTriggerAsync(database, table.Name, triggerName).ConfigureAwait(false);
+
+        await catalogs.ReplicateDropTriggerAsync(
+            database, table.Name, triggerName,
+            caller is null ? null : (locked, trigger) => RequireMayDrop(database, locked, trigger, caller)).ConfigureAwait(false);
+    }
+
+    private static TriggerDefinition? FindTrigger(DatabaseDescriptor database, string tableName, string triggerName) =>
+        database.Schema.Tables.TryGetValue(tableName, out TableSchema? table) ? TriggerDeltaApplier.Find(table, triggerName) : null;
+
+    private static bool Owns(Principal caller, TriggerDefinition? trigger) =>
+        trigger?.OwnerId is { Length: > 0 } ownerId && string.Equals(caller.UserId, ownerId, StringComparison.Ordinal);
+
+    /// <summary>
+    /// The drop decision, under the schema lock, against the record that is dropped: a superuser,
+    /// <c>ALTER</c> on the table, or the owner of the trigger.
+    /// </summary>
+    private static void RequireMayDrop(DatabaseDescriptor database, TableSchema table, TriggerDefinition trigger, Principal caller)
+    {
+        if (caller.IsSuperuser || Owns(caller, trigger) || caller.HasPrivilege(Privilege.Alter, database.Id, table.Id))
+            return;
+
+        throw new CamusDBException(
+            CamusDBErrorCodes.InsufficientPrivilege,
+            $"Missing Alter privilege on table '{database.Name}.{table.Name}', and trigger '{trigger.Name}' has another owner");
     }
 
     /// <summary>

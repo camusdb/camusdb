@@ -20,7 +20,8 @@ namespace CamusDB.Tests.InlineFunctions;
 
 /// <summary>
 /// Shared setup for the tests that run inline functions through SQL: the engine under test has
-/// <see cref="CamusDBOptions.InlineFunctionsEnabled"/> on. The engine fixes its settings when it is
+/// <see cref="CamusDBOptions.InlineFunctionsEnabled"/> and <see cref="CamusDBOptions.InlineTriggersEnabled"/>
+/// on. The engine fixes its settings when it is
 /// built, so a test that needs another setting builds its own engine with <c>Options with { ... }</c>.
 /// </summary>
 public abstract class InlineFunctionTestBase : ExtensionTestBase
@@ -28,7 +29,7 @@ public abstract class InlineFunctionTestBase : ExtensionTestBase
     protected const string Slugify =
         "CREATE FUNCTION slugify(s STRING) RETURNS STRING LANGUAGE csharp AS $$ return s.Trim().ToLowerInvariant().Replace(' ', '-'); $$";
 
-    protected override CamusDBOptions ConfigureOptions(CamusDBOptions defaults) => defaults with { InlineFunctionsEnabled = true };
+    protected override CamusDBOptions ConfigureOptions(CamusDBOptions defaults) => defaults with { InlineFunctionsEnabled = true, InlineTriggersEnabled = true };
 
     protected static async Task<string> Code(System.Func<Task> action) =>
         Assert.ThrowsAsync<CamusDBException>(async () => await action())!.Code;

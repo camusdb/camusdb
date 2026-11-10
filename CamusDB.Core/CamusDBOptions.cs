@@ -2125,6 +2125,22 @@ public sealed record CamusDBOptions
     public bool InlineFunctionsEnabled { get; init; }
 
     /// <summary>
+    /// When true, <c>CREATE TRIGGER ... LANGUAGE csharp AS $$ body $$</c> is accepted: a user with the
+    /// <c>ALTER</c> privilege on a table can define a row trigger whose body is C# source. Off by
+    /// default, and separate from <see cref="InlineFunctionsEnabled"/>: a trigger body runs SQL and has
+    /// side effects, where a function body is pure, so an operator can allow one and not the other.
+    /// With it off the statement is refused with <c>CADB0841</c>; triggers that exist still fire.
+    ///
+    /// <para>Restart-class and cluster scope, for the reasons given on <see cref="InlineFunctionsEnabled"/>.
+    /// The compiler is the one of inline functions, built when either setting is on.</para>
+    ///
+    /// <para>Set via <c>inline_triggers_enabled</c> in <c>config.yml</c>. Default: <c>false</c>.</para>
+    /// </summary>
+    [ConfigSetting(ConfigMutability.Restart, ConfigScope.Cluster)]
+    public bool InlineTriggersEnabled { get; init; }
+
+
+    /// <summary>
     /// The longest one call of an inline function may run, in milliseconds. The body checks it at the
     /// start of every loop body, lambda and local function, so a call ends at most one framework call
     /// after the limit, with <c>CADB0840</c>. Zero or less disables the limit.

@@ -386,7 +386,8 @@ concurrent statements. Keep no per-statement state in fields. Static state is pe
 engine loads each extension into its own load context.
 
 **Privileges.** `CREATE TRIGGER` and `DROP TRIGGER` need the `ALTER` privilege on the table, the same
-as `ALTER TABLE`.
+as `ALTER TABLE`. The owner of an inline trigger can also drop it without `ALTER`; see
+[Triggers in C#](#triggers-in-c).
 
 **Cluster mode.** Trigger DDL replicates through the schema log to every node. It must run on the
 database's **schema leader**, the same as view and sequence DDL; a follower refuses it with an error
@@ -448,6 +449,103 @@ CREATE TRIGGER trim ON orders BEFORE INSERT, UPDATE EXTERNAL NAME 'MyCompany.Ext
   The untyped `ICamusTrigger` reads the row without a copy; prefer it on a hot table. The rows that
   wait for AFTER triggers are kept in the engine's form, so the `CADB0826` budget is the same for
   both kinds. The mapping is compiled once per row class: no reflection runs per row.
+
+### Triggers in C#
+
+A row trigger can also be a C# method body inside `CREATE TRIGGER`, with no extension DLL. The server
+compiles the body in memory, with the same pipeline and the same rules as an
+[inline function](#inline-functions), plus the additions below. A user with the `ALTER` privilege on
+the table creates one; no superuser is necessary. The setting `inline_triggers_enabled` must be on
+(see [configuration](configuration.md#inline-functions)).
+
+```sql
+CREATE TRIGGER slug ON posts BEFORE INSERT, UPDATE LANGUAGE csharp AS $$
+    if (NEW!.title is { } title)
+        NEW.slug = slugify(title);          // an inline function, called as a method
+    if (NEW.price is < 0)
+        throw new ArgumentException("price must not be negative");
+$$;
+
+CREATE TRIGGER audit ON orders AFTER INSERT, UPDATE, DELETE LANGUAGE csharp AS $$
+    await Sql.Set("op", Operation.ToString()).Set("id", (OLD ?? NEW)!.id)
+             .ExecuteAsync("INSERT INTO audit_log (op, order_id) VALUES (@op, @id)");
+$$;
+
+DROP TRIGGER slug ON posts;
+```
+
+The two forms share one record and fire in one list: the triggers of one timing on one table fire in
+creation order, whatever their form.
+
+**What the body sees.** The server writes the class around the body. The body can use:
+
+| Name | Type | Notes |
+| --- | --- | --- |
+| `NEW` | a row class generated from the table | `null` for DELETE. One property per column, named as the column and typed from its SQL type (`long?`, `string?`, `double?`, `bool?`, `Guid?`, `byte[]?`, `DateTime?`, `decimal?`, `IReadOnlyList<T?>?`). A set in a BEFORE trigger changes the row the statement writes; a set in an AFTER trigger throws. |
+| `OLD` | the same row class, read-only | `null` for INSERT. A set throws. |
+| `Operation`, `Timing`, `TableName`, `TriggerName` | as on `ITriggerContext` | |
+| `Sql` | `InlineSqlSession` | `Set(name, value)` once for each parameter, then `await ExecuteAsync(sql)` or `await QueryAsync(sql)`. `Set` has one overload for each SQL type, so the body never uses `object`. The parameters of the `Set` calls belong to the next statement only. |
+| `Context` | `ITriggerContext` | The row API of the DLL form. Use it for a column that has no property (see below). |
+| The inline functions of the database | methods | `slugify(string? s)`: one method for each function, with the CLR types of its signature. The call runs the function with its own NULL rule and its own budget. |
+
+A column named like a C# keyword gets a verbatim `@`: the property of a column `class` is
+`NEW.@class`. A column has no property when its name is one of the names in the table above
+(`Sql`, `Context`, `Timing` and so on), when it starts with `__camus`, or when its type has no
+mapping. Read and write such a column through `Context.New.GetString("Timing")` and
+`Context.New!.Set("Timing", "x")`.
+
+The row class and the method stubs come from the table and the functions at compile time. Each node
+compiles the body at the first fire after a change to them, so `ALTER TABLE ... ADD COLUMN` or
+`CREATE OR REPLACE FUNCTION` takes effect at the next fire with no change to the trigger. A body
+that names a column which is then dropped, or calls a function which is then dropped, does not
+compile again: each statement that fires it fails with `CADB0845` until the trigger is dropped or
+created again. `DROP COLUMN` and `DROP FUNCTION` do not check the bodies of inline triggers.
+
+**`await` and the budgets.** The body is the body of an `async` method, so it can `await` the methods
+of `Sql`, and only those: `Task.Run`, `Task.Delay`, `Task.WhenAll` and the other members of `Task` are
+refused. `await` is allowed in the statements of the body, not inside a lambda or a local function.
+`DateTime.UtcNow` and `Guid.NewGuid()` are allowed, because a trigger is not
+cached and has side effects by nature. Every other rule of a function body applies.
+
+The budgets of `inline_function_call_timeout_ms`, `inline_function_allocation_limit_bytes` and
+`inline_function_array_limit` apply to one fire of the body for one row. A fire over a budget fails
+its statement with `CADB0840`, and the message names the trigger. The time and the memory of a
+statement that the body runs through `Sql` are not part of the budget: that statement has its own
+limits, and the transaction's mutation limit stops a body that runs SQL in a loop. The memory that
+the body allocates after an `await` counts, also when the body continues on another thread.
+
+**Rights.** The SQL of the body runs with the rights of the trigger's owner, the user who created it,
+not with the rights of the user whose statement fired it. The DLL form uses the rights of that user,
+because its author is an operator who installed the extension. The author of an inline trigger can
+be any user with `ALTER` on one table; with the invoker's rights, an administrator's `INSERT` would
+run the author's SQL with the administrator's rights. So:
+
+- a writer without rights on `audit_log` still writes to it through a trigger whose owner has them;
+- an owner without those rights cannot get them from the writer, and not from a superuser either;
+- when the owner is dropped, or a new user has the old name, the fire fails with `CADB0846`. It never
+  falls back to the rights of the writer. A superuser drops the trigger, or creates it again as a user
+  who may run its SQL.
+
+**Drop.** `DROP TRIGGER` needs `ALTER` on the table, a superuser, or the owner of the trigger. The
+owner can drop the trigger also after `ALTER` was revoked, but the owner still needs some grant in
+the database, because the database is not visible without one. The owner is matched by user id, so a
+new user with the old owner's name is not the owner. A trigger that was created while authentication
+was off has no owner, so only `ALTER` or a superuser drops it.
+
+The changes of a BEFORE trigger to `NEW` need no privilege of the owner: they are part of the
+statement's own write. A trigger created while authentication was off has no owner, and its SQL runs
+with the rights of the statement.
+
+**Errors.** A body that does not compile is refused at `CREATE TRIGGER` with `CADB0838`, and a body
+that uses something not allowed with `CADB0839`; the record never reaches the schema. A `throw` in the
+body fails the statement with `CADB0818` and the exception's message. A body that catches the error
+of its own SQL and returns still fails the statement (`CADB0823`). With `inline_triggers_enabled` off,
+`CREATE TRIGGER ... LANGUAGE csharp` is refused with `CADB0841`; triggers that exist still fire.
+
+**Listing.** `SHOW TRIGGERS [ON table]` lists the triggers of both forms, and `SHOW CREATE TRIGGER name
+ON table` gives the statement that creates one again: `EXTERNAL NAME '...'` for the DLL form, and
+`LANGUAGE csharp AS $$ body $$` for the inline form, with a tagged quote (`$fn$`) when the body holds
+`$$`. Both need `SELECT` or `ALTER` on the database.
 
 ### Procedures
 
@@ -957,8 +1055,9 @@ and its members at startup.
 | `CADB0838` | The body of an inline function does not compile, or the compile ran out of time; the message lists the compiler's errors (HTTP 400) |
 | `CADB0839` | The body or the signature of an inline function uses something an inline function may not use; the message lists every finding (HTTP 400) |
 | `CADB0840` | A call of an inline function went over its time, memory, array or stack budget (HTTP 400) |
-| `CADB0841` | `CREATE FUNCTION` while `inline_functions_enabled` is off, or on a build with no compiler (HTTP 400) |
+| `CADB0841` | `CREATE FUNCTION` while `inline_functions_enabled` is off, `CREATE TRIGGER ... LANGUAGE csharp` while `inline_triggers_enabled` is off, or either on a build with no compiler (HTTP 400) |
 | `CADB0842` | The function exists, or another function, aggregate, table function or extension member has the name (HTTP 409) |
 | `CADB0843` | `DROP FUNCTION`, `ALTER FUNCTION` or `SHOW CREATE FUNCTION` named a function the database does not have (HTTP 404) |
 | `CADB0844` | A view, a materialized view or a CHECK constraint calls the function; the message lists them (HTTP 409) |
-| `CADB0845` | This node could not compile an inline function that a statement called (HTTP 503) |
+| `CADB0845` | This node could not compile an inline function that a statement called, or an inline trigger that a statement fired (HTTP 503) |
+| `CADB0846` | An inline trigger runs its SQL as its owner, and the owner no longer exists (HTTP 403) |

@@ -126,6 +126,7 @@ Example: YAML `mode: cluster` with `--mode standalone` starts in standalone mode
 | `inline_function_source_limit_bytes` | — | `65536` |
 | `inline_function_compile_timeout_ms` | — | `10000` |
 | `inline_function_compile_concurrency` | — | `2` |
+| `inline_triggers_enabled` | — | `false` (accept `CREATE TRIGGER ... LANGUAGE csharp`; see [Inline functions](#inline-functions)) |
 | `max_inline_functions_per_database` | — | `256` |
 | `kahuna.*` | — | mode-specific baseline |
 
@@ -218,6 +219,7 @@ whole description. These settings are all restart-class: change the file on the 
 | `inline_function_compile_timeout_ms` | `10000` | node | The longest one compile may take, the wait for a compile slot included. Must be greater than 0. |
 | `inline_function_compile_concurrency` | `2` | node | How many functions the node compiles at the same time. Each compile uses one core. Must be greater than 0. |
 | `max_inline_functions_per_database` | `256` | cluster | The most inline functions in one database. `0` or less disables the limit. |
+| `inline_triggers_enabled` | `false` | cluster | Accept `CREATE TRIGGER ... LANGUAGE csharp`. It is separate from `inline_functions_enabled`, because a trigger body runs SQL and a function body does not. With `false` the statement is refused with `CADB0841`; triggers that exist still fire. One fire of a trigger body for one row has the time, memory and array limits above. See [Triggers in C#](csharp-extensions.md#triggers-in-c). |
 
 Give the cluster-scope settings the same value on every node: a statement must pass or fail the
 same way wherever it runs. A call over its time, memory or array limit fails its statement with

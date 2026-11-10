@@ -102,6 +102,7 @@ internal sealed class TestConfigSettingClassification
             // The engine reads these once, when it builds its inline-function runtime, and the guard of
             // each compiled function keeps the budgets it was built with.
             nameof(CamusDBOptions.InlineFunctionsEnabled),
+            nameof(CamusDBOptions.InlineTriggersEnabled),
             nameof(CamusDBOptions.InlineFunctionCallTimeoutMs),
             nameof(CamusDBOptions.InlineFunctionAllocationLimitBytes),
             nameof(CamusDBOptions.InlineFunctionArrayLimit),

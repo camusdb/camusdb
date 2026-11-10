@@ -1793,6 +1793,47 @@ internal sealed class SchemaQuerier
     }
 
 
+    /// <summary>
+    /// Lists the row triggers of a database, or of one table, in both forms. See
+    /// <c>DerivedTableSchemaBuilder.ShowTriggersSchema</c>. A table of the list is a plain table;
+    /// a view never has triggers. Replicated metadata only, so every node lists the same rows.
+    /// </summary>
+    internal async IAsyncEnumerable<QueryResultRow> ShowTriggers(DatabaseDescriptor database, string? tableName)
+    {
+        await Task.CompletedTask;
+
+        if (tableName is not null && !database.Schema.Tables.ContainsKey(tableName))
+            throw new CamusDBException(CamusDBErrorCodes.TableDoesntExist, $"Table '{tableName}' does not exist");
+
+        foreach (TableSchema table in database.Schema.Tables.Values.OrderBy(t => t.Name, StringComparer.OrdinalIgnoreCase))
+        {
+            if (tableName is not null && !string.Equals(table.Name, tableName, StringComparison.OrdinalIgnoreCase))
+                continue;
+
+            if (table.Triggers is not { } triggers)
+                continue;
+
+            foreach (TriggerDefinition trigger in triggers)
+            {
+                bool inline = trigger.IsInline;
+
+                yield return new QueryResultRow(default, new Dictionary<string, ColumnValue>(StringComparer.OrdinalIgnoreCase)
+                {
+                    { "name",          new ColumnValue(ColumnType.String, trigger.Name) },
+                    { "table",         new ColumnValue(ColumnType.String, table.Name) },
+                    { "timing",        new ColumnValue(ColumnType.String, trigger.Timing == TriggerFireTiming.Before ? "BEFORE" : "AFTER") },
+                    { "events",        new ColumnValue(ColumnType.String, Extensions.TriggerStatementRenderer.Events(trigger.Events)) },
+                    { "form",          new ColumnValue(ColumnType.String, inline ? trigger.Language : "extension") },
+                    { "type_name",     inline ? ColumnValue.Null : Text(trigger.TypeName) },
+                    { "extension",     inline ? ColumnValue.Null : Text(trigger.ExtensionName) },
+                    { "owner",         inline ? Text(trigger.Owner) : ColumnValue.Null },
+                    { "source_sha256", inline ? Text(trigger.SourceSha256) : ColumnValue.Null },
+                    { "created_at",    new ColumnValue(ColumnType.String, IsoFromUnixMs(trigger.CreatedAt.L)) },
+                });
+            }
+        }
+    }
+
     private static QueryResultRow ExtensionRow(
         string name, string version, string status, ColumnValue path, string sha256, ColumnValue trust,
         IEnumerable<string> requires, IEnumerable<string> functions, IEnumerable<string> triggers, IEnumerable<string> procedures,

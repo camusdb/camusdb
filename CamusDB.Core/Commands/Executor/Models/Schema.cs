@@ -442,8 +442,13 @@ public sealed class Schema : IDisposable
 
     public void Dispose()
     {
-        // Gives the compiled code of this database's inline functions back to the engine.
+        // Gives the compiled code of this database's inline functions and inline triggers back to the
+        // engine.
         FunctionCatalog.Dispose();
+
+        foreach (TableSchema table in Tables.Values)
+            CamusDB.Core.Extensions.TriggerRuntime.RetireAll(table);
+
         Semaphore?.Dispose();
     }
 

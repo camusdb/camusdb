@@ -106,6 +106,11 @@ public class ConfigDefinition
     /// <c>CamusDBOptions.InlineFunctionsEnabled</c>. Default false.</summary>
     public bool InlineFunctionsEnabled { get; set; }
 
+    /// <summary>Accept <c>CREATE TRIGGER ... LANGUAGE csharp</c>. Maps to
+    /// <c>CamusDBOptions.InlineTriggersEnabled</c>. Default false.</summary>
+    public bool InlineTriggersEnabled { get; set; }
+
+
     /// <summary>Longest call of an inline function, in milliseconds. &lt;= 0 disables. Maps to
     /// <c>CamusDBOptions.InlineFunctionCallTimeoutMs</c>. Default 1000.</summary>
     public int InlineFunctionCallTimeoutMs { get; set; } = 1000;

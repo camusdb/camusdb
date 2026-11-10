@@ -138,6 +138,7 @@ public static class GrpcErrorMapper
 
         // This node could not compile the function's source; another node can run the statement.
         CamusDBErrorCodes.InlineFunctionUnavailableOnNode => StatusCode.Unavailable,
+        CamusDBErrorCodes.TriggerOwnerMissing => StatusCode.PermissionDenied,
 
         // Refused because of what the data or the schema holds right now, not because of the
         // statement text: the same statement succeeds once the dependent rows or objects are gone.

@@ -18,7 +18,8 @@ namespace CamusDB.Core.Catalogs.Apply;
 /// resolved the type and named its installed extension, and each node binds the record to its own
 /// loaded code at the first DML. An apply that consulted the local registry could fail on a node that
 /// lacks the extension, and a committed schema delta must apply everywhere. The apply checks only the
-/// replicated catalog: the named extension must be installed.</para>
+/// replicated catalog: the named extension must be installed. An inline trigger names no extension, and
+/// its body is compiled by each node at the first fire, never by the apply.</para>
 ///
 /// <para><b>Idempotent.</b> A re-delivered create finds its own trigger (same name and type) and returns;
 /// a re-delivered drop finds nothing to remove and returns. The checks that can fail — the table was
@@ -44,7 +45,7 @@ internal static class TriggerDeltaApplier
 
         if (existing is not null)
         {
-            if (string.Equals(existing.TypeName, trigger.TypeName, StringComparison.Ordinal) &&
+            if (SameBody(existing, trigger) &&
                 existing.Timing == trigger.Timing &&
                 existing.Events == trigger.Events)
                 return table;
@@ -60,8 +61,9 @@ internal static class TriggerDeltaApplier
                 $"'{table.Name}' is not a plain table; triggers can be created only on tables");
 
         // In log order against DROP EXTENSION: a trigger must name an installed extension, and a drop
-        // proposed in between would otherwise leave it pointing at nothing.
-        if (!schema.Extensions.ContainsKey(trigger.ExtensionName))
+        // proposed in between would otherwise leave it pointing at nothing. An inline trigger names
+        // no extension: its code is its own body.
+        if (!trigger.IsInline && !schema.Extensions.ContainsKey(trigger.ExtensionName))
             throw new CamusDBException(
                 CamusDBErrorCodes.ExtensionNotInstalled,
                 $"Trigger '{trigger.Name}' names extension '{trigger.ExtensionName}', which is not installed in this database");
@@ -77,19 +79,33 @@ internal static class TriggerDeltaApplier
         if (Find(table, payload.TriggerName) is null)
             return table;
 
+        TriggerDefinition removed = Find(table, payload.TriggerName)!;
+
         List<TriggerDefinition> remaining = table.Triggers!
-            .Where(t => !string.Equals(t.Name, payload.TriggerName, StringComparison.OrdinalIgnoreCase))
+            .Where(t => !ReferenceEquals(t, removed))
             .ToList();
 
         table.Triggers = remaining.Count == 0 ? null : remaining;
+
+        // An inline trigger's binding holds a reference on its compiled code; give it back now, not
+        // when the engine closes. A statement that still fires it keeps the code alive until it ends.
+        CamusDB.Core.Extensions.TriggerRuntime.Retire(removed);
         return table;
     }
+
+    /// <summary>
+    /// True when two records of one trigger name have the same code: the same type for the DLL form,
+    /// the same body for the inline form.
+    /// </summary>
+    private static bool SameBody(TriggerDefinition existing, TriggerDefinition trigger) =>
+        string.Equals(existing.TypeName, trigger.TypeName, StringComparison.Ordinal) &&
+        string.Equals(existing.SourceSha256, trigger.SourceSha256, StringComparison.Ordinal);
 
     internal static bool WasCreateApplied(Schema schema, SchemaCreateTriggerPayload payload) =>
         payload.Trigger is { } trigger
         && schema.Tables.TryGetValue(payload.TableName, out TableSchema? table)
         && Find(table, trigger.Name) is { } existing
-        && string.Equals(existing.TypeName, trigger.TypeName, StringComparison.Ordinal);
+        && SameBody(existing, trigger);
 
     internal static bool WasDropApplied(Schema schema, SchemaDropTriggerPayload payload) =>
         !schema.Tables.TryGetValue(payload.TableName, out TableSchema? table)

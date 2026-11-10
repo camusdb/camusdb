@@ -142,6 +142,7 @@ public class TestConfigurationDefaults
         Assert.AreEqual(250, CamusDBOptions.Default.RegexMatchTimeoutMs, nameof(CamusDBOptions.Default.RegexMatchTimeoutMs));
         Assert.AreEqual(1024, CamusDBOptions.Default.RegexCacheMaxEntries, nameof(CamusDBOptions.Default.RegexCacheMaxEntries));
         Assert.AreEqual(false, CamusDBOptions.Default.InlineFunctionsEnabled, nameof(CamusDBOptions.Default.InlineFunctionsEnabled));
+        Assert.AreEqual(false, CamusDBOptions.Default.InlineTriggersEnabled, nameof(CamusDBOptions.Default.InlineTriggersEnabled));
         Assert.AreEqual(1000, CamusDBOptions.Default.InlineFunctionCallTimeoutMs, nameof(CamusDBOptions.Default.InlineFunctionCallTimeoutMs));
         Assert.AreEqual(16L * 1024 * 1024, CamusDBOptions.Default.InlineFunctionAllocationLimitBytes, nameof(CamusDBOptions.Default.InlineFunctionAllocationLimitBytes));
         Assert.AreEqual(1_048_576, CamusDBOptions.Default.InlineFunctionArrayLimit, nameof(CamusDBOptions.Default.InlineFunctionArrayLimit));

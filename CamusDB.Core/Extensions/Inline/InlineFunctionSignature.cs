@@ -131,7 +131,7 @@ internal static class InlineFunctionSignature
     }
 
     /// <summary>A name as SQL text: as it is when the lexer reads it as one plain word, and between backquotes when it does not.</summary>
-    private static string SqlName(string name) => SQLParser.ExtractCall.IsBareWord(name) ? name : "`" + name + "`";
+    internal static string SqlName(string name) => SQLParser.ExtractCall.IsBareWord(name) ? name : "`" + name + "`";
 
     /// <summary>
     /// The <c>CREATE FUNCTION</c> statement that creates <paramref name="function"/> again, for

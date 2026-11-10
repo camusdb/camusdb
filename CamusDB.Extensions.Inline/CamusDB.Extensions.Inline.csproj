@@ -15,4 +15,10 @@
     <Deterministic>true</Deterministic>
   </PropertyGroup>
 
+  <ItemGroup>
+    <!-- The trigger contract (ITriggerContext, IRow, ISqlSession): an inline trigger body sees its row
+         and runs its SQL through these types, wrapped by the session in this assembly. -->
+    <ProjectReference Include="..\CamusDB.Extensions.Abstractions\CamusDB.Extensions.Abstractions.csproj" />
+  </ItemGroup>
+
 </Project>

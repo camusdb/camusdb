@@ -240,6 +240,7 @@ public sealed class TestConfigResolver
     {
         string yml =
             "inline_functions_enabled: true\n" +
+            "inline_triggers_enabled: true\n" +
             "inline_function_call_timeout_ms: 250\n" +
             "inline_function_allocation_limit_bytes: 8388608\n" +
             "inline_function_array_limit: 4096\n" +
@@ -251,6 +252,7 @@ public sealed class TestConfigResolver
         CamusDBOptions resolved = ConfigResolver.Resolve(new ConfigReader().Read(yml));
 
         Assert.That(resolved.InlineFunctionsEnabled, Is.True);
+        Assert.That(resolved.InlineTriggersEnabled, Is.True);
         Assert.That(resolved.InlineFunctionCallTimeoutMs, Is.EqualTo(250));
         Assert.That(resolved.InlineFunctionAllocationLimitBytes, Is.EqualTo(8_388_608L));
         Assert.That(resolved.InlineFunctionArrayLimit, Is.EqualTo(4096));

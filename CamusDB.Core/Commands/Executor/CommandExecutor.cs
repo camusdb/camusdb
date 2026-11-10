@@ -457,6 +457,14 @@ public sealed class CommandExecutor : IAsyncDisposable
     internal CamusDB.Core.Extensions.Inline.InlineFunctionRuntime InlineFunctions { get; }
 
     /// <summary>
+    /// Loads the principal of a stored object's owner by name and immutable id, or returns null when
+    /// that owner is gone (see <see cref="AuthService.TryLoadOwnerPrincipalAsync"/>). The view binder
+    /// and the inline trigger runtime use it to run a body with its owner's rights. Null when the
+    /// engine has no auth service (no shared node): there is then no principal to switch to.
+    /// </summary>
+    internal Func<string, string, Task<Principal?>>? OwnerPrincipalResolver { get; }
+
+    /// <summary>
     /// Makes the frame of <paramref name="databaseName"/> on this engine the function scope of the
     /// current flow, and returns it. Called first thing in each entry point that can evaluate an
     /// expression, in the method's synchronous part, so the scope also reaches the caller that later
@@ -609,11 +617,10 @@ public sealed class CommandExecutor : IAsyncDisposable
         // The owner resolver is what turns a recorded owner into enforceable definer's rights. Null
         // when the engine has no auth service (no shared node), in which case there is no principal to
         // swap to and every view binds as the caller — the same as authentication being off.
-        queryBinder = new QueryBinder(
-            tableOpener,
-            authService is null
-                ? null
-                : (ownerName, ownerId) => authService.TryLoadOwnerPrincipalAsync(ownerName, ownerId));
+        OwnerPrincipalResolver = authService is null
+            ? null
+            : (ownerName, ownerId) => authService.TryLoadOwnerPrincipalAsync(ownerName, ownerId);
+        queryBinder = new QueryBinder(tableOpener, OwnerPrincipalResolver);
         SubqueryQueryExecutor subqueryQueryExecutor = new(queryExecutor);
         ExistsSubqueryExecutor existsSubqueryExecutor = new(subqueryQueryExecutor);
         SubqueryScopeAnalyzer subqueryScopeAnalyzer = new(queryBinder);

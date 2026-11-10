@@ -77,6 +77,8 @@ public static class PreparedStatementBinder
         NodeType.ShowExtensions or
         NodeType.ShowFunctions or
         NodeType.ShowCreateFunction or
+        NodeType.ShowTriggers or
+        NodeType.ShowCreateTrigger or
         NodeType.ShowClusterSettings or
 
         NodeType.ShowQueries or NodeType.ShowClusterQueries or

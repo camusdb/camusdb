@@ -24,8 +24,17 @@ internal sealed class InlineFunctionCompileBusyException(string message)
     : CamusDBException(CamusDBErrorCodes.InlineFunctionCompileFailed, message);
 
 /// <summary>
-/// The compiled code of one inline function source on this engine, shared by every function record
-/// that compiles to it (see <c>InlineFunctionCompiler.UnitKey</c>) and counted by them.
+/// The static <c>Run</c> method of a compiled trigger class (see <see cref="InlineTriggerWrapper"/>):
+/// the context of the row event, the budget object of this fire, the typed session, and one delegate
+/// per inline function of the database, in the order of the unit's source.
+/// </summary>
+internal delegate Task InlineTriggerRunner(
+    CamusDB.Extensions.ITriggerContext context, TriggerBudget frame, InlineSqlSession sql, Func<object?[], object?>[] functions);
+
+/// <summary>
+/// The compiled code of one inline function source or one inline trigger source on this engine, shared
+/// by every record that compiles to it (see <c>InlineFunctionCompiler.UnitKey</c> and
+/// <c>InlineTriggerWrapper.UnitKey</c>) and counted by them.
 /// </summary>
 internal sealed class InlineFunctionUnit(string key)
 {
@@ -34,6 +43,12 @@ internal sealed class InlineFunctionUnit(string key)
 
     /// <summary>The adapter over the compiled method, without the budgets. Null until the compile ended well.</summary>
     public ScalarFunctionEvaluatorDelegate? Evaluator { get; set; }
+
+    /// <summary>The compiled runner of a trigger unit; null for a function unit and until the compile ended well.</summary>
+    public InlineTriggerRunner? Trigger { get; set; }
+
+    /// <summary>True when the unit has code: a function evaluator or a trigger runner.</summary>
+    public bool IsBuilt => Evaluator is not null || Trigger is not null;
 
     /// <summary>Why this node cannot run the source. Kept, so the node compiles a bad source once.</summary>
     public CamusDBException? Failure { get; set; }
@@ -103,6 +118,7 @@ internal sealed class InlineFunctionRuntime : IDisposable
         this.logger = logger;
 
         Enabled = options.InlineFunctionsEnabled;
+        TriggersEnabled = options.InlineTriggersEnabled;
         MaxFunctionsPerDatabase = options.MaxInlineFunctionsPerDatabase;
         callTimeoutMs = options.InlineFunctionCallTimeoutMs;
         allocationLimitBytes = options.InlineFunctionAllocationLimitBytes;
@@ -116,13 +132,17 @@ internal sealed class InlineFunctionRuntime : IDisposable
             options.InlineFunctionArrayLimit,
             logger);
 
-        if (Enabled)
+        if (Enabled || TriggersEnabled)
             _ = Task.Run(Warm);
+
 #endif
     }
 
     /// <summary>True when this engine accepts <c>CREATE FUNCTION</c>. Functions that exist run either way.</summary>
     public bool Enabled { get; }
+
+    /// <summary>Whether <c>CREATE TRIGGER … LANGUAGE csharp</c> is accepted on this engine (<c>inline_triggers_enabled</c>).</summary>
+    public bool TriggersEnabled { get; }
 
     /// <summary>The most inline functions one database may hold; zero or less for no limit.</summary>
     public int MaxFunctionsPerDatabase { get; }
@@ -176,6 +196,62 @@ internal sealed class InlineFunctionRuntime : IDisposable
         {
             compiled.Context.Unload();
         }
+#endif
+    }
+
+    /// <summary>
+    /// Compiles and binds a trigger body and unloads it again, as <see cref="Validate"/> does for a
+    /// function. <c>CREATE TRIGGER … LANGUAGE csharp</c> calls it on the proposing node.
+    /// </summary>
+    public void ValidateTrigger(InlineTriggerSource source, CancellationToken cancellation)
+    {
+#if CAMUSDB_BROWSER
+        throw NoCompiler();
+#else
+        CompiledInlineFunction compiled = compiler.CompileTrigger(source, cancellation);
+
+        try
+        {
+            BindTrigger(compiled);
+        }
+        finally
+        {
+            compiled.Context.Unload();
+        }
+#endif
+    }
+
+    /// <summary>
+    /// Takes a reference on the unit of a trigger body, and compiles it when this is the first one; the
+    /// same contract as <see cref="Acquire"/>. The unit is keyed by the body, the table's columns and the
+    /// functions of the database, so a schema change or a new function makes a new unit.
+    /// </summary>
+    internal InlineFunctionUnit AcquireTrigger(InlineTriggerSource source, string label)
+    {
+#if CAMUSDB_BROWSER
+        return new InlineFunctionUnit("") { Failure = NoCompiler() };
+#else
+        string key = InlineTriggerWrapper.UnitKey(source);
+        InlineFunctionUnit unit;
+
+        lock (units)
+        {
+            if (!units.TryGetValue(key, out unit!))
+                units[key] = unit = new InlineFunctionUnit(key);
+
+            unit.References++;
+        }
+
+        if (!unit.IsBuilt)
+        {
+            lock (unit)
+            {
+                if (!unit.IsBuilt && (unit.Failure is null || (unit.RetryAt != 0 && Environment.TickCount64 >= unit.RetryAt)))
+                    BuildTrigger(unit, source, label);
+            }
+        }
+
+        return unit;
 #endif
     }
 
@@ -347,7 +423,10 @@ internal sealed class InlineFunctionRuntime : IDisposable
         };
     }
 
-    private static CamusDBException BudgetExceeded(string function, Exception cause, int timeoutMs, long allocationBytes)
+    private static CamusDBException BudgetExceeded(string function, Exception cause, int timeoutMs, long allocationBytes) =>
+        BudgetExceeded("Function", function, cause, timeoutMs, allocationBytes);
+
+    private static CamusDBException BudgetExceeded(string label, string name, Exception cause, int timeoutMs, long allocationBytes)
     {
         string reason = cause switch
         {
@@ -362,7 +441,7 @@ internal sealed class InlineFunctionRuntime : IDisposable
             _ => cause.Message,
         };
 
-        return new CamusDBException(CamusDBErrorCodes.InlineFunctionBudgetExceeded, $"Function '{function}' was stopped: {reason}", cause);
+        return new CamusDBException(CamusDBErrorCodes.InlineFunctionBudgetExceeded, $"{label} '{name}' was stopped: {reason}", cause);
     }
 
 #if !CAMUSDB_BROWSER
@@ -416,6 +495,177 @@ internal sealed class InlineFunctionRuntime : IDisposable
     /// </summary>
     private static ScalarFunctionEvaluatorDelegate Bind(CompiledInlineFunction compiled) =>
         ExtensionFunctionBinder.Bind(compiled.Method, new CamusFunctionAttribute("inline")).Evaluator;
+
+    private static InlineTriggerRunner BindTrigger(CompiledInlineFunction compiled) =>
+        compiled.Method.CreateDelegate<InlineTriggerRunner>();
+
+    private void BuildTrigger(InlineFunctionUnit unit, InlineTriggerSource source, string label)
+    {
+        try
+        {
+            CompiledInlineFunction compiled = compiler.CompileTrigger(source, CancellationToken.None);
+
+            try
+            {
+                unit.Trigger = BindTrigger(compiled);
+                unit.Context = compiled.Context;
+                unit.Failure = null;
+                unit.RetryAt = 0;
+            }
+            catch
+            {
+                compiled.Context.Unload();
+                throw;
+            }
+        }
+        catch (InlineFunctionCompileBusyException busy)
+        {
+            unit.Failure = TriggerUnavailable(source, busy.Message);
+            unit.RetryAt = Environment.TickCount64 + BusyRetryMs;
+        }
+        catch (CamusDBException refused)
+        {
+            unit.RetryAt = 0;
+            unit.Failure = TriggerUnavailable(source, refused.Message);
+            logger?.LogError(
+                "Inline trigger {Trigger} cannot fire on this node: {Reason}. Statements that write the table fail here until the trigger is dropped or created again",
+                label, refused.Message);
+        }
+        catch (Exception unexpected)
+        {
+            unit.Failure = TriggerUnavailable(source, unexpected.Message);
+            logger?.LogError(unexpected, "Inline trigger {Trigger} cannot fire on this node", label);
+        }
+    }
+
+    private static CamusDBException TriggerUnavailable(InlineTriggerSource source, string reason) =>
+        new(CamusDBErrorCodes.InlineFunctionUnavailableOnNode,
+            $"Trigger '{source.Name}' on table '{source.TableName}' cannot fire on this node: {reason}. " +
+            "Drop it, or create it again with a body this node accepts");
+
+    /// <summary>
+    /// Wraps the runner of a trigger unit with what every fire needs: the budget object, the typed
+    /// session over the session the engine built with the trigger's rights, the invariant culture, a
+    /// stack check before the body's frame is taken, and the error for an exhausted budget.
+    /// </summary>
+    internal Func<CamusDB.Extensions.ITriggerContext, CamusDB.Extensions.ISqlSession, Task> GuardTrigger(
+        InlineTriggerRunner runner, Func<object?[], object?>[] functions, string triggerName)
+    {
+        int timeout = callTimeoutMs;
+        long allocation = allocationLimitBytes;
+        int array = arrayLimit;
+
+        return async (context, session) =>
+        {
+            CultureInfo culture = CultureInfo.CurrentCulture;
+            CultureInfo uiCulture = CultureInfo.CurrentUICulture;
+            bool pinned = culture.Name.Length != 0 || uiCulture.Name.Length != 0;
+
+            if (pinned)
+            {
+                CultureInfo.CurrentCulture = CultureInfo.InvariantCulture;
+                CultureInfo.CurrentUICulture = CultureInfo.InvariantCulture;
+            }
+
+            TriggerBudget frame = new(timeout, allocation, array);
+            long deadline = timeout > 0 ? Environment.TickCount64 + timeout : long.MaxValue;
+
+            try
+            {
+                System.Runtime.CompilerServices.RuntimeHelpers.EnsureSufficientExecutionStack();
+                await runner(context, frame, new InlineSqlSession(session, frame), functions).ConfigureAwait(false);
+            }
+            catch (Exception failed) when (failed is not OperationCanceledException and not CamusDBException && CallBudget.IsBudgetException(failed))
+            {
+                throw BudgetExceeded("Trigger", triggerName, failed, timeout, allocation);
+            }
+            catch (System.Text.RegularExpressions.RegexMatchTimeoutException timedOut) when (Environment.TickCount64 >= deadline)
+            {
+                throw BudgetExceeded("Trigger", triggerName, new CallBudgetExceededException(CallBudgetKind.Time, timedOut.Message), timeout, allocation);
+            }
+            finally
+            {
+                if (pinned)
+                {
+                    CultureInfo.CurrentCulture = culture;
+                    CultureInfo.CurrentUICulture = uiCulture;
+                }
+            }
+        };
+    }
+
+    /// <summary>
+    /// The delegates a trigger unit calls its function stubs through, one per function of
+    /// <paramref name="functions"/> in that order: each maps the CLR arguments to values, calls the
+    /// function through its own evaluator (with the function's NULL rule and budget), and maps the
+    /// result back to the CLR type the stub declares.
+    /// </summary>
+    internal static Func<object?[], object?>[] FunctionStubs(IReadOnlyList<InlineFunctionDefinition> functions, InlineFunctionSet set)
+    {
+        Func<object?[], object?>[] stubs = new Func<object?[], object?>[functions.Count];
+
+        for (int i = 0; i < stubs.Length; i++)
+        {
+            InlineFunctionDefinition function = functions[i];
+            ColumnType returnType = function.ReturnType;
+            ColumnType? elementType = function.ReturnElementType;
+            string name = function.Name;
+
+            if (!set.TryGetFunction(name, out ScalarFunctionDescriptor descriptor))
+            {
+                stubs[i] = _ => throw new CamusDBException(CamusDBErrorCodes.FunctionNotFound, $"Function '{name}' does not exist any more");
+                continue;
+            }
+
+            ScalarFunctionEvaluatorDelegate evaluator = descriptor.Evaluator;
+
+            stubs[i] = arguments =>
+            {
+                ColumnValue[] values = new ColumnValue[arguments.Length];
+
+                for (int a = 0; a < values.Length; a++)
+                    values[a] = ExtensionValueMapping.FromObject(arguments[a]);
+
+                return ToClr(evaluator(name, values), returnType, elementType, name);
+            };
+        }
+
+        return stubs;
+    }
+
+    /// <summary>The boxed CLR value of a function result, in the nullable form the stub declares.</summary>
+    private static object? ToClr(ColumnValue value, ColumnType type, ColumnType? elementType, string function)
+    {
+        if (value.Type == ColumnType.Null)
+            return null;
+
+        return type switch
+        {
+            ColumnType.Integer64 => ExtensionValueMapping.ToNullableInt64(value, function, 0),
+            ColumnType.Float64 => ExtensionValueMapping.ToNullableDouble(value, function, 0),
+            ColumnType.Float32 => ExtensionValueMapping.ToNullableSingle(value, function, 0),
+            ColumnType.Bool => ExtensionValueMapping.ToNullableBoolean(value, function, 0),
+            ColumnType.String => ExtensionValueMapping.ToNullableString(value, function, 0),
+            ColumnType.Uuid => ExtensionValueMapping.ToNullableGuid(value, function, 0),
+            ColumnType.Bytes => ExtensionValueMapping.ToNullableBytes(value, function, 0),
+            ColumnType.DateTime => ExtensionValueMapping.ToNullableDateTime(value, function, 0),
+            ColumnType.Numeric => ExtensionValueMapping.ToNullableDecimal(value, function, 0),
+            ColumnType.Array => elementType switch
+            {
+                ColumnType.Integer64 => ExtensionValueMapping.ToNullableList(value, function, 0, ExtensionValueMapping.ToNullableInt64, nullElements: true),
+                ColumnType.Float64 => ExtensionValueMapping.ToNullableList(value, function, 0, ExtensionValueMapping.ToNullableDouble, nullElements: true),
+                ColumnType.Float32 => ExtensionValueMapping.ToNullableList(value, function, 0, ExtensionValueMapping.ToNullableSingle, nullElements: true),
+                ColumnType.Bool => ExtensionValueMapping.ToNullableList(value, function, 0, ExtensionValueMapping.ToNullableBoolean, nullElements: true),
+                ColumnType.String => ExtensionValueMapping.ToNullableList(value, function, 0, ExtensionValueMapping.ToNullableString, nullElements: true),
+                ColumnType.Uuid => ExtensionValueMapping.ToNullableList(value, function, 0, ExtensionValueMapping.ToNullableGuid, nullElements: true),
+                ColumnType.DateTime => ExtensionValueMapping.ToNullableList(value, function, 0, ExtensionValueMapping.ToNullableDateTime, nullElements: true),
+                ColumnType.Numeric => ExtensionValueMapping.ToNullableList(value, function, 0, ExtensionValueMapping.ToNullableDecimal, nullElements: true),
+                _ => null,
+            },
+            _ => null,
+        };
+    }
+
 
     private static CamusDBException Unavailable(InlineFunctionDefinition function, string reason) =>
         new(CamusDBErrorCodes.InlineFunctionUnavailableOnNode,

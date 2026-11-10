@@ -1153,6 +1153,9 @@ show_stmt : TSHOW TCOLUMNS TFROM any_identifier { $$.n = new(NodeType.ShowColumn
           /* SHOW CREATE FUNCTION <name>. FUNCTION is a plain identifier that ShowCreateFunctionStatement
              checks; the other SHOW CREATE forms each name a keyword token, so the shapes cannot collide. */
           | TSHOW TCREATE TIDENTIFIER any_identifier { $$.n = ShowCreateFunctionStatement($3.s, $4.n); }
+          /* SHOW CREATE TRIGGER <name> ON <table>. TRIGGER is a plain identifier, checked in the action;
+             the ON makes the shape longer than SHOW CREATE FUNCTION, so the two do not collide. */
+          | TSHOW TCREATE TIDENTIFIER any_identifier TON any_identifier { $$.n = ShowCreateTriggerStatement($3.s, $4.n, $6.n); }
           | TSHOW TDATABASE { $$.n = NodeAst.ShowDatabase; }
           | TSHOW TDATABASES { $$.n = NodeAst.ShowDatabases; }
           | TSHOW TDATABASES TLIKE string { $$.n = new(NodeType.ShowDatabases, $4.n, null, null, null, null, null, null, null); }
@@ -1279,11 +1282,15 @@ show_stmt : TSHOW TCOLUMNS TFROM any_identifier { $$.n = new(NodeType.ShowColumn
                 $$.n = new(NodeType.ShowExtensions, null, null, null, null, null, null, null, null);
             else if (string.Equals($2.s, "functions", System.StringComparison.OrdinalIgnoreCase))
                 $$.n = new(NodeType.ShowFunctions, null, null, null, null, null, null, null, null);
+            else if (string.Equals($2.s, "triggers", System.StringComparison.OrdinalIgnoreCase))
+                $$.n = new(NodeType.ShowTriggers, null, null, null, null, null, null, null, null);
             else
                 throw new CamusDB.Core.CamusDBException(
                     CamusDB.Core.CamusDBErrorCodes.InvalidInput,
-                    "Expected: SHOW VARIABLES [LIKE '<pattern>'], SHOW USERS [LIKE '<pattern>'], SHOW QUERIES [LIKE '<pattern>'], SHOW CONNECTIONS, SHOW EXTENSIONS or SHOW FUNCTIONS");
+                    "Expected: SHOW VARIABLES [LIKE '<pattern>'], SHOW USERS [LIKE '<pattern>'], SHOW QUERIES [LIKE '<pattern>'], SHOW CONNECTIONS, SHOW EXTENSIONS, SHOW FUNCTIONS or SHOW TRIGGERS [ON <table>]");
           }
+          /* SHOW TRIGGERS ON <table>: TRIGGERS is a plain identifier, checked in the action. */
+          | TSHOW TIDENTIFIER TON any_identifier { $$.n = ShowTriggersOnStatement($2.s, $4.n); }
           | TSHOW TIDENTIFIER TLIKE string
           {
             if (string.Equals($2.s, "variables", System.StringComparison.OrdinalIgnoreCase))
@@ -1394,14 +1401,19 @@ cancel_stmt : TIDENTIFIER TIDENTIFIER string
             }
             ;
 
-/* CREATE TRIGGER <name> ON <table> {BEFORE|AFTER} <event>[, <event>...] EXTERNAL NAME '<Type>' and
+/* CREATE TRIGGER <name> ON <table> {BEFORE|AFTER} <event>[, <event>...] EXTERNAL NAME '<Type>', the
+   same with LANGUAGE csharp AS $$ body $$ for a body of inline C#, and
    DROP TRIGGER <name> ON <table>. No word is reserved: TRIGGER, BEFORE, AFTER, EXTERNAL and NAME are
+
    plain identifiers that CreateTriggerStatement / DropTriggerStatement check, so each stays usable as
    a table or column name. No other statement starts with CREATE or DROP followed by an identifier, so
    the shapes cannot collide. The events are the INSERT, UPDATE and DELETE tokens. */
 create_trigger_stmt : TCREATE TIDENTIFIER any_identifier TON any_identifier TIDENTIFIER trigger_event_list TIDENTIFIER TIDENTIFIER string
                       { $$.n = CreateTriggerStatement($2.s, $3.n, $5.n, $6.s, $7.s, $8.s, $9.s, $10.n); }
+                    | TCREATE TIDENTIFIER any_identifier TON any_identifier TIDENTIFIER trigger_event_list TIDENTIFIER TIDENTIFIER TAS TDOLLARQUOTED
+                      { $$.n = CreateInlineTriggerStatement($2.s, $3.n, $5.n, $6.s, $7.s, $8.s, $9.s, $11.s); }
                     ;
+
 
 drop_trigger_stmt : TDROP TIDENTIFIER any_identifier TON any_identifier
                     { $$.n = DropTriggerStatement($2.s, $3.n, $5.n); }

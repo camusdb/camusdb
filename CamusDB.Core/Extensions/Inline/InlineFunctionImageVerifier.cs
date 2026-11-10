@@ -66,6 +66,36 @@ internal static class InlineFunctionImageVerifier
         BudgetAssemblyName,
     }.ToFrozenSet(StringComparer.OrdinalIgnoreCase);
 
+    /// <summary>The assembly of the extension contract, which a trigger image refers to for its row and context types.</summary>
+    public const string ContractAssemblyName = "CamusDB.Extensions.Abstractions";
+
+    /// <summary>The assemblies a trigger image may refer to beyond <see cref="AllowedAssemblies"/>.</summary>
+    public static readonly FrozenSet<string> TriggerAssemblies = new[] { ContractAssemblyName, "netstandard" }.ToFrozenSet(StringComparer.OrdinalIgnoreCase);
+
+
+    /// <summary>
+    /// Types whose every member a trigger image may refer to: the budget object the rewrite calls,
+    /// and what the compiler emits for an <c>async</c> method. The body cannot name any of them: the
+    /// budget object sits in a reserved field, and the state machine types are not on the list.
+    /// </summary>
+    internal static readonly FrozenSet<string> TriggerHelperTypes = new[]
+    {
+        "CamusDB.Extensions.Inline.TriggerBudget",
+        "System.Runtime.CompilerServices.AsyncTaskMethodBuilder",
+        "System.Runtime.CompilerServices.AsyncTaskMethodBuilder`1",
+        "System.Runtime.CompilerServices.IAsyncStateMachine",
+        "System.Runtime.CompilerServices.TaskAwaiter",
+        "System.Runtime.CompilerServices.TaskAwaiter`1",
+        "System.Runtime.CompilerServices.AsyncStateMachineAttribute",
+        "System.Diagnostics.DebuggerHiddenAttribute",
+        // The argument of AsyncStateMachineAttribute is the state machine's type; the body cannot
+        // name System.Type or typeof.
+        "System.Type",
+        "System.Threading.Tasks.Task",
+        "System.Threading.Tasks.Task`1",
+    }.ToFrozenSet(StringComparer.Ordinal);
+
+
     /// <summary>The members of the budget assembly that the rewrite inserts. <c>Enter</c> and <c>Exit</c> are the server's, and are not here.</summary>
     private static readonly FrozenSet<string> BudgetMembers = new[]
     {
@@ -193,8 +223,12 @@ internal static class InlineFunctionImageVerifier
     /// Returns every reference of <paramref name="image"/> that is not allowed, in metadata order. An
     /// empty list means the image passes.
     /// </summary>
-    public static IReadOnlyList<string> Verify(byte[] image)
+    public static IReadOnlyList<string> Verify(byte[] image) => Verify(image, InlineUnitKind.Function);
+
+    /// <summary>The check for an image of <paramref name="kind"/>: a trigger image may refer to the contract and the async helpers too.</summary>
+    public static IReadOnlyList<string> Verify(byte[] image, InlineUnitKind kind)
     {
+        bool trigger = kind == InlineUnitKind.Trigger;
         using PEReader pe = new(new MemoryStream(image, writable: false));
         MetadataReader reader = pe.GetMetadataReader();
 
@@ -211,7 +245,7 @@ internal static class InlineFunctionImageVerifier
         {
             string name = reader.GetString(reader.GetAssemblyReference(handle).Name);
 
-            if (!AllowedAssemblies.Contains(name))
+            if (!AllowedAssemblies.Contains(name) && !(trigger && TriggerAssemblies.Contains(name)))
                 Add($"assembly reference {name}");
         }
 
@@ -219,7 +253,7 @@ internal static class InlineFunctionImageVerifier
         {
             string name = TypeName(reader, handle);
 
-            if (!IsAllowedType(name))
+            if (!IsAllowedType(name, kind))
                 Add($"type {name}");
         }
 
@@ -247,12 +281,11 @@ internal static class InlineFunctionImageVerifier
                 : "";
 
             if (BudgetMembers.Contains(full) || HelperMembers.Contains(full) || HelperMembers.Contains(full + parameters) ||
-                HelperInterfaces.Contains(owner))
+                HelperInterfaces.Contains(owner) || (trigger && TriggerHelperTypes.Contains(owner)))
                 continue;
 
-
             if (InlineFunctionAllowList.DeniedEverywhere.Contains(memberName) ||
-                !InlineFunctionAllowList.TryGetRule(owner, out InlineFunctionAllowList.TypeRule? rule) ||
+                !InlineFunctionAllowList.TryGetRule(owner, kind, out InlineFunctionAllowList.TypeRule? rule) ||
                 !InlineFunctionAllowList.Allows(rule, key, key + parameters))
                 Add($"member {full}{parameters}");
 
@@ -280,9 +313,11 @@ internal static class InlineFunctionImageVerifier
         return findings;
     }
 
-    private static bool IsAllowedType(string name) =>
-        InlineFunctionAllowList.IsListed(name) || HelperTypes.Contains(name) ||
-        name is "CamusDB.Extensions.Inline.CallBudget" or "CamusDB.Extensions.Inline.InlineValues";
+    private static bool IsAllowedType(string name, InlineUnitKind kind) =>
+        InlineFunctionAllowList.IsListed(name, kind) || HelperTypes.Contains(name) ||
+        name is "CamusDB.Extensions.Inline.CallBudget" or "CamusDB.Extensions.Inline.InlineValues" ||
+        (kind == InlineUnitKind.Trigger && TriggerHelperTypes.Contains(name));
+
 
     /// <summary>
     /// The allowed-list key of a referenced member: a property accessor is its property, read

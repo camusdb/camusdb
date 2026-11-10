@@ -1244,5 +1244,16 @@ public enum NodeType
     /// as written. It is not a string literal: nothing in it is escaped or unescaped.
     /// </summary>
     FunctionBody,
-}
 
+    /// <summary>
+    /// <c>SHOW TRIGGERS [ON table]</c>: the row triggers of the current database, both forms.
+    /// <c>leftAst</c> = the table identifier, or null for every table.
+    /// </summary>
+    ShowTriggers,
+
+    /// <summary>
+    /// <c>SHOW CREATE TRIGGER name ON table</c>. <c>leftAst</c> = the trigger name identifier,
+    /// <c>rightAst</c> = the table identifier.
+    /// </summary>
+    ShowCreateTrigger,
+}

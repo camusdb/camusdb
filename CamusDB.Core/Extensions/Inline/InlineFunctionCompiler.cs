@@ -104,6 +104,17 @@ internal sealed class InlineFunctionCompiler : IDisposable
     private static readonly Lazy<MetadataReference> BudgetReference =
         new(() => ReferenceTo(typeof(CamusDB.Extensions.Inline.CallBudget).Assembly));
 
+    private static readonly Lazy<MetadataReference> ContractReference =
+        new(() => ReferenceTo(typeof(CamusDB.Extensions.ITriggerContext).Assembly));
+
+    /// <summary>
+    /// The .NET Standard facade of the running framework. The contract assembly targets .NET Standard,
+    /// so its types name <c>System.Enum</c> and <c>System.Object</c> through that facade, and a compile
+    /// that references the contract needs the facade to unify them with the framework's own types.
+    /// </summary>
+    private static readonly Lazy<MetadataReference> FacadeReference = new(() =>
+        MetadataReference.CreateFromFile(Path.Combine(Path.GetDirectoryName(typeof(object).Assembly.Location)!, "netstandard.dll")));
+
     /// <summary>
     /// The stack of a compile thread. The compiler walks a type by recursion, once for each level of
     /// nesting, and a body can nest a type one level with each line: a few thousand levels in a body
@@ -203,8 +214,64 @@ internal sealed class InlineFunctionCompiler : IDisposable
     public CompiledInlineFunction Compile(InlineFunctionDefinition function, CancellationToken cancellation)
     {
         CheckSignature(function);
-        CheckText(function);
+        CheckText("Function", function.Name, function.Source);
 
+        if (function.Language != InlineFunctionDefinition.CSharp)
+            throw new CamusDBException(
+                CamusDBErrorCodes.InlineFunctionRefused,
+                $"Function '{function.Name}' is refused: the language '{function.Language}' is not supported; the only language is csharp");
+
+        if (function.LanguageVersion.Length > 0 && function.LanguageVersion != LanguageName)
+            throw new CamusDBException(
+                CamusDBErrorCodes.InlineFunctionRefused,
+                $"Function '{function.Name}' was created for C# language version '{function.LanguageVersion}', and this node compiles '{LanguageName}'");
+
+        string unit = UnitKey(function)[..16];
+        string[] names = new string[function.Parameters.Count];
+
+        for (int i = 0; i < names.Length; i++)
+            names[i] = function.Parameters[i].Name;
+
+        return Compile(new InlineUnitPlan
+        {
+            Kind = InlineUnitKind.Function,
+            Name = function.Name,
+            Source = function.Source,
+            Unit = unit,
+            TypeName = WrapperNamespace + ".Fn_" + unit,
+            CheckWrapper = WrapperSource(function, unit, withRun: false),
+            FinalWrapper = WrapperSource(function, unit, withRun: true),
+            ParameterNames = names,
+        }, cancellation);
+    }
+
+    /// <summary>
+    /// Compiles the body of an inline trigger into a class whose static <c>Run</c> fires it (see
+    /// <see cref="InlineTriggerWrapper"/>). The same limits, checks and errors as a function, with the
+    /// word "Trigger" in the messages. The caller owns the returned context and unloads it.
+    /// </summary>
+    public CompiledInlineFunction CompileTrigger(InlineTriggerSource source, CancellationToken cancellation)
+    {
+        CheckText("Trigger", source.Name, source.Source);
+
+        string unit = InlineTriggerWrapper.UnitKey(source)[..16];
+        string wrapper = InlineTriggerWrapper.Source(source, unit);
+
+        return Compile(new InlineUnitPlan
+        {
+            Kind = InlineUnitKind.Trigger,
+            Name = source.Name,
+            Source = source.Source,
+            Unit = unit,
+            TypeName = WrapperNamespace + "." + InlineTriggerWrapper.TypePrefix + unit,
+            CheckWrapper = wrapper,
+            FinalWrapper = wrapper,
+            ParameterNames = [],
+        }, cancellation);
+    }
+
+    private CompiledInlineFunction Compile(InlineUnitPlan plan, CancellationToken cancellation)
+    {
         CancellationTokenSource deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellation);
         deadline.CancelAfter(timeoutMs);
 
@@ -219,12 +286,12 @@ internal sealed class InlineFunctionCompiler : IDisposable
             if (cancellation.IsCancellationRequested)
                 throw;
 
-            throw Busy(function);
+            throw Busy(plan);
         }
 
         // From here the slot and the deadline belong to the compile thread, which gives them back
         // when it ends, however late that is.
-        CompileJob job = new(function, deadline);
+        CompileJob job = new(plan, deadline);
 
         try
         {
@@ -245,13 +312,13 @@ internal sealed class InlineFunctionCompiler : IDisposable
             Interlocked.Increment(ref abandoned);
 
             logger?.LogError(
-                "The compile of inline function {Function} (source {Hash}) did not stop at its limit of {Timeout} ms. Its thread still runs and " +
+                "The compile of inline {Kind} {Name} (unit {Unit}) did not stop at its limit of {Timeout} ms. Its thread still runs and " +
                 "holds one compile slot until it ends; {Abandoned} compiles were left this way since the node started",
-                function.Name, function.SourceSha256, timeoutMs, Volatile.Read(ref abandoned));
+                plan.Label, plan.Name, plan.Unit, timeoutMs, Volatile.Read(ref abandoned));
 
             throw new CamusDBException(
                 CamusDBErrorCodes.InlineFunctionCompileFailed,
-                $"Function '{function.Name}' did not compile within {timeoutMs} ms (inline_function_compile_timeout_ms) and the compiler " +
+                $"{plan.Label} '{plan.Name}' did not compile within {timeoutMs} ms (inline_function_compile_timeout_ms) and the compiler " +
                 "did not stop; make the body simpler");
         }
 
@@ -266,12 +333,12 @@ internal sealed class InlineFunctionCompiler : IDisposable
                 throw new OperationCanceledException(cancellation);
 
             case OperationCanceledException:
-                throw Busy(function);
+                throw Busy(plan);
 
             case InsufficientExecutionStackException:
                 throw new CamusDBException(
                     CamusDBErrorCodes.InlineFunctionCompileFailed,
-                    $"Function '{function.Name}' is too complex to compile: an expression is nested too deeply");
+                    $"{plan.Label} '{plan.Name}' is too complex to compile: an expression is nested too deeply");
 
             default:
                 System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(job.Failure).Throw();
@@ -279,8 +346,8 @@ internal sealed class InlineFunctionCompiler : IDisposable
         }
     }
 
-    private InlineFunctionCompileBusyException Busy(InlineFunctionDefinition function) => new(
-        $"Function '{function.Name}' did not compile within {timeoutMs} ms (inline_function_compile_timeout_ms); " +
+    private InlineFunctionCompileBusyException Busy(InlineUnitPlan plan) => new(
+        $"{plan.Label} '{plan.Name}' did not compile within {timeoutMs} ms (inline_function_compile_timeout_ms); " +
         "make the body simpler, or try again when the node compiles fewer functions");
 
     /// <summary>The body of the compile thread. It never lets an exception leave: that would end the process.</summary>
@@ -295,7 +362,7 @@ internal sealed class InlineFunctionCompiler : IDisposable
 
         try
         {
-            job.Result = CompileCore(job.Function, job.Deadline.Token);
+            job.Result = CompileCore(job.Plan, job.Deadline.Token);
         }
         catch (Exception failure)
         {
@@ -329,13 +396,13 @@ internal sealed class InlineFunctionCompiler : IDisposable
     /// waits for it. Exactly one of the two wins: the thread completes the job, or the caller leaves
     /// it when the wait is over.
     /// </summary>
-    private sealed class CompileJob(InlineFunctionDefinition function, CancellationTokenSource deadline)
+    private sealed class CompileJob(InlineUnitPlan plan, CancellationTokenSource deadline)
     {
         private const int Running = 0, Completed = 1, Abandoned = 2;
 
         private int state;
 
-        public InlineFunctionDefinition Function { get; } = function;
+        public InlineUnitPlan Plan { get; } = plan;
 
         public CancellationTokenSource Deadline { get; } = deadline;
 
@@ -350,64 +417,64 @@ internal sealed class InlineFunctionCompiler : IDisposable
         public bool TryAbandon() => Interlocked.CompareExchange(ref state, Abandoned, Running) == Running;
     }
 
-    private CompiledInlineFunction CompileCore(InlineFunctionDefinition function, CancellationToken cancellation)
+    private CompiledInlineFunction CompileCore(InlineUnitPlan plan, CancellationToken cancellation)
     {
         // ── 1. Syntax ────────────────────────────────────────────────────────────────────────────
 
         List<InlineFunctionFinding> errors = [];
-        BlockSyntax? parsed = InlineFunctionSyntaxChecker.Parse(function.Source, ParseOptions, errors);
+        BlockSyntax? parsed = InlineFunctionSyntaxChecker.Parse(plan.Source, ParseOptions, errors, async: plan.Kind == InlineUnitKind.Trigger);
 
         if (parsed is null)
-            throw CompileFailed(function, errors);
+            throw CompileFailed(plan, errors);
 
         if (InlineFunctionSyntaxChecker.MeasureDepth(parsed, InlineFunctionSyntaxChecker.MaxDepth) > InlineFunctionSyntaxChecker.MaxDepth)
             throw new CamusDBException(
                 CamusDBErrorCodes.InlineFunctionRefused,
-                $"Function '{function.Name}' is refused: the body is nested more than {InlineFunctionSyntaxChecker.MaxDepth} levels deep");
+                $"{plan.Label} '{plan.Name}' is refused: the body is nested more than {InlineFunctionSyntaxChecker.MaxDepth} levels deep");
 
-        List<InlineFunctionFinding> refused = InlineFunctionSyntaxChecker.Check(parsed);
+        List<InlineFunctionFinding> refused = InlineFunctionSyntaxChecker.Check(parsed, plan.Kind);
 
         if (refused.Count > 0)
-            throw Refused(function, refused);
+            throw Refused(plan, refused);
 
         // The compiler cannot be stopped in the middle of these two kinds of work, so a body that
         // asks for too much of either does not reach it.
         if (InlineFunctionSyntaxChecker.CheckLambdaCost(parsed) is { } costly)
-            throw Refused(function, [costly]);
+            throw Refused(plan, [costly]);
 
-        List<InlineFunctionFinding> grown = InlineFunctionTypeGrowthChecker.Check(parsed, function.Parameters.Select(parameter => parameter.Name));
+        List<InlineFunctionFinding> grown = InlineFunctionTypeGrowthChecker.Check(parsed, plan.ParameterNames);
 
         if (grown.Count > 0)
-            throw Refused(function, grown);
+            throw Refused(plan, grown);
 
         cancellation.ThrowIfCancellationRequested();
 
         // ── 2. First compile and the allowed list ────────────────────────────────────────────────
 
-        string unit = UnitKey(function)[..16];
-        (SyntaxTree tree, MethodDeclarationSyntax bodyMethod) = Graft(WrapperSource(function, unit, withRun: false), parsed);
+        string unit = plan.Unit;
+        (SyntaxTree tree, MethodDeclarationSyntax bodyMethod) = Graft(plan.CheckWrapper, parsed);
 
         CSharpCompilation checkedCompilation = CSharpCompilation.Create(
-            "camusdb-inline-check-" + unit, [tree], FrameworkReferences.Value, CompilationOptions);
+            "camusdb-inline-check-" + unit, [tree], ReferencesFor(plan, final: false), CompilationOptions);
 
         List<InlineFunctionFinding> compileErrors = ErrorsOf(checkedCompilation.GetDiagnostics(cancellation), bodyMethod);
 
         if (compileErrors.Count > 0)
-            throw CompileFailed(function, compileErrors);
+            throw CompileFailed(plan, compileErrors);
 
         InlineFunctionSymbolReport report = InlineFunctionSymbolChecker.Check(
-            checkedCompilation.GetSemanticModel(tree), bodyMethod, arrayLimit, cancellation);
+            checkedCompilation.GetSemanticModel(tree), bodyMethod, arrayLimit, cancellation, plan.Kind);
 
         if (report.Findings.Count > 0)
-            throw Refused(function, report.Findings);
+            throw Refused(plan, report.Findings);
 
         // ── 3. Budget checks and the second compile ──────────────────────────────────────────────
 
-        BlockSyntax budgeted = InlineFunctionBudgetRewriter.Rewrite(bodyMethod.Body!, report);
-        (SyntaxTree finalTree, MethodDeclarationSyntax finalBody) = Graft(WrapperSource(function, unit, withRun: true), budgeted);
+        BlockSyntax budgeted = InlineFunctionBudgetRewriter.Rewrite(bodyMethod.Body!, report, plan.Kind);
+        (SyntaxTree finalTree, MethodDeclarationSyntax finalBody) = Graft(plan.FinalWrapper, budgeted);
 
         CSharpCompilation compilation = CSharpCompilation.Create(
-            "camusdb-inline-" + unit, [finalTree], [.. FrameworkReferences.Value, BudgetReference.Value], CompilationOptions);
+            "camusdb-inline-" + unit, [finalTree], ReferencesFor(plan, final: true), CompilationOptions);
 
         using MemoryStream stream = new();
         Microsoft.CodeAnalysis.Emit.EmitResult emitted = compilation.Emit(stream, cancellationToken: cancellation);
@@ -419,7 +486,7 @@ internal sealed class InlineFunctionCompiler : IDisposable
 
             throw new CamusDBException(
                 CamusDBErrorCodes.InlineFunctionCompileFailed,
-                $"Function '{function.Name}' does not compile after the server added its budget checks. " +
+                $"{plan.Label} '{plan.Name}' does not compile after the server added its budget checks. " +
                 "This is an error of the server, not of the body: " + Join(internalErrors));
         }
 
@@ -427,12 +494,12 @@ internal sealed class InlineFunctionCompiler : IDisposable
 
         // ── 4. The image check and the load ──────────────────────────────────────────────────────
 
-        IReadOnlyList<string> foreign = InlineFunctionImageVerifier.Verify(image);
+        IReadOnlyList<string> foreign = InlineFunctionImageVerifier.Verify(image, plan.Kind);
 
         if (foreign.Count > 0)
             throw new CamusDBException(
                 CamusDBErrorCodes.InlineFunctionRefused,
-                $"Function '{function.Name}' is refused: its compiled code refers to {string.Join("; ", foreign)}. " +
+                $"{plan.Label} '{plan.Name}' is refused: its compiled code refers to {string.Join("; ", foreign)}. " +
                 "The body passed the source check, so the compiler added these references for a language form the server does not accept yet");
 
         InlineFunctionLoadContext context = new(unit);
@@ -440,7 +507,7 @@ internal sealed class InlineFunctionCompiler : IDisposable
         try
         {
             Assembly assembly = context.LoadFromStream(new MemoryStream(image, writable: false));
-            MethodInfo method = assembly.GetType(WrapperNamespace + ".Fn_" + unit, throwOnError: true)!
+            MethodInfo method = assembly.GetType(plan.TypeName, throwOnError: true)!
                 .GetMethod(RunMethodName, BindingFlags.Public | BindingFlags.Static)!;
 
             return new CompiledInlineFunction(method, context, image.Length);
@@ -454,37 +521,29 @@ internal sealed class InlineFunctionCompiler : IDisposable
 
     // ─── Checks before the compiler ──────────────────────────────────────────────────────────────
 
-    private void CheckText(InlineFunctionDefinition function)
+    private void CheckText(string label, string name, string source)
     {
-        string source = function.Source;
-
-        // Every character is at least one byte and at most three, so most bodies need no count.
         if (source.Length > sourceLimitBytes || (source.Length * 3L > sourceLimitBytes && Encoding.UTF8.GetByteCount(source) > sourceLimitBytes))
             throw new CamusDBException(
                 CamusDBErrorCodes.InlineFunctionRefused,
-                $"Function '{function.Name}' is refused: the body is longer than {sourceLimitBytes} bytes (inline_function_source_limit_bytes)");
+                $"{label} '{name}' is refused: the body is longer than {sourceLimitBytes} bytes (inline_function_source_limit_bytes)");
 
         if (source.Contains('\0'))
             throw new CamusDBException(
                 CamusDBErrorCodes.InlineFunctionRefused,
-                $"Function '{function.Name}' is refused: the body holds a NUL character");
-
-        if (function.Language != InlineFunctionDefinition.CSharp)
-            throw new CamusDBException(
-                CamusDBErrorCodes.InlineFunctionRefused,
-                $"Function '{function.Name}' is refused: the language '{function.Language}' is not supported; the only language is csharp");
-
-        if (function.LanguageVersion.Length > 0 && function.LanguageVersion != LanguageName)
-            throw new CamusDBException(
-                CamusDBErrorCodes.InlineFunctionRefused,
-                $"Function '{function.Name}' was created for C# language version '{function.LanguageVersion}', and this node compiles '{LanguageName}'");
+                $"{label} '{name}' is refused: the body holds a NUL character");
     }
 
-    /// <summary>
-    /// The parameter and result types are in the mapped set, and each parameter name is a plain C#
-    /// identifier that the body can use: not a C# keyword, not reserved for the server, and not the
-    /// same as another parameter in any letter case.
-    /// </summary>
+    /// <summary>The references of a compile: the framework, and the budget and contract assemblies where the wrapper needs them.</summary>
+    private static MetadataReference[] ReferencesFor(InlineUnitPlan plan, bool final)
+    {
+        if (plan.Kind == InlineUnitKind.Trigger)
+            return [.. FrameworkReferences.Value, BudgetReference.Value, ContractReference.Value, FacadeReference.Value];
+
+
+        return final ? [.. FrameworkReferences.Value, BudgetReference.Value] : FrameworkReferences.Value;
+    }
+
     private static void CheckSignature(InlineFunctionDefinition function)
     {
         if (!InlineFunctionSignature.IsAccepted(function.ReturnType, function.ReturnElementType))
@@ -649,11 +708,11 @@ internal sealed class InlineFunctionCompiler : IDisposable
         return errors;
     }
 
-    private static CamusDBException CompileFailed(InlineFunctionDefinition function, List<InlineFunctionFinding> errors) =>
-        new(CamusDBErrorCodes.InlineFunctionCompileFailed, $"Function '{function.Name}' does not compile: " + Join(errors));
+    private static CamusDBException CompileFailed(InlineUnitPlan plan, List<InlineFunctionFinding> errors) =>
+        new(CamusDBErrorCodes.InlineFunctionCompileFailed, $"{plan.Label} '{plan.Name}' does not compile: " + Join(errors));
 
-    private static CamusDBException Refused(InlineFunctionDefinition function, List<InlineFunctionFinding> findings) =>
-        new(CamusDBErrorCodes.InlineFunctionRefused, $"Function '{function.Name}' is refused: " + Join(findings));
+    private static CamusDBException Refused(InlineUnitPlan plan, List<InlineFunctionFinding> findings) =>
+        new(CamusDBErrorCodes.InlineFunctionRefused, $"{plan.Label} '{plan.Name}' is refused: " + Join(findings));
 
     private static string Join(List<InlineFunctionFinding> findings) => string.Join("; ", findings);
 

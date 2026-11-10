@@ -43,20 +43,31 @@ internal sealed class InlineFunctionBudgetRewriter : CSharpSyntaxRewriter
 {
     private const string Budget = "global::CamusDB.Extensions.Inline.CallBudget";
 
-    private static readonly StatementSyntax Tick = SyntaxFactory.ParseStatement(Budget + ".Tick();");
+    /// <summary>The field of the trigger wrapper that holds the budget object of the fire; the body cannot name it.</summary>
+    public const string TriggerFrame = InlineFunctionSyntaxChecker.ReservedPrefix + "_frame";
 
     private readonly InlineFunctionSymbolReport report;
 
+    /// <summary>What the checks are called on: the static helper for a function, the frame field for a trigger.</summary>
+    private readonly string checks;
+
+    private readonly StatementSyntax tick;
+
     private int caught;
 
-    private InlineFunctionBudgetRewriter(InlineFunctionSymbolReport report)
+    private InlineFunctionBudgetRewriter(InlineFunctionSymbolReport report, InlineUnitKind kind)
     {
         this.report = report;
+        checks = kind == InlineUnitKind.Trigger ? TriggerFrame : Budget;
+        tick = SyntaxFactory.ParseStatement(checks + ".Tick();");
     }
 
     /// <summary>Returns <paramref name="body"/> with the budget checks. <paramref name="body"/> must be the block the report was made from.</summary>
     public static BlockSyntax Rewrite(BlockSyntax body, InlineFunctionSymbolReport report) =>
-        (BlockSyntax)new InlineFunctionBudgetRewriter(report).Visit(body)!;
+        Rewrite(body, report, InlineUnitKind.Function);
+
+    public static BlockSyntax Rewrite(BlockSyntax body, InlineFunctionSymbolReport report, InlineUnitKind kind) =>
+        (BlockSyntax)new InlineFunctionBudgetRewriter(report, kind).Visit(body)!;
 
     // ─── Loops ───────────────────────────────────────────────────────────────────────────────────
 
@@ -187,7 +198,7 @@ internal sealed class InlineFunctionBudgetRewriter : CSharpSyntaxRewriter
         return SyntaxFactory.InvocationExpression(
                 SyntaxFactory.MemberAccessExpression(
                     SyntaxKind.SimpleMemberAccessExpression,
-                    SyntaxFactory.ParseName(Budget),
+                    SyntaxFactory.ParseName(checks),
                     SyntaxFactory.GenericName(
                         SyntaxFactory.Identifier("NewArray"),
                         SyntaxFactory.TypeArgumentList(SyntaxFactory.SingletonSeparatedList(element.WithoutTrivia())))),
@@ -205,23 +216,24 @@ internal sealed class InlineFunctionBudgetRewriter : CSharpSyntaxRewriter
 
         return visited.WithExpression(
             SyntaxFactory.InvocationExpression(
-                SyntaxFactory.ParseExpression(Budget + ".RegexTimeout"),
+                SyntaxFactory.ParseExpression(checks + ".RegexTimeout"),
+
                 SyntaxFactory.ArgumentList(SyntaxFactory.SingletonSeparatedList(SyntaxFactory.Argument(visited.Expression.WithoutTrivia())))));
     }
 
     // ─── Parts ───────────────────────────────────────────────────────────────────────────────────
 
-    private static BlockSyntax WithTick(StatementSyntax statement) =>
+    private BlockSyntax WithTick(StatementSyntax statement) =>
         statement is BlockSyntax block
-            ? block.WithStatements(block.Statements.Insert(0, Tick))
-            : SyntaxFactory.Block(Tick, statement);
+            ? block.WithStatements(block.Statements.Insert(0, tick))
+            : SyntaxFactory.Block(tick, statement);
 
     /// <summary>
     /// The block of a lambda or a local function with a tick first. An expression body becomes
     /// <c>{ Tick(); return expression; }</c>, or <c>{ Tick(); expression; }</c> when there is no
     /// value to return. A <c>throw</c> expression becomes a <c>throw</c> statement in both cases.
     /// </summary>
-    private static BlockSyntax TickedBody(BlockSyntax? block, ExpressionSyntax? expression, bool returnsVoid)
+    private BlockSyntax TickedBody(BlockSyntax? block, ExpressionSyntax? expression, bool returnsVoid)
     {
         if (block is not null)
             return WithTick(block);
@@ -235,7 +247,8 @@ internal sealed class InlineFunctionBudgetRewriter : CSharpSyntaxRewriter
             _ => SyntaxFactory.ReturnStatement(value),
         };
 
-        return SyntaxFactory.Block(Tick, statement.NormalizeWhitespace());
+        return SyntaxFactory.Block(tick, statement.NormalizeWhitespace());
+
     }
 }
 

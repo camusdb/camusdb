@@ -1159,6 +1159,14 @@ public static class CamusDBErrorCodes
     public const string InlineFunctionUnavailableOnNode = "CADB0845";
 
     /// <summary>
+    /// The SQL of an inline trigger body runs with the rights of the user who created the trigger, and
+    /// that user no longer exists. The statement that fired the trigger fails closed: nothing may run
+    /// with rights nobody holds. Drop the trigger, or create it again under a current user. Maps to
+    /// HTTP 403.
+    /// </summary>
+    public const string TriggerOwnerMissing = "CADB0846";
+
+    /// <summary>
     /// Returns the HTTP status code that should be used when surfacing <paramref name="code"/>
     /// to an API caller. Client errors (permanent, non-retryable caller mistakes) map to 400;
     /// all other codes map to 500.
@@ -1296,6 +1304,7 @@ public static class CamusDBErrorCodes
         FunctionNotFound => 404,
         FunctionHasDependents => 409,
         InlineFunctionUnavailableOnNode => 503,
+        TriggerOwnerMissing => 403,
         _ => 500
 
     };
