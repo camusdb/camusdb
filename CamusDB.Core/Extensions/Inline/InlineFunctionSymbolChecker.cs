@@ -409,7 +409,8 @@ internal sealed class InlineFunctionSymbolChecker
         // The element conversion of "foreach (IList<int> x in objects)" is a cast like any other.
 
         if (info.ElementConversion.IsExplicit && info.ElementType is not null &&
-            model.GetDeclaredSymbol(loop, cancellation) is ILocalSymbol { Type.TypeKind: TypeKind.Interface })
+            loop is ForEachStatementSyntax single &&
+            model.GetDeclaredSymbol(single, cancellation) is { Type.TypeKind: TypeKind.Interface })
             Refuse(loop, "a cast to an interface is not allowed");
     }
 
