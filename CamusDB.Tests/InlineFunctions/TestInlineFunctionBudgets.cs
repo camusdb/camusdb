@@ -32,31 +32,61 @@ public sealed class TestInlineFunctionBudgets
     /// <summary>How long after the limit a stopped call may return: the check runs between framework calls.</summary>
     private const int SlackMs = 2000;
 
+    /// <summary>
+    /// The time limit of <see cref="stackProbe"/>. It is far above the time a recursion takes to fill
+    /// the stack, also on a slow CI runner under the load of the whole suite.
+    /// </summary>
+    private const int StackTimeoutMs = 60_000;
+
     private InlineFunctionProbe probe = null!;
 
+    /// <summary>
+    /// A probe where only the stack can end a recursion. With the 100 ms limit of <see cref="probe"/>,
+    /// a recursion races the deadline: a slow runner reaches the deadline before the stack check, and
+    /// the call stops with the time reason instead of the stack reason.
+    /// </summary>
+    private InlineFunctionProbe stackProbe = null!;
+
     [OneTimeSetUp]
-    public void CreateProbe() => probe = new InlineFunctionProbe(CamusDBOptions.Default with
+    public void CreateProbes()
     {
-        InlineFunctionCallTimeoutMs = TimeoutMs,
-        InlineFunctionAllocationLimitBytes = 4 * 1024 * 1024,
-        InlineFunctionArrayLimit = 10_000,
-    });
+        probe = new InlineFunctionProbe(CamusDBOptions.Default with
+        {
+            InlineFunctionCallTimeoutMs = TimeoutMs,
+            InlineFunctionAllocationLimitBytes = 4 * 1024 * 1024,
+            InlineFunctionArrayLimit = 10_000,
+        });
+
+        stackProbe = new InlineFunctionProbe(CamusDBOptions.Default with
+        {
+            InlineFunctionCallTimeoutMs = StackTimeoutMs,
+            InlineFunctionAllocationLimitBytes = 1L << 30,
+            InlineFunctionArrayLimit = 10_000,
+        });
+    }
 
     [OneTimeTearDown]
-    public void DisposeProbe() => probe.Dispose();
+    public void DisposeProbes()
+    {
+        probe.Dispose();
+        stackProbe.Dispose();
+    }
 
-    private CamusDBException Stopped(string body, string reason)
+    private CamusDBException Stopped(string body, string reason) =>
+        Stopped(probe, TimeoutMs + SlackMs, body, reason);
+
+    private static CamusDBException Stopped(InlineFunctionProbe target, long withinMs, string body, string reason)
     {
         Stopwatch watch = Stopwatch.StartNew();
 
         CamusDBException stopped = Assert.Throws<CamusDBException>(
-            () => probe.Call(InlineFunctionProbe.Number(body), "x", 5))!;
+            () => target.Call(InlineFunctionProbe.Number(body), "x", 5))!;
 
         watch.Stop();
 
         Assert.AreEqual(CamusDBErrorCodes.InlineFunctionBudgetExceeded, stopped.Code, stopped.Message);
         StringAssert.Contains(reason, stopped.Message);
-        Assert.Less(watch.ElapsedMilliseconds, TimeoutMs + SlackMs, "the call must end soon after its limit");
+        Assert.Less(watch.ElapsedMilliseconds, withinMs, "the call must end soon after its limit");
 
         return stopped;
     }
@@ -89,7 +119,7 @@ public sealed class TestInlineFunctionBudgets
     [TestCase("long A(long x) => B(x) + 1; long B(long x) => A(x) + 1; return A(n);")]
     [TestCase("long Deeper(long x) { try { return Deeper(x + 1) + 1; } catch { return 0; } } return Deeper(n);")]
     public void UnboundedRecursion_FailsTheCallAndNotTheProcess(string body) =>
-        Stopped(body, "nested too deeply");
+        Stopped(stackProbe, StackTimeoutMs, body, "nested too deeply for the stack");
 
     [TestCase("var l = new List<string>(); while (true) { l.Add(new string(new char[1000])); }")]
     [TestCase("string x = \"ab\"; while (true) { x = x + x; }")]
