@@ -160,7 +160,7 @@ public static class RoutingModeStartupCheck
     {
         (KeyValueResponseType type, ReadOnlyKeyValueEntry? entry) = await node.Kahuna.LocateAndTryGetValue(
             HLCTimestamp.Zero, MarkerKey, -1, HLCTimestamp.Zero, KeyValueDurability.Persistent, cancellationToken).ConfigureAwait(false);
-        KahunaRetryPolicy.ThrowIfStorageCorrupt(type);
+        KahunaRetryPolicy.ThrowIfReadRefused(type);
 
         if (type == KeyValueResponseType.DoesNotExist || (type == KeyValueResponseType.Get && entry?.Value is null))
             return null;

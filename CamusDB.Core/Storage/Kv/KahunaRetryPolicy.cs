@@ -44,8 +44,10 @@ namespace CamusDB.Core.Storage.Kv;
 /// <para><c>StorageCorrupt</c> is the opposite of transient: the answering node's store is damaged. It
 /// is never retried here, and every overload raises it as <see cref="CamusDBErrorCodes.StorageCorrupted"/>
 /// instead of returning it. Callers decode a response that is not <c>Get</c> as "the key is absent", so a
-/// damaged key that reached them would read as a missing row. A point read that does not go through
-/// these overloads calls <see cref="ThrowIfStorageCorrupt"/> itself.</para>
+/// damaged key that reached them would read as a missing row. <c>SnapshotTooOld</c> follows the same
+/// rule and is raised as <see cref="CamusDBErrorCodes.SnapshotTooOld"/>: the read timestamp is older than
+/// the history the store keeps, so a retry at that timestamp gets the same answer. A point read that
+/// does not go through these overloads calls <see cref="ThrowIfReadRefused"/> itself.</para>
 /// </summary>
 internal sealed class KahunaRetryPolicy
 {
@@ -75,15 +77,37 @@ internal sealed class KahunaRetryPolicy
     internal const int TransientRetryWindowMs = 15_000;
 
     /// <summary>
-    /// Raises <see cref="CamusDBErrorCodes.StorageCorrupted"/> for a <c>StorageCorrupt</c> answer. Call it
-    /// on every Kahuna response that does not pass through a retry overload of this class, before the
-    /// response is decoded: code that treats anything but <c>Get</c> as an absent key would otherwise
-    /// report damaged data as missing data. A source test holds every point read to this rule.
+    /// Raises the error for an answer that refuses a read for good: <c>StorageCorrupt</c> gives
+    /// <see cref="CamusDBErrorCodes.StorageCorrupted"/>, and <c>SnapshotTooOld</c> gives
+    /// <see cref="CamusDBErrorCodes.SnapshotTooOld"/>. Call it on every Kahuna response that does not pass
+    /// through a retry overload of this class, before the response is decoded. Code that treats anything
+    /// but <c>Get</c> as an absent key would otherwise report damaged data, or history the store no longer
+    /// keeps, as a missing row. A source test holds every point read to this rule.
     /// </summary>
-    internal static void ThrowIfStorageCorrupt(KeyValueResponseType type)
+    internal static void ThrowIfReadRefused(KeyValueResponseType type)
     {
         if (type == KeyValueResponseType.StorageCorrupt)
             throw StorageCorrupted(null);
+
+        if (type == KeyValueResponseType.SnapshotTooOld)
+            throw SnapshotTooOld(null);
+    }
+
+    /// <summary>
+    /// The failure for a read whose timestamp is older than the revision history the node still keeps.
+    /// The engine does not retry it, because the same timestamp gets the same answer; only a new
+    /// transaction, at a newer timestamp, can succeed.
+    /// </summary>
+    internal static CamusDBException SnapshotTooOld(string? what, string? detail = null)
+    {
+        string operation = what is null ? "A read" : $"The {what}";
+        string suffix = detail is null ? "" : $" {detail}";
+
+        return new CamusDBException(
+            CamusDBErrorCodes.SnapshotTooOld,
+            $"{operation} was refused because its snapshot is older than the revision history the store " +
+            "still keeps (kahuna.persistent_revision_retention_age_seconds). A retry at the same timestamp " +
+            $"fails again: start a new transaction, or read AS OF a newer time.{suffix}");
     }
 
     /// <summary>
@@ -273,7 +297,7 @@ internal sealed class KahunaRetryPolicy
         }
         while (type is KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication && MayRetryTransient(ref retries, deadline));
 
-        ThrowIfStorageCorrupt(type);
+        ThrowIfReadRefused(type);
 
         return type;
     }
@@ -306,7 +330,7 @@ internal sealed class KahunaRetryPolicy
         }
         while (type is KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication && MayRetryTransient(ref retries, deadline));
 
-        ThrowIfStorageCorrupt(type);
+        ThrowIfReadRefused(type);
 
         return (type, entry);
     }
@@ -352,7 +376,7 @@ internal sealed class KahunaRetryPolicy
         }
         while (type is KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication && MayRetryTransient(ref retries, deadline));
 
-        ThrowIfStorageCorrupt(type);
+        ThrowIfReadRefused(type);
 
         return (type, entry);
     }
@@ -381,7 +405,7 @@ internal sealed class KahunaRetryPolicy
         }
         while (type is KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication && MayRetryTransient(ref retries, deadline));
 
-        ThrowIfStorageCorrupt(type);
+        ThrowIfReadRefused(type);
 
         return (type, revision, ts);
     }
@@ -410,7 +434,7 @@ internal sealed class KahunaRetryPolicy
         }
         while (type is KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication && MayRetryTransient(ref retries, deadline));
 
-        ThrowIfStorageCorrupt(type);
+        ThrowIfReadRefused(type);
 
         return (type, endpoint, durability);
     }
@@ -453,7 +477,7 @@ internal sealed class KahunaRetryPolicy
         while (type is KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication
                && (type == KeyValueResponseType.WaitingForReplication || ++retries < MaxKahunaRetries));
 
-        ThrowIfStorageCorrupt(type);
+        ThrowIfReadRefused(type);
 
         return (type, revision, ts);
     }
@@ -511,7 +535,7 @@ internal sealed class KahunaRetryPolicy
         while (type is KeyValueResponseType.MustRetry or KeyValueResponseType.WaitingForReplication
                && (type == KeyValueResponseType.WaitingForReplication || ++retries < MaxKahunaRetries));
 
-        ThrowIfStorageCorrupt(type);
+        ThrowIfReadRefused(type);
 
         return (type, endpoint, durability, holder);
     }

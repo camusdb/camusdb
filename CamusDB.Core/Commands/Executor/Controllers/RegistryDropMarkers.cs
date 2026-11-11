@@ -173,7 +173,7 @@ public sealed class RegistryDropMarkers : IAsyncDisposable
                     $"Could not confirm drop-intent state for '{sourceId}' ({ex.Message}); retry the operation");
             }
 
-            KahunaRetryPolicy.ThrowIfStorageCorrupt(type);
+            KahunaRetryPolicy.ThrowIfReadRefused(type);
 
             if (type == KeyValueResponseType.Get)
                 return true;
@@ -355,7 +355,7 @@ public sealed class RegistryDropMarkers : IAsyncDisposable
                 return null;
             }
 
-            KahunaRetryPolicy.ThrowIfStorageCorrupt(type);
+            KahunaRetryPolicy.ThrowIfReadRefused(type);
 
             if (type == KeyValueResponseType.Get && entry?.Value is not null)
                 return System.Text.Encoding.UTF8.GetString(entry.Value);

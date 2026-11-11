@@ -1519,7 +1519,7 @@ public sealed class DatabaseRegistry : IAsyncDisposable
             tx.TransactionId, key, -1,
             HLCTimestamp.Zero, KeyValueDurability.Persistent, CancellationToken.None
         ).ConfigureAwait(false);
-        KahunaRetryPolicy.ThrowIfStorageCorrupt(getType);
+        KahunaRetryPolicy.ThrowIfReadRefused(getType);
 
         if (getType == KeyValueResponseType.DoesNotExist
             || (getType == KeyValueResponseType.Get && current?.Value is null))
@@ -2036,7 +2036,7 @@ public sealed class DatabaseRegistry : IAsyncDisposable
                     tx.TransactionId, key, -1,
                     HLCTimestamp.Zero, KeyValueDurability.Persistent, CancellationToken.None
                 ).ConfigureAwait(false);
-            KahunaRetryPolicy.ThrowIfStorageCorrupt(getType);
+            KahunaRetryPolicy.ThrowIfReadRefused(getType);
 
             if (getType != KeyValueResponseType.Get || currentEntry?.Value is null)
                 return false;

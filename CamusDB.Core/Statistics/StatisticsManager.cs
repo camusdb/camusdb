@@ -532,7 +532,7 @@ public sealed class StatisticsManager
             KeyValueDurability.Persistent,
             cancellationToken
         ).ConfigureAwait(false);
-        KahunaRetryPolicy.ThrowIfStorageCorrupt(getType);
+        KahunaRetryPolicy.ThrowIfReadRefused(getType);
 
         if (getType == KeyValueResponseType.Get && entry?.Value is not null)
             return MetaJsonSerializer.DeserializeCompat(entry.Value, MetaJsonContext.Default.TableStatistics);
@@ -1481,7 +1481,7 @@ public sealed class StatisticsManager
                         Kommander.Time.HLCTimestamp.Zero,
                         KeyValueDurability.Persistent, CancellationToken.None
                     ).ConfigureAwait(false);
-                KahunaRetryPolicy.ThrowIfStorageCorrupt(getType);
+                KahunaRetryPolicy.ThrowIfReadRefused(getType);
 
                 if (getType == KeyValueResponseType.Get && persistedEntry?.Value is not null)
                 {
@@ -1848,7 +1848,7 @@ public sealed class StatisticsManager
                     Kommander.Time.HLCTimestamp.Zero,
                     KeyValueDurability.Persistent, CancellationToken.None
                 ).ConfigureAwait(false);
-            KahunaRetryPolicy.ThrowIfStorageCorrupt(getType);
+            KahunaRetryPolicy.ThrowIfReadRefused(getType);
 
             if (getType == KeyValueResponseType.Get && entry?.Value is not null)
                 return MetaJsonSerializer.DeserializeCompat(entry.Value, MetaJsonContext.Default.TableStatistics);

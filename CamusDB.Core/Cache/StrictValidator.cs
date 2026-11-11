@@ -97,7 +97,7 @@ internal static class StrictValidator
                     HLCTimestamp.Zero, pointKey, -1,
                     HLCTimestamp.Zero, KeyValueDurability.Persistent, ct)
                 .ConfigureAwait(false);
-            KahunaRetryPolicy.ThrowIfStorageCorrupt(type);
+            KahunaRetryPolicy.ThrowIfReadRefused(type);
 
             if (type == KeyValueResponseType.DoesNotExist || entry is null)
                 return false;  // row deleted since T_cache

@@ -438,7 +438,7 @@ internal sealed class OrphanReclaimer : IAsyncDisposable
         (KeyValueResponseType type, ReadOnlyKeyValueEntry? entry) = await sharedNode.Kahuna.LocateAndTryGetValue(
             HLCTimestamp.Zero, $"{dbId}/meta/table:{tableId}", -1, HLCTimestamp.Zero,
             KeyValueDurability.Persistent, ct).ConfigureAwait(false);
-        KahunaRetryPolicy.ThrowIfStorageCorrupt(type);
+        KahunaRetryPolicy.ThrowIfReadRefused(type);
 
         if (type != KeyValueResponseType.Get || entry?.Value is not { Length: > 0 })
             return false;
@@ -479,7 +479,7 @@ internal sealed class OrphanReclaimer : IAsyncDisposable
         (KeyValueResponseType type, ReadOnlyKeyValueEntry? entry) = await sharedNode.Kahuna.LocateAndTryGetValue(
             HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero,
             KeyValueDurability.Persistent, ct).ConfigureAwait(false);
-        KahunaRetryPolicy.ThrowIfStorageCorrupt(type);
+        KahunaRetryPolicy.ThrowIfReadRefused(type);
         return type == KeyValueResponseType.Get && entry?.Value is not null;
     }
 

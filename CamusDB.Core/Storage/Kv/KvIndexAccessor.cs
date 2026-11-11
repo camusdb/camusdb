@@ -888,6 +888,9 @@ internal sealed class KvIndexAccessor
                         case KeyValueResponseType.StorageCorrupt:
                             throw KahunaRetryPolicy.StorageCorrupted($"batched range probe of {bucketPrefix}");
 
+                        case KeyValueResponseType.SnapshotTooOld:
+                            throw KahunaRetryPolicy.SnapshotTooOld($"batched range probe of {bucketPrefix}");
+
                         case KeyValueResponseType.InvalidInput:
                             throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation,
                                 $"Kahuna refused a batched range probe of {pendingCount} seeks on {bucketPrefix}: a probe holds at most " +

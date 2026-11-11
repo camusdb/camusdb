@@ -439,6 +439,12 @@ key untouched since before the window restores from its current row, which pruni
 Snapshot reads older than the retention age are **not guaranteed**; readers that must reach further
 back (branch forks) pin their own snapshot floors, which pruning honors.
 
+A snapshot read that needs history that pruning already removed fails with `CADB0847`
+(`SnapshotTooOld`, HTTP 409, gRPC `FailedPrecondition`). It never returns the key as
+absent or with an older value. Examples are an `AS OF SYSTEM TIME` read older than the retention age,
+or a statement that runs for longer than the retention age. The engine does not retry it, because a
+read at the same timestamp gets the same answer. Start a new transaction, or read as of a newer time.
+
 - `kahuna.persistent_revision_retention_age_seconds` — explicit age bound. Must be ≥ the effective
   PITR window (pruning below the window deletes history an in-window restore may need — the backup
   machinery would then fail closed). `0` disables age pruning and, together with an unset count,

@@ -182,6 +182,10 @@ public static class GrpcErrorMapper
         // not read it as an empty result or as a transient failure.
         CamusDBErrorCodes.StorageCorrupted => StatusCode.DataLoss,
 
+        // The read timestamp is older than the history the store keeps. A retry at the same timestamp
+        // fails again, so this is not Aborted: only a new transaction, at a newer timestamp, can succeed.
+        CamusDBErrorCodes.SnapshotTooOld => StatusCode.FailedPrecondition,
+
         // Authentication / authorization
         CamusDBErrorCodes.AuthenticationFailed   => StatusCode.Unauthenticated,
         CamusDBErrorCodes.InsufficientPrivilege  => StatusCode.PermissionDenied,

@@ -108,7 +108,7 @@ public sealed class RegistryPendingBranches
             HLCTimestamp.Zero, PendingKey(branchId), -1,
             HLCTimestamp.Zero, KeyValueDurability.Persistent, CancellationToken.None
         ).ConfigureAwait(false);
-        KahunaRetryPolicy.ThrowIfStorageCorrupt(type);
+        KahunaRetryPolicy.ThrowIfReadRefused(type);
         return type == KeyValueResponseType.Get;
     }
 

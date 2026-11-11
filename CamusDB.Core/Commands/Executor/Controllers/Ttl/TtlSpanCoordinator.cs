@@ -74,7 +74,7 @@ internal sealed class TtlSpanCoordinator : IAsyncDisposable
             HLCTimestamp.Zero, ManifestKey(dbId, tableId), -1,
             HLCTimestamp.Zero, KeyValueDurability.Persistent, ct
         ).ConfigureAwait(false);
-        KahunaRetryPolicy.ThrowIfStorageCorrupt(type);
+        KahunaRetryPolicy.ThrowIfReadRefused(type);
 
         if (type != KeyValueResponseType.Get || entry?.Value is null)
             return null;
@@ -237,7 +237,7 @@ internal sealed class TtlSpanCoordinator : IAsyncDisposable
             HLCTimestamp.Zero, SpanCheckpointKey(dbId, tableId, spanIndex), -1,
             HLCTimestamp.Zero, KeyValueDurability.Persistent, ct
         ).ConfigureAwait(false);
-        KahunaRetryPolicy.ThrowIfStorageCorrupt(type);
+        KahunaRetryPolicy.ThrowIfReadRefused(type);
 
         if (type != KeyValueResponseType.Get || entry?.Value is null)
             return null;

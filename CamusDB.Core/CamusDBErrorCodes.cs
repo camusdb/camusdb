@@ -1170,6 +1170,18 @@ public static class CamusDBErrorCodes
     public const string TriggerOwnerMissing = "CADB0846";
 
     /// <summary>
+    /// A read at a snapshot timestamp was refused because the timestamp is older than the revision
+    /// history the store still keeps. Revision retention removed history that the read could need, and
+    /// no snapshot hold protected it, so Kahuna answers <c>SnapshotTooOld</c> instead of an absent key or
+    /// an older value. The statement did not read a complete result, so it must not be treated as "no
+    /// rows". The engine does not retry it, because a read at the same timestamp fails again. A new
+    /// transaction reads at a newer timestamp and can succeed. An <c>AS OF SYSTEM TIME</c> read must use
+    /// a timestamp inside the retention age (<c>kahuna.persistent_revision_retention_age_seconds</c>,
+    /// which defaults to the PITR window). Maps to HTTP 409 and gRPC <c>FailedPrecondition</c>.
+    /// </summary>
+    public const string SnapshotTooOld = "CADB0847";
+
+    /// <summary>
     /// Returns the HTTP status code that should be used when surfacing <paramref name="code"/>
     /// to an API caller. Client errors (permanent, non-retryable caller mistakes) map to 400;
     /// all other codes map to 500.
@@ -1308,6 +1320,7 @@ public static class CamusDBErrorCodes
         FunctionHasDependents => 409,
         InlineFunctionUnavailableOnNode => 503,
         TriggerOwnerMissing => 403,
+        SnapshotTooOld => 409,
         _ => 500
 
     };

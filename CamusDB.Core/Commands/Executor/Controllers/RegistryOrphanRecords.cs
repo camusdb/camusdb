@@ -64,7 +64,7 @@ public sealed class RegistryOrphanRecords
             HLCTimestamp.Zero, OrphanKey(dbId), -1,
             HLCTimestamp.Zero, KeyValueDurability.Persistent, CancellationToken.None
         ).ConfigureAwait(false);
-        KahunaRetryPolicy.ThrowIfStorageCorrupt(type);
+        KahunaRetryPolicy.ThrowIfReadRefused(type);
 
         if (type != KeyValueResponseType.Get || entry?.Value is null)
             return null;

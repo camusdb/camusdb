@@ -434,6 +434,9 @@ internal sealed class KvBranchReader
                         case KeyValueResponseType.StorageCorrupt:
                             throw KahunaRetryPolicy.StorageCorrupted($"batch read of key {keys[slot]}");
 
+                        case KeyValueResponseType.SnapshotTooOld:
+                            throw KahunaRetryPolicy.SnapshotTooOld($"batch read of key {keys[slot]}");
+
                         case KeyValueResponseType.InvalidInput:
                             // The batch was malformed (too many keys, or keys of several key spaces): a
                             // caller bug that a retry cannot fix.

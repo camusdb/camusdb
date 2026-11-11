@@ -122,7 +122,7 @@ internal static class SchemaLoader
                     HLCTimestamp.Zero,
                     KeyValueDurability.Persistent, CancellationToken.None
                 ).ConfigureAwait(false);
-            KahunaRetryPolicy.ThrowIfStorageCorrupt(type);
+            KahunaRetryPolicy.ThrowIfReadRefused(type);
 
             if (type != KeyValueResponseType.Get || entry?.Value is null)
                 return null;

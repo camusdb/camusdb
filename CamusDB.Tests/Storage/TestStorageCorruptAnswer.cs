@@ -141,7 +141,7 @@ public sealed class TestStorageCorruptAnswer
     [TestCase(KeyValueResponseType.Errored)]
     public void TheCheck_PassesEveryOtherAnswer(KeyValueResponseType type)
     {
-        Assert.DoesNotThrow(() => KahunaRetryPolicy.ThrowIfStorageCorrupt(type));
+        Assert.DoesNotThrow(() => KahunaRetryPolicy.ThrowIfReadRefused(type));
     }
 
     [Test]
@@ -195,7 +195,7 @@ public sealed class TestStorageCorruptAnswer
 
     /// <summary>
     /// Holds every point read in the engine to the rule: the answer goes through a retry overload, which
-    /// raises the damage, or through <see cref="KahunaRetryPolicy.ThrowIfStorageCorrupt"/>. A new read that
+    /// raises the damage, or through <see cref="KahunaRetryPolicy.ThrowIfReadRefused"/>. A new read that
     /// does neither decodes a damaged key as a missing key, and nothing else would catch that.
     /// </summary>
     [Test]
@@ -231,7 +231,7 @@ public sealed class TestStorageCorruptAnswer
                     continue;
 
                 int end = Math.Min(lines.Length, i + 25);
-                if (!string.Join('\n', lines[i..end]).Contains(nameof(KahunaRetryPolicy.ThrowIfStorageCorrupt)))
+                if (!string.Join('\n', lines[i..end]).Contains(nameof(KahunaRetryPolicy.ThrowIfReadRefused)))
                     unguarded.Add($"{Path.GetRelativePath(root, path)}:{i + 1}");
             }
         }

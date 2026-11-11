@@ -164,7 +164,7 @@ internal static class CoordinatorJobStore
         (KeyValueResponseType getType, ReadOnlyKeyValueEntry? entry) = await kahuna.LocateAndTryGetValue(
             HLCTimestamp.Zero, key, -1, HLCTimestamp.Zero,
             KeyValueDurability.Persistent, CancellationToken.None).ConfigureAwait(false);
-        KahunaRetryPolicy.ThrowIfStorageCorrupt(getType);
+        KahunaRetryPolicy.ThrowIfReadRefused(getType);
 
         if (getType != KeyValueResponseType.Get || entry?.Value is not { Length: > 0 } bytes)
             return null;

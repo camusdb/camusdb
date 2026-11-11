@@ -217,7 +217,7 @@ internal sealed class MetadataDiscoveryService
                     KeyValueDurability.Persistent,
                     ct
                 ).ConfigureAwait(false);
-            KahunaRetryPolicy.ThrowIfStorageCorrupt(type);
+            KahunaRetryPolicy.ThrowIfReadRefused(type);
 
             if (type != KeyValueResponseType.Get || entry?.Value is null)
                 return null;

@@ -283,7 +283,7 @@ internal static class SchemaMetaStore
             (KeyValueResponseType getType, ReadOnlyKeyValueEntry? tableEntry) = await kahuna.LocateAndTryGetValue(
                 HLCTimestamp.Zero, MetaKeys.TableKey(database.Id, tableId), -1, HLCTimestamp.Zero,
                 KeyValueDurability.Persistent, CancellationToken.None).ConfigureAwait(false);
-            KahunaRetryPolicy.ThrowIfStorageCorrupt(getType);
+            KahunaRetryPolicy.ThrowIfReadRefused(getType);
 
             if (getType == KeyValueResponseType.Get && tableEntry?.Value is { Length: > 0 })
             {
@@ -337,7 +337,7 @@ internal static class SchemaMetaStore
                 HLCTimestamp.Zero, catalogKey, -1, HLCTimestamp.Zero,
                 KeyValueDurability.Persistent, CancellationToken.None
             ).ConfigureAwait(false);
-        KahunaRetryPolicy.ThrowIfStorageCorrupt(readType);
+        KahunaRetryPolicy.ThrowIfReadRefused(readType);
 
         if (readType == KeyValueResponseType.Get && existingEntry?.Value is { Length: > 0 } existingBytes)
         {
@@ -355,7 +355,7 @@ internal static class SchemaMetaStore
                     HLCTimestamp.Zero, MetaKeys.KeyspaceCatalogKey(dbId, tableSchema.Id), -1, HLCTimestamp.Zero,
                     KeyValueDurability.Persistent, CancellationToken.None
                 ).ConfigureAwait(false);
-            KahunaRetryPolicy.ThrowIfStorageCorrupt(legacyType);
+            KahunaRetryPolicy.ThrowIfReadRefused(legacyType);
 
             if (legacyType == KeyValueResponseType.Get && legacyEntry?.Value is { Length: > 0 } legacyBytes)
             {

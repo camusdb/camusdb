@@ -82,13 +82,17 @@ internal static class KvScanFailure
 
     /// <summary>
     /// The failure for a scan Kahuna gave up on: <see cref="CamusDBErrorCodes.TransactionMustRetry"/>,
-    /// worded for a read, carrying Kahuna's response type and its own message. A damaged store gives
-    /// <see cref="CamusDBErrorCodes.StorageCorrupted"/> instead, which is not retryable.
+    /// worded for a read, carrying Kahuna's response type and its own message. Two answers are not
+    /// retryable and get their own code: a damaged store gives <see cref="CamusDBErrorCodes.StorageCorrupted"/>,
+    /// and a page below the history the store keeps gives <see cref="CamusDBErrorCodes.SnapshotTooOld"/>.
     /// </summary>
     internal static CamusDBException Describe(KahunaServerException ex, string what)
     {
         if (ex.ResponseType == KeyValueResponseType.StorageCorrupt)
             return KahunaRetryPolicy.StorageCorrupted(what, ex.Message);
+
+        if (ex.ResponseType == KeyValueResponseType.SnapshotTooOld)
+            return KahunaRetryPolicy.SnapshotTooOld(what, ex.Message);
 
         string verdict = ex.ResponseType is KeyValueResponseType type ? type.ToString() : "no response type";
         return new CamusDBException(
