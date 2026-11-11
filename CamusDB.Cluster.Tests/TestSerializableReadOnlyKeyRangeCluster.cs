@@ -203,7 +203,7 @@ public sealed class TestSerializableReadOnlyKeyRangeCluster
             }
             finally
             {
-                await cluster.Nodes[0].Database.Transactions.RollbackIfNotCompletedAsync(latest);
+                await cluster.Nodes[0].Database!.Transactions.RollbackIfNotCompletedAsync(latest);
             }
         }
         finally

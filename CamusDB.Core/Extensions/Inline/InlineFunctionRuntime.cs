@@ -107,9 +107,9 @@ internal sealed class InlineFunctionRuntime : IDisposable
 
 #if !CAMUSDB_BROWSER
     private readonly InlineFunctionCompiler compiler;
-#endif
 
     private volatile bool disposed;
+#endif
 
     public InlineFunctionRuntime(CamusDBOptions options, ILogger? logger)
     {
@@ -709,9 +709,9 @@ internal sealed class InlineFunctionRuntime : IDisposable
 
     public void Dispose()
     {
+#if !CAMUSDB_BROWSER
         disposed = true;
 
-#if !CAMUSDB_BROWSER
         List<InlineFunctionLoadContext> contexts = [];
 
         lock (units)

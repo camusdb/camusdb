@@ -105,7 +105,7 @@
     <PackageReference Include="Kahuna.Core" Version="1.16.6" />
     <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.14" />
     <PackageReference Include="System.IO.Hashing" Version="10.0.14" />
-    <PackageReference Include="System.Formats.Cbor" Version="10.0.14" />
+    <PackageReference Include="System.Formats.Cbor" Version="10.0.15" />
     <PackageReference Include="YaccLexTools" Version="1.2.3" />
     <PackageReference Include="Nito.AsyncEx" Version="5.1.2" />
     <PackageReference Include="YamlDotNet" Version="18.1.0" />
