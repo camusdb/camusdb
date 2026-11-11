@@ -696,6 +696,18 @@ internal static class DerivedTableSchemaBuilder
     /// a <c>RIGHT JOIN</c> is bound with its operands swapped, and tables and derived tables are bound
     /// into two separate lists.</para>
     /// </summary>
+    /// <summary>
+    /// The columns that a <c>*</c> in the select list of <paramref name="bound"/> puts out, in order, each
+    /// with the row key of its cell. The binder reads this to resolve an ORDER BY position at or after a
+    /// <c>*</c> (see <see cref="OrderByItem.OutputPosition"/>).
+    /// </summary>
+    internal static List<DerivedColumnSchema> ExpandStar(BoundSelectQuery bound)
+    {
+        List<DerivedColumnSchema> columns = [];
+        ExpandAllFields(bound, new QueryRowNameResolver(bound.Sources, bound.DerivedSources), columns);
+        return columns;
+    }
+
     private static void ExpandAllFields(
         BoundSelectQuery innerBound, QueryRowNameResolver resolver, List<DerivedColumnSchema> columns)
     {

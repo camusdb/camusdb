@@ -76,9 +76,8 @@ internal sealed class QueryBinder
         ValidateJoinPredicates(query.Source, sources, derivedSources);
 
         QueryRowNameResolver rowNames = new(sources, derivedSources);
-        ValidateQuery(query, rowNames);
-
         BoundSelectQuery bound = new(query, sources, rowNames, derivedSources);
+        ValidateQuery(query, rowNames, ResolveOrderByPositions(bound));
 
         // The statement checks run here, before any row is read, so an unknown function, a known type
         // mismatch, a non-boolean condition, or a CASE, COALESCE, IFNULL or IF with no common type fails
@@ -126,10 +125,11 @@ internal sealed class QueryBinder
             }
         }
 
-        ValidateOrderBy(query, rowNames);
+        BoundSelectQuery bound = new(query, sources, rowNames, derivedSources);
+
+        ValidateOrderBy(query, rowNames, ResolveOrderByPositions(bound));
         ValidateProjectionAndGrouping(query);
 
-        BoundSelectQuery bound = new(query, sources, rowNames, derivedSources);
         ConditionalResultTypes.CheckQuery(bound);
 
         return bound;
@@ -258,6 +258,10 @@ internal sealed class QueryBinder
 
         await CollectBoundSourcesAsync(database, query.Source, sources, derivedSources, aliases, nested: null).ConfigureAwait(false);
 
+        // A * reads the sources of the body only, so its positions resolve before the outer sources join.
+        IReadOnlyList<OrderByItem>? orderBy = ResolveOrderByPositions(
+            new BoundSelectQuery(query, [.. sources], new QueryRowNameResolver(sources, derivedSources), [.. derivedSources]));
+
         int nestedSourceCount = sources.Count;
         int nestedDerivedCount = derivedSources.Count;
 
@@ -269,7 +273,7 @@ internal sealed class QueryBinder
             ? new QueryRowNameResolver(sources, derivedSources)
             : new QueryRowNameResolver(sources, derivedSources, nestedSourceCount, nestedDerivedCount);
 
-        ValidateQuery(query, rowNames, outputIsDiscarded: true);
+        ValidateQuery(query, rowNames, orderBy, outputIsDiscarded: true);
         ConditionalResultTypes.CheckQuery(new BoundSelectQuery(query, sources, rowNames, derivedSources));
 
         await CheckSubqueriesOfOutputAsync(database, query).ConfigureAwait(false);
@@ -738,7 +742,13 @@ internal sealed class QueryBinder
     /// precondition for freezing that resolver when the binding is shared across concurrent
     /// executions (<see cref="QueryRowNameResolver.FreezeForSharedReuse"/>).</para>
     /// </summary>
-    private static void ValidateQuery(SelectQuery query, QueryRowNameResolver rowNames, bool outputIsDiscarded = false)
+    /// <param name="orderBy">The ORDER BY of <paramref name="query"/> with its positions resolved
+    /// (<see cref="ResolveOrderByPositions"/>).</param>
+    private static void ValidateQuery(
+        SelectQuery query,
+        QueryRowNameResolver rowNames,
+        IReadOnlyList<OrderByItem>? orderBy,
+        bool outputIsDiscarded = false)
     {
         QueryLimiter.RefuseNegativeLiteral(query);
 
@@ -768,7 +778,7 @@ internal sealed class QueryBinder
             }
         }
 
-        ValidateOrderBy(query, rowNames);
+        ValidateOrderBy(query, rowNames, orderBy);
 
         if (query.Having is not null)
             QueryExpressionClassifier.ValidateNoNestedAggregate(query.Having.Expression);
@@ -807,9 +817,9 @@ internal sealed class QueryBinder
         }
     }
 
-    private static void ValidateOrderBy(SelectQuery query, QueryRowNameResolver rowNames)
+    private static void ValidateOrderBy(SelectQuery query, QueryRowNameResolver rowNames, IReadOnlyList<OrderByItem>? resolvedOrderBy)
     {
-        if (query.OrderBy is null)
+        if (resolvedOrderBy is null)
             return;
 
         bool sortAfterProjection = query.GroupBy is { Count: > 0 }
@@ -817,8 +827,14 @@ internal sealed class QueryBinder
 
         bool ungroupedAggregate = QueryTicketAdapter.IsUngroupedAggregate(query);
 
-        foreach (OrderByItem orderBy in query.OrderBy)
+        foreach (OrderByItem item in resolvedOrderBy)
         {
+            // A column of a *, named by its position: its cell is known, so nothing is left to check.
+            if (item.RowKey is not null)
+                continue;
+
+            OrderByItem orderBy = item;
+
             QueryProjectionResolver.RejectAmbiguousOrderName(
                 orderBy.Expression,
                 query.Projections,
@@ -862,6 +878,82 @@ internal sealed class QueryBinder
 
             ValidateExpression(validated, rowNames);
         }
+    }
+
+    /// <summary>
+    /// Resolves each ORDER BY position at or after a <c>*</c> (see <see cref="OrderByItem.OutputPosition"/>)
+    /// against the output columns, as PostgreSQL counts them: a <c>*</c> counts once per column it puts out.
+    /// A position that names a column of a <c>*</c> gets the row key of that column's cell. A position that
+    /// names an item after the <c>*</c> becomes that item's expression, as a position before the <c>*</c>
+    /// already did in the query creator.
+    ///
+    /// <para><b>Why the query keeps its positions.</b> The stages around the binder keep copies of the query
+    /// as it was before the bind (the bind pipeline rebuilds the bound query from its own copy after the
+    /// EXISTS preparation), so a rewrite of the bound query would be lost. The binder therefore resolves the
+    /// positions only to check them, and the ticket resolves them again from the bound sources
+    /// (<c>QueryTicketAdapter.ToQueryTicket</c>). Both reach the same columns, because both read the same
+    /// sources.</para>
+    /// </summary>
+    /// <returns>The ORDER BY of <paramref name="bound"/>, the same list when it holds no such position, or null
+    /// when the query has no ORDER BY.</returns>
+    internal static IReadOnlyList<OrderByItem>? ResolveOrderByPositions(BoundSelectQuery bound)
+    {
+        SelectQuery query = bound.Query;
+
+        if (query.OrderBy is not { } orderBy || !HasUnresolvedPosition(orderBy))
+            return query.OrderBy;
+
+        List<DerivedColumnSchema> starColumns = DerivedTableSchemaBuilder.ExpandStar(bound);
+        List<OrderByItem> resolved = new(orderBy.Count);
+
+        foreach (OrderByItem item in orderBy)
+        {
+            resolved.Add(item.OutputPosition is int position && item.RowKey is null
+                ? ResolveOutputPosition(item, position, query.Projections, starColumns)
+                : item);
+        }
+
+        return resolved;
+    }
+
+    private static bool HasUnresolvedPosition(IReadOnlyList<OrderByItem> orderBy)
+    {
+        foreach (OrderByItem item in orderBy)
+        {
+            if (item.OutputPosition is not null && item.RowKey is null)
+                return true;
+        }
+
+        return false;
+    }
+
+    private static OrderByItem ResolveOutputPosition(
+        OrderByItem item,
+        int position,
+        IReadOnlyList<ProjectionItem> projections,
+        List<DerivedColumnSchema> starColumns)
+    {
+        int remaining = position;
+
+        foreach (ProjectionItem projection in projections)
+        {
+            NodeAst target = QueryExpressionClassifier.UnwrapAlias(projection.Expression);
+            bool isStar = target.nodeType == NodeType.ExprAllFields;
+            int width = isStar ? starColumns.Count : 1;
+
+            if (remaining <= width)
+            {
+                return isStar
+                    ? item with { RowKey = starColumns[remaining - 1].RowKey }
+                    : new OrderByItem(target, item.Direction);
+            }
+
+            remaining -= width;
+        }
+
+        throw new CamusDBException(
+            CamusDBErrorCodes.InvalidInput,
+            $"ORDER BY position {position} is out of range");
     }
 
     /// <summary>

@@ -49,7 +49,8 @@ internal static class QueryTicketAdapter
         ToQueryTicketInternal(
             bound.Query, ticket, bound.RowNames, existsSubqueries, semiJoinSpecs,
             exclusivePredicateLocks, suppressCacheHint, requiredColumnsMemo,
-            SetOperationColumns(bound));
+            SetOperationColumns(bound),
+            QueryBinder.ResolveOrderByPositions(bound));
 
     /// <summary>
     /// The output columns of the set operation that is the whole FROM of <paramref name="bound"/>, or
@@ -70,9 +71,14 @@ internal static class QueryTicketAdapter
         bool exclusivePredicateLocks = false,
         bool suppressCacheHint = false,
         SingleTableRequiredColumnsMemo? requiredColumnsMemo = null,
-        IReadOnlyList<DerivedColumnSchema>? setOperationColumns = null)
+        IReadOnlyList<DerivedColumnSchema>? setOperationColumns = null,
+        IReadOnlyList<OrderByItem>? resolvedOrderBy = null)
     {
         TableSource tableSource = GetPrimaryTableSource(query.Source);
+
+        // A query that did not bind keeps its ORDER BY as written; ResolveOrderClause refuses a position
+        // that only the bound sources can resolve.
+        IReadOnlyList<OrderByItem>? orderBy = resolvedOrderBy ?? query.OrderBy;
         NodeAst? where = query.Where?.Expression;
         PredicateAnalysis analyzedWhere = PredicateAnalyzer.Analyze(where, ticket.Parameters);
 
@@ -91,7 +97,7 @@ internal static class QueryTicketAdapter
                 : IsUngroupedAggregate(query)
                     ? null
                     : ToQueryOrderBy(
-                        query.OrderBy,
+                        orderBy,
                         query.Projections,
                         query.GroupBy,
                         SortAfterProjection(query)),
@@ -264,6 +270,18 @@ internal static class QueryTicketAdapter
         IReadOnlyList<NodeAst>? groupBy,
         bool sortAfterProjection)
     {
+        // A column of a *, named by its position: the binder resolved it to the key of its cell, which
+        // is the same key before and after the projection, because the projection keeps the keys of a *.
+        if (item.RowKey is { } rowKey)
+            return new QueryOrderBy(rowKey, item.Direction);
+
+        // Only a statement that did not bind can still hold a position here; sorting on the literal
+        // would silently keep the input order.
+        if (item.OutputPosition is not null)
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInternalOperation,
+                $"ORDER BY position {item.OutputPosition} was not resolved against the select list");
+
         NodeAst expression = item.Expression;
 
         if (sortAfterProjection

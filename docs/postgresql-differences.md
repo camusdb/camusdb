@@ -147,6 +147,19 @@ A derived table and a view compute every column of each of their rows before the
 
 `CREATE VIEW` and `CREATE MATERIALIZED VIEW` bind the body and run none of its subqueries, as PostgreSQL does. So `CREATE VIEW c AS SELECT (SELECT 1 / 0) AS x` succeeds, and a read of `x` fails. A scalar subquery column has the declared type of the subquery column, also when the subquery returns no row.
 
+## NULL in ORDER BY
+
+NULL sorts as the smallest value, the GoogleSQL rule: it comes first in ascending order and last in
+descending order. PostgreSQL sorts NULL as the largest value, so it does the opposite. The rule is the
+same for every ordered result: a sort, a top-k, `DISTINCT`, `GROUP BY`, a set operation and a window
+`ORDER BY`. An index keeps its keys in the same order, so an `ORDER BY` that an index supplies needs
+no sort. `NULLS FIRST` and `NULLS LAST` are not supported. `nl` has the rows `(1, 10)` and `(2, NULL)`.
+
+| Statement | CamusDB | PostgreSQL |
+|---|---|---|
+| `SELECT v FROM nl ORDER BY v` | `NULL`, `10` | `10`, `NULL` |
+| `SELECT v FROM nl ORDER BY v DESC` | `10`, `NULL` | `NULL`, `10` |
+
 ## LIMIT and OFFSET
 
 A negative `LIMIT` or `OFFSET` fails with `CADB0400` and the message of PostgreSQL, `LIMIT must not be negative`. A literal is refused when the statement binds, and a parameter when the clause is read.
@@ -218,6 +231,7 @@ CamusDB refuses these forms with a clear error, so no answer is wrong. `d` has t
 |---|---|---|
 | `SELECT v + 1 FROM d GROUP BY v` | `CADB0400` | `11`, `21` |
 | `SELECT id, v FROM d GROUP BY id`, where `id` is the primary key | `CADB0400` | Both rows |
+| `SELECT * FROM d GROUP BY 1`, where `id` is the primary key | `CADB0400` | Both rows |
 | `SELECT v AS q FROM d GROUP BY q` | `CADB0404` | `10`, `20` |
 | `SELECT id, (SELECT 5) FROM d GROUP BY id` | `CADB0400` | Both rows |
 | `SELECT v FROM d GROUP BY v ORDER BY COUNT(*), v` | `CADB0400` | `10`, `20` |
