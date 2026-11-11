@@ -758,21 +758,15 @@ internal sealed class SelectQueryCreator
         {
             case NodeType.Identifier:
             case NodeType.Integer:
-                orderItems.Add(new OrderByItem(
-                    ResolveSelectOrdinal(orderByAst, projections, "ORDER BY"),
-                    OrderType.Ascending));
+                orderItems.Add(CreateOrderByItem(orderByAst, OrderType.Ascending, projections));
                 return;
 
             case NodeType.SortAsc:
-                orderItems.Add(new OrderByItem(
-                    ResolveSelectOrdinal(orderByAst.leftAst!, projections, "ORDER BY"),
-                    OrderType.Ascending));
+                orderItems.Add(CreateOrderByItem(orderByAst.leftAst!, OrderType.Ascending, projections));
                 return;
 
             case NodeType.SortDesc:
-                orderItems.Add(new OrderByItem(
-                    ResolveSelectOrdinal(orderByAst.leftAst!, projections, "ORDER BY"),
-                    OrderType.Descending));
+                orderItems.Add(CreateOrderByItem(orderByAst.leftAst!, OrderType.Descending, projections));
                 return;
 
             case NodeType.IdentifierList:
@@ -785,11 +779,43 @@ internal sealed class SelectQueryCreator
                 return;
 
             default:
-                orderItems.Add(new OrderByItem(
-                    ResolveSelectOrdinal(orderByAst, projections, "ORDER BY"),
-                    OrderType.Ascending));
+                orderItems.Add(CreateOrderByItem(orderByAst, OrderType.Ascending, projections));
                 return;
         }
+    }
+
+    /// <summary>
+    /// One ORDER BY item. A position counts output columns, as in PostgreSQL. A position before the
+    /// first <c>*</c> names one item, so it resolves here as before. A position at or after the first
+    /// <c>*</c> depends on how many columns the <c>*</c> puts out, which only the bound sources tell,
+    /// so it stays a position for the binder (see <see cref="OrderByItem.OutputPosition"/>).
+    /// </summary>
+    private static OrderByItem CreateOrderByItem(
+        NodeAst expression,
+        OrderType direction,
+        IReadOnlyList<ProjectionItem> projections)
+    {
+        if (expression.nodeType == NodeType.Integer
+            && int.TryParse(expression.yytext, out int position)
+            && FirstStarIndex(projections) is int star
+            && position > star)
+        {
+            return new OrderByItem(expression, direction) { OutputPosition = position };
+        }
+
+        return new OrderByItem(ResolveSelectOrdinal(expression, projections, "ORDER BY"), direction);
+    }
+
+    /// <summary>The 0-based index of the first <c>*</c> item of the select list, or null when it has none.</summary>
+    private static int? FirstStarIndex(IReadOnlyList<ProjectionItem> projections)
+    {
+        for (int i = 0; i < projections.Count; i++)
+        {
+            if (QueryExpressionClassifier.UnwrapAlias(projections[i].Expression).nodeType == NodeType.ExprAllFields)
+                return i;
+        }
+
+        return null;
     }
 
     private static NodeAst ResolveSelectOrdinal(

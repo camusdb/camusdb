@@ -118,7 +118,7 @@ partition.
 - The window `ORDER BY` sorts NULL the same way as the query's `ORDER BY`: NULL comes first in
   ascending order and last in descending order. PostgreSQL does the opposite by default, so a
   ranking over a nullable column can differ from PostgreSQL. `NULLS FIRST` and `NULLS LAST` are not
-  supported yet.
+  supported yet. See [NULL in ORDER BY](./postgresql-differences.md#null-in-order-by).
 - `PARTITION BY` puts all rows with a NULL key into one partition, as `GROUP BY` does.
 - `row_number()` over rows with equal `ORDER BY` values numbers them in no defined order. Add a
   unique column to the window `ORDER BY` when the order must be repeatable.

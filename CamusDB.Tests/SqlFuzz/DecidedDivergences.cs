@@ -79,6 +79,15 @@ public static class DecidedDivergences
     private const string RegexHalfPair =
         "The engine matches UTF-16 units, so the result would hold half of a pair, which has no UTF-8 form. An error is better than a damaged value.";
 
+    private static readonly string[] NullTable =
+    [
+        "CREATE TABLE nl (id INT64 PRIMARY KEY, v INT64)",
+        "INSERT INTO nl (id, v) VALUES (1, 10), (2, NULL)",
+    ];
+
+    private const string NullSortsFirst =
+        "NULL sorts as the smallest value, the GoogleSQL rule, and an index keeps its keys in the same order, so an ORDER BY that an index supplies needs no sort. PostgreSQL sorts NULL as the largest value. NULLS FIRST and NULLS LAST are not supported.";
+
     private const string NotSupportedYet =
         "CamusDB does not have this form yet. The statement fails with a clear error, and no answer is wrong.";
 
@@ -412,6 +421,11 @@ public static class DecidedDivergences
             CamusDBErrorCodes.InvalidInput, "1",
             NotSupportedYet),
 
+        new("A * with GROUP BY is refused, also when the group key is the primary key", RowTable,
+            "SELECT * FROM d GROUP BY 1 ORDER BY 1",
+            CamusDBErrorCodes.InvalidInput, "1",
+            NotSupportedYet),
+
         new("GROUP BY cannot name an output alias", RowTable,
             "SELECT v AS q FROM d GROUP BY q",
             CamusDBErrorCodes.UnknownColumn, "10",
@@ -451,6 +465,16 @@ public static class DecidedDivergences
             "SELECT * FROM d a NATURAL JOIN d b ORDER BY id",
             CamusDBErrorCodes.SqlSyntaxError, "1",
             NotSupportedYet),
+
+        new("NULL sorts first in ascending order", NullTable,
+            "SELECT v FROM nl ORDER BY v",
+            "NULL", "10",
+            NullSortsFirst),
+
+        new("NULL sorts last in descending order", NullTable,
+            "SELECT v FROM nl ORDER BY v DESC",
+            "10", "NULL",
+            NullSortsFirst),
 
         new("FULL OUTER JOIN is not supported", RowTable,
             "SELECT * FROM d FULL JOIN d b ON d.id = b.id ORDER BY d.id",

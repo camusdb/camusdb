@@ -238,8 +238,14 @@ internal static class WindowQueryRewriter
 
                 outerOrderBy = new(orderBy.Count);
 
+                // A position at or after a * stays a position: the outer select list keeps every item
+                // at its place and keeps the *, so the binder resolves it against the outer list.
                 foreach (OrderByItem item in orderBy)
-                    outerOrderBy.Add(new OrderByItem(LiftOrderExpression(item.Expression, liftedItems), item.Direction));
+                {
+                    outerOrderBy.Add(item.OutputPosition is not null
+                        ? item
+                        : new OrderByItem(LiftOrderExpression(item.Expression, liftedItems), item.Direction));
+                }
             }
 
             List<ProjectionItem> innerProjections = new(inputs.Count + 1);
