@@ -90,7 +90,7 @@ public class TestConfigurationDefaults
         Assert.AreEqual(3_600_000, CamusDBOptions.Default.MaxSerializableTransactionLifetimeMs, nameof(CamusDBOptions.Default.MaxSerializableTransactionLifetimeMs));
         Assert.AreEqual(300_000, CamusDBOptions.Default.TransactionIdleTimeoutMs, nameof(CamusDBOptions.Default.TransactionIdleTimeoutMs));
         Assert.AreEqual(30_000, CamusDBOptions.Default.TransactionReaperIntervalMs, nameof(CamusDBOptions.Default.TransactionReaperIntervalMs));
-        Assert.AreEqual(50, CamusDBOptions.Default.LockEscalationThreshold, nameof(CamusDBOptions.Default.LockEscalationThreshold));
+        Assert.AreEqual(1000, CamusDBOptions.Default.LockEscalationThreshold, nameof(CamusDBOptions.Default.LockEscalationThreshold));
         Assert.AreEqual(64, CamusDBOptions.Default.GrpcBatchMaxInFlight, nameof(CamusDBOptions.Default.GrpcBatchMaxInFlight));
         Assert.AreEqual(512, CamusDBOptions.Default.GrpcMaxPreparedStatementsPerStream, nameof(CamusDBOptions.Default.GrpcMaxPreparedStatementsPerStream));
         Assert.AreEqual(512, CamusDBOptions.Default.RestMaxPreparedStatementsPerPrincipal, nameof(CamusDBOptions.Default.RestMaxPreparedStatementsPerPrincipal));

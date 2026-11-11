@@ -857,8 +857,8 @@ public class ConfigDefinition
     /// <summary>Retained prepared-statement bytes per BatchExecute stream. 0 = unlimited. Default 8 MiB.</summary>
     public long GrpcMaxPreparedStatementBytesPerStream { get; set; } = 8L * 1024 * 1024;
 
-    /// <summary>Per-bucket shared-point-lock count before whole-bucket escalation. Default 50.</summary>
-    public int LockEscalationThreshold { get; set; } = 50;
+    /// <summary>Per-bucket shared-point-lock count before whole-bucket escalation. Default 1000.</summary>
+    public int LockEscalationThreshold { get; set; } = 1000;
 
     /// <summary>Wall-clock cap per lock-acquire retry loop for Serializable conflicts. Default 500 ms.</summary>
     public int LockWaitDeadlineMs { get; set; } = 500;

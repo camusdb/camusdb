@@ -275,8 +275,20 @@ Serializable read-only (snapshot) reads take none.
 
 **Escalation for large reads.** To keep a transaction that reads thousands of rows from accumulating
 thousands of individual point locks, once the per-table point-lock count passes a threshold the
-transaction collapses them into a single whole-table shared lock and stops taking new per-row locks.
-This bounds the lock bookkeeping at the cost of locking a little more of the table than strictly read.
+transaction takes a single whole-table shared lock and stops taking new per-row locks. The threshold
+is `lock_escalation_threshold` (1000 by default). The count is for one transaction and one table (or
+one index), over all of its statements.
+
+The whole-table lock is not "a little more" than the rows read: it conflicts with every write to the
+table by another transaction until the reader ends. So the default sits above the row count of an
+ordinary page read, and a read that names a bounded set of rows (`WHERE usersId = @p`, an `IN` list
+of ids) locks only the rows it read. A transaction that reads more rows of one table than the
+threshold still takes the whole-table lock. If that is not acceptable, read the rows in a
+Serializable read-only transaction (a snapshot, no locks), or raise the threshold.
+
+A read that fetches a page of rows through an index takes the point locks of the page together: it
+drops the rows the transaction already holds, decides escalation once for the page, and then acquires
+the locks with bounded concurrency. A page that crosses the threshold takes only the whole-table lock.
 
 ```
                             Reads                         Writes (INSERT/UPDATE/DELETE)

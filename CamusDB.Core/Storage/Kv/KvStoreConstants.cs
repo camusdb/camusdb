@@ -56,6 +56,14 @@ internal static class KvStoreConstants
     internal const int ForeignKeyLockConcurrency = 16;
 
     /// <summary>
+    /// How many shared point locks one page of a Serializable read-write read acquires at the same
+    /// time (<see cref="KvRangeLockManager.AcquireSharedPointLocksAsync"/>). Each lock is one round
+    /// trip to the leader of the partition that owns the bucket. The bound keeps one large read from
+    /// flooding that partition.
+    /// </summary>
+    internal const int PointLockConcurrency = 16;
+
+    /// <summary>
     /// How many parent-side probes of a child index one statement runs at the same time. Each probe is
     /// one round trip to the child's partition, so a DELETE of many referenced parents would otherwise
     /// wait for them one after another: measured, 100 sequential probes added about 60% to a 100-row

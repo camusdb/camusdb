@@ -196,8 +196,8 @@ internal sealed class KvIndexAccessor
     ///
     /// <para>Locks, snapshot and ancestry are those of <see cref="LookupUnique"/>. Under Serializable
     /// read-write the shared point lock on each encoded key is taken before the read, one acquire per key
-    /// the transaction does not hold yet, so the lock set after the call is exactly what the same lookups
-    /// one at a time would leave. A level-0 hit is remembered in the row-id cache as a single lookup
+    /// the transaction does not hold yet, so the lock set after the call covers what the same lookups
+    /// one at a time would lock (<see cref="KvRangeLockManager.AcquireSharedPointLocksAsync"/>). A level-0 hit is remembered in the row-id cache as a single lookup
     /// remembers it. The index nested-loop join probes a page of outer keys through this.</para>
     /// </summary>
     internal async Task<ObjectIdValue?[]> LookupUniqueRowIdsAsync(
@@ -214,11 +214,14 @@ internal sealed class KvIndexAccessor
         {
             string indexBucketPrefix = keys.BuildIndexBucketPrefix(indexId);
 
+            List<string> lockKeys = new(kvKeys.Length);
             for (int i = 0; i < kvKeys.Length; i++)
             {
                 if (kvKeys[i] is { } kvKey)
-                    await locks.AcquireSharedPointLockAsync(tx, indexBucketPrefix, kvKey, cancellationToken).ConfigureAwait(false);
+                    lockKeys.Add(kvKey);
             }
+
+            await locks.AcquireSharedPointLocksAsync(tx, indexBucketPrefix, lockKeys, cancellationToken).ConfigureAwait(false);
         }
 
         return await ProbeUniqueRowIdsAsync(tx, indexId, lookupKeys, kvKeys, rememberRowIds: true, latest: false, cancellationToken).ConfigureAwait(false);

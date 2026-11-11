@@ -1075,7 +1075,8 @@ does not give up a bounded index scan for a table scan in two cases, whatever th
 
 - the scan pins at least one leading key column by equality (`WHERE usersId = @p`), or the predicate is an
   IN list on the first column of an index;
-- the table holds no more rows than `lock_escalation_threshold` (50 by default).
+- the table holds no more than 50 rows (or no more than `lock_escalation_threshold`, when that setting is
+  below 50).
 
 Without this rule the plan follows the statistics of the moment. On a table of one or two rows the table
 scan is as cheap as the index. After `ANALYZE`, a filter that selects most rows of a table (one tenant that

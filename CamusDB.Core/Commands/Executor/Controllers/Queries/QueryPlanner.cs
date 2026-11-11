@@ -1087,16 +1087,28 @@ public sealed class QueryPlanner
     ///     (<paramref name="equalityPrefixLength"/> &gt; 0). Such a read names its rows (one
     ///     player, one order), and its lock must cover those rows only, whatever the statistics
     ///     say about how many there are.</item>
-    ///   <item>The table holds no more rows than <see cref="CamusDBOptions.LockEscalationThreshold"/>.
-    ///     No bounded scan of it can read enough rows to escalate its row locks, so the index is
-    ///     always the smaller lock, and the read cost of so few rows does not matter.</item>
+    ///   <item>The table holds no more rows than <see cref="SmallTableRowLimit"/>, and no more
+    ///     than <see cref="CamusDBOptions.LockEscalationThreshold"/>. No bounded scan of it can
+    ///     read enough rows to escalate its row locks, so the index is always the smaller lock,
+    ///     and the read cost of so few rows does not matter.</item>
     /// </list>
     /// A pure range on a larger table (<c>year &gt; 2000</c>) is not protected: it can read a large
     /// share of the table, its row locks then escalate to the whole row range in any plan, and the
     /// index would only add a row fetch for each entry. It keeps the cost comparison.
     /// </summary>
     internal static bool KeepsBoundedScan(int equalityPrefixLength, long tableRowCount, CamusDBOptions options)
-        => equalityPrefixLength > 0 || tableRowCount <= options.LockEscalationThreshold;
+        => equalityPrefixLength > 0 || tableRowCount <= Math.Min(SmallTableRowLimit, options.LockEscalationThreshold);
+
+    /// <summary>
+    /// The largest table for which <see cref="KeepsBoundedScan"/> protects a scan that has no
+    /// equality prefix. The limit is a constant of the planner and does not follow
+    /// <see cref="CamusDBOptions.LockEscalationThreshold"/> upward. The reason: the rule ignores
+    /// the read cost, and that is correct only while the cost is negligible. On a table of some
+    /// hundred rows a range that reads most rows, or a range that hides a more selective inverted
+    /// index, costs real work, so such a table keeps the cost comparison. A threshold below this
+    /// limit still lowers the bound, because the rule must not protect a scan that can escalate.
+    /// </summary>
+    internal const int SmallTableRowLimit = 50;
 
     /// <summary>
     /// The number of leading key columns a step pins by equality: every column of a unique lookup,

@@ -244,7 +244,8 @@ internal sealed class KvRowAccessor
     /// <summary>
     /// Batch point-read for a query that found its row ids through an index: the batch form of a
     /// sequence of <see cref="GetRow"/> calls. For a Serializable read-write transaction it first takes
-    /// the shared point lock on every row key, held to commit, exactly as <see cref="GetRow"/> does;
+    /// the shared point lock on every row key, held to commit, as <see cref="GetRow"/> does, but for
+    /// the whole batch at once (<see cref="KvRangeLockManager.AcquireSharedPointLocksAsync"/>);
     /// then it reads every row at <see cref="KvTransaction.QueryReadView"/>, as
     /// <see cref="GetRowsBatch"/> does. Every other transaction takes no lock.
     ///
@@ -270,11 +271,19 @@ internal sealed class KvRowAccessor
         {
             await tx.EnsureSessionStartedAsync(cancellationToken, keys.TableKeyPrefix).ConfigureAwait(false);
 
-            for (int i = 0; i < rowIds.Count; i++)
-                await locks.AcquireSharedPointLockAsync(tx, keys.RowBucketPrefix, keys.BuildRowKey(rowIds[i]), cancellationToken).ConfigureAwait(false);
+            await locks.AcquireSharedPointLocksAsync(tx, keys.RowBucketPrefix, BuildRowKeys(rowIds), cancellationToken).ConfigureAwait(false);
         }
 
         return await GetRowsBatch(tx, rowIds, cancellationToken).ConfigureAwait(false);
+    }
+
+    private string[] BuildRowKeys(IReadOnlyList<ObjectIdValue> rowIds)
+    {
+        string[] rowKeys = new string[rowIds.Count];
+        for (int i = 0; i < rowIds.Count; i++)
+            rowKeys[i] = keys.BuildRowKey(rowIds[i]);
+
+        return rowKeys;
     }
 
     /// <summary>
@@ -297,9 +306,9 @@ internal sealed class KvRowAccessor
     /// </para>
     ///
     /// <para>
-    /// The acquired locks are byte-for-byte the set a sequence of per-row <see cref="GetRow"/> calls
-    /// would take (including whole-bucket escalation past
-    /// <see cref="CamusDBOptions.LockEscalationThreshold"/>); only the reads are batched into one round
+    /// The acquired locks cover every row a sequence of per-row <see cref="GetRow"/> calls would lock.
+    /// The batch decides whole-bucket escalation once
+    /// (<see cref="KvRangeLockManager.AcquireSharedPointLocksAsync"/>), and the reads are one round
     /// trip. The subsequent exclusive batch write then upgrades/covers these same keys, exactly as the
     /// per-row <see cref="GetRow"/> path already did.
     /// </para>
@@ -325,10 +334,7 @@ internal sealed class KvRowAccessor
         await tx.EnsureSessionStartedAsync(cancellationToken, keys.TableKeyPrefix).ConfigureAwait(false);
 
         if (KvRangeLockManager.IsSerializableReadWrite(tx))
-        {
-            foreach (ObjectIdValue rowId in rowIds)
-                await locks.AcquireSharedPointLockAsync(tx, keys.RowBucketPrefix, keys.BuildRowKey(rowId), cancellationToken).ConfigureAwait(false);
-        }
+            await locks.AcquireSharedPointLocksAsync(tx, keys.RowBucketPrefix, BuildRowKeys(rowIds), cancellationToken).ConfigureAwait(false);
 
         return await GetRowsBatch(tx, rowIds, cancellationToken, aborts, latest: true).ConfigureAwait(false);
     }

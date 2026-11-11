@@ -26,14 +26,14 @@ using CamusDB.Core.Util.ObjectIds;
 namespace CamusDB.Tests.Transactions;
 
 /// <summary>
-/// Verifies Task 5a — shared-point-lock escalation for Serializable+RW transactions.
+/// Verifies shared-point-lock escalation for Serializable+RW transactions.
 ///
 /// Uses <see cref="KvTableStore"/> directly (bypassing the query executor) so that
 /// <see cref="KvTableStore.GetRow"/> is called per-row and triggers per-row point locks —
 /// the full query executor always takes a whole-bucket scan lock instead.
 ///
 /// Tests build their manager with <see cref="CamusDBOptions.LockEscalationThreshold"/> at 3 so escalation triggers
-/// after a few reads rather than the default 50.
+/// after a few reads and not after the default count.
 ///
 /// Serial: each test starts its own embedded Kahuna node. The escalation threshold belongs to the
 /// manager and store the test constructs, so the node is the only remaining reason.
@@ -274,13 +274,102 @@ public sealed class TestSerializableLockEscalation
     }
 
     // -----------------------------------------------------------------------
-    // 7. Default threshold is 50.
+    // 7. The default threshold is above the row count of an ordinary page read.
     // -----------------------------------------------------------------------
 
     [Test]
-    public void DefaultThresholdIsFifty()
+    public void DefaultThresholdIsAboveAPageRead()
     {
-        Assert.AreEqual(50, CamusDBOptions.Default.LockEscalationThreshold,
-            "LockEscalationThreshold default must be 50");
+        Assert.AreEqual(1000, CamusDBOptions.Default.LockEscalationThreshold,
+            "A bounded read of some hundred rows must not escalate to a whole-table lock");
+    }
+
+    // -----------------------------------------------------------------------
+    // 8. A batch read decides escalation once for the whole batch.
+    // -----------------------------------------------------------------------
+
+    [Test]
+    public async Task BatchAtThreshold_TakesOnePointLockPerRow()
+    {
+        (EmbeddedKahuna node, KvTransactionsManager mgr, KvTableStore store) =
+            await CreateAsync("ESC-08");
+        await using EmbeddedKahuna _ = node;
+
+        ObjectIdValue[] ids = await InsertRowsAsync(mgr, store, 3);
+
+        KvTransaction tx = await mgr.BeginAsync(
+            CamusIsolationLevel.Serializable, CamusTransactionMode.ReadWrite);
+
+        // A repeated id must not count twice toward the threshold.
+        await store.GetRowsBatchForRead(tx, [ids[0], ids[1], ids[2], ids[0]]);
+
+        Assert.IsFalse(HasAnyWholeBucketLock(tx), "A batch of exactly threshold rows must not escalate");
+        Assert.AreEqual(3, CountPointLocks(tx), "One point lock per distinct row");
+
+        // The same rows again are covered: no escalation, no new lock.
+        await store.GetRowsBatchForRead(tx, [ids[2], ids[1]]);
+        Assert.IsFalse(HasAnyWholeBucketLock(tx), "Rows already locked must not count toward escalation");
+        Assert.AreEqual(3, CountPointLocks(tx));
+
+        await mgr.RollbackAsync(tx);
+    }
+
+    [Test]
+    public async Task BatchPastThreshold_TakesTheWholeBucketLockAndNoPointLock()
+    {
+        (EmbeddedKahuna node, KvTransactionsManager mgr, KvTableStore store) =
+            await CreateAsync("ESC-09");
+        await using EmbeddedKahuna _ = node;
+
+        ObjectIdValue[] ids = await InsertRowsAsync(mgr, store, 5);
+
+        KvTransaction tx = await mgr.BeginAsync(
+            CamusIsolationLevel.Serializable, CamusTransactionMode.ReadWrite);
+
+        await store.GetRowsBatchForRead(tx, [ids[0], ids[1]]);
+        Assert.AreEqual(2, CountPointLocks(tx));
+
+        // 2 held + 2 new > 3: the batch escalates before it takes a point lock of its own.
+        ReadOnlyMemory<byte>?[] rows = await store.GetRowsBatchForRead(tx, [ids[2], ids[3]]);
+        Assert.IsTrue(rows.All(r => r is not null), "The escalated batch still reads its rows");
+        Assert.IsTrue(HasAnyWholeBucketLock(tx), "A batch that crosses the threshold escalates");
+        Assert.AreEqual(2, CountPointLocks(tx), "The escalated batch adds no point lock");
+
+        // The whole-bucket lock fences a row the transaction did not read.
+        KvTransaction bob = await mgr.BeginAsync();
+        Assert.ThrowsAsync<CamusDBException>(() => store.UpdateRow(bob, ids[4], [42]));
+        await mgr.RollbackAsync(bob);
+
+        await mgr.RollbackAsync(tx);
+    }
+
+    [Test]
+    public async Task BatchBelowThreshold_ForeignWriteToAReadRowIsBlocked_OtherRowIsNot()
+    {
+        (EmbeddedKahuna node, KvTransactionsManager mgr, KvTableStore store) =
+            await CreateAsync("ESC-10", CamusDBOptions.Default with { LockEscalationThreshold = 64 });
+        await using EmbeddedKahuna _ = node;
+
+        ObjectIdValue[] ids = await InsertRowsAsync(mgr, store, 41);
+
+        KvTransaction alice = await mgr.BeginAsync(
+            CamusIsolationLevel.Serializable, CamusTransactionMode.ReadWrite);
+
+        // 40 rows: more than the concurrency of the batch acquire, so every lock must still land.
+        await store.GetRowsBatchForRead(alice, ids[..40]);
+        Assert.AreEqual(40, CountPointLocks(alice));
+        Assert.IsFalse(HasAnyWholeBucketLock(alice));
+
+        KvTransaction bob = await mgr.BeginAsync();
+        Assert.ThrowsAsync<CamusDBException>(() => store.UpdateRow(bob, ids[39], [42]),
+            "A row of the batch is locked");
+        await mgr.RollbackAsync(bob);
+
+        KvTransaction carol = await mgr.BeginAsync();
+        await store.UpdateRow(carol, ids[40], [42]);
+        Assert.DoesNotThrowAsync(async () => await mgr.CommitAsync(carol),
+            "A row outside the batch is not locked");
+
+        await mgr.RollbackAsync(alice);
     }
 }

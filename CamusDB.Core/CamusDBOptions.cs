@@ -1189,10 +1189,17 @@ public sealed record CamusDBOptions
     /// a very high value effectively disables escalation. Tests may set this to 1–3 to exercise
     /// the escalation path without reading thousands of rows.</para>
     ///
-    /// Default: 50.
+    /// <para><b>Why the default is above a page read.</b> The whole-bucket lock conflicts with
+    /// every write to the table by another transaction until the reader ends. A read that names a
+    /// bounded set of rows (one player's items) must not take it, so the default sits above the row
+    /// count of an ordinary OLTP read. It is not higher because the storage node keeps the range
+    /// locks of one key space in a list: each acquire, and each write into the key space, walks
+    /// that list.</para>
+    ///
+    /// Default: 1000.
     /// </summary>
     [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Cluster)]
-    public int LockEscalationThreshold { get; init; } = 50;
+    public int LockEscalationThreshold { get; init; } = 1000;
 
     /// <summary>
     /// Maximum concurrently in-flight operations the server executes per <c>CamusSql.BatchExecute</c>

@@ -187,6 +187,16 @@ public sealed class KvTransaction
     /// transaction ends.
     /// </summary>
     private HashSet<string>? exclusiveLockPrefixes;
+
+    /// <summary>
+    /// For each bucket prefix, how many entries of <see cref="acquiredRangeLocks"/> it has: the
+    /// singleton point locks, and all locks. Kept beside the set so
+    /// <see cref="CountPointLocksForBucket"/> and <see cref="CountRangeLocksForBucket"/> are one
+    /// lookup. Each point-lock acquire asks for the count to decide escalation, so a walk of the
+    /// whole set there made a read of N rows cost O(N²). <see cref="TrackRangeLock"/> is the only
+    /// writer, and it keeps the counts equal to the set.
+    /// </summary>
+    private Dictionary<string, (int Points, int Total)>? rangeLockCounts;
     private HashSet<(string key, KeyValueDurability durability)>? modifiedKeys;
     private Dictionary<string, SchemaVersionPin>? schemaPins;
 
@@ -1126,15 +1136,27 @@ public sealed class KvTransaction
         {
             acquiredRangeLocks ??= [];
 
+            int delta = 0;
+
             if (mode == RangeLockMode.Exclusive)
             {
-                acquiredRangeLocks.Remove(
-                    new RangeLockBounds(prefix, startKey, startInclusive, endKey, endInclusive, durability, RangeLockMode.Shared));
+                if (acquiredRangeLocks.Remove(
+                        new RangeLockBounds(prefix, startKey, startInclusive, endKey, endInclusive, durability, RangeLockMode.Shared)))
+                    delta--;
 
                 (exclusiveLockPrefixes ??= new(StringComparer.Ordinal)).Add(prefix);
             }
 
-            acquiredRangeLocks.Add(new RangeLockBounds(prefix, startKey, startInclusive, endKey, endInclusive, durability, mode));
+            if (acquiredRangeLocks.Add(new RangeLockBounds(prefix, startKey, startInclusive, endKey, endInclusive, durability, mode)))
+                delta++;
+
+            if (delta != 0)
+            {
+                rangeLockCounts ??= new(StringComparer.Ordinal);
+                rangeLockCounts.TryGetValue(prefix, out (int Points, int Total) counts);
+                bool isPoint = startKey is not null && startKey == endKey;
+                rangeLockCounts[prefix] = (counts.Points + (isPoint ? delta : 0), counts.Total + delta);
+            }
 
             if (startKey is null && endKey is null)
                 (wholeBucketPrefixes ??= new(StringComparer.Ordinal)).Add(prefix);
@@ -1188,22 +1210,16 @@ public sealed class KvTransaction
 
     /// <summary>
     /// Counts singleton point locks (<c>[key,key]</c> entries) held for <paramref name="prefix"/>.
-    /// Used to decide when to escalate to a whole-bucket lock.
+    /// Used to decide when to escalate to a whole-bucket lock. O(1): it reads the counts that
+    /// <see cref="TrackRangeLock"/> keeps.
     /// </summary>
     public int CountPointLocksForBucket(string prefix)
     {
         lock (trackSync)
         {
-            if (acquiredRangeLocks is null)
-                return 0;
-            
-            int count = 0;
-            foreach (RangeLockBounds b in acquiredRangeLocks)
-            {
-                if (b.Prefix == prefix && b.StartKey is not null && b.StartKey == b.EndKey)
-                    count++;
-            }
-            return count;
+            return rangeLockCounts is not null && rangeLockCounts.TryGetValue(prefix, out (int Points, int Total) counts)
+                ? counts.Points
+                : 0;
         }
     }
 
@@ -1217,16 +1233,9 @@ public sealed class KvTransaction
     {
         lock (trackSync)
         {
-            if (acquiredRangeLocks is null)
-                return 0;
-
-            int count = 0;
-            foreach (RangeLockBounds b in acquiredRangeLocks)
-            {
-                if (b.Prefix == prefix)
-                    count++;
-            }
-            return count;
+            return rangeLockCounts is not null && rangeLockCounts.TryGetValue(prefix, out (int Points, int Total) counts)
+                ? counts.Total
+                : 0;
         }
     }
 

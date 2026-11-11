@@ -620,6 +620,81 @@ internal sealed class KvRangeLockManager
     }
 
     /// <summary>
+    /// The batch form of <see cref="AcquireSharedPointLockAsync"/>: takes the shared point lock on each
+    /// of <paramref name="lockKeys"/>, the keys one page of a read is about to fetch. A read that
+    /// found its rows through an index calls it once for each page.
+    ///
+    /// <para><b>One escalation decision for the page.</b> A key the transaction already holds costs
+    /// nothing, and repeats are dropped. If the locks the transaction holds on the bucket plus the
+    /// new ones stay at or below <see cref="CamusDBOptions.LockEscalationThreshold"/>, each new key
+    /// gets its own lock. If not, one whole-bucket Shared lock is taken and none of the page's keys
+    /// gets a lock of its own. So the transaction never holds more point locks on a bucket than the
+    /// threshold, and a page that crosses it does not spend acquires on locks the whole-bucket lock
+    /// then makes redundant.</para>
+    ///
+    /// <para><b>Concurrent on purpose.</b> Each acquire is one round trip to the leader of the
+    /// partition that owns the bucket, and Kahuna has no call that takes several range locks. One
+    /// after another, a page of rows costs one round trip for each row, and that cost is what made a
+    /// low escalation threshold look necessary. At most
+    /// <see cref="KvStoreConstants.PointLockConcurrency"/> acquires are in flight. The concurrent
+    /// acquires are safe for the reason given at <see cref="AcquireForeignKeyLocksAsync"/>: the
+    /// lock tracking and the session start of the transaction are synchronized. The first failure
+    /// cancels the rest and propagates, and the locks already granted stay tracked and are released
+    /// with the transaction.</para>
+    ///
+    /// <para>Unlike <see cref="AcquireForeignKeyLocksAsync"/>, a transaction with no identity is
+    /// skipped without an error, as <see cref="AcquireRangeLockAsync"/> skips it: the caller gates on
+    /// <see cref="IsSerializableReadWrite"/>, and such a transaction always has an identity.</para>
+    /// </summary>
+    internal async Task AcquireSharedPointLocksAsync(
+        KvTransaction tx,
+        string bucketPrefix,
+        IReadOnlyList<string> lockKeys,
+        CancellationToken cancellationToken)
+    {
+        if (lockKeys.Count == 0 || tx.HasWholeBucketLock(bucketPrefix))
+            return;
+
+        if (lockKeys.Count == 1)
+        {
+            await AcquireSharedPointLockAsync(tx, bucketPrefix, lockKeys[0], cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        List<string>? pending = null;
+        HashSet<string> seen = new(lockKeys.Count, StringComparer.Ordinal);
+
+        for (int i = 0; i < lockKeys.Count; i++)
+        {
+            string key = lockKeys[i];
+
+            if (seen.Add(key) && !tx.HasPointLock(bucketPrefix, key))
+                (pending ??= new(lockKeys.Count - i)).Add(key);
+        }
+
+        if (pending is null)
+            return;
+
+        if ((long)tx.CountPointLocksForBucket(bucketPrefix) + pending.Count > options.LockEscalationThreshold)
+        {
+            await AcquireRangeLockAsync(tx, bucketPrefix, null, true, null, true, cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        if (pending.Count == 1)
+        {
+            await AcquireRangeLockAsync(tx, bucketPrefix, pending[0], true, pending[0], true, cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        await Parallel.ForEachAsync(
+            pending,
+            new ParallelOptions { MaxDegreeOfParallelism = KvStoreConstants.PointLockConcurrency, CancellationToken = cancellationToken },
+            (key, ct) => new ValueTask(AcquireRangeLockAsync(tx, bucketPrefix, key, true, key, true, ct))
+        ).ConfigureAwait(false);
+    }
+
+    /// <summary>
     /// Takes the foreign-key rendezvous lock — a shared point lock — on each key of a parent's
     /// referenced unique index. A child writer holds it until commit, so a parent writer that deletes
     /// or re-keys the entry is fenced until the child finishes, and a child that arrives while a parent

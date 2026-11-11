@@ -284,7 +284,7 @@ internal sealed class TestDescendingIndexSeeks : SharedNodeBaseTest
         int absentValues = CamusDBOptions.Default.LockEscalationThreshold + 10;
         string list = "5, 12, " + string.Join(", ", Enumerable.Range(1000, absentValues));
 
-        await AssertInListLocks(executor, db, dbname, $"SELECT id FROM t WHERE v IN ({list})", refused: [8, 500], allowed: [3, 2000]);
+        await AssertInListLocks(executor, db, dbname, $"SELECT id FROM t WHERE v IN ({list})", refused: [8, 500], allowed: [3, 1000 + absentValues + 100]);
     }
 
     private static async Task AssertInListLocks(
