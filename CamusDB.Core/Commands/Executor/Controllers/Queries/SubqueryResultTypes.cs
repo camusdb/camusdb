@@ -61,6 +61,16 @@ internal static class SubqueryResultTypes
                 : new ExpressionType(column.Type, column.ElementType ?? ColumnType.Null);
         }
 
+        // A * with one column reads that column through the lookup, as ConditionalResultTypes.OutputTypes does.
+        if (bound.Query.Projections is [{ Expression.nodeType: NodeType.ExprAllFields }])
+        {
+            List<DerivedColumnSchema> columns = DerivedTableSchemaBuilder.ExpandStar(bound);
+
+            return columns.Count == 1
+                ? ConditionalResultTypes.LookupFor(bound, excludeOutputAliases: false)(columns[0].RowKey)
+                : null;
+        }
+
         return bound.Query.Projections.Count == 1
             ? ConditionalResultTypes.TypeOf(bound.Query.Projections[0].Expression, ConditionalResultTypes.LookupFor(bound, excludeOutputAliases: false))
             : null;

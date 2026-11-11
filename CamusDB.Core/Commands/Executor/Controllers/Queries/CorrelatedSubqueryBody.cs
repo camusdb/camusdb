@@ -150,11 +150,9 @@ internal sealed class CorrelatedSubqueryBody
         SelectBindResult checkedBind;
         SelectBindResult? bound = null;
 
-        // A value body returns one column, as an uncorrelated subquery must. A set operation shows its
-        // column count only once its operands are bound.
-        bool isSetOperation = bodyQuery.Source is DerivedTableSource { SetOperation: not null };
-
-        if (!isExistsBody && !isSetOperation)
+        // A value body returns one column, as an uncorrelated subquery must. A * (also the * over a set
+        // operation) shows its column count only once it is bound.
+        if (!isExistsBody)
             SubqueryQueryExecutor.ValidateSingleColumnProjection(bodyQuery);
 
         if (NestedSubqueryReadsOuterValue(substituted))
@@ -172,8 +170,7 @@ internal sealed class CorrelatedSubqueryBody
 
         if (!isExistsBody)
         {
-            if (isSetOperation && checkedBind.Bound.DerivedSources[0].Columns.Count != 1)
-                throw new CamusDBException(CamusDBErrorCodes.InvalidInput, "Subquery must return exactly one column");
+            SubqueryQueryExecutor.ValidateSingleColumnOutput(checkedBind.Bound);
 
             outputType = SubqueryResultTypes.OutputTypeOf(checkedBind.Bound);
         }

@@ -214,14 +214,15 @@ The clauses below have no stage that runs once for each row. CamusDB refuses a c
 An expression column that has no alias takes its position in the select list as its name, starting at
 `0`. So `SELECT MAX(v) FROM d` has the column `0`. PostgreSQL takes the name of the function, such as
 `max`, or `?column?`. A scalar subquery column takes the name of its inner column, as in PostgreSQL, but
-over an expression it has its position as its name too. Write `AS` to give a column a name. `d` has the
-rows `(1, 10)` and `(2, 20)`.
+over an expression or a `*` it has its position as its name too. PostgreSQL names a `*` of one column
+after that column. Write `AS` to give a column a name. `d` has the rows `(1, 10)` and `(2, 20)`.
 
 | Statement | CamusDB | PostgreSQL |
 |---|---|---|
 | `SELECT max FROM (SELECT MAX(v) FROM d) q` | `CADB0404` | `20` |
 | `SELECT abs FROM (SELECT abs(v) FROM d) q ORDER BY 1` | `CADB0404` | `10`, `20` |
 | `SELECT id, (SELECT MAX(v) FROM d) FROM d ORDER BY max, id` | `CADB0404` | Both rows |
+| `SELECT v FROM (SELECT (SELECT * FROM (SELECT v FROM d WHERE id = 1) s)) q` | `CADB0404` | `10` |
 
 ## Forms that CamusDB does not have yet
 

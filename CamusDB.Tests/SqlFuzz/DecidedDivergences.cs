@@ -657,5 +657,10 @@ public static class DecidedDivergences
             "SELECT id, (SELECT MAX(v) FROM d) FROM d ORDER BY max, id",
             CamusDBErrorCodes.UnknownColumn, "1",
             ExpressionColumnName),
+
+        new("A scalar subquery over a * has its position as its name", RowTable,
+            "SELECT v FROM (SELECT (SELECT * FROM (SELECT v FROM d WHERE id = 1) s)) q",
+            CamusDBErrorCodes.UnknownColumn, "10",
+            ExpressionColumnName),
     ];
 }

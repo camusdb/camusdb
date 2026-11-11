@@ -177,10 +177,7 @@ internal sealed class SubqueryQueryExecutor
 
         SelectQuery subquery = selectQueryCreator.CreateSelectQuery(selectAst);
 
-        // A set operation projects *, and its column count is known only once its operands are bound.
-        bool isSetOperation = subquery.Source is DerivedTableSource { SetOperation: not null };
-
-        if (requireSingleColumn && !isSetOperation)
+        if (requireSingleColumn)
             ValidateSingleColumnProjection(subquery);
 
         // No request-scoped ticket reaches this helper, so the descriptor's display name is the only
@@ -195,10 +192,8 @@ internal sealed class SubqueryQueryExecutor
 
         SelectBindResult bound = await bindPipeline.BindAsync(database, subquery, executeTicket, isExistsBody).ConfigureAwait(false);
 
-        if (requireSingleColumn && isSetOperation && bound.Bound.DerivedSources[0].Columns.Count != 1)
-            throw new CamusDBException(
-                CamusDBErrorCodes.InvalidInput,
-                "Subquery must return exactly one column");
+        if (requireSingleColumn)
+            ValidateSingleColumnOutput(bound.Bound);
 
         // A type that the static rules do not show (an aggregate such as MAX(v)) comes from the schema
         // builder, which types the column as CREATE TABLE AS does: the column of (SELECT MAX(v) FROM t) is
@@ -252,6 +247,11 @@ internal sealed class SubqueryQueryExecutor
         return new ExpressionType(columns[0].Type, columns[0].ElementType ?? ColumnType.Null);
     }
 
+    /// <summary>
+    /// The check before the bind of a subquery that must give one column (scalar, <c>IN</c>, quantified):
+    /// its select list holds one item. A <c>*</c> passes here, because the number of its columns is known
+    /// only from the bound sources; <see cref="ValidateSingleColumnOutput"/> counts them after the bind.
+    /// </summary>
     internal static void ValidateSingleColumnProjection(SelectQuery subquery)
     {
         if (subquery.Projections.Count != 1)
@@ -260,8 +260,18 @@ internal sealed class SubqueryQueryExecutor
                 CamusDBErrorCodes.InvalidInput,
                 "Subquery must return exactly one column");
         }
+    }
 
-        if (subquery.Projections[0].Expression.nodeType == NodeType.ExprAllFields)
+    /// <summary>
+    /// The check after the bind of a subquery that must give one column: a lone <c>*</c> must expand to
+    /// one column, as in PostgreSQL, so <c>(SELECT * FROM (SELECT v FROM t) s)</c> is a scalar subquery. A set
+    /// operation is a <c>*</c> over its result, so this also counts the columns of a <c>UNION</c>. The rows
+    /// of a <c>*</c> hold its visible columns only, so <see cref="ExtractSingleColumnValue"/> reads the one cell.
+    /// </summary>
+    internal static void ValidateSingleColumnOutput(BoundSelectQuery bound)
+    {
+        if (bound.Query.Projections is [{ Expression.nodeType: NodeType.ExprAllFields }]
+            && DerivedTableSchemaBuilder.ExpandStar(bound).Count != 1)
         {
             throw new CamusDBException(
                 CamusDBErrorCodes.InvalidInput,
