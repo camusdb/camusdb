@@ -45,6 +45,15 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <!-- An idle thread-pool worker spins before it blocks, waiting for the next work item. A node
+         runs many short work items per operation, so workers went idle and spun constantly: the
+         spinning was about 15% of the leader's CPU per operation under load. With no spin a worker
+         blocks at once. DOTNET_ThreadPool_UnfairSemaphoreSpinLimit in the environment (hexadecimal) overrides
+         the value written here. -->
+    <RuntimeHostConfigurationOption Include="System.Threading.ThreadPool.UnfairSemaphoreSpinLimit" Value="0" />
+  </ItemGroup>
+
+  <ItemGroup>
     <None Include="../README.md" Pack="true" PackagePath="/" Visible="false" />
     <None Include="../LICENSE.txt" Pack="true" PackagePath="/" Visible="false" />
   </ItemGroup>
