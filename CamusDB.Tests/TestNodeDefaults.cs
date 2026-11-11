@@ -12,8 +12,9 @@ using Kahuna;
 namespace CamusDB.Tests;
 
 /// <summary>
-/// Settings for the single-node, in-memory nodes that tests boot — Raft timings and executor pool size.
-/// Both exist for the same reason: the embedded defaults are sized
+/// Settings for the single-node, in-memory nodes that tests boot — Raft timings, executor pool size,
+/// and range auto-split. Auto-split is off so that a test node splits only when a test asks, the same
+/// as a production node. The timings and the pool size exist for one reason: the embedded defaults are sized
 /// for a real node that must replay a WAL and join peers before it may participate in elections; a
 /// test node has neither, so it spends that grace period idle and every node-booting test pays it.
 ///
@@ -76,6 +77,16 @@ public static class TestNodeDefaults
         // groups per node, where one worker really can serialize work that needs to overlap and a
         // delayed heartbeat becomes a spurious election.
         options.PartitionExecutorPoolSize = 1;
+
+        // Range auto-split off, as production pins it in EmbeddedKahunaOptionsBuilder. Kahuna's own
+        // count threshold is 1000 sampled keys, so an inherited default let a key-range-routed table
+        // split itself in the middle of a test: a bulk insert whose per-key locks sat in the moving
+        // half then failed its commit with LostLock (the key now routes to another partition), a
+        // retryable abort that a production node never meets because it never splits unasked. A
+        // fixture that tests auto-split turns its branch back on in ConfigureNodeOptions, which runs
+        // after this; manual splits (SplitRangeAtKeyWithOutcomeAsync) ignore both thresholds.
+        options.RangeSplitThreshold = 0;
+        options.RangeSplitLoadThreshold = 0;
 
         return options;
     }
