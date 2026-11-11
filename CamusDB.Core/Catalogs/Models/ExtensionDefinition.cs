@@ -93,6 +93,14 @@ public sealed class ExtensionDefinition
     /// <summary>The lowercase hex SHA-256 of the assembly bytes of that version on the proposing node.</summary>
     public string Sha256 { get; set; } = "";
 
+    /// <summary>
+    /// The lowercase hex SHA-256 of the list of files the build on the proposing node can load besides
+    /// its assembly (see <c>ExtensionDependencyHash</c>). Empty on a record installed before the field
+    /// existed: such a record does not pin its dependencies, and <c>ALTER EXTENSION ... UPDATE</c> to
+    /// the same version fills it in.
+    /// </summary>
+    public string DependenciesSha256 { get; set; } = "";
+
     /// <summary>The extensions the installed version requires, from its manifest.</summary>
     public List<string> Requires { get; set; } = [];
 

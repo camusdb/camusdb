@@ -304,6 +304,48 @@ public sealed class TestExtensionLoading : ExtensionTestBase
     }
 
     [Test]
+    public void Safe_HostAccess_ReflectionAndBackgroundWork_ListsEveryFinding()
+    {
+        CamusDBException ex = AssertBootFails(WithExtensions("Fixture.HostAccess"));
+        Assert.AreEqual(CamusDBErrorCodes.ExtensionVerificationFailed, ex.Code);
+
+        string[] expected =
+        [
+            // Secrets and facts of the host.
+            "member System.Environment.GetEnvironmentVariable",
+            "member System.Environment.get_MachineName",
+            "member System.Environment.get_UserName",
+            "member System.Environment.get_CommandLine",
+            "member System.Environment.get_ProcessId",
+            // Reflection: the Module path names reflection types, the by-name delegate path does not.
+            "type System.Reflection.Module (namespace System.Reflection)",
+            "type System.Reflection.MethodInfo (namespace System.Reflection)",
+            "member System.Delegate.CreateDelegate",
+            "member System.Delegate.DynamicInvoke",
+            // Raw memory and the shared pool.
+            "type System.Runtime.CompilerServices.Unsafe",
+            "type System.Buffers.ArrayPool`1",
+            // Code that outlives the call.
+            "type System.Threading.Thread",
+            "type System.Threading.ThreadPool",
+            "type System.Threading.Timer",
+            "member System.Threading.Tasks.Task.Run",
+        ];
+
+        foreach (string finding in expected)
+            StringAssert.Contains(finding, ex.Message);
+    }
+
+    [Test]
+    public void Safe_EveryOtherSafeFixture_StillHasNoFindings()
+    {
+        // The reflection namespace ban must not catch the attribute types that every compiled
+        // assembly references for its own metadata.
+        foreach (string fixture in new[] { "Fixture.Good", "Fixture.GoodV2", "Fixture.Rich", "Fixture.Aggregate", "Fixture.Requires" })
+            Assert.IsEmpty(ExtensionAssemblyVerifier.Verify(File.ReadAllBytes(FixturePath(fixture))), fixture);
+    }
+
+    [Test]
     public void Safe_PInvoke_Refused()
     {
         CamusDBException ex = AssertBootFails(WithExtensions("Fixture.PInvoke"));
@@ -358,7 +400,7 @@ public sealed class TestExtensionLoading : ExtensionTestBase
     public void SafeLoadContext_RefusesAssemblyOutsideTheAllowList()
     {
         // The runtime half of the SAFE check: a dynamic load that the static scan cannot see.
-        ExtensionLoadContext context = new("probe", FixturePath("Fixture.Good"), ExtensionTrust.Safe);
+        ExtensionLoadContext context = new("probe", FixturePath("Fixture.Good"), ExtensionTrust.Safe, ExtensionDependencyHash.Compute(FixturePath("Fixture.Good"), ExtensionTrust.Safe));
 
         // The runtime wraps an exception from Load in a FileLoadException; the refusal is its inner
         // exception, so the extension's own catch sees a failed load, never a loaded assembly.
@@ -374,7 +416,7 @@ public sealed class TestExtensionLoading : ExtensionTestBase
     [Test]
     public void LoadContext_ReturnsTheServerContract()
     {
-        ExtensionLoadContext context = new("probe", FixturePath("Fixture.Good"), ExtensionTrust.Safe);
+        ExtensionLoadContext context = new("probe", FixturePath("Fixture.Good"), ExtensionTrust.Safe, ExtensionDependencyHash.Compute(FixturePath("Fixture.Good"), ExtensionTrust.Safe));
 
         Assembly contract = context.LoadFromAssemblyName(new AssemblyName(ExtensionAssemblyVerifier.ContractAssemblyName));
         Assert.AreSame(typeof(CamusDB.Extensions.ICamusTrigger).Assembly, contract);

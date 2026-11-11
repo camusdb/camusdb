@@ -78,7 +78,8 @@ internal sealed class ExtensionCatalog
             ExtensionDefinition installed = RequireInstalled(database, extension.Name);
 
             if (string.Equals(installed.Version, extension.Version, StringComparison.Ordinal) &&
-                string.Equals(installed.Sha256, extension.Sha256, StringComparison.OrdinalIgnoreCase))
+                string.Equals(installed.Sha256, extension.Sha256, StringComparison.OrdinalIgnoreCase) &&
+                string.Equals(installed.DependenciesSha256, extension.DependenciesSha256, StringComparison.OrdinalIgnoreCase))
                 return false;
 
             checkDependents(database.Schema, installed, extension);

@@ -1144,8 +1144,10 @@ public static class CamusDBErrorCodes
 
     /// <summary>
     /// <c>DROP FUNCTION</c>, or a <c>CREATE OR REPLACE FUNCTION</c> that changes the parameter types or
-    /// the result type, was refused because a column default, a CHECK constraint, a view or a
-    /// materialized view calls the function. The message lists them. Maps to HTTP 409.
+    /// the result type, was refused because a column default, a CHECK constraint, a view, a
+    /// materialized view or the body of an inline trigger calls the function; or a replace that keeps
+    /// the types but changes the body was refused because a CHECK constraint calls the function. The
+    /// message lists them. Maps to HTTP 409.
     /// </summary>
     public const string FunctionHasDependents = "CADB0844";
 
@@ -1160,9 +1162,10 @@ public static class CamusDBErrorCodes
 
     /// <summary>
     /// The SQL of an inline trigger body runs with the rights of the user who created the trigger, and
-    /// that user no longer exists. The statement that fired the trigger fails closed: nothing may run
-    /// with rights nobody holds. Drop the trigger, or create it again under a current user. Maps to
-    /// HTTP 403.
+    /// that user no longer exists, or the trigger has no owner because it was created while
+    /// authentication was off. The statement that fired the trigger fails closed: nothing may run with
+    /// rights nobody holds, and a trigger with no owner never borrows the writer's rights. Drop the
+    /// trigger, or create it again under a current user. Maps to HTTP 403.
     /// </summary>
     public const string TriggerOwnerMissing = "CADB0846";
 

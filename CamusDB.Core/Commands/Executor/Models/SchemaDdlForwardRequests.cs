@@ -292,13 +292,16 @@ public sealed class SchemaAppliedProbeResponse
 
 /// <summary>
 /// One extension build a node loaded at boot, as the extension peer probe reports it: the manifest
-/// name and version and the SHA-256 of the assembly bytes.
+/// name and version, the SHA-256 of the assembly bytes, and the hash of its dependency files. A node
+/// that predates the dependency hash leaves <see cref="DependenciesSha256"/> empty, and the asking node
+/// then compares the assembly hash only.
 /// </summary>
 public sealed class LoadedExtensionProbeEntry
 {
     public string Name { get; set; } = "";
     public string Version { get; set; } = "";
     public string Sha256 { get; set; } = "";
+    public string DependenciesSha256 { get; set; } = "";
 }
 
 /// <summary>

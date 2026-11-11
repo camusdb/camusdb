@@ -180,6 +180,11 @@ internal sealed class InstalledExtensionSet
                 reason = $"this node loads a different build of extension '{record.Name}' {record.Version} " +
                          $"(sha256 {build.Sha256}, installed sha256 {record.Sha256})";
             }
+            else if (!ExtensionBuild.SameDependencies(record.DependenciesSha256, build.DependenciesSha256))
+            {
+                reason = $"this node loads extension '{record.Name}' {record.Version} with different dependency files " +
+                         $"(dependencies sha256 {build.DependenciesSha256}, installed {record.DependenciesSha256})";
+            }
 
             if (reason is not null)
             {

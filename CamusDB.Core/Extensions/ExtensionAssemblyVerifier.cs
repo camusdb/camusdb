@@ -35,8 +35,10 @@ internal sealed record ExtensionManifestData(string? Name, string? Version, IRea
 ///
 /// <para><b>A guardrail, not a security boundary.</b> .NET has no in-process sandbox. The check
 /// catches accidental use of a dangerous API and gives a reviewer a list to read; it does not contain
-/// a determined attacker (a SAFE extension can still loop forever or allocate without limit). The
-/// operator's control of which files the server loads is the real boundary.</para>
+/// a determined attacker. A SAFE extension can still loop forever or allocate without limit, and the
+/// list cannot name every framework member that reaches a file or the network (a
+/// <c>StreamReader</c> opened on a path, an XML reader opened on a URI). The operator's control of
+/// which files the server loads is the real boundary.</para>
 ///
 /// <para>The rules, all reported together so one boot lists every problem:</para>
 /// <list type="bullet">
@@ -44,9 +46,20 @@ internal sealed record ExtensionManifestData(string? Name, string? Version, IRea
 /// compute-only framework facades.</item>
 /// <item>No TypeRef inside a banned namespace (<see cref="BannedNamespaces"/>), no reference to a
 /// banned type (<see cref="BannedTypes"/>), and no MemberRef to a banned member
-/// (<see cref="BannedMembers"/>). <c>System.Reflection</c> is <b>not</b> a banned namespace: every
-/// compiled assembly references <c>System.Reflection.Assembly*Attribute</c> types for its own
-/// metadata, so reflection is banned at the type and member level instead.</item>
+/// (<see cref="BannedMembers"/>).</item>
+/// <item><b>Reflection.</b> <c>System.Reflection</c> is a banned namespace except for its attribute
+/// types: every compiled assembly references <c>System.Reflection.Assembly*Attribute</c> for its own
+/// metadata, and an attribute type carries no capability. A ban of single members cannot hold here:
+/// <c>typeof(string).Module.GetType("System.IO.File")</c>, then <c>GetMethod</c> and
+/// <c>CreateDelegate</c>, reaches a banned type with no reference to it. Every such path goes through
+/// a <c>MethodInfo</c>, a <c>Module</c>, a <c>ConstructorInfo</c> or another type of the namespace,
+/// and a member that returns or takes one names that type in its signature, which puts a TypeRef to
+/// it in the file. The reflection members that need no such type (<c>Delegate.CreateDelegate</c> by
+/// name, <c>Type.GetType</c>, <c>Type.InvokeMember</c>) are banned one by one.</item>
+/// <item><b>Code that outlives the call.</b> Threads, the thread pool, timers, <c>Parallel</c> and
+/// <c>Task.Run</c> start code that no statement waits for and no cancellation reaches.</item>
+/// <item><b>Host disclosure.</b> The environment variables, the command line, the process path and
+/// the user and machine names can hold secrets of the deployment.</item>
 /// <item>No P/Invoke (a non-empty ImplMap table) and no <c>/unsafe</c> code (a module-level
 /// <c>UnverifiableCodeAttribute</c>). A walk of the IL for <c>calli</c> and pointer types is not
 /// done.</item>
@@ -91,7 +104,12 @@ internal static class ExtensionAssemblyVerifier
         "System.Net",
         "System.Runtime.Loader",
         "System.Runtime.InteropServices",
-        "System.Reflection.Emit",
+        "System.Reflection",
+        "System.IO.MemoryMappedFiles",
+        "System.IO.Pipes",
+        "System.IO.IsolatedStorage",
+        "System.Timers",
+        "Microsoft.Win32",
     ];
 
     /// <summary>Single types a SAFE extension may not reference.</summary>
@@ -102,19 +120,65 @@ internal static class ExtensionAssemblyVerifier
         "System.IO.Directory",
         "System.IO.FileInfo",
         "System.IO.DirectoryInfo",
+        "System.IO.FileSystemInfo",
+        "System.IO.FileSystemWatcher",
+        "System.IO.DriveInfo",
+        "System.IO.RandomAccess",
         "System.Diagnostics.Process",
+        "System.Diagnostics.Debugger",
         "System.AppDomain",
         "System.Activator",
-        "System.Reflection.Assembly");
+        "System.Reflection.Assembly",
+        // Reads and writes any memory, with no /unsafe flag.
+        "System.Runtime.CompilerServices.Unsafe",
+        // An array returned to the shared pool that the pool did not hand out corrupts the buffers
+        // of other requests.
+        "System.Buffers.ArrayPool`1",
+        "System.Threading.Thread",
+        "System.Threading.ThreadPool",
+        "System.Threading.Timer",
+        "System.Threading.Tasks.Parallel",
+        "System.Threading.Tasks.TaskFactory",
+        "System.Threading.Tasks.TaskFactory`1");
 
     /// <summary>Single members a SAFE extension may not call, as <c>Namespace.Type.Member</c>.</summary>
     public static readonly ImmutableHashSet<string> BannedMembers = ImmutableHashSet.Create(
         StringComparer.Ordinal,
         "System.Environment.Exit",
+        "System.Environment.FailFast",
+        "System.Environment.set_ExitCode",
         "System.Environment.SetEnvironmentVariable",
+        "System.Environment.GetEnvironmentVariable",
+        "System.Environment.GetEnvironmentVariables",
+        "System.Environment.ExpandEnvironmentVariables",
+        "System.Environment.GetCommandLineArgs",
+        "System.Environment.get_CommandLine",
+        "System.Environment.get_ProcessPath",
+        "System.Environment.get_ProcessId",
+        "System.Environment.get_MachineName",
+        "System.Environment.get_UserName",
+        "System.Environment.get_UserDomainName",
+        "System.Environment.get_CurrentDirectory",
+        "System.Environment.set_CurrentDirectory",
+        "System.Environment.get_SystemDirectory",
+        "System.Environment.GetFolderPath",
+        "System.Environment.GetLogicalDrives",
+        "System.Environment.get_StackTrace",
         "System.Type.GetType",
+        "System.Type.GetTypeFromProgID",
+        "System.Type.GetTypeFromCLSID",
+        "System.Type.InvokeMember",
+        "System.Delegate.CreateDelegate",
+        "System.Delegate.DynamicInvoke",
         "System.Reflection.MethodBase.Invoke",
-        "System.GC.Collect");
+        "System.Threading.Tasks.Task.Run",
+        "System.Threading.Tasks.Task.Start",
+        "System.Threading.Tasks.Task.get_Factory",
+        "System.Threading.Tasks.Task`1.get_Factory",
+        "System.Runtime.CompilerServices.RuntimeHelpers.GetUninitializedObject",
+        "System.GC.Collect",
+        "System.GC.TryStartNoGCRegion",
+        "System.GC.AddMemoryPressure");
 
     /// <summary>
     /// Types inside a banned namespace that the compiler itself emits for ordinary code, and that
@@ -124,6 +188,15 @@ internal static class ExtensionAssemblyVerifier
     private static readonly ImmutableHashSet<string> CompilerEmittedExemptions = ImmutableHashSet.Create(
         StringComparer.Ordinal,
         "System.Runtime.InteropServices.InAttribute");
+
+    /// <summary>
+    /// True for a type of <c>System.Reflection</c> that is an attribute: the compiler writes
+    /// <c>AssemblyTitleAttribute</c>, <c>DefaultMemberAttribute</c> and their kind into every
+    /// assembly, and an attribute only describes metadata. Only a top-level type qualifies, and only in
+    /// the namespace itself, not in <c>System.Reflection.Emit</c>.
+    /// </summary>
+    private static bool IsReflectionAttribute(string ns, string fullName) =>
+        ns == "System.Reflection" && !fullName.Contains('+') && fullName.EndsWith("Attribute", StringComparison.Ordinal);
 
     /// <summary>
     /// Reads the identity of the file. Throws <see cref="CamusDBErrorCodes.ExtensionNotAnAssembly"/>
@@ -268,7 +341,7 @@ internal static class ExtensionAssemblyVerifier
 
             string ns = TypeReferenceNamespace(reader, handle);
 
-            if (CompilerEmittedExemptions.Contains(fullName))
+            if (CompilerEmittedExemptions.Contains(fullName) || IsReflectionAttribute(ns, fullName))
                 continue;
 
             foreach (string banned in BannedNamespaces)

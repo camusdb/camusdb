@@ -79,6 +79,11 @@ internal sealed class InlineFunctionSymbolReport
 /// zone.</item>
 /// <item><b>Regular expressions need a timeout</b>, and the result of <c>Matches</c> can only be read
 /// with <c>foreach</c>, so the budget check of the loop runs between two matches.</item>
+/// <item><b>The SQL text of a trigger is a constant.</b> The text given to <c>Sql.ExecuteAsync</c> or
+/// <c>Sql.QueryAsync</c> must be a compile-time constant, and those two methods can only be called,
+/// not taken as a delegate. The SQL runs with the trigger owner's rights, and a row value comes from
+/// whoever writes the table: a value joined into the text would let that writer run SQL as the
+/// owner. Values go through <c>Sql.Set</c> as parameters.</item>
 /// <item><b>Own code.</b> A symbol of the compiled unit itself passes only when it is a local, a
 /// parameter, a lambda or a local function of the body. A body cannot call the method it is in: that
 /// would be a recursion with no budget check.</item>
@@ -463,6 +468,10 @@ internal sealed class InlineFunctionSymbolChecker
 
             case IMethodReferenceOperation method:
                 CheckSymbol(method.Method, where, write: false);
+
+                if (IsSqlStatementMethod(method.Method))
+                    Refuse(where, $"Sql.{method.Method.Name} can only be called, not used as a delegate");
+
                 break;
 
             case ILocalReferenceOperation local:
@@ -664,11 +673,21 @@ internal sealed class InlineFunctionSymbolChecker
             if (regex && parameter.Name == "matchTimeout" && argument.Syntax is ArgumentSyntax { Expression: var timeout })
                 report.MatchTimeoutArguments.Add(timeout.Span);
 
+            if (parameter.Name == "sql" && IsSqlStatementMethod(method) && argument.Value.ConstantValue is not { HasValue: true, Value: string })
+                Refuse(argument.Syntax,
+                    $"the SQL text of Sql.{method.Name} must be a constant text; pass each value with Sql.Set(name, value) and name it @name in the text");
+
             // The format of a ToString call. A parse method reads its format and makes no text from it.
             if (parameter.Name == "format" && parameter.Type.SpecialType == SpecialType.System_String && method.Name == "ToString")
                 CheckFormat(argument.Value, receiverType ?? method.ContainingType, argument.Syntax);
         }
     }
+
+    /// <summary>True for the two methods of a trigger's SQL session that run a statement.</summary>
+    private static bool IsSqlStatementMethod(IMethodSymbol method) =>
+        method.Name is "ExecuteAsync" or "QueryAsync" &&
+        method.ContainingType is { } containing &&
+        TypeKey(containing.OriginalDefinition) == "CamusDB.Extensions.Inline.InlineSqlSession";
 
     private void CheckConversion(IConversionOperation conversion)
     {

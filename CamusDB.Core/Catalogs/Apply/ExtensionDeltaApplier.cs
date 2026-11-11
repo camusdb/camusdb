@@ -179,6 +179,7 @@ internal static class ExtensionDeltaApplier
     private static bool IsSameRecord(ExtensionDefinition a, ExtensionDefinition b) =>
         string.Equals(a.Version, b.Version, StringComparison.Ordinal)
         && string.Equals(a.Sha256, b.Sha256, StringComparison.OrdinalIgnoreCase)
+        && string.Equals(a.DependenciesSha256, b.DependenciesSha256, StringComparison.OrdinalIgnoreCase)
         && a.InstalledAt == b.InstalledAt
         && a.UpdatedAt == b.UpdatedAt;
 

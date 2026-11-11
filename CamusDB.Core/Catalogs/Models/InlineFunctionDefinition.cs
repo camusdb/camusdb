@@ -150,6 +150,27 @@ public sealed class InlineFunctionDefinition
         return true;
     }
 
+    /// <summary>
+    /// True when <paramref name="other"/> computes the same thing: the same signature, the same
+    /// parameter names (the body reads them), the same NULL rule and the same source text. A replace
+    /// that changes none of these leaves the result of every call as it was.
+    /// </summary>
+    public bool HasSameMeaning(InlineFunctionDefinition other)
+    {
+        if (!HasSameSignature(other) || NullInput != other.NullInput ||
+            !string.Equals(Source, other.Source, StringComparison.Ordinal) ||
+            !string.Equals(Language, other.Language, StringComparison.OrdinalIgnoreCase))
+            return false;
+
+        for (int i = 0; i < Parameters.Count; i++)
+        {
+            if (!string.Equals(Parameters[i].Name, other.Parameters[i].Name, StringComparison.Ordinal))
+                return false;
+        }
+
+        return true;
+    }
+
     /// <summary>True when the two records are the same version of the same function.</summary>
     public bool IsSameRecord(InlineFunctionDefinition other) =>
         CreatedAt == other.CreatedAt

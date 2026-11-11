@@ -182,6 +182,55 @@ public sealed class TestInlineTriggers : InlineFunctionTestBase
     }
 
     [Test]
+    public async Task DropOrRenameOfAColumnThatABodyNames_IsRefused_AndOtherColumnsChangeFreely()
+    {
+        (string db, CommandExecutor executor) = await Start();
+        await ExecDdl(executor, db, SlugTrigger);
+        await ExecDdl(executor, db,
+            "CREATE TRIGGER note ON posts AFTER UPDATE LANGUAGE csharp AS $$ var total = Context.New!.GetString(\"title\"); $$");
+
+        CamusDBException dropped = Assert.ThrowsAsync<CamusDBException>(() => ExecDdl(executor, db, "ALTER TABLE posts DROP COLUMN price"))!;
+        Assert.AreEqual(CamusDBErrorCodes.DependentObjectsExist, dropped.Code);
+        StringAssert.Contains("trigger(s) slug", dropped.Message);
+
+        CamusDBException renamed = Assert.ThrowsAsync<CamusDBException>(() => ExecDdl(executor, db, "ALTER TABLE posts RENAME COLUMN title TO headline"))!;
+        Assert.AreEqual(CamusDBErrorCodes.DependentObjectsExist, renamed.Code);
+        StringAssert.Contains("slug, note", renamed.Message, "a name in a string literal of the Context API counts too");
+
+        // A new column that has the name of a local of a body is added: only a drop or a rename checks.
+        await ExecDdl(executor, db, "ALTER TABLE posts ADD COLUMN total INT64");
+        await ExecDdl(executor, db, "ALTER TABLE posts ADD COLUMN extra STRING");
+        await ExecDdl(executor, db, "ALTER TABLE posts DROP COLUMN extra");
+
+        // The table still takes writes, and the column goes once the trigger is gone.
+        await ExecNonQuery(executor, db, "INSERT INTO posts (id, title, price) VALUES (1, 'A B', 1)");
+        await ExecDdl(executor, db, "DROP TRIGGER slug ON posts");
+        await ExecDdl(executor, db, "ALTER TABLE posts DROP COLUMN price");
+        await ExecNonQuery(executor, db, "INSERT INTO posts (id, title) VALUES (2, 'C')");
+    }
+
+    [Test]
+    public async Task DropFunction_ThatABodyCalls_IsRefused_AndSoIsAChangeOfItsTypes()
+    {
+        (string db, CommandExecutor executor) = await Start();
+        await ExecDdl(executor, db, SlugTrigger);
+
+        CamusDBException dropped = Assert.ThrowsAsync<CamusDBException>(() => ExecDdl(executor, db, "DROP FUNCTION slugify"))!;
+        Assert.AreEqual(CamusDBErrorCodes.FunctionHasDependents, dropped.Code);
+        StringAssert.Contains("trigger slug on table posts", dropped.Message);
+
+        Assert.AreEqual(CamusDBErrorCodes.FunctionHasDependents, await Code(() => ExecDdl(executor, db,
+            "CREATE OR REPLACE FUNCTION slugify(s STRING) RETURNS INT64 LANGUAGE csharp AS $$ return s.Length; $$")));
+
+        // The table still takes writes through the trigger.
+        await ExecNonQuery(executor, db, "INSERT INTO posts (id, title) VALUES (1, 'A B')");
+        Assert.AreEqual("a-b", await Text(executor, db, "SELECT slug FROM posts WHERE id = 1"));
+
+        await ExecDdl(executor, db, "DROP TRIGGER slug ON posts");
+        await ExecDdl(executor, db, "DROP FUNCTION slugify");
+    }
+
+    [Test]
     public async Task ReplaceFunction_TheStubCallsTheNewBodyAtTheNextFire()
     {
         (string db, CommandExecutor executor) = await Start();

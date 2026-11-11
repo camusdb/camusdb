@@ -612,13 +612,19 @@ internal sealed class StatementTriggers
     /// The SQL sessions the triggers of one statement use: the statement's own session, and one session
     /// per inline trigger owner, made at the first fire that needs it and kept for the statement.
     ///
-    /// <para><b>When the owner's rights apply.</b> Only when all three hold: the engine has an auth
-    /// service, the trigger records an owner id, and the statement runs as a principal. Without an
-    /// auth service or a principal there are no rights to switch between, and a trigger created while
-    /// authentication was off has no owner to switch to; those fire with the statement's session. An
-    /// owner that cannot be loaded any more (dropped, or a new user under the same name) fails the fire
-    /// with <see cref="CamusDBErrorCodes.TriggerOwnerMissing"/>: the trigger never falls back to the
+    /// <para><b>When the owner's rights apply.</b> When the engine has an auth service and the
+    /// statement runs as a principal. Without an auth service or a principal there are no rights to
+    /// switch between, and the trigger fires with the statement's session. An owner that cannot be
+    /// loaded any more (dropped, or a new user under the same name) fails the fire with
+    /// <see cref="CamusDBErrorCodes.TriggerOwnerMissing"/>: the trigger never falls back to the
     /// invoker's rights.</para>
+    ///
+    /// <para><b>A trigger with no owner.</b> A trigger created while authentication was off records no
+    /// owner. Under a principal it gets a refusing session: the body still fires and can change
+    /// <c>NEW</c>, but each statement it runs through <c>Sql</c> fails with
+    /// <see cref="CamusDBErrorCodes.TriggerOwnerMissing"/>. The statement's session would run the
+    /// author's SQL with the rights of whoever writes the table, a superuser included, and the author
+    /// may be anyone who had API access before authentication was turned on.</para>
     ///
     /// <para>All sessions share the statement's transaction, so a failed statement of any of them
     /// marks that one transaction rollback-only.</para>
@@ -650,8 +656,11 @@ internal sealed class StatementTriggers
         /// <summary>The session an inline trigger's SQL runs in; see the class summary for the rules.</summary>
         public async ValueTask<ExtensionSqlSession> ForOwnerAsync(InlineTriggerFire trigger, string triggerName, string tableName)
         {
-            if (principal is null || trigger.OwnerId is not { Length: > 0 } ownerId || executor.OwnerPrincipalResolver is not { } resolve)
+            if (principal is null || executor.OwnerPrincipalResolver is not { } resolve)
                 return Statement;
+
+            if (trigger.OwnerId is not { Length: > 0 } ownerId)
+                return Ownerless(triggerName, tableName);
 
             if (owners is not null && owners.TryGetValue(ownerId, out ExtensionSqlSession? cached))
                 return cached;
@@ -664,6 +673,26 @@ internal sealed class StatementTriggers
 
             ExtensionSqlSession session = new(executor, databaseName, transaction, owner);
             (owners ??= new Dictionary<string, ExtensionSqlSession>(StringComparer.Ordinal))[ownerId] = session;
+            return session;
+        }
+
+        /// <summary>
+        /// The refusing session of a trigger with no owner, kept for the statement. The key cannot be
+        /// a user id: a user id never starts with a NUL character.
+        /// </summary>
+        private ExtensionSqlSession Ownerless(string triggerName, string tableName)
+        {
+            string key = "\0" + tableName + "\0" + triggerName;
+
+            if (owners is not null && owners.TryGetValue(key, out ExtensionSqlSession? cached))
+                return cached;
+
+            ExtensionSqlSession session = new(
+                executor, databaseName, transaction, principal: null,
+                refusal: $"Trigger '{triggerName}' on table '{tableName}' has no owner, because it was created while authentication was off, " +
+                         "so its SQL has no rights to run with; a superuser drops the trigger and creates it again as a user who may run its SQL");
+
+            (owners ??= new Dictionary<string, ExtensionSqlSession>(StringComparer.Ordinal))[key] = session;
             return session;
         }
     }

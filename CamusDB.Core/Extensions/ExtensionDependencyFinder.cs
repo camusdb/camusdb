@@ -67,14 +67,59 @@ internal static class ExtensionDependencyFinder
 
     /// <summary>
     /// Describes each object that calls the function <paramref name="functionName"/>: a column default,
-    /// a CHECK constraint, a view or a materialized view. <c>DROP FUNCTION</c> refuses while the list
-    /// is not empty, and so does a <c>CREATE OR REPLACE FUNCTION</c> that changes the function's
-    /// parameter types or result type. An inline function has no qualified name and no trigger.
+    /// a CHECK constraint, a view, a materialized view, or an inline trigger whose C# body names it
+    /// (<see cref="Inline.InlineTriggerBodyReferences"/>; the body calls the function as a method whose
+    /// types come from the function, so the body would no longer compile). <c>DROP FUNCTION</c> refuses
+    /// while the list is not empty, and so does a <c>CREATE OR REPLACE FUNCTION</c> that changes the
+    /// function's parameter types or result type. An inline function has no qualified name.
     /// </summary>
     public static List<string> FindCallers(Schema schema, string functionName, Func<string, NodeAst> parseStatement)
     {
         HashSet<string> functionNames = new(StringComparer.OrdinalIgnoreCase) { functionName };
-        return FindUsers(schema, functionNames, new HashSet<string>(StringComparer.OrdinalIgnoreCase), null, new HashSet<string>(StringComparer.Ordinal), parseStatement);
+        List<string> dependents = FindUsers(schema, functionNames, new HashSet<string>(StringComparer.OrdinalIgnoreCase), null, new HashSet<string>(StringComparer.Ordinal), parseStatement);
+
+        foreach (TableSchema table in schema.Tables.Values)
+        {
+            if (table.Triggers is not { } triggers)
+                continue;
+
+            foreach (TriggerDefinition trigger in triggers)
+            {
+                if (trigger.IsInline && Inline.InlineTriggerBodyReferences.NamesFunction(trigger.Source, functionName))
+                    dependents.Add($"trigger {trigger.Name} on table {table.Name}");
+            }
+        }
+
+        return dependents;
+    }
+
+    /// <summary>
+    /// Describes each CHECK constraint that calls the function <paramref name="functionName"/>. A
+    /// replace that changes what the function computes is refused while this list is not empty, because
+    /// it would change what the constraint accepts with no check of the rows already stored.
+    /// </summary>
+    public static List<string> FindCheckCallers(Schema schema, string functionName)
+    {
+        List<string> dependents = [];
+
+        foreach (TableSchema table in schema.Tables.Values)
+        {
+            if (table.CheckConstraints is not { } checks)
+                continue;
+
+            foreach (CheckConstraintSchema check in checks)
+            {
+                NodeAst? condition = check.ParsedCondition
+                    ?? (string.IsNullOrEmpty(check.Expression) ? null : SQLParserProcessor.ParseCondition(check.Expression));
+
+                if (condition is not null && NodeAstWalk.Any(condition, node =>
+                        node.nodeType == NodeType.ExprFuncCall &&
+                        string.Equals(node.leftAst?.yytext, functionName, StringComparison.OrdinalIgnoreCase)))
+                    dependents.Add($"CHECK constraint {check.Name} on table {table.Name}");
+            }
+        }
+
+        return dependents;
     }
 
     /// <summary>

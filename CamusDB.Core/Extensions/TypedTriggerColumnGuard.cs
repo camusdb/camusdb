@@ -14,7 +14,10 @@ namespace CamusDB.Core.Extensions;
 /// <summary>
 /// The proposer-side check that keeps a typed trigger's row mapping valid: a column that a typed
 /// trigger (<c>ICamusTrigger&lt;TRow&gt;</c>) maps cannot be dropped or renamed while the trigger exists,
-/// so a trigger that works cannot start failing because of a schema change.
+/// so a trigger that works cannot start failing because of a schema change. The same holds for an
+/// inline trigger whose C# body names the column (<see cref="Inline.InlineTriggerBodyReferences"/>):
+/// after the drop or the rename the body would no longer compile, and every write to the table would
+/// fail.
 ///
 /// <para><b>Catalog only.</b> The check reads the columns each trigger record keeps
 /// (<see cref="TriggerDefinition.RowColumns"/>), not the trigger's assembly, so it gives the same answer
@@ -61,7 +64,7 @@ internal static class TypedTriggerColumnGuard
                 SchemaElementStatePayload payload = SchemaDeltaApplier.DecodePayload<SchemaElementStatePayload>(entry);
 
                 if (payload.ElementKind == SchemaElementKind.Column && payload.State != SchemaElementState.Public)
-                    RefuseIfMapped(schema, payload.TableName, payload.ElementName, "drop");
+                    RefuseIfMapped(schema, payload.TableName, payload.ElementName, "drop", inlineBodies: IsPublic(schema, payload.TableName, payload.ElementName));
 
                 return;
             }
@@ -86,22 +89,51 @@ internal static class TypedTriggerColumnGuard
         }
     }
 
-    private static void RefuseIfMapped(Schema schema, string tableName, string column, string action)
+    /// <param name="inlineBodies">
+    /// False for the steps of a staged column change that do not start a drop: an <c>ADD COLUMN</c>
+    /// moves a new column through the same non-public states, and a trigger body may hold a local
+    /// with the new column's name, which must not block the add.
+    /// </param>
+    private static void RefuseIfMapped(Schema schema, string tableName, string column, string action, bool inlineBodies = true)
     {
         if (!schema.Tables.TryGetValue(tableName, out TableSchema? table) || table.Triggers is not { Count: > 0 } triggers)
             return;
 
         List<string>? users = null;
+        List<string>? bodies = null;
 
         foreach (TriggerDefinition trigger in triggers)
         {
             if (trigger.RowColumns is { } mapped && mapped.Contains(column, StringComparer.OrdinalIgnoreCase))
                 (users ??= []).Add(trigger.Name);
+            else if (inlineBodies && trigger.IsInline && Inline.InlineTriggerBodyReferences.NamesColumn(trigger.Source, column))
+                (bodies ??= []).Add(trigger.Name);
         }
 
         if (users is not null)
             throw new CamusDBException(
                 CamusDBErrorCodes.DependentObjectsExist,
                 $"Cannot {action} column '{column}' of table '{table.Name}': typed trigger(s) {string.Join(", ", users)} map it to a row property; drop the trigger(s) first");
+
+        if (bodies is not null)
+            throw new CamusDBException(
+                CamusDBErrorCodes.DependentObjectsExist,
+                $"Cannot {action} column '{column}' of table '{table.Name}': the C# body of trigger(s) {string.Join(", ", bodies)} names it, " +
+                "and would no longer compile; drop the trigger(s) first, or create them again without the name");
+    }
+
+    /// <summary>True when the table has the column and the column is public: a move out of that state starts a drop.</summary>
+    private static bool IsPublic(Schema schema, string tableName, string column)
+    {
+        if (!schema.Tables.TryGetValue(tableName, out TableSchema? table) || table.Columns is not { } columns)
+            return false;
+
+        foreach (TableColumnSchema candidate in columns)
+        {
+            if (string.Equals(candidate.Name, column, StringComparison.OrdinalIgnoreCase))
+                return candidate.State == SchemaElementState.Public;
+        }
+
+        return false;
     }
 }

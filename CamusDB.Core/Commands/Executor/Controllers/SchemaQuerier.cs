@@ -1709,7 +1709,8 @@ internal sealed class SchemaQuerier
                 Text(extension.Path), extension.Sha256,
                 Text(extension.Trust == Extensions.ExtensionTrust.Safe ? "safe" : "unsafe"),
                 extension.Requires, extension.Functions, extension.Triggers, extension.Procedures,
-                extension.Aggregates, extension.TableFunctions, Text(string.Join("; ", extension.Signatures)));
+                extension.Aggregates, extension.TableFunctions, Text(string.Join("; ", extension.Signatures)),
+                Text(extension.DependenciesSha256));
         }
 
         if (installed is null || resolved is null)
@@ -1728,7 +1729,8 @@ internal sealed class SchemaQuerier
                 Members(record, ExtensionMemberKind.Procedure),
                 Members(record, ExtensionMemberKind.Aggregate),
                 Members(record, ExtensionMemberKind.TableFunction),
-                ColumnValue.Null);
+                ColumnValue.Null,
+                record.DependenciesSha256.Length == 0 ? ColumnValue.Null : Text(record.DependenciesSha256));
         }
     }
 
@@ -1837,7 +1839,7 @@ internal sealed class SchemaQuerier
     private static QueryResultRow ExtensionRow(
         string name, string version, string status, ColumnValue path, string sha256, ColumnValue trust,
         IEnumerable<string> requires, IEnumerable<string> functions, IEnumerable<string> triggers, IEnumerable<string> procedures,
-        IEnumerable<string> aggregates, IEnumerable<string> tableFunctions, ColumnValue signatures) =>
+        IEnumerable<string> aggregates, IEnumerable<string> tableFunctions, ColumnValue signatures, ColumnValue dependenciesSha256) =>
         new(default, new Dictionary<string, ColumnValue>(StringComparer.OrdinalIgnoreCase)
         {
             { "name",       new ColumnValue(ColumnType.String, name) },
@@ -1853,6 +1855,7 @@ internal sealed class SchemaQuerier
             { "aggregates", new ColumnValue(ColumnType.String, string.Join(",", aggregates)) },
             { "table_functions", new ColumnValue(ColumnType.String, string.Join(",", tableFunctions)) },
             { "signatures", signatures },
+            { "dependencies_sha256", dependenciesSha256 },
         });
 
     /// <summary>

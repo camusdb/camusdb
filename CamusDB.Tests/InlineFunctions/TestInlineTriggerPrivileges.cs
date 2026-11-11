@@ -323,4 +323,69 @@ internal sealed class TestInlineTriggerPrivileges : BaseTest
 
         Assert.AreEqual(1, await Count(ex, db, "SELECT COUNT(*) FROM posts WHERE title = 'ABC'", root));
     }
+
+    /// <summary>
+    /// Makes the trigger <paramref name="name"/> look as it does when it was created while authentication
+    /// was off: no owner. Test-only: with authentication on, SQL cannot create such a record (a statement
+    /// without a principal is refused), so the test clears the owner of a record before its first fire,
+    /// which is when the binding reads it.
+    /// </summary>
+    private static async Task ClearOwner(CommandExecutor ex, string db, string name)
+    {
+        TriggerDefinition trigger = (await Triggers(ex, db))!.Single(t => t.Name == name);
+        trigger.Owner = null;
+        trigger.OwnerId = null;
+    }
+
+    [Test]
+    public async Task ATriggerWithNoOwner_RunsNoSql_ForAWriterOrASuperuser()
+    {
+        (CommandExecutor ex, string db, Principal root) = await Start();
+
+        await Ddl(ex, db, "CREATE TRIGGER audit ON posts " + AuditBody, root);
+        await ClearOwner(ex, db, "audit");
+
+        Principal writer = await Login(ex, "writer", "pw");
+
+        CamusDBException refused = Assert.ThrowsAsync<CamusDBException>(() => Dml(ex, db, "INSERT INTO posts (id, title) VALUES (1, 'a')", writer))!;
+        Assert.AreEqual(CamusDBErrorCodes.TriggerOwnerMissing, refused.Code);
+        StringAssert.Contains("has no owner", refused.Message);
+
+        Assert.AreEqual(CamusDBErrorCodes.TriggerOwnerMissing, await Code(() => Dml(ex, db, "INSERT INTO posts (id, title) VALUES (2, 'b')", root)),
+            "the SQL of a trigger with no owner never runs with a superuser's rights");
+
+        Assert.AreEqual(0, await Count(ex, db, "SELECT COUNT(*) FROM posts", root), "the failed statements wrote nothing");
+        Assert.AreEqual(0, await Count(ex, db, "SELECT COUNT(*) FROM audit_log", root));
+
+        // A superuser drops the trigger, and the table takes writes again.
+        await Ddl(ex, db, "DROP TRIGGER audit ON posts", root);
+        await Dml(ex, db, "INSERT INTO posts (id, title) VALUES (3, 'c')", writer);
+    }
+
+    [Test]
+    public async Task ATriggerWithNoOwner_ThatCatchesTheRefusal_StillFailsItsStatement()
+    {
+        (CommandExecutor ex, string db, Principal root) = await Start();
+
+        await Ddl(ex, db,
+            "CREATE TRIGGER audit ON posts AFTER INSERT LANGUAGE csharp AS $$ " +
+            "try { await Sql.Set(\"id\", NEW!.id).ExecuteAsync(\"INSERT INTO audit_log (post_id) VALUES (@id)\"); } catch (Exception) { } $$",
+            root);
+        await ClearOwner(ex, db, "audit");
+
+        Assert.AreEqual(CamusDBErrorCodes.ExtensionCaughtSqlError, await Code(() => Dml(ex, db, "INSERT INTO posts (id, title) VALUES (1, 'a')", root)));
+        Assert.AreEqual(0, await Count(ex, db, "SELECT COUNT(*) FROM posts", root));
+    }
+
+    [Test]
+    public async Task ATriggerWithNoOwner_StillChangesTheRowOfItsStatement()
+    {
+        (CommandExecutor ex, string db, Principal root) = await Start();
+
+        await Ddl(ex, db, "CREATE TRIGGER upper ON posts BEFORE INSERT LANGUAGE csharp AS $$ NEW!.title = NEW.title?.ToUpperInvariant(); $$", root);
+        await ClearOwner(ex, db, "upper");
+
+        await Dml(ex, db, "INSERT INTO posts (id, title) VALUES (1, 'abc')", await Login(ex, "writer", "pw"));
+        Assert.AreEqual(1, await Count(ex, db, "SELECT COUNT(*) FROM posts WHERE title = 'ABC'", root));
+    }
 }

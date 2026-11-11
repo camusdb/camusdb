@@ -42,9 +42,14 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.DDL;
 /// owns a new function; a replace keeps the owner.</para>
 ///
 /// <para><b>Dependents.</b> <c>DROP FUNCTION</c>, and a replace that changes the parameter types or the
-/// result type, are refused while a column default, a CHECK constraint, a view or a materialized view
-/// calls the function. A replace that keeps the signature is allowed, and those objects see the new
-/// body at their next evaluation.</para>
+/// result type, are refused while a column default, a CHECK constraint, a view, a materialized view or
+/// the body of an inline trigger calls the function. A replace that keeps the signature but changes
+/// what the function computes (its body, its parameter names or its NULL rule) is refused while a
+/// CHECK constraint calls it: the owner of a function needs no right on the table, and a new body such
+/// as <c>return true;</c> would turn the table's constraint off for every later write, while the rows
+/// already stored were only checked against the old body. Drop the constraint, replace the function
+/// and add the constraint again, which checks the stored rows. Defaults, views and materialized views
+/// see the new body at their next evaluation.</para>
 ///
 /// <para><b>Runs on the schema leader</b>, under the database's DDL semaphore, like extension, view
 /// and sequence DDL.</para>
@@ -112,7 +117,20 @@ internal sealed class FunctionDdlService
                 authorizer.RequireFunctionOwnership(database, existing, ticket, "replace");
 
                 if (existing.HasSameSignature(next))
+                {
+                    if (existing.HasSameMeaning(next))
+                        return;
+
+                    List<string> checks = ExtensionDependencyFinder.FindCheckCallers(schema, existing.Name);
+
+                    if (checks.Count > 0)
+                        throw new CamusDBException(
+                            CamusDBErrorCodes.FunctionHasDependents,
+                            $"Cannot change the body of function '{existing.Name}' because these CHECK constraints call it: {string.Join(", ", checks)}; " +
+                            "drop each constraint, replace the function, then add the constraint again, which checks the stored rows");
+
                     return;
+                }
 
                 List<string> dependents = ExtensionDependencyFinder.FindCallers(schema, existing.Name, Parse);
 

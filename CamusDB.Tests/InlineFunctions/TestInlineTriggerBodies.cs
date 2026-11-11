@@ -275,6 +275,38 @@ public sealed class TestInlineTriggerBodies
         Assert.That(refused.Code, Is.EqualTo(CamusDBErrorCodes.InlineFunctionRefused).Or.EqualTo(CamusDBErrorCodes.InlineFunctionCompileFailed), refused.Message);
     }
 
+    // The SQL runs with the owner's rights and a row value comes from whoever writes the table, so a
+    // value joined into the SQL text would let the writer run SQL as the owner.
+    [TestCase("await Sql.ExecuteAsync(\"UPDATE cfg SET v = '\" + NEW!.title + \"' WHERE k = 1\");")]
+    [TestCase("await Sql.QueryAsync($\"SELECT id FROM posts WHERE title = '{NEW!.title}'\");")]
+    [TestCase("string text = \"DELETE FROM x\"; await Sql.ExecuteAsync(text);")]
+    [TestCase("await Sql.ExecuteAsync(NEW!.title!);")]
+    [TestCase("await Sql.ExecuteAsync(NEW!.price > 0 ? \"DELETE FROM x\" : \"DELETE FROM y\");")]
+    public void ASqlTextThatIsNotAConstant_IsRefused(string body)
+    {
+        CamusDBException refused = Refusal(body);
+        Assert.AreEqual(CamusDBErrorCodes.InlineFunctionRefused, refused.Code, refused.Message);
+        StringAssert.Contains("must be a constant text", refused.Message);
+    }
+
+    [Test]
+    public void TheSqlSessionMethods_CannotBeTakenAsADelegate()
+    {
+        CamusDBException refused = Refusal("Func<string, Task<long>> run = Sql.ExecuteAsync; await run(\"DELETE FROM x\");");
+        Assert.AreEqual(CamusDBErrorCodes.InlineFunctionRefused, refused.Code, refused.Message);
+    }
+
+    [Test]
+    public void AConstantSqlText_JoinedFromLiterals_IsAccepted()
+    {
+        FakeSession sql = new();
+
+        Fire("await Sql.Set(\"id\", NEW!.id).ExecuteAsync(\"UPDATE posts \" + \"SET slug = 'x' \" + $\"WHERE id = @id\");",
+            TriggerTiming.After, TriggerOperation.Insert, null, Row(1, "a"), sql);
+
+        Assert.AreEqual("UPDATE posts SET slug = 'x' WHERE id = @id", sql.Statements.Single());
+    }
+
     [Test]
     public void ABodyThatDoesNotCompile_NamesTheTrigger()
     {

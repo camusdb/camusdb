@@ -45,6 +45,13 @@ namespace CamusDB.Core.Extensions;
 /// first write. A nested statement opens its tables after the outer one wrote, so its fence error is
 /// turned into <see cref="CamusDBErrorCodes.TransactionMustRetry"/>: the caller retries from a new
 /// transaction instead of repeating writes in this one.</para>
+///
+/// <para><b>A refusing session.</b> A session made with a refusal text runs no statement: each call
+/// throws <see cref="CamusDBErrorCodes.TriggerOwnerMissing"/> with that text. It is the session of an
+/// inline trigger whose SQL has no rights to run with (see
+/// <see cref="StatementTriggers.StatementSessions"/>). The refusal is recorded as a
+/// <see cref="Failure"/>, so a body that catches it and returns still fails its statement: an audit
+/// trigger cannot skip its write and let the statement commit.</para>
 /// </summary>
 internal sealed class ExtensionSqlSession : ISqlSession
 {
@@ -55,6 +62,8 @@ internal sealed class ExtensionSqlSession : ISqlSession
     private readonly KvTransaction transaction;
 
     private readonly Principal? principal;
+
+    private readonly string? refusal;
 
     private long affectedRows;
 
@@ -67,16 +76,21 @@ internal sealed class ExtensionSqlSession : ISqlSession
     /// <c>CALL</c> reports as its own affected-row count.</summary>
     public long AffectedRows => Interlocked.Read(ref affectedRows);
 
-    public ExtensionSqlSession(CommandExecutor executor, string databaseName, KvTransaction transaction, Principal? principal)
+    /// <param name="refusal">Null for a session that runs SQL. Otherwise the reason every statement of
+    /// this session is refused; see the class summary.</param>
+    public ExtensionSqlSession(CommandExecutor executor, string databaseName, KvTransaction transaction, Principal? principal, string? refusal = null)
     {
         this.executor = executor;
         this.databaseName = databaseName;
         this.transaction = transaction;
         this.principal = principal;
+        this.refusal = refusal;
     }
 
     public async Task<long> ExecuteAsync(string sql, IReadOnlyDictionary<string, object?>? parameters = null)
     {
+        RefuseWithoutRights();
+
         NodeType kind = Classify(sql);
 
         if (kind is not (NodeType.Insert or NodeType.InsertSelect or NodeType.Update or NodeType.Delete))
@@ -98,6 +112,8 @@ internal sealed class ExtensionSqlSession : ISqlSession
 
     public async Task<IReadOnlyList<IRow>> QueryAsync(string sql, IReadOnlyDictionary<string, object?>? parameters = null)
     {
+        RefuseWithoutRights();
+
         if (Classify(sql) != NodeType.Select)
             throw Refused(sql, "QueryAsync runs SELECT");
 
@@ -119,6 +135,16 @@ internal sealed class ExtensionSqlSession : ISqlSession
         {
             throw Fail(sql, ex);
         }
+    }
+
+    /// <summary>Throws the refusal of a refusing session, and records it as the session's failure.</summary>
+    private void RefuseWithoutRights()
+    {
+        if (refusal is null)
+            return;
+
+        Interlocked.CompareExchange(ref failure, refusal, null);
+        throw new CamusDBException(CamusDBErrorCodes.TriggerOwnerMissing, refusal);
     }
 
     private NodeType Classify(string sql)

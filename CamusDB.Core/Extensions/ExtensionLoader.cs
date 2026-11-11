@@ -109,11 +109,12 @@ internal static class ExtensionLoader
                     "Loading extension {Name} {Version} from {Path} WITHOUT the SAFE check (unsafe_extension_assemblies); it runs with the server's full rights",
                     name, version.Text, path);
 
+            ExtensionDependencyHash dependencies = ExtensionDependencyHash.Compute(path, trust);
             Assembly assembly;
 
             try
             {
-                ExtensionLoadContext context = new(name + "@" + version.Text, path, trust);
+                ExtensionLoadContext context = new(name + "@" + version.Text, path, trust, dependencies);
                 using MemoryStream stream = new(image, writable: false);
                 assembly = context.LoadFromStream(stream);
             }
@@ -141,6 +142,7 @@ internal static class ExtensionLoader
                 AssemblyName = identity.Name,
                 Path = path,
                 Sha256 = sha256,
+                DependenciesSha256 = dependencies.Sha256,
                 Trust = trust,
                 Requires = requires,
                 Functions = functionNames,

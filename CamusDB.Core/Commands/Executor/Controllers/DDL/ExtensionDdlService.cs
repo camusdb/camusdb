@@ -208,6 +208,7 @@ internal sealed class ExtensionDdlService
         Name = build.Name,
         Version = build.Version,
         Sha256 = build.Sha256,
+        DependenciesSha256 = build.DependenciesSha256,
         Requires = [.. build.Requires],
         Members = build.BuildMembers(),
         InstalledAt = installedAt,
@@ -243,7 +244,8 @@ internal sealed class ExtensionDdlService
             bool hasBuild = loaded.Any(entry =>
                 string.Equals(entry.Name, build.Name, StringComparison.OrdinalIgnoreCase) &&
                 string.Equals(entry.Version, build.Version, StringComparison.Ordinal) &&
-                string.Equals(entry.Sha256, build.Sha256, StringComparison.OrdinalIgnoreCase));
+                string.Equals(entry.Sha256, build.Sha256, StringComparison.OrdinalIgnoreCase) &&
+                ExtensionBuild.SameDependencies(entry.DependenciesSha256, build.DependenciesSha256));
 
             if (!hasBuild)
                 lacking.Add(peers[i]);
@@ -252,8 +254,8 @@ internal sealed class ExtensionDdlService
         if (lacking.Count > 0)
             throw new CamusDBException(
                 CamusDBErrorCodes.ExtensionClusterMismatch,
-                $"Extension '{build.Name}' {build.Version} (sha256 {build.Sha256}) is not loaded on nodes {string.Join(", ", lacking)}; " +
-                "deploy the same file there, add it to extension_assemblies and restart them, then run the statement again");
+                $"Extension '{build.Name}' {build.Version} (sha256 {build.Sha256}, dependencies sha256 {build.DependenciesSha256}) is not loaded on nodes {string.Join(", ", lacking)}; " +
+                "deploy the same files there, add the extension to extension_assemblies and restart them, then run the statement again");
     }
 
     private static string RequireName(NodeAst ast)

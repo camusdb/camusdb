@@ -252,11 +252,29 @@ public sealed class TestInlineFunctions : InlineFunctionTestBase
             CamusDBErrorCodes.FunctionHasDependents,
             await Code(() => ExecDdl(executor, db, "CREATE OR REPLACE FUNCTION slugify(s STRING, sep STRING) RETURNS STRING LANGUAGE csharp AS $$ return s; $$")));
 
-        // A replace that keeps the signature is allowed, and the view and the CHECK see the new body.
-        await ExecDdl(executor, db, "CREATE OR REPLACE FUNCTION slugify(s STRING) RETURNS STRING LANGUAGE csharp AS $$ return s.Trim().ToUpperInvariant().Replace(' ', '_'); $$");
+        // A replace that keeps the signature but changes the body is refused while a CHECK calls the
+        // function: the new body would change what the constraint accepts, with no check of the rows
+        // already stored. The owner of a function needs no right on the table.
+        const string NewBody = "CREATE OR REPLACE FUNCTION slugify(s STRING) RETURNS STRING LANGUAGE csharp AS $$ return s.Trim().ToUpperInvariant().Replace(' ', '_'); $$";
+
+        CamusDBException bodyBlocked = Assert.ThrowsAsync<CamusDBException>(() => ExecDdl(executor, db, NewBody))!;
+        Assert.AreEqual(CamusDBErrorCodes.FunctionHasDependents, bodyBlocked.Code);
+        StringAssert.Contains("CHECK constraint no_admin on table posts", bodyBlocked.Message);
+        Assert.AreEqual("hello-world", await Text(executor, db, "SELECT slug FROM slugs WHERE id = 1"), "the refused replace changed nothing");
+
+        // The same body again is not a change, so it passes.
+        await ExecDdl(executor, db, "CREATE OR REPLACE " + Slugify["CREATE ".Length..]);
+
+        // Without the CHECK, the replace passes and the view sees the new body. Adding the CHECK again
+        // checks the stored rows against the new body.
+        await ExecDdl(executor, db, "ALTER TABLE posts DROP CONSTRAINT no_admin");
+        await ExecDdl(executor, db, NewBody);
 
         Assert.AreEqual("HELLO_WORLD", await Text(executor, db, "SELECT slug FROM slugs WHERE id = 1"));
-        await ExecNonQuery(executor, db, "INSERT INTO posts (id, title) VALUES (2, ' ADMIN ')");
+        await ExecDdl(executor, db, "ALTER TABLE posts ADD CONSTRAINT no_admin CHECK (slugify(title) <> 'ADMIN')");
+        Assert.AreEqual(
+            CamusDBErrorCodes.CheckConstraintViolation,
+            await Code(() => ExecNonQuery(executor, db, "INSERT INTO posts (id, title) VALUES (2, ' ADMIN ')")));
 
         await ExecDdl(executor, db, "DROP VIEW slugs");
         await ExecDdl(executor, db, "ALTER TABLE posts DROP CONSTRAINT no_admin");

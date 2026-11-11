@@ -441,7 +441,7 @@ public sealed class CommandExecutor : IAsyncDisposable
         List<LoadedExtensionProbeEntry> entries = new(Extensions.Extensions.Count);
 
         foreach (CamusDB.Core.Extensions.LoadedExtension extension in Extensions.Extensions)
-            entries.Add(new() { Name = extension.Name, Version = extension.Version, Sha256 = extension.Sha256 });
+            entries.Add(new() { Name = extension.Name, Version = extension.Version, Sha256 = extension.Sha256, DependenciesSha256 = extension.DependenciesSha256 });
 
         return entries;
     }

@@ -377,6 +377,14 @@ APIs over HTTP and gRPC.
 expiry, the backfill of `ALTER TABLE … ADD COLUMN`, the rewrite of `DROP COLUMN` and
 `ALTER TABLE … REWRITE STORAGE`, `CREATE TABLE … AS SELECT`, materialized-view refresh, and restore.
 
+**A trigger is not a security control.** Because of the list above, a user who may run `TRUNCATE`
+or `DROP TABLE`, and an operator who restores a backup, change rows that no trigger sees. The
+logical dump does not carry triggers, and a recovered table comes back without them. So an audit
+trigger has gaps, and a BEFORE trigger that refuses a change refuses it only for `INSERT`, `UPDATE`
+and `DELETE`. Use privileges to control who may change a table. Use a trigger to keep data
+consistent for the writes that fire it. This is the same as in PostgreSQL, where `TRUNCATE` does not
+fire DELETE triggers.
+
 **Where triggers can be created.** On plain tables only, not on views or materialized views. A dropped
 table that is recovered comes back without its triggers, the same as without its foreign keys;
 re-create them.
@@ -484,7 +492,7 @@ creation order, whatever their form.
 | `NEW` | a row class generated from the table | `null` for DELETE. One property per column, named as the column and typed from its SQL type (`long?`, `string?`, `double?`, `bool?`, `Guid?`, `byte[]?`, `DateTime?`, `decimal?`, `IReadOnlyList<T?>?`). A set in a BEFORE trigger changes the row the statement writes; a set in an AFTER trigger throws. |
 | `OLD` | the same row class, read-only | `null` for INSERT. A set throws. |
 | `Operation`, `Timing`, `TableName`, `TriggerName` | as on `ITriggerContext` | |
-| `Sql` | `InlineSqlSession` | `Set(name, value)` once for each parameter, then `await ExecuteAsync(sql)` or `await QueryAsync(sql)`. `Set` has one overload for each SQL type, so the body never uses `object`. The parameters of the `Set` calls belong to the next statement only. |
+| `Sql` | `InlineSqlSession` | `Set(name, value)` once for each parameter, then `await ExecuteAsync(sql)` or `await QueryAsync(sql)`. `Set` has one overload for each SQL type, so the body never uses `object`. The parameters of the `Set` calls belong to the next statement only. The SQL text must be a constant: see below. |
 | `Context` | `ITriggerContext` | The row API of the DLL form. Use it for a column that has no property (see below). |
 | The inline functions of the database | methods | `slugify(string? s)`: one method for each function, with the CLR types of its signature. The call runs the function with its own NULL rule and its own budget. |
 
@@ -499,7 +507,30 @@ compiles the body at the first fire after a change to them, so `ALTER TABLE ... 
 `CREATE OR REPLACE FUNCTION` takes effect at the next fire with no change to the trigger. A body
 that names a column which is then dropped, or calls a function which is then dropped, does not
 compile again: each statement that fires it fails with `CADB0845` until the trigger is dropped or
-created again. `DROP COLUMN` and `DROP FUNCTION` do not check the bodies of inline triggers.
+created again. To prevent this, `ALTER TABLE … DROP COLUMN` and `RENAME COLUMN` are refused with
+`CADB0530` while the body of an inline trigger on the table names the column, and `DROP FUNCTION`,
+and a `CREATE OR REPLACE FUNCTION` that changes the types, are refused with `CADB0844` while a body
+calls the function. The check reads the text of the body, not its meaning. A column matches each
+identifier of that name, and each string literal that is exactly the name, as in
+`Context.New.GetString("total")`. A function matches each identifier of that name that is not the
+part after the dot of `a.b`. So a local variable with the name of a column or of a function also
+blocks the drop: drop the trigger first, or create it again without the name. A change of a
+column's type is not checked.
+
+**The SQL text is a constant.** The text given to `Sql.ExecuteAsync` and `Sql.QueryAsync` must be
+a compile-time constant: a literal, or literals joined with `+`. A body that builds the text from a
+value is refused with `CADB0839`, and so is a body that takes one of these methods as a delegate.
+The SQL runs with the rights of the trigger's owner, and the row values come from the user who
+writes the table. If a body joined a value into the text, that user could run SQL with the owner's
+rights. Give each value to `Sql.Set(name, value)` and name it `@name` in the text:
+
+```csharp
+// Refused: NEW.note comes from the writer.
+await Sql.ExecuteAsync("UPDATE cfg SET v = '" + NEW!.note + "' WHERE k = 'audit'");
+
+// Accepted: the value is a parameter.
+await Sql.Set("note", NEW!.note).ExecuteAsync("UPDATE cfg SET v = @note WHERE k = 'audit'");
+```
 
 **`await` and the budgets.** The body is the body of an `async` method, so it can `await` the methods
 of `Sql`, and only those: `Task.Run`, `Task.Delay`, `Task.WhenAll` and the other members of `Task` are
@@ -533,8 +564,17 @@ new user with the old owner's name is not the owner. A trigger that was created 
 was off has no owner, so only `ALTER` or a superuser drops it.
 
 The changes of a BEFORE trigger to `NEW` need no privilege of the owner: they are part of the
-statement's own write. A trigger created while authentication was off has no owner, and its SQL runs
-with the rights of the statement.
+statement's own write.
+
+**A trigger with no owner.** A trigger created while authentication was off has no owner. While
+authentication stays off, its SQL runs as the statement does, because there are no rights to check.
+After authentication is turned on, each statement that its body runs through `Sql` fails with
+`CADB0846`, for every writer, a superuser included. The body still fires, so a BEFORE trigger that
+only changes `NEW` keeps its work. A body that catches the error still fails its statement
+(`CADB0823`). The reason: before authentication was on, any user with API access could create a
+trigger. If its SQL ran with the rights of the writer, an administrator's `INSERT` would run that
+SQL with the administrator's rights. To keep such a trigger, a superuser drops it and creates it
+again as a user who may run its SQL. `SHOW TRIGGERS` shows an empty owner for these triggers.
 
 **Errors.** A body that does not compile is refused at `CREATE TRIGGER` with `CADB0838`, and a body
 that uses something not allowed with `CADB0839`; the record never reaches the schema. A `throw` in the
@@ -594,7 +634,11 @@ CALL transfer(@from, @to, 10 * 3);
   `QueryAsync` runs `SELECT` and returns copies of the rows, which stay valid after the call.
 - DDL and transaction control (`BEGIN`, `COMMIT`, `ROLLBACK`) are refused with `CADB0820`.
 - The SQL runs **with the privileges of the user** whose statement fired the trigger or called the
-  procedure.
+  procedure. This is different from an [inline trigger](#triggers-in-c), which runs its SQL with
+  its owner's rights. So every user who writes a table with a DLL trigger that writes to an audit
+  table needs `INSERT` on that audit table. Give only `INSERT`, not `ALL PRIVILEGES`: a user who
+  can also `UPDATE` or `DELETE` the audit table can change its history. If the writers must not
+  have even `INSERT` there, use an inline trigger, whose owner holds the right.
 - A placeholder `@name` takes the dictionary entry `name` (with or without the `@`).
 - Writes count against the transaction's mutation limit (`max_mutations_per_transaction`), and fire
   the triggers of the tables they write.
@@ -671,9 +715,13 @@ the database's schema leader, the same as trigger DDL. Only a superuser may run 
 
 In cluster mode the node that runs `CREATE EXTENSION` or `ALTER EXTENSION ... UPDATE` first asks
 every other node in the cluster which builds it loaded, and refuses (`CADB0835`) while a node that
-answers does not load the target build: the same name, version and SHA-256. The error names those
-nodes. A node that does not answer is skipped; if it comes back without the file, see the next
-section.
+answers does not load the target build: the same name, version, SHA-256 and dependency hash. The
+error names those nodes. A node that does not answer is skipped; if it comes back without the file,
+see the next section. The skip can cost availability on that node, never correctness: each
+statement on that node still compares the installed build with its own (`CADB0834`).
+
+`CREATE EXTENSION geo` without `VERSION` installs the highest version that the node which runs it
+loads. During a rolling upgrade that can be the new version. In scripts, always write the version.
 
 ### A node without the installed build
 
@@ -708,12 +756,24 @@ separated). See [configuration.md](configuration.md).
   `.deps.json` when there is one). Each extension loads into its own load context, so two
   extensions can carry different versions of one dependency.
 - **Every node must deploy the same files.** An installed extension records the SHA-256 of its
-  build. A node that loads another build of the same version refuses the statements that use the
-  extension (`CADB0834`) instead of running different code; this covers functions, procedures and
-  triggers alike. **The hash covers that one assembly file only.** The private dependencies of an
-  UNSAFE extension, which load from their folder, are not hashed: two nodes with the same extension
-  file and different dependency files are not told apart. Deploy the whole extension folder as one
-  unit. To upgrade an extension, follow the [rolling upgrade](#rolling-upgrade).
+  assembly and a **dependency hash**. A node that loads another build of the same version refuses
+  the statements that use the extension (`CADB0834`) instead of running different code; this covers
+  functions, procedures and triggers alike. To upgrade an extension, follow the
+  [rolling upgrade](#rolling-upgrade).
+- **The dependency hash.** For an UNSAFE extension, the server hashes every other file in the folder
+  of the extension's assembly and in its subfolders when it starts: the `.deps.json`, the private
+  assemblies, the native libraries, and any other file. A file that never loads, such as a `.pdb`,
+  still counts. So give each UNSAFE extension a folder of its own, and deploy that folder as one
+  unit. A SAFE extension can load no private file, so its dependency hash is always the hash of an
+  empty list. `SHOW EXTENSIONS` shows the value in `dependencies_sha256`.
+- **A dependency loads only with the bytes it had at startup.** A dependency loads at its first use.
+  At that time the server reads its bytes again and refuses a file that is new or changed since the
+  start. The extension then gets a load error. Restart the node to load new files.
+- **After a change of dependency files.** An install record made before this check existed pins no
+  dependencies. To pin them, or to accept new dependency files with the same version, deploy the
+  files on every node, restart the nodes, and run `ALTER EXTENSION name UPDATE TO 'same version'`.
+- **The extension folder is as sensitive as the server binary.** Code in it runs inside the server
+  process. Only the operator account may write to it.
 - The browser playground has no extensions.
 - The logical dump carries `CREATE EXTENSION name VERSION 'v'` for each installed extension, not
   its members, and does not carry triggers; see
@@ -727,13 +787,38 @@ metadata tables (no extension code runs) and refuses the file when it finds any 
 - a reference to an assembly outside the allow-list: the contract and the compute-only framework
   facades (`netstandard`, `System.Runtime`, `System.Collections`, `System.Linq`, `System.Memory`,
   `System.Threading`, `System.Text.RegularExpressions`, and a few more);
-- a type in `System.Net`, `System.Runtime.Loader`, `System.Runtime.InteropServices` or
-  `System.Reflection.Emit`;
-- the types `File`, `FileStream`, `Directory`, `FileInfo`, `DirectoryInfo`, `Process`, `AppDomain`,
-  `Activator` and `Assembly`;
-- the members `Environment.Exit`, `Environment.SetEnvironmentVariable`, `Type.GetType`,
-  `MethodBase.Invoke` and `GC.Collect`;
+- a type in `System.Net`, `System.Runtime.Loader`, `System.Runtime.InteropServices`,
+  `System.Reflection` (except its attribute types, which every compiled assembly uses),
+  `System.IO.MemoryMappedFiles`, `System.IO.Pipes`, `System.IO.IsolatedStorage`, `System.Timers` or
+  `Microsoft.Win32`;
+- the types `File`, `FileStream`, `Directory`, `FileInfo`, `DirectoryInfo`, `FileSystemInfo`,
+  `FileSystemWatcher`, `DriveInfo`, `RandomAccess`, `Process`, `Debugger`, `AppDomain`, `Activator`,
+  `Assembly`, `Unsafe`, `ArrayPool<T>`, `Thread`, `ThreadPool`, `System.Threading.Timer`,
+  `Parallel` and `TaskFactory`;
+- these members:
+  - of `Environment`: `Exit`, `FailFast`, `ExitCode` (set), `SetEnvironmentVariable`,
+    `GetEnvironmentVariable`, `GetEnvironmentVariables`, `ExpandEnvironmentVariables`,
+    `GetCommandLineArgs`, `CommandLine`, `ProcessPath`, `ProcessId`, `MachineName`, `UserName`,
+    `UserDomainName`, `CurrentDirectory`, `SystemDirectory`, `GetFolderPath`, `GetLogicalDrives`
+    and `StackTrace`;
+  - of `Type`: `GetType`, `GetTypeFromProgID`, `GetTypeFromCLSID` and `InvokeMember`;
+  - of `Delegate`: `CreateDelegate` and `DynamicInvoke`;
+  - `MethodBase.Invoke`, `Task.Run`, `Task.Start`, `Task.Factory`,
+    `RuntimeHelpers.GetUninitializedObject`, `GC.Collect`, `GC.TryStartNoGCRegion` and
+    `GC.AddMemoryPressure`;
 - a P/Invoke declaration (`DllImport`), or code compiled with `/unsafe`.
+
+The lists have these reasons:
+
+- **Reflection** is banned as a whole namespace. With single bans,
+  `typeof(string).Module.GetType("System.IO.File")` and a delegate made from the method would
+  reach a banned type with no reference to it.
+- **The environment and the host names** can hold the deployment's secrets: a function that
+  returns an environment variable shows it to every user who can call the function.
+- **Threads, the thread pool, timers, `Parallel` and `Task.Run`** start code that keeps running after
+  the call. No statement waits for that code, and no cancellation reaches it.
+- **`Unsafe`** reads and writes any memory without `/unsafe`. An array given back to the shared
+  `ArrayPool<T>` that the pool did not hand out damages the buffers of other requests.
 
 The error lists every finding at once. At run time, the SAFE extension's load context also refuses
 any assembly outside the allow-list, so a dynamic load cannot go around the check.
@@ -743,9 +828,16 @@ startup, and `SHOW EXTENSIONS` reports its trust as `unsafe`.
 
 **SAFE is a guardrail, not a sandbox.** .NET has no in-process isolation: an extension runs inside
 the server process with the server's rights. The SAFE check catches accidental use of a dangerous
-API and gives a reviewer a short list to read; it does not stop code that loops forever or allocates
-without limit. Deploy only code you have reviewed. Your control over which files the server loads is
-the real security boundary.
+API. It does not stop code that loops forever or allocates without limit. The lists also cannot
+name every framework member that reaches a file or the network: for example, a `StreamReader`
+opened on a path, or an XML reader opened on a URI, passes the check. So a SAFE extension that
+passes the check is not proven harmless, and a reviewer must still read all of its code. Deploy only
+code you have reviewed. Your control over which files the server loads is the real security
+boundary.
+
+An existing SAFE extension that uses a member that this release bans fails the startup with
+`CADB0806`, and the message names the member. Change the code, or move the file to
+`unsafe_extension_assemblies` after a review.
 
 ## Inline functions
 
@@ -804,12 +896,22 @@ SHOW CREATE FUNCTION name
 - **The dollar quote.** The text between `$$` and `$$` is raw: quotes, semicolons and comments in
   it are text. A body that holds `$$` takes a quote with a tag, as in `$fn$ ... $fn$`.
 - **`CREATE OR REPLACE`** keeps the function's owner and the objects that call it. It is refused
-  while a view, a materialized view or a CHECK constraint calls the function **and** the parameter
-  types or the result type change (`CADB0844`). A change of the body alone is allowed, and those
-  objects see the new body at their next evaluation.
-- **`DROP FUNCTION`** is refused while a view, a materialized view or a CHECK constraint calls the
-  function (`CADB0844`). A column default is not in that list: an inline function is deterministic,
-  so the default is computed once when the table is created and the table keeps the value.
+  with `CADB0844` in two cases:
+  - the parameter types or the result type change, while a view, a materialized view, a CHECK
+    constraint or the body of an inline trigger calls the function;
+  - the body, a parameter name or the NULL rule changes, while a CHECK constraint calls the
+    function.
+
+  The second rule exists because the owner of a function needs no right on the table. Without the
+  rule, the owner could replace the body with `return true;` and turn off the table's constraint,
+  and the rows already stored were checked against the old body only. To change such a function,
+  drop the constraint, replace the function, and add the constraint again: the add checks the stored
+  rows against the new body. A replace with the same text is not a change and passes. Views and
+  materialized views see a new body at their next evaluation.
+- **`DROP FUNCTION`** is refused while a view, a materialized view, a CHECK constraint or the body of
+  an inline trigger calls the function (`CADB0844`). A column default is not in that list: an inline
+  function is deterministic, so the default is computed once when the table is created and the
+  table keeps the value.
 
 An exception from the body fails the statement with `CADB0809` and the exception's message, as for
 an extension function. A compiler error fails `CREATE FUNCTION` with `CADB0838` and the compiler's
@@ -865,6 +967,12 @@ A call that goes over a budget fails its statement with `CADB0840`. The node goe
 | Managed memory one call allocates | `inline_function_allocation_limit_bytes` | 16777216 (16 MiB) |
 | Elements of one array made with `new T[n]` | `inline_function_array_limit` | 1048576 |
 | Depth of the body's own calls | none: the free stack of the thread | |
+
+**The budgets are for one call, not for one statement.** `SELECT f(x) FROM big_table` calls `f`
+once for each row, and each call gets the full budget. A user who may create a function can
+therefore write a statement that runs for a very long time, with each call inside its budget. There
+is no statement timeout in this version. Watch for long statements, and give `CREATE` on a database
+only to users who may use that much of the node.
 
 The server compiles a check into the start of every loop body, lambda and local function. An
 endless loop ends at the time limit, and a recursion with no end fails with `CADB0840` before the
@@ -924,6 +1032,10 @@ same globalization mode (the server image uses the invariant mode):
 - A function does not run with its owner's rights. It reads no table and no setting, so any user
   who can run a statement can call a function in it.
 - `SHOW FUNCTIONS` and `SHOW CREATE FUNCTION` need `SELECT` or `CREATE` on the database.
+- **Never put a secret in a body.** The source text of a function or of an inline trigger is stored
+  in the schema, shown by `SHOW CREATE FUNCTION` and `SHOW CREATE TRIGGER` to every user with
+  `SELECT` on the database, and written to the logical dump. A key, a salt or a password in a body
+  is visible to all of them.
 
 ### In a cluster
 
@@ -1001,12 +1113,14 @@ the manifest), `status`, `path`, `sha256`, `trust` (`safe` or `unsafe`), `requir
 comma-separated `functions`, `triggers`, `procedures`, `aggregates` and `table_functions` it
 registered, and `signatures`: the SQL signature of each function, aggregate and table function,
 joined by `; ` (for example `split_words(STRING) -> SETOF STRING` and
-`sum_list(ARRAY(INT64)) -> INT64`; an optional parameter is in brackets). When the statement runs in a
+`sum_list(ARRAY(INT64)) -> INT64`; an optional parameter is in brackets), and `dependencies_sha256`,
+the [dependency hash](#deployment) (NULL for a `missing` row whose record predates the hash). When the statement runs in a
 database, `status` is `installed` for the build that database uses and `available` for the others,
 and a row with status `missing` (and no path or trust) reports an extension the database installed
 that this node does not load. A node without extensions, in a database without installed
-extensions, returns no rows. The statement is node-local (compare the `sha256` column across nodes
-to find a node with another build) and requires a superuser.
+extensions, returns no rows. The statement is node-local (compare the `sha256` and
+`dependencies_sha256` columns across nodes to find a node with another build) and requires a
+superuser.
 
 The triggers of a table are part of its schema record. The server also logs each loaded extension
 and its members at startup.
@@ -1058,6 +1172,6 @@ and its members at startup.
 | `CADB0841` | `CREATE FUNCTION` while `inline_functions_enabled` is off, `CREATE TRIGGER ... LANGUAGE csharp` while `inline_triggers_enabled` is off, or either on a build with no compiler (HTTP 400) |
 | `CADB0842` | The function exists, or another function, aggregate, table function or extension member has the name (HTTP 409) |
 | `CADB0843` | `DROP FUNCTION`, `ALTER FUNCTION` or `SHOW CREATE FUNCTION` named a function the database does not have (HTTP 404) |
-| `CADB0844` | A view, a materialized view or a CHECK constraint calls the function; the message lists them (HTTP 409) |
+| `CADB0844` | A view, a materialized view, a CHECK constraint or an inline trigger body calls the function, or a CHECK constraint calls a function whose body a replace changes; the message lists them (HTTP 409) |
 | `CADB0845` | This node could not compile an inline function that a statement called, or an inline trigger that a statement fired (HTTP 503) |
-| `CADB0846` | An inline trigger runs its SQL as its owner, and the owner no longer exists (HTTP 403) |
+| `CADB0846` | An inline trigger runs its SQL as its owner, and the owner no longer exists, or the trigger has no owner because it was created while authentication was off (HTTP 403) |

@@ -428,6 +428,7 @@ internal static class DerivedTableSchemaBuilder
         new("aggregates", ColumnType.String),
         new("table_functions", ColumnType.String),
         new("signatures", ColumnType.String),
+        new("dependencies_sha256", ColumnType.String),
     ];
 
     // SHOW FUNCTIONS: one row per inline function of the current database, plus one row per unit of

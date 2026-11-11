@@ -33,7 +33,10 @@ namespace CamusDB.Core.Extensions;
 ///
 /// <para><b>UNSAFE mode.</b> Private dependencies resolve from the extension's folder through
 /// <see cref="AssemblyDependencyResolver"/> (which reads the extension's <c>.deps.json</c> when there is
-/// one); anything else falls back to the default context.</para>
+/// one); anything else falls back to the default context. A resolved file must have the bytes it had
+/// at boot (<see cref="ExtensionDependencyHash"/>): an assembly is loaded from the bytes that were
+/// checked, and a native library is checked and then loaded from its path. A file that is new or
+/// changed since the boot is refused.</para>
 ///
 /// <para>Not collectible: the server never unloads an extension, and a collectible context would make
 /// every compiled adapter delegate pin it anyway.</para>
@@ -48,11 +51,14 @@ internal sealed class ExtensionLoadContext : AssemblyLoadContext
 
     private readonly string extensionName;
 
-    public ExtensionLoadContext(string extensionName, string assemblyPath, ExtensionTrust trust)
+    private readonly ExtensionDependencyHash dependencies;
+
+    public ExtensionLoadContext(string extensionName, string assemblyPath, ExtensionTrust trust, ExtensionDependencyHash dependencies)
         : base("camusdb-extension:" + extensionName, isCollectible: false)
     {
         this.extensionName = extensionName;
         this.trust = trust;
+        this.dependencies = dependencies;
         resolver = new AssemblyDependencyResolver(assemblyPath);
     }
 
@@ -74,7 +80,12 @@ internal sealed class ExtensionLoadContext : AssemblyLoadContext
         }
 
         string? path = resolver.ResolveAssemblyToPath(assemblyName);
-        return path is null ? null : LoadFromAssemblyPath(path);
+
+        if (path is null)
+            return null;
+
+        using MemoryStream stream = new(dependencies.ReadVerified(path, extensionName), writable: false);
+        return LoadFromStream(stream);
     }
 
     protected override IntPtr LoadUnmanagedDll(string unmanagedDllName)
@@ -85,7 +96,12 @@ internal sealed class ExtensionLoadContext : AssemblyLoadContext
                 $"SAFE extension '{extensionName}' tried to load native library '{unmanagedDllName}'");
 
         string? path = resolver.ResolveUnmanagedDllToPath(unmanagedDllName);
-        return path is null ? IntPtr.Zero : LoadUnmanagedDllFromPath(path);
+
+        if (path is null)
+            return IntPtr.Zero;
+
+        dependencies.VerifyFile(path, extensionName);
+        return LoadUnmanagedDllFromPath(path);
     }
 }
 

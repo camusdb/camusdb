@@ -105,7 +105,12 @@ carries, and loads one compiled against the same or an older one. While CamusDB 
 a newer major.minor (`0.17.*` is newer than a 0.16 server); from 1.0 on, a newer major.
 
 **Trust.** An extension runs inside the server process with the server's rights. The server's SAFE
-check is a guardrail for reviewed code, not a sandbox.
+check is a guardrail for reviewed code, not a sandbox. It refuses a SAFE extension that uses
+reflection (`System.Reflection`, `Delegate.CreateDelegate`), reads the environment or the host
+(`Environment.GetEnvironmentVariable`, `MachineName`, `CommandLine`), or starts code that outlives the
+call (`Thread`, `ThreadPool`, `Timer`, `Parallel`, `Task.Run`). The guide lists every ban. An UNSAFE
+extension's private dependencies are hashed at startup: deploy each UNSAFE extension in a folder of
+its own, as one unit.
 
 The full guide (value mapping and arrays, NULL rules, table-function, aggregate, trigger and
 procedure semantics, the SAFE check, limits and error codes) is

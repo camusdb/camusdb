@@ -45,8 +45,11 @@ namespace CamusDB.Core.Extensions.Inline;
 /// </summary>
 internal static class InlineFunctionAllowList
 {
-    /// <summary>The revision of this list and of the rules of the symbol checker.</summary>
-    public const int Revision = 1;
+    /// <summary>
+    /// The revision of this list and of the rules of the symbol checker. Revision 2: the SQL text of
+    /// a trigger's <c>Sql.ExecuteAsync</c> and <c>Sql.QueryAsync</c> must be a constant.
+    /// </summary>
+    public const int Revision = 2;
 
     /// <summary>What one listed type allows.</summary>
     internal sealed class TypeRule

@@ -34,7 +34,9 @@ public enum ExtensionTrust
 ///
 /// <para><see cref="Sha256"/> is the hash of the exact bytes the server verified and loaded (the file
 /// is read once, and those bytes are both checked and loaded). It is how a node with a different build
-/// of the same name and version is told apart: such a node does not bind the database's record.</para>
+/// of the same name and version is told apart: such a node does not bind the database's record.
+/// <see cref="DependenciesSha256"/> does the same for the other files the extension can load from its
+/// folder (see <see cref="ExtensionDependencyHash"/>).</para>
 /// </summary>
 public sealed class LoadedExtension
 {
@@ -52,6 +54,12 @@ public sealed class LoadedExtension
 
     /// <summary>The lowercase hex SHA-256 of the loaded bytes.</summary>
     public required string Sha256 { get; init; }
+
+    /// <summary>
+    /// The lowercase hex SHA-256 of the list of files the extension can load besides its own assembly,
+    /// taken at boot; <see cref="ExtensionBuild.EmptyDependencySet"/> when it can load none.
+    /// </summary>
+    public string DependenciesSha256 { get; init; } = ExtensionBuild.EmptyDependencySet;
 
     /// <summary>SAFE or UNSAFE.</summary>
     public required ExtensionTrust Trust { get; init; }
@@ -302,4 +310,24 @@ internal sealed class ExtensionRegistry
 
         return null;
     }
+}
+
+/// <summary>
+/// The rule that decides whether a loaded build is the build an install record names: the same name,
+/// version, assembly hash and dependency hash.
+///
+/// <para><b>Records from before the dependency hash.</b> A record installed before the dependency
+/// hash existed has an empty <see cref="Catalogs.Models.ExtensionDefinition.DependenciesSha256"/>; its
+/// dependencies are not compared, so an upgrade does not refuse the extensions that are installed.
+/// <c>ALTER EXTENSION ... UPDATE</c> to the same version writes the hash into the record. A probe
+/// answer of a node that predates the hash is treated the same way.</para>
+/// </summary>
+internal static class ExtensionBuild
+{
+    /// <summary>The SHA-256 of the empty text: the dependency hash of an extension that loads only its own assembly.</summary>
+    public const string EmptyDependencySet = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+
+    /// <summary>True when <paramref name="loaded"/> matches <paramref name="pinned"/>, or <paramref name="pinned"/> pins nothing.</summary>
+    public static bool SameDependencies(string? pinned, string? loaded) =>
+        string.IsNullOrEmpty(pinned) || string.IsNullOrEmpty(loaded) || string.Equals(pinned, loaded, StringComparison.OrdinalIgnoreCase);
 }
