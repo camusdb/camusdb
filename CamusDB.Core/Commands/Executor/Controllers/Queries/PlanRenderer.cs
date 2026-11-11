@@ -230,6 +230,9 @@ public static class PlanRenderer
         if (node.IsStreamingGroupBy)
             parts.Add("streaming: true");
 
+        if (node.TopK is { } topK)
+            parts.Add($"top_k=[{topK.OutputName} {(topK.Descending ? "DESC" : "ASC")}, k: {topK.K.ToString(System.Globalization.CultureInfo.InvariantCulture)}]");
+
         return parts.Count > 0 ? $"aggregate({string.Join(", ", parts)})" : "aggregate";
     }
 

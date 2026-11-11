@@ -532,7 +532,10 @@ internal sealed class QueryExecutor
     /// types never reach this method — multi-source plans execute through
     /// <see cref="QueryJoinExecutor"/>.
     /// </summary>
-    private IAsyncEnumerable<QueryResultRow> ExecutePlanNode(QueryPlan plan, PhysicalPlanNode node, bool collectStats)
+    /// <param name="kthThreshold">Set only for the aggregate directly below a bounded sort of a
+    /// grouped COUNT top k: the k-th count the sort publishes, which lets the spill aggregation skip a
+    /// partition (see <see cref="AggregateTopKThreshold"/>). Made new for each execution.</param>
+    private IAsyncEnumerable<QueryResultRow> ExecutePlanNode(QueryPlan plan, PhysicalPlanNode node, bool collectStats, AggregateTopKThreshold? kthThreshold = null)
     {
         // Partial-merge aggregation replaces BOTH the aggregate and its gather input: every
         // span contributes one partial row and the merge projection produces the final answer.
@@ -564,7 +567,14 @@ internal sealed class QueryExecutor
             return ExecutePlanNode(plan, node.Input, collectStats);
         }
 
-        IAsyncEnumerable<QueryResultRow>? input = node.Input is null ? null : ExecutePlanNode(plan, node.Input, collectStats);
+        // A bounded sort directly over a grouped COUNT DESC top k shares its k-th count with the
+        // aggregate below it. The aggregate uses it only when it spills.
+        AggregateTopKThreshold? childThreshold =
+            node is SortNode { BoundedLimit: not null, Input: AggregateNode { IsStreamingGroupBy: false, TopK.Order: AggregateTopKOrder.CountDescending } }
+                ? new AggregateTopKThreshold()
+                : null;
+
+        IAsyncEnumerable<QueryResultRow>? input = node.Input is null ? null : ExecutePlanNode(plan, node.Input, collectStats, childThreshold);
 
         IAsyncEnumerable<QueryResultRow> cursor;
 
@@ -614,14 +624,16 @@ internal sealed class QueryExecutor
             case SortNode sortNode:
                 Trace(QueryPlanStepType.SortBy);
                 cursor = querySorter.SortResultset(
-                    plan.Ticket, RequireInput(input), QueryExecutionContext.For(plan.Database, plan.Ticket), sortNode.BoundedLimit);
+                    plan.Ticket, RequireInput(input), QueryExecutionContext.For(plan.Database, plan.Ticket), sortNode.BoundedLimit,
+                    kthThreshold: childThreshold);
                 break;
 
             case AggregateNode aggregateNode:
                 Trace(QueryPlanStepType.Aggregate);
                 cursor = aggregateNode.IsStreamingGroupBy
                     ? queryAggregator.AggregateStreamingGrouped(plan.Ticket, RequireInput(input), QueryExecutionContext.For(plan.Database, plan.Ticket))
-                    : queryAggregator.AggregateResultset(plan.Ticket, RequireInput(input), QueryExecutionContext.For(plan.Database, plan.Ticket));
+                    : queryAggregator.AggregateResultset(plan.Ticket, RequireInput(input), QueryExecutionContext.For(plan.Database, plan.Ticket),
+                        kthThreshold is not null ? aggregateNode.TopK : null, kthThreshold);
                 break;
 
             case HavingFilterNode:
@@ -792,6 +804,7 @@ internal sealed class QueryExecutor
         int schemaVersion,
         IReadOnlySet<string>? requiredColumns,
         KvTransaction snapshotTx,
+        QueryFragmentTopK? topK,
         [EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
         QueryTicket ticket = new(
@@ -814,7 +827,21 @@ internal sealed class QueryExecutor
             ScanSpanRows(database, table, filter, fromRowId, untilRowId, schemaVersion, requiredColumns, snapshotTx, ticket, cancellationToken),
             QueryExecutionContext.For(database, ticket));
 
+        if (topK is null)
+        {
+            await foreach (QueryResultRow row in partialRows.ConfigureAwait(false))
+                yield return new QueryFragmentRow(null, null, EncodeCells(row.Row));
+
+            yield break;
+        }
+
+        // A hash aggregation holds every group before it yields the first one, so collecting the
+        // partial rows here adds no memory beyond what the aggregation already used.
+        List<QueryResultRow> all = [];
         await foreach (QueryResultRow row in partialRows.ConfigureAwait(false))
+            all.Add(row);
+
+        foreach (QueryResultRow row in SpanTopKSelector.Select(all, topK.OutputName, topK.Descending, topK.K))
             yield return new QueryFragmentRow(null, null, EncodeCells(row.Row));
     }
 
@@ -916,6 +943,14 @@ internal sealed class QueryExecutor
 
         string? filterJson = filter is not null ? NodeAstWireCodec.Serialize(filter) : null;
         string[] aggregatesJson = partialPlan.ShipProjections.Select(NodeAstWireCodec.Serialize).ToArray();
+
+        // For MAX DESC, or MIN ASC on a NOT NULL column, with no other aggregate, each span may send
+        // only its local top k: the union still holds every group of the global top k with its exact
+        // value (AggregateTopK.SpanLocalTopKIsExact has the proof). The SortNode above the merge then
+        // keeps the k groups. Every other shape sends every group of every span.
+        QueryFragmentTopK? spanTopK = aggregateNode.TopK is { SpanLocalTopKIsExact: true } topK
+            ? new QueryFragmentTopK { OutputName = topK.OutputName, Descending = topK.Descending, K = topK.K }
+            : null;
         string[]? groupByJson = partialPlan.ShipGroupBy?.Select(NodeAstWireCodec.Serialize).ToArray();
 
         IReadOnlyList<PlacementSpan> spans = gather.Placement.Spans;
@@ -1025,6 +1060,7 @@ internal sealed class QueryExecutor
                     FilterJson = filterJson ?? "",
                     AggregatesJson = aggregatesJson,
                     GroupByJson = groupByJson,
+                    TopK = spanTopK,
                     RequiredColumns = plan.ScanRequiredColumns?.ToArray(),
                 };
 
@@ -1067,7 +1103,7 @@ internal sealed class QueryExecutor
             await foreach (QueryFragmentRow partial in ExecuteFragmentAggregate(
                 database, table, partialPlan.ShipProjections, partialPlan.ShipGroupBy, filter,
                 fromRowId, untilRowId, plan.TableSchemaVersion, plan.ScanRequiredColumns,
-                plan.Ticket.TxnState, cts.Token).ConfigureAwait(false))
+                plan.Ticket.TxnState, spanTopK, cts.Token).ConfigureAwait(false))
             {
                 partials.Add(ParseCells(partial.CellsJson!));
             }

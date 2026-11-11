@@ -795,7 +795,13 @@ When a primary-row scan qualifies, the planner wraps it in a `GatherNode`. The g
 on its leader through `IQueryFragmentTransport` when a shippable filter or another supported
 fragment shape can run there. Unfiltered spans can still run concurrently using Kahuna's locator
 routing. The peer evaluates the filter and streams survivors; a qualifying aggregate computes
-per-span partials that the coordinator merges. An eligible inner hash join broadcasts a bounded
+per-span partials that the coordinator merges. For `GROUP BY ... ORDER BY MAX(x) DESC LIMIT n`, or
+`MIN(x) ASC` on a NOT NULL column, with no other aggregate in the select list, each span sends only
+its local top `OFFSET + LIMIT` groups, ties at the last value included, instead of every group (the
+`top_k` detail of the aggregate row). The union of those groups holds each group of the result with
+its exact value, so the merge and the bounded sort above it give the same answer. A peer that does
+not know the request field sends every group, which is still correct. `COUNT` and `SUM` add up over
+the spans, so a span cannot rank its groups by them alone, and they still send every group. An eligible inner hash join broadcasts a bounded
 build side so peers can probe their local spans. See
 [key-range sharding](key-range-sharding.md#interaction-with-distributed-query-execution) for the
 wire path and `EXPLAIN` for the gather and eligibility reason. General remote execution of

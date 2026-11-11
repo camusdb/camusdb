@@ -37,6 +37,8 @@ public sealed class StatementProbe
 
     private int spilled;
 
+    private long spillPartitionsPruned;
+
     /// <summary>
     /// Distinct hashes of the plans the statement built, guarded by its own monitor. A statement
     /// builds one plan per relation it reads — a join, a subquery, a derived table — and a correlated
@@ -52,6 +54,12 @@ public sealed class StatementProbe
 
     /// <summary>True when any blocking operator wrote to a spill file.</summary>
     public bool Spilled => Volatile.Read(ref spilled) != 0;
+
+    /// <summary>
+    /// Spill partitions of a grouped top-k aggregate that were never read back, because no group in
+    /// them could reach the k-th count of the bounded sort (see <c>AggregateTopKThreshold</c>).
+    /// </summary>
+    public long SpillPartitionsPruned => Interlocked.Read(ref spillPartitionsPruned);
 
     /// <summary>
     /// A hash of every distinct plan the statement built, or zero when it built none (an
@@ -122,4 +130,7 @@ public sealed class StatementProbe
     /// spills is reported without touching this type.
     /// </summary>
     public void NoteSpill() => Volatile.Write(ref spilled, 1);
+
+    /// <summary>Counts one spill partition that a grouped top-k aggregate skipped.</summary>
+    public void NoteSpillPartitionPruned() => Interlocked.Increment(ref spillPartitionsPruned);
 }

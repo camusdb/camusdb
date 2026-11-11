@@ -1894,7 +1894,7 @@ internal sealed class SelectStatementExecutor
 
                 await foreach (QueryFragmentRow partial in queryExecutor.ExecuteFragmentAggregate(
                     database, table, projections, groupBy, filter, fromRowId, untilRowId,
-                    request.SchemaVersion, requiredColumns, snapshotTx, cancellationToken).ConfigureAwait(false))
+                    request.SchemaVersion, requiredColumns, snapshotTx, request.TopK, cancellationToken).ConfigureAwait(false))
                 {
                     shippedOut++;
                     yield return partial;

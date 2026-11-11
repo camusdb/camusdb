@@ -328,6 +328,8 @@ public sealed class InProcessSchemaCluster : IAsyncDisposable
 
         private long rowsReturned;
 
+        private long cellBytesReturned;
+
         internal RecordingFragmentTransport(IQueryFragmentTransport inner) => this.inner = inner;
 
         internal int ExecutedCount { get { lock (executed) return executed.Count; } }
@@ -345,14 +347,26 @@ public sealed class InProcessSchemaCluster : IAsyncDisposable
         /// <summary>Total survivor rows shipped across all fragment executions since the last reset.</summary>
         internal long RowsReturned => Interlocked.Read(ref rowsReturned);
 
+        /// <summary>Total UTF-16 length of the aggregate cells (<c>CellsJson</c>) shipped since the last
+        /// reset: a size measure of partial-aggregate traffic that does not depend on the transport.</summary>
+        internal long CellBytesReturned => Interlocked.Read(ref cellBytesReturned);
+
         internal void ResetExecuted()
         {
             lock (executed) executed.Clear();
             Interlocked.Exchange(ref rowsReturned, 0);
+            Interlocked.Exchange(ref cellBytesReturned, 0);
         }
 
         /// <summary>The next <paramref name="count"/> fragment executions throw before any row.</summary>
         internal void FailNextFragments(int count) => failRemaining = count;
+
+        /// <summary>
+        /// When true, the top-k field of each fragment request is removed before the peer sees it,
+        /// as on a peer whose build does not know the field and ignores it. The peer then sends every
+        /// group, and the coordinator must still return the exact answer.
+        /// </summary>
+        internal bool IgnoreTopK { get; set; }
 
         public async IAsyncEnumerable<CamusDB.Core.CommandsExecutor.Models.Queries.QueryFragmentRow> ExecuteFragmentAsync(
             string targetRaftEndpoint,
@@ -368,12 +382,18 @@ public sealed class InProcessSchemaCluster : IAsyncDisposable
                 throw new System.IO.IOException("Injected fragment transport failure");
             }
 
+            if (IgnoreTopK)
+                request.TopK = null;
+
             await foreach (CamusDB.Core.CommandsExecutor.Models.Queries.QueryFragmentRow row in
                 inner.ExecuteFragmentAsync(targetRaftEndpoint, request, cancellationToken).ConfigureAwait(false))
             {
                 // Terminal stats frames are protocol bookkeeping, not shipped survivors.
                 if (row.Stats is null)
                     Interlocked.Increment(ref rowsReturned);
+
+                if (row.CellsJson is not null)
+                    Interlocked.Add(ref cellBytesReturned, row.CellsJson.Length);
 
                 yield return row;
             }

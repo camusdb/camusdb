@@ -74,6 +74,14 @@ public sealed class AggregateNode : PhysicalPlanNode
     /// </summary>
     public PartialAggregatePlan? PartialPlan { get; init; }
 
+    /// <summary>
+    /// The top-k shape of this grouped aggregate, or null when the query is not
+    /// <c>GROUP BY ... ORDER BY aggregate LIMIT n</c> in a form <see cref="AggregateTopK"/> accepts.
+    /// The partial-aggregate gather reads it to let each span send only its local top k; see
+    /// <see cref="AggregateTopK.SpanLocalTopKIsExact"/> for when that is allowed.
+    /// </summary>
+    public AggregateTopK? TopK { get; init; }
+
     public AggregateNode(PhysicalPlanNode input)
     {
         Input = input;

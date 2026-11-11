@@ -12,6 +12,7 @@ using System.Numerics;
 using System.Runtime.CompilerServices;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
+using CamusDB.Core.CommandsExecutor.Models.Plans;
 using CamusDB.Core.CommandsExecutor.Models.Queries;
 using CamusDB.Core.CommandsExecutor.Models.Tickets;
 using CamusDB.Core.CommandsExecutor.Controllers.Queries.Spill;
@@ -31,13 +32,29 @@ internal sealed class QueryAggregator
         _stats = stats;
     }
 
-    internal IAsyncEnumerable<QueryResultRow> AggregateResultset(QueryTicket ticket, IAsyncEnumerable<QueryResultRow> dataCursor, QueryExecutionContext context)
+    /// <param name="topK">The grouped COUNT DESC top-k shape of the query, set together with
+    /// <paramref name="kthThreshold"/> by the executor when a bounded sort sits directly above.</param>
+    /// <param name="kthThreshold">The k-th count of that sort. When both are set and the aggregation
+    /// spills, a partition whose largest slot total is below it is not read back
+    /// (see <see cref="SpillTopKPruning"/>).</param>
+    internal IAsyncEnumerable<QueryResultRow> AggregateResultset(
+        QueryTicket ticket,
+        IAsyncEnumerable<QueryResultRow> dataCursor,
+        QueryExecutionContext context,
+        AggregateTopK? topK = null,
+        AggregateTopKThreshold? kthThreshold = null)
     {
         if (ticket.Projection is null || ticket.Projection.Count == 0)
             throw new CamusDBException(CamusDBErrorCodes.InvalidInternalOperation, "This resultset shouldn't be aggregated");
 
         if (ticket.GroupBy is { Count: > 0 })
-            return AggregateGrouped(ticket, dataCursor, _stats, context, context.CancellationToken);
+        {
+            SpillTopKPruning? pruning = topK is { Order: AggregateTopKOrder.CountDescending } && kthThreshold is not null
+                ? new SpillTopKPruning(topK.OutputName, kthThreshold)
+                : null;
+
+            return AggregateGrouped(ticket, dataCursor, _stats, context, pruning, context.CancellationToken);
+        }
 
         // The single-aggregate fast paths below compute projection[0] only. Several aggregates, a
         // compound over aggregates, or a HAVING that needs hidden aggregates all go through the
@@ -81,6 +98,7 @@ internal sealed class QueryAggregator
         IAsyncEnumerable<QueryResultRow> dataCursor,
         StatisticsManager? stats,
         QueryExecutionContext context,
+        SpillTopKPruning? pruning,
         [EnumeratorCancellation] CancellationToken ct = default)
     {
         IReadOnlyList<NodeAst> groupBy = ticket.GroupBy!;
@@ -108,7 +126,7 @@ internal sealed class QueryAggregator
         }
 
         await foreach (QueryResultRow row in AggregateGroupedWithPossibleSpill(
-            groupBy, layout, ticket, dataCursor, stats, context, ct).ConfigureAwait(false))
+            groupBy, layout, ticket, dataCursor, stats, context, pruning, ct).ConfigureAwait(false))
             yield return row;
     }
 
@@ -198,12 +216,17 @@ internal sealed class QueryAggregator
         IAsyncEnumerable<QueryResultRow> dataCursor,
         StatisticsManager? stats,
         QueryExecutionContext context,
+        SpillTopKPruning? pruning,
         [EnumeratorCancellation] CancellationToken ct)
     {
         int threshold = context.Options.SpillEffectiveThreshold;
         long byteThreshold = context.Options.SpillEffectiveThresholdBytes;
         long groupBytes = 0;
         int K = context.Options.SpillMergeFanIn;
+
+        // Slot totals of each partition, only for a grouped COUNT DESC top k: partition p, slot s is
+        // at [p * SpillTopKPruning.Slots + s]. Filled from the spill point on.
+        long[]? slotTotals = null;
 
         SpillScope? scope = null;
         SpillWriteStream[]? writers = null;
@@ -221,7 +244,7 @@ internal sealed class QueryAggregator
             {
                 if (scope is not null)
                 {
-                    WriteToGroupPartition(row, groupBy, ticket, K, writers!, builder, scratch);
+                    WriteToGroupPartition(row, groupBy, ticket, K, writers!, builder, scratch, slotTotals: slotTotals);
                     continue;
                 }
 
@@ -260,7 +283,10 @@ internal sealed class QueryAggregator
                 carried = PartitionAccumulators(groups, K, seed: 0);
                 groups.Clear();
 
-                WriteToGroupPartition(row, groupBy, ticket, K, writers, builder, scratch);
+                if (pruning is not null)
+                    slotTotals = pruning.StartSlotTotals(carried, ticket);
+
+                WriteToGroupPartition(row, groupBy, ticket, K, writers, builder, scratch, slotTotals: slotTotals);
             }
 
             if (scope is null)
@@ -277,8 +303,19 @@ internal sealed class QueryAggregator
                     writers[i].Close();
                 }
 
-                for (int i = 0; i < K; i++)
+                // With slot totals, the partitions run from the largest slot total down, so the bounded
+                // sort above reaches a high k-th count early, and a partition whose every slot is below
+                // that count is skipped. Without them the partitions run in index order.
+                int[] order = slotTotals is null ? Enumerable.Range(0, K).ToArray() : SpillTopKPruning.OrderByLargestSlot(slotTotals, K);
+
+                foreach (int i in order)
                 {
+                    if (slotTotals is not null && pruning!.Threshold.Prunes(SpillTopKPruning.LargestSlot(slotTotals, i)))
+                    {
+                        context.Probe?.NoteSpillPartitionPruned();
+                        continue;
+                    }
+
                     await foreach (QueryResultRow row in AggregatePartitionAsync(
                         paths![i], carried![i], layout, groupBy, ticket, scope!, depth: 0, seed: 0, stats, context, ct).ConfigureAwait(false))
                         yield return row;
@@ -326,11 +363,18 @@ internal sealed class QueryAggregator
         SpillWriteStream[] writers,
         GroupKeyBuilder builder,
         ColumnValue[] scratch,
-        int seed = 0)
+        int seed = 0,
+        long[]? slotTotals = null)
     {
         ReadOnlySpan<ColumnValue> key = builder.BuildInto(groupBy, row.Row, ticket, scratch);
-        int p = GroupPartitionIndex(key, K, seed);
+        int hash = GroupKeyComparer.Instance.GetHashCode(key);
+        int p = PartitionFromHash(hash, K, seed);
         SpillRowCodec.EncodeToStream(writers[p], row);
+
+        // Each row adds at most 1 to its group's COUNT, so counting rows gives an upper bound of
+        // COUNT(*) and of COUNT(col) alike.
+        if (slotTotals is not null)
+            slotTotals[p * SpillTopKPruning.Slots + SpillTopKPruning.SlotOf(hash)]++;
     }
 
     /// <summary>
@@ -1135,6 +1179,108 @@ internal sealed class QueryAggregator
             });
 
             return aggregates.Count - 1;
+        }
+    }
+
+    /// <summary>
+    /// Skips spill partitions of a grouped <c>COUNT(...) DESC</c> top k that cannot hold a result
+    /// group. Each spill partition is cut into <see cref="Slots"/> slots by bits of the group-key hash
+    /// that the partition choice does not use, and each slot keeps the sum of the counts of the groups
+    /// in it: the count each carried accumulator already holds, plus one for each row written after
+    /// the spill started. No group in a slot can have a count above the slot total, so when the largest
+    /// slot total of a partition is at or below the k-th count of the full heap of the bounded sort
+    /// (<see cref="AggregateTopKThreshold"/>), no group of that partition can enter the heap, and the
+    /// partition is never read back.
+    ///
+    /// <para><b>Why COUNT only.</b> The proof needs each row to add a non-negative amount to its group.
+    /// A row adds 0 or 1 to a COUNT. A SUM argument can be negative, and CamusDB cannot prove that it
+    /// is not, so SUM is out of scope.</para>
+    ///
+    /// <para><b>Why slots.</b> One total per partition would prune only when the whole partition is
+    /// below the k-th count. With many small groups in one partition the total is large while each
+    /// group is small; slots split that total without more spill files.</para>
+    ///
+    /// <para>Only the first spill level prunes. A partition that spills again inside
+    /// <see cref="AggregatePartitionAsync"/> is read in full, as before.</para>
+    /// </summary>
+    private sealed class SpillTopKPruning
+    {
+        /// <summary>Slots per spill partition.</summary>
+        public const int Slots = 8;
+
+        /// <summary>A seed that no spill level uses (levels use 0 to <see cref="MaxGroupByRecursionDepth"/>),
+        /// so that the slot of a key does not follow from its partition.</summary>
+        private const int SlotSeed = 0x5107;
+
+        public SpillTopKPruning(string outputName, AggregateTopKThreshold threshold)
+        {
+            OutputName = outputName;
+            Threshold = threshold;
+        }
+
+        /// <summary>The output name of the ordered COUNT.</summary>
+        public string OutputName { get; }
+
+        /// <summary>The k-th count of the bounded sort above.</summary>
+        public AggregateTopKThreshold Threshold { get; }
+
+        /// <summary>The slot of a group-key hash, in [0, <see cref="Slots"/>).</summary>
+        public static int SlotOf(int hash) => PartitionFromHash(hash, Slots, SlotSeed);
+
+        /// <summary>
+        /// Makes the slot totals at the moment the aggregation starts to spill, from the counts the
+        /// carried accumulators already hold. Called once per spill, so the cost of building each
+        /// carried group's result row is paid once per carried group.
+        /// </summary>
+        public long[] StartSlotTotals(List<KeyValuePair<CompositeColumnValue, GroupAccumulator>>[] carried, QueryTicket ticket)
+        {
+            long[] totals = new long[carried.Length * Slots];
+
+            for (int p = 0; p < carried.Length; p++)
+            {
+                foreach (KeyValuePair<CompositeColumnValue, GroupAccumulator> group in carried[p])
+                {
+                    long count = group.Value.ToResultRow(ticket).Row.TryGetValue(OutputName, out ColumnValue? value)
+                        && value is { Type: ColumnType.Integer64 }
+                            ? value.LongValue
+                            : long.MaxValue;
+
+                    int slot = p * Slots + SlotOf(GroupKeyComparer.Instance.GetHashCode(group.Key));
+                    totals[slot] = count == long.MaxValue || totals[slot] > long.MaxValue - count
+                        ? long.MaxValue
+                        : totals[slot] + count;
+                }
+            }
+
+            return totals;
+        }
+
+        /// <summary>The largest slot total of partition <paramref name="partition"/>.</summary>
+        public static long LargestSlot(long[] totals, int partition)
+        {
+            long largest = 0;
+            int start = partition * Slots;
+
+            for (int s = 0; s < Slots; s++)
+                largest = Math.Max(largest, totals[start + s]);
+
+            return largest;
+        }
+
+        /// <summary>The partition indexes ordered from the largest slot total down, ties by index.</summary>
+        public static int[] OrderByLargestSlot(long[] totals, int partitions)
+        {
+            int[] order = new int[partitions];
+            long[] largest = new long[partitions];
+
+            for (int p = 0; p < partitions; p++)
+            {
+                order[p] = p;
+                largest[p] = LargestSlot(totals, p);
+            }
+
+            Array.Sort(order, (a, b) => largest[a] != largest[b] ? largest[b].CompareTo(largest[a]) : a.CompareTo(b));
+            return order;
         }
     }
 

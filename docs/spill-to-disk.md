@@ -112,6 +112,17 @@ finishes in memory.
 After a spill, `DISTINCT` returns the rows that came before the overflow first, then the rest
 partition by partition. SQL does not define an order for `DISTINCT` without `ORDER BY`.
 
+**Top-k groupings skip partitions.** For `GROUP BY ... ORDER BY COUNT(...) DESC LIMIT n` (the
+`top_k` detail of the aggregate row in `EXPLAIN`), the spill code keeps 8 slot totals for each
+partition while it writes the partition files. A slot total is the sum of the counts of the groups
+that hash to that slot, so no group in the slot has a larger count. The partitions are then read
+back from the largest slot total down. The bounded sort above the grouping keeps the current n-th
+count, and a partition whose largest slot total is at or below that count is not read back: none of
+its groups can enter the result. The file is still deleted with the others. This applies only to the
+first level of partitions, only when the sort is bounded (`n` at or below `SpillThresholdRows`), and
+only to `COUNT`, because a `SUM` argument can be negative. Data where all groups have similar counts
+gives no saving.
+
 ### The row codec
 
 Intermediate rows can be synthetic — post-join, post-projection shapes that do not correspond to

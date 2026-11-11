@@ -92,6 +92,16 @@ public sealed class QueryFragmentRequest
     /// <summary>Serialized fragment-side GROUP BY expressions; null for global aggregates.</summary>
     public string[]? GroupByJson { get; set; }
 
+    /// <summary>
+    /// When set on a grouped aggregate fragment: the fragment sends only its local top k groups by
+    /// one projected aggregate, every group that ties with the k-th value included, instead of
+    /// every group. The coordinator sets it only when a span-local top k gives the exact answer
+    /// (<c>AggregateTopK.SpanLocalTopKIsExact</c>). A peer on an older build ignores the unknown
+    /// field and sends every group; that is a superset of the top k, and the merge stays exact, so
+    /// the field needs no format-version bump.
+    /// </summary>
+    public QueryFragmentTopK? TopK { get; set; }
+
     /// <summary>Columns the remote must decode (filter columns included); null = all columns.</summary>
     public string[]? RequiredColumns { get; set; }
 
@@ -114,6 +124,24 @@ public sealed class QueryFragmentRequest
     /// — rejects it outright and the coordinator falls back to a local probe.
     /// </summary>
     public QueryFragmentJoinSpec? Join { get; set; }
+}
+
+/// <summary>
+/// The local top-k request of a grouped aggregate fragment (<see cref="QueryFragmentRequest.TopK"/>):
+/// keep the groups whose <see cref="OutputName"/> value ranks in the first <see cref="K"/> in the
+/// given direction, with every group that ties with the k-th value. Values are ranked with
+/// <c>ColumnValue.CompareTo</c>, the order the coordinator's sort uses.
+/// </summary>
+public sealed class QueryFragmentTopK
+{
+    /// <summary>The output name (alias) of the aggregate the groups are ranked by.</summary>
+    public string OutputName { get; set; } = "";
+
+    /// <summary>True to keep the largest values, false to keep the smallest.</summary>
+    public bool Descending { get; set; }
+
+    /// <summary>The number of leading groups to keep, ties at the k-th value not counted.</summary>
+    public int K { get; set; }
 }
 
 /// <summary>

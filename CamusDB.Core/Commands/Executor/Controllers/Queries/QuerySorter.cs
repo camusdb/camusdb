@@ -69,7 +69,8 @@ internal sealed class QuerySorter
         IAsyncEnumerable<QueryResultRow> dataCursor,
         QueryExecutionContext context,
         long? boundedLimit = null,
-        [EnumeratorCancellation] CancellationToken cancellationToken = default)
+        [EnumeratorCancellation] CancellationToken cancellationToken = default,
+        AggregateTopKThreshold? kthThreshold = null)
     {
         // Executed as part of a plan the token arrives on the context; driven directly it arrives
         // on the enumerator. See QueryExecutionContext.Effective for which one wins.
@@ -102,7 +103,13 @@ internal sealed class QuerySorter
                         rows => SelectWithSpillAsync(rows, comparer, k, context, token))
                     : null;
 
-                plain = TopKAsync(dataCursor, comparer, k, byteCap, cancellationToken);
+                // A grouped COUNT top k below reads the k-th count of this heap to skip spill
+                // partitions (see AggregateTopKThreshold). Only a single key has one k-th value.
+                Action<QueryResultRow>? publishKth = kthThreshold is not null && ticket.OrderBy.Count == 1
+                    ? row => kthThreshold.Publish(GetSortValue(row, ticket.OrderBy[0].ColumnName))
+                    : null;
+
+                plain = TopKAsync(dataCursor, comparer, k, byteCap, cancellationToken, publishKth);
             }
             else
             {
@@ -276,7 +283,8 @@ internal sealed class QuerySorter
         IComparer<T> comparer,
         int k,
         TopKByteCap<T>? byteCap,
-        [EnumeratorCancellation] CancellationToken cancellationToken)
+        [EnumeratorCancellation] CancellationToken cancellationToken,
+        Action<T>? onKthChanged = null)
     {
         if (k <= 0)
             yield break;
@@ -310,6 +318,9 @@ internal sealed class QuerySorter
                 long evictedBytes = retained.DequeueEnqueue((row, bytes), row).Bytes;
                 retainedBytes += bytes - evictedBytes;
             }
+
+            if (onKthChanged is not null && retained.Count == k && retained.TryPeek(out _, out T? kth))
+                onKthChanged(kth!);
 
             if (byteCap is null || retainedBytes < byteCap.Limit)
                 continue;

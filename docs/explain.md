@@ -211,7 +211,7 @@ One row is emitted per physical plan node, in depth-first order (parent before c
 | `index-range-scan`       | Range predicate (`<`, `>`, `BETWEEN`), or equality on a **non-unique** index | `index=<name>, from>=<val>, to<<val>` |
 | `index-in-list`          | `x IN (v1, v2, …)`, or `x = v1 OR x = v2 OR …`, where `x` is the first column of an index — one index seek per distinct value, results unioned. The index can be a unique index of several columns, such as a composite primary key: each value then seeks every entry that starts with it | `index=<name>, values=<n>` (count of seek values) |
 | `filter`                 | Residual predicate not satisfied by the chosen index | `<expr>` |
-| `aggregate`              | `GROUP BY` or aggregate functions | `group=[<exprs>], aggs=[<calls>]` |
+| `aggregate`              | `GROUP BY` or aggregate functions | `group=[<exprs>], aggs=[<calls>]`, and `top_k=[<alias> DESC\|ASC, k: <n>]` for a top-k grouping (see [Aggregate with GROUP BY](#aggregate-with-group-by)) |
 | `having-filter`          | `HAVING` clause applied after aggregation | `<expr>` |
 | `sort`                   | `ORDER BY` not satisfied by scan ordering | `<col> ASC/DESC, ...` |
 | `limit`                  | `LIMIT` / `OFFSET` | `<n>` or `<n> offset <m>` |
@@ -395,6 +395,30 @@ stage     node        detail
 physical  aggregate   group=[year], aggs=[count(*)]
 physical  table-scan  table=robots
 ```
+
+A grouping whose only `ORDER BY` key is an aggregate alias, with a `LIMIT`, adds `top_k` to the
+aggregate row. `k` is `OFFSET + LIMIT`:
+
+```sql
+EXPLAIN SELECT name, MAX(year) AS m FROM robots GROUP BY name ORDER BY m DESC LIMIT 5 OFFSET 1;
+```
+
+The aggregate row of that plan:
+
+```
+physical  aggregate   group=[name], aggs=[max(year)], top_k=[m DESC, k: 6]
+```
+
+The planner shows `top_k` for `COUNT` descending, `MAX` descending, and `MIN` ascending on a NOT NULL
+column, when the query has no `HAVING`. The shape lets the engine read or send fewer groups:
+
+- In a cluster, for `MAX` descending or `MIN` ascending with no other aggregate in the select list,
+  each span sends only its local top k groups to the coordinator.
+- When a `COUNT` grouping spills to disk, a spill partition that cannot hold a result group is not
+  read back.
+
+The query result is the same as without these steps. The detail text is the only change to the
+plan.
 
 ---
 

@@ -361,6 +361,144 @@ public sealed class QueryPlanner
     /// row, so only it may ship its span sums as exact NUMERIC totals: a cast of a float would change
     /// the result.
     /// </summary>
+    /// <summary>
+    /// Recognizes <c>GROUP BY ... ORDER BY aggregate LIMIT n [OFFSET m]</c> and returns its
+    /// <see cref="AggregateTopK"/> shape, or null for any other query. The rules:
+    /// <list type="bullet">
+    /// <item>The query groups, has no HAVING, and has exactly one ORDER BY key, which is not a
+    /// computed expression.</item>
+    /// <item>That key names the alias of exactly one projected aggregate call:
+    /// <c>COUNT</c> descending, <c>MAX</c> descending, or <c>MIN</c> ascending on a NOT NULL column
+    /// (see <see cref="AggregateTopKOrder"/> for why MIN needs NOT NULL).</item>
+    /// <item><c>offset + limit</c> is a non-negative value that fits in an <see cref="int"/>, by the
+    /// same rules as <see cref="ApplyTopKBound"/>. The value is evaluated for this statement,
+    /// parameters included: the plan cache keeps only the access decision and rebuilds the plan
+    /// nodes for each statement, so a cached plan never carries another statement's k.</item>
+    /// </list>
+    /// The shape is only a record of the query; see <see cref="AggregateTopK"/> for what a reader may
+    /// do with it.
+    /// </summary>
+    internal static AggregateTopK? TryRecognizeAggregateTopK(QueryTicket ticket, TableDescriptor table)
+    {
+        if (ticket.GroupBy is not { Count: > 0 } || ticket.Having is not null)
+            return null;
+
+        if (ticket.OrderBy is not { Count: 1 } || ticket.OrderBy[0].IsExpression)
+            return null;
+
+        if (ticket.Projection is not { Count: > 0 } projection)
+            return null;
+
+        long? limit = EvalLong(ticket.Limit, ticket);
+        if (limit is not { } limitValue || limitValue < 0)
+            return null;
+
+        long offsetValue = ticket.Offset is null ? 0 : EvalLong(ticket.Offset, ticket) ?? -1;
+        if (offsetValue < 0)
+            return null;
+
+        long k;
+        try
+        {
+            k = checked(offsetValue + limitValue);
+        }
+        catch (OverflowException)
+        {
+            return null;
+        }
+
+        if (k > int.MaxValue)
+            return null;
+
+        QueryOrderBy key = ticket.OrderBy[0];
+        NodeAst? ordered = null;
+        string? orderedAlias = null;
+
+        // Anything in the projection besides bare columns and the ordered aggregate. Counted
+        // conservatively: a compound expression or a second aggregate both need values from every
+        // span, so both clear SpanLocalTopKIsExact.
+        int otherOutputs = 0;
+
+        foreach (NodeAst item in projection)
+        {
+            NodeAst expression = item.nodeType == NodeType.ExprAlias ? item.leftAst! : item;
+
+            if (expression.nodeType == NodeType.Identifier)
+                continue;
+
+            if (ordered is null
+                && item.nodeType == NodeType.ExprAlias
+                && item.rightAst?.yytext is { } alias
+                && string.Equals(alias, key.ColumnName, StringComparison.OrdinalIgnoreCase)
+                && expression.nodeType == NodeType.ExprFuncCall
+                && expression.leftAst?.yytext is { } name
+                && AggregateFunctionCatalog.IsBuiltIn(name))
+            {
+                ordered = expression;
+                orderedAlias = alias;
+                continue;
+            }
+
+            otherOutputs++;
+        }
+
+        if (ordered is null || orderedAlias is null)
+            return null;
+
+        // A second output with the ordered name makes the key ambiguous.
+        int sameName = 0;
+        for (int i = 0; i < projection.Count; i++)
+        {
+            if (string.Equals(QueryProjectionResolver.GetOutputNameFromProjectionExpression(projection[i], i), orderedAlias, StringComparison.OrdinalIgnoreCase))
+                sameName++;
+        }
+
+        if (sameName != 1)
+            return null;
+
+        string function = ordered.leftAst!.yytext!;
+        AggregateTopKOrder order;
+
+        if (function.Equals("count", StringComparison.OrdinalIgnoreCase) && key.Type == OrderType.Descending)
+        {
+            order = AggregateTopKOrder.CountDescending;
+        }
+        else if (function.Equals("max", StringComparison.OrdinalIgnoreCase) && key.Type == OrderType.Descending)
+        {
+            order = AggregateTopKOrder.MaxDescending;
+        }
+        else if (function.Equals("min", StringComparison.OrdinalIgnoreCase) && key.Type == OrderType.Ascending
+                 && IsNotNullColumn(ordered.rightAst, table))
+        {
+            order = AggregateTopKOrder.MinAscending;
+        }
+        else
+        {
+            return null;
+        }
+
+        return new AggregateTopK(orderedAlias, order, (int)k, OtherAggregatesProjected: otherOutputs > 0);
+    }
+
+    /// <summary>True when <paramref name="argument"/> is a bare or qualified reference to a NOT NULL
+    /// column of <paramref name="table"/>.</summary>
+    private static bool IsNotNullColumn(NodeAst? argument, TableDescriptor table)
+    {
+        if (argument is not { nodeType: NodeType.Identifier, yytext: { } name })
+            return false;
+
+        int dot = name.LastIndexOf('.');
+        string bare = dot >= 0 ? name[(dot + 1)..] : name;
+
+        foreach (TableColumnSchema column in table.Schema.Columns ?? [])
+        {
+            if (string.Equals(column.Name, bare, StringComparison.OrdinalIgnoreCase))
+                return column.NotNull;
+        }
+
+        return false;
+    }
+
     private static bool IsInteger64Column(NodeAst? argument, TableDescriptor table) =>
         argument is { nodeType: NodeType.Identifier }
         && ColumnTypeOf(table, argument.yytext) == ColumnType.Integer64;
@@ -673,6 +811,7 @@ public sealed class QueryPlanner
             root = new AggregateNode(root)
             {
                 PartialPlan = isStreamingGroupBy ? null : TryBuildPartialAggregatePlan(ticket, table, root),
+                TopK = TryRecognizeAggregateTopK(ticket, table),
                 GroupByExpressions = ticket.GroupBy,
                 AggregateProjections = ExtractAggregateProjections(ticket),
                 IsStreamingGroupBy = isStreamingGroupBy,
