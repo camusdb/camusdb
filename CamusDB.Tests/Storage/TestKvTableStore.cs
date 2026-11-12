@@ -653,10 +653,13 @@ public sealed class TestKvTableStore
     [NonParallelizable]
     public async Task SerializableOptimistic_StillTakesReadPredicateLock_Hybrid()
     {
-        (EmbeddedKahuna node, KvTableStore store) = await CreateStoreAsync("hybridopt", ShardedOptions);
+        // The hybrid is the locking form of Serializable reads, so the test states the setting.
+        CamusDBOptions hybridOptions = ShardedOptions with { SerializableOptimisticPointLocks = true };
+
+        (EmbeddedKahuna node, KvTableStore store) = await CreateStoreAsync("hybridopt", hybridOptions);
         await using EmbeddedKahuna __ = node;
 
-        KvTransactionsManager transactions = new(node.Kahuna, ShardedOptions);
+        KvTransactionsManager transactions = new(node.Kahuna, hybridOptions);
 
         ObjectIdValue rowId = new(9, 9, 9);
         KvTransaction seed = await transactions.BeginAsync();

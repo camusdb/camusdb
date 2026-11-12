@@ -48,7 +48,10 @@ internal sealed class TestLargeValueConcurrency : SharedNodeBaseTest
     public TestLargeValueConcurrency(KeyValueTransactionLocking locking) => this.locking = locking;
 
     protected override CamusDBOptions ConfigureOptions(CamusDBOptions defaults)
-        => defaults with { DefaultTransactionLocking = locking };
+        // This fixture describes the locking form of Serializable reads: a shared lock on each key read,
+        // upgraded at the write. It states the setting so that it holds whatever the default is; the form
+        // that proves single-key reads at commit is covered by TestSerializableOptimisticPointReads.
+        => defaults with { DefaultTransactionLocking = locking, SerializableOptimisticPointLocks = true };
 
     private static readonly Random Rng = new(90210);
 

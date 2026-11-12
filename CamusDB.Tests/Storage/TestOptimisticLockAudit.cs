@@ -80,7 +80,9 @@ public sealed class TestOptimisticLockAudit
         await node.StartAsync(CancellationToken.None);
         await node.WaitForLeaderAsync($"{tableId}/warmup", CancellationToken.None);
         CountingKahuna stub = new(node.Kahuna);
-        return (node, stub, new KvTableStore(stub, CamusDBOptions.Default, "lockaudit", tableId));
+        // The audit counts the lock round trips of the locking form of Serializable reads, so it states the
+        // setting instead of taking the default.
+        return (node, stub, new KvTableStore(stub, CamusDBOptions.Default with { SerializableOptimisticPointLocks = true }, "lockaudit", tableId));
     }
 
     private static async Task<KvTransaction> BeginAsync(IKahuna kahuna, KeyValueTransactionLocking locking, CamusIsolationLevel level)

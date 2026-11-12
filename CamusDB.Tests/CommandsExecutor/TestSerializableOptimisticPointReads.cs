@@ -313,4 +313,182 @@ internal sealed class TestSerializableOptimisticPointReads : BaseTest
             await database.Transactions.RollbackIfNotCompletedAsync(mover);
         }
     }
+
+    /// <summary>Runs <paramref name="first"/> to its commit, then <paramref name="second"/>, and requires that not both commit.</summary>
+    private static async Task<(bool First, bool Second)> AtMostOneCommitsAsync(
+        DatabaseDescriptor database, KvTransaction first, Func<Task> firstSteps, KvTransaction second, Func<Task> secondSteps, string anomaly)
+    {
+        bool firstDone = await TryFinishAsync(database, first, firstSteps);
+        bool secondDone = await TryFinishAsync(database, second, secondSteps);
+
+        Assert.IsFalse(firstDone && secondDone, anomaly);
+        return (firstDone, secondDone);
+    }
+
+    private static string LargeText(int seed)
+    {
+        Random random = new(seed);
+        char[] chars = new char[6000];
+        for (int i = 0; i < chars.Length; i++)
+            chars[i] = (char)('a' + random.Next(26));
+        return new string(chars);
+    }
+
+    [Test]
+    public async Task ARowReadThroughAJoin_ThenWrittenByBoth_AtMostOneCommits()
+    {
+        (string db, DatabaseDescriptor database, CommandExecutor executor) = await SetupAsync();
+
+        await executor.ExecuteDDLSQL(new ExecuteSQLTicket(null!, db,
+            "CREATE TABLE refs (k INT64 PRIMARY KEY, target INT64 NOT NULL)", null));
+
+        KvTransaction seed = await BeginAsync(database);
+        await ExecAsync(executor, db, seed, "INSERT INTO refs (k, target) VALUES (1, 1), (2, 2)");
+        await database.Transactions.CommitAsync(seed);
+
+        const string read = "SELECT a.balance FROM refs j JOIN accounts a ON a.id = j.target WHERE j.k = 1";
+
+        KvTransaction first = await BeginAsync(database);
+        KvTransaction second = await BeginAsync(database);
+
+        try
+        {
+            long firstRead = (await QueryAsync(executor, db, first, read)).Single().Row["balance"].LongValue;
+            long secondRead = (await QueryAsync(executor, db, second, read)).Single().Row["balance"].LongValue;
+            Assert.AreEqual(100, firstRead);
+            Assert.AreEqual(100, secondRead);
+
+            (bool firstDone, bool secondDone) = await AtMostOneCommitsAsync(database,
+                first, () => ExecAsync(executor, db, first, $"UPDATE accounts SET balance = {firstRead + 10} WHERE id = 1"),
+                second, () => ExecAsync(executor, db, second, $"UPDATE accounts SET balance = {secondRead + 1} WHERE id = 1"),
+                "both read 100 through the join and both wrote: a lost update");
+
+            KvTransaction check = await BeginAsync(database);
+            long balance = await BalanceAsync(executor, db, check, 1);
+            await database.Transactions.CommitAsync(check);
+            Assert.AreEqual(firstDone ? 110 : secondDone ? 101 : 100, balance);
+        }
+        finally
+        {
+            await database.Transactions.RollbackIfNotCompletedAsync(first);
+            await database.Transactions.RollbackIfNotCompletedAsync(second);
+        }
+    }
+
+    [Test]
+    public async Task RowsReadByAnInList_EachWritesADifferentOne_AtMostOneCommits()
+    {
+        (string db, DatabaseDescriptor database, CommandExecutor executor) = await SetupAsync();
+
+        const string read = "SELECT balance FROM accounts WHERE id IN (1, 2)";
+
+        KvTransaction first = await BeginAsync(database);
+        KvTransaction second = await BeginAsync(database);
+
+        try
+        {
+            Assert.AreEqual(200, (await QueryAsync(executor, db, first, read)).Sum(r => r.Row["balance"].LongValue));
+            Assert.AreEqual(200, (await QueryAsync(executor, db, second, read)).Sum(r => r.Row["balance"].LongValue));
+
+            await AtMostOneCommitsAsync(database,
+                first, () => ExecAsync(executor, db, first, "UPDATE accounts SET balance = -50 WHERE id = 1"),
+                second, () => ExecAsync(executor, db, second, "UPDATE accounts SET balance = -50 WHERE id = 2"),
+                "both withdrawals committed after an IN-list read of both rows: write skew");
+
+            KvTransaction check = await BeginAsync(database);
+            long total = (await QueryAsync(executor, db, check, read)).Sum(r => r.Row["balance"].LongValue);
+            await database.Transactions.CommitAsync(check);
+            Assert.GreaterOrEqual(total, 50);
+        }
+        finally
+        {
+            await database.Transactions.RollbackIfNotCompletedAsync(first);
+            await database.Transactions.RollbackIfNotCompletedAsync(second);
+        }
+    }
+
+    [Test]
+    public async Task RowsAnInvertedIndexReadExaminedAndDropped_EachWritesOne_AtMostOneCommits()
+    {
+        (string db, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+
+        await executor.ExecuteDDLSQL(new ExecuteSQLTicket(null!, db,
+            "CREATE TABLE doctors (id int64 PRIMARY KEY, oncall int64, doc jsonb, INVERTED INDEX gin_doc (doc))", null));
+
+        KvTransaction seed = await BeginAsync(database);
+        await ExecAsync(executor, db, seed,
+            "INSERT INTO doctors (id, oncall, doc) VALUES (1, 1, '{\"k\":1}'), (2, 0, '{\"k\":2}'), (3, 0, '{\"k\":3}')");
+        await database.Transactions.CommitAsync(seed);
+
+        // The index returns all three rows; the filter on oncall drops rows 2 and 3 after they are read.
+        const string read = "SELECT id FROM doctors WHERE doc ? 'k' AND oncall = 1";
+
+        KvTransaction first = await BeginAsync(database);
+        KvTransaction second = await BeginAsync(database);
+
+        try
+        {
+            Assert.AreEqual(1, (await QueryAsync(executor, db, first, read)).Count);
+            Assert.AreEqual(1, (await QueryAsync(executor, db, second, read)).Count);
+
+            // Each saw one doctor on call and puts a second one on call: a different row each, both of them
+            // rows the other's read examined and dropped. With both committed there are three on call, which
+            // neither order of the two allows.
+            await AtMostOneCommitsAsync(database,
+                first, () => ExecAsync(executor, db, first, "UPDATE doctors SET oncall = 1 WHERE id = 2"),
+                second, () => ExecAsync(executor, db, second, "UPDATE doctors SET oncall = 1 WHERE id = 3"),
+                "each changed a row the other's read examined and dropped, and both committed");
+
+            KvTransaction check = await BeginAsync(database);
+            int onCall = (await QueryAsync(executor, db, check, read)).Count;
+            await database.Transactions.CommitAsync(check);
+            Assert.LessOrEqual(onCall, 2);
+        }
+        finally
+        {
+            await database.Transactions.RollbackIfNotCompletedAsync(first);
+            await database.Transactions.RollbackIfNotCompletedAsync(second);
+        }
+    }
+
+    [Test]
+    public async Task ALargeValueReadByBoth_ThenReplacedByBoth_AtMostOneCommits()
+    {
+        (string db, DatabaseDescriptor database, CommandExecutor executor) = await CreateDatabase();
+
+        await executor.ExecuteDDLSQL(new ExecuteSQLTicket(null!, db,
+            "CREATE TABLE docs (id INT64 PRIMARY KEY, body STRING)", null));
+
+        string original = LargeText(1), fromFirst = LargeText(2), fromSecond = LargeText(3);
+
+        KvTransaction seed = await BeginAsync(database);
+        await ExecAsync(executor, db, seed, $"INSERT INTO docs (id, body) VALUES (1, '{original}')");
+        await database.Transactions.CommitAsync(seed);
+
+        const string read = "SELECT body FROM docs WHERE id = 1";
+
+        KvTransaction first = await BeginAsync(database);
+        KvTransaction second = await BeginAsync(database);
+
+        try
+        {
+            Assert.AreEqual(original, (await QueryAsync(executor, db, first, read)).Single().Row["body"].StrValue);
+            Assert.AreEqual(original, (await QueryAsync(executor, db, second, read)).Single().Row["body"].StrValue);
+
+            (bool firstDone, bool secondDone) = await AtMostOneCommitsAsync(database,
+                first, () => ExecAsync(executor, db, first, $"UPDATE docs SET body = '{fromFirst}' WHERE id = 1"),
+                second, () => ExecAsync(executor, db, second, $"UPDATE docs SET body = '{fromSecond}' WHERE id = 1"),
+                "both read the value and both replaced it: a lost update");
+
+            KvTransaction check = await BeginAsync(database);
+            string stored = (await QueryAsync(executor, db, check, read)).Single().Row["body"].StrValue!;
+            await database.Transactions.CommitAsync(check);
+            Assert.AreEqual(firstDone ? fromFirst : secondDone ? fromSecond : original, stored);
+        }
+        finally
+        {
+            await database.Transactions.RollbackIfNotCompletedAsync(first);
+            await database.Transactions.RollbackIfNotCompletedAsync(second);
+        }
+    }
 }

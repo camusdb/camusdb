@@ -70,7 +70,10 @@ public sealed class TestSerializableAnomalies : SharedNodeBaseTest
     /// mode, so it is inherited from here.
     /// </summary>
     protected override CamusDBOptions ConfigureOptions(CamusDBOptions defaults)
-        => defaults with { DefaultTransactionLocking = locking };
+        // This fixture describes the locking form of Serializable reads: a shared lock on each key read,
+        // upgraded at the write. It states the setting so that it holds whatever the default is; the form
+        // that proves single-key reads at commit is covered by TestSerializableOptimisticPointReads.
+        => defaults with { DefaultTransactionLocking = locking, SerializableOptimisticPointLocks = true };
 
     // accounts(id Id PK, name String NOT NULL, balance Integer64)
     private async Task<(string dbname, DatabaseDescriptor db, CommandExecutor executor, string aliceId, string bobId)>
