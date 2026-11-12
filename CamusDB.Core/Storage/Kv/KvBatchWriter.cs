@@ -1205,6 +1205,16 @@ internal sealed class KvBatchWriter
                 item.Flags |= KeyValueFlags.AbortWhenDoomed;
         }
 
+        // A transaction that takes no lock for the keys it reads has nothing that orders it against a
+        // writer of those keys: a younger writer stages its write, and the older reader is refused at
+        // its commit, after all its work. With the flag the younger writer gives way at its write to an
+        // older transaction that read the key and is still running, as it would to that reader's lock.
+        if (locks.ValidatesPointReadsAtCommit(tx))
+        {
+            foreach (KahunaSetKeyValueRequestItem item in items)
+                item.Flags |= KeyValueFlags.YieldToOlderReaders;
+        }
+
         List<KahunaSetKeyValueRequestItem> pending = new(items);
         long deadline = retry.LockWaitDeadlineTicks();
         long replicationDeadline = retry.ReplicationWaitDeadlineTicks();
