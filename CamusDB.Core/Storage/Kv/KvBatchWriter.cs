@@ -1195,6 +1195,16 @@ internal sealed class KvBatchWriter
         CancellationToken ct,
         RetryableAbortSink? aborts = null)
     {
+        // A set of a key this transaction read, refused by a live write intent of another transaction,
+        // can succeed only if that transaction rolls back. With the flag Kahuna answers Aborted at once
+        // instead of MustRetry, and the loop below does not poll for the other commit only to abort
+        // after it. The retried transaction's read waits for the intent (KahunaRetryPolicy.IntentWaitFor).
+        if (retry.WaitsForIntents(tx))
+        {
+            foreach (KahunaSetKeyValueRequestItem item in items)
+                item.Flags |= KeyValueFlags.AbortWhenDoomed;
+        }
+
         List<KahunaSetKeyValueRequestItem> pending = new(items);
         long deadline = retry.LockWaitDeadlineTicks();
         long replicationDeadline = retry.ReplicationWaitDeadlineTicks();

@@ -82,7 +82,7 @@ internal sealed class TestRegistryRevalidationCost : BaseTest
         public override ValueTask<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> LocateAndTryGetValue(
             HLCTimestamp transactionId, string key, long revision, HLCTimestamp readTimestamp,
             KeyValueDurability durability, CancellationToken cancellationToken,
-            string coordinatorKey = "", TransactionOperationId operationId = default, KeyValueReadMode readMode = KeyValueReadMode.Default)
+            string coordinatorKey = "", TransactionOperationId operationId = default, KeyValueReadMode readMode = KeyValueReadMode.Default, KeyValueIntentWait intentWait = default)
         {
             if (key.StartsWith(registryBucket + "/db:", StringComparison.Ordinal))
                 Interlocked.Increment(ref RegistryPointReads);
@@ -91,7 +91,7 @@ internal sealed class TestRegistryRevalidationCost : BaseTest
 
             return base.LocateAndTryGetValue(
                 transactionId, key, revision, readTimestamp, durability, cancellationToken,
-                coordinatorKey, operationId, readMode);
+                coordinatorKey, operationId, readMode, intentWait);
         }
     }
 

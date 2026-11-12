@@ -156,6 +156,55 @@ internal sealed class KahunaRetryPolicy
     internal void ApplyOptions(CamusDBOptions next) => options = next;
 
     /// <summary>
+    /// True when <paramref name="tx"/> is an optimistic read-write transaction with a Kahuna session and
+    /// <see cref="CamusDBOptions.OptimisticIntentWaitMs"/> is above zero: the transactions whose row reads
+    /// wait for a foreign write intent (<see cref="IntentWaitFor"/>) and whose sets carry
+    /// <see cref="KeyValueFlags.AbortWhenDoomed"/>. The two go together. A set that aborts at once
+    /// while the retried read still pins the value below the same intent would abort again.
+    /// </summary>
+    internal bool WaitsForIntents(KvTransaction tx)
+        => options.OptimisticIntentWaitMs > 0
+            && tx.Locking == KeyValueTransactionLocking.Optimistic
+            && tx.TransactionMode == CamusTransactionMode.ReadWrite
+            && !tx.IsReadOnly
+            && tx.TransactionId != HLCTimestamp.Zero;
+
+    /// <summary>
+    /// The intent wait of a row read of <paramref name="tx"/> at <paramref name="view"/>.
+    ///
+    /// <para>An optimistic transaction reads the latest committed value and Kahuna pins it. When another
+    /// transaction holds a live write intent on the row, the pinned value is the one that transaction
+    /// is about to replace, so a later write of the row by this transaction can succeed only if the
+    /// other one rolls back. With the wait, Kahuna holds the read until the intent settles, for at most
+    /// <see cref="CamusDBOptions.OptimisticIntentWaitMs"/>, and the read then pins the value the other
+    /// transaction committed. At the limit the read is answered as it is without the wait.</para>
+    ///
+    /// <para>No wait for a read at a timestamp (Kahuna ignores the option there) and for any transaction
+    /// <see cref="WaitsForIntents"/> leaves out.</para>
+    ///
+    /// <para><b>HoldsLocks.</b> With it set, Kahuna does not let a transaction wait for an older one
+    /// (wait-die), because two transactions that hold something could wait for each other. A Serializable
+    /// read-write transaction takes a shared lock before each row read and always states it. A Read
+    /// Committed transaction states false also after it wrote, on purpose. A transaction that writes a row
+    /// and then reads a second one is the common read-modify-write of two rows, and under wait-die half
+    /// of those second reads did not wait and their transactions were retried. A cycle is possible: each
+    /// of two transactions wrote the row the other now reads. It is bounded: both reads are answered at
+    /// the limit with the committed value, and the next set of either is refused at once, as it is
+    /// without the wait. On a 256-worker two-row transfer load 0.4% of the waits ended at a 100 ms limit,
+    /// and a 25 ms limit made transactions run out of client retries.</para>
+    /// </summary>
+    internal KeyValueIntentWait IntentWaitFor(KvTransaction tx, KvReadView view)
+    {
+        if (!view.Timestamp.IsNull() || !WaitsForIntents(tx))
+            return KeyValueIntentWait.None;
+
+        // A Serializable transaction locks each key before it reads it, so it holds a range lock by the
+        // time it asks; one that proves its single-key reads at commit instead may hold none.
+        bool holdsLocks = tx.IsolationLevel == CamusIsolationLevel.Serializable && tx.HoldsRangeLocks;
+        return new KeyValueIntentWait(options.OptimisticIntentWaitMs, holdsLocks);
+    }
+
+    /// <summary>
     /// Exponential back-off: 1 ms, 2 ms, 4 ms, … capped at <see cref="MaxRetryDelayMs"/>.
     /// Guards against int overflow: <c>1 &lt;&lt; attempt</c> becomes negative for attempt >= 31.
     /// </summary>

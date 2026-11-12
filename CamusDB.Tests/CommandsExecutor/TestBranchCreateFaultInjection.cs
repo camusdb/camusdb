@@ -55,7 +55,7 @@ public sealed class TestBranchCreateFaultInjection : BaseTest
         public override ValueTask<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> LocateAndTryGetValue(
             HLCTimestamp transactionId, string key, long revision, HLCTimestamp readTimestamp,
             KeyValueDurability durability, CancellationToken cancellationToken,
-            string coordinatorKey = "", TransactionOperationId operationId = default, KeyValueReadMode readMode = KeyValueReadMode.Default)
+            string coordinatorKey = "", TransactionOperationId operationId = default, KeyValueReadMode readMode = KeyValueReadMode.Default, KeyValueIntentWait intentWait = default)
         {
             // Any drop-intent read reports a present marker → branch-create aborts after publishing.
             if (key.Contains("dbregistry/drop-intent:", StringComparison.Ordinal))
@@ -63,7 +63,7 @@ public sealed class TestBranchCreateFaultInjection : BaseTest
                     (KeyValueResponseType.Get, null));
 
             return base.LocateAndTryGetValue(transactionId, key, revision, readTimestamp, durability,
-                cancellationToken, coordinatorKey, operationId, readMode);
+                cancellationToken, coordinatorKey, operationId, readMode, intentWait);
         }
 
         public override Task<(KeyValueResponseType, long, HLCTimestamp)> LocateAndTryDeleteKeyValue(
@@ -98,7 +98,7 @@ public sealed class TestBranchCreateFaultInjection : BaseTest
         public override ValueTask<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> LocateAndTryGetValue(
             HLCTimestamp transactionId, string key, long revision, HLCTimestamp readTimestamp,
             KeyValueDurability durability, CancellationToken cancellationToken,
-            string coordinatorKey = "", TransactionOperationId operationId = default, KeyValueReadMode readMode = KeyValueReadMode.Default)
+            string coordinatorKey = "", TransactionOperationId operationId = default, KeyValueReadMode readMode = KeyValueReadMode.Default, KeyValueIntentWait intentWait = default)
         {
             if (key.Contains("dbregistry/drop-intent:", StringComparison.Ordinal))
             {
@@ -111,7 +111,7 @@ public sealed class TestBranchCreateFaultInjection : BaseTest
             }
 
             return base.LocateAndTryGetValue(transactionId, key, revision, readTimestamp, durability,
-                cancellationToken, coordinatorKey, operationId, readMode);
+                cancellationToken, coordinatorKey, operationId, readMode, intentWait);
         }
     }
 
@@ -887,13 +887,13 @@ public sealed class TestBranchCreateFaultInjection : BaseTest
         public override ValueTask<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> LocateAndTryGetValue(
             HLCTimestamp transactionId, string key, long revision, HLCTimestamp readTimestamp,
             KeyValueDurability durability, CancellationToken cancellationToken,
-            string coordinatorKey = "", TransactionOperationId operationId = default, KeyValueReadMode readMode = KeyValueReadMode.Default)
+            string coordinatorKey = "", TransactionOperationId operationId = default, KeyValueReadMode readMode = KeyValueReadMode.Default, KeyValueIntentWait intentWait = default)
         {
             if (abortCreate && key.Contains("dbregistry/drop-intent:", StringComparison.Ordinal))
                 return ValueTask.FromResult<(KeyValueResponseType, ReadOnlyKeyValueEntry?)>((KeyValueResponseType.Get, null));
 
             return base.LocateAndTryGetValue(transactionId, key, revision, readTimestamp, durability,
-                cancellationToken, coordinatorKey, operationId, readMode);
+                cancellationToken, coordinatorKey, operationId, readMode, intentWait);
         }
 
         public override Task<(KeyValueResponseType, long, HLCTimestamp)> LocateAndTryDeleteKeyValue(

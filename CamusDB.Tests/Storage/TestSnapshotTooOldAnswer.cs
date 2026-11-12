@@ -196,13 +196,13 @@ public sealed class TestSnapshotTooOldAnswer
         public override ValueTask<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> LocateAndTryGetValue(
             HLCTimestamp transactionId, string key, long revision, HLCTimestamp readTimestamp, KeyValueDurability durability,
             CancellationToken cancellationToken, string coordinatorKey = "", TransactionOperationId operationId = default,
-            KeyValueReadMode readMode = KeyValueReadMode.Default)
+            KeyValueReadMode readMode = KeyValueReadMode.Default, KeyValueIntentWait intentWait = default)
             => ValueTask.FromResult<(KeyValueResponseType, ReadOnlyKeyValueEntry?)>((KeyValueResponseType.SnapshotTooOld, null));
 
         public override Task<KeyValueProbeResult[]> LocateAndTryProbeMany(
             HLCTimestamp transactionId, HLCTimestamp readTimestamp, IReadOnlyList<string> keys, KeyValueProbeLock lockMode,
             int expiresMs, KeyValueDurability durability, CancellationToken cancellationToken, string coordinatorKey = "",
-            TransactionOperationId operationId = default, KeyValueReadMode readMode = KeyValueReadMode.Default)
+            TransactionOperationId operationId = default, KeyValueReadMode readMode = KeyValueReadMode.Default, KeyValueIntentWait intentWait = default)
         {
             KeyValueProbeResult[] results = new KeyValueProbeResult[keys.Count];
             for (int i = 0; i < results.Length; i++)

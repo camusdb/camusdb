@@ -111,7 +111,7 @@ internal sealed class KvRowAccessor
             await locks.AcquireSharedPointLockAsync(tx, keys.RowBucketPrefix, key, cancellationToken).ConfigureAwait(false);
 
         KvReadView view = tx.QueryReadView;
-        BranchKvValue probe = await branch.ProbeRaw(tx.TransactionId, view.Timestamp, key, cancellationToken, tx.ReadRegistrationKey(key), aborts, view.Mode).ConfigureAwait(false);
+        BranchKvValue probe = await branch.ProbeRaw(tx.TransactionId, view.Timestamp, key, cancellationToken, tx.ReadRegistrationKey(key), aborts, view.Mode, retry.IntentWaitFor(tx, view)).ConfigureAwait(false);
         if (aborts is { HasAbort: true })
             return null;
 
@@ -193,7 +193,8 @@ internal sealed class KvRowAccessor
             "get_rows_batch",
             cancellationToken,
             aborts,
-            view.Mode
+            view.Mode,
+            retry.IntentWaitFor(tx, view)
         ).ConfigureAwait(false);
 
         ReadOnlyMemory<byte>?[] output = new ReadOnlyMemory<byte>?[rowIds.Count];

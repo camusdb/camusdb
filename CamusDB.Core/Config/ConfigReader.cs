@@ -123,6 +123,8 @@ public class ConfigReader
         "grpc_max_prepared_statement_bytes_per_stream",
         "lock_escalation_threshold",
         "lock_wait_deadline_ms",
+        "optimistic_intent_wait_ms",
+        "serializable_optimistic_point_locks",
         "replication_wait_deadline_ms",
         "key_range_sharding",
         "distributed_query_execution",

@@ -111,7 +111,7 @@ public sealed class TestKvTableStoreRetry
         // ---- intercepted: single-key get ----
         public override ValueTask<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> LocateAndTryGetValue(
             HLCTimestamp txId, string key, long revision, HLCTimestamp readTimestamp, KeyValueDurability durability, CancellationToken ct,
-            string coordinatorKey = "", TransactionOperationId operationId = default, KeyValueReadMode readMode = KeyValueReadMode.Default)
+            string coordinatorKey = "", TransactionOperationId operationId = default, KeyValueReadMode readMode = KeyValueReadMode.Default, KeyValueIntentWait intentWait = default)
         {
             if (InjectGetValueFaults-- > 0)
                 return ValueTask.FromResult<(KeyValueResponseType, ReadOnlyKeyValueEntry?)>((KeyValueResponseType.MustRetry, null));
@@ -142,7 +142,7 @@ public sealed class TestKvTableStoreRetry
         // whichever Kahuna call the path issues.
         public override Task<KeyValueProbeResult[]> LocateAndTryProbeMany(
             HLCTimestamp txId, HLCTimestamp readTimestamp, IReadOnlyList<string> keys, KeyValueProbeLock lockMode, int expiresMs,
-            KeyValueDurability durability, CancellationToken ct, string coordinatorKey = "", TransactionOperationId operationId = default, KeyValueReadMode readMode = KeyValueReadMode.Default)
+            KeyValueDurability durability, CancellationToken ct, string coordinatorKey = "", TransactionOperationId operationId = default, KeyValueReadMode readMode = KeyValueReadMode.Default, KeyValueIntentWait intentWait = default)
         {
             GetManyCalls++;
 

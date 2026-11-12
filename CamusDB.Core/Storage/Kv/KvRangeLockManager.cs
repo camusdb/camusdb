@@ -123,6 +123,19 @@ internal sealed class KvRangeLockManager
     private static bool ScanTakesPredicateLock(KvTransaction tx) => IsSerializableReadWrite(tx);
 
     /// <summary>
+    /// True when <paramref name="tx"/> proves its single-key reads at commit instead of locking them: an
+    /// optimistic transaction whose reads are folded into its read set, on a node configured with
+    /// <see cref="CamusDBOptions.SerializableOptimisticPointLocks"/> false. Kahuna checks every key the
+    /// transaction read and did not write against the committed head at commit, the absence of a key
+    /// included, and checks a key it read and then wrote as the base of that write. A range is not a key,
+    /// so scans keep their locks.
+    /// </summary>
+    internal bool ValidatesPointReadsAtCommit(KvTransaction tx)
+        => !options.SerializableOptimisticPointLocks
+            && tx.Locking == KeyValueTransactionLocking.Optimistic
+            && tx.FoldReads;
+
+    /// <summary>
     /// Returns <c>true</c> if <paramref name="tx"/> holds a singleton <b>Shared</b> point lock
     /// <c>[key, key]</c> for the given <paramref name="bucketPrefix"/>. Used by write paths
     /// to detect the read-then-write pattern and trigger the S→X upgrade.
@@ -587,6 +600,9 @@ internal sealed class KvRangeLockManager
         string key,
         CancellationToken cancellationToken)
     {
+        if (ValidatesPointReadsAtCommit(tx))
+            return Task.CompletedTask;
+
         // Whole-bucket lock already covers this point — no new RPC needed.
         if (tx.HasWholeBucketLock(bucketPrefix))
             return Task.CompletedTask;
@@ -652,7 +668,7 @@ internal sealed class KvRangeLockManager
         IReadOnlyList<string> lockKeys,
         CancellationToken cancellationToken)
     {
-        if (lockKeys.Count == 0 || tx.HasWholeBucketLock(bucketPrefix))
+        if (lockKeys.Count == 0 || tx.HasWholeBucketLock(bucketPrefix) || ValidatesPointReadsAtCommit(tx))
             return;
 
         if (lockKeys.Count == 1)
@@ -898,7 +914,9 @@ internal sealed class KvRangeLockManager
         string bucketPrefix,
         string key,
         CancellationToken cancellationToken)
-        => AcquireRangeLockAsync(tx, bucketPrefix, key, true, key, true, cancellationToken, RangeLockMode.Exclusive);
+        => ValidatesPointReadsAtCommit(tx)
+            ? Task.CompletedTask
+            : AcquireRangeLockAsync(tx, bucketPrefix, key, true, key, true, cancellationToken, RangeLockMode.Exclusive);
 
     /// <summary>
     /// Takes the per-key exclusive write lock that drives the 2PC commit path for a single-key

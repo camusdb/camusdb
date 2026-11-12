@@ -1442,6 +1442,30 @@ public sealed record CamusDBOptions
     public int MaterializedViewRefreshTakeoverAttempts { get; init; } = 3;
 
     /// <summary>
+    /// How long, in milliseconds, a row read of an optimistic read-write transaction waits for a write
+    /// that another transaction has staged on the row and not yet committed. Without the wait the read
+    /// returns the committed value below that write, and an <c>UPDATE</c> of the row by the reading
+    /// transaction then fails with a retryable conflict once the other transaction commits. With it the
+    /// read returns the value the other transaction committed, and the update goes through. A set
+    /// that still cannot succeed is refused at once instead of after the other commit. A read that
+    /// reaches the limit is answered without the wait. <c>0</c> turns the wait off.
+    /// Kahuna caps the value at its own limit of 1000 ms.
+    /// Default: 100 ms.
+    /// </summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Cluster)]
+    public int OptimisticIntentWaitMs { get; init; } = 100;
+
+    /// <summary>
+    /// Whether a Serializable read-write transaction with optimistic locking takes a shared lock on each
+    /// single key it reads, and upgrades it to exclusive when it writes the key. With false such a
+    /// transaction takes no lock for a read of one key: the read is recorded in the transaction's read
+    /// set and proved at commit, and a key it read and then wrote is proved as the base of the write.
+    /// Scans keep their range locks in both cases. Experimental; the default keeps the locks.
+    /// </summary>
+    [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Cluster)]
+    public bool SerializableOptimisticPointLocks { get; init; } = true;
+
+    /// <summary>
     /// Wall-clock cap, in milliseconds, for a single lock-acquire retry loop during Serializable
     /// conflicts. Bounds deadlock and persistent lock-conflict latency per operation.
     /// Default: 500 ms.

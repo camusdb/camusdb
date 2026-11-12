@@ -1290,6 +1290,16 @@ public sealed class KvTransaction
         }
     }
 
+    /// <summary>True while this transaction holds at least one range lock, of any mode and any bounds.</summary>
+    public bool HoldsRangeLocks
+    {
+        get
+        {
+            lock (trackSync)
+                return acquiredRangeLocks is { Count: > 0 };
+        }
+    }
+
     /// <summary>True when this transaction already wrote or deleted <paramref name="key"/>.</summary>
     public bool HasModified(string key)
     {

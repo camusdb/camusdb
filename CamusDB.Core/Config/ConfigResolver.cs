@@ -349,6 +349,8 @@ public static class ConfigResolver
         GrpcMaxPreparedStatementBytesPerStream = config.GrpcMaxPreparedStatementBytesPerStream,
         LockEscalationThreshold = config.LockEscalationThreshold,
         LockWaitDeadlineMs = config.LockWaitDeadlineMs,
+        OptimisticIntentWaitMs = config.OptimisticIntentWaitMs,
+        SerializableOptimisticPointLocks = config.SerializableOptimisticPointLocks,
         ReplicationWaitDeadlineMs = config.ReplicationWaitDeadlineMs,
 
         KeyRangeShardingEnabled = keyRangeSharding,

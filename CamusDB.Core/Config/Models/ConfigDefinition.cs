@@ -860,6 +860,11 @@ public class ConfigDefinition
     /// <summary>Per-bucket shared-point-lock count before whole-bucket escalation. Default 1000.</summary>
     public int LockEscalationThreshold { get; set; } = 1000;
 
+    /// <summary>How long a row read of an optimistic read-write transaction waits for another transaction's uncommitted write of the row. 0 = no wait. Default 100 ms.</summary>
+    public int OptimisticIntentWaitMs { get; set; } = 100;
+
+    public bool SerializableOptimisticPointLocks { get; set; } = true;
+
     /// <summary>Wall-clock cap per lock-acquire retry loop for Serializable conflicts. Default 500 ms.</summary>
     public int LockWaitDeadlineMs { get; set; } = 500;
 
@@ -1580,6 +1585,8 @@ public class ConfigDefinition
         if (LockEscalationThreshold <= 0)
             throw Invalid($"'lock_escalation_threshold' must be > 0, got {LockEscalationThreshold}");
 
+        if (OptimisticIntentWaitMs < 0)
+            throw Invalid($"'optimistic_intent_wait_ms' must be >= 0, got {OptimisticIntentWaitMs}");
         if (LockWaitDeadlineMs <= 0)
             throw Invalid($"'lock_wait_deadline_ms' must be > 0, got {LockWaitDeadlineMs}");
 

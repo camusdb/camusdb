@@ -347,6 +347,28 @@ nothing and has no such dependency. For a bulk read out of a busy table under op
 a snapshot (`AS OF SYSTEM TIME`) or run that statement pessimistically — see
 [`insert-select-and-ctas.md`](insert-select-and-ctas.md#concurrent-writers-on-the-source).
 
+**A row read waits for an uncommitted write of the row.** When an optimistic read-write transaction
+reads a row by its key and another transaction has written that row and not yet committed, the read
+waits for the other transaction to commit or roll back, and then returns the committed result. Without
+the wait the read would return the value the other transaction is about to replace, and a later
+`UPDATE` of the row by the reading transaction would fail with `CADB0504` once the other one commits.
+With it, two read-modify-write transactions on one row run one after the other and both commit. The
+wait is bounded by `optimistic_intent_wait_ms` (default 100 ms); at the limit the read returns the
+committed value as before. `0` turns the wait off. Three limits:
+
+- Only reads by row key wait: a point lookup, and the rows an index lookup fetches. A range scan does
+  not wait.
+- At Read Committed a transaction waits also after it has written. Two transactions that each wrote
+  the row the other one reads then wait for each other, until the limit; each read returns the
+  committed value and the next `UPDATE` of either is refused. Keep the limit well above the commit time
+  (a low limit turns waits into retries) and well below the client's statement timeout.
+- At Serializable a transaction does not wait for an older transaction's write, because it holds a
+  lock from its first read on and the two could wait for each other. It reads the committed value as
+  before.
+- When two transactions both read a row before either writes it, the second `UPDATE` cannot succeed.
+  It is refused at once with `CADB0504`, without waiting for the first transaction to commit, and the
+  client retries the transaction.
+
 #### Selecting the locking mode
 
 Pessimistic is the default. Optimistic is opt-in, chosen three ways (precedence: per-request >

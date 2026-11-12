@@ -96,14 +96,14 @@ internal sealed class TestDatabaseRegistry
 
         public override ValueTask<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> LocateAndTryGetValue(
             HLCTimestamp transactionId, string key, long revision, HLCTimestamp readTimestamp, KeyValueDurability durability,
-            CancellationToken cancellationToken, string coordinatorKey = "", TransactionOperationId operationId = default, KeyValueReadMode readMode = KeyValueReadMode.Default)
+            CancellationToken cancellationToken, string coordinatorKey = "", TransactionOperationId operationId = default, KeyValueReadMode readMode = KeyValueReadMode.Default, KeyValueIntentWait intentWait = default)
         {
             bool generation = key.EndsWith("dbregistry/generation", StringComparison.Ordinal);
             if (Refuse && (RefuseGenerationReads || !generation))
                 throw new RpcException(new Status(StatusCode.Unavailable, "Error connecting to subchannel.",
                     new SocketException((int)SocketError.ConnectionRefused)));
 
-            return base.LocateAndTryGetValue(transactionId, key, revision, readTimestamp, durability, cancellationToken, coordinatorKey, operationId, readMode);
+            return base.LocateAndTryGetValue(transactionId, key, revision, readTimestamp, durability, cancellationToken, coordinatorKey, operationId, readMode, intentWait);
         }
     }
 
@@ -904,10 +904,10 @@ internal sealed class TestDatabaseRegistry
         public override async ValueTask<(KeyValueResponseType, ReadOnlyKeyValueEntry?)> LocateAndTryGetValue(
             HLCTimestamp transactionId, string key, long revision, HLCTimestamp readTimestamp,
             KeyValueDurability durability, CancellationToken cancellationToken,
-            string coordinatorKey = "", TransactionOperationId operationId = default, KeyValueReadMode readMode = KeyValueReadMode.Default)
+            string coordinatorKey = "", TransactionOperationId operationId = default, KeyValueReadMode readMode = KeyValueReadMode.Default, KeyValueIntentWait intentWait = default)
         {
             (KeyValueResponseType, ReadOnlyKeyValueEntry?) result = await base.LocateAndTryGetValue(
-                transactionId, key, revision, readTimestamp, durability, cancellationToken, coordinatorKey, operationId, readMode);
+                transactionId, key, revision, readTimestamp, durability, cancellationToken, coordinatorKey, operationId, readMode, intentWait);
 
             // Pause AFTER the read so the caller holds a copy that a concurrent delete then outdates.
             if (!gateScan)
