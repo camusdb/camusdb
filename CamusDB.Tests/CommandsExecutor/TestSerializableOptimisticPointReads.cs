@@ -250,4 +250,67 @@ internal sealed class TestSerializableOptimisticPointReads : BaseTest
             await database.Transactions.RollbackIfNotCompletedAsync(second);
         }
     }
+
+    /// <summary>
+    /// Another transaction moves 50 from row 1 to row 2 and commits between a transaction's read of row 1
+    /// and its read of row 2. The reader must not be handed 100 and 150, with or without a write of its own.
+    /// </summary>
+    [TestCase(false)]
+    [TestCase(true)]
+    public async Task ATransferCommittedBetweenTwoReads_WhatTheReaderSeesAndWhetherItCommits(bool readerWrites)
+    {
+        (string db, DatabaseDescriptor database, CommandExecutor executor) = await SetupAsync();
+
+        KvTransaction seed = await BeginAsync(database);
+        await ExecAsync(executor, db, seed, "INSERT INTO accounts (id, balance) VALUES (3, 0)");
+        await database.Transactions.CommitAsync(seed);
+
+        KvTransaction reader = await BeginAsync(database);
+        KvTransaction mover = await BeginAsync(database);
+
+        try
+        {
+            long first = await BalanceAsync(executor, db, reader, 1);
+
+            bool moverDone = await TryFinishAsync(database, mover, async () =>
+            {
+                await ExecAsync(executor, db, mover, "UPDATE accounts SET balance = 50 WHERE id = 1");
+                await ExecAsync(executor, db, mover, "UPDATE accounts SET balance = 150 WHERE id = 2");
+            });
+
+            long second = -1;
+            string readOutcome = "ok";
+            bool readerDone = await TryFinishAsync(database, reader, async () =>
+            {
+                try
+                {
+                    second = await BalanceAsync(executor, db, reader, 2);
+                }
+                catch (CamusDBException e)
+                {
+                    readOutcome = e.Code;
+                    throw;
+                }
+
+                if (readerWrites)
+                    await ExecAsync(executor, db, reader, $"UPDATE accounts SET balance = {first + second} WHERE id = 3");
+            });
+
+            TestContext.Out.WriteLine(
+                $"pointLocks={pointLocks} readerWrites={readerWrites}: moverCommitted={moverDone} first={first} second={second} " +
+                $"secondRead={readOutcome} readerCommitted={readerDone}");
+
+            if (moverDone && readerDone)
+                Assert.AreEqual(200, first + second, "the reader committed on two rows that never held these values together");
+
+            // The reader is never handed two values that were not committed together: with the locks the
+            // mover is refused, without them the reader's second read is.
+            Assert.IsTrue(second == -1 || first + second == 200, $"the reader was handed {first} and {second}");
+        }
+        finally
+        {
+            await database.Transactions.RollbackIfNotCompletedAsync(reader);
+            await database.Transactions.RollbackIfNotCompletedAsync(mover);
+        }
+    }
 }

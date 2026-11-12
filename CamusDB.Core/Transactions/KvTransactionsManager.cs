@@ -420,7 +420,8 @@ public sealed class KvTransactionsManager : IDisposable
                 TransactionHandle h = await StartKahunaTransactionAsync(
                     coordinatorKey, "start Kahuna transaction",
                     txDeferred.Locking, txDeferred.ReadValidation, capturedDecision,
-                    txDeferred.Priority, ct, coordinatorPartition
+                    txDeferred.Priority, ct, coordinatorPartition,
+                    readFloor: WantsReadFloor(txDeferred.IsolationLevel, txDeferred.TransactionMode, txDeferred.Locking)
                 ).ConfigureAwait(false);
 
                 // A pinned start returns the key in its pinned form, and every later operation,
@@ -443,7 +444,8 @@ public sealed class KvTransactionsManager : IDisposable
             readValidationMode, 
             decisionDurabilityMode,
             priorityMode, 
-            cancellationToken
+            cancellationToken,
+            readFloor: WantsReadFloor(level, mode, lockingMode)
         ).ConfigureAwait(false);
 
         KvTransaction tx = new(
@@ -606,6 +608,20 @@ public sealed class KvTransactionsManager : IDisposable
     /// CADB0501. Any other non-<see cref="KeyValueResponseType.Set"/> response is a real failure and
     /// is surfaced immediately.</para>
     /// </summary>
+    /// <summary>
+    /// Whether a transaction asks Kahuna to hold its reads to one point in time. A Serializable read-write
+    /// transaction with optimistic locking that takes no lock for its single-key reads
+    /// (<see cref="CamusDBOptions.SerializableOptimisticPointLocks"/> false) needs it: without the locks
+    /// nothing stops another transaction from changing a row between two of its reads, and although its
+    /// commit is then refused, the statements in between would return rows that never held those values
+    /// together. With the locks the rows cannot change, and Read Committed promises no such thing.
+    /// </summary>
+    private bool WantsReadFloor(CamusIsolationLevel level, CamusTransactionMode mode, KeyValueTransactionLocking locking)
+        => !options.SerializableOptimisticPointLocks
+            && level == CamusIsolationLevel.Serializable
+            && mode == CamusTransactionMode.ReadWrite
+            && locking == KeyValueTransactionLocking.Optimistic;
+
     private async Task<TransactionHandle> StartKahunaTransactionAsync(
         string coordinatorKey, 
         string operation, 
@@ -614,7 +630,8 @@ public sealed class KvTransactionsManager : IDisposable
         DecisionDurability decisionDurability,
         TransactionPriority priority, 
         CancellationToken cancellationToken,
-        int? coordinatorPartition = null
+        int? coordinatorPartition = null,
+        bool readFloor = false
     )
     {
         KeyValueResponseType type = KeyValueResponseType.MustRetry;
@@ -636,6 +653,7 @@ public sealed class KvTransactionsManager : IDisposable
                     // key, and the handle carries the key in its pinned form (see SessionAnchorOf).
                     CoordinatorPartitionId = coordinatorPartition,
                     Locking           = locking,
+                    ReadFloor         = readFloor,
                     ReadValidation    = readValidation,
                     DecisionDurability = decisionDurability,
                     // Consulted by the node's admission gate to decide which queued transaction starts
