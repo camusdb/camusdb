@@ -863,7 +863,7 @@ public class ConfigDefinition
     /// <summary>How long a row read of an optimistic read-write transaction waits for another transaction's uncommitted write of the row. 0 = no wait. Default 100 ms.</summary>
     public int OptimisticIntentWaitMs { get; set; } = 100;
 
-    public bool SerializableOptimisticPointLocks { get; set; } = true;
+    public bool SerializableOptimisticPointLocks { get; set; } = false;
 
     /// <summary>Wall-clock cap per lock-acquire retry loop for Serializable conflicts. Default 500 ms.</summary>
     public int LockWaitDeadlineMs { get; set; } = 500;

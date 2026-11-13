@@ -43,11 +43,13 @@ namespace CamusDB.Core.Storage.Kv;
 /// writer, which is the reader-side half of strict two-phase locking; the write path's refusal of
 /// a mutation under a foreign range lock is the other half.</para>
 ///
-/// <para><b>Optimistic transactions still lock on the read side.</b> The write path skips the
-/// explicit exclusive lock under optimistic locking, but a Serializable read takes its shared
-/// predicate lock regardless of <see cref="KvTransaction.Locking"/>. Serializable + Optimistic is
-/// therefore a hybrid — optimistic writes with commit-time validation, plus retained predicate locks
-/// that keep the read phantom-free. Weakening it to fully lock-free would silently break isolation.</para>
+/// <para><b>Optimistic transactions still lock their scans.</b> The write path skips the explicit
+/// exclusive lock under optimistic locking, but a Serializable scan takes its shared range lock
+/// regardless of <see cref="KvTransaction.Locking"/>: a range is not a key, and only the lock keeps a
+/// scan phantom-free. A read of a single key is different. By default an optimistic transaction takes
+/// no lock for it and proves it at commit (<see cref="ValidatesPointReadsAtCommit"/>);
+/// <see cref="CamusDBOptions.SerializableOptimisticPointLocks"/> true makes it take the shared point
+/// lock and upgrade it at the write, as a pessimistic transaction does.</para>
 ///
 /// <para><b>A pinned snapshot never locks.</b> A transaction with a <see cref="KvTransaction.ReadTimestamp"/>
 /// (the Serializable read-only shape) reads every key as of that timestamp, on every page, range and
@@ -123,8 +125,8 @@ internal sealed class KvRangeLockManager
     private static bool ScanTakesPredicateLock(KvTransaction tx) => IsSerializableReadWrite(tx);
 
     /// <summary>
-    /// True when <paramref name="tx"/> proves its single-key reads at commit instead of locking them: an
-    /// optimistic transaction whose reads are folded into its read set, on a node configured with
+    /// True when <paramref name="tx"/> proves its single-key reads at commit instead of locking them: a
+    /// Serializable read-write optimistic transaction whose reads are folded into its read set, on a node configured with
     /// <see cref="CamusDBOptions.SerializableOptimisticPointLocks"/> false. Kahuna checks every key the
     /// transaction read and did not write against the committed head at commit, the absence of a key
     /// included, and checks a key it read and then wrote as the base of that write. A range is not a key,
@@ -141,6 +143,7 @@ internal sealed class KvRangeLockManager
 
     internal bool ValidatesPointReadsAtCommit(KvTransaction tx)
         => !options.SerializableOptimisticPointLocks
+            && IsSerializableReadWrite(tx)
             && tx.Locking == KeyValueTransactionLocking.Optimistic
             && tx.FoldReads;
 

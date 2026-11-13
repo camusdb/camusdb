@@ -322,17 +322,36 @@ not mean the same thing at both isolation levels** — read what you actually ge
 | | **Read Committed + Optimistic** | **Serializable + Optimistic** |
 |---|---|---|
 | Explicit write locks | none | none (write folds an implicit intent) |
-| Read/scan predicate locks | none | **still taken** (shared range/point locks) |
-| Lock-free? | **yes**, fully | **no** — this is a *hybrid* |
-| Phantom protection | ✗ (validates observed rows only) | ✓ (predicate locks fence the scan) |
+| Locks for a read of one key | none | none by default (proved at commit) |
+| Locks for a scan | none | **taken** (shared range locks) |
+| Lock-free? | **yes**, fully | for single-key reads; scans lock |
+| Phantom protection | ✗ (validates observed rows only) | ✓ (range locks fence the scan) |
 
-The predicate-lock behavior is gated on the **isolation level**, not on the locking mode: a
-Serializable read still takes its shared predicate lock and a following write upgrades it to exclusive,
-even when the transaction is optimistic. So **Serializable + Optimistic is a hybrid** — optimistic
-write/read-set validation *plus* the retained predicate locks that keep it phantom-free — and only
-**Read Committed + Optimistic** is fully lock-free (and, being lock-free, is phantom-vulnerable: its
-validation covers the specific rows it read, not predicates). Serializable is deliberately never weakened
-to lock-free, because that would silently break its isolation guarantee. See
+**Serializable + Optimistic locks ranges, not single keys.** A scan takes its shared range lock whatever
+the locking mode, because a range is not a key: a row inserted into a scanned range cannot be found by
+checking the keys the scan saw. A read of one key (a row by its primary key, a unique-index lookup, the
+rows a page of an index read fetches) takes no lock. Three things stand in for it:
+
+- **The read is proved at commit.** The key and the revision read, or the fact that the key was
+  missing, go into the transaction's read set, and the commit is refused if the key changed. A key that
+  was read and then written is proved as the base of that write.
+- **The reads are held to one point in time.** A read of a key the transaction has not read yet is
+  answered only if every key it read before still has the revision it read; otherwise that read is
+  refused. So a transaction is never handed two rows that were not committed together, which without a
+  lock could happen between its first read and its second.
+- **A write gives way to an older reader.** A write or a delete of a key that an older transaction read,
+  while that transaction is still running, is refused at once. The younger of the two gives way at its
+  statement and the older one goes on, the order a lock on the key would give.
+
+What changes for an application: a reader no longer blocks a writer of the row. A conflict that a lock
+would refuse at the writer's statement can instead be refused at the reader's next read or at its commit.
+Every such refusal is retryable from the start of the transaction.
+
+`serializable_optimistic_point_locks: true` restores the earlier form, in which a Serializable read takes
+a shared lock on each key it reads and a following write upgrades it to exclusive, even when the
+transaction is optimistic. That form blocks writers behind readers, and every commit of such a
+transaction takes the two-phase path. **Read Committed + Optimistic** is lock-free in both forms (and is
+phantom-vulnerable: its validation covers the specific rows it read, not predicates). See
 `kahuna-transaction-coordinator.md` for the mechanism.
 
 **What "observed rows" means.** An observation is recorded per *key*, for every key a read touched: the

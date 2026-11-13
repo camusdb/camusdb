@@ -104,9 +104,9 @@ internal sealed class KvRowAccessor
 
         string key = keys.BuildRowKey(rowId);
 
-        // Gated on isolation + mode only, NOT on tx.Locking: a Serializable+RW read takes this shared
-        // predicate lock even when tx.Locking is Optimistic (that is the Serializable+Optimistic hybrid —
-        // optimistic writes, but predicate locks still keep the read phantom-free).
+        // A Serializable read-write read asks for the shared point lock of the key. A pessimistic
+        // transaction takes it. An optimistic one takes it only when the node is configured to lock
+        // single-key reads; by default the lock manager returns at once and the read is proved at commit.
         if (tx.IsolationLevel == CamusIsolationLevel.Serializable && tx.TransactionMode == CamusTransactionMode.ReadWrite)
             await locks.AcquireSharedPointLockAsync(tx, keys.RowBucketPrefix, key, cancellationToken).ConfigureAwait(false);
 

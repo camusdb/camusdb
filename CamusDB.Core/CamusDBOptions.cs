@@ -1457,13 +1457,14 @@ public sealed record CamusDBOptions
 
     /// <summary>
     /// Whether a Serializable read-write transaction with optimistic locking takes a shared lock on each
-    /// single key it reads, and upgrades it to exclusive when it writes the key. With false such a
-    /// transaction takes no lock for a read of one key: the read is recorded in the transaction's read
-    /// set and proved at commit, and a key it read and then wrote is proved as the base of the write.
-    /// Scans keep their range locks in both cases. Experimental; the default keeps the locks.
+    /// single key it reads, and upgrades it to exclusive when it writes the key. With false, the default,
+    /// such a transaction takes no lock for a read of one key: the read is recorded in the transaction's
+    /// read set and proved at commit, and a key it read and then wrote is proved as the base of the write.
+    /// Its reads are held to one point in time, and its writes give way to an older transaction that read
+    /// the key and is still running. Scans keep their range locks in both cases. True restores the locks.
     /// </summary>
     [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Cluster)]
-    public bool SerializableOptimisticPointLocks { get; init; } = true;
+    public bool SerializableOptimisticPointLocks { get; init; } = false;
 
     /// <summary>
     /// Wall-clock cap, in milliseconds, for a single lock-acquire retry loop during Serializable

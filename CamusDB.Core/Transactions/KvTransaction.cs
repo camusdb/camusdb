@@ -384,12 +384,12 @@ public sealed class KvTransaction
     /// pass the coordinator key when this is set, so an optimistic transaction detects read-write
     /// and write-skew conflicts as well as write-write ones.</para>
     ///
-    /// <para><b>What folding does not cover.</b> Two gaps make the retained predicate locks
-    /// load-bearing rather than redundant, so neither may be dropped on the strength of this flag:
-    /// folding records only the keys actually observed, never the absence of keys, so it cannot
-    /// detect a phantom inserted into a scanned range; and the coordinator excludes a key from
-    /// read-set validation once the same transaction also writes it, so on a read-then-write key the
-    /// read→write window is guarded solely by the shared point lock and its S→X upgrade.</para>
+    /// <para><b>What folding does not cover.</b> Folding records the keys a read observed, a missing
+    /// key included, but not a range: it cannot detect a phantom inserted into a scanned range, so a
+    /// Serializable scan keeps its range lock whatever this flag says. A key that is read and then
+    /// written leaves the read set and becomes the validated base of that write, which the commit
+    /// checks, so a single-key read needs no lock to be proved (see
+    /// <see cref="CamusDBOptions.SerializableOptimisticPointLocks"/>).</para>
     /// </summary>
     public bool FoldReads =>
         TransactionId != HLCTimestamp.Zero &&
