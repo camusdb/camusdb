@@ -629,7 +629,7 @@ internal sealed class KvRowAccessor
         byte[] encodedData = BranchKvCodec.EncodeValue(data);
 
         (KeyValueResponseType type, _, _) = await retry.RetryOnMustRetryRegistered(tx, "row write", key,
-            (coordinatorKey, operationId) => kahuna.LocateAndTrySetKeyValue(tx.TransactionId, key, encodedData, null, -1, KeyValueFlags.Set, 0, KeyValueDurability.Persistent, cancellationToken, coordinatorKey: coordinatorKey, operationId: operationId),
+            (coordinatorKey, operationId) => kahuna.LocateAndTrySetKeyValue(tx.TransactionId, key, encodedData, null, -1, locks.WriteFlags(tx, KeyValueFlags.Set), 0, KeyValueDurability.Persistent, cancellationToken, coordinatorKey: coordinatorKey, operationId: operationId),
             cancellationToken
         ).ConfigureAwait(false);
 
@@ -666,7 +666,7 @@ internal sealed class KvRowAccessor
         {
             // Branch: write a tombstone so the ancestry merge suppresses the inherited row.
             (KeyValueResponseType type, _, _) = await retry.RetryOnMustRetryRegistered(tx, "row delete (branch tombstone)", key,
-                (coordinatorKey, operationId) => kahuna.LocateAndTrySetKeyValue(tx.TransactionId, key, BranchKvCodec.EncodeTombstone(), null, -1, KeyValueFlags.Set, 0, KeyValueDurability.Persistent, cancellationToken, coordinatorKey: coordinatorKey, operationId: operationId),
+                (coordinatorKey, operationId) => kahuna.LocateAndTrySetKeyValue(tx.TransactionId, key, BranchKvCodec.EncodeTombstone(), null, -1, locks.WriteFlags(tx, KeyValueFlags.Set), 0, KeyValueDurability.Persistent, cancellationToken, coordinatorKey: coordinatorKey, operationId: operationId),
                 cancellationToken
             ).ConfigureAwait(false);
 

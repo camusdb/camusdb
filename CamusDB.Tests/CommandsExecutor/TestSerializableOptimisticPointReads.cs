@@ -491,4 +491,41 @@ internal sealed class TestSerializableOptimisticPointReads : BaseTest
             await database.Transactions.RollbackIfNotCompletedAsync(second);
         }
     }
+
+    [Test]
+    public async Task ARowReadByAnOlderTransaction_ThenDeletedByAYoungerOne_TheOlderOneCommits()
+    {
+        (string db, DatabaseDescriptor database, CommandExecutor executor) = await SetupAsync();
+
+        KvTransaction older = await BeginAsync(database);
+        KvTransaction younger = await BeginAsync(database);
+
+        try
+        {
+            // The older one decides on row 1 and writes row 2; the younger one deletes row 1.
+            long seen = await BalanceAsync(executor, db, older, 1);
+            Assert.AreEqual(100, await BalanceAsync(executor, db, younger, 2));
+            Assert.Less(older.TransactionId.CompareTo(younger.TransactionId), 0, "the first to read is the older one");
+
+            // The read of the older one may be answered off the key's actor, with its pin sent after it.
+            await Task.Delay(100);
+
+            bool youngerDone = await TryFinishAsync(database, younger,
+                () => ExecAsync(executor, db, younger, "DELETE FROM accounts WHERE id = 1"));
+            bool olderDone = await TryFinishAsync(database, older,
+                () => ExecAsync(executor, db, older, $"UPDATE accounts SET balance = {seen + 1} WHERE id = 2"));
+
+            Assert.IsFalse(olderDone && youngerDone, "the row one decided on was deleted by the other, and both committed");
+
+            // With the locks the delete is refused by the reader's lock; without them it gives way to the
+            // older running reader. Either way the older transaction is the one that goes on.
+            Assert.IsFalse(youngerDone, "the younger delete must give way to the older reader");
+            Assert.IsTrue(olderDone, "the older reader must commit");
+        }
+        finally
+        {
+            await database.Transactions.RollbackIfNotCompletedAsync(older);
+            await database.Transactions.RollbackIfNotCompletedAsync(younger);
+        }
+    }
 }

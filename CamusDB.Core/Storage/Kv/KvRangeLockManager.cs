@@ -130,6 +130,15 @@ internal sealed class KvRangeLockManager
     /// included, and checks a key it read and then wrote as the base of that write. A range is not a key,
     /// so scans keep their locks.
     /// </summary>
+    /// <summary>
+    /// The flags of a write by <paramref name="tx"/>: <paramref name="flags"/>, plus the flag that makes the
+    /// write give way to an older running reader of the key when the transaction takes no lock for the keys
+    /// it reads (<see cref="ValidatesPointReadsAtCommit"/>). Such a transaction has nothing else that orders
+    /// it against a reader, and without the flag the older reader is refused at its commit instead.
+    /// </summary>
+    internal KeyValueFlags WriteFlags(KvTransaction tx, KeyValueFlags flags)
+        => ValidatesPointReadsAtCommit(tx) ? flags | KeyValueFlags.YieldToOlderReaders : flags;
+
     internal bool ValidatesPointReadsAtCommit(KvTransaction tx)
         => !options.SerializableOptimisticPointLocks
             && tx.Locking == KeyValueTransactionLocking.Optimistic

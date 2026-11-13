@@ -290,7 +290,7 @@ internal sealed class KvBatchWriter
                         KeyValueFlags flags = uniqueFlags[kvKey];
 
                         (KeyValueResponseType type, _, _) = await retry.RetryOnMustRetryRegistered(tx, "unique index entry write", kvKey,
-                            (coordinatorKey, operationId) => kahuna.LocateAndTrySetKeyValue(tx.TransactionId, kvKey, value, null, -1, flags, 0, KeyValueDurability.Persistent, cancellationToken, coordinatorKey: coordinatorKey, operationId: operationId),
+                            (coordinatorKey, operationId) => kahuna.LocateAndTrySetKeyValue(tx.TransactionId, kvKey, value, null, -1, locks.WriteFlags(tx, flags), 0, KeyValueDurability.Persistent, cancellationToken, coordinatorKey: coordinatorKey, operationId: operationId),
                             cancellationToken
                         ).ConfigureAwait(false);
 
@@ -591,7 +591,7 @@ internal sealed class KvBatchWriter
                         KeyValueFlags flags = uniqueFlags[kvKey];
 
                         (KeyValueResponseType type, _, _) = await retry.RetryOnMustRetryRegistered(tx, "unique index entry write", kvKey,
-                            (coordinatorKey, operationId) => kahuna.LocateAndTrySetKeyValue(tx.TransactionId, kvKey, value, null, -1, flags, 0, KeyValueDurability.Persistent, cancellationToken, coordinatorKey: coordinatorKey, operationId: operationId),
+                            (coordinatorKey, operationId) => kahuna.LocateAndTrySetKeyValue(tx.TransactionId, kvKey, value, null, -1, locks.WriteFlags(tx, flags), 0, KeyValueDurability.Persistent, cancellationToken, coordinatorKey: coordinatorKey, operationId: operationId),
                             cancellationToken
                         ).ConfigureAwait(false);
 
@@ -1367,6 +1367,13 @@ internal sealed class KvBatchWriter
     /// </summary>
     private async Task<bool> DeleteManyWithRetry(KvTransaction tx, List<KahunaDeleteKeyValueRequestItem> items, CancellationToken ct, RetryableAbortSink? aborts = null)
     {
+        // A delete gives way to an older running reader of the row as a set does (see SetManyWithRetry).
+        if (locks.ValidatesPointReadsAtCommit(tx))
+        {
+            foreach (KahunaDeleteKeyValueRequestItem item in items)
+                item.Flags |= KeyValueFlags.YieldToOlderReaders;
+        }
+
         List<KahunaDeleteKeyValueRequestItem> pending = new(items);
         long deadline = retry.LockWaitDeadlineTicks();
         long replicationDeadline = retry.ReplicationWaitDeadlineTicks();

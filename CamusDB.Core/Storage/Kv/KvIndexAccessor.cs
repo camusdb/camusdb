@@ -1313,7 +1313,7 @@ internal sealed class KvIndexAccessor
             flags = unique ? KeyValueFlags.SetIfNotExists : KeyValueFlags.Set;
 
         (KeyValueResponseType type, _, _) = await retry.RetryOnMustRetryRegistered(tx, "index entry write", kvKey,
-            (coordinatorKey, operationId) => kahuna.LocateAndTrySetKeyValue(tx.TransactionId, kvKey, value, null, -1, flags, 0, KeyValueDurability.Persistent, cancellationToken, coordinatorKey: coordinatorKey, operationId: operationId),
+            (coordinatorKey, operationId) => kahuna.LocateAndTrySetKeyValue(tx.TransactionId, kvKey, value, null, -1, locks.WriteFlags(tx, flags), 0, KeyValueDurability.Persistent, cancellationToken, coordinatorKey: coordinatorKey, operationId: operationId),
             cancellationToken
         ).ConfigureAwait(false);
 
@@ -1387,7 +1387,7 @@ internal sealed class KvIndexAccessor
         {
             // Branch: write a tombstone so the ancestry merge suppresses the inherited index entry.
             (KeyValueResponseType type, _, _) = await retry.RetryOnMustRetryRegistered(tx, "index entry delete (branch tombstone)", kvKey,
-                (coordinatorKey, operationId) => kahuna.LocateAndTrySetKeyValue(tx.TransactionId, kvKey, BranchKvCodec.EncodeTombstone(), null, -1, KeyValueFlags.Set, 0, KeyValueDurability.Persistent, cancellationToken, coordinatorKey: coordinatorKey, operationId: operationId),
+                (coordinatorKey, operationId) => kahuna.LocateAndTrySetKeyValue(tx.TransactionId, kvKey, BranchKvCodec.EncodeTombstone(), null, -1, locks.WriteFlags(tx, KeyValueFlags.Set), 0, KeyValueDurability.Persistent, cancellationToken, coordinatorKey: coordinatorKey, operationId: operationId),
                 cancellationToken
             ).ConfigureAwait(false);
 
