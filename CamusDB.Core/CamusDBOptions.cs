@@ -1463,7 +1463,7 @@ public sealed record CamusDBOptions
     /// Scans keep their range locks in both cases. Experimental; the default keeps the locks.
     /// </summary>
     [ConfigSetting(ConfigMutability.Runtime, ConfigScope.Cluster)]
-    public bool SerializableOptimisticPointLocks { get; init; } = true;
+    public bool SerializableOptimisticPointLocks { get; init; } = false;
 
     /// <summary>
     /// Wall-clock cap, in milliseconds, for a single lock-acquire retry loop during Serializable
