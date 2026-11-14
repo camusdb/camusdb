@@ -410,11 +410,8 @@ internal partial class sqlParser
     /// for <c>gin</c>, null for <c>btree</c> (the ordered index every other CREATE INDEX builds). An
     /// operator class is accepted only on a GIN index (see <see cref="OperatorClassColumn"/>).
     /// </summary>
-    private static string? IndexMethod(string? usingWord, string? method, NodeAst columns)
+    private static string? IndexMethod(string? method, NodeAst columns)
     {
-        if (!string.Equals(usingWord, "using", StringComparison.OrdinalIgnoreCase))
-            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"Syntax error: expected USING, got '{usingWord}'");
-
         if (string.Equals(method, "gin", StringComparison.OrdinalIgnoreCase))
             return GinIndexMethod;
 

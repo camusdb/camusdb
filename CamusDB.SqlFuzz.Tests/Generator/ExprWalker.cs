@@ -38,8 +38,9 @@ internal static class ExprWalker
         InsertStmt insert => insert.Rows.SelectMany(r => r).Cast<object>()
             .Concat((insert.OnConflict?.DoUpdate ?? []).Select(a => (object)a.Value)),
         InsertSelectStmt insertSelect => [insertSelect.Source],
-        UpdateStmt update => update.Set.Select(a => (object)a.Value).Append(update.Where),
-        DeleteStmt delete => [delete.Where],
+        UpdateStmt update => update.Set.Select(a => (object)a.Value).Append(update.Where)
+            .Concat(update.From is null ? [] : JoinPredicates(update.From)),
+        DeleteStmt delete => new object[] { delete.Where }.Concat(delete.Using is null ? [] : JoinPredicates(delete.Using)),
         _ => [],
     };
 

@@ -295,11 +295,31 @@ internal sealed record InsertStmt(string Table, IReadOnlyList<string> Columns, I
 
 internal sealed record InsertSelectStmt(string Table, IReadOnlyList<string> Columns, SelectStmt Source) : Statement;
 
-/// <summary>An UPDATE. <see cref="Where"/> is never null: a full-table update is <c>WHERE TRUE</c>, because one without WHERE is refused by design.</summary>
-internal sealed record UpdateStmt(string Table, IReadOnlyList<Assignment> Set, Expr Where) : Statement;
+/// <summary>
+/// An UPDATE. <see cref="Where"/> is never null: a full-table update is <c>WHERE TRUE</c>, because one
+/// without WHERE is refused by design.
+///
+/// <para>The joined form is <c>UPDATE t [AS alias] SET … FROM list WHERE …</c>. <see cref="Alias"/> names
+/// the target, and <see cref="From"/> is the relation list, or null. In both forms with an alias or a
+/// list, every column of the statement is qualified: a target column by <see cref="Qualifier"/>, a column
+/// of the list by its own alias. A bare name that the target and a source both have is ambiguous, so the
+/// generator never writes a bare name there.</para>
+/// </summary>
+internal sealed record UpdateStmt(string Table, IReadOnlyList<Assignment> Set, Expr Where, string? Alias = null, FromItem? From = null) : Statement
+{
+    /// <summary>The name that qualifies a target column: the alias, else the table name in a joined form, else null (bare columns).</summary>
+    public string? Qualifier => Alias ?? (From is null ? null : Table);
+}
 
-/// <summary>A DELETE. <see cref="Where"/> is never null, for the reason of <see cref="UpdateStmt"/>.</summary>
-internal sealed record DeleteStmt(string Table, Expr Where) : Statement;
+/// <summary>
+/// A DELETE. <see cref="Where"/> is never null, for the reason of <see cref="UpdateStmt"/>. The joined form
+/// is <c>DELETE FROM t [AS alias] USING list WHERE …</c>, with the column rule of <see cref="UpdateStmt"/>.
+/// </summary>
+internal sealed record DeleteStmt(string Table, Expr Where, string? Alias = null, FromItem? Using = null) : Statement
+{
+    /// <summary>The name that qualifies a target column; see <see cref="UpdateStmt.Qualifier"/>.</summary>
+    public string? Qualifier => Alias ?? (Using is null ? null : Table);
+}
 
 internal sealed record AnalyzeStmt(string Table) : Statement;
 

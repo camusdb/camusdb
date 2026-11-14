@@ -593,14 +593,19 @@ internal sealed class StatementGenerator
         if (targets.Count == 0)
             return null;
 
-        ExprScope scope = DmlScope(table);
+        JoinedWrite? joined = JoinedForm(table);
+        ExprScope scope = joined?.Scope ?? DmlScope(table);
         List<Assignment> set = new();
         foreach (ColumnDef column in random.Shuffled(targets).Take(random.Between(1, Math.Min(2, targets.Count))))
             set.Add(new Assignment(column.Name, State.IsUniqueColumn(table.Name, column.Name) && random.Chance(0.85)
                 ? new LiteralExpr(FreshValue(column.Type))
-                : AssignedValue(column, scope)));
+                : joined?.From is not null && SourceValue(column, joined.SourceColumns) is { } copied
+                    ? copied
+                    : AssignedValue(column, scope)));
 
-        return new UpdateStmt(table.Name, set, DmlWhere(scope));
+        return joined is null
+            ? new UpdateStmt(table.Name, set, DmlWhere(scope))
+            : new UpdateStmt(table.Name, set, joined.Where(this), joined.Alias, joined.From);
     }
 
     public DeleteStmt? GenerateDelete()
@@ -608,7 +613,123 @@ internal sealed class StatementGenerator
         if (!profile.Allows(StatementFeature.Delete))
             return null;
         TableDef table = random.Pick(State.Tables);
-        return new DeleteStmt(table.Name, DmlWhere(DmlScope(table)));
+        JoinedWrite? joined = JoinedForm(table);
+        return joined is null
+            ? new DeleteStmt(table.Name, DmlWhere(DmlScope(table)))
+            : new DeleteStmt(table.Name, joined.Where(this), joined.Alias, joined.From);
+    }
+
+    /// <summary>
+    /// The target qualifier, the relation list and the scope of an <c>UPDATE … FROM</c> or a
+    /// <c>DELETE … USING</c>, or of a write with a target alias only. Null for about seven writes in ten,
+    /// which keep the plain form, and when the profile has no joined writes.
+    ///
+    /// <para>The list is 1 or 2 tables from <see cref="GenerateFrom"/>. With the target it reads at most
+    /// three relations, and at most two when the round has a sized table, which it names at most once,
+    /// for the reason of <see cref="SchemaState.SizedTable"/>. The WHERE always holds an equality between
+    /// a target column and a column of the list (<see cref="JoinedWrite.Link"/>), so the join stays near
+    /// the table sizes. Most links compare with the primary key of a source, so that a target row
+    /// matches one row of that source and an UPDATE passes the one-change rule. The other links can
+    /// match a target row more than once, and the UPDATE must then fail.</para>
+    /// </summary>
+    private JoinedWrite? JoinedForm(TableDef table)
+    {
+        if (!profile.Allows(StatementFeature.JoinedWrites) || !random.Chance(0.3))
+            return null;
+
+        bool withList = random.Chance(0.8);
+        string? alias = !withList || random.Chance(0.7) ? "u" : null;
+        string qualifier = alias ?? table.Name;
+        List<ScopeColumn> target = table.Columns.Select(c => new ScopeColumn(qualifier, c.Name, c.Type)).ToList();
+
+        if (!withList)
+            return new JoinedWrite(alias, null, new ExprScope(target, State.Tables), [], null);
+
+        for (int attempt = 0; attempt < 8; attempt++)
+        {
+            (FromItem from, ExprScope sources) = GenerateFrom(SelectOptions.Comparable with { MaxTables = State.SizedTable is null ? 2 : 1 });
+            List<TableRef> tables = TablesOf(from);
+            int sized = (table.Name == State.SizedTable ? 1 : 0) + tables.Count(t => t.Table == State.SizedTable);
+            if (State.SizedTable is not null && sized > 1)
+                continue;
+
+            Expr? link = Link(target, sources.Columns, tables);
+            if (link is null)
+                continue;
+
+            List<ScopeColumn> all = target.Concat(sources.Columns).ToList();
+            return new JoinedWrite(alias, from, new ExprScope(all, State.Tables), sources.Columns, link);
+        }
+        return null;
+    }
+
+    /// <summary>An equality of a target column and a column of the list; see <see cref="JoinedForm"/>.</summary>
+    private Expr? Link(List<ScopeColumn> target, IReadOnlyList<ScopeColumn> sources, List<TableRef> tables)
+    {
+        if (random.Chance(0.6))
+        {
+            TableRef source = random.Pick(tables);
+            ColumnDef key = State.Table(source.Table).PrimaryKey;
+            List<ScopeColumn> same = target.Where(c => c.Type == key.Type).ToList();
+            if (same.Count > 0)
+            {
+                ScopeColumn column = random.Pick(same);
+                return new BinaryExpr(BinaryOp.Eq, new ColumnExpr(column.Source, column.Column, column.Type), new ColumnExpr(source.Alias, key.Name, key.Type), FuzzType.Bool);
+            }
+        }
+        return EquiJoin(target, sources.ToList(), force: true);
+    }
+
+    private static List<TableRef> TablesOf(FromItem from)
+    {
+        List<TableRef> tables = new();
+        FromItem current = from;
+        while (current is JoinFrom join)
+        {
+            tables.Add(join.Right);
+            current = join.Left;
+        }
+        if (current is TableRef first)
+            tables.Add(first);
+        return tables;
+    }
+
+    /// <summary>
+    /// A column of the list with the type of <paramref name="column"/>, for about one assignment in three,
+    /// so the new value comes from the joined row. A NOT NULL target takes it inside a COALESCE; a profile
+    /// without COALESCE gets null, and the caller makes another value.
+    /// </summary>
+    private Expr? SourceValue(ColumnDef column, IReadOnlyList<ScopeColumn> sources)
+    {
+        if (!random.Chance(0.35))
+            return null;
+        List<ScopeColumn> same = sources.Where(c => c.Type == column.Type).ToList();
+        if (same.Count == 0)
+            return null;
+        ScopeColumn source = random.Pick(same);
+        Expr value = new ColumnExpr(source.Source, source.Column, source.Type);
+        if (!column.NotNull)
+            return value;
+        return profile.Allows(ExprFeature.Coalesce)
+            ? new FunctionExpr("coalesce", [value, new LiteralExpr(values.Next(column.Type, nullable: false, boundaries: false))], column.Type)
+            : null;
+    }
+
+    /// <summary>
+    /// The parts of a joined UPDATE or DELETE that <see cref="JoinedForm"/> chose. <see cref="From"/> is
+    /// null for a target alias without a list.
+    /// </summary>
+    private sealed record JoinedWrite(string? Alias, FromItem? From, ExprScope Scope, IReadOnlyList<ScopeColumn> SourceColumns, Expr? Link)
+    {
+        /// <summary>The WHERE: the link, most of the time with a generated predicate over the target and the list.</summary>
+        public Expr Where(StatementGenerator generator)
+        {
+            if (Link is null)
+                return generator.DmlWhere(Scope);
+            return generator.random.Chance(0.3)
+                ? Link
+                : new BinaryExpr(BinaryOp.And, Link, generator.DmlWhere(Scope), FuzzType.Bool);
+        }
     }
 
     public InsertStmt? GenerateUpsert()

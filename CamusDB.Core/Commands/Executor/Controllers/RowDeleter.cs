@@ -131,6 +131,22 @@ internal sealed class RowDeleter
     }
 
     /// <summary>
+    /// The statement's DELETE triggers on <paramref name="table"/>, or null, for a statement that deletes
+    /// rows it found itself (<c>DELETE ... USING</c>) through <see cref="DeleteLocatedRowsAsync"/>. Bind it
+    /// before the first delete, and fire the AFTER triggers once, after the last.
+    /// </summary>
+    internal Extensions.StatementTriggers? CreateStatementTriggers(DatabaseDescriptor database, TableDescriptor table, KvTransaction tx) =>
+        triggers?.ForStatement(database, table, tx, TriggerEventSet.Delete);
+
+    /// <summary>
+    /// The foreign-key checker for a statement that deletes rows it found itself; see
+    /// <see cref="ForeignKeyStatementChecker.ForParentDeletesAsync"/>. Build it before the first delete:
+    /// it opens and pins the child tables, which may throw SchemaCatchingUp. Complete it after the last.
+    /// </summary>
+    internal ValueTask<ForeignKeyStatementChecker> CreateStatementCheckerAsync(DatabaseDescriptor database, TableDescriptor table, KvTransaction tx) =>
+        ForeignKeyStatementChecker.ForParentDeletesAsync(database, table, tableOpener, tx);
+
+    /// <summary>
     /// Deletes an explicit set of rows that a row-level TTL sweep found expired, re-asserting the expiry
     /// predicate on each one under the mutation lock. Returns how many rows were deleted and how many
     /// were spared by the re-check.
@@ -413,21 +429,8 @@ internal sealed class RowDeleter
     internal Func<Task>? TestBeforeLocateHook;
 
     /// <summary>
-    /// Deletes one chunk of located rows: <b>lock, then read, then re-check, then delete</b>.
-    ///
-    /// <para><see cref="KvTableStore.LockAndReadRowsForMutationAsync"/> takes the exclusive row locks
-    /// before it reads the rows, so the read returns the latest committed row and nothing can change it
-    /// before this transaction ends. The index entries to delete come from that read: a row read without
-    /// its lock could miss a concurrent commit that changed an indexed column, and the delete would then
-    /// remove the stale entry and orphan the new one. The predicate is re-evaluated on the same read
-    /// (<see cref="MutationRowRecheck"/>), so a row that a concurrent commit moved out of the WHERE is
-    /// kept, and a row that a concurrent commit already deleted is skipped. Neither is counted.</para>
-    ///
-    /// <para>For a RETURNING list, the decode also covers the columns the list reads (every column when
-    /// the list holds <c>*</c>), and large values of those columns are fetched. Without that, a column
-    /// the list reads would reach the projection as NULL, with no error. The deleted rows go to the
-    /// collector only after the batch delete succeeded, so the returned rows are exactly the counted
-    /// rows.</para>
+    /// Deletes one chunk of rows that the locate scan found, through <see cref="DeleteLocatedRowsAsync"/>,
+    /// with the statement's predicate as the re-check.
     /// </summary>
     private async Task FlushDeleteChunk(
         TableDescriptor table,
@@ -436,27 +439,105 @@ internal sealed class RowDeleter
         DeleteFluxState state,
         MutationRowRecheck recheck)
     {
+        LocatedRowDelete delete = new()
+        {
+            Database = state.Database,
+            Table = table,
+            Transaction = tx,
+            MaintainIndexes = state.MaintainIndexes,
+            ForeignKeys = state.ForeignKeys,
+            Triggers = state.Triggers,
+            Returning = state.Returning,
+            KeepColumns = recheck.Columns,
+            Keep = recheck.IsEmpty
+                ? null
+                : (_, row) => recheck.MatchesAsync(state.QueryExecutor, state.Database, state.LocateTicket!, row),
+        };
+
+        state.DeletedRows += await DeleteLocatedRowsAsync(delete, chunk).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// What <see cref="DeleteLocatedRowsAsync"/> needs to delete rows that its caller found: the plain
+    /// DELETE (its locate scan) and DELETE ... USING (its join) share it, so the lock, the re-check, the
+    /// triggers, the foreign-key checks and RETURNING behave the same for both.
+    /// </summary>
+    internal sealed class LocatedRowDelete
+    {
+        public required DatabaseDescriptor Database { get; init; }
+
+        public required TableDescriptor Table { get; init; }
+
+        public required KvTransaction Transaction { get; init; }
+
+        /// <summary>False only when the caller already purged every index bucket of the table; see <see cref="Delete"/>.</summary>
+        public bool MaintainIndexes { get; init; } = true;
+
+        public ForeignKeyStatementChecker ForeignKeys { get; init; } = ForeignKeyStatementChecker.None;
+
+        public Extensions.StatementTriggers? Triggers { get; init; }
+
+        public DML.WriteReturningPlan.ReturningRowCollector? Returning { get; init; }
+
+        /// <summary>
+        /// The schema-cased columns <see cref="Keep"/> reads on the locked read, or null for every column.
+        /// An empty set means it reads none.
+        /// </summary>
+        public IReadOnlySet<string>? KeepColumns { get; init; }
+
+        /// <summary>
+        /// Decides, on the row read under the write lock, whether the row at the given chunk position is
+        /// still deleted, or null to delete every row that still exists. A row it refuses is kept and not
+        /// counted. It runs before the BEFORE DELETE trigger.
+        /// </summary>
+        public Func<int, Dictionary<string, ColumnValue>, ValueTask<bool>>? Keep { get; init; }
+    }
+
+    /// <summary>
+    /// Deletes the rows <paramref name="chunk"/> names and returns how many it deleted:
+    /// <b>lock, then read, then re-check, then delete</b>.
+    ///
+    /// <para><see cref="KvTableStore.LockAndReadRowsForMutationAsync"/> takes the exclusive row locks
+    /// before it reads the rows, so the read returns the latest committed row and nothing can change it
+    /// before this transaction ends. The index entries to delete come from that read: a row read without
+    /// its lock could miss a concurrent commit that changed an indexed column, and the delete would then
+    /// remove the stale entry and orphan the new one. <see cref="LocatedRowDelete.Keep"/> decides on the
+    /// same read (for a plain DELETE, its predicate, <see cref="MutationRowRecheck"/>), so a row that a
+    /// concurrent commit moved out of the WHERE is kept, and a row that a concurrent commit already
+    /// deleted is skipped. Neither is counted.</para>
+    ///
+    /// <para>For a RETURNING list, the decode also covers the columns the list reads (every column when
+    /// the list holds <c>*</c>), and large values of those columns are fetched. Without that, a column
+    /// the list reads would reach the projection as NULL, with no error. The deleted rows go to the
+    /// collector only after the batch delete succeeded, so the returned rows are exactly the counted
+    /// rows.</para>
+    /// </summary>
+    internal async Task<int> DeleteLocatedRowsAsync(LocatedRowDelete delete, List<ObjectIdValue> chunk)
+    {
+        TableDescriptor table = delete.Table;
+        KvTransaction tx = delete.Transaction;
+
         // Index writability is fixed for the statement, so filter once per chunk instead of per row;
         // the decode below is narrowed to the index key columns and the re-checked predicate's
         // columns — the only values this path consumes (the row bytes are deleted wholesale, never
         // re-encoded), plus the columns a RETURNING list reads. Values for those columns are identical
         // to a full decode; other columns are simply never materialized. A predicate or RETURNING
         // column that cannot be named exactly decodes all.
-        List<TableIndexSchema> writableIndexes = state.MaintainIndexes
+        List<TableIndexSchema> writableIndexes = delete.MaintainIndexes
             ? SchemaElementStateRules.CollectWritableIndexes(table.Schema, table.AllIndexes)
             : [];
         HashSet<string>? requiredColumns = null;
         // A trigger reads all of OLD, so a table with delete triggers decodes the whole row (null).
-        if (state.Triggers is null && recheck.Columns is not null && (state.Returning is null || state.Returning.RequiredColumns is not null))
+        if (delete.Triggers is null && delete.KeepColumns is not null && (delete.Returning is null || delete.Returning.RequiredColumns is not null))
         {
             requiredColumns = CollectIndexKeyColumns(writableIndexes);
-            requiredColumns.UnionWith(recheck.Columns);
+            requiredColumns.UnionWith(delete.KeepColumns);
 
             // The referenced columns are unique-index key columns, so they are here already; added
             // explicitly so that a later narrowing of the decode cannot drop them.
-            state.ForeignKeys.CollectParentColumns(requiredColumns);
+            delete.ForeignKeys.CollectParentColumns(requiredColumns);
 
-            if (state.Returning?.RequiredColumns is { } returned)
+            if (delete.Returning?.RequiredColumns is { } returned)
                 requiredColumns.UnionWith(returned);
         }
         RowEncoder.DictionaryDecodeState decodeState = new();
@@ -472,11 +553,11 @@ internal sealed class RowDeleter
         (ReadOnlyMemory<byte>?[] rawRows, List<int>?[] outOfLine) = await ReadRowsForDeleteAsync(table, tx, chunk, requiredColumns, default).ConfigureAwait(false);
 
         List<KvTableStore.RowDelete> batch = new(chunk.Count);
-        List<QueryResultRow>? returnedRows = state.Returning is not null ? new(chunk.Count) : null;
-        List<Dictionary<string, ColumnValue>>? returnedRowsForTriggers = state.Triggers is { HasAfter: true } ? new(chunk.Count) : null;
+        List<QueryResultRow>? returnedRows = delete.Returning is not null ? new(chunk.Count) : null;
+        List<Dictionary<string, ColumnValue>>? returnedRowsForTriggers = delete.Triggers is { HasAfter: true } ? new(chunk.Count) : null;
 
         // While this chunk's BEFORE triggers run, their SQL must not change a row this chunk read.
-        object? reentrancy = state.Triggers is { HasBefore: true }
+        object? reentrancy = delete.Triggers is { HasBefore: true }
             ? Extensions.TriggerReentrancyGuard.Protect(table.Id, chunk)
             : null;
 
@@ -485,7 +566,7 @@ internal sealed class RowDeleter
             ObjectIdValue rowId = chunk[i];
             ReadOnlyMemory<byte>? data = rawRows[i];
 
-            // A concurrent transaction deleted the row and committed after the locate scan chose it.
+            // A concurrent transaction deleted the row and committed after the caller found it.
             if (data is null || data.Value.Length == 0)
                 continue;
 
@@ -496,13 +577,13 @@ internal sealed class RowDeleter
                 decodeState: decodeState
            ).ConfigureAwait(false);
 
-            // A concurrent commit changed the row after the locate scan chose it, and it no longer
-            // matches the statement's predicate.
-            if (!recheck.IsEmpty && !await recheck.MatchesAsync(state.QueryExecutor, state.Database, state.LocateTicket!, writableRow).ConfigureAwait(false))
+            // A concurrent commit changed the row after the caller found it, and it no longer matches
+            // the statement's predicate.
+            if (delete.Keep is { } keep && !await keep(i, writableRow).ConfigureAwait(false))
                 continue;
 
             // A BEFORE DELETE trigger can veto the row by throwing; it cannot change it.
-            if (state.Triggers is { HasBefore: true } beforeTriggers)
+            if (delete.Triggers is { HasBefore: true } beforeTriggers)
                 await beforeTriggers.FireBeforeAsync(writableRow, null).ConfigureAwait(false);
 
             batch.Add(new()
@@ -512,32 +593,33 @@ internal sealed class RowDeleter
                 LargeValueOrdinals = outOfLine[i],
             });
 
-            state.ForeignKeys.AddRemovedParentRow(writableRow);
+            delete.ForeignKeys.AddRemovedParentRow(writableRow);
             returnedRows?.Add(new QueryResultRow(rowId, writableRow));
             returnedRowsForTriggers?.Add(writableRow);
         }
 
-        if (state.Triggers is { HasBefore: true })
+        if (delete.Triggers is { HasBefore: true })
             Extensions.TriggerReentrancyGuard.Release(reentrancy);
 
         if (_stats is not null && batch.Count > _stats.DeleteBatchMaxChunkSeen)
             _stats.DeleteBatchMaxChunkSeen = batch.Count;
 
         await table.Store.DeleteRowsBatch(tx, batch).ConfigureAwait(false);
-        state.DeletedRows += batch.Count;
 
         // Queued only once the batch is deleted: the AFTER triggers see exactly the counted rows.
-        if (state.Triggers is { HasAfter: true } afterTriggers && returnedRowsForTriggers is not null)
+        if (delete.Triggers is { HasAfter: true } afterTriggers && returnedRowsForTriggers is not null)
         {
             foreach (Dictionary<string, ColumnValue> deletedRow in returnedRowsForTriggers)
                 afterTriggers.QueueAfter(deletedRow, null);
         }
 
         if (returnedRows is not null)
-            await state.Returning!.AddChunkAsync(returnedRows).ConfigureAwait(false);
+            await delete.Returning!.AddChunkAsync(returnedRows).ConfigureAwait(false);
 
         foreach (KvTableStore.RowDelete row in batch)
             Log.LogRowDeleted(logger, row.RowId);
+
+        return batch.Count;
     }
 
     /// <summary>

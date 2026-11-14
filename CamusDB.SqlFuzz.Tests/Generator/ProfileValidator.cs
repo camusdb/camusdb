@@ -35,11 +35,17 @@ internal static class ProfileValidator
             case InsertSelectStmt:
                 Need(profile.Allows(StatementFeature.InsertSelect), "an INSERT … SELECT");
                 break;
-            case UpdateStmt:
+            case UpdateStmt update:
                 Need(profile.Allows(StatementFeature.Update), "an UPDATE");
+                Need((update.Alias is null && update.From is null) || profile.Allows(StatementFeature.JoinedWrites), "an UPDATE … FROM or a target alias");
+                if (update.From is not null)
+                    CheckFrom(update.From, profile, Need);
                 break;
-            case DeleteStmt:
+            case DeleteStmt delete:
                 Need(profile.Allows(StatementFeature.Delete), "a DELETE");
+                Need((delete.Alias is null && delete.Using is null) || profile.Allows(StatementFeature.JoinedWrites), "a DELETE … USING or a target alias");
+                if (delete.Using is not null)
+                    CheckFrom(delete.Using, profile, Need);
                 break;
             case AnalyzeStmt:
                 Need(profile.Allows(StatementFeature.Analyze), "ANALYZE");
@@ -74,9 +80,9 @@ internal static class ProfileValidator
         return found;
     }
 
-    private static void CheckSelect(SelectStmt select, GeneratorProfile profile, Action<bool, string> need)
+    private static void CheckFrom(FromItem from, GeneratorProfile profile, Action<bool, string> need)
     {
-        FromItem current = select.From;
+        FromItem current = from;
         while (current is JoinFrom join)
         {
             need(profile.Allows(StatementFeature.Joins), "a join");
@@ -86,6 +92,11 @@ internal static class ProfileValidator
         }
         if (current is TableRef { IndexHint: not null })
             need(profile.Allows(StatementFeature.IndexHints), "an index hint");
+    }
+
+    private static void CheckSelect(SelectStmt select, GeneratorProfile profile, Action<bool, string> need)
+    {
+        CheckFrom(select.From, profile, need);
 
         need(select.GroupBy is null or { Count: 0 } || profile.Allows(StatementFeature.GroupBy), "GROUP BY");
         need(select.Having is null || profile.Allows(StatementFeature.Having), "HAVING");

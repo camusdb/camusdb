@@ -40,6 +40,9 @@ internal enum StatementFeature
     Upsert,
     Update,
     Delete,
+
+    /// <summary><c>UPDATE … FROM</c>, <c>DELETE … USING</c>, and an alias on the target of an UPDATE or a DELETE.</summary>
+    JoinedWrites,
     Analyze,
     UniqueIndexes,
     CoveringIndexes,

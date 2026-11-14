@@ -134,14 +134,30 @@ internal sealed class CamusSqlPrinter : ISqlPrinter
                 break;
 
             case UpdateStmt update:
-                sb.Append("UPDATE ").Append(update.Table).Append(" SET ");
+                sb.Append("UPDATE ").Append(update.Table);
+                if (update.Alias is { } updateAlias)
+                    sb.Append(" AS ").Append(updateAlias);
+                sb.Append(" SET ");
                 WriteAssignments(sb, update.Set);
+                if (update.From is { } from)
+                {
+                    sb.Append(" FROM ");
+                    WriteFrom(sb, from);
+                }
                 sb.Append(" WHERE ");
                 Write(sb, update.Where);
                 break;
 
             case DeleteStmt delete:
-                sb.Append("DELETE FROM ").Append(delete.Table).Append(" WHERE ");
+                sb.Append("DELETE FROM ").Append(delete.Table);
+                if (delete.Alias is { } deleteAlias)
+                    sb.Append(" AS ").Append(deleteAlias);
+                if (delete.Using is { } list)
+                {
+                    sb.Append(" USING ");
+                    WriteFrom(sb, list);
+                }
+                sb.Append(" WHERE ");
                 Write(sb, delete.Where);
                 break;
 

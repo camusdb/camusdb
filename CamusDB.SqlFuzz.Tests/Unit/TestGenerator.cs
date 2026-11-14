@@ -224,6 +224,90 @@ internal sealed class TestGenerator
         return false;
     }
 
+    /// <summary>
+    /// The generator writes UPDATE … FROM, DELETE … USING and the alias-only forms. In them every column
+    /// outside a subquery is qualified, by the target qualifier or by an alias of the list, because a bare
+    /// name that the target and a source both have is ambiguous. The WHERE links the target with the list.
+    /// </summary>
+    [Test]
+    public void JoinedWritesAppearAndQualifyEveryColumn()
+    {
+        int updateFrom = 0, deleteUsing = 0, aliasOnly = 0;
+
+        for (ulong seed = 1; seed <= 40; seed++)
+        {
+            StatementGenerator generator = new(new FuzzRandom(seed), GeneratorProfile.CamusDB);
+            generator.GenerateSchema();
+            generator.GenerateData();
+
+            for (int i = 0; i < 100; i++)
+            {
+                (string? qualifier, FromItem? list, IEnumerable<Expr> parts) = generator.GenerateWrite() switch
+                {
+                    UpdateStmt u => (u.Qualifier, u.From, u.Set.Select(a => a.Value).Append(u.Where)),
+                    DeleteStmt d => (d.Qualifier, d.Using, new[] { d.Where }),
+                    _ => (null, null, []),
+                };
+                if (qualifier is null)
+                    continue;
+
+                if (list is null)
+                    aliasOnly++;
+                else if (parts.Count() > 1)
+                    updateFrom++;
+                else
+                    deleteUsing++;
+
+                HashSet<string> names = list is null ? [qualifier] : [qualifier, .. Aliases(list)];
+                foreach (Expr part in parts)
+                    foreach (ColumnExpr column in OuterColumns(part))
+                        Assert.That(column.Source is not null && names.Contains(column.Source), Is.True,
+                            $"column {column.Source}.{column.Column} in a joined write");
+            }
+        }
+
+        Assert.That(updateFrom, Is.GreaterThan(20), "UPDATE … FROM");
+        Assert.That(deleteUsing, Is.GreaterThan(20), "DELETE … USING");
+        Assert.That(aliasOnly, Is.GreaterThan(5), "a target alias without a list");
+
+        UpdateStmt sample = new("t0", [new Assignment("c1", new ColumnExpr("a0", "c2", FuzzType.Int64))],
+            new BinaryExpr(BinaryOp.Eq, new ColumnExpr("u", "c0", FuzzType.Int64), new ColumnExpr("a0", "c0", FuzzType.Int64), FuzzType.Bool),
+            "u", new TableRef("t1", "a0"));
+        Assert.That(CamusSqlPrinter.Instance.Print(sample), Is.EqualTo("UPDATE t0 AS u SET c1 = a0.c2 FROM t1 AS a0 WHERE (u.c0 = a0.c0)"));
+        Expr byTableName = new BinaryExpr(BinaryOp.Eq, new ColumnExpr("t0", "c0", FuzzType.Int64), new ColumnExpr("a0", "c0", FuzzType.Int64), FuzzType.Bool);
+        Assert.That(CamusSqlPrinter.Instance.Print(new DeleteStmt("t0", byTableName, null, new TableRef("t1", "a0"))),
+            Is.EqualTo("DELETE FROM t0 USING t1 AS a0 WHERE (t0.c0 = a0.c0)"));
+    }
+
+    private static IEnumerable<string> Aliases(FromItem from)
+    {
+        FromItem current = from;
+        while (current is JoinFrom join)
+        {
+            yield return join.Right.Alias;
+            current = join.Left;
+        }
+        if (current is TableRef table)
+            yield return table.Alias;
+    }
+
+    /// <summary>The column references of an expression, without entering its subqueries.</summary>
+    private static IEnumerable<ColumnExpr> OuterColumns(Expr expression)
+    {
+        Stack<object> pending = new();
+        pending.Push(expression);
+        while (pending.Count > 0)
+        {
+            object node = pending.Pop();
+            if (node is ColumnExpr column)
+                yield return column;
+            if (node is SelectStmt)
+                continue;
+            foreach (object child in ExprWalker.Children(node))
+                pending.Push(child);
+        }
+    }
+
     [Test]
     public void AProfileThatRemovesAFormStopsTheGeneratorFromSelectingIt()
     {

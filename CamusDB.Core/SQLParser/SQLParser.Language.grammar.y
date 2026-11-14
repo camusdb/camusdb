@@ -81,10 +81,12 @@
 %token TJSONFIELD TJSONFIELDTEXT TJSONPATH TJSONPATHTEXT TJSONCONTAINS TJSONCONTAINEDBY
 %token TJSONEXISTS TJSONEXISTSANY TJSONEXISTSALL TJSONDELETEPATH
 %token TBEGIN TSTART TTRANSACTION TROLLBACK TCOMMIT TJOIN TINNER TDOT THAVING TDISTINCT TBETWEEN TEXPLAIN
-/* LEFT, RIGHT, OUTER and CROSS are reserved for the join forms, as they are in PostgreSQL. FULL,
-   NATURAL and USING are not: FULL is already a plain identifier that the foreign-key MATCH FULL
-   clause validates in its parse action, and the other two have no join form here yet. */
-%token TLEFT TRIGHT TOUTER TCROSS
+/* LEFT, RIGHT, OUTER and CROSS are reserved for the join forms, as they are in PostgreSQL. FULL and
+   NATURAL are not: FULL is already a plain identifier that the foreign-key MATCH FULL clause
+   validates in its parse action, and NATURAL has no join form here yet. USING is reserved, as in
+   PostgreSQL, for DELETE ... USING: after the target of DELETE FROM a plain word could be the alias
+   of the target or the start of the USING list, and one token of lookahead cannot tell them apart. */
+%token TLEFT TRIGHT TOUTER TCROSS TUSING
 %token TRENAME TTO TANALYZE TBRANCH TBRANCHES TANCESTORS TEVICT TFORCE TRELINK TORPHAN
 %token TTRUNCATE TWITHOUT
 %token TCASE TWHEN TTHEN TELSE TEND
@@ -440,13 +442,17 @@ insert_values : LPAREN values_list RPAREN { $$.n = $2.n; $$.s = $2.s; }
              ;
 
 /* The optional RETURNING list hangs off extendedThree, because extendedTwo already holds LIMIT.
-   StatementScope.GetReturningList knows the slot of each statement; read the list through it. */
-update_stmt : TUPDATE any_identifier TSET update_list TWHERE condition opt_limit opt_returning
-            { $$.n = new(NodeType.Update, $2.n, $4.n, $6.n, $7.n, $8.n, null, null, null); }
+   StatementScope.GetReturningList knows the slot of each statement; read the list through it.
+   The FROM list of UPDATE ... FROM hangs off extendedFour and the alias of the target off
+   extendedFive; DmlJoinSlots reads both. The slots after RETURNING keep every older consumer of the
+   node unchanged, and a placeholder in the FROM list is published after the placeholders of the
+   SET list, the WHERE and RETURNING (see PlaceholderCollector). */
+update_stmt : TUPDATE any_identifier opt_dml_alias TSET update_list opt_dml_from TWHERE condition opt_limit opt_returning
+            { $$.n = new(NodeType.Update, $2.n, $5.n, $8.n, $9.n, $10.n, $6.n, $3.n, null); }
             /* UPDATE and DELETE without WHERE are refused on purpose, so one statement cannot change
                every row by accident. The rules exist only to name that rule in the error; without
                them the parser would report a bare "expecting TWHERE" syntax error. */
-            | TUPDATE any_identifier TSET update_list opt_limit opt_returning
+            | TUPDATE any_identifier opt_dml_alias TSET update_list opt_dml_from opt_limit opt_returning
             {
                 throw new CamusDBException(
                     CamusDBErrorCodes.InvalidInput,
@@ -455,10 +461,11 @@ update_stmt : TUPDATE any_identifier TSET update_list TWHERE condition opt_limit
             }
 		    ;
 
-/* The optional RETURNING list hangs off extendedTwo, the first free slot after LIMIT. */
-delete_stmt : TDELETE TFROM any_identifier TWHERE condition opt_limit opt_returning
-            { $$.n = new(NodeType.Delete, $3.n, $5.n, $6.n, $7.n, null, null, null, null); }
-            | TDELETE TFROM any_identifier opt_limit opt_returning
+/* The optional RETURNING list hangs off extendedTwo, the first free slot after LIMIT. The USING list
+   hangs off extendedThree and the alias of the target off extendedFour; DmlJoinSlots reads both. */
+delete_stmt : TDELETE TFROM any_identifier opt_dml_alias opt_dml_using TWHERE condition opt_limit opt_returning
+            { $$.n = new(NodeType.Delete, $3.n, $7.n, $8.n, $9.n, $5.n, $4.n, null, null); }
+            | TDELETE TFROM any_identifier opt_dml_alias opt_dml_using opt_limit opt_returning
             {
                 throw new CamusDBException(
                     CamusDBErrorCodes.InvalidInput,
@@ -466,6 +473,23 @@ delete_stmt : TDELETE TFROM any_identifier TWHERE condition opt_limit opt_return
                     "To delete every row, write WHERE TRUE");
             }
 			;
+
+/* The alias of the target of UPDATE or DELETE (UPDATE accounts a, DELETE FROM orders AS o). */
+opt_dml_alias : TAS any_identifier { $$.n = $2.n; }
+              | identifier { $$.n = $1.n; }
+              | escaped_identifier { $$.n = $1.n; }
+              | { $$.n = null; }
+              ;
+
+/* The relations that UPDATE ... FROM joins to its target: every FROM form a SELECT takes. */
+opt_dml_from : TFROM select_table { $$.n = $2.n; }
+             | { $$.n = null; }
+             ;
+
+/* The relations that DELETE ... USING joins to its target: every FROM form a SELECT takes. */
+opt_dml_using : TUSING select_table { $$.n = $2.n; }
+              | { $$.n = null; }
+              ;
 
 begin_stmt : TBEGIN { $$.n = NodeAst.Begin; }
            | TSTART TTRANSACTION { $$.n = NodeAst.Begin; }
@@ -1079,11 +1103,12 @@ create_index_stmt : TCREATE TINDEX any_identifier TON any_identifier LPAREN iden
                   | TCREATE TUNIQUE TINDEX any_identifier TON any_identifier LPAREN identifier_index_list RPAREN index_include_clause { $$.n = new(NodeType.AlterTableAddUniqueIndex, $6.n, $4.n, $8.n, $10.n, null, null, null, null); }
                   | TCREATE TUNIQUE TINDEX TIF TNOT TEXISTS any_identifier TON any_identifier LPAREN identifier_index_list RPAREN index_include_clause { $$.n = new(NodeType.AlterTableAddUniqueIndexIfNotExists, $9.n, $7.n, $11.n, $13.n, null, null, null, null); }
                   /* CREATE INDEX ... USING <method> (col [opclass]) and the CockroachDB CREATE INVERTED INDEX.
-                     USING, GIN, BTREE, INVERTED and the operator class are plain identifiers, so none of them
-                     becomes a reserved word; the actions check the words. A GIN index builds the AST of
-                     CREATE INDEX with "gin" in its text, so every consumer of that node handles it. */
-                  | TCREATE TINDEX any_identifier TON any_identifier TIDENTIFIER TIDENTIFIER LPAREN method_index_list RPAREN { $$.n = new(NodeType.AlterTableAddIndex, $5.n, $3.n, $9.n, null, null, null, null, IndexMethod($6.s, $7.s, $9.n)); }
-                  | TCREATE TINDEX TIF TNOT TEXISTS any_identifier TON any_identifier TIDENTIFIER TIDENTIFIER LPAREN method_index_list RPAREN { $$.n = new(NodeType.AlterTableAddIndexIfNotExists, $8.n, $6.n, $12.n, null, null, null, null, IndexMethod($9.s, $10.s, $12.n)); }
+                     GIN, BTREE, INVERTED and the operator class are plain identifiers, so none of them
+                     becomes a reserved word; the actions check the words. USING is reserved for
+                     DELETE ... USING (see the token list). A GIN index builds the AST of CREATE INDEX with
+                     "gin" in its text, so every consumer of that node handles it. */
+                  | TCREATE TINDEX any_identifier TON any_identifier TUSING TIDENTIFIER LPAREN method_index_list RPAREN { $$.n = new(NodeType.AlterTableAddIndex, $5.n, $3.n, $9.n, null, null, null, null, IndexMethod($7.s, $9.n)); }
+                  | TCREATE TINDEX TIF TNOT TEXISTS any_identifier TON any_identifier TUSING TIDENTIFIER LPAREN method_index_list RPAREN { $$.n = new(NodeType.AlterTableAddIndexIfNotExists, $8.n, $6.n, $12.n, null, null, null, null, IndexMethod($10.s, $12.n)); }
                   | TCREATE TIDENTIFIER TINDEX any_identifier TON any_identifier LPAREN identifier_index_list RPAREN { $$.n = new(NodeType.AlterTableAddIndex, $6.n, $4.n, $8.n, null, null, null, null, InvertedIndexWord($2.s)); }
                   | TCREATE TIDENTIFIER TINDEX TIF TNOT TEXISTS any_identifier TON any_identifier LPAREN identifier_index_list RPAREN { $$.n = new(NodeType.AlterTableAddIndexIfNotExists, $9.n, $7.n, $11.n, null, null, null, null, InvertedIndexWord($2.s)); }
                   ;

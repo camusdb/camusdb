@@ -42,12 +42,13 @@ internal sealed record SqlFuzzRows(IReadOnlyList<string> Columns, IReadOnlyList<
 
 /// <summary>
 /// What a write must do to its table, for <see cref="WriteEffect"/>. <see cref="Kind"/> is
-/// <c>insert</c>, <c>insert-select</c>, <c>update</c>, <c>delete</c> or <c>upsert</c>.
+/// <c>insert</c>, <c>insert-select</c>, <c>update</c>, <c>update-from</c>, <c>delete</c>, <c>delete-using</c> or <c>upsert</c>.
 /// <list type="bullet">
 /// <item><see cref="PredictionSql"/> runs before the write. For an UPDATE it returns the key and the new
 /// value of each assigned column (in <see cref="AssignedColumns"/> order) for every row the WHERE
 /// selects; for a DELETE, the key of each such row; for an UPSERT with DO UPDATE, the key and the new
-/// assigned values of each proposed row whose key exists.</item>
+/// assigned values of each proposed row whose key exists. For UPDATE … FROM and DELETE … USING it
+/// returns one such row for each match of the join, so a target row can appear more than once.</item>
 /// <item><see cref="ProposedRowsSql"/> also runs before the write. Its queries return the full rows an
 /// INSERT, an INSERT … SELECT or an UPSERT proposes, with the columns of <see cref="ProposedColumns"/>.</item>
 /// <item><see cref="InsertedKeys"/> holds the rendered keys of the rows an INSERT or UPSERT names. The
@@ -81,6 +82,9 @@ internal readonly record struct WriteResult(string? Problem, string? Error, int 
 /// <item>DELETE removes the rows its WHERE selected before it ran, and no other row.</item>
 /// <item>UPDATE gives each selected row the values the assignments had on the old row, and leaves the
 /// other columns and the other rows as they were.</item>
+/// <item>UPDATE … FROM (<c>update-from</c>) follows the UPDATE rule. A target row that its prediction
+/// names twice matched two rows of the list, and the statement must then fail. DELETE … USING
+/// (<c>delete-using</c>) follows the DELETE rule and deletes such a row once.</item>
 /// <item>INSERT and INSERT … SELECT add exactly the proposed rows, with the proposed value in every
 /// column.</item>
 /// <item>UPSERT inserts each proposed row whose key is absent. A proposed row whose key exists changes
@@ -164,7 +168,10 @@ internal static class WriteEffect
         switch (spec.Kind)
         {
             case "delete":
+            case "delete-using":
             {
+                // A row that the WHERE of DELETE … USING matches through two rows of the list is deleted
+                // once: the set of keys below removes the second match.
                 if (prediction is null)
                 {
                     // Without the prediction: the write may only remove rows.
@@ -184,9 +191,12 @@ internal static class WriteEffect
             }
 
             case "update":
+            case "update-from":
             {
                 if (prediction is null)
                     return CompareKeys(old, now);
+                if (spec.Kind == "update-from" && MatchedTwice(prediction) is { } twice)
+                    return $"UPDATE ... FROM succeeded, but row {twice} matched more than one row of its FROM list, so it must fail and change nothing";
                 Dictionary<string, IReadOnlyList<ColumnValue>> updated = ByKey(prediction);
                 if (affected != updated.Count)
                     return $"UPDATE reported {affected} row(s); its WHERE selected {updated.Count} before it ran";
@@ -321,6 +331,16 @@ internal static class WriteEffect
         foreach (IReadOnlyList<ColumnValue> row in rows.Rows)
             if (!keys.Add(SqlFuzzValues.Render(row[0])))
                 return $"the table holds key {SqlFuzzValues.Render(row[0])} twice {when}";
+        return null;
+    }
+
+    /// <summary>The first key that the prediction of an UPDATE … FROM names twice, or null.</summary>
+    private static string? MatchedTwice(SqlFuzzRows prediction)
+    {
+        HashSet<string> keys = new(StringComparer.Ordinal);
+        foreach (IReadOnlyList<ColumnValue> row in prediction.Rows)
+            if (!keys.Add(SqlFuzzValues.Render(row[0])))
+                return SqlFuzzValues.Render(row[0]);
         return null;
     }
 

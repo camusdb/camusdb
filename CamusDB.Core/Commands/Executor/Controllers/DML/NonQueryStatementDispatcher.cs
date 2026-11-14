@@ -89,6 +89,9 @@ internal sealed class NonQueryStatementDispatcher
     /// <summary>Prepares the correlated subqueries of an UPDATE or DELETE, see <see cref="SelectBindPipeline.PrepareWriteClausesAsync"/>.</summary>
     private readonly SelectBindPipeline bindPipeline;
 
+    /// <summary>Runs UPDATE ... FROM, DELETE ... USING, and an UPDATE or DELETE whose target has an alias.</summary>
+    private readonly JoinedDmlExecutor joinedDml;
+
     internal readonly MaterializedViewRefresher matViewRefresher;
 
     /// <summary>
@@ -152,6 +155,7 @@ internal sealed class NonQueryStatementDispatcher
         this.rowDeleter = rowDeleter;
         this.rowInsertSelector = rowInsertSelector;
         rowUpserter = new RowUpserter(rowInserter, rowUpdater);
+        joinedDml = new JoinedDmlExecutor(context, selectExecutor, rowUpdater, rowDeleter);
         this.queryExecutor = queryExecutor;
         this.subqueryRewriter = subqueryRewriter;
         this.bindPipeline = bindPipeline;
@@ -267,7 +271,7 @@ internal sealed class NonQueryStatementDispatcher
     internal static bool FenceAfterWrite(CamusDBException ex, Transactions.KvTransaction tx, long writesBefore) =>
         ex.Code == CamusDBErrorCodes.SchemaCatchingUp && tx.WriteCount != writesBefore;
 
-    private static CamusDBException MustRetryAfterWrite(CamusDBException fence) =>
+    internal static CamusDBException MustRetryAfterWrite(CamusDBException fence) =>
         new(CamusDBErrorCodes.TransactionMustRetry,
             "A schema change in progress interrupted the statement after it wrote; retry the transaction",
             fence);
@@ -503,6 +507,14 @@ internal sealed class NonQueryStatementDispatcher
                         }
                     }
                 }
+
+            // The join forms find their rows with a SELECT over the target and the other relations; see
+            // JoinedDmlExecutor. The statement timestamp is minted here, once, as for the plain forms.
+            case NodeType.Update when DmlJoinSlots.IsJoined(ast):
+                return await joinedDml.UpdateAsync(database, ast, ticket, MintStatementTimestamp(database, ticket.TxnState)).ConfigureAwait(false);
+
+            case NodeType.Delete when DmlJoinSlots.IsJoined(ast):
+                return await joinedDml.DeleteAsync(database, ast, ticket, MintStatementTimestamp(database, ticket.TxnState)).ConfigureAwait(false);
 
             case NodeType.Update:
                 {

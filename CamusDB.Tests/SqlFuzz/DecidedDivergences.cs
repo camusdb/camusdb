@@ -106,6 +106,14 @@ public static class DecidedDivergences
     private const string ExpressionColumnName =
         "An expression column that has no alias takes its position in the select list as its name, starting at 0. PostgreSQL takes the name of the function, or ?column?. Write AS to give the column a name.";
 
+    private static readonly string[] TwoMatchTables =
+    [
+        "CREATE TABLE d (id INT64 PRIMARY KEY, v INT64)",
+        "INSERT INTO d (id, v) VALUES (1, 10), (2, 20)",
+        "CREATE TABLE s (sid INT64 PRIMARY KEY, id INT64, v INT64)",
+        "INSERT INTO s (sid, id, v) VALUES (1, 1, 5), (2, 1, 6)",
+    ];
+
     private static readonly string[] TwoRowZeroTable =
     [
         "CREATE TABLE t (id INT64 PRIMARY KEY, v INT64)",
@@ -128,6 +136,11 @@ public static class DecidedDivergences
             "UPDATE d SET id = 3 WHERE id = 2",
             CamusDBErrorCodes.InvalidInput, "UPDATE 1",
             "Row identity, the row id caches and foreign keys depend on a key that does not change. Delete the row and insert it."),
+
+        new("UPDATE ... FROM refuses a target row that matches two rows of the FROM list", TwoMatchTables,
+            "UPDATE d SET v = s.v FROM s WHERE s.id = d.id",
+            CamusDBErrorCodes.InvalidInput, "UPDATE 1",
+            "The new value would depend on which match the statement used, which the plan decides. PostgreSQL uses one of them and does not say which."),
 
         new("CHAR(n) does not pad with blanks, so a trailing blank is significant in equality", CharTable,
             "SELECT COUNT(*) FROM ch WHERE c = 'ab '",
@@ -534,6 +547,21 @@ public static class DecidedDivergences
         new("FOR UPDATE is not supported in a subquery", NoSetup,
             "SELECT (SELECT 1 FOR UPDATE)",
             CamusDBErrorCodes.SqlSyntaxError, "1",
+            NotSupportedYet),
+
+        new("RETURNING of UPDATE ... FROM does not read the other relations", RowTable,
+            "UPDATE d SET v = 0 FROM d e WHERE e.id = d.id AND d.id = 1 RETURNING e.v",
+            CamusDBErrorCodes.InvalidInput, "10",
+            NotSupportedYet),
+
+        new("RETURNING * is not supported in UPDATE ... FROM", RowTable,
+            "UPDATE d SET v = 0 FROM d e WHERE e.id = d.id AND d.id = 1 RETURNING *",
+            CamusDBErrorCodes.InvalidInput, "1",
+            NotSupportedYet),
+
+        new("VALUES is not supported as a relation in FROM", RowTable,
+            "UPDATE d SET v = x.v FROM (VALUES (1, 5)) AS x(id, v) WHERE x.id = d.id",
+            CamusDBErrorCodes.SqlSyntaxError, "UPDATE 1",
             NotSupportedYet),
 
         new("A subquery is not supported in RETURNING", EmptyTable,

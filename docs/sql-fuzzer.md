@@ -21,7 +21,7 @@ It runs as its own CI job, `.github/workflows/sql-fuzz-nightly.yml`.
 | TLP (ternary logic partitioning) | For a predicate `p`, the queries with `WHERE p`, `WHERE NOT p` and `WHERE p IS NULL` together return exactly the rows of the query with no WHERE. Variants: aggregates (MIN of the MINs, MAX of the MAXs, SUM of the SUMs, SUM of the COUNTs), DISTINCT, GROUP BY, HAVING, and the ON predicate of an INNER join. | NULL handling, three-valued logic, NaN and -0.0, a comparison that is neither TRUE, FALSE nor NULL in a consistent way. |
 | NoREC | `SELECT COUNT(*) FROM … WHERE p` equals `SELECT SUM(CASE WHEN p THEN 1 ELSE 0 END) FROM …`. The first form lets the planner use indexes and pushdown. The second form evaluates `p` on every row of a full scan. A variant compares the rows too. | A seek with wrong bounds, a probe that loses a key, a predicate pushed to the wrong side of a join. |
 | Plan equivalence | One query returns the same rows, with the same output shape, under every plan: each `@{FORCE_INDEX=…}` choice of each source, each engine configuration and forced join operator (see below), and, for a one-table query, a full scan of the primary rows. | An index or a join operator that returns other rows than a scan. |
-| DML integrity | After each write, the table is exactly the table the rule expects: the affected-row count, every proposed and assigned value cell by cell, no other row added, changed or lost, and no change at all after a failure. The full scan, every index (its keys and its INCLUDE payload) and the large-value cells agree. In an explicit transaction, every write has its effect inside the transaction; a failed statement aborts the transaction (later statements fail with `CADB0824`, COMMIT fails with `CADB0824`, and the committed rows are as they were before); a transaction with no failure commits exactly the state it saw at its end. | Twin rows, orphan index entries, rows missing from an index, stale covering payloads, orphan or lost large-value cells, a wrong value or affected-row count, an UPSERT that skipped its insert or its update, a failed statement that changed data. |
+| DML integrity | After each write, the table is exactly the table the rule expects: the affected-row count, every proposed and assigned value cell by cell, no other row added, changed or lost, and no change at all after a failure. The full scan, every index (its keys and its INCLUDE payload) and the large-value cells agree. In an explicit transaction, every write has its effect inside the transaction; a failed statement aborts the transaction (later statements fail with `CADB0824`, COMMIT fails with `CADB0824`, and the committed rows are as they were before); a transaction with no failure commits exactly the state it saw at its end. | Twin rows, orphan index entries, rows missing from an index, stale covering payloads, orphan or lost large-value cells, a wrong value or affected-row count, an UPSERT that skipped its insert or its update, an `UPDATE … FROM` that changed a row its list matched twice, a failed statement that changed data. |
 
 ### FLOAT64 sums
 
@@ -219,6 +219,16 @@ generator adds on its own (the key offset and the ORDER BY … LIMIT of INSERT �
 a NOT NULL column) obey it too. `ProfileValidator` walks a finished tree and lists what the profile does
 not allow; `TestGenerator.EveryProfileExclusionHoldsOnTheWholeTree` runs it for every single exclusion
 and some combinations.
+
+About three UPDATE and DELETE statements in ten are joined forms: `UPDATE … FROM`, `DELETE … USING`, or
+a target alias without a list (see [UPDATE … FROM and DELETE … USING](update-from-delete-using.md)). The
+list is one or two tables, and every column of the statement is qualified, because a bare name that the
+target and a source both have is ambiguous. The WHERE always compares a target column with a column of
+the list, most of the time with the primary key of a source, so that most target rows match one row.
+The DML-integrity oracle predicts a joined write with a plain SELECT over `list CROSS JOIN target` and the
+same WHERE. A target row that the prediction names twice matched two rows of the list: an UPDATE must
+then fail and change nothing, and a DELETE deletes the row once. The generator does not write a comma
+list, a derived table or a set-returning function in the list, and it never writes `RETURNING`.
 
 The statement list carries BEGIN, COMMIT and ROLLBACK markers, so a consumer can group statements into
 explicit transactions without a new format. Every list keeps its seed.

@@ -78,6 +78,7 @@ internal static class ErrorClassifier
         new(CamusDBErrorCodes.InvalidInput, "CAST of NaN or an infinity to INT64 or NUMERIC", "cast"),
         new(CamusDBErrorCodes.InvalidInput, "a function argument out of its domain"),
         new(CamusDBErrorCodes.InvalidInput, "date, datetime or interval arithmetic on a boundary value past years 1 to 9999 or past an interval part", "out of range"),
+        new(CamusDBErrorCodes.InvalidInput, "UPDATE … FROM whose WHERE matches one target row with two rows of the FROM list", "more than once"),
         new(CamusDBErrorCodes.DuplicatePrimaryKey, "INSERT or INSERT … SELECT with a key that exists"),
         new(CamusDBErrorCodes.DuplicateUniqueKeyValue, "INSERT, UPDATE or UPSERT with a key of a unique index that exists"),
         new(CamusDBErrorCodes.NotNullViolation, "a NULL into a NOT NULL column (an UPDATE with a NULL literal, a deliberate failure)"),

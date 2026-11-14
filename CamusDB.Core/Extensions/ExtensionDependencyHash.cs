@@ -55,7 +55,7 @@ internal sealed class ExtensionDependencyHash
     /// <summary>The lowercase hex SHA-256 of the file list; see the class summary.</summary>
     public string Sha256 { get; }
 
-    /// <summary>The lowercase hex SHA-256 of each file at boot, keyed by its full path.</summary>
+    /// <summary>The lowercase hex SHA-256 of each file at boot, keyed by its full path with the folder links resolved (<see cref="WithResolvedFolder"/>).</summary>
     public FrozenDictionary<string, string> Files { get; }
 
     /// <summary>Hashes the dependency set of the extension whose assembly is <paramref name="assemblyPath"/>.</summary>
@@ -64,7 +64,7 @@ internal sealed class ExtensionDependencyHash
         if (trust == ExtensionTrust.Safe)
             return None;
 
-        string main = Path.GetFullPath(assemblyPath);
+        string main = WithResolvedFolder(assemblyPath);
         string folder = Path.GetDirectoryName(main) ?? main;
 
         List<(string Relative, string Full)> found = [];
@@ -105,7 +105,7 @@ internal sealed class ExtensionDependencyHash
     /// </summary>
     public byte[] ReadVerified(string path, string extensionName)
     {
-        string full = Path.GetFullPath(path);
+        string full = WithResolvedFolder(path);
         byte[] bytes = File.ReadAllBytes(full);
         Verify(full, Convert.ToHexStringLower(SHA256.HashData(bytes)), extensionName);
         return bytes;
@@ -114,7 +114,7 @@ internal sealed class ExtensionDependencyHash
     /// <summary>Checks the file at <paramref name="path"/> against its hash at boot; see <see cref="ReadVerified"/>.</summary>
     public void VerifyFile(string path, string extensionName)
     {
-        string full = Path.GetFullPath(path);
+        string full = WithResolvedFolder(path);
         Verify(full, HashFile(full), extensionName);
     }
 
@@ -129,6 +129,51 @@ internal sealed class ExtensionDependencyHash
             throw new CamusDBException(
                 CamusDBErrorCodes.ExtensionAssemblyRefused,
                 $"Extension '{extensionName}' tried to load '{full}', which changed after the server started (sha256 {sha256}, at startup {expected}); restart the node to load a new dependency");
+    }
+
+    /// <summary>
+    /// The full path of <paramref name="path"/> with every symbolic link in its folder part resolved.
+    /// <see cref="Files"/> keys the paths that the boot found, and the load context asks for the paths
+    /// that the dependency resolver gives. The two can name one folder in two forms: on macOS the temp
+    /// folder <c>/var/folders/…</c> is a link to <c>/private/var/folders/…</c>, and the resolver gives
+    /// the second form. Both sides use this method, so they agree. The file name itself is not
+    /// resolved: an assembly that is a link keeps the folder that holds the link.
+    /// </summary>
+    internal static string WithResolvedFolder(string path)
+    {
+        string full = Path.GetFullPath(path);
+        string? folder = Path.GetDirectoryName(full);
+
+        return folder is null ? full : Path.Combine(ResolveFolder(folder, depth: 0), Path.GetFileName(full));
+    }
+
+    /// <summary>
+    /// <paramref name="folder"/> with every link resolved. A link target can hold links of its own, so
+    /// the walk starts again on the target. The depth limit stops a link loop.
+    /// </summary>
+    private static string ResolveFolder(string folder, int depth)
+    {
+        string? root = Path.GetPathRoot(folder);
+
+        if (string.IsNullOrEmpty(root) || depth > 40)
+            return folder;
+
+        string current = root;
+        string[] parts = folder[root.Length..].Split(Path.DirectorySeparatorChar, StringSplitOptions.RemoveEmptyEntries);
+
+        for (int i = 0; i < parts.Length; i++)
+        {
+            current = Path.Combine(current, parts[i]);
+            DirectoryInfo info = new(current);
+
+            if (info.LinkTarget is null || info.ResolveLinkTarget(returnFinalTarget: false) is not { } target)
+                continue;
+
+            string rest = string.Join(Path.DirectorySeparatorChar, parts, i + 1, parts.Length - i - 1);
+            return ResolveFolder(Path.GetFullPath(Path.Combine(target.FullName, rest)), depth + 1);
+        }
+
+        return current;
     }
 
     private static string HashFile(string path)
