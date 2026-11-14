@@ -68,7 +68,8 @@ public sealed class ColumnSchemaDto
 
         foreach (DerivedColumnSchema col in schema)
         {
-            ColumnSchemaDto dto = new() { Name = col.Name, Type = col.Type };
+            // An interval column reaches the client as a string column of ISO-8601 text.
+            ColumnSchemaDto dto = new() { Name = col.Name, Type = IntervalMath.ClientColumnType(col.Type) };
 
             if (col.Type == ColumnType.Array)
                 dto.ElementType = KnownElementType(col.ElementType) ?? FirstCellElementType(col, rows);

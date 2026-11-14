@@ -43,4 +43,12 @@ public enum ColumnType
     /// ordered-index key, a primary key or an array element.
     /// </summary>
     Jsonb = 13,
+
+    /// <summary>
+    /// A PostgreSQL <c>interval</c>: months, days and microseconds, kept separate
+    /// (<see cref="CamusDB.Core.CommandsExecutor.Models.IntervalMath"/>). An expression value only: no
+    /// table column, index key, array element or schema default has this type, so no stored row
+    /// holds it. A client receives its ISO-8601 text as a string.
+    /// </summary>
+    Interval = 14,
 }

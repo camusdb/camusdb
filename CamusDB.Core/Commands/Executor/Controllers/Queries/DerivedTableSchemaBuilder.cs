@@ -1048,7 +1048,7 @@ internal static class DerivedTableSchemaBuilder
             return ColumnType.String;
         }
 
-        // Plain arithmetic: the rule the evaluator applies (MixedNumericComparison.ArithmeticResultType),
+        // Plain arithmetic: the rule the evaluator applies (TemporalArithmetic.ArithmeticResultType),
         // so a CTAS column or client metadata has the type the value will have. An operand whose type
         // is not statically known keeps the String fallback.
         if (target.nodeType is NodeType.ExprAdd or NodeType.ExprSub or NodeType.ExprMult or NodeType.ExprDiv
@@ -1058,7 +1058,8 @@ internal static class DerivedTableSchemaBuilder
             if (target.nodeType == NodeType.ExprSub && InferArgType(target.leftAst, innerBound, innerResolver) == ColumnType.Jsonb)
                 return ColumnType.Jsonb;
 
-            return MixedNumericComparison.ArithmeticResultType(
+            return TemporalArithmetic.ArithmeticResultType(
+                       target.nodeType,
                        InferArgType(target.leftAst, innerBound, innerResolver),
                        InferArgType(target.rightAst, innerBound, innerResolver))
                    ?? ColumnType.String;
@@ -1095,7 +1096,7 @@ internal static class DerivedTableSchemaBuilder
         if (target.nodeType == NodeType.ExprSubscript)
             return InferSubscriptType(target.leftAst!, innerBound, innerResolver);
 
-        // Unary minus keeps its operand's numeric type.
+        // Unary minus keeps its operand's type: a number or an interval.
         if (target.nodeType == NodeType.ExprNegate)
             return InferType(target.leftAst!, innerBound, innerResolver);
 

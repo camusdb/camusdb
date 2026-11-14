@@ -50,7 +50,11 @@ internal static class ProfileValidator
                 break;
             case CreateTableStmt create:
                 foreach (ColumnDef column in create.Table.Columns)
+                {
                     Need(profile.Allows(column.Type), $"a column of type {column.Type}");
+                    // Not a profile rule but an engine rule: no CamusDB table stores an interval.
+                    Need(!FuzzTypes.IsExpressionOnly(column.Type), $"a column of the expression-only type {column.Type}");
+                }
                 break;
         }
 

@@ -73,6 +73,19 @@ internal static class FunctionCatalog
         new("starts_with", [FuzzType.String, FuzzType.String], FuzzType.Bool),
         new("ends_with", [FuzzType.String, FuzzType.String], FuzzType.Bool),
         new("concat", [FuzzType.String, FuzzType.String], FuzzType.String),
+        // The interval functions. The generator writes the first argument of date_part (a field name),
+        // the parts of make_interval (small integers) and the stride of date_bin (a positive interval
+        // with no month part) as literals, so these calls do not fail on their arguments.
+        new("date_part", [FuzzType.String, FuzzType.Interval], FuzzType.Int64),
+        new("date_part", [FuzzType.String, FuzzType.DateTime], FuzzType.Int64),
+        new("date_part", [FuzzType.String, FuzzType.Date], FuzzType.Int64),
+        new("justify_days", [FuzzType.Interval], FuzzType.Interval),
+        new("justify_hours", [FuzzType.Interval], FuzzType.Interval),
+        new("justify_interval", [FuzzType.Interval], FuzzType.Interval),
+        new("make_interval", [FuzzType.Int64, FuzzType.Int64, FuzzType.Int64, FuzzType.Int64, FuzzType.Int64, FuzzType.Int64], FuzzType.Interval),
+        new("age", [FuzzType.DateTime, FuzzType.DateTime], FuzzType.Interval),
+        new("age", [FuzzType.Date, FuzzType.Date], FuzzType.Interval),
+        new("date_bin", [FuzzType.Interval, FuzzType.DateTime, FuzzType.DateTime], FuzzType.DateTime),
     ];
 
     public static IEnumerable<string> Names => All.Select(f => f.Name).Distinct();
@@ -116,7 +129,11 @@ internal sealed class GeneratorProfile
 
     public string Name { get; }
 
-    /// <summary>The column types. INT64 is always kept: every table has an INT64 or STRING primary key, and the counts of the oracles are INT64.</summary>
+    /// <summary>
+    /// The value types. Each one is a column type, except an expression-only type
+    /// (<see cref="FuzzTypes.IsExpressionOnly"/>, INTERVAL), which only an expression has. INT64 is
+    /// always kept: every table has an INT64 or STRING primary key, and the counts of the oracles are INT64.
+    /// </summary>
     public IReadOnlySet<FuzzType> Types { get; }
 
     public IReadOnlySet<UnaryOp> UnaryOps { get; }

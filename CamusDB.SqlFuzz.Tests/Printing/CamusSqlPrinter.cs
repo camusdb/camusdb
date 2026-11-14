@@ -32,7 +32,7 @@ internal interface ISqlPrinter
 /// <list type="bullet">
 /// <item>Every compound expression is in parentheses, so the text never depends on operator precedence.</item>
 /// <item>A NULL inside an expression is <c>CAST(NULL AS type)</c>, so it keeps its type. In a VALUES list it is a plain <c>NULL</c>.</item>
-/// <item>NUMERIC, DATE and JSONB literals are casts of a string; NaN and the infinities are casts of their names.</item>
+/// <item>NUMERIC, DATE, DATETIME and JSONB literals are casts of a string; NaN and the infinities are casts of their names. An INTERVAL literal is <c>INTERVAL '…'</c>.</item>
 /// <item>The index hint follows the alias: <c>t0 AS a0@{FORCE_INDEX=t0_i1}</c>. CamusDB refuses the hint before the alias.</item>
 /// </list>
 /// </summary>
@@ -48,7 +48,9 @@ internal sealed class CamusSqlPrinter : ISqlPrinter
         FuzzType.String => "string",
         FuzzType.Bool => "bool",
         FuzzType.Date => "date",
+        FuzzType.DateTime => "datetime",
         FuzzType.Jsonb => "jsonb",
+        FuzzType.Interval => "interval",
         _ => throw new ArgumentOutOfRangeException(nameof(type)),
     };
 
@@ -541,18 +543,28 @@ internal sealed class CamusSqlPrinter : ISqlPrinter
                 WriteString(sb, value.Text!);
                 sb.Append(" AS date)");
                 break;
+            case FuzzType.DateTime:
+                sb.Append("CAST(");
+                WriteString(sb, value.Text!);
+                sb.Append(" AS datetime)");
+                break;
             case FuzzType.Jsonb:
                 sb.Append("CAST(");
                 WriteString(sb, value.Text!);
                 sb.Append(" AS jsonb)");
+                break;
+            case FuzzType.Interval:
+                sb.Append("INTERVAL ");
+                WriteString(sb, value.Text!);
                 break;
         }
     }
 
     /// <summary>
     /// A literal in the form an IN-list item allows: CamusDB parses an item as a <c>simple_expr</c> (a
-    /// name or a plain literal), so NULL is untyped, a NUMERIC is <c>NUMERIC '…'</c>, and a DATE is its
-    /// string, which a comparison with a DATE parses.
+    /// name or a plain literal), so NULL is untyped, a NUMERIC is <c>NUMERIC '…'</c>, a DATE or a DATETIME
+    /// is its string, which a comparison with a DATE or a DATETIME parses, and an INTERVAL is its
+    /// <c>INTERVAL '…'</c> literal, which the grammar reads as a <c>simple_expr</c>.
     /// </summary>
     private void WriteSimpleLiteral(StringBuilder sb, FuzzValue value)
     {
@@ -568,6 +580,7 @@ internal sealed class CamusSqlPrinter : ISqlPrinter
                 WriteString(sb, value.Text!);
                 break;
             case FuzzType.Date:
+            case FuzzType.DateTime:
                 WriteString(sb, value.Text!);
                 break;
             default:

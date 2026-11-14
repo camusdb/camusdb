@@ -617,13 +617,13 @@ internal static class ConditionalResultTypes
                     : null;
 
             case NodeType.ExprNegate:
-                return left is { } operand && MixedNumericComparison.IsNumeric(operand.Type)
+                return left is { } operand && (MixedNumericComparison.IsNumeric(operand.Type) || operand.Type == ColumnType.Interval)
                     ? operand with { IsStringLiteral = false }
                     : null;
 
             case NodeType.ExprAdd or NodeType.ExprSub or NodeType.ExprMult or NodeType.ExprDiv:
                 return left is { } addend && right is { } other
-                       && MixedNumericComparison.ArithmeticResultType(addend.Type, other.Type) is { } arithmetic
+                       && TemporalArithmetic.ArithmeticResultType(target.nodeType, addend.Type, other.Type) is { } arithmetic
                     ? new ExpressionType(arithmetic)
                     : null;
 

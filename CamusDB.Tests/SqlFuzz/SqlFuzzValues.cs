@@ -28,6 +28,9 @@ namespace CamusDB.Tests.SqlFuzz;
 /// An index-only read can return the zero of the key where the row holds -0.0.</item>
 /// <item>NaN has one text, because NaN equals NaN in CamusDB.</item>
 /// <item>A NUMERIC has the text of its exact value.</item>
+/// <item>An INTERVAL has the text of its order key, where a month is 30 days and a day is 24 hours
+/// (<see cref="IntervalMath.ComparisonKey"/>). <c>1 mon</c> and <c>30 days</c> are equal, so a DISTINCT,
+/// a GROUP BY or a UNION can return either one, as in PostgreSQL.</item>
 /// <item>The type is part of the text. An INT64 1 and a FLOAT64 1 are different cells, and so are a
 /// FLOAT32 1 and a FLOAT64 1, or a DATE and a DATETIME.</item>
 /// </list>
@@ -56,6 +59,8 @@ internal static class SqlFuzzValues
                 return "d:" + value.IsoValue;
             case ColumnType.DateTime:
                 return "t:" + value.IsoValue;
+            case ColumnType.Interval:
+                return "v:" + IntervalMath.ComparisonKey(value.IntervalParts).ToString(CultureInfo.InvariantCulture);
             case ColumnType.Jsonb:
                 return "j:" + value.JsonValue;
             case ColumnType.Bytes:

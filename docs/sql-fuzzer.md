@@ -79,8 +79,16 @@ that need a fault. Other harnesses own them.
 
 The row oracles compare only queries whose rows do not depend on order: no LIMIT, no window function
 and no set operation. The error-classification oracle runs those forms, but nothing checks their
-rows. The generator has no FLOAT32, DATETIME, BYTES, UUID or array column, no CHECK constraint and no
+rows. The generator has no FLOAT32, BYTES, UUID or array column, no CHECK constraint and no
 composite primary key, and it pairs only comparable types.
+
+INTERVAL is an expression type only, because no CamusDB table stores an interval. The generator writes
+interval literals in the PostgreSQL and ISO-8601 forms, `date ± n`, `date - date`, `point ± interval`,
+`datetime - datetime`, interval arithmetic with numbers, interval comparisons, and the functions
+`age`, `make_interval`, `justify_*`, `date_bin` and `date_part`. It never writes an interval column, an
+interval value in a write, or `SUM` or `AVG` of an interval. The row oracles compare an interval by its
+order key, where a month is 30 days: `1 mon` and `30 days` are one value, so a DISTINCT or a UNION can
+return either one.
 
 ## Run it locally
 

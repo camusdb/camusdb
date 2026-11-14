@@ -156,6 +156,12 @@ internal static class ColumnValueAstBuilder
             // subquery over a date column failed with the internal-error code.
             ColumnType.Date => TypedCast(value.IsoValue!, NodeAst.TypeDate),
             ColumnType.DateTime => TypedCast(value.IsoValue!, NodeAst.TypeDateTime),
+            // An interval is CAST('<ISO text>' AS interval), the node INTERVAL '<text>' parses to. The
+            // ISO text keeps the three parts, so the value comes back with the same months, days and time.
+            ColumnType.Interval => TypedCast(
+                IntervalMath.FormatIso(value.IntervalParts),
+                new NodeAst(NodeType.Identifier, leftAst: null, rightAst: null, extendedOne: null, extendedTwo: null,
+                    extendedThree: null, extendedFour: null, extendedFive: null, yytext: "interval")),
             ColumnType.Null => NodeAst.Null,
             _ => throw new CamusDBException(
                 CamusDBErrorCodes.InvalidInternalOperation,

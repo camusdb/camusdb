@@ -55,6 +55,7 @@ integers exactly — never renumber or reuse them:
 | `UUID`       | 11  | `uuid_value`        | **exactly 16 bytes, big-endian** (high 8 bytes ‖ low 8 bytes) |
 | `NUMERIC`    | 12  | `numeric_value`     | decimal text, for example `"-12.5"` (see below) |
 | `JSONB`      | 13  | `json_value`        | the document's JSON text, for example `{"a": [1, 2.50]}` (see below) |
+| (interval)   | —   | `string_value`      | An interval has no type code on the wire. A query result sends its ISO-8601 text, for example `"P1DT2H"`, in a column of type `STRING`. A client sends an interval as text: `CAST(@p AS interval)` |
 
 ### Encoding rules you MUST implement precisely
 

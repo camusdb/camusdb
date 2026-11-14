@@ -13,6 +13,7 @@ Built-in function groups. Each lowercase name in the second column is a register
 | `HashScalarFunctions` | `md5`, `sha1`, `sha256`, `sha512` — lowercase hex digest of a string (UTF-8) or bytes value; not for security. `digest`, `hmac` — the digest or HMAC as bytes; `crc32` |
 | `BytesScalarFunctions` | `encode`, `decode`, `hex`, `unhex`, `to_base64`, `from_base64`, `convert_to`, `convert_from`, `get_byte`, `set_byte`, `get_bit`, `set_bit`, `bit_length`, `bit_count`, `gen_random_bytes` — see `docs/bytes-functions.md` |
 | `DateTimeScalarFunctions` | `current_timestamp` / `now`, `current_date`, `date_part`, `date_trunc`, `date_add`, `date_diff`, `unix_timestamp`, `unix_timestamp_ms`, `from_unixtime` |
+| `IntervalScalarFunctions` | `age`, `make_interval`, `justify_days`, `justify_hours`, `justify_interval`, `date_bin` — the PostgreSQL interval functions; `EXTRACT` from an interval is in `date_part` |
 | `DateConstructorScalarFunctions` | `make_date`, `make_timestamp`, `makedate`, `last_day` — build a date or a datetime from its parts; an invalid part is an error that names the part |
 | `DateTimeScalarFunctions` (MySQL shortcuts) | `year`, `month`, `day` / `dayofmonth`, `hour`, `minute`, `second`, `quarter`, `week`, `dayofweek`, `weekday`, `dayofyear`, `dayname`, `monthname` |
 | `DateTimeScalarFunctions` (SQL standard) | `EXTRACT(field FROM x)` — the parser turns it into a call to `extract`, an alias of `date_part` |

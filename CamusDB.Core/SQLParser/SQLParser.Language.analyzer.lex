@@ -103,6 +103,7 @@ TTypeGuid       (G|g)(U|u)(I|i)(D|d)
 TTypeNumeric    (N|n)(U|u)(M|m)(E|e)(R|r)(I|i)(C|c)
 TTypeDecimal    (D|d)(E|e)(C|c)(I|i)(M|m)(A|a)(L|l)
 TTypeArray      (A|a)(R|r)(R|r)(A|a)(Y|y)
+TInterval       (I|i)(N|n)(T|t)(E|e)(R|r)(V|v)(A|a)(L|l)
 TCast           (C|c)(A|a)(S|s)(T|t)
 TCase           (C|c)(A|a)(S|s)(E|e)
 TWhen           (W|w)(H|h)(E|e)(N|n)
@@ -462,6 +463,11 @@ TSequence       (S|s)(E|e)(Q|q)(U|u)(E|e)(N|n)(C|c)(E|e)
 {TTypeDecimal} { return (int)Token.TTYPE_NUMERIC; }
 
 {TTypeArray} { return (int)Token.TTYPE_ARRAY; }
+
+/* INTERVAL is a keyword only before its literal: a quote, a digit or a parameter. Anywhere else the word is
+   an identifier, so a column named interval keeps working, as in PostgreSQL. The trailing context makes
+   this rule longer than {Identifier}, so it wins. */
+{TInterval}/[ \t\r\n]*['0-9@] { return (int)Token.TINTERVAL; }
 
 {TCast} { return (int)Token.TCAST; }
 

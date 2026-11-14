@@ -13,7 +13,7 @@ namespace CamusDB.SqlFuzz.Tests.Generator;
 /// Makes literal values. Values come from small pools, so that rows share values (duplicates in
 /// non-unique columns, join matches, equal group keys), plus boundary values: INT64 min and max, 0,
 /// -0.0, NaN, the infinities, very large and very small exponents, the empty string, Unicode, the
-/// NUMERIC limits, the first and last dates.
+/// NUMERIC limits, the first and last dates and datetimes, and the interval parts at their limits.
 ///
 /// <para>A boundary value is a literal the engine stores as written. An expression on it can still
 /// overflow, and that error is on the expected-error list (<c>CADB0420</c>, <c>CADB0421</c>,
@@ -35,6 +35,24 @@ internal sealed class ValueGenerator
 
     private static readonly string[] SmallDates = ["2024-01-01", "2024-02-29", "2000-01-01", "2023-12-31", "1999-06-15", "2024-01-02"];
     private static readonly string[] BoundaryDates = ["0001-01-01", "9999-12-31", "1970-01-01"];
+
+    // Midnight of each small date is in the pool, so a DATE and a DATETIME compare equal on some rows.
+    private static readonly string[] SmallDateTimes =
+    [
+        "2024-01-01T00:00:00Z", "2024-02-29T00:00:00Z", "2024-01-31T10:00:00Z", "2024-02-29T12:30:00Z",
+        "2000-01-01T00:00:00Z", "2023-12-31T23:59:59.5Z", "2024-01-02T00:00:00Z", "1999-06-15T08:15:00.000001Z",
+    ];
+    private static readonly string[] BoundaryDateTimes = ["0001-01-01T00:00:00Z", "9999-12-31T23:59:59.999999Z", "1970-01-01T00:00:00Z"];
+
+    // The PostgreSQL text form and the ISO-8601 form. "1 mon" and "30 days", and "1 day" and "24 hours",
+    // are equal in the interval order but print differently, so a GROUP BY, DISTINCT or join on them
+    // exercises the 30-day month rule.
+    private static readonly string[] SmallIntervals =
+    [
+        "1 day", "2 hours", "1 mon", "30 days", "24 hours", "-3 days", "P1DT2H", "1 day 2 hours", "00:30:00",
+        "-1 day +2 hours", "1.5 days", "1 year 2 mons", "0", "PT90M", "7 days", "1 month -1 day", "3 hours ago",
+    ];
+    private static readonly string[] BoundaryIntervals = ["178956970 years", "-2147483648 days", "2562047788 hours", "-178956970 years -8 mons"];
 
     private static readonly string[] Jsons = ["{}", "{\"a\":1}", "{\"a\":2,\"b\":\"x\"}", "[1,2]", "null", "\"x\"", "{\"a\":{\"b\":null}}", "{\"b\":[1,{\"c\":true}]}", "1.5", "[]"];
 
@@ -69,7 +87,9 @@ internal sealed class ValueGenerator
             FuzzType.String => FuzzValue.String(boundary ? random.Pick(BoundaryStrings) : random.Pick(SmallStrings)),
             FuzzType.Bool => FuzzValue.Of(random.NextBool()),
             FuzzType.Date => FuzzValue.Date(boundary ? random.Pick(BoundaryDates) : random.Pick(SmallDates)),
+            FuzzType.DateTime => FuzzValue.DateTime(boundary ? random.Pick(BoundaryDateTimes) : random.Pick(SmallDateTimes)),
             FuzzType.Jsonb => FuzzValue.Json(random.Pick(Jsons)),
+            FuzzType.Interval => FuzzValue.Interval(boundary ? random.Pick(BoundaryIntervals) : random.Pick(SmallIntervals)),
             _ => throw new ArgumentOutOfRangeException(nameof(type)),
         };
     }
@@ -102,6 +122,12 @@ internal sealed class ValueGenerator
             _ => FuzzValue.String(core),
         };
     }
+
+    /// <summary>A small INT64 for a number of days or an interval factor, so most date and interval results stay in range.</summary>
+    public FuzzValue SmallInt() => FuzzValue.Of(random.Pick(SmallInts));
+
+    /// <summary>A positive stride for <c>date_bin</c>: no month part, greater than zero, so the call does not fail.</summary>
+    public FuzzValue BinStride() => FuzzValue.Interval(random.Pick(new[] { "15 minutes", "1 hour", "1 day", "7 days", "PT90S" }));
 
     /// <summary>A non-zero INT64 divisor, so most divisions do not fail with a division by zero.</summary>
     public FuzzValue NonZeroInt() => FuzzValue.Of(random.Pick(new long[] { -3, -2, -1, 1, 2, 3, 7 }));

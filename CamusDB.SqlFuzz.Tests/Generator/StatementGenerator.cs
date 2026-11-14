@@ -128,7 +128,8 @@ internal sealed class StatementGenerator
         FuzzType keyType = profile.Allows(FuzzType.String) && random.Chance(0.15) ? FuzzType.String : FuzzType.Int64;
         List<ColumnDef> columns = [new ColumnDef("c0", keyType, NotNull: true, PrimaryKey: true)];
 
-        List<FuzzType> types = profile.Types.ToList();
+        // An interval is a value of an expression only: CamusDB refuses an interval column.
+        List<FuzzType> types = profile.Types.Where(t => !FuzzTypes.IsExpressionOnly(t)).ToList();
         int count = random.Between(2, 6);
         for (int i = 1; i <= count; i++)
         {
@@ -273,6 +274,7 @@ internal sealed class StatementGenerator
             FuzzType.Numeric => FuzzValue.Numeric((1000 + n).ToString(System.Globalization.CultureInfo.InvariantCulture) + ".25"),
             FuzzType.String => FuzzValue.String("u" + n.ToString(System.Globalization.CultureInfo.InvariantCulture)),
             FuzzType.Date => FuzzValue.Date(new DateTime(2100, 1, 1).AddDays(n).ToString("yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture)),
+            FuzzType.DateTime => FuzzValue.DateTime(new DateTime(2100, 1, 1, 0, 0, 0, DateTimeKind.Utc).AddSeconds(n).ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", System.Globalization.CultureInfo.InvariantCulture)),
             _ => values.Next(type, nullable: false, boundaries: false),
         };
     }

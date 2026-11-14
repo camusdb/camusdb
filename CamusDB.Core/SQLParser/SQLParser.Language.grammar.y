@@ -61,8 +61,14 @@
    `a + b[1]` subscripts only b, and `NOT x::bool` negates the cast value. Declaring them above every
    binary operator makes each such shift/reduce choice resolve to a shift. */
 %left TCOLONCOLON LBRACKET
+/* INTERVAL '3' HOUR: after INTERVAL and its text, an identifier is the unit, so the parser shifts it.
+   A plain identifier can follow an expression in a few places (ON CONFLICT (a) WHERE p DO NOTHING), so
+   the choice must be stated. TIDENTIFIER takes a precedence only for this choice: no other conflict
+   has it as the lookahead. INTERVAL_TEXT is a precedence name only; no token carries it. */
+%nonassoc INTERVAL_TEXT
+%nonassoc TIDENTIFIER
 
-%token TBYTESLIT LBRACKET RBRACKET TMOD TCOLONCOLON
+%token TBYTESLIT LBRACKET RBRACKET TMOD TCOLONCOLON TINTERVAL
 %token TDIGIT TFLOAT TSTRING TIDENTIFIER TPLACEHOLDER LPAREN RPAREN TCOMMA TMULT TADD TMINUS TDIV TSELECT TFROM TWHERE 
 %token TEQUALS TNOTEQUALS TLESSTHAN TGREATERTHAN TLESSTHANEQUALS TGREATERTHANEQUALS TAND TOR TORDER TBY TASC TDESC
 %token TTRUE TFALSE TUPDATE TSET TDELETE TINSERT TINTO TVALUES TCREATE TTABLE TNOT TNULL
@@ -2420,12 +2426,25 @@ simple_expr : any_identifier { $$.n = $1.n; $$.s = $1.s; }
             | placeholder { $$.n = $1.n; $$.s = $1.s; }
             | numeric_literal { $$.n = $1.n; $$.s = $1.s; }
             | identifier_typed_literal { $$.n = $1.n; $$.s = $1.s; }
+            | interval_literal { $$.n = $1.n; $$.s = $1.s; }
 			;
 
 /* JSONB '{"a": 1}' (also JSON '…'): the PostgreSQL typed literal for a type whose name is a plain
    identifier. It builds the same ExprCast node as '…'::jsonb, so the text is parsed by the cast. */
 identifier_typed_literal : TIDENTIFIER string { $$.n = new(NodeType.ExprCast, $2.n, TypeFromWord($1.s), null, null, null, null, null, null); }
                          ;
+
+/* INTERVAL '1 day 2 hours' (PostgreSQL), INTERVAL '3' HOUR (SQL standard) and INTERVAL 3 HOUR (MySQL).
+   The lexer returns TINTERVAL only when a quote, a digit or a parameter follows the word, so a column
+   named interval stays an identifier. Every form builds nodes that exist already: a cast of the text to
+   the interval type, or n * CAST('1 hour' AS interval). An identifier right after INTERVAL '…' is read
+   as its unit (see INTERVAL_TEXT in the precedence list). */
+interval_literal : TINTERVAL string %prec INTERVAL_TEXT { $$.n = new(NodeType.ExprCast, $2.n, IntervalTypeNode(), null, null, null, null, null, null); }
+                 | TINTERVAL string TIDENTIFIER { $$.n = IntervalWithUnit($2.n, $3.s); }
+                 | TINTERVAL int TIDENTIFIER { $$.n = IntervalWithUnit($2.n, $3.s); }
+                 | TINTERVAL float TIDENTIFIER { $$.n = IntervalWithUnit($2.n, $3.s); }
+                 | TINTERVAL placeholder TIDENTIFIER { $$.n = IntervalWithUnit($2.n, $3.s); }
+                 ;
 
 /* NUMERIC '1.23' is the Spanner typed literal. It builds the ExprCast node that CAST('1.23' AS NUMERIC)
    builds, so the string is parsed exactly by the cast and never passes through a float. */

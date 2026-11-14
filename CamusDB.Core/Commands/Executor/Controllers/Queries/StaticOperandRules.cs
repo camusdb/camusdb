@@ -92,7 +92,7 @@ internal static class StaticOperandRules
                 return;
 
             case NodeType.ExprNegate:
-                if (left is { Type: not ColumnType.Null } negated && !MixedNumericComparison.IsNumeric(negated.Type))
+                if (left is { Type: not (ColumnType.Null or ColumnType.Interval) } negated && !MixedNumericComparison.IsNumeric(negated.Type))
                     throw new CamusDBException(
                         CamusDBErrorCodes.InvalidInput,
                         $"No matching signature for unary operator - for argument type: {negated.Type}");
@@ -347,7 +347,7 @@ internal static class StaticOperandRules
         if (op == NodeType.ExprSub && leftType.Type == ColumnType.Jsonb)
             return;
 
-        if (MixedNumericComparison.ArithmeticResultType(leftType.Type, rightType.Type) is null)
+        if (TemporalArithmetic.ArithmeticResultType(op, leftType.Type, rightType.Type) is null)
             throw new CamusDBException(
                 CamusDBErrorCodes.InvalidInput,
                 $"No matching signature for operator {SQLExecutorBaseCreator.ArithmeticSymbol(op)} for argument types: {leftType.Type}, {rightType.Type}");

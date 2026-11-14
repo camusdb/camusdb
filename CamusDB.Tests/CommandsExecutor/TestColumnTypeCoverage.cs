@@ -51,10 +51,11 @@ public sealed class TestColumnTypeCoverage
     /// <summary>
     /// Every type that an array can hold: a scalar, so neither NULL nor an array. Jsonb is not an
     /// element type either: <see cref="ColumnValue.FromArray"/> refuses an array of documents, because
-    /// a jsonb array is the way to hold several documents.
+    /// a jsonb array is the way to hold several documents. It also refuses an array of intervals,
+    /// because an interval is an expression value only.
     /// </summary>
     private static IEnumerable<ColumnType> ElementTypes() =>
-        Enum.GetValues<ColumnType>().Where(t => t is not ColumnType.Null and not ColumnType.Array and not ColumnType.Jsonb);
+        Enum.GetValues<ColumnType>().Where(t => t is not ColumnType.Null and not ColumnType.Array and not ColumnType.Jsonb and not ColumnType.Interval);
 
     private static IEnumerable<ColumnType> HashedTypes() =>
         Enum.GetValues<ColumnType>().Where(t => t is not ColumnType.Null);
@@ -123,6 +124,13 @@ public sealed class TestColumnTypeCoverage
             3 => "123456789012345678901234567890.123",
             _ => $"{{\"k\": {i}, \"s\": \"v{i}\", \"f\": {i}.5}}",
         }),
+        // The extremes of each part, and values whose three parts all differ in sign and size.
+        ColumnType.Interval => ColumnValue.FromInterval(i switch
+        {
+            0 => new IntervalParts(int.MinValue, int.MinValue, long.MinValue),
+            1 => new IntervalParts(int.MaxValue, int.MaxValue, long.MaxValue),
+            _ => new IntervalParts(i, -3 * i, i * 1_000_003L),
+        }),
         _ => throw new AssertionException(
             $"ColumnType.{type} has no samples. Add samples here. Then give the type an arm in SpillRowCodec " +
             "(WriteScalar, ReadScalar, MeasureScalar), ColumnValueHash, ColumnValueWireCodec, GrpcValueCodec " +
@@ -146,7 +154,7 @@ public sealed class TestColumnTypeCoverage
         foreach (ColumnValue value in samples)
             yield return value;
 
-        if (type is ColumnType.Null or ColumnType.Array or ColumnType.Jsonb)
+        if (type is ColumnType.Null or ColumnType.Array or ColumnType.Jsonb or ColumnType.Interval)
             yield break;
 
         yield return ColumnValue.FromArray(type, []);
@@ -198,7 +206,12 @@ public sealed class TestColumnTypeCoverage
         foreach (ColumnValue value in ValuesAndArraysOf(type))
         {
             CamusDB.Grpc.Value fromValue = GrpcValueCodec.ToProto(value);
-            AssertSameValue(value, GrpcValueCodec.FromProto(fromValue), "gRPC from a value");
+
+            // An interval reaches a client as its ISO-8601 text, so it comes back as a string.
+            if (type == ColumnType.Interval)
+                Assert.AreEqual(IntervalMath.FormatIso(value.IntervalParts), GrpcValueCodec.FromProto(fromValue).StrValue, $"gRPC text of {value}");
+            else
+                AssertSameValue(value, GrpcValueCodec.FromProto(fromValue), "gRPC from a value");
 
             ValueSlot slot = ValueSlot.FromColumnValue(value);
             AssertSameValue(value, slot.ToColumnValue(), "value slot");
@@ -259,6 +272,14 @@ public sealed class TestColumnTypeCoverage
             .SetName("Uuid from two spellings");
         yield return new TestCaseData(ColumnValue.FromNumericString("1.50"), ColumnValue.FromNumericString("1.5"))
             .SetName("Numeric with a trailing zero");
+        yield return new TestCaseData(
+                ColumnValue.FromInterval(new IntervalParts(1, 0, 0)),
+                ColumnValue.FromInterval(new IntervalParts(0, 30, 0)))
+            .SetName("Interval of one month and of 30 days");
+        yield return new TestCaseData(
+                ColumnValue.FromInterval(new IntervalParts(0, 1, 0)),
+                ColumnValue.FromInterval(new IntervalParts(0, 0, IntervalMath.MicrosPerDay)))
+            .SetName("Interval of one day and of 24 hours");
         yield return new TestCaseData(new ColumnValue(Array.Empty<byte>()), new ColumnValue((byte[])null!))
             .SetName("Bytes empty and missing");
         yield return new TestCaseData(ColumnValue.FromJsonText("{\"a\": 1.0, \"b\": [10.50]}"), ColumnValue.FromJsonText("{\"b\": [10.5], \"a\": 1}"))

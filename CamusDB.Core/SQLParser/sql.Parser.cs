@@ -507,10 +507,50 @@ internal partial class sqlParser
         if (string.Equals(word, "bigint", StringComparison.OrdinalIgnoreCase))
             return NodeAst.TypeInteger64;
 
+        if (string.Equals(word, "interval", StringComparison.OrdinalIgnoreCase))
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInput,
+                "'interval' is not a column type: an interval is a value of an expression only, and a table cannot store it. " +
+                "Store the text form in a string column, or the parts in integer columns.");
+
         throw new CamusDBException(
             CamusDBErrorCodes.InvalidInput,
             $"'{word}' is not a column type. Use one of the declared types, JSONB for a JSON document, " +
             "or SERIAL for an auto-numbered int64 column.");
+    }
+
+    /// <summary>
+    /// The type node of the interval type: an <see cref="NodeType.Identifier"/> node, the node that
+    /// <c>CAST(x AS interval)</c> builds. An interval is an expression value only, so there is no type
+    /// token, and <see cref="TypeFromWord"/> refuses the word for a column.
+    /// </summary>
+    private static NodeAst IntervalTypeNode() =>
+        new(NodeType.Identifier, null, null, null, null, null, null, null, "interval");
+
+    /// <summary>
+    /// <c>INTERVAL amount unit</c>: the SQL-standard form <c>INTERVAL '3' HOUR</c> and the MySQL form
+    /// <c>INTERVAL 3 HOUR</c>. A string amount becomes the cast of <c>'3 hour'</c>, so the interval
+    /// parser reads the number and the unit together. A number or a parameter becomes
+    /// <c>amount * CAST('1 hour' AS interval)</c>, so the amount can come from a parameter. The forms
+    /// use only nodes that exist already, so a view body renders and parses back with no new syntax.
+    /// </summary>
+    private static NodeAst IntervalWithUnit(NodeAst amount, string? unit)
+    {
+        if (unit is null || !CommandsExecutor.Models.IntervalMath.TryParseUnit(unit, out _))
+            throw new CamusDBException(CamusDBErrorCodes.InvalidInput, $"'{unit}' is not an interval unit");
+
+        string unitWord = unit.ToLowerInvariant();
+
+        if (amount.nodeType == NodeType.String)
+        {
+            string text = SqlStringLiteral.Decode(amount.yytext!).Trim();
+            NodeAst combined = new(NodeType.String, null, null, null, null, null, null, null, SqlStringLiteral.Quote(text + " " + unitWord));
+            return new(NodeType.ExprCast, combined, IntervalTypeNode(), null, null, null, null, null, null);
+        }
+
+        NodeAst oneUnit = new(NodeType.String, null, null, null, null, null, null, null, SqlStringLiteral.Quote("1 " + unitWord));
+        NodeAst perUnit = new(NodeType.ExprCast, oneUnit, IntervalTypeNode(), null, null, null, null, null, null);
+        return new(NodeType.ExprMult, amount, perUnit, null, null, null, null, null, null);
     }
 
     /// <summary>

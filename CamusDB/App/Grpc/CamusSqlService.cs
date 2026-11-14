@@ -2210,7 +2210,8 @@ public sealed class CamusSqlService : CamusSql.CamusSqlBase
             rs.Columns.Add(new ColumnSchema
             {
                 Name = col.Name,
-                Type = (ProtoColType)(int)col.Type,
+                // An interval column reaches the client as a string column of ISO-8601 text.
+                Type = (ProtoColType)(int)IntervalMath.ClientColumnType(col.Type),
             });
         return rs;
     }

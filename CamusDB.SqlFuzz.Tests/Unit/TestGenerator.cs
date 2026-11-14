@@ -278,6 +278,36 @@ internal sealed class TestGenerator
         Assert.That(CamusSqlPrinter.Instance.Print(new LiteralExpr(FuzzValue.Of(long.MinValue))), Is.EqualTo("-9223372036854775808"));
         Assert.That(CamusSqlPrinter.Instance.Print(new LiteralExpr(FuzzValue.Of(1e300))), Is.EqualTo("1e300"));
         Assert.That(CamusSqlPrinter.Instance.Print(new LiteralExpr(FuzzValue.Null(FuzzType.Date))), Is.EqualTo("CAST(NULL AS date)"));
+        Assert.That(CamusSqlPrinter.Instance.Print(new LiteralExpr(FuzzValue.Interval("1 day 2 hours"))), Is.EqualTo("INTERVAL '1 day 2 hours'"));
+        Assert.That(CamusSqlPrinter.Instance.Print(new LiteralExpr(FuzzValue.Null(FuzzType.Interval))), Is.EqualTo("CAST(NULL AS interval)"));
+        Assert.That(CamusSqlPrinter.Instance.Print(new LiteralExpr(FuzzValue.DateTime("2024-02-29T12:30:00Z"))), Is.EqualTo("CAST('2024-02-29T12:30:00Z' AS datetime)"));
+        Assert.That(CamusSqlPrinter.Instance.Print(new InListExpr(new ColumnExpr("a0", "c1", FuzzType.DateTime), [new LiteralExpr(FuzzValue.DateTime("2024-01-01T00:00:00Z"))], false)),
+            Is.EqualTo("(a0.c1 IN ('2024-01-01T00:00:00Z'))"));
+    }
+
+    /// <summary>
+    /// An interval is an expression type only. Over many seeds the generator writes interval literals,
+    /// interval arithmetic, datetime columns and the interval functions, but never an interval column.
+    /// </summary>
+    [Test]
+    public void IntervalsAppearInExpressionsButNeverAsAColumn()
+    {
+        List<string> sql = new();
+        for (ulong seed = 1; seed <= 40; seed++)
+            sql.AddRange(Program(seed, GeneratorProfile.CamusDB, 250));
+        string all = string.Join("\n", sql);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(sql.Where(s => s.StartsWith("CREATE TABLE", StringComparison.Ordinal)), Has.None.Contains(" interval"));
+            Assert.That(all, Does.Contain("INTERVAL '"));
+            Assert.That(all, Does.Contain(" datetime"));
+            Assert.That(all, Does.Contain("justify_"));
+            Assert.That(all, Does.Contain("make_interval("));
+            Assert.That(all, Does.Contain("date_bin("));
+            Assert.That(all, Does.Contain("age("));
+            Assert.That(all, Does.Contain("date_part("));
+        });
     }
 
     /// <summary>
@@ -302,7 +332,7 @@ internal sealed class TestGenerator
             yield return full.WithoutJoins(kind).Named("without " + kind + " joins");
         foreach (SetOpKind kind in Enum.GetValues<SetOpKind>())
             yield return full.WithoutSetOperations(kind).Named("without " + kind);
-        foreach (FuzzType type in new[] { FuzzType.Float64, FuzzType.Numeric, FuzzType.String, FuzzType.Date, FuzzType.Jsonb })
+        foreach (FuzzType type in new[] { FuzzType.Float64, FuzzType.Numeric, FuzzType.String, FuzzType.Date, FuzzType.DateTime, FuzzType.Jsonb, FuzzType.Interval })
             yield return full.WithoutTypes(type).Named("without " + type);
 
         yield return full.WithoutOperators(BinaryOp.Add).WithoutFeatures(ExprFeature.Coalesce).Named("without + and COALESCE");
@@ -378,6 +408,8 @@ internal sealed class TestGenerator
         await using FuzzEngine engine = await FuzzEngine.StartAsync();
         int succeeded = 0;
         int run = 0;
+        int intervalSucceeded = 0;
+        int intervalRun = 0;
         Dictionary<string, int> errors = new(StringComparer.Ordinal);
         Dictionary<string, string> samples = new(StringComparer.Ordinal);
         List<string> unclassified = new();
@@ -401,9 +433,14 @@ internal sealed class TestGenerator
             {
                 Statement statement = generator.GenerateStatement();
                 StatementOutcome outcome = await runner.ExecuteAsync(SetupStatement.RouteOf(statement), CamusSqlPrinter.Instance.Print(statement));
+                bool hasInterval = ExprWalker.Nodes(statement).OfType<Expr>().Any(e => e.Type == FuzzType.Interval);
+                if (hasInterval)
+                    intervalRun++;
                 if (outcome.IsSuccess && outcome.WireError is null)
                 {
                     succeeded++;
+                    if (hasInterval)
+                        intervalSucceeded++;
                     continue;
                 }
 
@@ -418,11 +455,18 @@ internal sealed class TestGenerator
         }
 
         double rate = 100.0 * succeeded / run;
-        string report = $"{succeeded} of {run} statements ({rate:0.0} %) ran with no error.\n"
+        double intervalRate = intervalRun == 0 ? 0 : 100.0 * intervalSucceeded / intervalRun;
+        string report = $"{succeeded} of {run} statements ({rate:0.0} %) ran with no error; "
+            + $"{intervalSucceeded} of the {intervalRun} statements with an interval expression ({intervalRate:0.0} %).\n"
             + string.Join("\n", errors.OrderByDescending(kv => kv.Value).Take(25).Select(kv => $"  {kv.Value,5}x {kv.Key}\n         e.g. {samples[kv.Key]}"))
             + (unclassified.Count > 0 ? $"\nfindings ({unclassified.Count}):\n  " + string.Join("\n  ", unclassified.Take(20)) : "");
         TestContext.Progress.WriteLine(report);
         Assert.That(rate, Is.GreaterThanOrEqualTo(90.0), report);
+        // Intervals have no column, so they come from expressions only. This proves that the oracles see
+        // enough of them, and that most of them run: an interval statement that always fails checks nothing.
+        // Measured 2026-11-12 with this seed: 1,207 of 10,000 statements, 95.4 % of them with no error.
+        Assert.That(intervalRun, Is.GreaterThanOrEqualTo(500), report);
+        Assert.That(intervalRate, Is.GreaterThanOrEqualTo(85.0), report);
         // A defect is a failure on its own, whatever the rate: a few internal-code outcomes in 10,000
         // statements would not move the rate, and must not hide in it.
         Assert.That(unclassified, Is.Empty, report);

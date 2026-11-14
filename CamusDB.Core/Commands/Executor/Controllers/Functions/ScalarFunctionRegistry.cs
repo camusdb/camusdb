@@ -46,6 +46,7 @@ internal sealed class ScalarFunctionRegistry
         DateTimeScalarFunctions.Register(registry);
         DateConstructorScalarFunctions.Register(registry);
         ClockScalarFunctions.Register(registry);
+        IntervalScalarFunctions.Register(registry);
         DatePatternScalarFunctions.Register(registry);
         MathScalarFunctions.Register(registry);
         StringScalarFunctions.Register(registry);

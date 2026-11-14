@@ -127,6 +127,7 @@ internal static class CastScalarFunctions
             ColumnType.Uuid      => CastToUuid(castName, value),
             ColumnType.Numeric   => CastToNumeric(castName, value),
             ColumnType.Jsonb     => CastToJsonb(castName, value),
+            ColumnType.Interval  => CastToInterval(castName, value),
             _ => throw UnknownTargetType(castName, targetType.ToString()),
         };
     }
@@ -282,9 +283,22 @@ internal static class CastScalarFunctions
             "double" => ColumnType.Float64,
             "uuid" or "guid" => ColumnType.Uuid,
             "jsonb" or "json" => ColumnType.Jsonb,
+            "interval" => ColumnType.Interval,
             _ => throw UnknownTargetType(castName, identifier),
         };
     }
+
+    /// <summary>
+    /// The cast to <c>interval</c>. Text is read by <see cref="IntervalMath.Parse"/>: the PostgreSQL form
+    /// (<c>'1 day 2 hours'</c>) or the ISO-8601 form (<c>'P1DT2H'</c>). No other type converts, as in
+    /// PostgreSQL, where a number needs a unit (<c>n * INTERVAL '1 day'</c>).
+    /// </summary>
+    private static ColumnValue CastToInterval(string castName, ColumnValue value) => value.Type switch
+    {
+        ColumnType.Interval => value,
+        ColumnType.String => ColumnValue.FromInterval(IntervalMath.Parse(value.StrValue!)),
+        _ => throw InvalidConversion(castName, value.Type, ColumnType.Interval),
+    };
 
     private static ColumnValue CastToString(string castName, ColumnValue value)
     {

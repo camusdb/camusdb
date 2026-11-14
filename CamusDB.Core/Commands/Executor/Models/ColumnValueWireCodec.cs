@@ -24,6 +24,8 @@ namespace CamusDB.Core.CommandsExecutor.Models;
 /// path range-checks a NUMERIC, so a corrupt frame cannot carry a value past ±(10³⁸−1) unscaled.
 /// A jsonb value travels as its cell bytes in base64 (<c>"j"</c>); the read path checks the format
 /// version.
+/// An interval travels as the same two halves (<c>"u"</c> the packed months and days, <c>"l"</c> the
+/// microseconds).
 /// </summary>
 public static class ColumnValueWireCodec
 {
@@ -72,6 +74,7 @@ public static class ColumnValueWireCodec
 
             case ColumnType.Uuid:
             case ColumnType.Numeric:
+            case ColumnType.Interval:
                 writer.WriteNumber("u", value.UuidHigh);
                 writer.WriteNumber("l", value.LongValue);
                 break;
@@ -114,6 +117,8 @@ public static class ColumnValueWireCodec
                     element.GetProperty("j").GetBytesFromBase64(), CamusDBErrorCodes.JsonbValueCorrupt)),
             ColumnType.Uuid or ColumnType.Numeric =>
                 new ColumnValue(type, element.GetProperty("u").GetInt64(), element.GetProperty("l").GetInt64()),
+            ColumnType.Interval =>
+                ColumnValue.FromIntervalHalves(element.GetProperty("u").GetInt64(), element.GetProperty("l").GetInt64()),
             ColumnType.Array => ReadArray(element),
             _ => throw new CamusDBException(
                 CamusDBErrorCodes.InvalidInternalOperation,

@@ -89,6 +89,11 @@ internal static class ScalarTextForm
                 text = value.JsonValue!;
                 return true;
 
+            // The ISO-8601 text, the same text that a client receives.
+            case ColumnType.Interval:
+                text = IntervalMath.FormatIso(value.IntervalParts);
+                return true;
+
             default:
                 text = "";
                 return false;
