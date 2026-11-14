@@ -9,6 +9,7 @@ Built-in function groups. Each lowercase name in the second column is a register
 | File | Functions |
 |------|-----------|
 | `MathScalarFunctions` | `abs`, `ceil` / `ceiling`, `floor`, `round`, `trunc`, `sqrt`, `pow` / `power`, `mod`, `sign`, `random` |
+| `TrigonometricScalarFunctions` | `sin`, `cos`, `tan`, `cot`, `asin`, `acos`, `atan`, `atan2`, `sind`, `cosd`, `tand`, `cotd`, `asind`, `acosd`, `atand`, `atan2d`, `radians`, `degrees`, `pi` — the PostgreSQL forms; the names that end in d take or return degrees and are exact at the common angles; an infinite angle and an inverse sine or cosine argument outside [-1, 1] are errors |
 | `StringScalarFunctions` | `length`, `lower`, `upper`, `trim`, `ltrim`, `rtrim`, `substring`, `strpos`, `replace`, `contains`, `starts_with`, `ends_with`, `concat` — `length`, `substring`, the trims, `strpos` and the three predicates also take bytes; `POSITION(x IN y)` parses to `strpos(y, x)` (`PositionCall`) |
 | `HashScalarFunctions` | `md5`, `sha1`, `sha256`, `sha512` — lowercase hex digest of a string (UTF-8) or bytes value; not for security. `digest`, `hmac` — the digest or HMAC as bytes; `crc32` |
 | `BytesScalarFunctions` | `encode`, `decode`, `hex`, `unhex`, `to_base64`, `from_base64`, `convert_to`, `convert_from`, `get_byte`, `set_byte`, `get_bit`, `set_bit`, `bit_length`, `bit_count`, `gen_random_bytes` — see `docs/bytes-functions.md` |
