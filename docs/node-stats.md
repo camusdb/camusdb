@@ -116,7 +116,7 @@ when you mount a separate disk there.
 **`below_watermark` is the write gate's own answer.** When `available_bytes` on the data volume falls
 below `min_free_disk_bytes` (default 64 MiB), the node refuses new writes with
 `InsufficientDiskSpace` (`CADB0536`). Reads, DDL and `DROP` still work, so you can free space. The
-stats call reads the same cached probe and the same live watermark that the gate reads. Thus, when
+stats call reads the same cached probe and the same live watermark that the gate reads. So when
 `below_watermark` is `true`, writes on that node fail, and when it is `false`, the gate admits them.
 A change of `min_free_disk_bytes` (for example with `SET CLUSTER SETTING`) shows in the next call.
 

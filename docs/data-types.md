@@ -475,7 +475,7 @@ support `@>` or `<@` yet.
 ## Literal and value formats
 
 How a value is written depends on the path. **The SQL literal form and the JSON form differ for
-`bytes`** — note that below.
+`bytes`** — see the note below.
 
 ### In SQL statements
 
@@ -513,8 +513,8 @@ SELECT * FROM events WHERE created = day;                      -- true only at m
 SELECT * FROM events WHERE day < make_timestamp(2026, 3, 15, 10, 0, 0);  -- includes 2026-03-15
 ```
 
-A string that does not parse is an `InvalidInput` error, not a row that fails to match: with a
-silent non-match, `created >= '2026-13-01'` would look like a valid empty result. A `date` takes only
+A string that does not parse is an `InvalidInput` error. With a silent non-match,
+`created >= '2026-13-01'` would look like a valid empty result. A `date` takes only
 the `yyyy-MM-dd` form, so `day = '2026-03-15T00:00:00Z'` is an error too. An index on a `date` or
 `datetime` column serves these comparisons, because the planner converts the constant into the
 column's type before it builds the index key.
@@ -524,7 +524,7 @@ column's type before it builds the index key.
 There are two forms, following PostgreSQL.
 
 **Plain — `'…'` or `"…"`.** No escape processing at all. A backslash is an ordinary character, and
-the only special sequence is a doubled delimiter. Use this for essentially everything, including
+the only special sequence is a doubled delimiter. Use this for almost everything, including
 regex patterns and Windows paths:
 
 ```sql
@@ -550,8 +550,8 @@ a spelling:
 COMMENT ON TABLE t IS E'line1\nline2';       -- stores an embedded newline
 ```
 
-An unrecognized escape yields the character itself, so `E'\d'` is `d` — which is exactly why regex
-patterns belong in the plain form. A truncated numeric escape (`E'\x4'`) or an unpaired surrogate
+An unrecognized escape yields the character itself, so `E'\d'` is `d`. For this reason, write regex
+patterns in the plain form. A truncated numeric escape (`E'\x4'`) or an unpaired surrogate
 raises `InvalidInput`.
 
 Every value has a literal form, so anything that can be stored can also be emitted by
@@ -559,8 +559,8 @@ Every value has a literal form, so anything that can be stored can also be emitt
 `E'…'` only when the value contains a control character.
 
 A bytes literal is written `X'4D5A'` (or lowercase `x'…'`); `X''` is the empty byte string, and an
-odd number of hex digits is an error. Note that a bare `0xFF` is an **integer** literal, not bytes —
-it keeps that meaning, which is why bytes got their own syntax. The legacy form of passing bytes as a
+odd number of hex digits is an error. A bare `0xFF` is an **integer** literal and keeps that
+meaning, so bytes have their own syntax. The legacy form of passing bytes as a
 string whose text starts with `0x` still coerces on insert, but only where the target column type is
 known; `X'…'` carries its type on its own.
 
@@ -656,7 +656,7 @@ The HTTP API exchanges values as JSON:
 | `array(T)` | JSON array of the element type |
 | `jsonb` | the document itself as native JSON; numbers keep all their digits. With `"jsonbAsText": true` on the request, a JSON string that holds the text form, so JSON `null` differs from SQL `NULL` (see [json.md](json.md#json-null-over-rest)). A parameter is `{"type": 13, "strValue": "<json text>"}` |
 
-> **Bytes format differs by path:** SQL literals use `0x`-hex, JSON uses base64. A round-trip through
+> **Bytes format differs by path:** SQL literals use `X'…'` hex, JSON uses base64. A round-trip through
 > each path is lossless, but the encodings are not interchangeable.
 
 #### Array columns in REST query results
@@ -893,10 +893,10 @@ To declare `string(N)` / `array(T)` over HTTP, the create-table column carries `
 
 ## Temporal functions
 
-The built-in date/time functions return engine-typed `date` or `datetime` values, not strings. The
-JSON wire representation is unchanged (ISO-8601 string via the `isoValue` field), but the engine
-type is now correct — so comparisons against typed columns, INSERT without CAST, and indexing all
-work with function results.
+The built-in date/time functions return engine-typed `date` or `datetime` values. The
+JSON wire representation is unchanged (ISO-8601 string via the `isoValue` field). Because the engine
+type is `date` or `datetime`, comparisons against typed columns, INSERT without CAST, and indexing
+all work with function results.
 
 | Function | Return type | Notes |
 |----------|-------------|-------|
@@ -1262,7 +1262,7 @@ oid  object_id  smallint  int  int64  integer  string  bool  boolean  float32  f
 date  datetime  timestamp  bytes  blob  array  numeric  decimal
 ```
 
-Note that `id` is **not** a SQL type keyword and remains usable as an identifier (column/table name) —
+`id` is **not** a SQL type keyword and remains usable as an identifier (column/table name) —
 the ObjectId type is spelled `oid`/`object_id` in SQL. `bigint` and `precision` are also usable as names.
 
 Only the exact keyword is reserved — identifiers that merely *start with* a keyword (e.g. `internal`,

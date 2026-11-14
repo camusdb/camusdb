@@ -53,7 +53,7 @@ guarantees that keep it from disrupting a busy node.
 
 Manual `ANALYZE` counts exactly, holding every distinct value in memory — fine for a user command,
 but its memory would scale with table size. The background path instead samples with fixed-size
-sketches, so peak memory is a function of the sample size, **not** the table size:
+sketches, so peak memory depends on the sample size and stays the same as the table grows:
 
 - **Histograms** are built from a bounded [reservoir sample](../CamusDB.Core/Statistics/ReservoirSampler.cs)
   (Vitter's Algorithm R) of at most `auto_analyze_histogram_sample_rows` (default `10,000`) values per
@@ -117,9 +117,9 @@ A background loop, owned by the engine and modeled on the orphan-reclaimer, swee
    the sweep, so N nodes don't each analyze the same table, and a failover hands the work to the new
    leader.
 2. **Discovers candidates from authoritative metadata.** The owner enumerates every database in the
-   registry and every table's per-object meta key — *not* its local open-object list — and reads each
-   table's persisted staleness. So a table created and mutated on one node is still found and analyzed
-   by the owner, even if the owner never opened it.
+   registry and every table's per-object meta key, and reads each table's persisted staleness. It
+   does not use its local open-object list, so a table created and mutated on one node is still
+   found and analyzed by the owner, even if the owner never opened it.
 3. **Backs off under load.** A foreground-load probe (in-flight explicit transactions plus in-flight
    HTTP and gRPC data requests) gates the sweep: above `auto_analyze_load_pause_threshold`, it skips
    starting new analyses and cancels a running one at the next batch boundary. Because the reads are
@@ -172,7 +172,7 @@ loaded). The feature is on by default; the tuning defaults around it are deliber
 
 Manual `ANALYZE TABLE` is unchanged: it counts exactly (no sampling), runs on the caller's
 transaction, and — like the background path — publishes atomically and resets the staleness counter.
-Running it by hand is always available and takes precedence in the moment; automatic ANALYZE simply
+Running it by hand is always available and takes precedence in the moment; automatic ANALYZE
 keeps things fresh between manual runs.
 
 ## Known limitations

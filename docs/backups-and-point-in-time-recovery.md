@@ -58,13 +58,13 @@ All endpoints are versioned under `/v1`. Requests and responses are JSON with ca
 `targetTimeMs` is Unix epoch **milliseconds**; `0` means "latest recoverable point in the chain". A
 non-zero value must fall inside the selected chain's **exact recoverable coverage**
 (`minRecoverablePhysicalMs`..`maxRecoverablePhysicalMs`, reported by the chain/restore responses) —
-otherwise it is rejected with `RestorePointOutOfWindow` (HTTP 422). Recoverability is a property of the
-chain, **not** of how much wall-clock time has passed, so an archived backup stays restorable.
+otherwise it is rejected with `RestorePointOutOfWindow` (HTTP 422). Recoverability depends on the
+chain alone. Elapsed wall-clock time does not change it, so an archived backup stays restorable.
 
 Backups verify every artifact (size + SHA-256) before publish and before restore and fail closed on a
-missing/corrupt/extra file. An incremental that can no longer be based on its parent is transparently
-taken as a full instead — the response then carries `requestedKind`/`actualKind`/`substitutionReason`
-so the substitution is visible rather than silent.
+missing/corrupt/extra file. An incremental that can no longer be based on its parent is
+taken as a full instead. The response then carries `requestedKind`/`actualKind`/`substitutionReason`,
+so the substitution is visible.
 
 Error codes surface as JSON `{ "status": "failed", "code": "...", "message": "..." }` with a matching
 HTTP status: `BackupNotConfigured` → 503, `RemoteRestoreDisabled` → 403, `BackupChainInvalid` → 422,
@@ -125,7 +125,7 @@ restored image:
    bootable CamusDB data directory. The response echoes it back as `dataRoot`.
 2. **Stop the CamusDB server.**
 3. **Start a fresh server with `data_dir = dataRoot`.** No manual file moves are needed — the node's
-   storage (`{dataRoot}/kv/{revision}`) and WAL (`{dataRoot}/wal`) resolve directly to the restored
+   storage (`{dataRoot}/kv/{revision}`) and WAL (`{dataRoot}/wal/{revision}`) resolve directly to the restored
    image. Keep the same `kahuna.storage`/revision settings the backup was taken with. A backup
    is bound to the storage revision it was taken under: a server on a newer revision opens a
    different directory and does not read it. To carry a backup across revisions, restore it with
@@ -193,7 +193,7 @@ the store and the WAL describe two different points in time.
 - **Incremental fallback.** If an incremental's parent has aged past the retention floor, Kahuna cannot
   produce a contiguous increment; take a fresh full backup instead.
 - **Retention cost.** Retained WAL is roughly `pitr_window_seconds × write throughput`, plus the base
-  images overlapping the window. Choose the window from how far back you realistically need to recover.
+  images overlapping the window. Choose the window from how far back you need to recover.
 - **Local filesystem only** in this version — there is no object-storage backup target yet.
 - **Large values are included.** A compressed or out-of-line column value (see
   [Large values](storage-layout.md)) is ordinary data in the store. A backup captures the whole store

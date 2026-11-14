@@ -96,7 +96,7 @@ The exporter also subscribes, by meter name, to the embedded dependencies and th
 - **.NET runtime** (`OpenTelemetry.Instrumentation.Runtime`): GC collections/allocations/heap,
   thread-pool thread count and queue length. ASP.NET Core request metrics are included too.
 
-> Kahuna's meter version is a fixed `1.0` and does not track the package version. Record the actual
+> Kahuna's meter version is a fixed `1.0` and does not track the package version. Record the
 > Kahuna/Kommander **package** versions from the build (`CamusDB.Core.csproj`) in any comparison.
 
 > **WAL fsync latency split** (leader-propose vs leader-commit p50/p99) comes only from Kommander's
@@ -147,7 +147,7 @@ refuses to overwrite an existing output directory.
 The report aligns client offered-vs-completed throughput and latency percentiles with server stage
 means (handler, executor, commit, scan), runtime/GC/thread-pool signals, and Kahuna/Kommander
 storage/WAL batch density, then lists the top candidate limiting stages each backed by a named
-measurement. It is **diagnostic evidence, not a prescription**: it does not declare a root cause from
+measurement. It is **diagnostic evidence**: it does not declare a root cause from
 the largest inclusive duration alone, because awaited durability (commit/WAL) can dominate latency
 while using little CPU, and overlapping stage durations are not additive.
 

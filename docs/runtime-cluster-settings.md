@@ -73,7 +73,7 @@ built-in default), so a node whose `config.yml` names that key returns to its fi
 For a runtime key the cluster value overrides the node's command line, environment, and
 `config.yml`. This is deliberate: if the local file won, a fleet-wide change would silently no-op
 on the one node whose YAML happens to name that key — invisible, and the hardest drift to
-diagnose. `restart`-class keys are never cluster-overridable, so genuinely node-defining values
+diagnose. `restart`-class keys are never cluster-overridable, so node-defining values
 (data directory, peers, ports) are unaffected.
 
 A node whose behavior contradicts its own `config.yml` explains itself in `SHOW VARIABLES`: the
@@ -83,8 +83,8 @@ or `default`.
 ## Confirming a change landed on every node
 
 `SHOW VARIABLES` is deliberately node-local — it describes the node that served the statement, and
-answering from the leader would hide exactly the drift you are looking for. So confirming a
-fleet-wide change means asking each node and checking the row:
+answering from the leader would hide the drift you are looking for. To confirm a fleet-wide
+change, ask each node and check the row:
 
 ```sql
 -- run against every node:
@@ -104,12 +104,12 @@ SHOW CLUSTER SETTINGS LIKE 'ttl_%';
 ```
 
 This lists the cluster overlay itself (name and value), which is distinct from `SHOW VARIABLES`:
-the overlay is what the fleet agreed on; the variables are what this node is actually running after
+the overlay is what the fleet agreed on; the variables are what this node is running after
 merging that overlay over its local configuration.
 
 ## Boot behavior
 
-A node necessarily boots on its file configuration and swaps to the merged cluster view as soon as
+A node always boots on its file configuration and swaps to the merged cluster view as soon as
 its store is readable — before the query engine starts serving. Components built before that point
 either react to the swap or hold only `restart`-class settings, so an ordinary restart cannot
 produce a node that permanently disagrees with the cluster.

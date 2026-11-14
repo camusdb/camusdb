@@ -30,9 +30,9 @@ On startup with auth enabled:
 
 - Both operator-supplied secrets — `CAMUSDB_AUTH_TOKEN_KEY` and, when set, `CAMUSDB_NODE_SECRET` —
   must be **at least 32 bytes**, or the server refuses to start and names the variable that failed.
-  A short token key voids the whole point of hashing tokens at rest: anyone who obtains the catalog
-  can then forge sessions offline. An unset node secret is a valid single-node configuration; it
-  leaves the peer routes refused rather than weakly guarded.
+  A short token key defeats the hashing of tokens at rest: anyone who obtains the catalog
+  can then forge sessions offline. An unset node secret is a valid single-node configuration; the
+  node then refuses the peer routes.
 - If the user catalog is **empty**, the server creates exactly one **superuser** from the bootstrap
   values (a transactional create-if-absent, so concurrent cluster startups yield one winner without
   overwriting a password).
@@ -77,8 +77,8 @@ Content-Type: application/json
 
 `POST /logout` (with the `Authorization` header) revokes the current token.
 
-- Tokens have a short absolute lifetime (default 15 minutes) — there is no refresh token; **re-login**
-  is the refresh.
+- Tokens have a short absolute lifetime (default 15 minutes) — there is no refresh token; **log in
+  again** to get a new token.
 - The token secret is never stored: the catalog holds only `HMAC(serverKey, token)`, so a catalog leak
   does not yield usable tokens.
 - A password rotation (`ALTER USER`), `DROP USER`, or `/logout` invalidates outstanding tokens.
@@ -87,15 +87,15 @@ Content-Type: application/json
   `CamusAuth` service (`Login` / `Logout`), which mirrors these routes — a gRPC-only deployment does not
   need the HTTP port open. See `docs/grpc-client-protocol.md` §5b.
 - **The reply reports when the token expires**: `expiresAtUnixMs` (absolute, UTC epoch ms) and
-  `expiresInSeconds` (the same deadline as a server-measured duration). Renew against those rather than
-  assuming a lifetime — `AccessTokenTtl` is configurable, so a hard-coded assumption breaks the moment an
+  `expiresInSeconds` (the same deadline as a server-measured duration). Renew against those
+  values. `AccessTokenTtl` is configurable, so a hard-coded lifetime breaks when an
   operator shortens it.
 
 ### TLS
 
 When auth is enabled, credential-bearing requests over a **plaintext** connection are refused
 (`RequireTlsWhenAuthEnabled`, default on) — terminate TLS in front of the API. A **loopback** peer is
-exempted so single-host development works without certificates. gRPC should likewise be deployed over
+exempted so single-host development works without certificates. gRPC should also be deployed over
 TLS.
 
 If TLS terminates *in front of* the node — an ingress, sidecar, or service mesh — the node itself only
@@ -112,10 +112,10 @@ or on the command line, which overrides the YAML value:
 camusdb --require-tls-when-auth-enabled false
 ```
 
-Unlike the token key and bootstrap credentials, this carries no secret, so it is a normal config
-setting rather than an environment variable. Turning it off relaxes **only** the transport check:
+This setting carries no secret, so it is a normal config setting. The token key and the bootstrap
+credentials stay in the environment. Turning it off relaxes **only** the transport check:
 requests still need a valid bearer token, and every grant is still enforced. Do not turn it off on a
-node that is directly reachable by clients — a bearer token in the clear is trivially stolen.
+node that is directly reachable by clients — a bearer token in the clear is easy to steal.
 
 ## 3. Managing users
 
@@ -144,7 +144,7 @@ DROP USER IF EXISTS myapp;
 Only `sha256_password` is accepted; any other plugin is rejected. Passwords are capped at 1 KiB.
 Network clients should **bind the password as a query parameter** rather than inline it in SQL, so it
 does not leak into client history, tracing, or query logs. Both literals of a `REPLACE` form are
-redacted from logs, not only the first.
+redacted from logs.
 
 A rotation invalidates that user's existing tokens, including the one that made the request.
 
@@ -159,7 +159,7 @@ The rule applies to a superuser changing their own password too. That is the acc
 taking over, so exempting it would leave the largest hole open.
 
 A superuser changing **another** user's password presents no old secret. That is the recovery path,
-and requiring a secret nobody knows is what recovery exists to avoid.
+for the case where nobody knows the old password.
 
 ### Listing the accounts
 
@@ -179,9 +179,9 @@ One row per account, ordered by name:
 | `grants` | int64 | how many grant records the account holds |
 | `created_at` | string | UTC ISO-8601, to the millisecond |
 
-**No column carries any part of a credential** — not the hash, not the salt, not the iteration count,
-not the algorithm. `has_password` is a boolean because that is the whole question worth asking of a
-restored account: whether it can log in. The two internal revocation epochs are omitted for the same
+**No column carries any part of a credential**: the hash, the salt, the iteration count and
+the algorithm are all left out. `has_password` is a boolean because the useful question about a
+restored account is whether it can log in. The two internal revocation epochs are omitted for the same
 reason.
 
 The statement requires a **superuser**. Its output names every account on the server, and no
@@ -288,7 +288,7 @@ With auth enabled, every statement is checked before it runs:
   need `UPDATE`, and `DeleteRows` and `DeleteById` need `DELETE`. A filtered update or delete needs
   only the write privilege, as `UPDATE … WHERE` does in SQL.
 - **Every table access must declare its privilege.** A request that reaches a table without one is
-  refused with `403 Insufficient privilege` — superusers included — rather than allowed unchecked.
+  refused with `403 Insufficient privilege`, superusers included.
   If you see that error with the message "the request did not declare which privilege it needs", it
   is a server defect, not a missing grant; please report it.
 - **C# extensions** — `CREATE TRIGGER` and `DROP TRIGGER` need `ALTER` on the table, the same as
@@ -337,12 +337,12 @@ With auth enabled, every statement is checked before it runs:
     not registered. The rows are then filtered exactly as `SHOW TABLES` run inside that database
     filters them: a caller with a grant on one table sees that table only.
   - `SHOW BRANCHES FROM db` / `SHOW ANCESTORS FROM db` name an arbitrary database, so a **target** the
-    caller cannot see is reported as `DatabaseDoesntExist` — the same error as a name that really is
-    unregistered, rather than a privilege error that would confirm it exists. The listed rows are then
+    caller cannot see is reported as `DatabaseDoesntExist`, the same error as an unregistered
+    name. A privilege error would confirm that the database exists. The listed rows are then
     filtered the same way: a non-visible descendant or ancestor is omitted, and `SHOW BRANCHES` blanks
     the `parent` column when the parent database is not visible. Depths stay the true position in the
-    real branch tree, so a filtered level shows up as a gap in the sequence rather than renumbering the
-    surviving rows.
+    real branch tree, so a filtered level shows up as a gap in the sequence, and the
+    surviving rows keep their numbers.
   - With authentication disabled all of these statements list everything, as before.
 
 ### Known behaviors and limitations (all fail-closed)
@@ -355,7 +355,7 @@ With auth enabled, every statement is checked before it runs:
 
 ### Reporting the session in SQL
 
-These functions report the session the statement runs in rather than anything about the rows:
+These functions report the session the statement runs in:
 
 | Function | Returns |
 | --- | --- |
@@ -373,7 +373,7 @@ INSERT INTO audit (id, actor) VALUES (gen_id(), current_user());
 They may be used anywhere an expression may: projections, `WHERE`, `INSERT … VALUES`, `UPDATE … SET`,
 and view bodies (a view reports the session querying it, not the one that created it). They may **not**
 back a column `DEFAULT` or appear in a `CHECK` condition — both are stored and replayed by later
-inserts, which carry no session, so the DDL rejects them rather than accept a schema element that could
+inserts, which carry no session, so the DDL rejects them. Such a schema element could
 only fail later.
 
 A query naming one of them bypasses the query result cache: the cache is per node and shared between
@@ -400,14 +400,14 @@ Every node caches the authorization it resolved for a token, for at most
   when a cached decision expires and it reads the catalog again. Setting the knob to 0 makes a
   cross-node change immediate, at the cost of a catalog lookup on every request.
 
-That is the whole bound, and it covers every transport. Note that a long-lived gRPC batch stream is
-included: it re-resolves its own authorization on the same schedule, rather than keeping whatever was
+This bound covers every transport. A long-lived gRPC batch stream is
+included: it re-resolves its own authorization on the same schedule, so it does not keep what was
 true when the stream opened.
 
 ### A gRPC batch stream and the lifetime of its token
 
 A `BatchExecute` stream presents a token once, in the metadata it opens with, and is meant to stay
-open for a whole client session. A token lives 15 minutes by default. The rule that reconciles the two:
+open for a whole client session. A token lives 15 minutes by default. This rule reconciles the two:
 
 > **A token's lifetime bounds how long it can be presented. It does not bound a stream that presented
 > it while it was valid.**
@@ -429,9 +429,9 @@ The session sweep keeps an expired record for `expired_session_retention_ms` (de
 before it deletes it. The record is the only evidence that separates an expiry from a logout, because
 a logout deletes it early. The stream does its lookup at the expiry, so the window only has to cover
 clock skew between nodes and a late timer. A stream that misses the window is ended: missing evidence
-is read as a revocation, never as a pass.
+is read as a revocation.
 
-A new stream always needs a token that resolves. A client must therefore still renew its token before
+A new stream always needs a token that resolves. So a client must still renew its token before
 `expiresAtUnixMs` for the streams it opens later, and for every unary call.
 
 ### What `FLUSH PRIVILEGES` adds
@@ -442,7 +442,7 @@ advances the durable coherence generation, which is replicated, so the other nod
 derived from the older one as soon as they read the catalog again — within `authentication_cache_ttl`,
 as above. There is no node-to-node call, and it does not matter which node you run it on.
 
-Reach for it when a node's view is suspect and the ordinary path did not correct it. It is not needed
+Use it when a node's view is suspect and the ordinary path did not correct it. It is not needed
 after an ordinary `GRANT` or `REVOKE`.
 
 **It revokes nothing.** A client whose grants did not change keeps working across it, with no
@@ -494,9 +494,9 @@ export CAMUSDB_BOOTSTRAP_PASSWORD="$(openssl rand -base64 24)"
 You do not need to export, reload, or rewrite anything. Authentication is a startup switch plus a
 one-time bootstrap seed. Your databases, tables, rows, indexes and backups are untouched by it.
 
-The reason an existing install converts cleanly: the user catalog lives in its own reserved
+An existing install converts cleanly because the user catalog lives in its own reserved
 `_system/auth/` key prefix, separate from every user database. An installation that never had
-authentication on has an **empty** user catalog, which is exactly the state §1 seeds from. At the next
+authentication on has an **empty** user catalog, which is the state §1 seeds from. At the next
 start the server finds zero users and creates the bootstrap superuser. Nothing pre-existing is
 migrated or rewritten, because nothing pre-existing lives in that prefix.
 
@@ -522,22 +522,22 @@ migrated or rewritten, because nothing pre-existing lives in that prefix.
 
 ### 8.2 Grant before you cut the clients over
 
-This is the one step that turns a migration into an outage. Before the restart every caller had full
+Skipping this step turns a migration into an outage. Before the restart every caller had full
 access; after it, **only the superuser does**. The superuser bypasses every check, but every other
 identity starts with no privileges at all, so an application that worked yesterday gets
 `403 Insufficient privilege` on its first statement.
 
-Do steps 4 and 5 while the old clients are still running unauthenticated, or during a planned window —
-not after you have already switched them.
+Do steps 4 and 5 while the old clients are still running unauthenticated, or during a planned window,
+before you switch them.
 
 Two properties of grants matter while you plan the migration:
 
 - A grant binds to the object's **immutable id**, not its name. A table you drop and recreate does not
   inherit its old grants; a rename keeps them. Re-grant after any recreate.
 - The privilege is checked against **every** table a statement touches. A join, a subquery or a
-  semi-join needs the privilege on each referenced table, not just the one in `FROM`.
+  semi-join needs the privilege on each referenced table.
 
-Audit what each application actually reads and writes before you write the `GRANT` statements. A
+Audit what each application reads and writes before you write the `GRANT` statements. A
 `SHOW GRANTS FOR <user>` afterwards confirms what landed.
 
 ### 8.3 Clusters

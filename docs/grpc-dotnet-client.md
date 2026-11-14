@@ -161,7 +161,7 @@ Rules:
 
 - **Issue a transaction's statements sequentially** — `await` each before the next. The whole unit of
   work (begin → statements → commit) pipelines over one stream, but within a transaction the calls are
-  ordered, which is what gives read-your-writes.
+  ordered, and that order gives read-your-writes.
 - The library pins a session's ops to a single stream automatically (so the server orders them) and
   threads the causal token forward for you. You don't manage handles or tokens.
 - After `CommitAsync`/`RollbackAsync` the session is finalized; using it again throws.
@@ -189,8 +189,8 @@ options.TrustedServerCertificateThumbprints.Add("A1B2…SHA256HEX");  // pin the
 await using CamusConnection conn = CamusConnection.Connect("https://host:5096", options);
 ```
 
-- The **pool size bounds the number of streams, not the number of in-flight transactions** — many
-  transactions hash onto the same streams and interleave. A small pool (2) is normal.
+- The **pool size bounds the number of streams**. It does not bound the number of in-flight
+  transactions — many transactions hash onto the same streams and interleave. A small pool (2) is normal.
 - TLS trust: by default the OS certificate chain is validated. Set
   `TrustedServerCertificateThumbprints` to **pin** by SHA-256 thumbprint instead, or (dev only)
   `AllowInsecureCertificateValidation = true` to accept any certificate. Do not use insecure mode
@@ -206,8 +206,8 @@ routing over them: a trust map from server node identities to configured address
 repeated eligible statements are sent straight to the node that leads their data; a transaction
 defers its START to its first statement and sends it on that statement's learned endpoint (or,
 with `BeginTransactionAsync(..., affinity: statement)`, starts at once on the warmed statement's
-endpoint), and stays pinned there. Everything about it — the wire contract, eligibility, and the exact client
-semantics — is in [sql-routing-advice.md](sql-routing-advice.md). Routing changes no result and
+endpoint), and stays pinned there. The wire contract, eligibility, and the exact client
+semantics are in [sql-routing-advice.md](sql-routing-advice.md). Routing changes no result and
 adds no retry. Under the `Auto` default the trust map is the opt-in: with no `NodeAddresses`
 (every pre-routing configuration) nothing is negotiated and behavior is exactly pre-routing;
 `Mode = Off` is the explicit kill switch.

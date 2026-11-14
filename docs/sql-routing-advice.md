@@ -6,10 +6,10 @@ statement, and sends the statement's future executions there directly — removi
 gateway-to-data-leader forwarding hop. This document describes the wire contract, the eligibility
 rules, the server configuration, and the in-repo .NET client's routing support.
 
-What routing advice is **not**:
+The limits of routing advice:
 
 - It is **never an instruction.** The operation that carried it already executed normally on the
-  node that answered. A client that ignores it (or predates it) loses nothing but a network hop.
+  node that answered. A client that ignores it (or predates it) loses only a network hop.
 - It does **not** change execution. Isolation, locking, authorization, causal tokens, commit
   handling and results are byte-for-byte identical with routing on or off.
 - It does **not** remove replication, transaction-coordinator traffic, or multi-partition work,
@@ -23,7 +23,7 @@ Routing metadata is strictly opt-in per request:
 - **REST:** set `"routingAcceptVersion": 1` on `/execute-sql-query` / `/execute-sql-non-query`.
 
 A request without the field (every pre-routing client sends 0) gets its exact historical response
-shape. A server that predates the feature ignores the field and simply attaches nothing; existing
+shape. A server that predates the feature ignores the field and attaches nothing; existing
 advice on the client then expires on its own. Unknown metadata versions must be ignored by clients.
 
 Metadata is emitted on autocommit statement responses **and** on statements inside an explicit
@@ -65,17 +65,17 @@ Contract:
    dependencies. It changes on schema change, `TRUNCATE`, materialized-view refresh, and database
    recreation. It is not sortable, not a routing authority, and not authentication.
 5. `maxAgeMs` bounds reuse, measured by the client with a **monotonic clock from receipt** and
-   clamped further by client policy. Expiry — not an invalidation protocol — is what heals a stale
-   belief after a leader transfer.
-6. `provenance: "placementHint"` states honestly that this is the answering node's local placement
-   belief, not proof of which node executed the underlying storage operations.
+   clamped further by client policy. Expiry heals a stale
+   belief after a leader transfer; there is no invalidation protocol.
+6. `provenance: "placementHint"` states that this is the answering node's local placement
+   belief. It does not prove which node executed the underlying storage operations.
 7. Advice is built only after the statement's normal authorization checks, and it never contains
    SQL literals, row values, encoded keys, credentials, or a cluster map.
 8. Advice construction is best-effort and side-effect-free: once a statement committed, no routing
    failure may convert that success into an error.
 
-`reason` values: `singleTableHash` (prefer), `ineligible`, `placementUnknown`, `cacheAffinity`
-(clear).
+`reason` values: `singleTableHash`, `singleRangeTable` (prefer), `ineligible`, `placementUnknown`,
+`cacheAffinity` (clear).
 
 ## 3. Eligibility — which statements get a "prefer"
 
@@ -118,7 +118,7 @@ nothing until they ask.
 
 ```csharp
 CamusGrpcOptions options = new();
-options.Routing.Mode = CamusRoutingMode.Learned;   // Off (default) | Learned | Auto
+options.Routing.Mode = CamusRoutingMode.Learned;   // Off | Learned | Auto (default)
 options.Routing.NodeAddresses["camus-a:7070"] = "https://db-a.internal:9090";
 options.Routing.NodeAddresses["camus-b:7070"] = "https://db-b.internal:9090";
 options.Routing.NodeAddresses["camus-c:7070"] = "https://db-c.internal:9090";
@@ -134,7 +134,7 @@ await using CamusConnection connection = CamusConnection.Connect(
 - **Modes.** `Off` rotates over configured endpoints and never negotiates. `Learned` negotiates
   and prefers learned destinations for unpinned work. `Auto` — the default — behaves as `Learned`
   only when the map names at least two distinct addresses (a single load-balancer URL is not a
-  node set), and as `Off` otherwise. The trust map is therefore the opt-in: a configuration
+  node set), and as `Off` otherwise. So the trust map is the opt-in: a configuration
   without `NodeAddresses` sends requests byte-identical to a pre-routing client, and `Off` remains
   the explicit kill switch.
 - **What is learned.** Advice is cached per `(database, exact SQL text, operation kind)` — no
@@ -153,7 +153,7 @@ await using CamusConnection connection = CamusConnection.Connect(
   - With routing negotiated and no affinity, START is **deferred to the first statement** and sent
     on that statement's learned endpoint. No application change is needed for this. The server
     anchors the transaction's coordinator session to the first table the transaction touches, so
-    starting on that table's leader is what makes every operation registration and the commit
+    starting on that table's leader makes every operation registration and the commit
     local. Statements inside the transaction still carry advice, which is learned for the *next*
     transaction and never moves this one. A session finalized before any statement sends START
     and then the finalize on a rotation endpoint. A failed START surfaces at the first statement
@@ -188,5 +188,5 @@ await using CamusConnection connection = CamusConnection.Connect(
   table whose row space is already divided gets an unpinned session, because the right partition
   depends on the row key. An autocommit statement opens its session eagerly and is not anchored.
 - Performance claims should come from the qualification benchmark (routing off vs learned vs a
-  manually selected leader on identical concurrency and pool budgets), not from intuition. The
+  manually selected leader on identical concurrency and pool budgets). The
   win is bounded by the eligible fraction of the workload and by how often statements repeat.

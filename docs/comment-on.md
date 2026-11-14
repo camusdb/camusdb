@@ -59,7 +59,7 @@ COMMENT ON COLUMN users.email IS 'The user''s email';   -- stores: The user's em
 ### Characters a comment can contain
 
 Any character. `SHOW CREATE TABLE` must emit DDL that parses back to the identical comment, and every
-value now has a literal form, so there is nothing that can be stored but not re-emitted. Quotes,
+value now has a literal form, so everything that can be stored can be re-emitted. Quotes,
 backslashes, newlines, tabs, and NUL all round-trip:
 
 ```sql
@@ -181,7 +181,7 @@ comment would inflate every schema checkpoint and every schema-log entry.
 All four forms, and `COMMENT ON SEQUENCE`, are accepted on the DDL and non-query SQL endpoints, over
 both REST and gRPC.
 `COMMENT ON DATABASE` needs no context database — it names its target in the statement — and starts
-no transaction, like `CREATE`/`DROP`/`RENAME DATABASE`. The other three require a context database.
+no transaction, like `CREATE`/`DROP`/`RENAME DATABASE`. The other forms require a context database.
 
 ## Versioning and replication
 
@@ -191,8 +191,8 @@ interpreted, so no row needs re-decoding. This matches how indexes, CHECK constr
 settings behave.
 
 In cluster mode a comment change is replicated as a schema-log delta and applied on every node. It is
-safe to replay: applying the same delta twice simply overwrites, and a delta whose target column or
-index has since been dropped is a no-op rather than a failure. A `COMMENT ON` issued on a follower is
+safe to replay: applying the same delta twice overwrites, and a delta whose target column or
+index has since been dropped is a no-op. A `COMMENT ON` issued on a follower is
 forwarded to the schema leader.
 
 ### Cross-node visibility of database comments

@@ -126,12 +126,12 @@ Function 'to_date' could not parse '02/30/2026' with pattern 'MM/DD/YYYY': day 3
 
 These are the rules:
 
-1. A numeric field reads from 1 digit up to its full width. Thus `3/5/2026` matches `MM/DD/YYYY`,
+1. A numeric field reads from 1 digit up to its full width. So `3/5/2026` matches `MM/DD/YYYY`,
    and `20260315` matches `YYYYMMDD`.
 2. A fraction field reads the digits after the decimal point. `MS` reads `5` as 500 ms, and `US`
    or `%f` reads `5` as 500000 µs.
 3. A name field matches English names without regard to case. `Mar`, `MAR` and `mar` all match `Mon`.
-4. A run of spaces in the pattern matches a run of one or more spaces in the text. Thus the blank
+4. A run of spaces in the pattern matches a run of one or more spaces in the text. So the blank
    padding that `Month` and `Day` print reads back.
 5. Any other character in the pattern, and quoted text, must match the text exactly.
 6. The whole text must match. An extra character after the end of the pattern is an error.
@@ -178,7 +178,7 @@ The clock fields follow these rules:
 | 100-519 | 2100-2519 |
 | 520-999 | 1520-1999 |
 
-`YYYY` and `%Y` read the year as written. Thus `26` with `YYYY` is the year 26.
+`YYYY` and `%Y` read the year as written. So `26` with `YYYY` is the year 26.
 
 ## Result types
 

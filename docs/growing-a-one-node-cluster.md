@@ -86,7 +86,7 @@ HTTP address of a peer in this order:
 
 The first node has no `peers`, so it always uses rule 2 to reach the joiners. A joiner knows only its
 seeds, so it uses rule 2 for every other joiner. If a joiner sets `http_peers` for its seeds, it also
-logs a warning each time it looks up a node that is not in that list. Thus, give every node the same
+logs a warning each time it looks up a node that is not in that list. So give every node the same
 `http_port`. With the same port on every node, rule 2 is correct for every node, and you do not need
 `http_peers`.
 

@@ -40,10 +40,10 @@ embedding moves out of its row.
 
 ### `bytes(N)` is a maximum, not a width
 
-`bytes(3072)` says a value may not exceed 3 072 bytes. It does **not** say a value must be exactly
-that long, so a 767-float embedding fits the column happily. The `CHECK` is what pins the dimension,
-and without one a short or truncated vector is stored without complaint and compared against
-full-length vectors until some query raises a dimension mismatch.
+`bytes(3072)` says a value may not exceed 3 072 bytes. A shorter value is accepted, so a 767-float
+embedding fits the column. The `CHECK` pins the dimension. Without one, a short or truncated vector
+is stored with no error and compared against full-length vectors until some query raises a
+dimension mismatch.
 
 Two functions support that check:
 
@@ -52,9 +52,9 @@ Two functions support that check:
 | `octet_length(bytes \| string)` | Byte count. For a string, the **UTF-8** byte count — `octet_length('áé')` is 4 while `length('áé')` is 2. |
 | `vector_dims(bytes)` | Element count, `octet_length / 4`. |
 
-`vector_dims` **rejects** a byte count that is not a multiple of four rather than rounding down. A
-3 070-byte value would otherwise report 767 dimensions and satisfy a check written for 767 — hiding
-exactly the corruption the check exists to catch.
+`vector_dims` **rejects** a byte count that is not a multiple of four. If it rounded down, a
+3 070-byte value would report 767 dimensions and satisfy a check written for 767, which hides
+the corruption the check exists to catch.
 
 A `NULL` embedding **passes** `CHECK (vector_dims(embedding) = 768)`, because SQL violates a check
 only on `false` and `vector_dims(NULL)` is `NULL`. Use `NOT NULL` to forbid a missing vector; the
@@ -99,8 +99,8 @@ All three take two vectors of equal dimension and return `float64`.
 | `cosine_distance(a, b)` | `1 - cosine_similarity` | smaller | `ASC` |
 | `inner_product(a, b)` | Dot product | **larger** | **`DESC`** |
 
-`inner_product` is the one that runs the other way. Ordering it ascending returns the *least* similar
-rows — and returns them without any error, so the mistake looks like a working query.
+`inner_product` runs the other way: a larger value is nearer. Ordering it ascending returns the
+*least* similar rows, with no error, so the mistake looks like a working query.
 
 ```sql
 -- Cosine: nearest first
@@ -174,8 +174,8 @@ request-body default. Neither is narrowed for vectors.
 | `NaN` or infinity in a vector | `CADB0412` invalid vector value |
 | `cosine_distance` on a zero-magnitude vector | `CADB0412` invalid vector value |
 
-All map to HTTP 400. A dimension mismatch is refused rather than truncated to the shorter operand,
-because truncating would return a plausible ranking computed from mismatched data.
+All map to HTTP 400. A dimension mismatch is refused. Truncating to the shorter operand would
+return a plausible ranking computed from mismatched data.
 
 Non-finite elements are rejected when a vector function reads them, not when the row is written. The
 schema cannot tell an embedding from a file, so no write path may reject a `bytes` value for failing
@@ -200,8 +200,8 @@ Measured on an Apple M3, 10 000 rows, 768 dimensions, with the SIMD distance ker
 | `SELECT id FROM docs` (no ordering) | 6 ms |
 
 The `LIMIT` cuts the query to roughly a quarter, and `k` itself barely matters — 10 and 100 measure
-the same, because the cost is dominated by reading and ranking every row rather than by what is
-retained.
+the same, because reading and ranking every row dominates the cost, and the rows retained add
+little to it.
 
 Cost is **linear in rows × dimensions**. The figures above extrapolate to roughly 1.2 s for the same
 query over a million rows on the same hardware. Always pair a vector `ORDER BY` with a `LIMIT`, and
@@ -216,6 +216,6 @@ node running it. There is no distributed top-k that bounds what crosses the netw
 - **No approximate index.** No HNSW, no IVF, no quantization. Every query is an exact scan.
 - **No vector-specific index type.** An ordinary index cannot help a distance ordering, because
   distance is not an order-preserving function of the stored bytes.
-- **No native vector type.** The dimension lives in a `CHECK`, not in the catalog, and the element
-  type is a convention rather than something the schema records.
+- **No native vector type.** The dimension lives in a `CHECK`, and the catalog does not hold it. The
+  element type is a convention that the schema does not record.
 - **No distributed top-k.** See the cluster note above.

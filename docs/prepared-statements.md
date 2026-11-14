@@ -1,8 +1,8 @@
 # Prepared statements
 
-A prepared statement is registered once and executed many times with different values. Neither the
-SQL text nor the parameter names travel again per execution, and — the larger win — the server stops
-re-parsing the statement on every request just to decide how to route it.
+A prepared statement is registered once and executed many times with different values. The SQL text and
+the parameter names do not travel again per execution. The larger saving is that the server stops
+re-parsing the statement on every request to decide how to route it.
 
 Both transports support it: gRPC over the duplex `BatchExecute` stream, and REST over
 `/prepare-sql-statement` plus the normal SQL endpoints.
@@ -14,8 +14,8 @@ Every *inline* request pays two costs before any engine work starts:
 1. **Re-sending and re-deserializing the statement.** Over gRPC this is the `sql` and `database`
    strings plus one .NET string per parameter *key*, allocated fresh by the protobuf runtime on every
    request. Over REST it is the same text inside the JSON body.
-2. **A transport-layer SQL parse.** Both transports parse the statement to answer a routing question
-   (is this a `SHOW DATABASES`? is it a database-scoped statement that must not open a transaction?),
+2. **A transport-layer SQL parse.** Both transports parse the statement to decide routing
+   (whether it is a `SHOW DATABASES`, or a database-scoped statement that must not open a transaction),
    and that parse does **not** go through the executor's parser cache — it is paid in full, every
    time.
 
@@ -40,14 +40,14 @@ same engine path, with the same isolation, retry, and cache-hint behavior.
 | Freed by | stream teardown (normal, cancel, or fault) | explicit close, idle timeout, or process exit |
 | Unknown handle means | the stream was rebuilt — prepare again | expired, another node, or another principal — prepare again |
 
-The difference is not a design preference. A gRPC stream already answers who owns a handle and when
+The difference follows from the transports. A gRPC stream already answers who owns a handle and when
 it ends, so nothing else is needed. HTTP has no session the server can trust — connections are
 pooled, HTTP/2-multiplexed, and load-balanced — so REST supplies those answers explicitly: an
 unguessable handle, an owner recorded at registration, and an idle timeout as the backstop for
 clients that never close what they prepared.
 
-**Handles are node-local on both transports.** They are never replicated and never valid anywhere but
-where they were minted.
+**Handles are node-local on both transports.** They are never replicated and are valid only on the
+node that minted them.
 
 ## Parameter binding is positional
 
@@ -64,12 +64,12 @@ A name used more than once occupies exactly one slot; every occurrence resolves 
 Placeholders inside subqueries are included. The count you send must equal the declared count
 exactly.
 
-Names deliberately do not travel on the wire — removing them is much of the point. A client that
+Names do not travel on the wire; removing them is a large part of the saving. A client that
 prefers to bind by name maps its own arguments onto ordinals locally, using the published names. The
-.NET gRPC client does exactly that for you: `ExecuteQueryAsync(new { id, name })` binds by property
+.NET gRPC client does that for you: `ExecuteQueryAsync(new { id, name })` binds by property
 name (case-insensitively, with or without the leading `@`) and sends ordinals. A property that
-matches no parameter, or a parameter with no property, is an error rather than a silent NULL — a
-misspelling should not quietly become a wrong answer.
+matches no parameter, or a parameter with no property, is an error, so a misspelling cannot become a
+silent NULL and a wrong answer.
 
 ## What can be prepared
 
@@ -80,7 +80,7 @@ run against no database at all, and the ones that name their own database (`SHOW
 
 Schema and database/user administration cannot be prepared: those statements are one-shot, several
 return no database descriptor, and nothing about them benefits from a handle. `/execute-sql-ddl` and
-the unary gRPC RPCs reject a handle outright rather than ignoring it.
+the unary gRPC RPCs reject a request that carries a handle.
 
 ## gRPC
 
@@ -95,10 +95,10 @@ CLOSE (statement_id)     -> CloseReply
 
 **Await the `PrepareReply` before sending anything that references the id** — the same contract
 `START` has. Ops on a stream run concurrently, so an execution sent before its registration is
-acknowledged may legitimately arrive first.
+acknowledged can arrive first.
 
 An execution that names a handle must not also carry `sql`, `database`, or the named `parameters`
-map; sending both is refused rather than resolved by a precedence rule.
+map; sending both is refused, and there is no precedence rule.
 
 `CLOSE` is idempotent — closing an unknown or already-closed id succeeds. Skipping it entirely is
 safe too, since the stream frees everything when it ends, but a long-lived stream that prepares many
@@ -128,7 +128,7 @@ await txn.ExecuteNonQueryAsync(insert, ["bumblebee", 1985L]);
 await txn.CommitAsync();
 ```
 
-A `CamusPreparedStatement` stands for the *statement*, not for one server-side handle: the client
+A `CamusPreparedStatement` stands for the *statement*, whichever stream runs it: the client
 multiplexes autocommit work across a pool of streams, so the statement registers itself lazily on
 whichever stream an execution lands on. When a stream faults and is rebuilt, its handles die with it;
 the client notices (it compares the registration's transport identity immediately before writing) and
@@ -147,9 +147,9 @@ POST /prepare-sql-statement
 ```
 
 Preparing parses and registers only. It performs no privilege check — authorization runs on
-execution, against the executing request's principal, exactly as for an inline statement — so
-preparing reveals nothing beyond whether the SQL parses. A statement that does not parse fails here
-rather than at some later execution.
+execution, against the executing request's principal, as for an inline statement — so
+preparing reveals only whether the SQL parses. A statement that does not parse fails here, at
+prepare time.
 
 ### Execute
 
@@ -167,7 +167,7 @@ POST /execute-sql-non-query
 
 Values use the same encoding as a value of the inline `parameters` map, so an existing client reuses
 its serialization unchanged. Everything else on the request — `txnIdPT`/`txnIdCounter`,
-`isolationLevel`, `transactionMode`, `locking`, `causalToken` — behaves exactly as it does inline.
+`isolationLevel`, `transactionMode`, `locking`, `causalToken` — behaves as it does inline.
 `sql`, `databaseName`, and `parameters` must be absent.
 
 ### Close
@@ -180,7 +180,7 @@ POST /close-sql-statement
 Idempotent. Skipping it is safe — the idle reaper collects abandoned handles — but a client that
 prepares unbounded distinct SQL will eventually hit its cap.
 
-### Handling `CADB0520` — this is normal, not a bug
+### Handling `CADB0520`
 
 An execution whose handle the node does not recognize fails with `CADB0520`
 (`UnknownPreparedStatement`, **HTTP 404**). Treat it as routine and **prepare again, then replay the
@@ -194,8 +194,8 @@ execution once**. It happens whenever:
 
 Behind a load balancer, either use sticky sessions or accept one re-prepare per node per statement;
 the steady state after warm-up is still one registration per node. On the streaming endpoint the
-handle is resolved before any bytes are written, so a 404 arrives as a normal JSON error rather than
-mid-stream.
+handle is resolved before any bytes are written, so a 404 arrives as a normal JSON error, before
+the stream starts.
 
 ## Limits
 
@@ -214,9 +214,9 @@ negative value is a startup error, never a silently-unbounded limit.
 | `prepared_statement_idle_timeout_ms` | 600000 | How long an unused REST statement survives. `0` disables reaping. |
 | `prepared_statement_sweep_interval_ms` | 60000 | Reaper sweep interval; must be > 0. |
 
-**Why both counts and bytes.** A count cap alone does not bound memory: 512 statements permits 512 ×
+**Counts and bytes are both limited.** A count cap alone does not bound memory: 512 statements permits 512 ×
 whatever the largest accepted request happens to be. The per-statement limit bounds the individual
-term and the budgets bound the total, so the two together mean something. A statement over
+term and the budgets bound the total, so the two together bound memory. A statement over
 `max_prepared_statement_bytes` is rejected as *invalid input* rather than as a quota failure — no
 amount of closing other statements would make it fit.
 
@@ -224,12 +224,11 @@ Exceeding a cap or budget fails the *registration* with `CADB0521` (`PreparedSta
 HTTP 429). It never evicts a live handle: silently dropping the least recently used one would make a
 correct client fail at an unpredictable later moment, so the server refuses the new statement and
 asks the caller to close what it no longer needs. Expired REST entries are reclaimed first, so a
-caller only meets a limit when its statements are genuinely all in use. Admission is taken
+caller only meets a limit when its statements are all in use. Admission is taken
 atomically, so concurrent registrations cannot all slip through the same last free slot.
 
 A `BatchExecute` stream also has a finite id space (2³¹ registrations). A stream that exhausts it is
-told to open a new one rather than being handed ids that would wrap into unusable — and eventually
-colliding — values.
+told to open a new one, because wrapped ids would be unusable and would eventually collide.
 
 ## Related
 

@@ -114,6 +114,6 @@ A correlated subquery with no `FROM` reads a column of the statement around it, 
 
 `EXPLAIN` of a FROM-less `SELECT` renders a fixed `constant-source` → `project` shape (plus a
 `limit` row when `LIMIT`/`OFFSET` is present) rather than a costed plan tree. `EXPLAIN (ANALYZE)`
-is rejected — there is no table access to measure. Note that `EXPLAIN` does **not**
+is rejected — there is no table access to measure. `EXPLAIN` does **not**
 pre-materialize projection subqueries; they appear only as their output column names. See
 [`docs/explain.md`](./explain.md).

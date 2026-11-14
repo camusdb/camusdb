@@ -78,8 +78,8 @@ statement ends its transaction, because CamusDB has no savepoints.
 ## Isolation levels and locking modes
 
 - **Read Committed.** All three options work. This is the level for job queues.
-- **Serializable.** `FOR UPDATE` and `NOWAIT` work. `SKIP LOCKED` fails with `CADB0533`. The reason:
-  at Serializable, a scan takes a shared lock over the range it reads. Two workers that scan the same
+- **Serializable.** `FOR UPDATE` and `NOWAIT` work. `SKIP LOCKED` fails with `CADB0533`.
+  At Serializable, a scan takes a shared lock over the range it reads. Two workers that scan the same
   queue both hold that lock, so each worker's later `UPDATE` of its own job conflicts with the other
   worker's lock. That defeats `SKIP LOCKED`.
 - **Serializable, full scans.** The shared range lock of the scan comes before the row locks. If the

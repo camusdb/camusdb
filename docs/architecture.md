@@ -46,7 +46,7 @@ while every reference to them in SQL matches **case-insensitively**. That case-i
 matching is done at lookup time by case-insensitive comparers on the schema/catalog
 dictionaries and name comparisons, not by rewriting identifier text in the parser. Because
 identifiers are restricted to ASCII (`[A-Za-z_][A-Za-z0-9_]*`), `OrdinalIgnoreCase` is an
-exact, culture-independent fold. Database names are likewise case-insensitive-unique
+exact, culture-independent fold. Database names are also case-insensitive-unique
 (`MyDb` and `mydb` are the same database) but stored and displayed in their original case.
 
 ### Binder
@@ -85,7 +85,7 @@ encoding (which is why renames move no data) — is documented in
 ### Storage layer
 
 Row data and index entries live in the process-level Kahuna transactional KV node. `KvTableStore`
-maps each table row and index entry onto a Kahuna key using a `{dbId}:{tableId}:…` prefix
+maps each table row and index entry onto a Kahuna key using a `{dbId}:{tableId}|…` prefix
 layout so that rows from different databases never collide even inside the same node. Within
 one database the prefix is chosen so that all rows of a table hash to the same Raft partition,
 keeping single-table reads and writes within one partition's leader. Eligible secondary indexes
@@ -97,7 +97,7 @@ can use key-range routing with an order-safe encoding so that range scans stay o
 |--------------------------------------|-----------------------------------------------------------------|
 | `_system/dbregistry/…`               | Database name → id registry                                     |
 | `{dbId}/meta/…`                      | Per-database schema: version, table definitions, coordinator jobs |
-| `{dbId}:stats:{tableId}`             | Row-count statistics for one table                              |
+| `{dbId}:stats:{tableId}`             | Statistics for one table: row counts, histograms, distinct counts |
 | `{dbId}:{tableId}|r/{rowId}`         | Row data                                                        |
 | `{dbId}:{tableId}|i:{indexId}/{key}` | Secondary index entries                                         |
 
@@ -125,7 +125,7 @@ and [serializable-retry-contract.md](serializable-retry-contract.md).
 
 Durability and replication come from Raft, via Kommander. Both standalone and cluster share
 the same unified storage model: **one Kahuna node per process** holds every database in the
-`{dbId}:{tableId}:…` keyspace. The only difference between the two modes is the transport:
+`{dbId}:{tableId}|…` keyspace. The only difference between the two modes is the transport:
 
 - **Cluster mode** — the node uses gRPC inter-node and Raft transports
   (`GrpcCommunication` + `StaticDiscovery`); nodes join with `--mode=cluster` and a static

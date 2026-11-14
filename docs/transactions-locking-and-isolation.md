@@ -12,8 +12,8 @@
 
 ## 1. The big picture: CamusDB is built on two other systems
 
-CamusDB does **not** implement its own storage engine, locking, or replication from scratch. It is a
-SQL layer on top of two lower-level building blocks. Understanding isolation in CamusDB means
+CamusDB is a SQL layer on top of two lower-level building blocks. They provide the storage engine,
+the locking and the replication. Understanding isolation in CamusDB means
 understanding how these three layers talk to each other.
 
 ```
@@ -33,8 +33,8 @@ understanding how these three layers talk to each other.
 └─────────────────────────────────────────────────────────────┘
 ```
 
-**Rule of thumb:** when you ask "what isolation does CamusDB give me?", you're really asking "how does
-CamusDB *use* Kahuna's transactions?" CamusDB rows and indexes are just key/value pairs in Kahuna.
+**Rule of thumb:** the isolation CamusDB gives you comes from how CamusDB *uses* Kahuna's
+transactions. CamusDB rows and indexes are key/value pairs in Kahuna.
 
 ---
 
@@ -177,14 +177,14 @@ Client: OK
 Key points for a newcomer:
 
 - **Write intents + per-key locks are how two writers are kept apart.** If transaction A and
-  transaction B both try to write the same row, one of them sees the other's intent/lock and fails
-  (rather than silently clobbering). This is **write-write conflict detection**.
+  transaction B both try to write the same row, one of them sees the other's intent/lock and fails,
+  so no write is silently overwritten. This is **write-write conflict detection**.
 - **2PC makes the row and its indexes commit together.** You never observe a state where the row
   exists but its index entry doesn't.
-- **Locks are held until the transaction ends** (commit or rollback), then released. CamusDB does not
-  assemble that list itself: Kahuna's **transaction coordinator** owns the transaction's working set —
-  every modified key and held lock is registered with it as the operation happens, so commit and
-  rollback just hand the coordinator a *handle* and it finalizes the set it accumulated. See
+- **Locks are held until the transaction ends** (commit or rollback), then released. Kahuna's
+  **transaction coordinator** owns the transaction's working set, and CamusDB keeps no list of its
+  own. Every modified key and held lock is registered with the coordinator as the operation happens,
+  so commit and rollback hand the coordinator a *handle* and it finalizes the set it accumulated. See
   `kahuna-transaction-coordinator.md` for how that registration works.
 - **Schema safety.** A write also "pins" the schema version of the tables it touches at the start, and
   the commit is rejected if the schema changed underneath it (e.g., a column was dropped mid-write).
@@ -206,13 +206,13 @@ Their purpose is **phantom protection**: stopping another transaction from inser
 deleting a row inside a range you are scanning, which would otherwise make a repeated scan return
 different results.
 
-Two things make range locks useful rather than a bottleneck:
+Two things keep range locks from becoming a bottleneck:
 
 - **They are *shared* for scans.** Two transactions scanning overlapping ranges both succeed and run
   side by side — a scan never blocks another scan. (Reads don't block reads, even serializable ones.)
 - **Writes respect them automatically.** A write does not need to take a range lock itself: when a
   transaction tries to insert/update/delete a key that falls inside a range another transaction has
-  locked, that write is held back (it retries). This is what actually stops a phantom row from
+  locked, that write is held back (it retries). This is what stops a phantom row from
   appearing mid-scan — including a *brand-new* key that didn't exist when the scan started.
 
 Range locks are acquired by every scan path in the query executor: the full-table scan, the index
@@ -238,7 +238,7 @@ holds these locks when its predicate names rows by equality or by an `IN` list, 
 or below the escalation threshold of §6.3, even where a table scan would read fewer keys. See "The lock
 of a table scan" in `docs/query-planner.md`.
 
-They fire in two situations:
+They fire in one situation:
 
 - **For a Serializable read-write transaction** (see §9), on *any* configuration including the default
   single-node hash setup — a serializable scan needs phantom protection to be correct, so the lock is
@@ -279,8 +279,8 @@ transaction takes a single whole-table shared lock and stops taking new per-row 
 is `lock_escalation_threshold` (1000 by default). The count is for one transaction and one table (or
 one index), over all of its statements.
 
-The whole-table lock is not "a little more" than the rows read: it conflicts with every write to the
-table by another transaction until the reader ends. So the default sits above the row count of an
+The whole-table lock conflicts with every write to the table by another transaction until the
+reader ends. So the default sits above the row count of an
 ordinary page read, and a read that names a bounded set of rows (`WHERE usersId = @p`, an `IN` list
 of ids) locks only the rows it read. A transaction that reads more rows of one table than the
 threshold still takes the whole-table lock. If that is not acceptable, read the rows in a
@@ -315,9 +315,9 @@ change to a key it wrote (write-write) or to a key it read (read-write / write s
 commit is aborted and the transaction retries. This trades write-time blocking for commit-time validation
 — good for low-contention, read-mostly workloads.
 
-This is a *concurrency strategy*, orthogonal to the isolation level: any
-`{ReadCommitted, Serializable} × {Pessimistic, Optimistic}` combination is valid. **But "optimistic" does
-not mean the same thing at both isolation levels** — read what you actually get:
+The locking mode is a *concurrency strategy*, independent of the isolation level: any
+`{ReadCommitted, Serializable} × {Pessimistic, Optimistic}` combination is valid. **"Optimistic" gives
+different behavior at the two isolation levels:**
 
 | | **Read Committed + Optimistic** | **Serializable + Optimistic** |
 |---|---|---|
@@ -326,8 +326,8 @@ not mean the same thing at both isolation levels** — read what you actually ge
 | Lock-free? | **yes**, fully | **no** — this is a *hybrid* |
 | Phantom protection | ✗ (validates observed rows only) | ✓ (predicate locks fence the scan) |
 
-The predicate-lock behavior is gated on the **isolation level**, not on the locking mode: a
-Serializable read still takes its shared predicate lock and a following write upgrades it to exclusive,
+The **isolation level** alone decides the predicate-lock behavior; the locking mode has no effect
+on it. A Serializable read still takes its shared predicate lock and a following write upgrades it to exclusive,
 even when the transaction is optimistic. So **Serializable + Optimistic is a hybrid** — optimistic
 write/read-set validation *plus* the retained predicate locks that keep it phantom-free — and only
 **Read Committed + Optimistic** is fully lock-free (and, being lock-free, is phantom-vulnerable: its
@@ -462,7 +462,7 @@ When v3's transaction commits, the intent becomes a real version; future reads t
 
 ## 8. Single node vs cluster — what actually differs
 
-The **locking and isolation model is the same** in both. The cluster simply distributes the same
+The **locking and isolation model is the same** in both. The cluster distributes the same
 machinery across more nodes and partitions. Here's the mapping:
 
 | Concept | Single node (default) | Cluster |
@@ -484,24 +484,23 @@ A few cluster-specific notes for newcomers:
 - **A transaction can span partitions.** If your write touches keys that route to different
   partitions, the two-phase commit coordinates across those partition leaders. The atomicity guarantee
   still holds.
-- **Key-range routing buys range-scan concurrency, not data distribution.** Today every node still
+- **Key-range routing buys range-scan concurrency.** Today every node still
   stores all the data; key-range routing changes *where locking and ordering happen*, letting a scan
   over `[A,B)` avoid blocking a writer working on a disjoint `[B,C)`. It does not spread storage across
   nodes.
 - **Isolation behaves identically on one node or many.** A Serializable transaction gives the same
-  result whether the data lives on one partition or several — single node is just the one-partition
+  result whether the data lives on one partition or several — single node is the one-partition
   case of the same algorithm. A client can't tell from the isolation behavior how many nodes there are.
 
-If you want the deep story on how schema changes (DDL) replicate and stay consistent across the
-cluster, see `distributed-schema-architecture.md` — this document deliberately focuses on data-path
-reads/writes.
+For how schema changes (DDL) replicate and stay consistent across the cluster, see
+`distributed-schema-architecture.md`. This document covers data-path reads/writes.
 
 ---
 
 ## 9. What consistency you can rely on **today**
 
-Be precise about this — it's the part app developers most need, and where it's easy to over-promise.
-What CamusDB guarantees right now:
+This is the part app developers need most, so it is stated precisely. What CamusDB guarantees right
+now:
 
 - ✅ **Atomic transactions.** A transaction's changes all apply, or none do.
 - ✅ **Durable commits.** A committed write has been replicated to a majority and survives node
@@ -520,7 +519,7 @@ chosen per transaction (the default applies when you don't ask for anything).
 ### 9.1 Serializable (the default)
 
 Every autocommit statement and every transaction runs at Serializable unless it opts down to Read
-Committed. See §9.2 for the full description.
+Committed. See §9.3 for the full description.
 
 **Opting out to Read Committed.** If you don't need the full serializable guarantee and want the
 absolute minimum overhead, you can request Read Committed per transaction — either via the isolation
@@ -650,7 +649,7 @@ statement, because retroactively upgrading the level would skip locks the earlie
 - **Long-running is supported, but bounded.** A serializable read-write transaction's range locks are
   kept alive by the **Kahuna coordinator**, which renews a live transaction's range-lock leases for the
   duration of its session and releases them on commit/rollback — so a transaction can stay open for a
-  genuinely long interactive session with no client-side heartbeat. There is still a hard **maximum
+  long interactive session with no client-side heartbeat. There is still a hard **maximum
   lifetime** (about one hour) as a backstop: if a transaction outlives it, it is **aborted with a clear
   error** at its next operation or at commit — it never silently loses its isolation, and an abandoned
   session is reclaimed by the server after that window. (This bound only applies to serializable
@@ -677,12 +676,12 @@ else is cheaper and fully concurrent under Read Committed.
 > 3-node cluster**, including multi-partition read-write transactions — the isolation behavior does not
 > depend on topology.
 >
-> Two things to keep in mind, neither a correctness gap. **(1)** A conflicting read-write transaction is
-> aborted, not auto-resolved end-to-end: use the retry helper (autocommit) or replay from `BEGIN`
-> (explicit), per the retry rule above. **(2)** CamusDB gives serializable ordering that is *logically*
-> consistent (via hybrid logical clocks), **not** the real-time, wall-clock ordering that systems with
-> specialized clock hardware provide — there is no externally-consistent / commit-wait guarantee, and
-> that is a deliberate design choice, not a missing piece.
+> Two things to keep in mind. Neither is a correctness gap. **(1)** A conflicting read-write transaction
+> is aborted, and nothing resolves it automatically end-to-end: use the retry helper (autocommit) or
+> replay from `BEGIN` (explicit), per the retry rule above. **(2)** CamusDB gives serializable ordering
+> that is *logically* consistent (via hybrid logical clocks). It does **not** give the real-time,
+> wall-clock ordering that systems with specialized clock hardware provide: there is no
+> externally-consistent / commit-wait guarantee. That is a deliberate design choice.
 >
 > The robustness refinements that were once outstanding are now in place: a *wait-die*
 > **deadlock-fairness** ordering (a deterministic winner instead of mutual aborts), **lock escalation**
@@ -699,7 +698,7 @@ transaction block), `COMMIT` rolls it back and reports the same code, and `ROLLB
 refusal names the statement that failed. There are no savepoints, so there is no statement-level
 recovery: a client that wants to continue after an error rolls back and starts a new transaction.
 
-The rule is the same whether or not the failed statement wrote anything, and that is the point. A
+The rule is the same whether or not the failed statement wrote anything. A
 transactional Kahuna batch is all-or-nothing, so a multi-row `INSERT` whose later row conflicts on
 the primary key stages nothing: no sibling row, and no second record for the conflicting key. But a
 `DELETE` or `UPDATE` that a foreign-key check refuses has its row writes staged, because that check
@@ -762,8 +761,8 @@ When reasoning about a concurrency question in CamusDB, ask in this order:
    mode. A Read Committed scan and an autocommit `SELECT` never take one.
 4. **Single partition or many?** Many partitions means writes/locks happen on partition leaders and a
    transaction may run a 2PC across them — but the isolation guarantees are the same either way.
-5. **What guarantee does the app actually need?** Need a consistent multi-statement read? Use a
-   Serializable **read-only** transaction (lock-free snapshot). Need a read-then-write invariant? Use a
+5. **What guarantee does the app need?** For a consistent multi-statement read, use a
+   Serializable **read-only** transaction (lock-free snapshot). For a read-then-write invariant, use a
    Serializable **read-write** transaction (the default) — keep it short and wrap it in a retry loop
    (it can be aborted on conflict) — or enforce it with a unique constraint. For maximum throughput with
    no invariant requirements, opt down to Read Committed explicitly.

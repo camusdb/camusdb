@@ -3,9 +3,9 @@ CamusDB
 
 CamusDB is a SQL distributed database written in C# on .NET. It provides a SQL interface with a Raft-replicated, transactional key-value storage layer, and makes a few opinionated choices: **serializable isolation/strong consistency are the default**; databases can be **branched copy-on-write like code**; and **dropped objects are recoverable** instead of instantly destroyed. It can auto-scale based on traffic. Development is driven by performance, Jepsen-style testing, chaos engineering, fault injection, and degraded-state testing.
 
-**While CamusDB is actively used in production, some of its features are still young, use it with caution.** APIs and storage formats may change between versions.
+**CamusDB is used in production, but some of its features are still young. Use it with caution.** APIs and storage formats may change between versions.
 
-[![Build Status](https://app.travis-ci.com/camusdb/camusdb.svg?branch=main)](https://app.travis-ci.com/camusdb/camusdb)
+[![Run Tests](https://github.com/camusdb/camusdb/actions/workflows/run-tests.yml/badge.svg)](https://github.com/camusdb/camusdb/actions/workflows/run-tests.yml)
 
 [Documentation](https://camusdb.github.io/docs/intro) | [Live playground](https://camusdb.github.io/playground/)
 
@@ -21,7 +21,7 @@ Why CamusDB?
 
 ### Serializable and consistent by default
 
-Most databases default to weaker isolation levels and ask you to opt in to correctness. CamusDB inverts that: **every transaction is serializable unless you ask for less.** Pessimistic two-phase locking with range/predicate locks blocks phantoms, wait-die scheduling avoids deadlocks, and reads run against consistent snapshots. Cross-partition writes are coordinated with two-phase commit on top of Raft consensus, so a committed write is durable and replicated. If a workload genuinely doesn't need serializability, read-committed is available per transaction (`SET TRANSACTION`) or as a process default, but you have to say so.
+**Every transaction is serializable unless you ask for less.** Pessimistic two-phase locking with range/predicate locks blocks phantoms, wait-die scheduling avoids deadlocks, and reads run against consistent snapshots. Cross-partition writes are coordinated with two-phase commit on top of Raft consensus, so a committed write is durable and replicated. For a workload that does not need serializability, read-committed is available per transaction (`SET TRANSACTION`) or as a process default.
 
 ### Database branching (copy-on-write forks)
 
@@ -31,7 +31,7 @@ Fork a database the way you branch code:
 CREATE DATABASE staging BRANCH FROM prod;
 ```
 
-The branch is created instantly and shares the parent's bytes until it diverges, no row data is copied, only a small amount of schema metadata. Reads on the branch see the parent as of the fork instant, writes are private to the branch, and the parent keeps evolving and never sees the branch. Branches nest arbitrarily deep, and the fork's frozen view is kept durable by a Raft-replicated snapshot-floor hold, so a long-lived branch keeps reading its parent as-of the fork instant even under heavy parent churn. Use it for cheap staging clones of production, schema-migration dry-runs, per-PR ephemeral databases, and "what-if" analytics. See [Database Branching](#database-branching) below.
+The branch is created instantly and shares the parent's bytes until it diverges. It copies a small amount of schema metadata and no row data. Reads on the branch see the parent as of the fork instant, writes are private to the branch, and the parent keeps evolving and never sees the branch. Branches nest to any depth, and the fork's frozen view is kept durable by a Raft-replicated snapshot-floor hold, so a long-lived branch keeps reading its parent as of the fork instant even under heavy parent churn. Use it for cheap staging clones of production, schema-migration dry-runs, per-PR ephemeral databases, and "what-if" analytics. See [Database Branching](#database-branching) below.
 
 ### Recover dropped objects
 
@@ -53,7 +53,7 @@ SELECT * FROM leaderboard AS OF SYSTEM TIME '-10s';                        -- 10
 SELECT * FROM accounts    AS OF SYSTEM TIME '2026-07-19 20:00:00+00:00';  -- an exact instant
 ```
 
-The whole statement, every scanned table, join, and subquery, reads one consistent historical snapshot, lock-free and without blocking writers. Beyond debugging ("what did this row look like before the deploy?"), it's a recovery tool: rows deleted or overwritten by mistake can be read back from just before the bad statement and re-inserted, as long as the storage layer still retains that history. See [Time-Travel Reads](#time-travel-reads) below.
+The whole statement, every scanned table, join, and subquery, reads one consistent historical snapshot, lock-free and without blocking writers. It helps with debugging, for example to see a row as it was before a deploy. It is also a recovery tool: rows deleted or overwritten by mistake can be read back from just before the bad statement and re-inserted, as long as the storage layer still retains that history. See [Time-Travel Reads](#time-travel-reads) below.
 
 ### Query result-set caching
 
@@ -63,11 +63,11 @@ Opt any read into an in-memory, per-node result cache with an inline hint — no
 SELECT id, total FROM orders {cache=recent_orders, ttl=30s} WHERE status = 1;
 ```
 
-The cache is correct before it is fast: a committed write on the same node evicts every dependent entry before it becomes visible to a later read, so a same-node reader never sees stale data. Cross-node staleness is bounded by a per-entry TTL, or eliminated per-hit with `strict` validation. See [Query Result Cache](#query-result-cache) below.
+A committed write on the same node evicts every dependent entry before it becomes visible to a later read, so a same-node reader never sees stale data. Cross-node staleness is bounded by a per-entry TTL, or eliminated per-hit with `strict` validation. See [Query Result Cache](#query-result-cache) below.
 
 ### Native .NET
 
-CamusDB's engine is written in modern C# on .NET: the SQL parser, the query planner and operators, the transaction layer, and the embedded [Kahuna](https://github.com/kahunakv/kahuna) storage node all run in a single .NET process (with [RocksDB](https://rocksdb.org/) underneath for persistence). Because the engine itself is pure .NET, extending it means writing ordinary C#: bring your own NuGet libraries and custom business logic directly into the database layer without crossing a language boundary or fighting a foreign extension API. Reading and debugging the engine is equally direct, and it runs on any platform .NET 10 supports. Clients talk to it over a JSON/HTTP API or a gRPC API with a .NET client library.
+CamusDB's engine is written in modern C# on .NET: the SQL parser, the query planner and operators, the transaction layer, and the embedded [Kahuna](https://github.com/kahunakv/kahuna) storage node all run in a single .NET process (with [RocksDB](https://rocksdb.org/) underneath for persistence). Because the engine itself is pure .NET, extending it means writing ordinary C#: bring your own NuGet libraries and custom business logic directly into the database layer, with no language boundary and no foreign extension API. You read and debug the engine the same way, and it runs on any platform .NET 10 supports. Clients talk to it over a JSON/HTTP API or a gRPC API with a .NET client library.
 
 ### Browser playground
 
@@ -86,20 +86,21 @@ Features
 - **Window functions** — `row_number`, `rank`, `dense_rank`, `percent_rank`, `cume_dist`, `ntile`, `lag`, `lead`, `first_value`, `last_value`, `nth_value`, and `count` / `sum` / `avg` / `min` / `max` with `OVER (PARTITION BY … ORDER BY … [ROWS | RANGE frame])`, including windows over grouped queries and top-N per group through a derived table or a view. 
 - **Row-locking reads** — `SELECT … FOR UPDATE [OF t] [NOWAIT | SKIP LOCKED]` locks each returned row until the transaction ends, for ORM pessimistic locking and job queues. 
 - **Filtering and ordering** — WHERE clauses with =, !=, <, >, <=, >=, AND, OR, LIKE, ILIKE, regex match operators (~, ~*, !~, !~*), BETWEEN, IS NULL, IN, NOT IN, quantified comparisons (`= ANY`, `= SOME`, `<> ALL`, and other operators with `ANY`/`ALL`), scalar subqueries, and EXISTS subqueries; ORDER BY (ASC/DESC), projection aliases, ordinal references, LIMIT, and OFFSET.
-- **Scalar functions** — string, math, date/time, cast, object id, UUID (`gen_uuid_v4()`, `gen_uuid_v7()`), regex (`regexp_*`), hash digests (`md5`, `sha1`, `sha256`, `sha512`), and JSON helpers including `json_valid`, `json_type`, `json_extract`, `json_value`, `json_array_length`, and `json_contains`.
+- **Scalar functions** — string, math, trigonometric (`sin`, `cos`, `tan`, `cot`, `asin`, `acos`, `atan`, `atan2`, the degree forms, `radians`, `degrees`, `pi`), date/time and interval (`age`, `make_interval`, `justify_*`), cast, object id, UUID (`gen_uuid_v4()`, `gen_uuid_v7()`), regex (`regexp_*`), hash digests (`md5`, `sha1`, `sha256`, `sha512`), and JSON helpers including `json_valid`, `json_type`, `json_extract`, `json_value`, `json_array_length`, and `json_contains`.
 - **Query planning** — physical plan trees for table scans, index scans, joins, aggregation, distinct, sorting, and limits, with predicate/projection/limit pushdown, index-based sort elision, cost-based join ordering, hash joins, merge joins, index nested-loop joins for eligible equi-joins, semi/anti-join rewrite of indexed `IN`/`NOT IN` subqueries, index-driven value-list `IN`, and streaming `DISTINCT`. A statistics-backed cost model (row counts, per-column min/max, equi-depth histograms, and distinct-value counts) chooses access paths and join order; a background job re-`ANALYZE`s tables whose statistics go stale. Sort, hash join, `GROUP BY`, `DISTINCT`, set-operation, window-function, and DML row buffers spill to temporary files past a configured threshold, so a large statement completes instead of exhausting memory. A client cancel stops a running `SELECT`.
 - **Query introspection** — `EXPLAIN`, `EXPLAIN (LOGICAL)`, `EXPLAIN (PHYSICAL)`, and `EXPLAIN (ANALYZE)` return the plan as result rows (node names, details, estimated rows/cost, and — for `ANALYZE` — actual row counts and KV access counters).
 - **Indexes** — PRIMARY KEY, inline UNIQUE column constraints, UNIQUE indexes, multi-column indexes, per-column ascending/descending ordered indexes, covering indexes (`INCLUDE` stored columns, so a query is answered from the index alone), GIN indexes over `jsonb` columns, CREATE INDEX IF NOT EXISTS, CREATE UNIQUE INDEX IF NOT EXISTS, and ALTER TABLE ADD/DROP INDEX.
-- **Database management** — databases must be created explicitly (`CREATE DATABASE`, `DROP DATABASE [IF EXISTS]`, `RENAME DATABASE old TO new`); there is no magic creation. Each database is assigned an immutable internal id at creation time; the name is a display-only label that can be renamed without moving any data.
+- **Database management** — databases must be created explicitly (`CREATE DATABASE`, `DROP DATABASE [IF EXISTS]`, `RENAME DATABASE old TO new`); a database is never created implicitly. Each database is assigned an immutable internal id at creation time; the name is a display-only label that can be renamed without moving any data.
 - **Schema management** — CREATE TABLE IF NOT EXISTS, DROP TABLE IF EXISTS, TRUNCATE TABLE, ALTER TABLE ADD/DROP COLUMN, ALTER TABLE RENAME TABLE/COLUMN/INDEX, column DEFAULT values (including function defaults such as `gen_uuid_v7()`), CHECK constraints, named NOT NULL constraints, foreign keys, `COMMENT ON` descriptions for databases, tables, columns, and indexes, and `SHOW CREATE TABLE`. In a cluster, DDL is online: schema changes replicate through Raft and move through staged states, so tables stay readable and writable while an index backfills.
 - **Foreign keys** — `REFERENCES` and `FOREIGN KEY … REFERENCES` with composite keys, self-references, `ON DELETE` / `ON UPDATE` `NO ACTION` or `RESTRICT`, and `ALTER TABLE ADD/DROP CONSTRAINT` that validates existing rows; checked at every isolation level, in standalone and cluster mode, and on database branches.
-- **Data types** — `int64`, `float64`, `float32`, `bool`, `numeric`/`decimal`, `string` / `string(N)`, `bytes`, `date`, `datetime`, `uuid`, `oid` (ObjectId), `array(T)`, and `jsonb`.
+- **Data types** — `int64`, `float64`, `float32`, `bool`, `numeric`/`decimal`, `string` / `string(N)`, `bytes`, `date`, `datetime`, `uuid`, `oid` (ObjectId), `array(T)`, and `jsonb`. An `interval` type exists in expressions only (`ts + INTERVAL '1 day'`); a table column cannot have it.
 - **JSON documents** — a `jsonb` column (`json` is an alias) stored as canonical binary CBOR, with the PostgreSQL operators (`->`, `->>`, `#>`, `@>`, `?`, `||`, `#-`, …), functions (`jsonb_set`, `jsonb_build_object`, `jsonb_each`, `jsonb_agg`, …) and GIN indexes (`CREATE INDEX … USING GIN`). 
 - **Views and materialized views** — `CREATE VIEW` (expanded at every reference, with `WITH CHECK OPTION`) and `CREATE MATERIALIZED VIEW` (stored rows, `REFRESH MATERIALIZED VIEW`); `SHOW VIEWS`, `SHOW MATERIALIZED VIEWS`, and `SHOW CREATE VIEW`.
 - **Sequences** — `CREATE SEQUENCE` with `nextval`, `currval`, and `setval`, usable as a column default (`DEFAULT nextval('order_no')`); `SHOW SEQUENCES` and `SHOW CREATE SEQUENCE`.
 - **Vector search** — embeddings stored as `bytes` columns, ranked with exact `l2_distance`, `cosine_distance`, and `inner_product` in an ordinary `ORDER BY … LIMIT`.
 - **Row-level TTL** — a table names an expiry column (`ALTER TABLE t SET (ttl_expiration_expression = 'expires_at')`) and a background sweep deletes expired rows; the parameters follow CockroachDB's row-level TTL.
 - **C# extensions** — scalar functions, row triggers (`CREATE TRIGGER … EXTERNAL NAME`) and stored procedures (`CALL`) written in C#, loaded from operator-deployed assemblies at startup and installed per database with `CREATE EXTENSION` (versioned, with `ALTER EXTENSION … UPDATE` for rolling upgrades), with a SAFE check for reviewed code.
+- **Inline C# functions and triggers** — `CREATE FUNCTION … LANGUAGE csharp AS $$ … $$` and `CREATE TRIGGER … LANGUAGE csharp AS $$ … $$` hold the C# body in the statement, with no file to deploy and no superuser needed; both are off by default (`inline_functions_enabled`, `inline_triggers_enabled`).
 - **Large values** — `string`, `bytes`, and array cells are compressed with LZ4 and moved out of the row when they are large, with a per-column storage strategy; query results do not change.
 - **Authentication and authorization** — off by default; `CREATE USER` / `ALTER USER` / `DROP USER`, `GRANT` / `REVOKE` privileges, `SHOW GRANTS`, `SHOW USERS`, and token-based access over both APIs.
 - **Backups and point-in-time recovery** — node-wide full and incremental backups and restore through a server-admin HTTP API, with retention and garbage collection.
@@ -178,7 +179,7 @@ dotnet tool install -g CamusDB.Server
 camusdb
 ```
 
-That is the whole setup — no clone, no build, no configuration file. The node starts on built-in
+No clone, build, or configuration file is needed. The node starts on built-in
 defaults and stores its data under `~/.local/share/camusdb` (`%LOCALAPPDATA%\camusdb` on Windows),
 serving the JSON/REST API on port 5095 and gRPC on 5096. 
 
@@ -235,7 +236,7 @@ dotnet run --project CamusDB -- \
 
 Architecture
 ------------
-A SQL statement enters over the HTTP API, is parsed into an AST, bound against the catalog, and turned into a physical plan by a cost-based query planner. The plan executes as a tree of storage-agnostic operators (scan, filter, join, aggregate, sort, project, limit) that read and write rows through a transactional key-value layer. That KV layer is an embedded [Kahuna](https://github.com/kahunakv/kahuna) node: table rows and index entries are mapped onto Kahuna keys with a prefix layout, transactions are coordinated via Kahuna's transaction API, and durability and replication are provided by Raft (Kommander). In a cluster, data is partitioned across nodes — each partition elects its own leader, statements are routed to the owning partition, and cross-partition writes use two-phase commit. Standalone mode runs the same stack against a per-process embedded node with no cluster configuration.
+A SQL statement enters over the HTTP or gRPC API, is parsed into an AST, bound against the catalog, and turned into a physical plan by a cost-based query planner. The plan executes as a tree of storage-agnostic operators (scan, filter, join, aggregate, sort, project, limit) that read and write rows through a transactional key-value layer. That KV layer is an embedded [Kahuna](https://github.com/kahunakv/kahuna) node: table rows and index entries are mapped onto Kahuna keys with a prefix layout, transactions are coordinated via Kahuna's transaction API, and durability and replication are provided by Raft (Kommander). In a cluster, data is partitioned across nodes — each partition elects its own leader, statements are routed to the owning partition, and cross-partition writes use two-phase commit. Standalone mode runs the same stack against a per-process embedded node with no cluster configuration.
 
 See [docs/architecture.md](docs/architecture.md) for a full developer reference: the request lifecycle, each layer (parser, binder, planner, operators, catalog, KV storage, transactions, cluster transport), the key layout and partitioning model, and how standalone and cluster modes differ.
 
@@ -266,7 +267,7 @@ SHOW ANCESTORS FROM staging;  -- staging's fork chain, immediate parent up to th
 DROP DATABASE staging;
 ```
 
-Use it for cheap staging clones of production, schema-migration dry-runs, per-PR ephemeral databases, and "what-if" analytics. Branches nest arbitrarily deep, and the fork's frozen view is kept durable by a Raft-replicated snapshot-floor hold — so a long-lived branch keeps reading its parent as of the fork instant even under heavy parent churn.
+Use it for cheap staging clones of production, schema-migration dry-runs, per-PR ephemeral databases, and "what-if" analytics. Branches nest to any depth, and the fork's frozen view is kept durable by a Raft-replicated snapshot-floor hold, so a long-lived branch keeps reading its parent as of the fork instant even under heavy parent churn.
 
 See [docs/database-branching.md](docs/database-branching.md) for a full developer/operator reference: the ancestry model and read lineage, the copy-on-write overlay and tombstones, frozen-view durability, crash-recovery, and operator guidance (metrics, config knobs, limitations).
 
@@ -290,7 +291,7 @@ A background reclaimer garbage-collects orphans once their retention window elap
 Time-Travel Reads
 -----------------
 
-Append `AS OF SYSTEM TIME` to a `SELECT` and the whole statement — every scanned table, join, and subquery — reads a single consistent historical snapshot instead of the latest committed data. The storage layer is multi-version: each key retains prior revisions tagged with the HLC timestamp at which they committed, so a historical read simply pins its snapshot to a past instant. Historical reads are lock-free and never block writers.
+Append `AS OF SYSTEM TIME` to a `SELECT` and the whole statement — every scanned table, join, and subquery — reads a single consistent historical snapshot instead of the latest committed data. The storage layer is multi-version: each key retains prior revisions tagged with the HLC timestamp at which they committed, so a historical read pins its snapshot to a past instant. Historical reads are lock-free and never block writers.
 
 ```sql
 -- Relative offset into the past (units: ms, s, m, h, d)
@@ -300,14 +301,14 @@ SELECT * FROM leaderboard AS OF SYSTEM TIME '-10s';
 SELECT * FROM accounts AS OF SYSTEM TIME '2026-07-19 20:00:00+00:00' WHERE id = 9910;
 ```
 
-This doubles as a fine-grained recovery tool: after an accidental `DELETE` or a bad `UPDATE`, query the table as of just before the mistake and re-insert what was lost. No backup restore needed, as long as the storage layer still retains that history (by default all persisted revisions are kept; tightening revision retention narrows the window).
+This is also a fine-grained recovery tool: after an accidental `DELETE` or a bad `UPDATE`, query the table as of just before the mistake and re-insert what was lost. No backup restore needed, as long as the storage layer still retains that history (by default all persisted revisions are kept; tightening revision retention narrows the window).
 
 `AS OF SYSTEM TIME` is limited to autocommit read-only statements (it is rejected inside explicit transactions, and there is no historical `UPDATE`/`DELETE`), and only past instants are accepted. See [docs/time-travel-reads.md](docs/time-travel-reads.md) for the full reference: syntax and accepted value forms, snapshot semantics, restrictions, and retention behavior.
 
 Query Result Cache
 ------------------
 
-Opt a read into an in-memory, per-node result cache with an inline hint: `SELECT * FROM orders {cache=recent_orders}`. An identical later query — same shape, same bound values, same schema is served from memory without touching storage. The cache is correct before it is fast: a committed write on the same node evicts every dependent entry before it becomes visible to a later read, so a same-node reader never sees stale data. Writes on other nodes are bounded by a per-entry TTL, or eliminated per-hit with `{cache=…, strict}`. Options include `ttl=30s` (units `ms`/`s`/`m`/`h`) and `strict`; entries are dropped manually with `EVICT CACHE 'name'` or `EVICT CACHE ALL`. The feature is on by default (opt-in per query via the hint — nothing without a `{cache=…}` hint is cached) and applies to autocommit single-table `SELECT`s; set `query_result_cache_enabled: false` to disable it entirely.
+Opt a read into an in-memory, per-node result cache with an inline hint: `SELECT * FROM orders {cache=recent_orders}`. An identical later query — same shape, same bound values, same schema — is served from memory without touching storage. A committed write on the same node evicts every dependent entry before it becomes visible to a later read, so a same-node reader never sees stale data. Writes on other nodes are bounded by a per-entry TTL, or eliminated per-hit with `{cache=…, strict}`. Options include `ttl=30s` (units `ms`/`s`/`m`/`h`) and `strict`; entries are dropped manually with `EVICT CACHE 'name'` or `EVICT CACHE ALL`. The feature is on by default (opt-in per query via the hint — nothing without a `{cache=…}` hint is cached) and applies to autocommit single-table `SELECT`s; set `query_result_cache_enabled: false` to disable it.
 
 ```sql
 -- Cache this result under the "recent_orders" family, expiring after 30 seconds
@@ -334,7 +335,7 @@ for the procedure, what a dump does and does not carry, and how to roll back.
 Configuration
 -------------
 
-CamusDB reads `CamusDB/Config/config.yml` at startup and merges CLI flags and environment variables into a single resolved configuration (precedence: CLI flag > environment variable > `config.yml` > built-in default). See [docs/configuration.md](docs/configuration.md) for the full reference: the precedence model, the CLI ↔ YAML mapping, the isolation/locking and parser-cache tunables, the allow-listed `kahuna:` engine passthrough, and the validation error matrix.
+CamusDB looks for a configuration file at startup, in this order: the `--config` path, `CAMUS_CONFIG_PATH`, `./camusdb.yml` or `./Config/config.yml`, and `~/.camusdb/config.yml`. With no file, it starts on built-in defaults. It merges CLI flags and environment variables into a single resolved configuration (precedence: CLI flag > environment variable > configuration file > built-in default). See [docs/configuration.md](docs/configuration.md) for the full reference: the precedence model, the CLI ↔ YAML mapping, the isolation/locking and parser-cache tunables, the allow-listed `kahuna:` engine passthrough, and the validation error matrix.
 
 ## Requirements
 - .NET 10 SDK

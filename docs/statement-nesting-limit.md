@@ -1,8 +1,8 @@
 # Statement Nesting Limit
 
 CamusDB refuses a statement whose parse tree is deeper than **1,000 levels**, with error
-**CADB0413** (`StatementTooDeeplyNested`). The limit exists to protect the server process, not to
-police query style: almost every statement is far below it.
+**CADB0413** (`StatementTooDeeplyNested`). The limit protects the server process. Almost every
+statement is far below it.
 
 ## Why there is a limit
 

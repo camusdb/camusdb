@@ -77,7 +77,7 @@ does not turn the fill into a batch that is validated, and aborted, at commit. A
 not overwritten, and a concurrent DELETE is not undone. A batch that loses a lock to a concurrent
 writer is retried until it wins: the batch is halved on each loss, so the rows that are free are
 written while the busy ones wait, and a lost batch waits only as long as the writers that hold its
-rows. A table under sustained writes is therefore still filled; the fill is slower, never abandoned.
+rows. So the fill of a table under sustained writes is slower, and it still completes.
 The statement enters the database's DDL gate for its table and hands the column to the schema-change
 coordinator, which takes the gate for each of the three schema steps and holds the table for the
 whole statement. While the rows are filled, the gate itself is released: `CREATE TABLE`, and any
@@ -105,15 +105,15 @@ per attempt before it is driven again.
 
 The job record carries the schema-leader term of the node that drives it. The next leader's resume
 stamps its own, newer term on the record before it drives, and from then on no write of the former
-driver lands on the record: not a take-back, not a checkpoint, not the final delete. The former
+driver lands on the record. This covers a take-back, a checkpoint and the final delete. The former
 driver's fill is cancelled the moment its node stops leading, so it stops at its next batch instead
 of running beside its successor.
 
 The statement that started the change is then answered from what the successor did, because the
-change is the successor's from that point on and may well have been made:
+change is the successor's from that point on and may have been made:
 
-- The successor published the column: the statement **succeeds**. It is not answered "nothing was
-  committed, retry", which would make a retrying client run the statement again and meet
+- The successor published the column: the statement **succeeds**. An answer of "nothing was
+  committed, retry" would make a retrying client run the statement again and meet
   `Duplicate column`.
 - The successor took the column back: the statement fails with the error the successor recorded,
   for example the `NOT NULL` violation it found, and the column is gone, so the statement can run

@@ -55,9 +55,9 @@ A timestamp string with no timezone is interpreted as UTC.
 
 CamusDB's storage layer (Kahuna) is multi-version: each key retains its prior revisions, each tagged
 with the Hybrid Logical Clock (HLC) timestamp at which it committed. Every CamusDB read already
-carries a *read timestamp*; a normal query uses "latest", and `AS OF SYSTEM TIME` simply supplies a
-past timestamp instead. The value is resolved to an HLC and the query runs on a cheap read-only
-snapshot pinned to it — the same mechanism used for serializable read-only snapshots, just aimed at
+carries a *read timestamp*; a normal query uses "latest", and `AS OF SYSTEM TIME` supplies a
+past timestamp. The value is resolved to an HLC and the query runs on a cheap read-only
+snapshot pinned to it — the same mechanism used for serializable read-only snapshots, aimed at
 an earlier point.
 
 ## Restrictions
@@ -71,12 +71,12 @@ an earlier point.
 - **A truncated table cannot be read before its current contents began.** `TRUNCATE` replaces the
   key-space a table's rows live in, and a live schema can locate only the current one. A snapshot
   earlier than that cut is refused with `CADB0537`
-  (`SnapshotPrecedesContentsGeneration`, HTTP 400) rather than answered with an empty result, which
-  would be indistinguishable from a correct empty answer. A snapshot exactly at the cut is allowed
+  (`SnapshotPrecedesContentsGeneration`, HTTP 400), because an empty result
+  would look the same as a correct empty answer. A snapshot exactly at the cut is allowed
   and observes the new, empty contents. To read the older rows, recover them under a new table with
   `CREATE TABLE … RELINK TO` — see [`TRUNCATE TABLE`](truncate-table.md#time-travel).
 - **Retention bounds how far back you can look.** The snapshot can only resolve against revisions the
-  storage layer still retains. A timestamp older than the retained history simply returns an empty
+  storage layer still retains. A timestamp older than the retained history returns an empty
   result (there is no error for "too old"). By default Kahuna keeps all persisted revisions, so in
   practice the window is wide; tightening revision retention narrows it.
 

@@ -15,6 +15,7 @@ The PostgreSQL column shows what PostgreSQL 16 did in the C locale when the beha
 | `UPDATE d SET v = 0` | `CADB0400` | Updates every row | A safety rule: one statement cannot change every row by accident. Write `WHERE TRUE` to do it on purpose. |
 | `DELETE FROM d` | `CADB0400` | Deletes every row | The same safety rule. |
 | `UPDATE d SET id = 3 WHERE id = 2`, where `id` is the primary key | `CADB0400` | Updates the row | Row identity, the row id caches and foreign keys depend on a key that does not change. Delete the row, and insert it with the new key. |
+| `UPDATE d SET v = s.v FROM s WHERE s.id = d.id`, where two rows of `s` have `id = 1` | `CADB0400` | Updates the row one time, with one of the two values | The new value would depend on which match the statement used, which the plan decides. PostgreSQL does not say which match it uses. Make the `FROM` list match one row for each target row, for example with `GROUP BY` in a derived table. See [UPDATE … FROM and DELETE … USING](update-from-delete-using.md). |
 
 ## Strings
 
@@ -253,4 +254,7 @@ CamusDB refuses these forms with a clear error, so no answer is wrong. `d` has t
 | `CREATE VIEW vv AS SELECT 1` | `CADB0400`; name the column with `AS` | Accepted, with the column `?column?` |
 | `SELECT x FROM (SELECT 5 AS x) d FOR UPDATE` | `CADB0400` | `5` |
 | `SELECT (SELECT 1 FOR UPDATE)` | `CADB0406` | `1` |
+| `UPDATE d SET v = 0 FROM d e WHERE e.id = d.id AND d.id = 1 RETURNING e.v` | `CADB0400`; `RETURNING` reads the target only | `10` |
+| `UPDATE d SET v = 0 FROM d e WHERE e.id = d.id AND d.id = 1 RETURNING *` | `CADB0400`; list the target columns | The columns of `d` and of `e` |
+| `UPDATE d SET v = x.v FROM (VALUES (1, 5)) AS x(id, v) WHERE x.id = d.id` | `CADB0406`; use a derived table, `(SELECT 1 AS id, 5 AS v UNION ALL …) x` | `UPDATE 1` |
 | `INSERT INTO em (id, v) VALUES (1, 1) RETURNING (SELECT 7)` | `CADB0400` | `7` |

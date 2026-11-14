@@ -9,10 +9,10 @@ SHOW ENGINE STATS;
 SHOW ENGINE STATS LIKE 'raft.executor%';
 ```
 
-This is engine introspection, not table statistics — for the optimizer's view of your data see
+This statement reports engine internals. For table statistics, the optimizer's view of your data, see
 [`SHOW STATISTICS FOR <table>`](show-statistics.md), [`ANALYZE`](automatic-analyze.md) and
-[the query planner guide](query-planner.md). It is also not placement: for where a table's data
-actually lives across partitions, see [`SHOW RANGES`](show-ranges.md).
+[the query planner guide](query-planner.md). For placement, where a table's data
+lives across partitions, see [`SHOW RANGES`](show-ranges.md).
 
 ## What it is for
 
@@ -35,7 +35,8 @@ SHOW ENGINE STATS LIKE 'raft.executor.operation_duration_ms';
 
 The `max` is the worst dispatch since the process started; `last` is the most recent one. A `max` far
 above the `total/count` average, with a `last` back at normal, is the signature of a periodic stall
-rather than sustained pressure — the next section is about finding what it lines up with.
+rather than sustained pressure — [Correlating a slow dispatch with a background cycle](#correlating-a-slow-dispatch-with-a-background-cycle)
+shows how to find what it lines up with.
 
 ## Result columns
 
@@ -54,7 +55,7 @@ Rows are ordered by `source`, `metric`, `tags`, so two invocations diff cleanly.
 
 ## Reading the window correctly
 
-Three properties will mislead you if you assume otherwise:
+Three properties decide how to read the numbers:
 
 - **Counters and histograms are cumulative since process start.** There is no reset. To measure a
   window, run the statement twice and subtract — a single reading of `raft.wal.batches_total` tells you
@@ -62,8 +63,8 @@ Three properties will mislead you if you assume otherwise:
 - **Gauges have no history.** They are sampled at the instant the statement runs and report only
   `last`. An observable *counter* is reported as a gauge whose `last` is its running total.
 - **The statement is node-local and never forwards to the leader.** In a cluster each node answers for
-  its own process, which is exactly what you want when one node is slow — but it means you must query
-  each node to see the cluster. The `node` column is there so output pasted into an issue says which
+  its own process, which is what you want when one node is slow. To see the cluster, query
+  each node. The `node` column is there so output pasted into an issue says which
   one it came from.
 
 ## Correlating a slow dispatch with a background cycle
@@ -82,10 +83,7 @@ If `raft.executor.operation_duration_ms.max` jumped between the two readings whi
 filter and look for what *did* advance in the same interval — `kahuna.kv.write.*` for write-path
 batching, `raft.wal.*` for WAL flush behavior, `kahuna.backup.*` for a backup or PITR cycle.
 
-Kahuna's **collection-tick** statistics are the most direct answer to that question, and they arrive
-with the Kahuna release after `0.9.8` — the version currently referenced, which does not publish them.
-Until that package is picked up, a collection tick shows up only indirectly, as a gap that none of the
-visible metrics explains. Once it is:
+Kahuna's **collection-tick** statistics show most directly whether a collect cycle caused the stall:
 
 | metric | tells you |
 |---|---|

@@ -4,8 +4,8 @@ This document explains how CamusDB turns a SQL `SELECT` string into result rows.
 read top to bottom by someone new to the project: **Part I** builds the mental model and vocabulary,
 **Part II** walks the pipeline stage by stage, **Parts III–IV** cover plan inspection and
 distributed execution, **Part V** is the cost-based optimizer (statistics → cardinality estimation →
-cost model → cost-based access-path and join-order search), and **Part VI** is an honest map of what is
-*not* built yet so you know where to contribute. Parts VII–IX are reference material (file map, extension
+cost model → cost-based access-path and join-order search), and **Part VI** maps what is
+*not* built yet, so you know where to contribute. Parts VII–IX are reference material (file map, extension
 checklist, glossary).
 
 If you only want to *use* `EXPLAIN`, see [`docs/explain.md`](./explain.md). This document is about how
@@ -17,9 +17,9 @@ the planner works internally and how to change it.
 
 ## What a query planner is, and why it exists
 
-SQL is *declarative*: a query says **what** rows you want, not **how** to fetch them.
-`SELECT * FROM robots WHERE id = 5` does not say "use the primary-key index" — it just describes the
-result. The query planner is the component that decides the **how**: which index to use, whether to
+SQL is *declarative*: a query says **what** rows you want and leaves **how** to fetch them to the
+engine. `SELECT * FROM robots WHERE id = 5` names no index; it describes the
+result. The query planner decides the **how**: which index to use, whether to
 sort, in what order to join tables, where to evaluate each predicate. Its job is to produce a correct
 *execution plan* and, among the many correct plans, pick a fast one.
 
@@ -32,8 +32,8 @@ knows only about ordered keys and values.
 
 ## The five-stage pipeline (the core mental model)
 
-Every `SELECT` flows through five stages. Keeping them separate is a deliberate design choice — it is
-what lets us add joins or subqueries without destabilizing single-table queries.
+Every `SELECT` flows through five stages. They are kept separate on purpose: that
+lets us add joins or subqueries without destabilizing single-table queries.
 
 ```
  SQL text
@@ -50,9 +50,9 @@ what lets us add joins or subqueries without destabilizing single-table queries.
 [5] EXECUTE         QueryExecutor / QueryJoinExecutor        → IAsyncEnumerable<QueryResultRow>
 ```
 
-Each stage has a single responsibility and a distinct data type as its output. A useful way to remember
-it: **parse** turns text into a tree, **bind** attaches meaning (which table is `u`? does column `email`
-exist? is it ambiguous?), **plan** decides the strategy, **execute** runs it.
+Each stage has a single responsibility and a distinct data type as its output. In short:
+**parse** turns text into a tree, **bind** attaches meaning (which table `u` is, whether column `email`
+exists, whether it is ambiguous), **plan** decides the strategy, **execute** runs it.
 
 The entry point that orchestrates all five stages is `CommandExecutor.ExecuteSQLQuery`
 (`CommandExecutor.cs:1146`). It returns `(DatabaseDescriptor, IAsyncEnumerable<QueryResultRow>)` to the
@@ -60,7 +60,7 @@ HTTP layer.
 
 ## Logical vs physical plans
 
-This distinction trips up newcomers, so it is worth stating plainly:
+Newcomers often confuse the two:
 
 - A **logical plan** says *what* relational result is wanted: "the rows of `users` where `id = 5`,
   projected to `email`." It says nothing about indexes. In CamusDB the logical model is `SelectQuery`
@@ -69,9 +69,9 @@ This distinction trips up newcomers, so it is worth stating plainly:
   project `email`." In CamusDB the physical plan is a tree of `PhysicalPlanNode` objects rooted at
   `QueryPlan.Root`.
 
-The planner (stage 4) is exactly the function `logical plan → physical plan`. Two physical plans can be
-*logically equivalent* (return the same rows) but wildly different in cost — choosing between them is the
-planner's reason to exist.
+The planner (stage 4) is the function `logical plan → physical plan`. Two physical plans can be
+*logically equivalent* (return the same rows) and differ widely in cost. The planner exists to choose
+between them.
 
 ## Heuristics vs cost-based optimization (where CamusDB is today)
 
@@ -83,10 +83,10 @@ There are two ways to choose a plan:
   selectivity) and pick the cheapest. More powerful, but needs statistics and a cost model.
 
 **CamusDB has a heuristic planner with a real cost-based optimizer layered on top, gated behind
-config flags.** The project followed the "heuristics before CBO" path, and the heuristic planner is
-still the default. But a full cost-based optimizer now exists and, when enabled, drives the two biggest
-plan decisions — **which access path** to use per table and **what order** to join tables — by costing
-alternatives against statistics rather than applying rules.
+config flags.** The project followed the "heuristics before CBO" path. Both cost-based flags are on
+by default, so the cost-based optimizer drives the two biggest plan decisions — **which access path**
+to use per table and **what order** to join tables — by costing alternatives against statistics. With
+a flag off, or with no usable statistics, the heuristic planner makes that decision.
 
 The mental model has three layers:
 
@@ -119,7 +119,7 @@ understanding the planner:
 | 4 | `QueryPlan` | Physical plan | `Root` (a `PhysicalPlanNode` tree) + `Steps` (a flattened linear list) |
 | 5 | `QueryResultRow` | A result row | `readonly struct`: `ObjectIdValue RowId` + `Dictionary<string,ColumnValue> Row` (keyed by column name) |
 
-Two subtleties worth internalizing early:
+Two points to learn early:
 
 1. **`NodeAst` never disappears.** Even after stage 2, expressions (the `WHERE` predicate, projection
    expressions, `ON` conditions) are still raw `NodeAst` subtrees — they are evaluated at runtime by
@@ -409,8 +409,8 @@ bound it cannot compare. `NumericBoundNormalizer` moves each literal into the co
 The same pass parses a bare string literal on a Uuid/Id column into that type. Every planner entry that
 feeds a table's predicates to a selector applies it — the single-table planner, the join-leaf builder,
 the join-leaf costing, and the cardinality estimator — and `IndexScanSelector` drops any comparison whose
-constant still mismatches its column, so a caller that skips the pass loses the index shortcut, never the
-right rows.
+constant still mismatches its column, so a caller that skips the pass loses the index shortcut and still
+returns the right rows.
 
 ### 4c. IndexScanSelector
 
@@ -426,8 +426,8 @@ best (ties → fewer columns = more selective):
 | ORDER BY prefix match (no predicate) | `1000` |
 
 **Composite matching:** walk index columns left to right, accumulate the equality prefix; if fully
-covered, emit `QueryFromIndex` (unique) or a prefix-bounded `RangeScanFromIndex` (non-unique). Note
-**equality on a non-unique index is a single-value range scan**, not a point lookup — `WHERE year = 2000`
+covered, emit `QueryFromIndex` (unique) or a prefix-bounded `RangeScanFromIndex` (non-unique).
+**Equality on a non-unique index is a single-value range scan**: `WHERE year = 2000`
 on a multi index renders as `index-range-scan(... from>=2000, to<2001)`, while `WHERE id = …` on the
 unique PK renders as `index-lookup`. If a partial prefix is followed by a range predicate on the next
 column, both bounds are combined.
@@ -468,7 +468,7 @@ is that **a unique index may serve a query only if every key column the query do
 `=`, `<`, `<=`, `>` or `>=` comparison is declared NOT NULL**. A constrained column needs no proof — a NULL
 there fails the predicate anyway — so a full-key lookup is always allowed and `a = 2 AND b > 0` keeps its
 prefix-plus-range scan even when `b` is nullable. `!=` does not count as a constraint. When the rule fails
-the index is simply not a candidate; the planner falls through to another index or the table scan. Five
+the index is not a candidate; the planner falls through to another index or the table scan. Five
 sites apply it: the shared predicate matcher (`TryMatchPredicateIndex`, which serves heuristic selection,
 cost enumeration, plan-cache replay and join leaves), the ORDER BY scan, the streaming DISTINCT/GROUP BY
 index (`TryFindStreamingDistinctIndex`), the correlated `EXISTS` prefix seek, and the merge join's
@@ -732,7 +732,7 @@ contains a subquery does read storage for the inner query. The outer query is ne
 
 ## EXPLAIN ANALYZE
 
-`EXPLAIN (ANALYZE) SELECT …` actually executes the query, drains the cursor, and adds **actual** runtime
+`EXPLAIN (ANALYZE) SELECT …` executes the query, drains the cursor, and adds **actual** runtime
 counters per node. Counters live in `PlanNodeStats` (`Models/Plans/PlanNodeStats.cs`):
 `RowsRead`, `RowsEmitted`, `KvPointLookups`, `KvScanEntries`, `ElapsedMs` (root-only), `RanAs` (the
 strategy a hash join actually ran, when it differs from the plan) and `BroadcastSpans` (per-span actuals
@@ -740,7 +740,7 @@ of a broadcast probe).
 Extra result columns: `actual_rows`, `rows_read`, `actual_time_ms` (NULL on non-root nodes),
 `kv_lookups`, `kv_scan_entries`.
 
-Design points worth knowing:
+Design points:
 
 - **Gated and zero-cost when off.** Counters are only allocated/updated when `QueryPlan.CollectRuntimeStats`
   is set (only EXPLAIN ANALYZE sets it). Normal `SELECT` pays nothing.
@@ -774,8 +774,8 @@ following properties:
 | `Distribution` (`DataDistribution?`) | How the node's output rows are spread across the cluster | Set on scan leaves: `Gathered` (single-node/unsharded), `Partitioned(keyColumns)` (range-sharded by these columns), or `Replicated`. `null` on non-leaf nodes |
 | `CanDecomposeToLocalPlusMerge` | Whether the operator splits into per-partition local work + a merge | `true` for scan/filter/project; `AggregateNode` only for `COUNT`/`SUM`/`MIN`/`MAX` (not `AVG`); `false` for sort/limit/distinct/all join operators |
 
-`CanDecomposeToLocalPlusMerge` is plan metadata, not the complete eligibility rule for partial
-aggregates: a supported grouped `AVG` can be decomposed internally into per-span `SUM` and `COUNT`
+`CanDecomposeToLocalPlusMerge` is plan metadata. The eligibility rule for partial aggregates is
+wider: a supported grouped `AVG` can be decomposed internally into per-span `SUM` and `COUNT`
 and finalized after the merge.
 
 `OutputOrdering` is set by the single-table `QueryPlanner` on index scans and sort nodes, and by
@@ -783,13 +783,13 @@ and finalized after the merge.
 on those columns can be elided). `HashJoinNode` leaves `OutputOrdering` null (hash does not preserve order).
 All join nodes set `CanDecomposeToLocalPlusMerge = false`.
 
-**`Distribution` is a real physical property, not a stub.** It replaces the old `PartitionLocality`
+**`Distribution` is a real physical property.** It replaces the old `PartitionLocality`
 placeholder. `PlacementReader` derives it from the table/index sharding scheme: when
 `KeyRangeShardingEnabled` is on, a primary-row scan reports `Partitioned(pkColumns)` and a
 secondary-index scan reports `Partitioned(indexColumns)`; a point lookup is always `Gathered` (it
 returns ≤1 row, pulled to the coordinator). With sharding off, everything is `Gathered`. It is a
-schema-derived snapshot — it encodes *which columns* partition the data, not the live Kahuna range map
-(partition count, which node is remote). The network **cost** that consumes it lives in
+schema-derived snapshot: it encodes *which columns* partition the data. It does not read the live Kahuna
+range map (partition count, which node is remote). The network **cost** that consumes it lives in
 `PlanCost.NetworkFactor` (see [Part V — Network & distribution cost](#network--distribution-cost)).
 When a primary-row scan qualifies, the planner wraps it in a `GatherNode`. The gather runs a span
 on its leader through `IQueryFragmentTransport` when a shippable filter or another supported
@@ -908,7 +908,7 @@ flagged passes and remain on by default.
 
 **Files:** `Statistics/StatisticsManager.cs`, `Statistics/Models/*`, `Controllers/TableAnalyzer.cs`.
 Persisted to Kahuna meta KV at `{dbId}:stats:{tableId}` via `MetaJsonContext`; advisory — a missing or
-stale value never throws, it just falls back. Everything described in this section is readable from a
+stale value never throws, it falls back. Everything described in this section is readable from a
 SQL console with [`SHOW STATISTICS FOR <table>`](show-statistics.md). Statistics come in two flavours:
 
 - **Incrementally maintained on DML** (cheap, always current-ish): `RowCount`, per-index entry counts,
@@ -1038,7 +1038,7 @@ at a cost break-even, because an operator choice flips at the break-even and not
 **Files:** `Controllers/Queries/PlacementReader.cs`, `RowWidthEstimator.cs`, `Models/Plans/DataDistribution.cs`.
 The network factor estimates scan-row transfer to the coordinator from placement and estimated row
 width. Actual traffic can be lower when a fragment filters or aggregates rows at the peer, so the
-factor is an approximation for distributed plans rather than a measurement of shipped bytes.
+factor is an approximation of shipped bytes for distributed plans.
 
 - **`DataDistribution`** (set on scan leaves) records *which columns* partition the data — `Gathered`,
   `Partitioned(keyColumns)`, or `Replicated` (see [Part IV](#part-iv--distributed-ready-plan-properties)).
@@ -1048,9 +1048,9 @@ factor is an approximation for distributed plans rather than a measurement of sh
   range map is not read yet). `rowWidthBytes` comes from `RowWidthEstimator` (per-column type sizes).
   `NetWeight` (default `0.01`) is calibrated so one remote 100-byte row ≈ one local KV lookup.
 
-When a `NetworkFactor` looks wrong, [`SHOW RANGES`](show-ranges.md) is how you tell the two
+When a `NetworkFactor` looks wrong, [`SHOW RANGES`](show-ranges.md) tells the two
 explanations apart: it reports each span of a relation's key space and whether this node believes it
-leads it, so you can see whether the data really is remote or whether this node's range map is simply
+leads it, so you can see whether the data is remote or whether this node's range map is
 behind a peer's.
 
 With sharding off or a single partition, `NetworkFactor` is 0 and the cost reduces to the single-node
@@ -1065,7 +1065,7 @@ remote access and filter pushdown automatically, because both ship fewer bytes.
 The heuristic `IndexScanSelector.TrySelectScan` picks the *first viable* index by a rule score (longest
 equality prefix). The cost-based path instead **enumerates all candidates** — one step per index that
 matches the predicate, plus the implicit full-scan baseline — costs each with `EstimateScanLeafCost`, and
-keeps the cheapest. So a higher-scored index loses to a lower-scored one that is genuinely cheaper, and the
+keeps the cheapest. So a higher-scored index loses to a lower-scored one that costs less, and the
 range-vs-full-scan veto becomes a true cost comparison rather than a fixed-threshold flip.
 
 It engages only when the flag is on, stats and a row count exist, and the query is not an `UPDATE`/`DELETE`
@@ -1112,7 +1112,7 @@ estimate uses, so the prefix weighs the same in every step that binds it. The co
 priced by its histogram over the bounds the step puts on it, else by linear interpolation between its
 min and max, else, when the step pins one value of it (the last column of a prefix-only step), by its
 distinct count, else by the fixed range constants for the bounds that column itself has (one side 0.50,
-two sides 0.10). The last rule is what keeps `studio_id = ? AND created_at >= ?` on the index
+two sides 0.10). The last rule keeps `studio_id = ? AND created_at >= ?` on the index
 `(studio_id, created_at)` when four indexes start with `studio_id`: a `uuid` column has no histogram, so
 without it the prefix-only steps on the other three indexes were priced at the fixed 10 % while the step
 that also bound `created_at` was priced by the histogram at its true third of the table, and lost.
@@ -1228,7 +1228,7 @@ avoidable cross product is returned unchanged, so its plan is the same as before
 predicates need a cross product keeps the heuristic tree.
 
 The repair needs no statistics. It runs whenever the heuristic plans the join: with the flag off, while
-a table's row count is not loaded yet, above the 12-table enumeration cap, and when the enumerator finds
+a table's row count is not loaded yet, above the 30-table enumeration cap, and when the enumerator finds
 no plan.
 
 ### The dynamic program
@@ -1310,7 +1310,7 @@ selects for the conjuncts that the step attaches. The checks are the builder's o
   point read) and 16 for a non-unique index (one batched bounded scan), solved from the retail data set
   at scale 4 on memory storage, where a scanned row costs about 0.55 µs, a unique probe about 2.2 to 4.8 µs
   with its row fetch and a non-unique probe about 10 µs with its 2.4 row fetches. The constants carry
-  their derivation in `CostEstimator`; a faster store means a smaller weight, not a different formula.
+  their derivation in `CostEstimator`; a faster store changes the weight and keeps the formula.
 - `matchesPerProbe` is the rows one probe returns: 1 for a unique index, else the right table's rows
   over the NDV of the indexed column (1 when unknown), or the named keys' share of the column when the
   plan-time lookup knows the keys. Each is one row fetch. The leaf model charges a range scan two
@@ -1324,7 +1324,7 @@ selects for the conjuncts that the step attaches. The checks are the builder's o
 
 A hash join therefore wins sooner than before: a unique probe is worth it while the right table has
 about four rows for each distinct left key, and a non-unique probe while it has about seventeen rows plus
-the rows the key returns. The fan-out term is what puts a filtered fact table before a small dimension:
+the rows the key returns. The fan-out term puts a filtered fact table before a small dimension:
 with `customers` first, each of its 8,000 rows probes `orders` through the non-unique `customer_id` index
 and returns three rows; with `orders` first, its 2,400 filtered rows join the customers with a hash join or
 with probes by primary key, and either costs a fraction of the 8,000 probes.
@@ -1342,7 +1342,7 @@ index lookup against hash, the merge-join size threshold and the hash build side
 input only as a fixed 10,000 rows and a filtered right input only by its output rows, and could build a hash
 join where the DP costed an index lookup. The heuristic order keeps the builder's own estimates.
 
-The `leftRows` term is what makes the order matter: the left input of a step is the intermediate result
+The `leftRows` term makes the order matter: the left input of a step is the intermediate result
 of the steps before it, so the total of a plan is the scan costs plus the size of each intermediate
 result. Without it, every hash-only order of a query costs the sum of its scans and ties.
 
@@ -1377,7 +1377,7 @@ rows[S] = Π leafRows[t ∈ S] × Π selectivity(g ⊆ S) × Π classFactor(C, S
   NDV for a column with a count and no histogram) and a column of the subset has heavy values, the `k − 1` factors
   are the skew-aware pair selectivities between an **anchor**, the skewed column of the subset with the
   fewest distinct values, and each other column. The distinct-count factors are the special case with no
-  heavy value. This is what makes the cycle `customers ⋈ orders ⋈ stores ⋈ cities`, where customers and
+  heavy value. This makes the cycle `customers ⋈ orders ⋈ stores ⋈ cities`, where customers and
   stores both concentrate in the popular cities, estimate at the size the data has instead of 1/20 of it.
   The factor is deliberately **one pair at a time**, never the sum over the product of every column's
   frequency: the mean of a product of five or six heavy-tailed frequencies is dominated by the few most
@@ -1394,9 +1394,9 @@ rows[S] = Π leafRows[t ∈ S] × Π selectivity(g ⊆ S) × Π classFactor(C, S
 A unique side gives the standard estimate `leftRows × filteredRightRows / rightTableRows`, so a scan
 filter on the unique side reduces it.
 
-The classic win the DP unlocks: a star join `events ⋈ sessions ⋈ users` where the heuristic keeps the large
-declared-first `events` outermost (paying a full `events` scan), while the DP drives the tiny filtered
-`sessions` into `events`'s `session_id` index via INLJ — orders of magnitude cheaper.
+A typical case where the DP wins is the star join `events ⋈ sessions ⋈ users`. The heuristic keeps the
+large declared-first `events` outermost (paying a full `events` scan), while the DP drives the tiny filtered
+`sessions` into `events`'s `session_id` index via INLJ, which is orders of magnitude cheaper.
 
 ### Plan cache and the build mode
 
@@ -1544,8 +1544,8 @@ These are the meaningful missing pieces and where new work fits.
 | **Cardinality estimator** | **Done** | `CardinalityEstimator`: histogram/NDV filter selectivity, IN-list, composite-key correlation, and FK-aware join cardinality (`|A||B|/max(NDV)`). |
 | **Cost model + network** | **Done** | `PlanCost`/`CostEstimator` populate `EstimatedCardinality`/`Cost` incl. a real `NetworkFactor` (`DataDistribution` + `PlacementReader` + `RowWidthEstimator`); always-on vetoes (range-vs-scan, join algorithm) plus the two flagged passes below. |
 | **Cost-based access-path selection** | **Done** | `cost_based_access_path_enabled`: enumerate + cost all index candidates per table, pick cheapest. On by default; off → heuristic. |
-| **Cost-based join-order enumeration** | **Done (opt-in)** | `cost_based_join_order_enabled`: System-R DP over the reachable table subsets (`JoinEnumerator`) of the conjunct graph (`JoinGraph`), up to 30 tables and a budget of 2,000,000 costed steps with a greedy order past it, inner-joins-only, falls back to the heuristic with its cross-product repair. On by default; off → heuristic. |
-| **Plan-cache hooks** | **Partial** | Plans record `TableSchemaVersion`; no stable query-shape identifier yet. No plan reuse. The next phase — caching optimized plans keyed by query shape — is unbuilt. |
+| **Cost-based join-order enumeration** | **Done** | `cost_based_join_order_enabled`: System-R DP over the reachable table subsets (`JoinEnumerator`) of the conjunct graph (`JoinGraph`), up to 30 tables and a budget of 2,000,000 costed steps with a greedy order past it, inner-joins-only, falls back to the heuristic with its cross-product repair. On by default; off → heuristic. |
+| **Plan cache** | **Done (opt-in)** | `plan_cache_enabled`: per-process LRU cache of the access-path and join-order decision, keyed by `QueryShapeId`. Off by default. |
 | **Interesting orders in the join DP** | **Missing** | The DP costs by scan/join cost only; it does not keep a costlier sub-plan that supplies an ordering/distribution a parent needs (would avoid a later sort/exchange). |
 | **Semi-/anti-join rewrite** | **Done** | Eligible uncorrelated `IN`/`NOT IN` over an **indexed** inner column rewrite to semi / anti / null-aware-anti join (`SemiJoinAnalyzer`/`SemiJoinExecutor`); non-indexed falls back to materialization. Three-valued `NOT IN` semantics preserved. |
 | **DISTINCT streaming** | **Done** | `SELECT DISTINCT` over a NOT-NULL index set-prefix streams (adjacent-row dedup, O(1) memory); otherwise hash dedup. |
@@ -1553,12 +1553,11 @@ These are the meaningful missing pieces and where new work fits.
 | **Logical EXPLAIN** | **Cosmetic** | `(LOGICAL)` renders the physical tree relabeled; there is no distinct logical-plan rendering. |
 | **Per-node timing** | **Root-only** | `actual_time_ms` is only measured for the whole plan, not per operator. |
 | **Error/semantics matrix** | **Done** | `TestErrorMatrix.cs` — 14 negative cases (ambiguous column, bad HAVING refs, multi-column/multi-row subqueries, `COUNT(DISTINCT)`, etc.) asserting precise codes + messages. |
-| **Query microbenchmarks** | **Missing** | No benchmarks for grouped aggregation, join algorithms, or subquery materialization. The last item from the original optimizer backlog (R14). |
+| **Query microbenchmarks** | **Missing** | No benchmarks for grouped aggregation, join algorithms, or subquery materialization. |
 
 Explicitly deferred (by design): `FULL OUTER JOIN`, `NATURAL JOIN`, `USING`, join-order enumeration
 across an outer join, outer-join simplification (a null-rejecting `WHERE` turning a left join into an
-inner join), window functions, CTEs, quantified predicates beyond
-`IN`/`NOT IN` (`ANY`/`ALL`/`SOME`), `COUNT(DISTINCT …)`, the optimized-plan cache, bushy join plans,
+inner join), CTEs, `COUNT(DISTINCT …)`, bushy join plans,
 "interesting orders" in the join DP, and general remote execution of arbitrary plan subtrees.
 Distributed fragments currently cover eligible span scans, partial aggregates, and bounded
 broadcast probes for inner hash joins; see Part IV for their eligibility.
@@ -1650,8 +1649,8 @@ broadcast probes for inner hash joins; see Part IV for their eligibility.
 - **Nested-loop join / index-nested-loop join** — for each left row, compare with the right source
   (read once and kept) / probe the right index.
 - **Heuristic vs cost-based** — rule-driven plan choice vs statistics-driven cost comparison. CamusDB
-  defaults to the heuristic planner with a real cost-based optimizer layered on top behind config flags
-  (cost-based access-path selection and join-order enumeration).
+  has a heuristic planner with a cost-based optimizer layered on top behind config flags
+  (cost-based access-path selection and join-order enumeration), both on by default.
 - **`PlanCost` / cost model** — per-node estimated cardinality + weighted I/O cost plus a `NetworkFactor`
   (`CostEstimator`), fed by histograms / NDV / min/max / row counts; surfaced in `EXPLAIN` and consumed
   by the access-path, join-algorithm, and join-order choices.

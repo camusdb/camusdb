@@ -20,7 +20,7 @@
 
 ## 1. Mental model
 
-Four ideas are the whole story; the rest is detail.
+The cache rests on four ideas.
 
 - **Opt-in per query.** Nothing is cached unless a `SELECT` carries a `{cache=name}` hint. The
   `name` is a *family*; the actual entry key also folds in the database id, the query shape, every
@@ -96,7 +96,7 @@ SELECT * FROM orders {cache=hot_orders, ttl=5m, strict};
 - **`strict`** turns on per-hit validation against live storage (§7). Useful when a reader must not
   see cross-node staleness.
 
-The hint applies to the **whole** `SELECT` result, not just the table it is attached to. Only one
+The hint applies to the **whole** `SELECT` result, whichever table it is attached to. Only one
 hint is allowed per statement; a second one is a parse error. Unknown option names and unknown hint
 keys are parse errors.
 
@@ -128,7 +128,7 @@ A query goes through the cache path only when **all** of these hold:
 - the cache feature is enabled.
 
 Anything else reads live storage. A join with a hint, or a hint inside a `WHERE`-clause subquery, is
-inert — the hint is ignored, not honored partially.
+inert: the whole hint is ignored.
 
 ### Observing what happened
 
@@ -193,15 +193,15 @@ the last row, and publish is skipped otherwise. This is the *no partial publish*
 one execution: the first caller becomes the owner and runs the sequence above, the rest wait. The
 slot carries a *completion signal only* — never rows. When the owner reports that it published, each
 waiter re-runs step 2 for itself; it serves the entry only if its own probe still finds and validates
-it, and executes live otherwise. That indirection is the point: a write can commit and evict the
+it, and executes live otherwise. The re-probe is needed because a write can commit and evict the
 entry between the owner's publish and the moment waiters wake, and a waiter is a query that began
 *after* that invalidation, so handing it the owner's materialized rows would serve state older than a
 committed write (and skip the schema/strict checks every other reader performs). A waiter that times
-out, or whose owner failed, simply executes independently.
+out, or whose owner failed, executes independently.
 
-Why snapshot only the table's **row** bucket, even for an index scan? Because every
+Step 4 snapshots only the table's **row** bucket, even for an index scan. Every
 `INSERT`/`UPDATE`/`DELETE` on a table writes the row key, so the row bucket's generation bumps on
-*any* same-table write — an index scan is covered by the row-bucket fence too. (This is exactly why
+*any* same-table write — an index scan is covered by the row-bucket fence too. (This is why
 joins must not use this path: they touch more than one table's buckets and the single-bucket fence
 would not cover the others.)
 
@@ -234,7 +234,7 @@ acceptable; over-coverage is.
 
 ## 5. Invalidation on the same node
 
-Invalidation is driven from the transaction boundary, not scattered across write methods, so batch
+Invalidation is driven from the transaction boundary, so batch
 and point writes are covered uniformly.
 
 **Row and index writes.** `KvTransactionsManager.CommitAsync` collects the transaction's modified
@@ -259,7 +259,7 @@ and overlapping entries — not with the total number of cached entries.
 
 ## 6. The publish gate (commit-safe ordering)
 
-The dangerous race is: a query misses, executes, and publishes an entry at the same moment a write
+The dangerous race is a query that misses, executes, and publishes an entry at the same moment a write
 commits into the same keyspace. If the publish landed after the write's invalidation ran, the stale
 entry would survive. `CachePublishGate` closes this window with two structures per keyspace:
 
@@ -269,8 +269,8 @@ entry would survive. `CachePublishGate` closes this window with two structures p
 The protocol:
 
 **Write path** (in `CommitAsync`): mark the modified keyspaces in-flight *before* the Kahuna commit,
-then resolve that mark according to what the finalize told us — and the axis is *"could this write be
-visible?"*, not *"did it commit?"*:
+then resolve that mark by the finalize outcome. The deciding condition is whether the write could be
+visible:
 
 | Finalize outcome | What it means | Gate action |
 | --- | --- | --- |
@@ -279,7 +279,7 @@ visible?"*, not *"did it commit?"*:
 | `Aborted`, a confirmed rollback, or any failure *before* the first commit request | definite non-commit | just clear the marks |
 
 Fencing a write that turns out never to have landed costs one re-execution. Skipping the fence for a
-write that did land serves rows older than a committed write — which is the one thing §1 promises
+write that did land serves rows older than a committed write, which §1 promises
 cannot happen on this node. So the unknown case is resolved conservatively, and if the caller later
 retries the same handle and resolves it, the second fence is a harmless no-op (generations only move
 forward, and the entries are already gone).
@@ -320,7 +320,7 @@ All reads are non-transactional (latest committed). Validation is bounded by a p
 rather than trusted. A failed validation evicts the entry so the next probe doesn't re-validate a
 known-stale one.
 
-Two correctness details worth knowing:
+Two correctness details:
 
 - **Physical deletes need point deps.** A deleted row's key is gone, so a range scan can't see it —
   only the row's point dependency catches the delete. That is why a strict entry whose point deps
@@ -338,12 +338,12 @@ multi-node reads, not a general performance path.
 ## 8. Fingerprinting
 
 The fingerprint must never let two logically different queries share an entry. It is a 128-bit
-non-cryptographic hash (XxHash128) over an **injective** canonical string — not a security boundary,
-just accidental-collision avoidance, so a fast hash over an unambiguous encoding is the right tool.
+non-cryptographic hash (XxHash128) over an **injective** canonical string. It guards against
+accidental collisions and is no security boundary, so a fast hash over an unambiguous encoding fits.
 
 Into the canonical form go: the database id, the family name, the query shape id, every bound
 parameter (sorted by name), the schema deps (sorted by table name, with version), and the cache
-options. The encoding is careful in two ways that matter:
+options. The encoding has two safeguards:
 
 - **Typed values.** Each value is tagged by type, so integer `1`, string `"1"`, `NULL`, and an
   object id never encode the same way.
@@ -398,7 +398,7 @@ far less often than it is read. Nothing without a hint is ever cached. In a clus
 node caches independently: with the default non-strict entries, a reader on one node can lag a write
 on another by up to the TTL. Lower `default_ttl_ms` to tighten that bound, or use `{cache=…, strict}`
 on the specific queries that must never lag (at the cost of a validation scan per hit). Size
-`max_bytes` / `max_entries` to the working set you actually want resident; oversized results simply
+`max_bytes` / `max_entries` to the working set you want resident; oversized results
 won't be cached. If a deployment never uses hints and you want to shave the small per-write gate
 bookkeeping, set `query_result_cache_enabled: false`.
 

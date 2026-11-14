@@ -108,7 +108,7 @@ Memory is the WebAssembly linear heap, which only grows: it is a high-water mark
 | `SELECT COUNT(*)`, median of 20 | 4.6 ms | 4.7–5.0 ms |
 | Leader changes over 60 idle seconds | — | 0 |
 
-Two nodes therefore cost about 12 MB more than one, and a statement costs about 1 ms more. The
+Two extra nodes therefore cost about 12 MB more than one node, and a statement costs about 1 ms more. The
 start is the real difference, so single-node stays the default and the cluster starts only when the
 visitor presses the button. Kommander's `IRaft` does not expose the Raft term, so the stand-in for
 a needless election is the leader of each partition: a leader that moves with no fault to explain

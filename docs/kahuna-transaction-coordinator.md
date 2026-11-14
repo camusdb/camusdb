@@ -4,7 +4,7 @@
 > **What you'll learn:** how CamusDB drives transactions through Kahuna's *server-owned*
 > transaction coordinator — what the coordinator owns, how each operation is registered and
 > folded into the transaction, how commit and rollback work, and what "pessimistic" vs
-> "optimistic" locking actually do. It also lists the invariants you must preserve when you
+> "optimistic" locking do. It also lists the invariants you must preserve when you
 > touch a write, read, or lock path.
 >
 > Assumes you've read **Transactions, Locking & Isolation** for the isolation-level picture.
@@ -20,7 +20,7 @@ Kahuna now provides a **server-owned transaction coordinator**: the server keeps
 authoritative state of an in-flight transaction, and the client contributes to that state one
 operation at a time instead of assembling it locally and shipping it at commit.
 
-The change is best understood as a move of *ownership*:
+The change moves *ownership* of the working set from the client to the server:
 
 ```
         OLD: client-owned working set                NEW: server-owned coordinator
@@ -79,7 +79,7 @@ working set:
 | A read of the latest committed value | an observation: the key's existence and base revision |
 | A registered scan | one read observation per row it returns |
 
-Two consequences you must internalize:
+Two consequences:
 
 1. **A transactional write or lock that is *not* registered is invisible to commit.** If a
    write goes out with an empty coordinator key, its effect never folds into the working set,
@@ -87,10 +87,10 @@ Two consequences you must internalize:
    Every transactional mutation and lock on a real (non-zero) transaction id **must** pass the
    coordinator key and an operation id.
 
-2. **A write already registers its own implicit point lock.** You do not need a separate
-   explicit lock just to make a write commit — the write folds both the modified key and the
-   lock. Explicit locks exist to provide *mutual exclusion before* the write (see pessimistic
-   locking below), not to make the write durable.
+2. **A write already registers its own implicit point lock.** A write commits without a
+   separate explicit lock, because the write folds both the modified key and the lock. Explicit
+   locks provide *mutual exclusion before* the write (see pessimistic locking below). They do
+   not make the write durable.
 
 The zero-identity fast path is the exception: a read-only transaction backed by
 `HLCTimestamp.Zero` performs non-transactional, read-committed reads. It has no coordinator
@@ -111,7 +111,7 @@ Kahuna's transport may re-deliver a call, and CamusDB itself retries transient r
 CamusDB follows this rule mechanically. A single-key operation mints one operation id and
 reuses it across its own transient retries (a stable id = idempotent replay). A batch operation
 that resends only the still-pending subset mints a **fresh** id per attempt, because a shrunken
-batch is genuinely different work. When in doubt: one logical operation, one operation id.
+batch is different work. When in doubt: one logical operation, one operation id.
 
 **The replay includes a failure.** The cached completion is whatever the first attempt returned,
 so a lock attempt that got `AlreadyLocked` replays `AlreadyLocked` (with an unknown holder) for as
@@ -155,9 +155,9 @@ The write path skips explicit lock acquisition for an optimistic transaction; th
 registers reads so they can be validated (see the next section). A losing optimistic transaction
 surfaces as a `CamusDBException` from `CommitAsync`.
 
-**"Optimistic" is not lock-free at every isolation level — this is the key boundary.** Skipping the
-write lock is the *only* thing the locking mode changes. The read/scan **predicate locks** are gated on
-the *isolation level*, not on the locking mode:
+**"Optimistic" is not lock-free at every isolation level.** The locking mode changes one thing:
+whether the write lock is skipped. The *isolation level* gates the read/scan **predicate locks**,
+whatever the locking mode:
 
 - **Read Committed + Optimistic** takes no predicate locks, so it is fully lock-free. Its validation
   covers *read observations* — the specific rows the transaction read — not *predicates*, so it does
@@ -203,8 +203,8 @@ statement) finalizes through the zero-identity fast path — no Kahuna round-tri
 ## 6. Read-set folding
 
 For read-set validation to work, the reads a transaction performs must be registered so their
-observations fold into the working set. CamusDB folds reads only when the transaction actually
-wants validation — that condition is captured by `KvTransaction.FoldReads`, which is true only
+observations fold into the working set. CamusDB folds reads only when the transaction
+wants validation. `KvTransaction.FoldReads` captures that condition, and it is true only
 when **all** of the following hold:
 
 - the transaction is Optimistic, **or** explicitly requested read-set tracking;
@@ -218,7 +218,7 @@ read path passes an empty coordinator key and behaves exactly as it always did: 
 relying on locks (or nothing, for a plain snapshot read). This gate is what keeps the default
 pessimistic path byte-for-byte unchanged.
 
-One subtlety worth flagging for anyone touching the scan code: a table or index scan has **two**
+A table or index scan has **two**
 implementations — a direct streaming path for root tables and a merge path for branch databases.
 Both must thread the coordinator key, or an optimistic scan on one table shape would silently
 skip validation.
@@ -252,8 +252,8 @@ commits or what survives a coordinator crash.
 ## 8. Range locks are coordinator-owned
 
 Serializable read-write transactions take **range locks** to fence out phantoms during a scan.
-These locks are registered like any other operation, so they fold into the working set — and
-that changes who keeps them alive.
+These locks are registered like any other operation, so they fold into the working set, and
+the coordinator keeps them alive.
 
 A range lock has a TTL. Previously CamusDB ran a background *heartbeat* that periodically
 re-acquired every range lock a live transaction held, refreshing the TTL so long transactions
@@ -263,7 +263,7 @@ the session and releases them on finalize. An abandoned session (a client that o
 transaction and vanished) is bounded by the session timeout: the server reaper reclaims it and
 releases its locks.
 
-There is one timing rule that falls out of this. The coordinator renews on its periodic
+This gives one timing rule. The coordinator renews on its periodic
 collection tick, which is a coarse interval (tens of seconds), not the sub-second cadence the old
 client heartbeat used. The **initial** range-lock TTL CamusDB requests must therefore comfortably
 exceed that tick, or a lock would lapse before the first server renewal. This is why the
@@ -278,7 +278,7 @@ A commit or rollback is routed to the coordinator that owns the session. Sometim
 no session, no retained outcome from a recent finalize, and no durable record to consult. The
 coordinator answers with its unknown outcome and logs `Trying to rollback unknown transaction`.
 
-That answer is terminal, but it is not clean. The coordinator releases from its own working set, and
+That answer is terminal, and it leaves state behind. The coordinator releases from its own working set, and
 that working set died with the session — so it releases nothing. Every write the transaction made
 planted a point intent with **no expiry** (the write path takes its exclusive lock with
 `expiresMs = 0`, which the storage node reads as "owned by the session, cleared by its cleanup").
@@ -304,12 +304,12 @@ required:
    has nothing left to remove. The pass is therefore idempotent and cannot take anything from a live
    transaction.
 
-Condition 2 is usually not met at the moment of the reap, and that is the point of what follows. The
+Condition 2 is usually not met at the moment of the reap. The
 reaper reclaims an abandoned transaction after a few idle minutes; the age at which no session can
 still own its holdings is the session ceiling, an hour at the shipped defaults. So the rollback
 **parks the key mirror** and finishes the transaction — terminal, untracked, never finalized again —
-and the reaper's ordinary tick releases the mirror once its age is reached. Parking is what keeps
-"not yet safe to release" from meaning "never released": once the transaction is dropped, nothing
+and the reaper's ordinary tick releases the mirror once its age is reached. Parking keeps
+the keys releasable once they are safe to release: once the transaction is dropped, nothing
 else in the system still knows which keys it planted. Parked mirrors are capped in total keys, and a
 mirror refused by that cap is logged, because the storage node's own expiry is then its only backstop.
 
@@ -419,7 +419,7 @@ If you touch a write, read, lock, or transaction-lifecycle path, keep these true
 - Every write, lock, and (when folding) read carries a **coordinator key + operation id**.
 - A write folds its **implicit point lock**; optimistic writes rely on that instead of taking an
   explicit lock.
-- Optimistic = lock-free writes + commit-time validation (write–write and read–write), **non-
-  phantom**.
+- Optimistic = lock-free writes + commit-time validation (write–write and read–write). The
+  validation does not cover phantoms; phantom protection comes from the Serializable predicate locks.
 - Range locks are **renewed and released by the coordinator**; there is no client heartbeat.
 - A finalized transaction is **dead** — begin a new one.

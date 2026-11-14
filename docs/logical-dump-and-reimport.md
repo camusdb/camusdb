@@ -142,14 +142,14 @@ See [foreign-keys.md](foreign-keys.md).
 Index definitions carry their **per-column sort direction** and their **comment**, both in the
 inline `KEY` clause of the `CREATE TABLE` and in the separate `CREATE INDEX` statements, so a
 descending index restores descending. Dumping from a server older than the release that added them
-loses both silently: the older server does not report the direction at all, and no amount of
-rewriting in the tool can recover it. Check a descending index after reimporting such a dump.
+loses both silently: the older server does not report the direction, and the tool cannot
+recover it. Check a descending index after reimporting such a dump.
 
 **A revision upgrade empties the user catalog.** Accounts, grants and sessions live in the same
 key-value store the rows do, under the same revision directory, so a `v2` server starting over a `v1`
-data directory starts with no accounts at all — it then seeds its bootstrap superuser and nothing else.
+data directory starts with no accounts. It then seeds its bootstrap superuser and nothing else.
 Record the accounts and their grants **before** you upgrade, with `SHOW USERS` and
-`SHOW GRANTS FOR *`, and recreate them after the reimport. Passwords cannot be exported at all, so
+`SHOW GRANTS FOR *`, and recreate them after the reimport. Passwords cannot be exported, so
 plan to set a new one for every account.
 
 The dump does **not** carry the objects below. Record them before the upgrade with the
@@ -217,12 +217,12 @@ camus-dump -e http://db1.internal:5096 --all-databases -b 100 \
      See "Choosing the batch size" below.
    - `--output-directory` writes one `<database>.sql` file per database. Use `-o server.sql`
      instead to get one file with every database in sequence.
-   - `--defer-indexes` is **not** in the command above on purpose. See "Should you defer the
-     indexes?" below; it is not the free win it sounds like.
+   - `--defer-indexes` is **not** in the command above on purpose. See "Deferring the
+     indexes" below; it does not always make the load faster.
 
 ### Choosing the batch size
 
-One row per `INSERT` is the tool default and it is by far the slowest thing you can do. Measured on
+One row per `INSERT` is the tool default and it is by far the slowest choice. Measured on
 a single node, restoring 20,000 narrow rows, 5,000 rows of about 1 KB, and 1,500 rows of about 8 KB:
 
 | Rows per `INSERT` | narrow (~100 B) | ~1 KB rows | ~8 KB rows |
@@ -244,8 +244,8 @@ of the measurement, which was about ±20 %.
 
 `-b 100` is the recommended starting point because it is at the knee *and* keeps the statement small:
 100 rows of an 8 KB-row table is about 805 KB of SQL, comfortably inside the 4 MiB gRPC message limit.
-A larger batch on a wide table is what breaks — 500 rows of 8 KB rows is a 4.02 MB statement, right at
-the edge. Raise `-b` for narrow tables if you want; do not raise it for wide ones without checking the
+A larger batch on a wide table breaks: 500 rows of 8 KB rows is a 4.02 MB statement, right at
+the limit. Raise `-b` for narrow tables if you want; do not raise it for wide ones without checking the
 statement size.
 
 Two hard limits bound the batch whatever the throughput says:
@@ -263,7 +263,7 @@ statement. A large value stored out of line also costs one more mutation per row
 (see [Large values](storage-layout.md#transaction-limits)). A reimported row is written under the
 current storage rules, so a reload also converts the table to the current form.
 
-### Should you defer the indexes?
+### Deferring the indexes
 
 `--defer-indexes` writes each table's `CREATE INDEX` statements after its rows, so the rows load into
 a table with no secondary index and each index is built once at the end instead of being maintained
@@ -279,8 +279,8 @@ restore time including the index build:
 
 The index build has to read the whole table once per index, and past one index that costs more than
 the per-row maintenance it saves. Use the flag for a table with a single secondary index; skip it for
-a table with several. These figures are from one machine at 20,000 rows — if your tables are far
-larger, measure rather than assume, because a bulk build and per-row maintenance do not scale the
+a table with several. These figures are from one machine at 20,000 rows. If your tables are far
+larger, measure them, because a bulk build and per-row maintenance do not scale the
 same way.
 
 Whether or not you use it, **a restore is complete only once every index is built and validated.**

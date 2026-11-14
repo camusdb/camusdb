@@ -44,7 +44,7 @@ These rules hold for every execution strategy the planner can pick.
 - **`ON` decides matching; `WHERE` filters the output.** A conjunct in `ON` decides which right
   rows pair with a left row. A conjunct in `WHERE` runs after padding and sees the padded rows.
 
-The last rule is what makes the two queries below differ:
+The last rule makes the queries below differ:
 
 ```sql
 -- Environments and their game, or NULL when the game is missing: three rows for three environments.

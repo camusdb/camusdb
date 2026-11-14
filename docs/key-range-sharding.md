@@ -25,9 +25,9 @@ Hash routing remains the default. Key-range routing is enabled per deployment wi
 | Splitting | Not applicable | A range can be divided, on demand or on a size threshold |
 | A client transaction's session | On the leader of the first touched table's partition (hashed anchor key) | Pinned to the partition of the first touched table's one row range; unpinned when the row space is already divided |
 
-Two consequences are worth stating plainly:
+Two consequences follow:
 
-**Locking gets finer, not just different.** A bounded scan takes a lock over the bounds it actually
+**Locking gets finer.** A bounded scan takes a lock over the bounds it actually
 read. Once a space has been divided, that becomes one clipped sub-lock per range it touches, so two
 transactions scanning disjoint parts of the same table or index no longer block each other. Under
 hash routing the equivalent lock covers the single partition that owns the whole space. A serializable
@@ -94,7 +94,7 @@ and no wrong answer is served.
 
 Registration succeeds on a node started with a single data partition, and the space genuinely is
 key-range routed — the range map itself lives on the reserved meta partition, so one data partition
-is enough to hold ranged data. What one partition cannot give you is the *benefit*: a range has
+is enough to hold ranged data. One partition does not give the *benefit*: a range has
 nowhere to move to, so the space stays one range and write coordination stays on one leader, exactly
 as under hash routing.
 
@@ -112,7 +112,7 @@ and numeric columns is eligible too.
 
 The only index that stays hash-routed is one whose key columns cannot be resolved: an entry with no
 column ids, or with an id that the table's columns do not hold. That is a damaged or legacy schema
-entry, not a choice of type, and the table's rows are unaffected either way. This is silent: a table
+entry, whatever the column type, and the table's rows are unaffected either way. This is silent: a table
 with such an entry works, with that one index space hashed.
 
 ---
@@ -288,8 +288,8 @@ The negotiation makes a rolling upgrade safe in both directions. An older peer i
 media type and streams NDJSON; an older coordinator never asks, so a newer peer streams NDJSON to
 it. Frames are flushed one at a time in both encodings, so the first row leaves the peer as soon as
 it survives the filter regardless of the format chosen. Base64 costs a third more bytes per row than
-the binary path and a decode pass on the coordinator; the binary path exists to remove that cost on
-row-heavy scans, not to change what a fragment carries.
+the binary path and a decode pass on the coordinator. The binary path removes that cost on
+row-heavy scans; a fragment carries the same content in both encodings.
 
 ---
 
