@@ -196,7 +196,7 @@ public static class ResultTypeRule
             throw new CamusDBException(
                 CamusDBErrorCodes.InvalidInput,
                 $"Cannot convert '{text}' to a {(target == ColumnType.Date ? "date" : "datetime")}: " +
-                $"expected {Controllers.Functions.CastScalarFunctions.TemporalTextForm(target)}");
+                Controllers.Functions.CastScalarFunctions.TemporalParseFailure(text, target));
 
         return parsed;
     }

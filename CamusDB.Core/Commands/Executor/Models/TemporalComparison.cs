@@ -108,7 +108,7 @@ public static class TemporalComparison
             throw new CamusDBException(
                 CamusDBErrorCodes.InvalidInput,
                 $"Cannot compare a {(target == ColumnType.Date ? "date" : "datetime")} with '{text}': " +
-                $"expected {CastScalarFunctions.TemporalTextForm(target)}");
+                CastScalarFunctions.TemporalParseFailure(text, target));
 
         return parsed;
     }

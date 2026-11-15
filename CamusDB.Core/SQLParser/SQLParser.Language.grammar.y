@@ -1986,6 +1986,7 @@ default_expr : int { $$.n = $1.n; $$.s = $1.s; }
              | null { $$.n = $1.n; $$.s = $1.s; }
              | fcall_expr { $$.n = $1.n; $$.s = $1.s; }
              | numeric_literal { $$.n = $1.n; $$.s = $1.s; }
+             | temporal_literal { $$.n = $1.n; $$.s = $1.s; }
              | identifier_typed_literal { $$.n = $1.n; $$.s = $1.s; }
 			 ;
 
@@ -2500,6 +2501,7 @@ simple_expr : any_identifier { $$.n = $1.n; $$.s = $1.s; }
             | null { $$.n = $1.n; $$.s = $1.s; }
             | placeholder { $$.n = $1.n; $$.s = $1.s; }
             | numeric_literal { $$.n = $1.n; $$.s = $1.s; }
+            | temporal_literal { $$.n = $1.n; $$.s = $1.s; }
             | identifier_typed_literal { $$.n = $1.n; $$.s = $1.s; }
             | interval_literal { $$.n = $1.n; $$.s = $1.s; }
 			;
@@ -2525,6 +2527,13 @@ interval_literal : TINTERVAL string %prec INTERVAL_TEXT { $$.n = new(NodeType.Ex
    builds, so the string is parsed exactly by the cast and never passes through a float. */
 numeric_literal : TTYPE_NUMERIC string { $$.n = new(NodeType.ExprCast, $2.n, NodeAst.TypeNumeric, null, null, null, null, null, null); }
                 ;
+
+/* DATE '2018-03-01' and TIMESTAMP '2018-03-01T10:00:00Z' (also DATETIME '…') are the SQL standard typed
+   literals. Each builds the ExprCast node that CAST('…' AS DATE) or CAST('…' AS DATETIME) builds, so the
+   cast parses the text and refuses a malformed value with the same error. */
+temporal_literal : TTYPE_DATE string { $$.n = new(NodeType.ExprCast, $2.n, NodeAst.TypeDate, null, null, null, null, null, null); }
+                 | TTYPE_DATETIME string { $$.n = new(NodeType.ExprCast, $2.n, NodeAst.TypeDateTime, null, null, null, null, null, null); }
+                 ;
 
 use_default_expr : TDEFAULT { $$.n = NodeAst.ExprDefault; }
                  ;

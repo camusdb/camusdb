@@ -487,15 +487,26 @@ How a value is written depends on the path. **The SQL literal form and the JSON 
 | `string` | quoted | `'hello'` or `"hello"` |
 | `bool` | `true` / `false` | `true` |
 | `oid` | quoted ObjectId string | `'652b...'` |
-| `date` | quoted `yyyy-MM-dd` | `'2026-03-15'` |
-| `datetime` | quoted ISO-8601 UTC | `'2026-03-15T12:00:00Z'` |
+| `date` | quoted `yyyy-MM-dd`, or `DATE '…'` | `'2026-03-15'`, `DATE '2026-03-15'` |
+| `datetime` | quoted ISO-8601 UTC, or `TIMESTAMP '…'` / `DATETIME '…'` | `'2026-03-15T12:00:00Z'`, `TIMESTAMP '2026-03-15T12:00:00Z'` |
 | `bytes` | **`X'…'` hex string** | `X'DEADBEEF'` |
 | `array(T)` | `ARRAY[…]` | `ARRAY[1, 2, 3]` |
 
 Numeric literals are parsed with the invariant culture (`.` is always the decimal separator,
 independent of server locale). Date/datetime strings are parsed as UTC; a value with no timezone is
 assumed to be UTC. A `datetime` string can also be a bare date, `'2026-03-15'`, which is midnight UTC
-of that day. Unparseable date/datetime/bytes literals raise `InvalidInput`. A decimal number
+of that day. Unparseable date/datetime/bytes literals raise `InvalidInput`. When date or datetime
+text holds a character outside ASCII, the error names the first one, its code point and its position.
+For a character that stands for an ASCII one, such as an en dash (U+2013) in place of `-`, the error
+also names the ASCII character to type. Text copied from a word processor or a web page often has
+such characters.
+
+The typed literals `DATE '…'`, `TIMESTAMP '…'` and `DATETIME '…'` are the same as
+`CAST('…' AS date)` and `CAST('…' AS datetime)`. They take the text forms above, so
+`TIMESTAMP '2026-03-15 12:00:00'`, with a space in place of the `T`, raises `InvalidInput`. A typed
+literal gives the value its type where a plain string has no column type to take, for example
+`SELECT DATE '2026-03-15' + 1`. In a column default, write it in parentheses:
+`DEFAULT(DATE '2026-03-15')`. A decimal number
 can group its digits with underscores, `200_000`; see
 [PostgreSQL expression syntax](sql-expression-syntax.md#digit-separators).
 

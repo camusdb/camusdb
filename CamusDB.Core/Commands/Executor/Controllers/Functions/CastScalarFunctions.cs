@@ -7,6 +7,7 @@
  */
 
 using System.Globalization;
+using System.Text;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor.Models;
 using CamusDB.Core.CommandsExecutor.Models.Jsonb;
@@ -537,7 +538,7 @@ internal static class CastScalarFunctions
         if (!TryParseTemporalText(text, ColumnType.Date, out ColumnValue value))
             throw new CamusDBException(
                 CamusDBErrorCodes.InvalidInput,
-                $"Function '{castName}' cannot parse '{text}' as date — expected format: {TemporalTextForm(ColumnType.Date)}");
+                $"Function '{castName}' cannot parse '{text}' as date — {TemporalParseFailure(text, ColumnType.Date)}");
 
         return value;
     }
@@ -547,7 +548,7 @@ internal static class CastScalarFunctions
         if (!TryParseTemporalText(text, ColumnType.DateTime, out ColumnValue value))
             throw new CamusDBException(
                 CamusDBErrorCodes.InvalidInput,
-                $"Function '{castName}' cannot parse '{text}' as datetime — expected {TemporalTextForm(ColumnType.DateTime)}");
+                $"Function '{castName}' cannot parse '{text}' as datetime — {TemporalParseFailure(text, ColumnType.DateTime)}");
 
         return value;
     }
@@ -584,6 +585,53 @@ internal static class CastScalarFunctions
     internal static string TemporalTextForm(ColumnType target) => target == ColumnType.Date
         ? "yyyy-MM-dd"
         : "ISO-8601 UTC format, e.g. 2026-01-01T12:00:00Z or 2026-01-01";
+
+    /// <summary>
+    /// The end of an error message for text that <see cref="TryParseTemporalText"/> refuses: the
+    /// expected form, plus the first character outside ASCII when the text has one. Text copied from a
+    /// word processor or a web page often holds an en dash (U+2013) or a similar character in place of
+    /// '-', and the two look the same in a terminal, so the message names the character, its position
+    /// and the ASCII character to type in its place. Every parse failure of date or datetime text uses
+    /// this, so CAST, assignment and comparison give the same hint.
+    /// </summary>
+    internal static string TemporalParseFailure(string text, ColumnType target)
+    {
+        string expected = "expected " + TemporalTextForm(target);
+
+        for (int i = 0; i < text.Length; i++)
+        {
+            if (char.IsAscii(text[i]))
+                continue;
+
+            if (Rune.DecodeFromUtf16(text.AsSpan(i), out Rune rune, out _) != System.Buffers.OperationStatus.Done)
+                rune = Rune.ReplacementChar;
+
+            string found = $"'{text}' contains the non-ASCII character '{rune}' " +
+                           $"(U+{rune.Value:X4}) at position {(i + 1).ToString(CultureInfo.InvariantCulture)}";
+
+            char? ascii = AsciiLookalike(rune.Value);
+            return ascii is null
+                ? $"{expected}; {found}"
+                : $"{expected}; {found}, type '{ascii}' in its place";
+        }
+
+        return expected;
+    }
+
+    /// <summary>
+    /// The ASCII character that a typographic character in date or datetime text most likely stands
+    /// for, or null when there is no clear match. Covers the dashes and minus signs that editors put in
+    /// place of '-', the colons that stand for ':', and the spaces that stand for ' '.
+    /// </summary>
+    private static char? AsciiLookalike(int codePoint) => codePoint switch
+    {
+        0x2010 or 0x2011 or 0x2012 or 0x2013 or 0x2014 or 0x2015 or 0x2212 or 0xFE58 or 0xFE63 or 0xFF0D => '-',
+        0x2236 or 0xFE13 or 0xFE55 or 0xFF1A => ':',
+        0x00A0 or 0x2007 or 0x2009 or 0x200A or 0x202F or 0x3000 => ' ',
+        0xFF0E => '.',
+        0xFF0B => '+',
+        _ => null,
+    };
 
     // Bytes text is hex behind a 0x prefix ('0xABCD01') or the PostgreSQL \x prefix ('\xabcd01').
     // The \x form is what a bytes value casts to (ScalarTextForm), so bytes round-trip through text.
