@@ -494,11 +494,6 @@ public static class DecidedDivergences
             CamusDBErrorCodes.FeatureNotSupported, "1",
             NotSupportedYet),
 
-        new("WITH is not supported", NoSetup,
-            "WITH c AS (SELECT 5 AS x) SELECT x FROM c",
-            CamusDBErrorCodes.SqlSyntaxError, "5",
-            NotSupportedYet),
-
         new("IS UNKNOWN is not supported", NoSetup,
             "SELECT NULL IS UNKNOWN",
             CamusDBErrorCodes.SqlSyntaxError, "true",
@@ -563,6 +558,26 @@ public static class DecidedDivergences
             "UPDATE d SET v = x.v FROM (VALUES (1, 5)) AS x(id, v) WHERE x.id = d.id",
             CamusDBErrorCodes.SqlSyntaxError, "UPDATE 1",
             NotSupportedYet),
+
+        new("WITH RECURSIVE is not supported", NoSetup,
+            "WITH RECURSIVE r AS (SELECT 1 AS n) SELECT n FROM r",
+            CamusDBErrorCodes.FeatureNotSupported, "1",
+            NotSupportedYet),
+
+        new("A WITH query that the statement does not read is not checked", RowTable,
+            "WITH c AS (SELECT id FROM nowhere) SELECT v FROM d WHERE id = 1",
+            "10", "relation \"nowhere\" does not exist",
+            "The parser writes out each WITH query where the statement reads it, so a query that nothing reads never reaches the binder and runs no check. A statement that reads it reports the unknown table."),
+
+        new("A WITH query in parentheses runs for each reader", NoSetup,
+            "SELECT same FROM (WITH r AS (SELECT random() AS x) SELECT a.x = b.x AS same FROM r a, r b) q",
+            "False", "true",
+            "A WITH in parentheses can read the columns of the query around it, so CamusDB writes its queries out where they are read, and each reader runs its copy. A WITH at the start of the statement computes a query that it reads two or more times one time, as PostgreSQL does."),
+
+        new("NOT MATERIALIZED inlines a WITH query that calls a volatile function", NoSetup,
+            "WITH r AS NOT MATERIALIZED (SELECT random() AS x) SELECT a.x = b.x AS same FROM r a, r b",
+            "False", "true",
+            "NOT MATERIALIZED always writes the query out where it is read. PostgreSQL computes a WITH query that calls a volatile function one time, whatever the hint says."),
 
         new("A subquery is not supported in RETURNING", EmptyTable,
             "INSERT INTO em (id, v) VALUES (1, 1) RETURNING (SELECT 7)",

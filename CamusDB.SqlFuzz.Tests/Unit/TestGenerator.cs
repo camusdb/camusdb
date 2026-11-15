@@ -230,6 +230,65 @@ internal sealed class TestGenerator
     /// name that the target and a source both have is ambiguous. The WHERE links the target with the list.
     /// </summary>
     [Test]
+    public void CtesAppearAndPrintInFrontOfTheirSelect()
+    {
+        int withSelects = 0, readTwice = 0;
+
+        for (ulong seed = 1; seed <= 40; seed++)
+        {
+            StatementGenerator generator = new(new FuzzRandom(seed), GeneratorProfile.CamusDB);
+            generator.GenerateSchema();
+            generator.GenerateData();
+
+            for (int i = 0; i < 50; i++)
+            {
+                SelectStmt select = generator.GenerateSelect(SelectOptions.Comparable);
+                if (select.CteTables is not { Count: > 0 } tables)
+                    continue;
+
+                withSelects++;
+                string sql = CamusSqlPrinter.Instance.Print(select);
+                Assert.That(sql, Does.StartWith("WITH " + CamusSqlPrinter.CteName(tables[0]) + " AS (SELECT * FROM " + tables[0] + ")"));
+
+                List<TableRef> marked = Tables(select.From).Where(t => t.ViaCte).ToList();
+                Assert.That(marked, Is.Not.Empty, sql);
+                foreach (TableRef table in marked)
+                {
+                    Assert.That(tables, Does.Contain(table.Table), sql);
+                    Assert.That(table.IndexHint, Is.Null, sql);
+                    Assert.That(sql, Does.Contain(CamusSqlPrinter.CteName(table.Table) + " AS " + table.Alias), sql);
+                }
+
+                if (marked.GroupBy(t => t.Table).Any(g => g.Count() > 1))
+                    readTwice++;
+            }
+        }
+
+        Assert.That(withSelects, Is.GreaterThan(100), "SELECTs with a WITH");
+        Assert.That(readTwice, Is.GreaterThan(3), "a CTE that the statement reads two times");
+
+        // A statement that reuses the FROM without the WITH prints the plain table.
+        SelectStmt plain = new([], new TableRef("t0", "a0") { ViaCte = true });
+        Assert.That(CamusSqlPrinter.Instance.Print(plain), Is.EqualTo("SELECT * FROM t0 AS a0"));
+        Assert.That(CamusSqlPrinter.Instance.Print(plain with { CteTables = ["t0"] }),
+            Is.EqualTo("WITH cte_t0 AS (SELECT * FROM t0) SELECT * FROM cte_t0 AS a0"));
+
+        // The right operand of a set operation reads the CTEs of the WITH in front of the whole query.
+        SelectStmt union = new([new SelectItem(new ColumnExpr("a0", "c0", FuzzType.Int64))], new TableRef("t0", "a0") { ViaCte = true },
+            SetOp: new SetOperation(SetOpKind.UnionAll, new SelectStmt([new SelectItem(new ColumnExpr("a1", "c0", FuzzType.Int64))],
+                new TableRef("t0", "a1") { ViaCte = true }) { CteTables = ["t0"] })) { CteTables = ["t0"] };
+        Assert.That(CamusSqlPrinter.Instance.Print(union),
+            Is.EqualTo("WITH cte_t0 AS (SELECT * FROM t0) SELECT a0.c0 FROM cte_t0 AS a0 UNION ALL SELECT a1.c0 FROM cte_t0 AS a1"));
+    }
+
+    private static IEnumerable<TableRef> Tables(FromItem from) => from switch
+    {
+        TableRef table => [table],
+        JoinFrom join => Tables(join.Left).Append(join.Right),
+        _ => [],
+    };
+
+    [Test]
     public void JoinedWritesAppearAndQualifyEveryColumn()
     {
         int updateFrom = 0, deleteUsing = 0, aliasOnly = 0;

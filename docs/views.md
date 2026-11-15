@@ -540,6 +540,7 @@ unpopulated object.
 | Writing to a materialized view | **Refused** | PostgreSQL refuses too; the row would be discarded by the next refresh either way. |
 | `DROP TABLE … CASCADE` | **No `CASCADE` form** | Drop the dependent views explicitly. |
 | `security_invoker` views | **Not supported** | Only the owner's-rights model is implemented. |
+| `WITH` in a body | **Stored without the `WITH`** | Each CTE is stored as a derived table where the body reads it, so `SHOW CREATE VIEW` shows no `WITH`, and a CTE that the body reads two times runs two times. See [WITH queries](common-table-expressions.md#views). |
 | `WITH RECURSIVE` views | **Not supported** | CamusDB has no `WITH RECURSIVE`. |
 | Cross-database views | **Not supported** | Matches the existing single-database restriction on `INSERT … SELECT`. |
 | Temporary views | **Not supported** | CamusDB has no temporary relations. |

@@ -268,7 +268,28 @@ internal sealed class SelectQueryCreator
         string? ownerId = derivedAst.extendedTwo?.yytext;
         string? ownerName = derivedAst.extendedTwo?.leftAst?.yytext;
 
-        return new DerivedTableSource(innerQuery, derivedAst.rightAst.yytext, cacheHint, ownerName, ownerId);
+        return new DerivedTableSource(innerQuery, derivedAst.rightAst.yytext, cacheHint, ownerName, ownerId)
+        {
+            ColumnAliases = derivedAst.extendedThree is { } columns ? ColumnAliasNames(columns) : null,
+            ComputedOnce = derivedAst.extendedFour,
+        };
+    }
+
+    /// <summary>The names of a column-alias list, in written order. The list is left-deep, so the walk follows the left spine.</summary>
+    private static string[] ColumnAliasNames(NodeAst list)
+    {
+        List<string> names = [];
+        NodeAst node = list;
+
+        while (node.nodeType == NodeType.IdentifierList)
+        {
+            names.Add(node.rightAst!.yytext!);
+            node = node.leftAst!;
+        }
+
+        names.Add(node.yytext!);
+        names.Reverse();
+        return names.ToArray();
     }
 
     /// <summary>

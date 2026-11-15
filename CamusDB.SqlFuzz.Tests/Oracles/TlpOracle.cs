@@ -63,6 +63,12 @@ internal sealed class TlpCheck : OracleCheck
 
     public TlpVariant Kind { get; }
 
+    /// <summary>
+    /// The tables that the whole query reads through CTEs, or null. The three parts read the plain tables,
+    /// so the check also compares a WITH with the tables it reads.
+    /// </summary>
+    public IReadOnlyList<string>? CteTables { get; init; }
+
     public FromItem From { get; }
 
     /// <summary>The output columns of the WHERE, DISTINCT and JOIN ON forms.</summary>
@@ -99,6 +105,12 @@ internal sealed class TlpCheck : OracleCheck
 
     /// <summary>The whole query and the three parts.</summary>
     public (SelectStmt Whole, SelectStmt[] Parts) Build()
+    {
+        (SelectStmt whole, SelectStmt[] parts) = BuildPlain();
+        return (whole with { CteTables = CteTables }, parts);
+    }
+
+    private (SelectStmt Whole, SelectStmt[] Parts) BuildPlain()
     {
         Expr[] partitions = [Predicate, Not(Predicate), IsNull(Predicate)];
         switch (Kind)
@@ -267,20 +279,23 @@ internal sealed class TlpCheck : OracleCheck
 
     public override IEnumerable<OracleCheck> Simplify()
     {
+        if (CteTables is not null)
+            yield return new TlpCheck(Kind, From, Items, Predicate, GroupBy, Aggregates);
+
         foreach (Expr p in ExprShrinker.Candidates(Predicate))
-            yield return new TlpCheck(Kind, From, Items, p, GroupBy, Aggregates);
+            yield return new TlpCheck(Kind, From, Items, p, GroupBy, Aggregates) { CteTables = CteTables };
 
         if (Items.Count > 1)
             for (int i = 0; i < Items.Count; i++)
-                yield return new TlpCheck(Kind, From, Items.Where((_, j) => j != i).ToList(), Predicate, GroupBy, Aggregates);
+                yield return new TlpCheck(Kind, From, Items.Where((_, j) => j != i).ToList(), Predicate, GroupBy, Aggregates) { CteTables = CteTables };
 
         if (Aggregates.Count > 1)
             for (int i = 0; i < Aggregates.Count; i++)
-                yield return new TlpCheck(Kind, From, Items, Predicate, GroupBy, Aggregates.Where((_, j) => j != i).ToList());
+                yield return new TlpCheck(Kind, From, Items, Predicate, GroupBy, Aggregates.Where((_, j) => j != i).ToList()) { CteTables = CteTables };
 
         if (GroupBy.Count > 1 && Kind == TlpVariant.GroupBy)
             for (int i = 0; i < GroupBy.Count; i++)
-                yield return new TlpCheck(Kind, From, Items, Predicate, GroupBy.Where((_, j) => j != i).ToList(), Aggregates);
+                yield return new TlpCheck(Kind, From, Items, Predicate, GroupBy.Where((_, j) => j != i).ToList(), Aggregates) { CteTables = CteTables };
 
         foreach (FromItem from in FromShrinker.Candidates(From, Kind == TlpVariant.JoinOn))
         {
@@ -288,7 +303,7 @@ internal sealed class TlpCheck : OracleCheck
             // would report a "mismatch" that the rule itself causes.
             if (Kind == TlpVariant.JoinOn && from is not JoinFrom { Kind: JoinKind.Inner, On: not null })
                 continue;
-            yield return new TlpCheck(Kind, from, Items, Predicate, GroupBy, Aggregates);
+            yield return new TlpCheck(Kind, from, Items, Predicate, GroupBy, Aggregates) { CteTables = CteTables };
         }
     }
 
@@ -338,7 +353,23 @@ internal sealed class TlpOracle : IOracle
         }
     }
 
+    /// <summary>
+    /// A check of one variant. About one in five reads some of its tables through CTEs in the whole query
+    /// (see <see cref="TlpCheck.CteTables"/>).
+    /// </summary>
     public static TlpCheck? Generate(StatementGenerator generator)
+    {
+        TlpCheck? check = GeneratePlain(generator);
+        if (check is null || generator.ChooseCteTables(check.From) is not { } ctes)
+            return check;
+
+        return new TlpCheck(check.Kind, StatementGenerator.ThroughCtes(check.From, ctes), check.Items, check.Predicate, check.GroupBy, check.Aggregates)
+        {
+            CteTables = ctes,
+        };
+    }
+
+    private static TlpCheck? GeneratePlain(StatementGenerator generator)
     {
         FuzzRandom random = generator.Random;
         GeneratorProfile profile = generator.Profile;

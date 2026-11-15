@@ -34,6 +34,9 @@ internal interface ISqlPrinter
 /// <item>A NULL inside an expression is <c>CAST(NULL AS type)</c>, so it keeps its type. In a VALUES list it is a plain <c>NULL</c>.</item>
 /// <item>NUMERIC, DATE, DATETIME and JSONB literals are casts of a string; NaN and the infinities are casts of their names. An INTERVAL literal is <c>INTERVAL '…'</c>.</item>
 /// <item>The index hint follows the alias: <c>t0 AS a0@{FORCE_INDEX=t0_i1}</c>. CamusDB refuses the hint before the alias.</item>
+/// <item>A SELECT with <see cref="SelectStmt.CteTables"/> starts with <c>WITH cte_t0 AS (SELECT * FROM t0)</c>, and each
+/// reference marked <see cref="TableRef.ViaCte"/> under that WITH reads <c>cte_t0</c>. The right operand of a set operation
+/// reads the CTEs of the WITH in front of the whole query, because it cannot start with a WITH of its own.</item>
 /// </list>
 /// </summary>
 internal sealed class CamusSqlPrinter : ISqlPrinter
@@ -202,8 +205,29 @@ internal sealed class CamusSqlPrinter : ISqlPrinter
         }
     }
 
-    private void WriteSelect(StringBuilder sb, SelectStmt select)
+    /// <summary>The name of the CTE through which a reference marked <see cref="TableRef.ViaCte"/> reads <paramref name="table"/>.</summary>
+    internal static string CteName(string table) => "cte_" + table;
+
+    private void WriteSelect(StringBuilder sb, SelectStmt select) => WriteSelect(sb, select, declared: null);
+
+    /// <param name="declared">The tables of the WITH that covers this SELECT: the WITH that this method
+    /// writes for <see cref="SelectStmt.CteTables"/>, or the WITH of the SELECT whose set operation this one
+    /// is the right operand of. A right operand cannot start with its own WITH.</param>
+    private void WriteSelect(StringBuilder sb, SelectStmt select, IReadOnlyList<string>? declared)
     {
+        if (declared is null && select.CteTables is { Count: > 0 } cteTables)
+        {
+            sb.Append("WITH ");
+            for (int i = 0; i < cteTables.Count; i++)
+            {
+                if (i > 0)
+                    sb.Append(", ");
+                sb.Append(CteName(cteTables[i])).Append(" AS (SELECT * FROM ").Append(cteTables[i]).Append(')');
+            }
+            sb.Append(' ');
+            declared = cteTables;
+        }
+
         sb.Append("SELECT ");
         if (select.Distinct)
             sb.Append("DISTINCT ");
@@ -223,7 +247,7 @@ internal sealed class CamusSqlPrinter : ISqlPrinter
         }
 
         sb.Append(" FROM ");
-        WriteFrom(sb, select.From);
+        WriteFrom(sb, select.From, declared);
 
         if (select.Where is not null)
         {
@@ -257,7 +281,7 @@ internal sealed class CamusSqlPrinter : ISqlPrinter
                 SetOpKind.Intersect => " INTERSECT ",
                 _ => " EXCEPT ",
             });
-            WriteSelect(sb, setOp.Right);
+            WriteSelect(sb, setOp.Right, declared ?? []);
         }
 
         if (select.OrderBy is { Count: > 0 } orderBy)
@@ -279,18 +303,21 @@ internal sealed class CamusSqlPrinter : ISqlPrinter
             sb.Append(" OFFSET ").Append(offset.ToString(CultureInfo.InvariantCulture));
     }
 
-    private void WriteFrom(StringBuilder sb, FromItem from)
+    private void WriteFrom(StringBuilder sb, FromItem from) => WriteFrom(sb, from, declared: null);
+
+    private void WriteFrom(StringBuilder sb, FromItem from, IReadOnlyList<string>? declared)
     {
         switch (from)
         {
             case TableRef table:
-                sb.Append(table.Table).Append(" AS ").Append(table.Alias);
+                bool viaCte = table.ViaCte && table.IndexHint is null && declared is not null && declared.Contains(table.Table);
+                sb.Append(viaCte ? CteName(table.Table) : table.Table).Append(" AS ").Append(table.Alias);
                 if (table.IndexHint is { } hint)
                     sb.Append("@{FORCE_INDEX=").Append(hint).Append('}');
                 break;
 
             case JoinFrom join:
-                WriteFrom(sb, join.Left);
+                WriteFrom(sb, join.Left, declared);
                 sb.Append(join.Kind switch
                 {
                     JoinKind.Inner => " INNER JOIN ",
@@ -298,7 +325,7 @@ internal sealed class CamusSqlPrinter : ISqlPrinter
                     JoinKind.Right => " RIGHT JOIN ",
                     _ => " CROSS JOIN ",
                 });
-                WriteFrom(sb, join.Right);
+                WriteFrom(sb, join.Right, declared);
                 if (join.On is not null)
                 {
                     sb.Append(" ON ");

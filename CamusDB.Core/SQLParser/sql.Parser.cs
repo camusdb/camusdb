@@ -15,6 +15,12 @@ internal partial class sqlParser
 {
     public sqlParser() : base(null) { }
 
+    /// <summary>
+    /// True once the parse reduced a WITH clause. Only then does <see cref="Parse(string)"/> walk the
+    /// tree for a WITH that is left to write out, so a statement without one pays nothing.
+    /// </summary>
+    private bool sawWith;
+
     public NodeAst Parse(string sqlStatement)
     {
         // Feed the SQL string straight into the scanner via SetSource(string). This avoids the
@@ -38,6 +44,10 @@ internal partial class sqlParser
         // concurrent executions), and the depth check must precede every recursive walker.
         if (ast is not null)
         {
+            // Before the other passes, so they see the CTE copies too.
+            if (sawWith)
+                ast = CommonTableExpressions.ExpandRemaining(ast);
+
             ExpressionChains.Normalize(ast);
             StatementDepthGuard.Enforce(ast);
         }

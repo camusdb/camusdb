@@ -755,6 +755,99 @@ internal static class DerivedTableSchemaBuilder
     }
 
     /// <summary>
+    /// Gives the first visible columns of a derived table the names of its column-alias list
+    /// (<c>AS d(a, b)</c>, or a CTE's <c>name (a, b)</c>), and adds to <paramref name="innerRowKeys"/> the
+    /// renames that move each renamed cell to its new key. A later column keeps its name, as in
+    /// PostgreSQL. A new name that another column already has, or that the list gives two times, gets its
+    /// own row key, so a reference to it is ambiguous rather than reading either column; PostgreSQL also
+    /// accepts such a list.
+    /// </summary>
+    /// <exception cref="CamusDBException"><see cref="CamusDBErrorCodes.InvalidInput"/> when the list names
+    /// more columns than the query has.</exception>
+    internal static IReadOnlyList<DerivedColumnSchema> WithColumnAliases(
+        IReadOnlyList<DerivedColumnSchema> columns,
+        IReadOnlyList<string> aliases,
+        string relation,
+        ref (string InnerKey, string RowKey)[]? innerRowKeys)
+    {
+        int visible = 0;
+        foreach (DerivedColumnSchema column in columns)
+        {
+            if (!column.Hidden)
+                visible++;
+        }
+
+        if (aliases.Count > visible)
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInput,
+                $"Relation '{relation}' has {visible} columns available but {aliases.Count} columns specified");
+
+        // The inner key of a column whose cell an earlier rename already moves.
+        Dictionary<string, string> innerKeyOf = new(StringComparer.OrdinalIgnoreCase);
+        if (innerRowKeys is not null)
+        {
+            foreach ((string innerKey, string rowKey) in innerRowKeys)
+                innerKeyOf[rowKey] = innerKey;
+        }
+
+        // Which columns are renamed, by position among all columns.
+        bool[] renamedAt = new bool[columns.Count];
+        for (int i = 0, seen = 0; i < columns.Count && seen < aliases.Count; i++)
+        {
+            if (columns[i].Hidden)
+                continue;
+
+            renamedAt[i] = true;
+            seen++;
+        }
+
+        HashSet<string> taken = new(columns.Count, StringComparer.OrdinalIgnoreCase);
+        for (int i = 0; i < columns.Count; i++)
+        {
+            if (!renamedAt[i])
+                taken.Add(columns[i].RowKey);
+        }
+
+        List<DerivedColumnSchema> result = new(columns.Count);
+        List<(string InnerKey, string RowKey)> renames = new(columns.Count);
+        int next = 0;
+
+        for (int i = 0; i < columns.Count; i++)
+        {
+            DerivedColumnSchema column = columns[i];
+            string innerKey = innerKeyOf.TryGetValue(column.RowKey, out string? earlier) ? earlier : column.RowKey;
+
+            if (!renamedAt[i])
+            {
+                if (!string.Equals(innerKey, column.RowKey, StringComparison.OrdinalIgnoreCase))
+                    renames.Add((innerKey, column.RowKey));
+
+                result.Add(column);
+                continue;
+            }
+
+            string name = aliases[next++];
+            string rowKey = name;
+
+            if (!taken.Add(rowKey))
+            {
+                rowKey = $"{name}$dup{i}";
+
+                while (!taken.Add(rowKey))
+                    rowKey += "_";
+            }
+
+            if (!string.Equals(innerKey, rowKey, StringComparison.OrdinalIgnoreCase))
+                renames.Add((innerKey, rowKey));
+
+            result.Add(column with { Name = name, RowKey = rowKey, SourceAlias = null });
+        }
+
+        innerRowKeys = renames.Count == 0 ? null : renames.ToArray();
+        return result;
+    }
+
+    /// <summary>
     /// Gives each column of a derived table a row key with no <c>.</c> in it, and returns in
     /// <paramref name="innerRowKeys"/> the renames from the old keys, or null when no key changes (every
     /// derived table except one over a <c>*</c> of a join).
@@ -1530,14 +1623,16 @@ internal static class DerivedTableSchemaBuilder
 
         if (innerBound.DerivedSources.Count > 0)
         {
-            bool isQualified = TrySplitQualified(originalIdentifier, out _, out string bareName);
+            bool isQualified = TrySplitQualified(originalIdentifier, out string qualifier, out string bareName);
 
             foreach (BoundDerivedTableSource source in innerBound.DerivedSources)
             {
                 if (source.FindColumnByLookupKey(lookupKey) is { } column)
                     return column.Type;
 
-                if (isQualified && source.HasColumn(bareName))
+                // The qualifier names the derived table. Two derived tables of a join can have a column of
+                // the same name, so a match on the name alone gave a1.c3 the type of a0.c3.
+                if (isQualified && string.Equals(qualifier, source.Alias, StringComparison.OrdinalIgnoreCase) && source.HasColumn(bareName))
                     return source.GetColumnType(bareName);
             }
         }

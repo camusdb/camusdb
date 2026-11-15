@@ -230,6 +230,15 @@ same WHERE. A target row that the prediction names twice matched two rows of the
 then fail and change nothing, and a DELETE deletes the row once. The generator does not write a comma
 list, a derived table or a set-returning function in the list, and it never writes `RETURNING`.
 
+About one SELECT in five reads some of its tables through a WITH (see
+[WITH queries](common-table-expressions.md)): `WITH cte_t0 AS (SELECT * FROM t0) SELECT … FROM cte_t0 AS
+a0`. The rows are the table's rows, so every oracle checks the WITH path. In a TLP check only the whole
+query has the WITH and the three parts read the tables, and in a NoREC check only the optimized query has
+it, so each check also compares a WITH with the tables it reads. A self join through a WITH reads one CTE
+two times, which CamusDB computes once. The source of INSERT … SELECT takes the same form. A reference
+with an index hint keeps the table, because a CTE has no index. The generator does not write a column
+list, `MATERIALIZED`, a CTE that reads another CTE, or a WITH in front of a write.
+
 The statement list carries BEGIN, COMMIT and ROLLBACK markers, so a consumer can group statements into
 explicit transactions without a new format. Every list keeps its seed.
 

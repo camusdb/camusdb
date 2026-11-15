@@ -107,7 +107,8 @@ the parentheses, or wrap the query in a derived table.
 
 An operand can be a view. It expands as it does in any `FROM`.
 
-`WITH` (common table expressions) and `CORRESPONDING BY` are not supported.
+An operand can start with a `WITH` inside its parentheses, and a `WITH` can stand in front of the whole
+set operation; see [WITH queries](common-table-expressions.md). `CORRESPONDING BY` is not supported.
 
 ## Views
 

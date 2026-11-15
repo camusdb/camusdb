@@ -195,6 +195,11 @@ stat    : select_stmt { $$.n = $1.n; }
         | drop_extension_stmt { $$.n = $1.n; }
         | create_function_stmt { $$.n = $1.n; }
         | alter_function_stmt { $$.n = $1.n; }
+        /* WITH in front of a write, as in PostgreSQL. A CTE is never the target of the write: the
+           target name always reads the table. A WITH in front of a SELECT is part of select_no_parens. */
+        | with_clause update_stmt { $$.n = CommonTableExpressions.With($1.n, $2.n); }
+        | with_clause delete_stmt { $$.n = CommonTableExpressions.With($1.n, $2.n); }
+        | with_clause insert_stmt { $$.n = CommonTableExpressions.With($1.n, $2.n); }
         ;
 
 /* SELECT … FOR UPDATE [OF t] [NOWAIT | SKIP LOCKED], and FOR NO KEY UPDATE as its synonym. Accepted
@@ -236,14 +241,52 @@ select_stmt : select_no_parens { $$.n = $1.n; }
             | select_with_parens { $$.n = $1.n; }
             ;
 
-select_with_parens : LPAREN select_no_parens RPAREN { $$.n = $2.n; }
+/* A WITH inside parentheses (a subquery, a derived table, an operand, a CTE body) is written out here,
+   with every CTE inlined: such a query can read the columns of an enclosing query, so its rows are not
+   computed once for the statement. Only a WITH at the start of a statement or of its source query
+   reaches the end of the parse, where a CTE that is read two or more times is marked to be computed
+   once (see CommonTableExpressions). */
+select_with_parens : LPAREN select_no_parens RPAREN { $$.n = CommonTableExpressions.InlineNested($2.n); }
                    ;
 
 select_no_parens : simple_select { $$.n = SetOperationAst.Finish($1.n, null, null, null); }
                  | select_clause order_clause opt_limit opt_offset { $$.n = SetOperationAst.Finish($1.n, $2.n, $3.n, $4.n); }
                  | select_clause limit_clause opt_offset { $$.n = SetOperationAst.Finish($1.n, null, $2.n, $3.n); }
                  | select_clause offset_clause { $$.n = SetOperationAst.Finish($1.n, null, null, $2.n); }
+                 | with_clause select_clause { $$.n = CommonTableExpressions.With($1.n, SetOperationAst.Finish($2.n, null, null, null)); }
+                 | with_clause select_clause order_clause opt_limit opt_offset { $$.n = CommonTableExpressions.With($1.n, SetOperationAst.Finish($2.n, $3.n, $4.n, $5.n)); }
+                 | with_clause select_clause limit_clause opt_offset { $$.n = CommonTableExpressions.With($1.n, SetOperationAst.Finish($2.n, null, $3.n, $4.n)); }
+                 | with_clause select_clause offset_clause { $$.n = CommonTableExpressions.With($1.n, SetOperationAst.Finish($2.n, null, null, $3.n)); }
                  ;
+
+/* WITH name [(c1, ...)] AS [[NOT] MATERIALIZED] (query) [, ...]. MATERIALIZED is already reserved for
+   the materialized-view statements. RECURSIVE is a plain identifier: it is refused here by name, so it
+   stays usable as a CTE name, a table name and a column name. */
+with_clause : TWITH cte_list { sawWith = true; $$.n = $2.n; }
+            | TWITH TIDENTIFIER cte_list
+            {
+                if (string.Equals($2.s, "recursive", System.StringComparison.OrdinalIgnoreCase))
+                    throw new CamusDBException(CamusDBErrorCodes.FeatureNotSupported, "WITH RECURSIVE is not supported");
+                throw new CamusDBException(CamusDBErrorCodes.SqlSyntaxError, "syntax error, unexpected '" + $2.s + "' after WITH");
+            }
+            ;
+
+cte_list : cte_list TCOMMA common_table_expr { $$.n = new(NodeType.CommonTableExpressionList, $1.n, $3.n, null, null, null, null, null, null); }
+         | common_table_expr { $$.n = $1.n; }
+         ;
+
+common_table_expr : any_identifier opt_cte_columns TAS opt_cte_materialized select_with_parens
+                  { $$.n = CommonTableExpressions.Definition($1.n, $2.n, $4.s, $5.n); }
+                  ;
+
+opt_cte_columns : LPAREN table_function_column_list RPAREN { $$.n = $2.n; }
+                | { $$.n = null; }
+                ;
+
+opt_cte_materialized : TMATERIALIZED { $$.s = CommonTableExpressions.Materialized; }
+                     | TNOT TMATERIALIZED { $$.s = CommonTableExpressions.NotMaterialized; }
+                     | { $$.s = null; }
+                     ;
 
 select_clause : simple_select { $$.n = $1.n; }
               | select_with_parens { $$.n = $1.n; }
@@ -1631,8 +1674,14 @@ table_function_column_list : table_function_column_list TCOMMA any_identifier
                            | any_identifier { $$.n = $1.n; $$.s = $1.s; }
                            ;
 
+/* AS t(c1, c2) names the columns of the derived table, as in PostgreSQL. The list hangs off
+   extendedThree; a list shorter than the query's columns renames the first ones only. */
 derived_table_reference : query_expr derived_table_alias
                 { $$.n = new(NodeType.DerivedTableReference, $1.n, $2.n, null, null, null, null, null, null); $$.s = $2.s; }
+                | query_expr TAS any_identifier LPAREN table_function_column_list RPAREN
+                { $$.n = new(NodeType.DerivedTableReference, $1.n, $3.n, null, null, $5.n, null, null, null); $$.s = null; }
+                | query_expr identifier LPAREN table_function_column_list RPAREN
+                { $$.n = new(NodeType.DerivedTableReference, $1.n, $2.n, null, null, $4.n, null, null, null); $$.s = $2.n.yytext; }
                 ;
 
 derived_table_alias : TAS any_identifier { $$.n = $2.n; $$.s = null; }

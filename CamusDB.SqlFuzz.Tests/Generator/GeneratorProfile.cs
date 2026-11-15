@@ -43,6 +43,9 @@ internal enum StatementFeature
 
     /// <summary><c>UPDATE … FROM</c>, <c>DELETE … USING</c>, and an alias on the target of an UPDATE or a DELETE.</summary>
     JoinedWrites,
+
+    /// <summary>A WITH in front of a SELECT that reads some of its tables through a CTE (see <see cref="SelectStmt.CteTables"/>).</summary>
+    CommonTableExpressions,
     Analyze,
     UniqueIndexes,
     CoveringIndexes,

@@ -329,6 +329,9 @@ internal sealed class NonQueryStatementDispatcher
         NodeAst ast = SQLParserProcessor.Parse(ticket.Sql, sqlParserCache);
         activity?.Describe(ast.nodeType);
 
+        // A write with a CTE that it computes once keeps that CTE's rows until the write ends.
+        await using Queries.ComputedOnceScope? computedOnce = Queries.ComputedOnceRows.Begin(ticket.TxnState, ast);
+
         // Executor stage timing for the write path (parse+plan+stage, exclusive of transport/commit
         // transport). Covers every return path of this method; a no-op when diagnostics are disabled.
         using ServerDiagnostics.ExecuteScope executeScope = ServerDiagnostics.MeasureExecute(

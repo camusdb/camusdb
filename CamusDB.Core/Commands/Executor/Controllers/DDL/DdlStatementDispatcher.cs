@@ -229,6 +229,9 @@ internal sealed class DdlStatementDispatcher
         NodeAst ast = SQLParserProcessor.Parse(ticket.Sql, sqlParserCache);
         activity?.Describe(ast.nodeType);
 
+        // CREATE TABLE … AS with a CTE that its query computes once keeps that CTE's rows until it ends.
+        await using Queries.ComputedOnceScope? computedOnce = Queries.ComputedOnceRows.Begin(ticket.TxnState, ast);
+
         statementAuthorizer.SetAuthorizationScope(ticket, ast);
         ticket = StatementScopedValues.Attach(ticket, ast);
         await statementAuthorizer.EnforceAsync(ticket, ast).ConfigureAwait(false);

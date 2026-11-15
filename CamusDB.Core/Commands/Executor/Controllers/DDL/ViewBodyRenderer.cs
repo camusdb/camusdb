@@ -399,9 +399,17 @@ internal sealed class ViewBodyRenderer : SqlAstRenderer
                 return;
 
             case NodeType.DerivedTableReference:
+                // A CTE of the body was written out as a derived table when the body was parsed, so the
+                // stored body has no WITH. Its column list renders as the derived table's.
                 sb.Append('(');
                 RenderSelectInto(sb, from.leftAst!);
                 sb.Append(") AS ").Append(from.rightAst!.yytext);
+                if (from.extendedThree is not null)
+                {
+                    sb.Append('(');
+                    RenderFunctionArguments(sb, from.extendedThree, NodeType.IdentifierList);
+                    sb.Append(')');
+                }
                 return;
 
             case NodeType.Join:

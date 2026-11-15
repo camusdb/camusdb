@@ -376,6 +376,17 @@ public static class PlanRenderer
 
     private static string RenderDerivedTableScan(DerivedTableScanNode node, QueryPlan plan)
     {
+        // A reader of a CTE that the statement computes once says so: every such reader reads the rows
+        // that the first one kept, so the plan under it runs one time for the statement.
+        if (node.BoundSource.Source.ComputedOnce is { } marker)
+        {
+            string inner = node.BoundSource.SetOperation is { } computedSet
+                ? RenderSetOperation(computedSet.Source, plan.Database.Options.SpillEnabled)
+                : $"derived-table-scan(alias={node.BoundSource.Alias})";
+
+            return string.Concat(inner.AsSpan(0, inner.Length - 1), $", computed_once={marker.yytext})");
+        }
+
         if (node.BoundSource.SetOperation is { } setOperation)
             return RenderSetOperation(setOperation.Source, plan.Database.Options.SpillEnabled);
 

@@ -453,13 +453,19 @@ internal sealed class QueryBinder
                 {
                     BoundSetOperation bound = await BindSetOperationAsync(database, setOperation, nested).ConfigureAwait(false);
 
+                    (string InnerKey, string RowKey)[]? setRowKeys = null;
+                    IReadOnlyList<DerivedColumnSchema> setColumns = derivedSource.ColumnAliases is { } setAliases
+                        ? DerivedTableSchemaBuilder.WithColumnAliases(bound.Columns, setAliases, derivedSource.Alias, ref setRowKeys)
+                        : bound.Columns;
+
                     derivedSources.Add(new BoundDerivedTableSource(
                         derivedSource,
                         derivedSource.Alias,
-                        bound.Columns,
+                        setColumns,
                         new BoundSelectQuery(derivedSource.Query, [], new QueryRowNameResolver([])))
                     {
                         SetOperation = bound,
+                        InnerRowKeys = setRowKeys,
                     });
                     return;
                 }
@@ -499,6 +505,9 @@ internal sealed class QueryBinder
                 // which the window operator adds to each row after the inner query ran.
                 if (derivedSource.Windows is { } windows)
                     columns = WindowResultSchema.Build(columns, windows);
+
+                if (derivedSource.ColumnAliases is { } columnAliases)
+                    columns = DerivedTableSchemaBuilder.WithColumnAliases(columns, columnAliases, derivedSource.Alias, ref innerRowKeys);
 
                 derivedSources.Add(new BoundDerivedTableSource(
                     derivedSource,

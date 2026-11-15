@@ -209,6 +209,24 @@ internal sealed class TestOracleDetection
         AssertDetects(new NoRecCheck(true, T0, [new SelectItem(C0), new SelectItem(C2)], P), runner,
             (sql, o) => sql.Contains(" WHERE ") ? FaultyExecutor.DropLastRow(o) : null, "norec:rows:mismatch");
 
+    // -- WITH -----------------------------------------------------------------------------------
+
+    /// <summary>A fault in the WITH path alone: a query that reads its table through a CTE loses its last row.</summary>
+    private static StatementOutcome? LoseRowThroughCte(string sql, StatementOutcome o) =>
+        sql.StartsWith("WITH ", StringComparison.Ordinal) ? FaultyExecutor.DropLastRow(o) : null;
+
+    private static readonly TableRef T0ViaCte = new("t0", "a0") { ViaCte = true };
+
+    [Test]
+    public Task TlpReportsAWholeQueryThroughACteThatLosesARow() =>
+        AssertDetects(new TlpCheck(TlpVariant.Where, T0ViaCte, [new SelectItem(C0), new SelectItem(C2)], P) { CteTables = ["t0"] },
+            runner, LoseRowThroughCte, "tlp:where:mismatch");
+
+    [Test]
+    public Task NoRecReportsAnOptimizedQueryThroughACteThatLosesARow() =>
+        AssertDetects(new NoRecCheck(true, T0ViaCte, [new SelectItem(C0), new SelectItem(C2)], P) { CteTables = ["t0"] },
+            runner, LoseRowThroughCte, "norec:rows:mismatch");
+
     // -- Plan equivalence -----------------------------------------------------------------------
 
     /// <summary>

@@ -249,7 +249,16 @@ internal sealed record TableDef(string Name, IReadOnlyList<ColumnDef> Columns)
 internal abstract record FromItem;
 
 /// <summary>A table in FROM. <see cref="IndexHint"/> names the index the scan must use, or null. A dialect without index hints prints nothing for it.</summary>
-internal sealed record TableRef(string Table, string Alias, string? IndexHint = null) : FromItem;
+internal sealed record TableRef(string Table, string Alias, string? IndexHint = null) : FromItem
+{
+    /// <summary>
+    /// True when the reference reads the table through the CTE <c>cte_{Table}</c> (<c>SELECT * FROM Table</c>)
+    /// that an enclosing <see cref="SelectStmt.CteTables"/> declares. The printer uses the CTE only when a
+    /// WITH it wrote declares that table, and never with an index hint, so a statement that an oracle builds
+    /// from parts of another one prints the plain table. The rows are the table's rows either way.
+    /// </summary>
+    public bool ViaCte { get; init; }
+}
 
 internal enum JoinKind
 {
@@ -337,7 +346,16 @@ internal sealed record SelectStmt(
     IReadOnlyList<OrderItem>? OrderBy = null,
     long? Limit = null,
     long? Offset = null,
-    SetOperation? SetOp = null) : Statement;
+    SetOperation? SetOp = null) : Statement
+{
+    /// <summary>
+    /// The tables that this SELECT declares in a WITH, each as <c>cte_{table} AS (SELECT * FROM table)</c>,
+    /// for the references marked <see cref="TableRef.ViaCte"/>; null for no WITH. A table that the SELECT
+    /// reads two times gives a CTE that the statement reads two times, which CamusDB computes once at the
+    /// start of a statement and inlines in parentheses.
+    /// </summary>
+    public IReadOnlyList<string>? CteTables { get; init; }
+}
 
 /// <summary>An EXPLAIN of a SELECT, for the plan names in a finding.</summary>
 internal sealed record ExplainStmt(SelectStmt Query) : Statement;

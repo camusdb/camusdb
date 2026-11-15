@@ -148,6 +148,19 @@ A derived table and a view compute every column of each of their rows before the
 
 `CREATE VIEW` and `CREATE MATERIALIZED VIEW` bind the body and run none of its subqueries, as PostgreSQL does. So `CREATE VIEW c AS SELECT (SELECT 1 / 0) AS x` succeeds, and a read of `x` fails. A scalar subquery column has the declared type of the subquery column, also when the subquery returns no row.
 
+## WITH queries
+
+`d` has the rows `(1, 10)` and `(2, 20)`. See [WITH queries](common-table-expressions.md).
+
+| Statement | CamusDB | PostgreSQL | Why |
+|---|---|---|---|
+| `WITH c AS (SELECT id FROM nowhere) SELECT v FROM d WHERE id = 1` | `10` | `relation "nowhere" does not exist` | The parser writes out each CTE where the statement reads it, so a CTE that nothing reads runs no check. A statement that reads it reports the unknown table. |
+| `SELECT same FROM (WITH r AS (SELECT random() AS x) SELECT a.x = b.x AS same FROM r a, r b) q` | `false` | `true` | A `WITH` in parentheses can read the columns of the query around it, so each reader runs its own copy. A `WITH` at the start of the statement computes a CTE that it reads two or more times one time, as PostgreSQL does. |
+| `WITH r AS NOT MATERIALIZED (SELECT random() AS x) SELECT a.x = b.x AS same FROM r a, r b` | `false` | `true` | `NOT MATERIALIZED` always inlines. PostgreSQL computes a CTE that calls a volatile function one time, whatever the hint says. |
+
+A view stores its body with each CTE written out as a derived table, so `SHOW CREATE VIEW` shows no
+`WITH`, where PostgreSQL shows the `WITH` that the body had.
+
 ## NULL in ORDER BY
 
 NULL sorts as the smallest value, the GoogleSQL rule: it comes first in ascending order and last in
@@ -243,7 +256,7 @@ CamusDB refuses these forms with a clear error, so no answer is wrong. `d` has t
 | `SELECT * FROM d a JOIN d b USING (id)` | `CADB0406` | Both rows, with one `id` column |
 | `SELECT * FROM d a NATURAL JOIN d b` | `CADB0406` | Both rows, with one column for each common name |
 | `SELECT * FROM d a FULL JOIN d b ON a.id = b.id` | `CADB0533`; use `LEFT JOIN` or `RIGHT JOIN` | Both rows |
-| `WITH c AS (SELECT 5 AS x) SELECT x FROM c` | `CADB0406` | `5` |
+| `WITH RECURSIVE r AS (SELECT 1 AS n) SELECT n FROM r` | `CADB0533` | `1` |
 | `SELECT NULL IS UNKNOWN`, and `IS NOT UNKNOWN` | `CADB0406` | `true` |
 | `SELECT 1 IS DISTINCT FROM 2`, and `IS NOT DISTINCT FROM` | `CADB0406` | `true` |
 | `SELECT 1 ISNULL`, and `NOTNULL` | `CADB0406` | `false` |

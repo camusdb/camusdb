@@ -417,7 +417,7 @@ internal sealed class StatementGenerator
         Expr? where = random.Chance(0.75) ? expressions.Predicate(scope.ForSelectWhere()) : null;
 
         if (options.AllowAggregates && profile.Allows(StatementFeature.GroupBy) && random.Chance(0.2))
-            return GroupedSelect(from, scope, where);
+            return WithCtes(GroupedSelect(from, scope, where));
 
         List<SelectItem> items = random.Chance(0.12) ? [] : GenerateProjection(scope);
 
@@ -460,8 +460,48 @@ internal sealed class StatementGenerator
                 setOp = new SetOperation(random.Pick(kinds), MatchingSelect(items.Select(i => i.Expr.Type).ToList()));
         }
 
-        return new SelectStmt(items, from, where, distinct, OrderBy: orderBy, Limit: limit, Offset: offset, SetOp: setOp);
+        return WithCtes(new SelectStmt(items, from, where, distinct, OrderBy: orderBy, Limit: limit, Offset: offset, SetOp: setOp));
     }
+
+    /// <summary>
+    /// Reads some tables of the SELECT's own FROM through a CTE, for about one SELECT in five: the SELECT
+    /// declares them in <see cref="SelectStmt.CteTables"/>, and their references get
+    /// <see cref="TableRef.ViaCte"/>. The rows do not change, so every oracle checks the WITH path. A
+    /// table that the FROM names two times (a self join) gives a CTE that the statement reads two times.
+    /// A reference with an index hint keeps the table: a CTE has no index.
+    /// </summary>
+    private SelectStmt WithCtes(SelectStmt select) =>
+        ChooseCteTables(select.From) is { } chosen
+            ? select with { From = ThroughCtes(select.From, chosen), CteTables = chosen }
+            : select;
+
+    /// <summary>
+    /// For about one FROM in five, some of its tables without an index hint, for a SELECT to read through
+    /// CTEs (see <see cref="SelectStmt.CteTables"/>); null otherwise, and for a profile without CTEs.
+    /// </summary>
+    public IReadOnlyList<string>? ChooseCteTables(FromItem from)
+    {
+        if (!profile.Allows(StatementFeature.CommonTableExpressions) || !random.Chance(0.2))
+            return null;
+
+        List<string> tables = TablesOf(from).Where(t => t.IndexHint is null).Select(t => t.Table).Distinct().ToList();
+        if (tables.Count == 0)
+            return null;
+
+        List<string> chosen = tables.Where(_ => random.Chance(0.7)).ToList();
+        if (chosen.Count == 0)
+            chosen.Add(random.Pick(tables));
+
+        return chosen;
+    }
+
+    /// <summary><paramref name="from"/> with each reference to a table of <paramref name="tables"/>, and no index hint, marked <see cref="TableRef.ViaCte"/>.</summary>
+    public static FromItem ThroughCtes(FromItem from, IReadOnlyList<string> tables) => from switch
+    {
+        TableRef table when table.IndexHint is null && tables.Contains(table.Table) => table with { ViaCte = true },
+        JoinFrom join => join with { Left = ThroughCtes(join.Left, tables), Right = (TableRef)ThroughCtes(join.Right, tables) },
+        _ => from,
+    };
 
     /// <summary>A one-table SELECT whose output columns have exactly <paramref name="types"/>, for the right operand of a set operation.</summary>
     private SelectStmt MatchingSelect(IReadOnlyList<FuzzType> types)
@@ -806,8 +846,15 @@ internal sealed class StatementGenerator
         // At most a few rows per copy: repeated copies of a whole table double it each time, and a later
         // join of three such tables reads millions of rows and passes the statement time limit.
         Expr where = expressions.Predicate(scope.ForSelectWhere());
-        return new InsertSelectStmt(table.Name, table.Columns.Select(c => c.Name).ToList(), new SelectStmt(items, new TableRef(table.Name, "s"), where,
-            OrderBy: [new OrderItem(new ColumnExpr("s", table.PrimaryKey.Name, table.PrimaryKey.Type), false)], Limit: random.Between(1, 5)));
+        SelectStmt source = new(items, new TableRef(table.Name, "s"), where,
+            OrderBy: [new OrderItem(new ColumnExpr("s", table.PrimaryKey.Name, table.PrimaryKey.Type), false)], Limit: random.Between(1, 5));
+
+        // INSERT INTO t (…) WITH cte_t AS (SELECT * FROM t) SELECT … FROM cte_t AS s: the CTE reads the
+        // table before the first insert, as the plain source does.
+        if (profile.Allows(StatementFeature.CommonTableExpressions) && random.Chance(0.2))
+            source = source with { From = new TableRef(table.Name, "s") { ViaCte = true }, CteTables = [table.Name] };
+
+        return new InsertSelectStmt(table.Name, table.Columns.Select(c => c.Name).ToList(), source);
     }
 
     /// <summary>The scope of a DML statement on one table: unqualified columns.</summary>

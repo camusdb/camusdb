@@ -13,6 +13,7 @@ using System.Threading.Tasks;
 using NUnit.Framework;
 
 using CamusDB.Core;
+using CamusDB.Core.SQLParser;
 using CamusDB.Core.Catalogs.Models;
 using CamusDB.Core.CommandsExecutor;
 using CamusDB.Core.CommandsExecutor.Models;
@@ -59,7 +60,7 @@ public sealed class TestPostgreSqlDivergences : SharedNodeBaseTest
         {
             string outcome = "no rows";
 
-            if (sql.StartsWith("SELECT", StringComparison.Ordinal))
+            if (IsRead(sql))
             {
                 (_, IAsyncEnumerable<QueryResultRow> cursor) = await executor.ExecuteSQLQuery(new ExecuteSQLTicket(tx, dbname, sql, null));
                 List<QueryResultRow> rows = await cursor.ToListAsync();
@@ -85,6 +86,28 @@ public sealed class TestPostgreSqlDivergences : SharedNodeBaseTest
         {
             await database.Transactions.RollbackAsync(tx);
             return ex.Code;
+        }
+    }
+
+    /// <summary>
+    /// True for a statement that returns rows: a SELECT, or a WITH in front of a SELECT. A WITH that does
+    /// not parse is sent to the query path too, so its error is the outcome.
+    /// </summary>
+    private static bool IsRead(string sql)
+    {
+        if (sql.StartsWith("SELECT", StringComparison.Ordinal))
+            return true;
+
+        if (!sql.StartsWith("WITH", StringComparison.Ordinal))
+            return false;
+
+        try
+        {
+            return SQLParserProcessor.Parse(sql).nodeType == NodeType.Select;
+        }
+        catch (CamusDBException)
+        {
+            return true;
         }
     }
 
