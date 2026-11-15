@@ -36,8 +36,9 @@ CREATE TABLE orders_before_truncate RELINK TO 'A0';
 
 - Exactly **one** base table. Several tables in one statement are not supported.
 - The `TABLE` keyword is optional.
-- There are no options. `RESTART IDENTITY` is meaningless in CamusDB (there are no user sequences),
-  and there is no `CASCADE`: a table that a foreign key references cannot be truncated (see below).
+- `RESTART IDENTITY` returns each sequence that a column of the table owns to its start value.
+  `CONTINUE IDENTITY`, the default, leaves the sequences alone. See [sequences.md](sequences.md).
+- There is no `CASCADE`: a table that a foreign key references cannot be truncated (see below).
 
 `TRUNCATE` is refused on:
 
@@ -56,7 +57,7 @@ The statement is **constant in row and index-entry cardinality**. A table with o
 with a billion rows do the same amount of row work: none. No row is read, no row is deleted, and no
 index entry is touched.
 
-That is not the same as constant wall-clock time. The statement still waits for:
+Wall-clock time is not constant. The statement still waits for:
 
 - the exclusive fence over the table's whole row key-space (which waits for conflicting writers);
 - the replicated schema entry to commit and to be acknowledged by every node;
@@ -103,7 +104,7 @@ TRUNCATE TABLE orders;   -- CADB0538
 ROLLBACK;
 ```
 
-The reason is honesty rather than caution. `TRUNCATE` commits a replicated schema entry, and a
+`TRUNCATE` commits a replicated schema entry, and a
 `ROLLBACK` of your transaction cannot undo that entry. Accepting the statement inside a transaction
 would promise rollback semantics the engine cannot deliver. Commit or roll back first, then truncate.
 
@@ -116,7 +117,7 @@ reporting a rollback would tell you the table still holds rows it no longer hold
 ## Concurrent readers and writers
 
 Before anything is proposed, the statement takes an **exclusive range lock over the table's entire
-row key-space**. That lock is what makes the swap atomic with respect to data transactions:
+row key-space**. That lock makes the swap atomic with respect to data transactions:
 
 - A writer — optimistic or pessimistic — that staged a row into the old key-space **before** the lock
   was taken is aborted at commit. It never receives success for a row that would live only in storage
@@ -159,7 +160,7 @@ Recovering publishes the retained rows as a **separate, new table**:
 CREATE TABLE orders_before_truncate RELINK TO 'A0';
 ```
 
-The recovered table gets a **fresh relation id** and reads the retired key-space. It has to: on a
+The recovered table gets a **fresh relation id** and reads the retired key-space. It needs a fresh id: on a
 table's first truncate the retired key-space is named by the *still-live* table's own id, so reusing
 that id would create a second name for a live relation.
 
@@ -183,10 +184,10 @@ SELECT * FROM orders AS OF SYSTEM TIME '-10s';
 --           longer reachable through this table.
 ```
 
-This is deliberate. The old rows are still on disk, but they live in a key-space the live table can
+The old rows are still on disk, but they live in a key-space the live table can
 no longer name, so the read would scan the new, empty generation and answer "no rows" — which is
-indistinguishable from a correct empty answer for a point in time when the table was full. An error
-is the only honest response.
+indistinguishable from a correct empty answer for a point in time when the table was full. So the
+read fails with an error.
 
 - A snapshot **exactly at** the cut is allowed, and observes the new, empty contents.
 - A snapshot **after** the cut behaves normally.
@@ -234,7 +235,7 @@ REFRESH MATERIALIZED VIEW orders_by_day;   -- now empty too
 
 The optimizer's statistics are keyed by the table's identity, which a truncate deliberately preserves.
 They are stamped with the contents generation they describe, so after a truncate the previous
-distribution is ignored rather than believed: `SHOW STATISTICS` and the planner treat the new
+distribution is ignored: `SHOW STATISTICS` and the planner treat the new
 generation as not yet measured. Run `ANALYZE` when you have repopulated the table.
 
 ---
@@ -264,7 +265,6 @@ span plan never described). The stale run's records are cleaned up in the backgr
 ## Not supported
 
 - `TRUNCATE a, b, c` — several tables in one statement.
-- `RESTART IDENTITY` — CamusDB has no user sequences.
 - `CASCADE` — a table that a foreign key references is refused with `CADB0530`. The child table,
   and a table that references only itself, can be truncated.
 - Automatically refreshing or invalidating a dependent materialized view.

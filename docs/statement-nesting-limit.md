@@ -1,8 +1,8 @@
 # Statement Nesting Limit
 
 CamusDB refuses a statement whose parse tree is deeper than **1,000 levels**, with error
-**CADB0413** (`StatementTooDeeplyNested`). The limit exists to protect the server process, not to
-police query style: almost every statement is far below it.
+**CADB0413** (`StatementTooDeeplyNested`). The limit protects the server process. Almost every
+statement is far below it.
 
 ## Why there is a limit
 
@@ -54,6 +54,13 @@ limit deep.
 statement may nest at most **64** of them on one path, with the same error code. A long chain of
 one associative operator is rebalanced and does not come near this limit. A chain of `EXCEPT`, or
 of mixed operators, adds one level per operator. See [set-operations.md](./set-operations.md).
+
+## A separate limit for WITH queries
+
+The parser writes each reference to a CTE out as a copy of the CTE's query (see
+[WITH queries](common-table-expressions.md)). The references of one `WITH` can copy at most 250,000
+parse nodes, and a statement that needs more fails with the same `CADB0413` error. The limit stops a
+chain of CTEs in which each reads the one before two times: such a chain doubles at each step.
 
 ## The error
 

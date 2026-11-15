@@ -34,7 +34,7 @@ The writer takes these steps for each non-null `string`, `bytes` or array value,
 4. If the result is at or above the threshold, store it under its own key and put a pointer in the
    row. If not, store it inside the row.
 
-Compression runs first on purpose. A value that compresses below the threshold stays in the row, so a
+Compression runs first, so a value that compresses below the threshold stays in the row, and a
 read of that column costs no second key.
 
 The minimum-saving rule protects data that does not compress, such as float32 embeddings, JPEG images
@@ -147,7 +147,7 @@ A setting change never alters an existing row. It decides the form of rows writt
 ## Data written before this feature
 
 Every row written before this feature is inline and uncompressed. It stays readable, with no operator
-action, for the life of the database. Migration is an optimisation, never a requirement.
+action, for the life of the database. Migration is optional. It is an optimisation.
 
 Existing data reaches the new form in three ways:
 

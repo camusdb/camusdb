@@ -195,7 +195,7 @@ internal static class StoredBodyColumns
                     NodeAst inner = Walk(schema, from.leftAst!, scope, viewName);
                     return ReferenceEquals(inner, from.leftAst)
                         ? from
-                        : new NodeAst(NodeType.DerivedTableReference, inner, from.rightAst, null, null, null, null, null, null);
+                        : new NodeAst(NodeType.DerivedTableReference, inner, from.rightAst, from.extendedOne, from.extendedTwo, from.extendedThree, from.extendedFour, null, null);
                 }
 
             case NodeType.Join:

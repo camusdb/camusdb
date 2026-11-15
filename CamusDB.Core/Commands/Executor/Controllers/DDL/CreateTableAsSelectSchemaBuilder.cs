@@ -84,6 +84,14 @@ internal static class CreateTableAsSelectSchemaBuilder
             // would fail. Such a projection is refused instead.
             ColumnType? elementType = null;
 
+            // An interval is an expression value only: no row encoding, index key or statistics
+            // exist for it, so a table cannot hold one.
+            if (derived[i].Type == ColumnType.Interval)
+                throw new CamusDBException(
+                    CamusDBErrorCodes.InvalidInput,
+                    $"Output column {i + 1} ('{derived[i].Name}') of {statementName} is an interval, and a table " +
+                    "cannot store an interval; store its text form with CAST(x AS string)");
+
             if (derived[i].Type == ColumnType.Array)
             {
                 elementType = derived[i].ElementType is { } known && known is not ColumnType.Null and not ColumnType.Array

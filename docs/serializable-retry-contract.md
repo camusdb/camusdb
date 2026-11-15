@@ -40,7 +40,7 @@ There are two distinct kinds of "retry", and they must not be confused:
 - **Replay from `BEGIN`** (three codes below): the transaction is dead and nothing it wrote survives,
   so recovery re-runs the whole business operation on a fresh transaction.
 - **Retry the *same* finalize** (`CADB0509`, see the next section): the transaction is **not** dead —
-  a commit or rollback simply has not resolved yet. You re-issue the *same* `COMMIT`/`ROLLBACK` on the
+  a commit or rollback has not resolved yet. You re-issue the *same* `COMMIT`/`ROLLBACK` on the
   *same* transaction. You must **not** replay the operation, because it may already have committed.
 
 All codes not listed as retryable are permanent and must propagate to the caller without retrying.
@@ -98,7 +98,7 @@ If the outcome is *still* unresolved when the budget runs out, `CommitAsync`/`Ro
 - It stays tracked and its handle stays valid, so the *same* finalize can be resumed.
 - No further data operations are accepted on it (the finalize fence is installed).
 
-**The one rule that makes this safe:** re-issue the **same** `COMMIT` (or `ROLLBACK`) on the **same**
+**The rule:** re-issue the **same** `COMMIT` (or `ROLLBACK`) on the **same**
 transaction. Do **not** start a new transaction and replay the statements — the original commit may have
 already durably committed server-side, so replaying would apply the write twice.
 
@@ -130,7 +130,7 @@ reclaims the server-side session and releases its locks as the ultimate backstop
 
 ## Auto-retry for autocommit statements
 
-For **single-statement autocommit** operations the entire transaction is just that one statement,
+For **single-statement autocommit** operations the entire transaction is that one statement,
 so replaying from `BEGIN` means running the operation again. Use `SerializableRetryHelper.ExecuteAutocommitAsync`
 to get bounded automatic retry with exponential back-off:
 
@@ -220,7 +220,7 @@ contention pattern can be reduced (shorter transactions, fewer rows per transact
 access order).
 
 The `TransactionLifetimeExceeded` error (CADB0505) means the transaction was open for longer than
-25 seconds. Shorten long-running serializable transactions so they complete within the deadline.
+`MaxSerializableTransactionLifetimeMs` (default 1 hour). Shorten long-running serializable transactions so they complete within the deadline.
 
 A wait that is not a conflict runs on its own budget. A key whose value is still replicating, or
 whose previous writer has committed but not yet settled, answers the store's `WaitingForReplication`

@@ -16,14 +16,14 @@ anything on it.
 
 The [slow query log](slow-query-log.md) shows single statements that crossed a threshold. It cannot
 show a statement that is fast each time but runs a million times an hour, and it cannot show that a
-statement became slower than it was yesterday. Statement statistics answer those questions:
+statement became slower than it was yesterday. Statement statistics show both. They show:
 
-- Which statements use the most time in total (`total_ms`)?
-- Which statements read far more rows than they return (`rows_read` against `rows_returned`)?
-- Which statements scan whole tables (`full_scans`) or spill to disk (`spills`)?
-- Which statements fail, and which fail with a code the client must retry (`errors`, `retries`)?
-- Which statements changed their plan (`plan_changes`)?
-- Which statements have two personalities — fast on most runs, slow on some (`cv`)?
+- which statements use the most time in total (`total_ms`);
+- which statements read far more rows than they return (`rows_read` against `rows_returned`);
+- which statements scan whole tables (`full_scans`) or spill to disk (`spills`);
+- which statements fail, and which fail with a code the client must retry (`errors`, `retries`);
+- which statements changed their plan (`plan_changes`);
+- which statements have two regimes, fast on most runs and slow on some (`cv`).
 
 ## What is recorded
 
@@ -49,7 +49,7 @@ Executions are grouped by **shape**, a fingerprint of the statement with its lit
 The shape id is a 16-character hex digest. It is the same on every node and after a restart, for the
 same build. The key of a row is the database plus the shape id.
 
-The shape comes from the parse tree, not from a plan. Every recorded statement has a parse tree on
+The shape comes from the parse tree and needs no plan. Every recorded statement has a parse tree on
 every configuration, including when the plan cache is off. The fingerprint is computed once per
 distinct statement text and kept with the cached parse tree, so an application that sends
 parameterized statements computes it once.
@@ -106,8 +106,9 @@ each scan reads, whether a scan reads the rows or an index, and which index. It 
 bounds, literals or estimates. Two executions that differ only in their literals have the same hash.
 A new index or a fresh `ANALYZE` that changes an access path gives a different hash.
 
-The hash is taken when the plan is built, not from what the execution touched. An execution whose
-outer side was empty never probes its inner index, and that is a property of the data, not of the plan.
+The hash is taken when the plan is built, so it does not depend on what the execution touched. An
+execution whose outer side was empty never probes its inner index. That is a property of the data,
+and the plan is the same.
 
 ## Worked example
 
@@ -147,7 +148,7 @@ holds the literals of whoever ran the shape first.
 2. **It is one node's view.** The statement reports the node that answered it. Inspect a cluster one
    node at a time, and sum the rows if you need a cluster total.
 3. **It is bounded.** At most `statement_stats_max_shapes` shapes; see `statement_stats.dropped`.
-4. **The sample is the first text seen**, not the slowest or the latest one.
+4. **The sample is the first text seen.** A slower or later text does not replace it.
 
 ## Related
 

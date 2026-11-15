@@ -10,8 +10,8 @@
 > point-in-time fork. The branch shares the parent's bytes until it diverges: reads see the
 > parent as of the fork instant, writes are private to the branch, and the parent keeps
 > evolving and never sees the branch. It is copy-on-write over the existing Kahuna KV store —
-> no data is copied at fork time, only a small amount of schema metadata. The hard parts are
-> not the high-level model; they are durability (keeping the parent's fork-time versions
+> no data is copied at fork time, only a small amount of schema metadata. The hard parts
+> are durability (keeping the parent's fork-time versions
 > readable under GC), recoverability (crash-safe create/drop), and cross-node concurrency
 > (fencing a drop against a concurrent branch-create). Known limitations are in §11.
 
@@ -19,8 +19,8 @@
 
 ## 1. Mental model
 
-Every database is a node in a **branch tree**. There is no "normal database" versus "branch":
-a root database is just a branch with an empty ancestry. One code path serves both.
+Every database is a node in a **branch tree**. A root database is a branch with an empty
+ancestry, so one code path serves roots and branches.
 
 A database carries an **immutable ancestry** — the chain of parents it was forked from, each
 with the HLC timestamp of the fork:
@@ -40,7 +40,7 @@ From that, a descriptor derives its **read lineage**, nearest level first:
 [ (self.Id, live) ] + entry.Ancestors
 ```
 
-Three ideas are the whole story; the rest is detail.
+The model rests on three ideas.
 
 - **The database id is the branch namespace.** All of a database's data lives under keys
   prefixed by its id (§2). A branch shares its parent's *table ids* (schema is copied
@@ -51,8 +51,8 @@ Three ideas are the whole story; the rest is detail.
   first hit or tombstone. A write or delete only ever writes to the branch's own overlay
   (level 0) — never to an ancestor (§4).
 - **The fork instant is an HLC timestamp, and the parent's history at that instant must stay
-  readable.** That is the entire durability problem, solved by an upstream Kahuna
-  **snapshot-floor hold** taken at `forkT` (§6).
+  readable.** An upstream Kahuna **snapshot-floor hold** taken at `forkT` keeps it readable
+  (§6).
 
 ### 1.1 Vocabulary
 
@@ -109,7 +109,7 @@ drop-in-progress     _system/dbregistry/dropping:{dbId}        -- crash-resume h
 hold-lost            _system/dbregistry/holdlost:{dbId}        -- durable record that a snapshot hold was removed (§6)
 ```
 
-Two invariants worth internalizing:
+Two invariants hold:
 
 - **Index keys use the immutable `TableIndexSchema.Id`**, never the mutable index name.
   Otherwise a branch that drops and re-adds an index with the same name could fall through to
@@ -127,7 +127,7 @@ Row and index payloads carry a one-byte `BranchKvCodec` envelope prefix distingu
 `ScanIndex`, and `WriteRowsBatch`; a tombstone returns not-found / is skipped and suppresses
 same-key records at deeper levels.
 
-Delete semantics differ by database kind — a deliberate two-path rule, not an inconsistency:
+Delete semantics differ by database kind. The two paths are deliberate:
 
 - **On a branch** (`ancestorStores.Length > 0`), a logical delete writes a **tombstone** to
   level 0 rather than physically deleting. This is **mandatory for correctness**: a physical
@@ -138,7 +138,7 @@ Delete semantics differ by database kind — a deliberate two-path rule, not an 
   delete is the cheaper choice (immediate reclamation, no decode overhead on later scans). This
   is an **intentional optimization**.
 
-The subtle correctness trap here (fixed early): batch paths must honor the envelope too.
+Batch paths must honor the envelope too (a correctness bug here was fixed early).
 `DeleteRowsBatch` originally bypassed the tombstone path via a physical batch delete; on a
 branch it must write tombstone items instead. And `RowUpdater` must **skip** the delete+insert
 of an unchanged index key (`oldKey.CompareTo(newKey) == 0`) — on a branch the delete tombstone
@@ -165,7 +165,7 @@ timestamp — the same MVCC snapshot pattern used everywhere ancestor data is to
 prefixes differ per level): `rowId` for rows, `encodedKey` for unique indexes,
 `encodedKey + rowId` for non-unique.
 
-**De-duplication is one last-suffix string, not a seen-set.** The heap priority is the pair
+**De-duplication keeps one last-suffix string and no seen-set.** The heap priority is the pair
 `(suffix, levelIndex)`, so all entries that share a suffix dequeue consecutively, and the nearest
 level dequeues first. An entry whose suffix equals the previous one is therefore suppressed
 immediately (`lastHex` in `KvRowAccessor`, `lastSuffix` in `KvIndexAccessor`). Scan state is
@@ -246,7 +246,7 @@ API on `IKahuna` — all auto-routed to the system-partition leader, all Raft-re
   **fails** — CamusDB never registers a branch whose frozen view it cannot guarantee.
 - **Release on leaf drop.** Dropping a branch releases its parent hold so that history can be
   reclaimed.
-- **Leader-owned renewal, tied to existence, not open-ness.** A hold must live as long as the
+- **Leader-owned renewal, tied to registration.** A hold must live as long as the
   branch is *registered*, even if no client has it open. `SnapshotHoldRenewer` runs on exactly
   one node — the leader of the database-registry partition (`EmbeddedKahuna.AmILeaderForKeyAsync`)
   — and every `lease/3` renews the hold of every registered branch. It reads the branch set from
@@ -254,9 +254,8 @@ API on `IKahuna` — all auto-routed to the system-partition leader, all Raft-re
   created on another node after this leader started is not missed. The election is re-checked
   each tick, so failover hands the sweep to the new leader.
 
-A key property that makes this cheap to reason about: a **live hold keeps the fork-boundary
-revision in memory regardless of storage backend**, and the *same* hold protects both the
-ancestor row/index reads and the metadata copy at `forkT`.
+A **live hold keeps the fork-boundary revision in memory regardless of storage backend**, and
+the *same* hold protects both the ancestor row/index reads and the metadata copy at `forkT`.
 
 **Fail-closed on a lost hold, fail-recovered on a mere lapse.** Since Kahuna 1.7.3 a hold's
 protection ends only when the hold is **removed from the replicated registry** — an explicit
@@ -282,7 +281,8 @@ turn that into a hard error instead:
   latches the branch permanently and throws `BranchSnapshotProtectionLost` (HTTP 410); a
   transient verification failure past 0.8 × lease throws a retryable error instead of guessing.
   This covers descendants (a grandchild verifies the middle branch's hold too), reopen, failover,
-  and renewer starvation — the sweep is an optimization for unopened branches, not the safety.
+  and renewer starvation. The guard is the safety; the sweep is an optimization for unopened
+  branches.
 - **Durable lost marker.** When the renewer sweep (or a guard) gets a definitive refusal, it
   writes `dbregistry/holdlost:{branchId}`; a later open pre-latches the guard from the marker so
   the very first read fails fast with the recorded reason. Correctness never depends on the
@@ -392,7 +392,7 @@ several layered fences:
   wins — either branch-create sees the intent and retracts, or drop's descendant scan sees the
   new child and aborts. The intent is released on every exit path.
 
-  The intent is a **lease**, not a plain marker (`KeyLeaseFence`). Its key carries a native expiry of
+  The intent is a **lease** (`KeyLeaseFence`). Its key carries a native expiry of
   `CamusDBOptions.FenceLeaseMs` (default 30 s), and the holder re-stamps it every
   `FenceLeaseRenewIntervalMs` for as long as it holds the fence. So a long purge is never interrupted,
   and a holder that dies stops blocking the id once the lease lapses. Every acquisition carries a
@@ -476,7 +476,7 @@ keeps the catalog available for the resume).
 
 **Snapshot holds pin parent history.** A live branch keeps its parent's fork-time revisions
 retained. Long-lived branches over a hot parent therefore hold back reclamation of that parent's
-old revisions — expected and correct, but worth watching capacity for. Kahuna exposes these
+old revisions. This is expected and correct, so watch capacity. Kahuna exposes these
 gauges (under the `Kahuna` meter scope) that operators should dashboard:
 
 - `kahuna.snapshot_floor.live_holds` — one per live branch (roughly). Rising unboundedly means

@@ -1,8 +1,8 @@
 # Operator dashboard
 
-Open a node's HTTP port in a browser and CamusDB serves a read-only dashboard. It answers four
-questions without a shell: is this node healthy, what load does it carry, what data does it hold,
-and what has the engine done since it started.
+Open a node's HTTP port in a browser and CamusDB serves a read-only dashboard. It shows, without a
+shell, whether this node is healthy, what load it carries, what data it holds, and what the engine
+has done since it started.
 
 The dashboard is read-only. It runs no DML and no DDL, opens no coordinated transaction, and offers
 no operator action. Nothing on the page changes the node.
@@ -28,14 +28,14 @@ card keeps working.
 
 ### Reading the Memory column
 
-**Loaded** means this node currently holds the database open. **Not loaded** means it does not, and
-that is an ordinary state rather than a fault. It covers two histories the page cannot tell apart:
+**Loaded** means this node currently holds the database open. **Not loaded** means it does not.
+That is an ordinary state. It covers two histories the page cannot tell apart:
 a database nobody has opened since the node started was never in memory, and one that idle eviction
 reclaimed is the eviction policy doing its job. Neither is coloured as a warning.
 
 Selecting a row reads that database's relations, and that is the one action on the page with an
-effect: reading relations opens a descriptor, so a not-loaded database becomes loaded. It is driven
-by a click rather than a timer for exactly that reason — on a schedule it would keep every database
+effect: reading relations opens a descriptor, so a not-loaded database becomes loaded. For that
+reason a click drives it and no timer does: on a schedule it would keep every database
 an operator can see in memory for as long as the browser tab stayed open, and idle eviction would
 never reclaim one.
 
@@ -47,14 +47,14 @@ password for the same short-lived token `/login` issues, and stores it in a cook
 so another site cannot cause it to be sent; and always `Secure`. It expires when the token does.
 Sign out revokes the token and clears the cookie.
 
-The `__Host-` prefix makes the browser enforce three properties rather than trusting the server to
-assert them: the cookie must be `Secure`, must have `Path=/`, and must name no `Domain`. The last one
+The `__Host-` prefix makes the browser enforce three properties that the server would otherwise only
+assert: the cookie must be `Secure`, must have `Path=/`, and must name no `Domain`. The last one
 also stops another host on the same registrable domain from writing a cookie this one would read.
 
-**The dashboard therefore needs HTTPS, or loopback.** `Secure` is set unconditionally, not from
-whether this particular connection was TLS. Behind a proxy that terminates TLS, the inbound hop is
+**The dashboard therefore needs HTTPS, or loopback.** `Secure` is always set, whether or not
+this particular connection was TLS. Behind a proxy that terminates TLS, the inbound hop is
 plaintext even though the browser connected over HTTPS, and reading the flag off that hop dropped it
-in exactly the deployment that needed it. Setting it always is also what removes any need to trust an
+in exactly the deployment that needed it. Setting it always also removes any need to trust an
 `X-Forwarded-Proto` header, which the server cannot verify. Browsers treat loopback as a secure
 context, so local development is unaffected; a plaintext connection to a remote address cannot hold
 the cookie, and sign-in there will not work.
@@ -73,7 +73,7 @@ the browser will refuse it.
 
 The cookie authenticates the dashboard's pages and its `/v1/dashboard/` endpoints, and nothing else.
 Every other route — `/execute-sql-non-query`, `/insert`, `/start-transaction` and the rest — still
-requires the bearer token in an `Authorization` header. That is what keeps a write route out of reach
+requires the bearer token in an `Authorization` header. That keeps a write route out of reach
 of a cross-site request: a browser attaches a cookie by itself, but never a header.
 
 **With authentication disabled** there is no principal to check any panel against, so the dashboard
@@ -84,11 +84,11 @@ the setting to turn on. To reach the dashboard from another machine, enable auth
 
 The card is empty on a node that has had nothing slow **and** on a node that is not recording at all,
 so it says which. With [the slow query log](slow-query-log.md) switched off it shows one line telling
-you to turn it on, rather than an empty table you would read as a healthy node.
+you to turn it on, because an empty table would read as a healthy node.
 
 Two flags carry most of the value. **Full scan** means the plan read a whole relation instead of
 seeking an index. **Spilled** means a sort, grouping, distinct or join outgrew its memory budget and
-wrote to disk. Together with rows read against rows returned they usually answer "why was this slow"
+wrote to disk. Together with rows read against rows returned they usually explain a slow statement
 without a second run.
 
 Statement text is clipped to fit the cell; the full text is the tooltip, and all of it is in
@@ -143,8 +143,8 @@ for a picture of the fleet.
 subtracting two readings, so a rate appears one refresh after the page loads, and a restart starts
 every rate again from nothing.
 
-**The Engine card is empty when `engine_metrics_enabled` is false.** The card says so rather than
-showing an empty table. Turning it back on needs a restart.
+**The Engine card is empty when `engine_metrics_enabled` is false.** The card says so in place of
+an empty table. Turning it back on needs a restart.
 
 **The Slow queries card is empty when `slow_query_log_enabled` is false**, and it says so for the
 same reason. Turning it on needs a restart. The log lives in memory, holds a bounded sample, and does

@@ -92,7 +92,7 @@ A `%` inside a string, such as a `LIKE` pattern, is not an operator.
 
 ## NULL operands
 
-A `NULL` operand gives `NULL` for every arithmetic operator, not only for `%`:
+A `NULL` operand gives `NULL` for every arithmetic operator:
 
 ```sql
 SELECT NULL + 1;      -- NULL
@@ -276,7 +276,7 @@ SELECT id FROM items WHERE flags & 4 = 4;
 
 - A `NULL` operand gives `NULL`.
 - `>>` is an arithmetic shift. It keeps the sign, so `-16 >> 2` is `-4`.
-- A shift uses only the low six bits of the count. Thus the count is taken modulo 64:
+- A shift uses only the low six bits of the count. So the count is taken modulo 64:
   `1 << 64` is `1`, and `1 << -1` is the smallest `int64`. PostgreSQL gives the same results on
   x86-64 and ARM64.
 - Two `bytes` operands of different lengths are an error, as for PostgreSQL `bit` strings.
@@ -285,7 +285,7 @@ SELECT id FROM items WHERE flags & 4 = 4;
 - `#` is XOR, as in PostgreSQL. `^` is [power](#power-), also as in PostgreSQL, and not XOR as in
   MySQL and GoogleSQL.
 - `#-` with no space between the two characters is the jsonb delete-path operator, as in PostgreSQL
-  (see [json.md](json.md#lexer-notes)). `x #-1` is therefore not `x XOR -1`; write `x # -1`.
+  (see [json.md](json.md#lexer-notes)). So `x #-1` does not mean `x XOR -1`; write `x # -1`.
 
 ### Power `^`
 
@@ -297,7 +297,7 @@ SELECT 2 ^ 10;             -- 1024
 SELECT id FROM points WHERE x ^ 2 + y ^ 2 < 100;
 ```
 
-The precedence and the grouping are those of PostgreSQL, and they are not those of mathematics:
+The precedence and the grouping are those of PostgreSQL, which differ from those of mathematics:
 
 | Expression | Value | Why |
 |------------|-------|-----|
@@ -308,12 +308,12 @@ The precedence and the grouping are those of PostgreSQL, and they are not those 
 Write `-(2 ^ 2)` for `-4`, and `2 ^ (3 ^ 2)` for `512`.
 
 A `NULL` operand gives `NULL`. For the errors and the special values, see
-[Non-finite and out-of-range floats](data-types.md).
+[Non-finite and out-of-range floats](data-types.md#float-values-infinity-nan-and-overflow).
 
 ### Prefix `~` and regex match `~`
 
 `~` has two meanings. Where an operand starts, `~` is bitwise NOT. After an operand, `~` is the
-regex match. Thus `name ~ '^A'` is a regex match, `~flags` is a bitwise NOT, and `a ~ ~b` is a regex
+regex match. So `name ~ '^A'` is a regex match, `~flags` is a bitwise NOT, and `a ~ ~b` is a regex
 match of `a` against `~b`.
 
 Prefix `~` binds as tightly as unary minus, so `~a + 1` is `(~a) + 1`. This is the C and MySQL
@@ -358,7 +358,7 @@ SELECT TRUE = 1 NOT IN (2);  -- true, that is TRUE = (1 NOT IN (2))
 SELECT NOT 1 + 1 IS NULL;    -- true, that is NOT ((1 + 1) IS NULL)
 ```
 
-`||` and the bitwise operators share one level, as in PostgreSQL. Thus `6 | 1 & 3` is `(6 | 1) & 3`.
+`||` and the bitwise operators share one level, as in PostgreSQL. So `6 | 1 & 3` is `(6 | 1) & 3`.
 In C, `&` binds tighter than `|`, and the result is 7.
 
 ### No chain

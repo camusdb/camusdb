@@ -80,6 +80,7 @@ public static class CompactRowEncoder
             ColumnType.Numeric   => value.NumericValue,
             ColumnType.Jsonb     => JsonbJsonWriter.ToElement(JsonbDocument.Item(value.BytesValue)),
             ColumnType.Array     => EncodeArray(value),
+            ColumnType.Interval  => IntervalMath.FormatIso(value.IntervalParts),
             _                    => null,
         };
     }

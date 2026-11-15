@@ -22,6 +22,8 @@ namespace CamusDB.Core.CommandsExecutor.Models;
 /// <item>Uuid and Numeric hash both 64-bit halves. With the low half only, values that differ in the
 ///   high half share one bucket.</item>
 /// <item>An array hashes its count and each element, and a NULL element hashes as its type only.</item>
+/// <item>Interval hashes its comparison total (<see cref="IntervalMath.ComparisonKey"/>), so '1 month'
+///   and '30 days', which compare equal, share a bucket.</item>
 /// <item>Jsonb hashes the document by value (<see cref="JsonbDocument.AddHash"/>): numbers with
 ///   trailing fraction zeros hash as the number without them, so 1.0 and 1 share a bucket.</item>
 /// </list>
@@ -116,6 +118,10 @@ internal static class ColumnValueHash
             case ColumnType.Numeric:
                 hash.Add(value.UuidHigh);
                 hash.Add(value.LongValue);
+                break;
+
+            case ColumnType.Interval:
+                hash.Add(IntervalMath.ComparisonKey(value.IntervalParts));
                 break;
         }
     }

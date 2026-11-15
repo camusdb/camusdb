@@ -12,19 +12,18 @@ sets `kahuna.max_concurrent_sessions`. Read §4 before you do.
 ## 1. What it does, and what it does not
 
 Priority decides **which queued transaction starts next** when the node is at its configured ceiling.
-That is the whole feature. Three consequences are worth stating plainly, because each of them
-surprises people:
+It has no other effect. Three consequences follow:
 
-- **It orders starts, not execution.** Once a transaction is admitted it competes for CPU, I/O, and
+- **It orders starts only.** Once a transaction is admitted it competes for CPU, I/O, and
   locks exactly like any other. Nothing is preempted, throttled, or descheduled. For a long-running
-  statement, priority decides one instant and nothing after it.
+  statement, priority decides only when it starts.
 - **It does not affect lock conflicts.** A `Background` transaction holding an exclusive lock blocks a
-  `Critical` one just as hard as a `Normal` one would. Isolation, 2PC, and commit semantics are
-  completely untouched.
+  `Critical` one exactly as a `Normal` one would. Isolation, 2PC, and commit semantics do not
+  change.
 - **It is per node.** Each node orders only the work it receives. There is no cluster-wide fairness.
 
-If your goal is to stop background work from *consuming* resources — rather than to decide who starts
-first under contention — priority is the wrong lever. Rate limiting is the right one; see §5.
+Priority does not stop background work from *consuming* resources. Use rate limiting for that;
+see §5.
 
 ## 2. The scale
 
@@ -38,7 +37,7 @@ first under contention — priority is the wrong lever. Rate limiting is the rig
 
 Don't tag ordinary application traffic `Critical`. If everything is critical, the ordering carries no
 information — and `Critical` can claim reserved capacity, so over-using it destroys the reserve that
-makes the setting useful in the first place.
+makes the setting useful.
 
 ## 3. Setting a priority
 
@@ -56,8 +55,8 @@ combined with `SET TRANSACTION LOCKING` and `SET TRANSACTION ISOLATION LEVEL`, i
 as all of them precede the first data statement.
 
 Priority is consumed when the coordinator session opens, so it cannot be changed after the
-transaction's first statement — `SET TRANSACTION PRIORITY` after that point is rejected rather than
-silently ignored.
+transaction's first statement. `SET TRANSACTION PRIORITY` after that point is rejected with an
+error.
 
 **HTTP** — a `priority` field on `/start-transaction` and on the `execute-sql-*` endpoints:
 
@@ -80,7 +79,7 @@ Precedence: `SET TRANSACTION PRIORITY` → per-request field → `default_transa
 
 ## 4. Turning the gate on
 
-This is the part to be careful with. All the settings live under `kahuna:` in `config.yml`:
+Configure the gate with care. All the settings live under `kahuna:` in `config.yml`:
 
 ```yml
 kahuna:
@@ -114,10 +113,10 @@ common case. A reserve at or above the ceiling is rejected at startup.
 A waiter's effective priority rises one level per `transaction_priority_aging_threshold` of waiting,
 so low-priority work cannot starve forever. At the 1 000 ms default, a `Background` transaction
 reaches `High` after roughly **three seconds** of waiting. `Background` is therefore a *soft* yield
-measured in seconds, not a "runs only when the node is idle" class.
+measured in seconds. It does not wait for the node to be idle.
 
-Raise the threshold (tens of seconds) to make background work genuinely patient. It is a single
-global rate, so raising it also lengthens the worst-case wait for a genuinely starved ordinary
+Raise the threshold (tens of seconds) to make background work wait longer. It is a single
+global rate, so raising it also lengthens the worst-case wait for a starved ordinary
 transaction. Setting it to `0` disables aging and permits indefinite starvation.
 
 ### How long a transaction waits at the door
@@ -134,10 +133,10 @@ kahuna:
   max_admission_wait_ms: 30000            # hard clamp on any caller-supplied budget
 ```
 
-This is deliberately **not** the transaction lifetime. `max_serializable_transaction_lifetime_ms`
+This budget is separate from the transaction lifetime. `max_serializable_transaction_lifetime_ms`
 (one hour by default) bounds how long an *admitted* transaction may live and doubles as the
 abandoned-session reaper window; the budget above bounds how long an *unadmitted* one waits to begin.
-A transaction meant to run for an hour is not thereby willing to wait an hour to start, and a long
+A transaction meant to run for an hour is not meant to wait an hour to start, and a long
 door-wait makes a saturated node hold requests open instead of shedding them.
 
 Keep the budget short — seconds. Lengthening it does not increase throughput; it only converts a
@@ -151,9 +150,9 @@ uses rate limiting and load-reactive backoff, which work with the gate off:
 
 - `auto_analyze_max_rows_per_second` — caps the background statistics scan's row rate.
 - `auto_analyze_load_pause_threshold` — pauses or cancels a background analyze when in-flight
-  foreground transactions exceed a threshold, re-checked mid-scan rather than only at start.
+  foreground transactions exceed a threshold, re-checked during the scan as well as at start.
 
-Note that the auto-analyze **scan** is not admission-gated at all: it runs on a zero-identity snapshot
+The auto-analyze **scan** is not admission-gated: it runs on a zero-identity snapshot
 with no coordinator session, so no ceiling applies to it. Only its brief statistics-publish write
 passes through the gate. The same is true of any read-committed autocommit `SELECT` — those hold no
 session and are never deferred.
@@ -176,6 +175,6 @@ The Kahuna node exposes admission gauges under `kahuna.tx_admission.*`, tagged b
 `in_flight`, `queued`, `max_queue_depth`, `admitted`, `aged_promotions`, `abandoned_while_waiting`,
 and `rejected_queue_full`.
 
-`queued` is the headline: zero means the gate is transparent and your ceiling is not binding.
+Watch `queued` first: zero means the gate is transparent and your ceiling is not binding.
 Sustained non-zero at `High`/`Critical` means the ceiling is too low for the offered load, or that a
 reserve is warranted.

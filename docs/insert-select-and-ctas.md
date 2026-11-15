@@ -1,6 +1,6 @@
 # `INSERT INTO … SELECT` and `CREATE TABLE … AS SELECT`
 
-Two statements that let a query, rather than a client, supply rows.
+Two statements that take their rows from a query.
 
 ```sql
 -- Copy rows between tables
@@ -64,8 +64,8 @@ this statement is bounded by that. A larger copy fails with `CADB0506`; split it
 
 ### Concurrent writers on the source
 
-What the source scan does about a concurrent writer of the source table is decided by the
-transaction's isolation level and locking mode, not by the statement:
+The transaction's isolation level and locking mode decide what the source scan does about a
+concurrent writer of the source table. The statement has no part in it:
 
 - **Serializable.** The source scan decides what is written, so it holds an **exclusive range lock**
   over the range it scanned for the rest of the transaction, exactly as an `UPDATE`'s locate scan
@@ -76,7 +76,7 @@ transaction's isolation level and locking mode, not by the statement:
   permits, and a writer that changes a source row afterwards does not affect the commit.
 - **Optimistic locking, at either level.** Every key the scan *visits* becomes a commit dependency,
   and the commit is refused with `CADB0502` if any of them was rewritten by a transaction that
-  committed in the meantime. This is stricter than it may look. The dependency is on the row, so a
+  committed in the meantime. The dependency is on the row, so a
   write to a column the copy never reads counts. It covers every row the scan passed over, including
   rows the `WHERE` clause rejected, because the filter runs after the store returned the page: a full
   scan of a 20,000-row table that copies 5,000 of them depends on all 20,000. And a long copy is
@@ -111,7 +111,7 @@ A query result has no key of its own, and every CamusDB table needs one, so a ke
 a leading `id oid NOT NULL DEFAULT gen_id()` column that the source does not fill. If the query
 already outputs a column called `id`, the synthesized one becomes `id2` (then `id3`, …).
 
-A projected column is never reused as the key: a projection is under no obligation to be unique — a
+A projected column is never reused as the key: a projection need not be unique — a
 join or a non-distinct projection repeats values — and the copy would fail partway with a duplicate
 key.
 
@@ -174,7 +174,7 @@ it in an incident:
 - **A dropped and recreated table is unreachable.** It has a different internal id, so its old rows
   are not part of the new table's history.
 - **Retention bounds how far back you can go.** Time travel only reaches revisions Kahuna still
-  retains. A snapshot older than that reads as *empty* rather than failing — so a recovery that
+  retains. A snapshot older than that reads as *empty* and does not fail, so a recovery that
   returns no rows is logged with a warning saying the history may already have been reclaimed.
 
 While a copy runs, the engine pins the revision floor at the requested snapshot so reclamation cannot
@@ -184,7 +184,7 @@ revisions already gone before it started.
 ## What the response tells you
 
 Both statements report the number of rows written, and both flag a time-travel copy that read
-nothing — the warning reaches the client, not just the server log, so an empty recovery cannot be
+nothing — the warning reaches the client as well as the server log, so an empty recovery cannot be
 mistaken for a successful one.
 
 `POST /execute-sql-ddl` (CTAS) and `POST /execute-sql-non-query` (`INSERT … SELECT`):

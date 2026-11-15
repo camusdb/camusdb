@@ -50,8 +50,7 @@ Each operator accumulates rows in memory up to two caps: `SpillThresholdRows` ro
 `SpillThresholdBytes` estimated bytes. When the buffer reaches either cap, the operator serializes
 its current buffer to a spill file and continues. A sort writes each buffer as a **sorted run**; the
 other operators write partitions or a single overflow file depending on their strategy. The caps
-apply **per operator instance**, not globally — two operators in the same query each get their own
-budget.
+apply **per operator instance**: two operators in the same query each get their own budget.
 
 The byte cap exists because a row count does not bound the heap. Ten thousand narrow rows and ten
 thousand rows that each hold a 64 KiB string differ by three orders of magnitude. The bytes are an
@@ -94,7 +93,7 @@ for the pathological case of a single over-represented key.
 
 ### GROUP BY and DISTINCT
 
-`GROUP BY` and `DISTINCT` count **distinct keys**, not input rows. A million rows that collapse into
+`GROUP BY` and `DISTINCT` count **distinct keys**. A million input rows that collapse into
 three groups or three distinct tuples hold three entries in memory and never spill. Below the
 threshold, `DISTINCT` returns each new tuple the moment it first arrives, in first-seen order, so a
 `LIMIT` stops the scan early — exactly as with spill off.
@@ -200,8 +199,8 @@ not change.
 ### CADB0507
 
 If an operator needs to spill but the temp store is unwritable (permissions, a full disk, a
-missing data directory), it raises **CADB0507** (`SpillStorageUnavailable`) rather than silently
-falling back to unbounded memory. The failure is surfaced to the caller instead of risking the OOM
+missing data directory), it raises **CADB0507** (`SpillStorageUnavailable`) and the caller sees
+the failure. The operator does not fall back to unbounded memory, because that risks the OOM
 the feature exists to prevent. CADB0507 is **not retryable** — retrying cannot make the temp store
 writable; the underlying storage problem must be fixed.
 
@@ -218,7 +217,7 @@ other queries release their spill files or when disk space is freed.
 
 With `SpillEnabled` off, this does not apply — behavior is unchanged from a build without spill.
 
-- **The caps are per operator, not per statement.** A statement with several retaining operators,
+- **The caps are per operator. A statement has no cap of its own.** A statement with several retaining operators,
   and several statements at once, can hold a multiple of `SpillThresholdBytes`.
 - **Some state is not charged.** `GROUP BY` charges a group when it admits it. An aggregate whose
   state grows inside one group (a `MIN` or `MAX` over strings) is charged at its starting size only.
@@ -235,11 +234,11 @@ With `SpillEnabled` off, this does not apply — behavior is unchanged from a bu
 
 - **Off is byte-identical.** With `SpillEnabled = false`, and with it on but under threshold, each
   operator keeps its exact original in-memory path. Spill is purely additive.
-- **Correctness over cleverness.** `GROUP BY` never writes or merges partial accumulators. The
+- **Correctness first.** `GROUP BY` never writes or merges partial accumulators. The
   accumulators built before the overflow stay in memory and move with their partition, and only the
   rows that arrive after the overflow go to disk, so each group is accumulated once, in input order.
   The hash join re-scans its build side on overflow. That costs extra I/O on the rare overflow path
   in exchange for a simpler, obviously-correct implementation.
-- **Fail loud, never silent.** The cardinal rule is that a required spill which cannot be performed
-  is an error (CADB0507, CADB0549 or CADB0536), not a quiet return to unbounded buffering.
+- **Fail loud.** A required spill that cannot be performed is an error (CADB0507, CADB0549 or
+  CADB0536). The operator never returns quietly to unbounded buffering.
 

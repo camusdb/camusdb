@@ -305,7 +305,9 @@ internal abstract class SQLExecutorBaseCreator
     /// (<c>'Infinity' + 1</c> is infinity). Non-numeric operands are rejected rather than silently
     /// coerced — mixed-type comparison lives in <see cref="CompareValues"/>, which has different
     /// (ordering) semantics. Division by a zero of any type raises an error instead of yielding IEEE
-    /// infinity/NaN.
+    /// infinity/NaN. The exceptions to the numeric rule are dates, datetimes and intervals
+    /// (<c>date ± int64</c>, <c>datetime ± interval</c>, <c>datetime - datetime</c>, <c>interval * n</c>
+    /// and the rest of the PostgreSQL table), through <see cref="TemporalArithmetic"/>.
     /// <para>A NULL operand gives NULL, as in <c>mod</c> and standard SQL. The NULL check runs before
     /// the type check, because NULL is not numeric and the type check would otherwise turn every NULL
     /// row into a query error. It also runs before the division-by-zero check, so <c>NULL / 0</c> is
@@ -319,6 +321,10 @@ internal abstract class SQLExecutorBaseCreator
         // `jsonb - text | integer | text[]` removes keys or an element; it is not arithmetic.
         if (op == NodeType.ExprSub && left.Type == ColumnType.Jsonb)
             return JsonbScalarFunctions.Delete(left, right);
+
+        // `date ± int64` and `date - date` count days.
+        if (TemporalArithmetic.TemporalResultType(op, left.Type, right.Type) is not null)
+            return TemporalArithmetic.Evaluate(op, left, right);
 
         if (MixedNumericComparison.ArithmeticResultType(left.Type, right.Type) is not { } resultType)
             throw new CamusDBException(
@@ -406,6 +412,10 @@ internal abstract class SQLExecutorBaseCreator
             case ColumnType.Numeric:
                 // The range is symmetric, so a negated NUMERIC always fits.
                 return ColumnValue.FromNumeric(NumericMath.Negate(value.NumericUnscaled));
+
+            // Each part changes sign; a part at its minimum is "interval out of range".
+            case ColumnType.Interval:
+                return TemporalArithmetic.Negate(value);
 
             default:
                 throw new CamusDBException(

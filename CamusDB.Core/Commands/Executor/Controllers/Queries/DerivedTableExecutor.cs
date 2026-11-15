@@ -98,9 +98,70 @@ internal sealed class DerivedTableExecutor
     {
         IAsyncEnumerable<QueryResultRow> cursor;
 
+        // A CTE that the statement computes once: the first reader keeps its rows, and every reader
+        // reads them. A statement that opened no entry for it runs it here, as an inlined CTE.
+        if (source.Source.ComputedOnce is { } marker
+            && await ComputedOnceRows.GetOrComputeAsync(
+                    outerTicket.TxnState, marker, () => KeepAsync(database, source, outerTicket)).ConfigureAwait(false) is { } kept)
+        {
+            cursor = kept.EnumerateAsync(outerTicket.CancellationToken);
+        }
+        else
+        {
+            cursor = Produce(database, source, outerTicket, stats, windowStats);
+        }
+
+        // A cell can carry a narrower numeric type than its column declares (COALESCE(p, 0) gives an
+        // INT64 zero for a NULL NUMERIC p). The outer join plans its key strategy from the declared
+        // types, so every cell is widened to that type here, before any consumer reads it. A set
+        // operation has already widened its cells, so for it this check finds nothing to change.
+        (string RowKey, ColumnType Type)[] numericColumns = NumericWidening.NumericColumns(source.Columns);
+
+        await foreach (QueryResultRow scanned in cursor.ConfigureAwait(false))
+        {
+            QueryResultRow row = numericColumns.Length == 0
+                ? scanned
+                : NumericWidening.WidenToDeclaredTypes(scanned, numericColumns);
+
+            if (executionFilter is not null)
+            {
+                IReadOnlyDictionary<string, ColumnValue> evalRow = outerTicket.RowNameResolver is { } resolver
+                                                         && resolver.UsesQualifiedRowKeys()
+                    ? QueryRowMerger.QualifyRow(row.Row, source.Alias)
+                    : row.Row;
+
+                if (!await queryFilterer
+                        .MeetWhereAsync(executionFilter, evalRow, outerTicket, database)
+                        .ConfigureAwait(false))
+                {
+                    continue;
+                }
+            }
+
+            yield return row;
+        }
+    }
+
+    /// <summary>
+    /// The rows of the derived table's query, before the numeric widening and the filter of the reader:
+    /// a set operation, or the inner query with its key renames and its window operator.
+    /// </summary>
+    private IAsyncEnumerable<QueryResultRow> Produce(
+        DatabaseDescriptor database,
+        BoundDerivedTableSource source,
+        QueryTicket outerTicket,
+        SetOperationStats? stats,
+        WindowStats? windowStats)
+    {
+        IAsyncEnumerable<QueryResultRow> cursor;
+
         if (source.SetOperation is { } setOperation)
         {
             cursor = setOperationExecutor.Execute(database, setOperation, outerTicket, stats);
+
+            // A column-alias list over a set operation renames the cells of its rows.
+            if (source.InnerRowKeys is { } setRenames)
+                cursor = RenameInnerRowKeys(cursor, setRenames);
         }
         else
         {
@@ -147,35 +208,34 @@ internal sealed class DerivedTableExecutor
                     outerTicket.CancellationToken);
         }
 
-        // A cell can carry a narrower numeric type than its column declares (COALESCE(p, 0) gives an
-        // INT64 zero for a NULL NUMERIC p). The outer join plans its key strategy from the declared
-        // types, so every cell is widened to that type here, before any consumer reads it. A set
-        // operation has already widened its cells, so for it this check finds nothing to change.
-        (string RowKey, ColumnType Type)[] numericColumns = NumericWidening.NumericColumns(source.Columns);
+        return cursor;
+    }
 
-        await foreach (QueryResultRow scanned in cursor.ConfigureAwait(false))
+    /// <summary>
+    /// Runs the query of a CTE that the statement computes once into a list that
+    /// <see cref="ComputedOnceRows"/> keeps for the statement. No reader's filter applies here: every
+    /// reader filters the kept rows itself. When the run throws, the list and its spill file are
+    /// disposed here.
+    /// </summary>
+    private async Task<SpillableRowList> KeepAsync(DatabaseDescriptor database, BoundDerivedTableSource source, QueryTicket outerTicket)
+    {
+        SpillableRowList rows = new(QueryExecutionContext.For(database, outerTicket));
+
+        try
         {
-            QueryResultRow row = numericColumns.Length == 0
-                ? scanned
-                : NumericWidening.WidenToDeclaredTypes(scanned, numericColumns);
+            await foreach (QueryResultRow row in Produce(database, source, outerTicket, stats: null, windowStats: null)
+                               .WithCancellation(outerTicket.CancellationToken).ConfigureAwait(false))
+                await rows.AddAsync(row).ConfigureAwait(false);
 
-            if (executionFilter is not null)
-            {
-                IReadOnlyDictionary<string, ColumnValue> evalRow = outerTicket.RowNameResolver is { } resolver
-                                                         && resolver.UsesQualifiedRowKeys()
-                    ? QueryRowMerger.QualifyRow(row.Row, source.Alias)
-                    : row.Row;
-
-                if (!await queryFilterer
-                        .MeetWhereAsync(executionFilter, evalRow, outerTicket, database)
-                        .ConfigureAwait(false))
-                {
-                    continue;
-                }
-            }
-
-            yield return row;
+            await rows.SealAsync().ConfigureAwait(false);
         }
+        catch
+        {
+            await rows.DisposeAsync().ConfigureAwait(false);
+            throw;
+        }
+
+        return rows;
     }
 
     /// <summary>

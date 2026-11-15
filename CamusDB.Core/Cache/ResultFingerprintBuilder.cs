@@ -244,6 +244,12 @@ public static class ResultFingerprintBuilder
                 sb.Append("nu:").Append(((ulong)v.UuidHigh).ToString("x16", CultureInfo.InvariantCulture))
                   .Append(((ulong)v.LongValue).ToString("x16", CultureInfo.InvariantCulture));
                 break;
+            case ColumnType.Interval:
+                // The three parts, not the comparison total: '1 month' and '30 days' compare equal but
+                // print differently, so they must fingerprint differently.
+                sb.Append("iv:").Append(((ulong)v.UuidHigh).ToString("x16", CultureInfo.InvariantCulture))
+                  .Append(((ulong)v.LongValue).ToString("x16", CultureInfo.InvariantCulture));
+                break;
             case ColumnType.Array:
                 // Each element is recursively injection-safe; the element count removes the
                 // ambiguity that would otherwise arise from comma-separated variable-length elements.

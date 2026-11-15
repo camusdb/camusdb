@@ -290,7 +290,7 @@ operators — `estimated_rows` / `estimated_cost` are `NULL` — but they surfac
 | `plan-info` | When the plan carries a shape id (plan-cache metadata) | `shape=<id>, schema-deps=[table@version, ...]` |
 | `cache`     | When the query carries a `{cache=…}` (or `@{cache=…}`) result-cache hint | `family=<name>, eligible=<true\|false>[, reason=<why>], ttl=<n>ms\|default, strict=<true\|false>` |
 
-The `cache` row answers **"will this result be cached?"** as a static plan property — it does
+The `cache` row reports **whether this result will be cached**, as a static plan property. It does
 **not** probe the cache or reveal whether a live entry currently exists (that is inherently racy;
 the authoritative run-time outcome is in the query response's `cacheStatus`). `eligible=true` means
 the query is a cacheable shape and the feature is on. `eligible=false` names why the hint will be

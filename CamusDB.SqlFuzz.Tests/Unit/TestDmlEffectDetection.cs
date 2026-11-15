@@ -223,6 +223,42 @@ internal sealed class TestDmlEffectDetection
                 o.Rows.Append([new ColumnValue(ColumnType.Integer64, 99L), new ColumnValue(ColumnType.Integer64, 9L), new ColumnValue(ColumnType.String, "z")]).ToList())),
             "dml:effect:delete");
 
+    private static ColumnExpr U(string column) => new("u", column, column == "c2" ? FuzzType.String : FuzzType.Int64);
+
+    private static ColumnExpr A0(string column) => new("a0", column, column == "c2" ? FuzzType.String : FuzzType.Int64);
+
+    private static BinaryExpr Eq(Expr left, Expr right) => new(BinaryOp.Eq, left, right, FuzzType.Bool);
+
+    [Test]
+    public Task AnUpdateFromThatDidNotApplyTheJoinedValueIsAFinding() =>
+        // Row 2 takes c2 of row 1 and row 3 takes c2 of row 2; the fault keeps the old c2 of row 2.
+        AssertDetects(
+            () => new WriteCheck(new UpdateStmt("tf", [new Assignment("c2", A0("c2"))],
+                Eq(U("c0"), new BinaryExpr(BinaryOp.Add, A0("c0"), I(1), FuzzType.Int64)), "u", new TableRef("tf", "a0")), Schema()),
+            AfterWrite(sql => sql.StartsWith("UPDATE", StringComparison.Ordinal), o => WithCell(o, 2, 2, new ColumnValue(ColumnType.String, "b"))),
+            "dml:effect:update-from");
+
+    [Test]
+    public Task AnUpdateFromThatChangedARowMatchedTwiceIsAFinding() =>
+        // Row 1 matches the three rows of the list. The engine refuses the statement and changes nothing,
+        // which passes; the fault turns the refusal into a success.
+        AssertDetects(
+            () => new WriteCheck(new UpdateStmt("tf", [new Assignment("c2", A0("c2"))],
+                new BinaryExpr(BinaryOp.And, Eq(U("c0"), I(1)), new BinaryExpr(BinaryOp.Ge, A0("c0"), I(1), FuzzType.Bool), FuzzType.Bool),
+                "u", new TableRef("tf", "a0")), Schema()),
+            () => (sql, o) => sql.StartsWith("UPDATE", StringComparison.Ordinal) && !o.IsSuccess ? StatementOutcome.FromAffected(sql, 1) : null,
+            "dml:effect:update-from");
+
+    [Test]
+    public Task ADeleteUsingThatCountedARowOnceForEachMatchIsAFinding() =>
+        // Row 1 matches the three rows of the list and is deleted once; the fault reports three rows.
+        AssertDetects(
+            () => new WriteCheck(new DeleteStmt("tf",
+                new BinaryExpr(BinaryOp.And, Eq(U("c0"), I(1)), new BinaryExpr(BinaryOp.Ge, A0("c0"), I(1), FuzzType.Bool), FuzzType.Bool),
+                "u", new TableRef("tf", "a0")), Schema()),
+            () => (sql, o) => sql.StartsWith("DELETE", StringComparison.Ordinal) && o.Kind == OutcomeKind.Affected ? StatementOutcome.FromAffected(sql, 3) : null,
+            "dml:effect:delete-using");
+
     [Test]
     public Task AWrongEffectInsideACommittedTransactionIsAFinding() =>
         AssertDetects(

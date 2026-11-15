@@ -103,6 +103,7 @@ TTypeGuid       (G|g)(U|u)(I|i)(D|d)
 TTypeNumeric    (N|n)(U|u)(M|m)(E|e)(R|r)(I|i)(C|c)
 TTypeDecimal    (D|d)(E|e)(C|c)(I|i)(M|m)(A|a)(L|l)
 TTypeArray      (A|a)(R|r)(R|r)(A|a)(Y|y)
+TInterval       (I|i)(N|n)(T|t)(E|e)(R|r)(V|v)(A|a)(L|l)
 TCast           (C|c)(A|a)(S|s)(T|t)
 TCase           (C|c)(A|a)(S|s)(E|e)
 TWhen           (W|w)(H|h)(E|e)(N|n)
@@ -121,6 +122,7 @@ TDeferrable     (D|d)(E|e)(F|f)(E|e)(R|r)(R|r)(A|a)(B|b)(L|l)(E|e)
 TInitially      (I|i)(N|n)(I|i)(T|t)(I|i)(A|a)(L|l)(L|l)(Y|y)
 TNoAction       (N|n)(O|o)[ \t\r\n]+(A|a)(C|c)(T|t)(I|i)(O|o)(N|n)
 TReturning      (R|r)(E|e)(T|t)(U|u)(R|r)(N|n)(I|i)(N|n)(G|g)
+TUsing          (U|u)(S|s)(I|i)(N|n)(G|g)
 TExplain        (E|e)(X|x)(P|p)(L|l)(A|a)(I|i)(N|n)
 TBegin          (B|b)(E|e)(G|g)(I|i)(N|n)
 TStart          (S|s)(T|t)(A|a)(R|r)(T|t)
@@ -463,6 +465,11 @@ TSequence       (S|s)(E|e)(Q|q)(U|u)(E|e)(N|n)(C|c)(E|e)
 
 {TTypeArray} { return (int)Token.TTYPE_ARRAY; }
 
+/* INTERVAL is a keyword only before its literal: a quote, a digit or a parameter. Anywhere else the word is
+   an identifier, so a column named interval keeps working, as in PostgreSQL. The trailing context makes
+   this rule longer than {Identifier}, so it wins. */
+{TInterval}/[ \t\r\n]*['0-9@] { return (int)Token.TINTERVAL; }
+
 {TCast} { return (int)Token.TCAST; }
 
 {TCase} { return (int)Token.TCASE; }
@@ -498,6 +505,10 @@ TSequence       (S|s)(E|e)(Q|q)(U|u)(E|e)(N|n)(C|c)(E|e)
 {TNoAction} { return (int)Token.TNOACTION; }
 
 {TReturning} { return (int)Token.TRETURNING; }
+
+/* USING is reserved, as in PostgreSQL: after the target of DELETE FROM a plain word could be the
+   alias of the target or the start of the USING list, and one token of lookahead cannot tell them apart. */
+{TUsing} { return (int)Token.TUSING; }
 
 {TAt} { return (int)Token.TAT; }
 

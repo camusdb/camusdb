@@ -29,6 +29,7 @@ and reserved keywords.
 | `bytes` | opaque byte string | yes | Length-bounded (default 10 MB). |
 | `array(T)` | ordered list of `T` | **no** | `T` is a scalar type; see [Arrays](#arrays). |
 | `jsonb` | JSON document, binary (canonical CBOR) | GIN only | PostgreSQL operators and functions. No ordered index, primary key, `UNIQUE` or foreign key. See [json.md](json.md). |
+| `interval` | months, days and microseconds | not stored | A value of an expression only: no table column can have this type. A client receives it as a string. See [Intervals](#intervals). |
 
 ### Aliases
 
@@ -199,9 +200,9 @@ SELECT * FROM readings WHERE v = CAST('Infinity' AS float64);
 A result from finite values that a float cannot hold fails with `CADB0421`
 (`FloatValueOutOfRange`): HTTP 400, gRPC `OUT_OF_RANGE`. It never becomes an infinity or a zero.
 
-- An *overflow* is a result too large for the type: `1e308 * 10`, `pow(10, 400)`, `exp(1000)`, the literal `1e400`,
+- An *overflow* is a result too large for the type: `1e308 * 10`, `pow(10, 400)`, `exp(1000)`, `degrees(1e308)`, the literal `1e400`,
   `CAST('1e400' AS float64)`, or a `SUM` or `AVG` total past the range.
-- An *underflow* is a nonzero result too small for the type: `1e-300 * 1e-300`, `pow(10, -400)`, `exp(-1000)`, or
+- An *underflow* is a nonzero result too small for the type: `1e-300 * 1e-300`, `pow(10, -400)`, `exp(-1000)`, `radians(5e-324)`, or
   the literal `1E-400`. A literal or a text with a zero mantissa, such as `0e-400`, is zero.
 - A subnormal result is a value, not an underflow: `4e-320` is stored as it is.
 - A `float64` value written to a `float32` column, or cast to `float32`, fails when it is past the
@@ -214,8 +215,13 @@ A result from finite values that a float cannot hold fails with `CADB0421`
 
 These operations have no real result and fail with `CADB0400`: `x / 0` for every `x`, `pow(0, y)` for
 a negative `y`, `pow(x, y)` for a negative `x` and a finite non-integer `y`, `sqrt` of a negative
-number, `ln`, `log` and `log10` of zero or of a negative number, `log(1, x)`, and `sign(NaN)`. `round(x, n)` and `trunc(x, n)` accept any scale and never turn a finite
+number, `ln`, `log` and `log10` of zero or of a negative number, `log(1, x)`, `sign(NaN)`, a sine, cosine,
+tangent or cotangent of an infinite angle (`sin`, `cos`, `tan`, `cot` and the degree forms `sind`, `cosd`,
+`tand`, `cotd`), and an `asin`, `acos`, `asind` or `acosd` argument outside [-1, 1]. `round(x, n)` and `trunc(x, n)` accept any scale and never turn a finite
 value into a NaN or an infinity.
+`cot(0)`, `tand(90)` and `cotd(0)` return an infinity and do not fail, as in PostgreSQL, because the true
+value there is infinite. PostgreSQL gives the error code `22003` for an infinite angle and for an
+`asin` argument outside [-1, 1]; CamusDB gives `CADB0400`, as it does for the other domain errors.
 
 ### Over the wire
 
@@ -274,7 +280,7 @@ fixed, as in Spanner. `array(numeric)` is refused too.
 | `SUM(numeric)` | `numeric`, exact; only the final total is range-checked |
 | `AVG(numeric)` | `numeric`, the exact total divided by the count, rounded half away from zero |
 | `MIN`, `MAX`, `abs`, `ceil`, `floor`, `round(x[, n])`, `trunc(x[, n])`, `mod`, `sign` | `numeric` |
-| `sqrt`, `pow` and `^`, `ln`, `log`, `log10`, `exp` | `float64` (Spanner returns NUMERIC for `sqrt`, `pow`, `ln`, `log` and `log10`) |
+| `sqrt`, `pow` and `^`, `ln`, `log`, `log10`, `exp`, the trigonometric functions, `radians`, `degrees` | `float64` (Spanner returns NUMERIC for `sqrt`, `pow`, `ln`, `log` and `log10`) |
 | `COALESCE`, `CASE` with `numeric` and `int64` branches | `numeric`; with a `float64` or `float32` branch, `float64` |
 
 Division by zero fails. An overflow anywhere fails with `CADB0417`.
@@ -469,7 +475,7 @@ support `@>` or `<@` yet.
 ## Literal and value formats
 
 How a value is written depends on the path. **The SQL literal form and the JSON form differ for
-`bytes`** — note that below.
+`bytes`** — see the note below.
 
 ### In SQL statements
 
@@ -507,8 +513,8 @@ SELECT * FROM events WHERE created = day;                      -- true only at m
 SELECT * FROM events WHERE day < make_timestamp(2026, 3, 15, 10, 0, 0);  -- includes 2026-03-15
 ```
 
-A string that does not parse is an `InvalidInput` error, not a row that fails to match: with a
-silent non-match, `created >= '2026-13-01'` would look like a valid empty result. A `date` takes only
+A string that does not parse is an `InvalidInput` error. With a silent non-match,
+`created >= '2026-13-01'` would look like a valid empty result. A `date` takes only
 the `yyyy-MM-dd` form, so `day = '2026-03-15T00:00:00Z'` is an error too. An index on a `date` or
 `datetime` column serves these comparisons, because the planner converts the constant into the
 column's type before it builds the index key.
@@ -518,7 +524,7 @@ column's type before it builds the index key.
 There are two forms, following PostgreSQL.
 
 **Plain — `'…'` or `"…"`.** No escape processing at all. A backslash is an ordinary character, and
-the only special sequence is a doubled delimiter. Use this for essentially everything, including
+the only special sequence is a doubled delimiter. Use this for almost everything, including
 regex patterns and Windows paths:
 
 ```sql
@@ -544,8 +550,8 @@ a spelling:
 COMMENT ON TABLE t IS E'line1\nline2';       -- stores an embedded newline
 ```
 
-An unrecognized escape yields the character itself, so `E'\d'` is `d` — which is exactly why regex
-patterns belong in the plain form. A truncated numeric escape (`E'\x4'`) or an unpaired surrogate
+An unrecognized escape yields the character itself, so `E'\d'` is `d`. For this reason, write regex
+patterns in the plain form. A truncated numeric escape (`E'\x4'`) or an unpaired surrogate
 raises `InvalidInput`.
 
 Every value has a literal form, so anything that can be stored can also be emitted by
@@ -553,8 +559,8 @@ Every value has a literal form, so anything that can be stored can also be emitt
 `E'…'` only when the value contains a control character.
 
 A bytes literal is written `X'4D5A'` (or lowercase `x'…'`); `X''` is the empty byte string, and an
-odd number of hex digits is an error. Note that a bare `0xFF` is an **integer** literal, not bytes —
-it keeps that meaning, which is why bytes got their own syntax. The legacy form of passing bytes as a
+odd number of hex digits is an error. A bare `0xFF` is an **integer** literal and keeps that
+meaning, so bytes have their own syntax. The legacy form of passing bytes as a
 string whose text starts with `0x` still coerces on insert, but only where the target column type is
 known; `X'…'` carries its type on its own.
 
@@ -650,7 +656,7 @@ The HTTP API exchanges values as JSON:
 | `array(T)` | JSON array of the element type |
 | `jsonb` | the document itself as native JSON; numbers keep all their digits. With `"jsonbAsText": true` on the request, a JSON string that holds the text form, so JSON `null` differs from SQL `NULL` (see [json.md](json.md#json-null-over-rest)). A parameter is `{"type": 13, "strValue": "<json text>"}` |
 
-> **Bytes format differs by path:** SQL literals use `0x`-hex, JSON uses base64. A round-trip through
+> **Bytes format differs by path:** SQL literals use `X'…'` hex, JSON uses base64. A round-trip through
 > each path is lossless, but the encodings are not interchangeable.
 
 #### Array columns in REST query results
@@ -887,10 +893,10 @@ To declare `string(N)` / `array(T)` over HTTP, the create-table column carries `
 
 ## Temporal functions
 
-The built-in date/time functions return engine-typed `date` or `datetime` values, not strings. The
-JSON wire representation is unchanged (ISO-8601 string via the `isoValue` field), but the engine
-type is now correct — so comparisons against typed columns, INSERT without CAST, and indexing all
-work with function results.
+The built-in date/time functions return engine-typed `date` or `datetime` values. The
+JSON wire representation is unchanged (ISO-8601 string via the `isoValue` field). Because the engine
+type is `date` or `datetime`, comparisons against typed columns, INSERT without CAST, and indexing
+all work with function results.
 
 | Function | Return type | Notes |
 |----------|-------------|-------|
@@ -899,11 +905,17 @@ work with function results.
 | `CLOCK_TIMESTAMP()` / `SYSDATE()` | `datetime` | The clock at each call, UTC |
 | `CURRENT_DATE()` | `date` | UTC date of the start of the transaction |
 | `DATE_ADD(temporal, n, unit)` | `datetime` | See promotion rule below |
+| `DATE_ADD(temporal, interval)`, `DATE_SUB(temporal, interval)` | `datetime` | MySQL form: `DATE_ADD(d, INTERVAL 1 DAY)`. See [Intervals](#intervals) |
+| `DATE_SUB(temporal, n, unit)` | `datetime` | `DATE_ADD` with `-n` |
 | `DATE_TRUNC(unit, temporal)` | `datetime` | Always yields datetime (Postgres-compatible) |
 | `FROM_UNIXTIME(seconds)` | `datetime` | Unix epoch seconds → UTC datetime. A fraction rounds to the nearest microsecond |
 | `DATE_DIFF(a, b, unit)` | `int64` | Difference in `unit` units (unchanged) |
 | `DATE_PART(unit, temporal)` | `int64` | Extracts calendar component (unchanged) |
 | `EXTRACT(unit FROM temporal)` | `int64` | SQL-standard form of `DATE_PART(unit, temporal)` |
+| `AGE(a, b)`, `AGE(a)` | `interval` | PostgreSQL. Years, months and days from `b` to `a`. See [Intervals](#intervals) |
+| `MAKE_INTERVAL(years, months, weeks, days, hours, mins, secs)` | `interval` | PostgreSQL. Every part is optional, by position |
+| `JUSTIFY_DAYS(i)`, `JUSTIFY_HOURS(i)`, `JUSTIFY_INTERVAL(i)` | `interval` | PostgreSQL. Move 30 days into a month, 24 hours into a day |
+| `DATE_BIN(stride, temporal, origin)` | `datetime` | PostgreSQL. The start of the bin that holds the value |
 | `UNIX_TIMESTAMP([temporal])` | `int64` | UTC seconds since epoch. With no argument, of the start of the transaction |
 | `UNIX_TIMESTAMP_MS([temporal])` | `int64` | UTC milliseconds since epoch, rounded down. With no argument, of the start of the transaction |
 | `MAKE_DATE(year, month, day)` | `date` | Integer parts. See [Date constructors](#date-constructors) |
@@ -919,6 +931,162 @@ work with function results.
 | `TO_TIMESTAMP(text, pattern)`, `STR_TO_DATE(text, pattern)` | `datetime` | Strict parse with a pattern; see [date-patterns.md](date-patterns.md) |
 | `TO_DATE(text, pattern)` | `date` | Strict parse with a PostgreSQL template, date only. `TO_DATE(x)` with one argument is still the cast to `date` |
 | `TO_TIMESTAMP(seconds)` | `datetime` | The PostgreSQL spelling of `FROM_UNIXTIME(seconds)` |
+
+### Date arithmetic
+
+The `+` and `-` operators accept a `date` with the PostgreSQL rules. The integer is a number of days.
+
+| Expression | Result |
+|------------|--------|
+| `date + int64`, `int64 + date` | `date` |
+| `date - int64` | `date` |
+| `date - date` | `int64`: the number of days from the right date to the left date |
+
+```sql
+SELECT current_date() + 30                       -- 30 days from today
+SELECT due - current_date() FROM invoices        -- days until each invoice is due
+SELECT * FROM events WHERE day > current_date() - 7
+```
+
+- `CAST('2024-02-28' AS date) + 1` is `2024-02-29`, and `CAST('2024-03-01' AS date) - CAST('2024-02-01' AS date)`
+  is `29`, because 2024 is a leap year.
+- A NULL operand gives NULL.
+- A result before `0001-01-01` or after `9999-12-31` is an error (`CADB0400`, `date out of range`), never
+  a wrapped date.
+
+Other pairs are errors, as in PostgreSQL:
+
+- `*` and `/` with a date, `int64 - date`, and `date + date`.
+- A date with a `float64`, a `numeric` or a `bool`. The number of days must be an `int64`.
+- A `datetime` with an integer. A datetime moves by an interval: `ts + INTERVAL '1 day'`. See
+  [Intervals](#intervals).
+- A quoted string: `'2024-01-01' + 1` is an error. Write `CAST('2024-01-01' AS date) + 1`.
+
+A date and an integer still have no common type for `CASE`, `COALESCE` and `UNION`.
+
+### Intervals
+
+An `interval` is a span of time with three parts: months, days and microseconds. The parts stay
+separate, as in PostgreSQL, because a month and a day have no fixed length when they are added to a date.
+`2024-01-31 + 1 month` is `2024-02-29`.
+
+**Literals and casts**
+
+| Form | Example | Value |
+|------|---------|-------|
+| PostgreSQL text | `INTERVAL '1 year 2 mons 3 days 04:05:06'` | as written |
+| ISO-8601 text | `INTERVAL 'P1DT2H'` | 1 day 2 hours |
+| SQL standard, one unit | `INTERVAL '3' HOUR` | 3 hours |
+| MySQL, one unit | `INTERVAL 3 HOUR`, `INTERVAL @n DAY` | 3 hours, `@n` days |
+| Cast of text | `CAST('1 day' AS interval)`, `'1 day'::interval` | 1 day |
+
+- The units are `microsecond`, `millisecond`, `second`, `minute`, `hour`, `day`, `week`, `month`,
+  `quarter`, `year`, `decade`, `century` and `millennium`, with their plurals and the PostgreSQL short
+  forms (`mons`, `hrs`, `us`). Case does not matter.
+- The text can have signs and `ago`: `'-1 day +2 hours'`, `'3 hours ago'`. A number with no unit is a
+  number of seconds.
+- A fraction moves to the smaller parts, as in PostgreSQL: `'1.5 days'` is 1 day 12 hours, and
+  `'1.5 months'` is 1 month 15 days. A fraction of a year rounds to whole months: `'1.1 years'` is 1 year
+  1 month.
+- `INTERVAL '3' HOUR` takes a number only. `INTERVAL '1 day' HOUR` is an error.
+- `INTERVAL n unit` is `n * INTERVAL '1 unit'`, so `n` can be a column or a parameter.
+- Only `CAST(text AS interval)` makes an interval from another type. A number needs a unit.
+
+**Operators**
+
+| Expression | Result |
+|------------|--------|
+| `datetime ± interval`, `interval + datetime` | `datetime` |
+| `date ± interval`, `interval + date` | `datetime` (the date is midnight UTC) |
+| `datetime - datetime`, `date - datetime`, `datetime - date` | `interval` of days and time, no months |
+| `interval ± interval`, `-interval` | `interval` |
+| `interval * number`, `number * interval`, `interval / number` | `interval` |
+| `=`, `<>`, `<`, `<=`, `>`, `>=` on two intervals | `bool` |
+
+```sql
+SELECT * FROM events WHERE created > now() - INTERVAL '7 days'
+SELECT created + INTERVAL 1 MONTH FROM invoices
+SELECT finished - started AS duration FROM jobs
+SELECT DATE_ADD(created, INTERVAL 2 HOUR), DATE_SUB(created, INTERVAL '1 day') FROM events
+```
+
+- A datetime plus an interval adds the months first, then the days, then the time. A day of the month
+  that does not exist moves back to the last day of the month: `2024-01-31 + INTERVAL '1 month'` is
+  `2024-02-29`, and `2024-02-29 + INTERVAL '1 year'` is `2025-02-28`. All values are UTC, so a day is
+  always 24 hours.
+- `datetime - datetime` puts whole days in the days part: `2024-01-02 03:00 - 2024-01-01 00:00` is
+  1 day 3 hours. `DATE_DIFF` gives the same span as a number.
+- `interval * number` and `interval / number` use the PostgreSQL rule: a fraction of a month moves into
+  days (30 a month), and a fraction of a day moves into the time. `INTERVAL '1 month' * 0.5` is 15 days.
+- Two intervals compare by one total, where a month is 30 days and a day is 24 hours. Thus
+  `INTERVAL '1 month' = INTERVAL '30 days'` is true, and `GROUP BY` and `DISTINCT` put the two in one
+  group.
+- A NULL operand gives NULL. A part past its range (32-bit months and days, 64-bit microseconds) is an
+  error (`CADB0400`, `interval out of range`). A datetime result before year 1 or after year 9999 is an
+  error (`CADB0400`, `timestamp out of range`).
+- Other pairs are errors: an interval with a plain number (`INTERVAL '1 day' + 1`), `number / interval`,
+  `interval * interval`, and an interval minus a date or a datetime (`INTERVAL '1 day' - d`).
+
+**Text form and the wire.** The text of an interval is its ISO-8601 form, in the PostgreSQL `iso_8601`
+style: `P1Y2M3DT4H5M6.5S`. The years and months share the sign of the months part, and the hours,
+minutes and seconds share the sign of the time part, so `-1 day +2 hours` is `P-1DT2H`. A zero interval
+is `PT0S`. `CAST(x AS string)` and `||` give this text. A query that returns an interval sends this text
+on every transport (REST JSON and gRPC), and the column type in the result metadata is `string`. Thus a
+client needs no change.
+
+**No table stores an interval.** An interval is a value of an expression only. These are errors:
+
+- a column of type `interval` in `CREATE TABLE` or `ALTER TABLE … ADD COLUMN`;
+- an interval column in `CREATE TABLE … AS SELECT` or `CREATE MATERIALIZED VIEW`;
+- an INSERT or an UPDATE that writes an interval into a column.
+
+A plain view can return an interval, because it stores no rows. To keep an interval in a table, store
+`CAST(x AS string)` in a string column, and read it back with `CAST(s AS interval)`. An interval also
+cannot be an array element.
+
+**Index use.** A bound such as `created > now() - INTERVAL '7 days'` is a constant for the statement,
+so an index on `created` gives a range scan, and `EXPLAIN` shows `index-range-scan` with that index. This is also true for
+`DATE_SUB(now(), INTERVAL 1 WEEK)` and `current_date() - 7`. When the column is inside the expression
+(`created + INTERVAL '7 days' > now()`), the bound is not a constant, and the query reads all rows
+through the primary key.
+
+**Interval functions**
+
+| Function | Result | Example |
+|----------|--------|---------|
+| `age(a, b)` | `interval` | `age(CAST('2001-04-10' AS date), CAST('1957-06-13' AS date))` is 43 years 9 months 27 days |
+| `age(a)` | `interval` | the same as `age(current_date(), a)` |
+| `make_interval(years, months, weeks, days, hours, mins, secs)` | `interval` | `make_interval(0, 0, 0, 1, 2)` is 1 day 2 hours |
+| `justify_days(i)` | `interval` | `'35 days'` gives 1 month 5 days |
+| `justify_hours(i)` | `interval` | `'27 hours'` gives 1 day 3 hours |
+| `justify_interval(i)` | `interval` | `'1 mon -1 hour'` gives 29 days 23 hours |
+| `date_bin(stride, x, origin)` | `datetime` | 15:44:17 in 15-minute bins from midnight gives 15:30:00 |
+| `EXTRACT(unit FROM i)`, `date_part(unit, i)` | `int64` | `EXTRACT(hour FROM INTERVAL '36 hours')` is 36 |
+
+- `age(a, b)` subtracts each calendar field of `b` from the same field of `a`. A negative field borrows
+  from the next larger field, and a day borrows the length of the month of the earlier value, as in
+  PostgreSQL. `age(a)` measures from midnight UTC of the current date of the transaction. `age` reads the
+  statement clock, so it is volatile with one or two arguments: a `CHECK` cannot call it, and a query
+  that calls it does not use the result cache. PostgreSQL marks the two-argument form immutable.
+- `make_interval` takes its parts by position only, because CamusDB has no named arguments
+  (`make_interval(days => 10)` is not supported). A missing part is zero. Every part except `secs` must
+  be an `int64`. The seconds round to a whole microsecond. A part that does not fit is an error
+  (`CADB0400`, `interval out of range`). PostgreSQL 16 wraps such a part without an error.
+- The `justify_*` functions use the PostgreSQL sign rules: after the move, a part that has the opposite
+  sign of a larger part gives one unit to it. `justify_days(INTERVAL '1 month -1 day')` is 29 days.
+- `date_bin` puts `x` in bins of width `stride` that start at `origin`. A value before the origin goes to
+  the earlier bin. The stride must be greater than zero and must not have a month part (`CADB0400`).
+  `origin` is required, as in PostgreSQL.
+- `EXTRACT` from an interval reads the fields without moving one into another:
+  `EXTRACT(day FROM INTERVAL '36 hours')` is 0. The years are `months / 12`, and `month` is `months % 12`.
+  Each field has the sign of the part that it comes from. As for a datetime, the result is an `int64`:
+  `second` is the whole seconds, `millisecond` and `microsecond` are the fraction of the current second
+  only, and `epoch` is whole seconds, rounded down, where a year is 365.25 days and a month is 30 days.
+  PostgreSQL returns a `numeric` with the fraction. `week`, `dow`, `isodow`, `doy` and `isoyear` name a
+  position in a calendar and are errors for an interval (`CADB0400`).
+
+**Not supported yet:** `SUM` and `AVG` of intervals, a string literal compared with an interval without
+the `INTERVAL` keyword (`x > '1 day'`), and the MySQL compound units (`'1:30' HOUR_MINUTE`).
 
 ### Date constructors
 
@@ -1094,11 +1262,12 @@ oid  object_id  smallint  int  int64  integer  string  bool  boolean  float32  f
 date  datetime  timestamp  bytes  blob  array  numeric  decimal
 ```
 
-Note that `id` is **not** a SQL type keyword and remains usable as an identifier (column/table name) —
+`id` is **not** a SQL type keyword and remains usable as an identifier (column/table name) —
 the ObjectId type is spelled `oid`/`object_id` in SQL. `bigint` and `precision` are also usable as names.
 
 Only the exact keyword is reserved — identifiers that merely *start with* a keyword (e.g. `internal`,
-`interval`, `dates`) are fine. Tables created through the HTTP / programmatic API are unaffected by SQL
+`dates`) are fine. `interval` is not reserved either: it is a keyword only right before a quote, a digit
+or a parameter (`INTERVAL '1 day'`, `INTERVAL 3 HOUR`), so a column named `interval` keeps working. Tables created through the HTTP / programmatic API are unaffected by SQL
 keyword reservation, since they bypass the SQL parser.
 
 ---

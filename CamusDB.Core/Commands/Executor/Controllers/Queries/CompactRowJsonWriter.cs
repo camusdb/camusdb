@@ -158,6 +158,11 @@ public static class CompactRowJsonWriter
                 WriteJsonb(writer, JsonbDocument.Item(value.BytesValue), jsonbAsText);
                 break;
 
+            // A client receives an interval as its ISO-8601 text, in a column typed as a string.
+            case ColumnType.Interval:
+                writer.WriteStringValue(IntervalMath.FormatIso(value.IntervalParts));
+                break;
+
             case ColumnType.Array:
                 WriteArray(writer, value, jsonbAsText);
                 break;
@@ -384,6 +389,10 @@ public static class CompactRowJsonWriter
 
             case ColumnType.Jsonb:
                 WriteJsonb(writer, JsonbDocument.Item(slot.AsBytes), jsonbAsText);
+                break;
+
+            case ColumnType.Interval:
+                writer.WriteStringValue(IntervalMath.FormatIso(slot.IntervalParts));
                 break;
 
             case ColumnType.Array:

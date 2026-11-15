@@ -15,6 +15,7 @@ The PostgreSQL column shows what PostgreSQL 16 did in the C locale when the beha
 | `UPDATE d SET v = 0` | `CADB0400` | Updates every row | A safety rule: one statement cannot change every row by accident. Write `WHERE TRUE` to do it on purpose. |
 | `DELETE FROM d` | `CADB0400` | Deletes every row | The same safety rule. |
 | `UPDATE d SET id = 3 WHERE id = 2`, where `id` is the primary key | `CADB0400` | Updates the row | Row identity, the row id caches and foreign keys depend on a key that does not change. Delete the row, and insert it with the new key. |
+| `UPDATE d SET v = s.v FROM s WHERE s.id = d.id`, where two rows of `s` have `id = 1` | `CADB0400` | Updates the row one time, with one of the two values | The new value would depend on which match the statement used, which the plan decides. PostgreSQL does not say which match it uses. Make the `FROM` list match one row for each target row, for example with `GROUP BY` in a derived table. See [UPDATE … FROM and DELETE … USING](update-from-delete-using.md). |
 
 ## Strings
 
@@ -147,6 +148,19 @@ A derived table and a view compute every column of each of their rows before the
 
 `CREATE VIEW` and `CREATE MATERIALIZED VIEW` bind the body and run none of its subqueries, as PostgreSQL does. So `CREATE VIEW c AS SELECT (SELECT 1 / 0) AS x` succeeds, and a read of `x` fails. A scalar subquery column has the declared type of the subquery column, also when the subquery returns no row.
 
+## WITH queries
+
+`d` has the rows `(1, 10)` and `(2, 20)`. See [WITH queries](common-table-expressions.md).
+
+| Statement | CamusDB | PostgreSQL | Why |
+|---|---|---|---|
+| `WITH c AS (SELECT id FROM nowhere) SELECT v FROM d WHERE id = 1` | `10` | `relation "nowhere" does not exist` | The parser writes out each CTE where the statement reads it, so a CTE that nothing reads runs no check. A statement that reads it reports the unknown table. |
+| `SELECT same FROM (WITH r AS (SELECT random() AS x) SELECT a.x = b.x AS same FROM r a, r b) q` | `false` | `true` | A `WITH` in parentheses can read the columns of the query around it, so each reader runs its own copy. A `WITH` at the start of the statement computes a CTE that it reads two or more times one time, as PostgreSQL does. |
+| `WITH r AS NOT MATERIALIZED (SELECT random() AS x) SELECT a.x = b.x AS same FROM r a, r b` | `false` | `true` | `NOT MATERIALIZED` always inlines. PostgreSQL computes a CTE that calls a volatile function one time, whatever the hint says. |
+
+A view stores its body with each CTE written out as a derived table, so `SHOW CREATE VIEW` shows no
+`WITH`, where PostgreSQL shows the `WITH` that the body had.
+
 ## NULL in ORDER BY
 
 NULL sorts as the smallest value, the GoogleSQL rule: it comes first in ascending order and last in
@@ -242,7 +256,7 @@ CamusDB refuses these forms with a clear error, so no answer is wrong. `d` has t
 | `SELECT * FROM d a JOIN d b USING (id)` | `CADB0406` | Both rows, with one `id` column |
 | `SELECT * FROM d a NATURAL JOIN d b` | `CADB0406` | Both rows, with one column for each common name |
 | `SELECT * FROM d a FULL JOIN d b ON a.id = b.id` | `CADB0533`; use `LEFT JOIN` or `RIGHT JOIN` | Both rows |
-| `WITH c AS (SELECT 5 AS x) SELECT x FROM c` | `CADB0406` | `5` |
+| `WITH RECURSIVE r AS (SELECT 1 AS n) SELECT n FROM r` | `CADB0533` | `1` |
 | `SELECT NULL IS UNKNOWN`, and `IS NOT UNKNOWN` | `CADB0406` | `true` |
 | `SELECT 1 IS DISTINCT FROM 2`, and `IS NOT DISTINCT FROM` | `CADB0406` | `true` |
 | `SELECT 1 ISNULL`, and `NOTNULL` | `CADB0406` | `false` |
@@ -253,4 +267,7 @@ CamusDB refuses these forms with a clear error, so no answer is wrong. `d` has t
 | `CREATE VIEW vv AS SELECT 1` | `CADB0400`; name the column with `AS` | Accepted, with the column `?column?` |
 | `SELECT x FROM (SELECT 5 AS x) d FOR UPDATE` | `CADB0400` | `5` |
 | `SELECT (SELECT 1 FOR UPDATE)` | `CADB0406` | `1` |
+| `UPDATE d SET v = 0 FROM d e WHERE e.id = d.id AND d.id = 1 RETURNING e.v` | `CADB0400`; `RETURNING` reads the target only | `10` |
+| `UPDATE d SET v = 0 FROM d e WHERE e.id = d.id AND d.id = 1 RETURNING *` | `CADB0400`; list the target columns | The columns of `d` and of `e` |
+| `UPDATE d SET v = x.v FROM (VALUES (1, 5)) AS x(id, v) WHERE x.id = d.id` | `CADB0406`; use a derived table, `(SELECT 1 AS id, 5 AS v UNION ALL …) x` | `UPDATE 1` |
 | `INSERT INTO em (id, v) VALUES (1, 1) RETURNING (SELECT 7)` | `CADB0400` | `7` |

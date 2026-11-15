@@ -47,6 +47,12 @@ internal sealed class ExpressionGenerator
 {
     private static readonly BinaryOp[] Comparisons = [BinaryOp.Eq, BinaryOp.Ne, BinaryOp.Lt, BinaryOp.Le, BinaryOp.Gt, BinaryOp.Ge];
 
+    /// <summary>The <c>date_part</c> fields that an interval has. A calendar position (week, dow, doy, isoyear) is an error for an interval.</summary>
+    private static readonly string[] IntervalFields = ["year", "month", "day", "hour", "minute", "second", "millisecond", "microsecond", "quarter", "epoch", "decade", "century"];
+
+    /// <summary>The <c>date_part</c> fields of a date or a datetime.</summary>
+    private static readonly string[] PointFields = ["year", "month", "day", "hour", "minute", "second", "quarter", "dow", "doy", "week", "epoch", "isoyear"];
+
     private readonly FuzzRandom random;
     private readonly GeneratorProfile profile;
     private readonly ValueGenerator values;
@@ -78,7 +84,9 @@ internal sealed class ExpressionGenerator
             FuzzType.Bool => BoolExpr(scope, depth),
             FuzzType.Int64 or FuzzType.Float64 or FuzzType.Numeric => NumberExpr(type, scope, depth),
             FuzzType.String => StringExpr(scope, depth),
-            FuzzType.Date => Conditional(FuzzType.Date, scope, depth) ?? Leaf(type, scope),
+            FuzzType.Date => DateExpr(scope, depth),
+            FuzzType.DateTime => DateTimeExpr(scope, depth),
+            FuzzType.Interval => IntervalExpr(scope, depth),
             FuzzType.Jsonb => JsonExpr(scope, depth),
             _ => Leaf(type, scope),
         };
@@ -113,15 +121,25 @@ internal sealed class ExpressionGenerator
     /// <summary>A type for one operand of a comparison: one the scope has, most of the time.</summary>
     private FuzzType PickComparableType(ExprScope scope)
     {
+        // No column is an interval, so an interval comparison comes from this branch only.
+        if (profile.Allows(FuzzType.Interval) && random.Chance(0.06))
+            return FuzzType.Interval;
+
         List<FuzzType> present = scope.TypesPresent.Where(t => FuzzTypes.IsOrderable(t) && profile.Allows(t)).ToList();
         if (present.Count > 0 && random.Chance(0.85))
             return random.Pick(present);
         return random.Pick(profile.Types.Where(FuzzTypes.IsOrderable).ToList());
     }
 
-    /// <summary>A type comparable with <paramref name="type"/>: the same one, or another number type.</summary>
+    /// <summary>A type comparable with <paramref name="type"/>: the same one, another number type, or the other point-in-time type.</summary>
     private FuzzType Partner(FuzzType type)
     {
+        if (FuzzTypes.IsPointInTime(type) && random.Chance(0.3))
+        {
+            FuzzType other = type == FuzzType.Date ? FuzzType.DateTime : FuzzType.Date;
+            return profile.Allows(other) ? other : type;
+        }
+
         if (FuzzTypes.IsNumber(type) && random.Chance(0.3))
         {
             List<FuzzType> numbers = profile.Types.Where(FuzzTypes.IsNumber).ToList();
@@ -204,8 +222,10 @@ internal sealed class ExpressionGenerator
         FuzzType type = PickComparableType(scope);
         int count = random.Between(1, 4);
         List<Expr> items = new(count);
+        // A DATE or DATETIME item is a plain string, which the comparison parses as the type of the
+        // value. So a point-in-time item has the type of the value: a DATE does not parse a datetime string.
         for (int i = 0; i < count; i++)
-            items.Add(InListItem(Partner(type), scope));
+            items.Add(InListItem(FuzzTypes.IsPointInTime(type) ? type : Partner(type), scope));
         return new InListExpr(Generate(type, scope, depth + 1), items, random.Chance(0.3));
     }
 
@@ -325,9 +345,157 @@ internal sealed class ExpressionGenerator
             < 65 => FunctionOf(type, scope, depth),
             < 75 => NumberCast(type, scope, depth),
             < 92 => Conditional(type, scope, depth),
-            _ => null,
+            _ => type == FuzzType.Int64 ? DateDifference(scope, depth) : null,
         };
         return result ?? Leaf(type, scope);
+    }
+
+    /// <summary><c>date - date</c>: the number of days, an INT64.</summary>
+    private Expr? DateDifference(ExprScope scope, int depth)
+    {
+        if (!profile.Allows(FuzzType.Date) || !profile.Allows(BinaryOp.Sub))
+            return null;
+        return new BinaryExpr(BinaryOp.Sub, Generate(FuzzType.Date, scope, depth + 1), Generate(FuzzType.Date, scope, depth + 1), FuzzType.Int64);
+    }
+
+    /// <summary>
+    /// A DATE: <c>date ± n</c> or <c>n + date</c> (days), a CAST of a DATETIME, or a conditional. The
+    /// number of days is usually a small literal, so most results stay inside years 1 to 9999.
+    /// </summary>
+    private Expr DateExpr(ExprScope scope, int depth)
+    {
+        int roll = random.Next(100);
+        Expr? result = roll switch
+        {
+            < 35 => DatePlusDays(scope, depth),
+            < 50 => profile.Allows(ExprFeature.Cast) && profile.Allows(FuzzType.DateTime)
+                ? new CastExpr(Generate(FuzzType.DateTime, scope, depth + 1), FuzzType.Date)
+                : null,
+            < 80 => Conditional(FuzzType.Date, scope, depth),
+            _ => null,
+        };
+        return result ?? Leaf(FuzzType.Date, scope);
+    }
+
+    private Expr? DatePlusDays(ExprScope scope, int depth)
+    {
+        bool add = random.NextBool();
+        if (!profile.Allows(add ? BinaryOp.Add : BinaryOp.Sub))
+            return null;
+
+        Expr date = Generate(FuzzType.Date, scope, depth + 1);
+        Expr days = random.Chance(0.75) ? new LiteralExpr(values.SmallInt()) : Generate(FuzzType.Int64, scope, depth + 1);
+        if (add && random.Chance(0.3))
+            return new BinaryExpr(BinaryOp.Add, days, date, FuzzType.Date);
+        return new BinaryExpr(add ? BinaryOp.Add : BinaryOp.Sub, date, days, FuzzType.Date);
+    }
+
+    /// <summary>
+    /// A DATETIME: a date or a datetime plus or minus an interval, an interval plus one, a
+    /// <c>date_bin</c> call, a CAST of a DATE, or a conditional.
+    /// </summary>
+    private Expr DateTimeExpr(ExprScope scope, int depth)
+    {
+        int roll = random.Next(100);
+        Expr? result = roll switch
+        {
+            < 40 => PointPlusInterval(scope, depth),
+            < 52 => FunctionOf(FuzzType.DateTime, scope, depth),
+            < 62 => profile.Allows(ExprFeature.Cast) && profile.Allows(FuzzType.Date)
+                ? new CastExpr(Generate(FuzzType.Date, scope, depth + 1), FuzzType.DateTime)
+                : null,
+            < 85 => Conditional(FuzzType.DateTime, scope, depth),
+            _ => null,
+        };
+        return result ?? Leaf(FuzzType.DateTime, scope);
+    }
+
+    private Expr? PointPlusInterval(ExprScope scope, int depth)
+    {
+        if (!profile.Allows(FuzzType.Interval))
+            return null;
+
+        bool add = random.NextBool();
+        if (!profile.Allows(add ? BinaryOp.Add : BinaryOp.Sub))
+            return null;
+
+        FuzzType pointType = profile.Allows(FuzzType.Date) && random.Chance(0.35) ? FuzzType.Date : FuzzType.DateTime;
+        Expr point = Generate(pointType, scope, depth + 1);
+        Expr interval = Generate(FuzzType.Interval, scope, depth + 1);
+        if (add && random.Chance(0.3))
+            return new BinaryExpr(BinaryOp.Add, interval, point, FuzzType.DateTime);
+        return new BinaryExpr(add ? BinaryOp.Add : BinaryOp.Sub, point, interval, FuzzType.DateTime);
+    }
+
+    /// <summary>
+    /// An INTERVAL: the sum or difference of two, a negation, a product with a number or a quotient by
+    /// one, the difference of two points in time where one is a DATETIME, an interval function, or a
+    /// conditional. A factor or a divisor is usually a small literal, so most results stay in range.
+    /// </summary>
+    private Expr IntervalExpr(ExprScope scope, int depth)
+    {
+        int roll = random.Next(100);
+        Expr? result = roll switch
+        {
+            < 22 => IntervalSum(scope, depth),
+            < 30 => profile.Allows(UnaryOp.Negate) ? new UnaryExpr(UnaryOp.Negate, Generate(FuzzType.Interval, scope, depth + 1)) : null,
+            < 45 => IntervalScaled(scope, depth),
+            < 60 => PointDifference(scope, depth),
+            < 82 => FunctionOf(FuzzType.Interval, scope, depth),
+            _ => Conditional(FuzzType.Interval, scope, depth),
+        };
+        return result ?? Leaf(FuzzType.Interval, scope);
+    }
+
+    private Expr? IntervalSum(ExprScope scope, int depth)
+    {
+        BinaryOp op = random.NextBool() ? BinaryOp.Add : BinaryOp.Sub;
+        if (!profile.Allows(op))
+            return null;
+        return new BinaryExpr(op, Generate(FuzzType.Interval, scope, depth + 1), Generate(FuzzType.Interval, scope, depth + 1), FuzzType.Interval);
+    }
+
+    private Expr? IntervalScaled(ExprScope scope, int depth)
+    {
+        bool divide = random.Chance(0.3);
+        if (!profile.Allows(divide ? BinaryOp.Div : BinaryOp.Mul))
+            return null;
+
+        Expr interval = Generate(FuzzType.Interval, scope, depth + 1);
+        if (divide)
+        {
+            Expr divisor = random.Chance(0.8) ? new LiteralExpr(values.NonZeroInt()) : Generate(random.Pick(profile.Types.Where(FuzzTypes.IsNumber).ToList()), scope, depth + 1);
+            return new BinaryExpr(BinaryOp.Div, interval, divisor, FuzzType.Interval);
+        }
+
+        Expr factor = random.Next(3) switch
+        {
+            0 => new LiteralExpr(values.SmallInt()),
+            1 when profile.Allows(FuzzType.Float64) => new LiteralExpr(FuzzValue.Of(random.Pick(new[] { 0.5, 1.5, -2.5, 0.1, 3.0 }))),
+            _ => Generate(random.Pick(profile.Types.Where(FuzzTypes.IsNumber).ToList()), scope, depth + 1),
+        };
+        return random.NextBool()
+            ? new BinaryExpr(BinaryOp.Mul, interval, factor, FuzzType.Interval)
+            : new BinaryExpr(BinaryOp.Mul, factor, interval, FuzzType.Interval);
+    }
+
+    /// <summary><c>a - b</c> where a or b is a DATETIME: an interval of days and time. Two DATEs give an INT64 instead.</summary>
+    private Expr? PointDifference(ExprScope scope, int depth)
+    {
+        if (!profile.Allows(FuzzType.DateTime) || !profile.Allows(BinaryOp.Sub))
+            return null;
+
+        FuzzType left = FuzzType.DateTime;
+        FuzzType right = FuzzType.DateTime;
+        if (profile.Allows(FuzzType.Date) && random.Chance(0.4))
+        {
+            if (random.NextBool())
+                left = FuzzType.Date;
+            else
+                right = FuzzType.Date;
+        }
+
+        return new BinaryExpr(BinaryOp.Sub, Generate(left, scope, depth + 1), Generate(right, scope, depth + 1), FuzzType.Interval);
     }
 
     /// <summary>
@@ -381,6 +549,12 @@ internal sealed class ExpressionGenerator
             // The position arguments of substring are small literals, so the call does not fail on a negative length.
             if (signature.Name == "substring" && i > 0)
                 args.Add(new LiteralExpr(FuzzValue.Of((long)random.Between(i == 1 ? 1 : 0, 3))));
+            else if (signature.Name == "date_part" && i == 0)
+                args.Add(new LiteralExpr(FuzzValue.String(random.Pick(signature.Args[1] == FuzzType.Interval ? IntervalFields : PointFields))));
+            else if (signature.Name == "make_interval")
+                args.Add(new LiteralExpr(values.SmallInt()));
+            else if (signature.Name == "date_bin" && i == 0)
+                args.Add(new LiteralExpr(values.BinStride()));
             else
                 args.Add(Generate(argType, scope, depth + 1));
         }
@@ -420,7 +594,7 @@ internal sealed class ExpressionGenerator
     {
         if (!profile.Allows(ExprFeature.Cast))
             return null;
-        List<FuzzType> sources = profile.Types.Where(t => t is FuzzType.Int64 or FuzzType.Bool or FuzzType.Date or FuzzType.Numeric).ToList();
+        List<FuzzType> sources = profile.Types.Where(t => t is FuzzType.Int64 or FuzzType.Bool or FuzzType.Date or FuzzType.DateTime or FuzzType.Numeric or FuzzType.Interval).ToList();
         if (sources.Count == 0)
             return null;
         return new CastExpr(Generate(random.Pick(sources), scope, depth + 1), FuzzType.String);

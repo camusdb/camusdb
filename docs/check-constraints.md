@@ -48,7 +48,7 @@ ALTER TABLE employees DROP CONSTRAINT positive_salary;
 ```
 
 A column check may reference **other** columns — `joined_date date CHECK (joined_date > birth_date)`
-is legal; it is simply a table check written at the column.
+is legal; it is a table check written at the column.
 
 ### Constraint names
 
@@ -96,7 +96,7 @@ arithmetic, `BETWEEN`, `LIKE`/`ILIKE`, the regex operators `~` / `~*` / `!~` / `
 SQL evaluates a CHECK with **three-valued logic**, and a constraint is violated **only when it is
 `FALSE`**. `TRUE` and `UNKNOWN` both pass. A comparison with a `NULL` operand is `UNKNOWN`.
 
-The practical consequence: **a nullable column with a check still accepts NULL.**
+So **a nullable column with a check still accepts NULL.**
 
 ```sql
 CREATE TABLE products (id object_id PRIMARY KEY, price int64 CHECK (price > 0));
@@ -142,7 +142,7 @@ Key points:
 - **.NET regex flavor, not POSIX ERE.** It is a superset for common constructs (character classes,
   quantifiers, anchors, alternation, groups). POSIX named classes like `[[:alpha:]]` are **not**
   supported — use `\p{L}` or `[a-zA-Z]`. Case-insensitivity (`~*` / `!~*`) is locale-invariant.
-- **Three-valued NULL** applies just like any other comparison: if the subject (or pattern) is
+- **Three-valued NULL** applies as in any other comparison: if the subject (or pattern) is
   `NULL` the result is `UNKNOWN`, so a nullable column with a regex CHECK still accepts `NULL`. This
   holds for the negated forms too (`!~` on a `NULL` is `UNKNOWN`, not "true").
 - **Malformed patterns fail early.** A literal pattern that isn't a valid regex is rejected at
@@ -196,21 +196,21 @@ Two coercions make the natural SQL work without explicit `CAST`, exactly as the 
 A comparison between incompatible types with no such coercion (e.g. a `string` column vs a numeric
 literal) is refused with `CADB0400` when the constraint is declared. When only a value shows the type, as
 for a function result (`CHECK (name > length(name))`), the write rejects the row as a check violation
-(`CADB0303`, "compares incompatible types", HTTP 400) — not a raw crash / 500.
+(`CADB0303`, "compares incompatible types", HTTP 400).
 
 ### ALTER adds validate existing data
 
 `ALTER TABLE … ADD CONSTRAINT … CHECK` **scans the whole table** and evaluates the new check against
 every existing row. If any row violates it, the `ALTER` is rejected (with `CADB0303`) and the
-constraint is removed again. This matches PostgreSQL. `NOT VALID` (add without scanning) is a
-deferred follow-up, not yet supported.
+constraint is removed again. This matches PostgreSQL. `NOT VALID` (add without scanning) is
+not yet supported.
 
 An `ALTER` that fails for any other reason (for example, a timeout while it waits for the other nodes)
 also removes the constraint. A failed `ALTER` therefore leaves no constraint, and you can run the same
 statement again.
 
 The check is **enforced before the scan starts**. While the scan runs, an INSERT or UPDATE that
-breaks the new check is refused with `CADB0303`, even if the `ALTER` fails later. This order is what
+breaks the new check is refused with `CADB0303`, even if the `ALTER` fails later. This order
 makes the result correct: a write that commits while the scan runs was checked by its own statement,
 so no violating row can appear behind the scan. A transaction that wrote the table before the
 `ALTER` started is refused at commit with the retryable `CADB0502`.
@@ -326,7 +326,7 @@ So checks use a dedicated **`CheckConditionRenderer`**:
   0`, but `(a OR b) AND c` keeps its grouping;
 - renders IN-lists, CAST target types, and function arguments in full;
 - **throws** for anything it cannot represent faithfully, so the DDL layer rejects the constraint
-  rather than persisting a string that would re-parse differently.
+  and never persists a string that would re-parse differently.
 
 `PlanRenderer` is unchanged and still used for EXPLAIN. The guard is a *semantic* round-trip test
 (render → parse → render is a fixed point), not a render-stability test.

@@ -1,6 +1,6 @@
 # SHOW VARIABLES
 
-Inspect the configuration a running CamusDB node is actually using, from a SQL prompt.
+Inspect the configuration a running CamusDB node is using, from a SQL prompt.
 
 ```sql
 SHOW VARIABLES;
@@ -19,10 +19,10 @@ ttl_span_lease_ms                 30000   int    30000    default  runtime     c
 
 ## Effective values, not file contents
 
-The rows come from the configuration object the engine was **constructed with**, not from re-reading
-`config.yml`. That distinction is the point of the statement: a value overridden by an environment
-variable or a command-line flag after the file was read differs from what the file says, and it is
-the resolved value that the engine obeys.
+The rows come from the configuration object the engine was **constructed with**. The statement does
+not re-read `config.yml`. A value overridden by an environment
+variable or a command-line flag after the file was read differs from what the file says, and the
+engine obeys the resolved value.
 
 A key you commented out in `config.yml` shows its built-in default. A key an environment variable
 overrode shows the override. What you see is what the node is running.
@@ -32,11 +32,11 @@ overrode shows the override. What you see is what the node is running.
 | column     | meaning |
 |------------|---------|
 | `variable` | The `snake_case` key you would write in `config.yml`. Keys of the nested `kahuna:` section appear in dotted form, e.g. `kahuna.wal_sync_writes`. |
-| `value`    | The effective value. SQL `NULL` when the setting is genuinely unset — distinct from an empty string. |
+| `value`    | The effective value. SQL `NULL` when the setting is unset — distinct from an empty string. |
 | `type`     | `bool`, `int`, `long`, `double`, `string`, `enum`, `duration_ms`, or `list`. |
 | `default`  | What the setting would be if nothing overrode it. A value differing from `default` is one somebody configured. |
 | `source`   | Which layer supplied the value: `default`, `config`, `env`, `cli`, or `cluster` (precedence runs cluster > cli > env > config > default). |
-| `mutability` | `runtime` if a new value takes effect without restarting the node, `restart` if the component that reads it latches the value when it is constructed. This is a claim about the reader, not a preference: a `restart` key can be changed, but the running node keeps obeying the old value until it is restarted. |
+| `mutability` | `runtime` if a new value takes effect without restarting the node, `restart` if the component that reads it latches the value when it is constructed. This describes how the reader behaves: a `restart` key can be changed, but the running node keeps obeying the old value until it is restarted. |
 | `scope`    | `cluster` when every node must agree — a per-node disagreement would change user-visible transaction behavior — and `node` when per-node divergence is the point, such as tracing or local cache sizes. |
 
 Values are rendered the way `config.yml` spells them, so a value read here can be pasted back into a
@@ -52,11 +52,11 @@ The optional pattern matches against the **variable name**. `%` matches any run 
 matches exactly one, and a backslash makes the next character a literal, so `ttl\_%` reads the underscore as
 itself. This is the rule of `LIKE` in a query, see
 [`LIKE` and `ILIKE` patterns](sql-expression-syntax.md#like-and-ilike-patterns). A pattern that matches nothing
-returns zero rows rather than an error. A pattern that ends with a backslash fails with `CADB0400` when the match
+returns zero rows and no error. A pattern that ends with a backslash fails with `CADB0400` when the match
 reaches it.
 
 Matching is **case-sensitive**, the same as `SHOW TABLES`, `SHOW DATABASES`, and `SHOW ENGINE STATS`
-— they share one matcher. Variable names are all lowercase, so `LIKE 'TTL_%'` legitimately matches
+— they share one matcher. Variable names are all lowercase, so `LIKE 'TTL_%'` matches
 nothing; write `LIKE 'ttl_%'`.
 
 All three string literal forms work as the pattern: `'ttl_%'`, `"ttl_%"`, and `E'ttl_%'`.
@@ -75,14 +75,14 @@ different configuration object than the engine's own settings and do not current
 which port a node listens on, read the configuration file or the startup banner.
 
 **Computed properties are not listed.** A value derived from other settings — the effective spill
-threshold, for instance — is a view of the configuration rather than part of it, and reporting it
+threshold, for instance — is a view of the configuration, and reporting it
 would offer a name no config file accepts. The settings it derives from are listed.
 
 ## Node-local
 
 `SHOW VARIABLES` describes **the node that served the statement**, and never forwards to the leader.
-Nodes in a cluster can legitimately differ — a different `data_dir`, a different port, a stale
-`config.yml` on one box — and answering from the leader would hide exactly the drift you are looking
+Nodes in a cluster can differ — a different `data_dir`, a different port, a stale
+`config.yml` on one box — and answering from the leader would hide the drift you are looking
 for.
 
 To compare configuration across a cluster, run the statement against each node's endpoint. This is
@@ -104,7 +104,7 @@ Settings are changed cluster-wide with `SET CLUSTER SETTING <name> = <value>` (a
 `RESET CLUSTER SETTING <name>`), which is superuser-gated — see
 [runtime cluster settings](runtime-cluster-settings.md).
 
-Whether such a change takes effect immediately is what the `mutability` column reports. A `runtime`
+The `mutability` column reports whether such a change takes effect immediately. A `runtime`
 setting is re-read by the component that uses it, so a new value applies without a restart. A
 `restart` setting is latched when its component is constructed: the overlay accepts the new value and
 `SHOW VARIABLES` will show it, but the running node keeps obeying the old one until it restarts.
@@ -112,7 +112,7 @@ Editing `config.yml` — the local layer — always requires a restart, and a cl
 that file until it is reset.
 
 `SET TRANSACTION …` is unrelated — it adjusts the in-flight transaction's isolation, locking, and
-priority, and does not touch configuration. The `default_*` variables shown here are only the
+priority, and does not touch configuration. The `default_*` variables shown here are the
 fallback used when a transaction does not state its own.
 
 ## See also

@@ -40,6 +40,10 @@ namespace CamusDB.App.Grpc;
 ///           its type and every client language can parse it with its own JSON reader. A client
 ///           value is parsed as JSON; invalid text is <see cref="CamusDBErrorCodes.InvalidJsonText"/>.
 ///           An old client that does not know the field reads the cell as NULL, as for NUMERIC.
+///   Interval — the ISO-8601 text (<see cref="IntervalMath.FormatIso"/>, <c>P1DT2H</c>) in
+///              <c>string_value</c>. An interval is an expression value only, and it reaches every
+///              client as a plain string, so an old client needs no change. A client sends an
+///              interval as text, so <see cref="FromProto"/> never makes one.
 ///   Id  — carried in <c>id_value</c>, not <c>string_value</c>, so <see cref="CoreColumnType.Id"/>
 ///          and <see cref="CoreColumnType.String"/> stay distinct across the wire.
 ///   Array — wraps an <c>ArrayValue</c> that carries the element type so an empty array still
@@ -73,6 +77,7 @@ public static class GrpcValueCodec
             CoreColumnType.Uuid     => new ProtoValue { UuidValue = UuidToBytes(cv.UuidHigh, cv.LongValue) },
             CoreColumnType.Numeric  => new ProtoValue { NumericValue = NumericMath.Format(cv.NumericUnscaled) },
             CoreColumnType.Jsonb    => new ProtoValue { JsonValue = JsonbText.ToText(JsonbDocument.Item(cv.BytesValue)) },
+            CoreColumnType.Interval => new ProtoValue { StringValue = IntervalMath.FormatIso(cv.IntervalParts) },
 
             _ => throw new CamusDBException(
                 CamusDBErrorCodes.InvalidInput,
@@ -105,6 +110,7 @@ public static class GrpcValueCodec
             CoreColumnType.Uuid     => new ProtoValue { UuidValue = UuidToBytes(slot.UuidHigh, slot.UuidLow) },
             CoreColumnType.Numeric  => new ProtoValue { NumericValue = NumericMath.Format(slot.NumericUnscaled) },
             CoreColumnType.Jsonb    => new ProtoValue { JsonValue = JsonbText.ToText(JsonbDocument.Item(slot.AsBytes)) },
+            CoreColumnType.Interval => new ProtoValue { StringValue = IntervalMath.FormatIso(slot.IntervalParts) },
 
             _ => throw new CamusDBException(
                 CamusDBErrorCodes.InvalidInput,

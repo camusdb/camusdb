@@ -47,15 +47,22 @@ internal sealed class NoRecCheck : OracleCheck
 
     public Expr Predicate { get; }
 
+    /// <summary>
+    /// The tables that the optimized query reads through CTEs, or null. The reference query reads the plain
+    /// tables, so the check also compares a WITH with the tables it reads.
+    /// </summary>
+    public IReadOnlyList<string>? CteTables { get; init; }
+
     public override OracleKind Oracle => OracleKind.NoRec;
 
     public override string Variant => CompareRows ? "norec:rows" : "norec:count";
 
     private Expr Flag => new CaseExpr([new CaseBranch(Predicate, new LiteralExpr(FuzzValue.Of(1L)))], new LiteralExpr(FuzzValue.Of(0L)), FuzzType.Int64);
 
-    public SelectStmt Optimized => CompareRows
+    public SelectStmt Optimized => (CompareRows
         ? new SelectStmt(Items, From, Predicate)
-        : new SelectStmt([new SelectItem(new AggregateExpr(AggregateFunc.CountStar, null, FuzzType.Int64), "n")], From, Predicate);
+        : new SelectStmt([new SelectItem(new AggregateExpr(AggregateFunc.CountStar, null, FuzzType.Int64), "n")], From, Predicate))
+        with { CteTables = CteTables };
 
     public SelectStmt Reference => CompareRows
         ? new SelectStmt(Items.Append(new SelectItem(Flag, "norec_flag")).ToList(), From)
@@ -97,17 +104,19 @@ internal sealed class NoRecCheck : OracleCheck
 
     public override IEnumerable<OracleCheck> Simplify()
     {
+        if (CteTables is not null)
+            yield return new NoRecCheck(CompareRows, From, Items, Predicate);
         foreach (Expr p in ExprShrinker.Candidates(Predicate))
-            yield return new NoRecCheck(CompareRows, From, Items, p);
+            yield return new NoRecCheck(CompareRows, From, Items, p) { CteTables = CteTables };
         if (CompareRows)
         {
-            yield return new NoRecCheck(false, From, Items, Predicate);
+            yield return new NoRecCheck(false, From, Items, Predicate) { CteTables = CteTables };
             if (Items.Count > 1)
                 for (int i = 0; i < Items.Count; i++)
-                    yield return new NoRecCheck(true, From, Items.Where((_, j) => j != i).ToList(), Predicate);
+                    yield return new NoRecCheck(true, From, Items.Where((_, j) => j != i).ToList(), Predicate) { CteTables = CteTables };
         }
         foreach (FromItem from in FromShrinker.Candidates(From, keepJoin: false))
-            yield return new NoRecCheck(CompareRows, from, Items, Predicate);
+            yield return new NoRecCheck(CompareRows, from, Items, Predicate) { CteTables = CteTables };
     }
 
     public override IEnumerable<string> Describe(ISqlPrinter printer)
@@ -186,7 +195,12 @@ internal sealed class NoRecOracle : IOracle
     {
         (FromItem from, ExprScope scope) = generator.GenerateFrom(SelectOptions.Comparable);
         bool rows = generator.Random.Chance(0.4);
+        IReadOnlyList<string>? ctes = generator.ChooseCteTables(from);
         // The unoptimized form puts the predicate in a projection, where only an uncorrelated subquery runs.
-        return new NoRecCheck(rows, from, rows ? generator.GenerateProjection(scope) : [], generator.Expressions.Predicate(scope.ForUncorrelatedSubqueries()));
+        return new NoRecCheck(rows, ctes is null ? from : StatementGenerator.ThroughCtes(from, ctes),
+            rows ? generator.GenerateProjection(scope) : [], generator.Expressions.Predicate(scope.ForUncorrelatedSubqueries()))
+        {
+            CteTables = ctes,
+        };
     }
 }

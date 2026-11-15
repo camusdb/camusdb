@@ -62,6 +62,20 @@ public sealed record DerivedTableSource(
     public IReadOnlyList<WindowFunctionCall>? Windows { get; init; }
 
     /// <summary>
+    /// The names of <c>AS alias(c1, c2)</c>, or of a CTE's column list, in order; null when the source
+    /// names no columns. The binder gives the first columns of the query these names, as PostgreSQL
+    /// does: a shorter list keeps the names of the later columns, and a longer list is refused.
+    /// </summary>
+    public IReadOnlyList<string>? ColumnAliases { get; init; }
+
+    /// <summary>
+    /// The <see cref="SQLParser.NodeType.CteMaterialization"/> node of a CTE that the statement computes
+    /// once, or null. Every reference of that CTE holds the same node, so the executor keeps the CTE's
+    /// rows under it for the statement, and each reference reads those rows.
+    /// </summary>
+    public SQLParser.NodeAst? ComputedOnce { get; init; }
+
+    /// <summary>
     /// The alias of the derived table that holds a windowed SELECT. The asterisks keep it apart from
     /// any identifier a user can write without quotes, as for <see cref="SetOperationSource.DerivedAlias"/>.
     /// </summary>

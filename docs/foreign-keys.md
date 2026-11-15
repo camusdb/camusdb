@@ -513,7 +513,7 @@ default); until then that node acknowledges no schema change of the database.
 - **The parent-side read runs after the parent's write.** Kahuna grants the exclusive key lock
   without a check of shared range locks; only the write meets the child's lock. A read before the
   write can miss a child that commits a moment later.
-- **The graph, not the open tables.** The parent side finds its children through the published
+- **The parent side reads the graph.** It finds its children through the published
   graph, which is built from every table of the schema. A child table that is not open is still
   checked.
 - **Ids only.** A constraint stores no table or column name except its own name. Names come from the

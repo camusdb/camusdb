@@ -106,6 +106,14 @@ public static class DecidedDivergences
     private const string ExpressionColumnName =
         "An expression column that has no alias takes its position in the select list as its name, starting at 0. PostgreSQL takes the name of the function, or ?column?. Write AS to give the column a name.";
 
+    private static readonly string[] TwoMatchTables =
+    [
+        "CREATE TABLE d (id INT64 PRIMARY KEY, v INT64)",
+        "INSERT INTO d (id, v) VALUES (1, 10), (2, 20)",
+        "CREATE TABLE s (sid INT64 PRIMARY KEY, id INT64, v INT64)",
+        "INSERT INTO s (sid, id, v) VALUES (1, 1, 5), (2, 1, 6)",
+    ];
+
     private static readonly string[] TwoRowZeroTable =
     [
         "CREATE TABLE t (id INT64 PRIMARY KEY, v INT64)",
@@ -128,6 +136,11 @@ public static class DecidedDivergences
             "UPDATE d SET id = 3 WHERE id = 2",
             CamusDBErrorCodes.InvalidInput, "UPDATE 1",
             "Row identity, the row id caches and foreign keys depend on a key that does not change. Delete the row and insert it."),
+
+        new("UPDATE ... FROM refuses a target row that matches two rows of the FROM list", TwoMatchTables,
+            "UPDATE d SET v = s.v FROM s WHERE s.id = d.id",
+            CamusDBErrorCodes.InvalidInput, "UPDATE 1",
+            "The new value would depend on which match the statement used, which the plan decides. PostgreSQL uses one of them and does not say which."),
 
         new("CHAR(n) does not pad with blanks, so a trailing blank is significant in equality", CharTable,
             "SELECT COUNT(*) FROM ch WHERE c = 'ab '",
@@ -481,11 +494,6 @@ public static class DecidedDivergences
             CamusDBErrorCodes.FeatureNotSupported, "1",
             NotSupportedYet),
 
-        new("WITH is not supported", NoSetup,
-            "WITH c AS (SELECT 5 AS x) SELECT x FROM c",
-            CamusDBErrorCodes.SqlSyntaxError, "5",
-            NotSupportedYet),
-
         new("IS UNKNOWN is not supported", NoSetup,
             "SELECT NULL IS UNKNOWN",
             CamusDBErrorCodes.SqlSyntaxError, "true",
@@ -535,6 +543,41 @@ public static class DecidedDivergences
             "SELECT (SELECT 1 FOR UPDATE)",
             CamusDBErrorCodes.SqlSyntaxError, "1",
             NotSupportedYet),
+
+        new("RETURNING of UPDATE ... FROM does not read the other relations", RowTable,
+            "UPDATE d SET v = 0 FROM d e WHERE e.id = d.id AND d.id = 1 RETURNING e.v",
+            CamusDBErrorCodes.InvalidInput, "10",
+            NotSupportedYet),
+
+        new("RETURNING * is not supported in UPDATE ... FROM", RowTable,
+            "UPDATE d SET v = 0 FROM d e WHERE e.id = d.id AND d.id = 1 RETURNING *",
+            CamusDBErrorCodes.InvalidInput, "1",
+            NotSupportedYet),
+
+        new("VALUES is not supported as a relation in FROM", RowTable,
+            "UPDATE d SET v = x.v FROM (VALUES (1, 5)) AS x(id, v) WHERE x.id = d.id",
+            CamusDBErrorCodes.SqlSyntaxError, "UPDATE 1",
+            NotSupportedYet),
+
+        new("WITH RECURSIVE is not supported", NoSetup,
+            "WITH RECURSIVE r AS (SELECT 1 AS n) SELECT n FROM r",
+            CamusDBErrorCodes.FeatureNotSupported, "1",
+            NotSupportedYet),
+
+        new("A WITH query that the statement does not read is not checked", RowTable,
+            "WITH c AS (SELECT id FROM nowhere) SELECT v FROM d WHERE id = 1",
+            "10", "relation \"nowhere\" does not exist",
+            "The parser writes out each WITH query where the statement reads it, so a query that nothing reads never reaches the binder and runs no check. A statement that reads it reports the unknown table."),
+
+        new("A WITH query in parentheses runs for each reader", NoSetup,
+            "SELECT same FROM (WITH r AS (SELECT random() AS x) SELECT a.x = b.x AS same FROM r a, r b) q",
+            "False", "true",
+            "A WITH in parentheses can read the columns of the query around it, so CamusDB writes its queries out where they are read, and each reader runs its copy. A WITH at the start of the statement computes a query that it reads two or more times one time, as PostgreSQL does."),
+
+        new("NOT MATERIALIZED inlines a WITH query that calls a volatile function", NoSetup,
+            "WITH r AS NOT MATERIALIZED (SELECT random() AS x) SELECT a.x = b.x AS same FROM r a, r b",
+            "False", "true",
+            "NOT MATERIALIZED always writes the query out where it is read. PostgreSQL computes a WITH query that calls a volatile function one time, whatever the hint says."),
 
         new("A subquery is not supported in RETURNING", EmptyTable,
             "INSERT INTO em (id, v) VALUES (1, 1) RETURNING (SELECT 7)",

@@ -31,6 +31,9 @@ namespace CamusDB.Core.CommandsExecutor.Models;
 /// <item><see cref="ColumnType.Uuid"/> — low 64 bits in <c>_low</c>, high 64 bits in <c>_high</c>.</item>
 /// <item><see cref="ColumnType.Numeric"/> — the signed Int128 (value times 10⁹): low 64 bits in
 ///   <c>_low</c>, high 64 bits in <c>_high</c>. Compared as a signed Int128, not as unsigned halves.</item>
+/// <item><see cref="ColumnType.Interval"/> — the microseconds in <c>_low</c>, the months and days packed in
+///   <c>_high</c>, as in <see cref="ColumnValue"/>. Compared and hashed by
+///   <see cref="IntervalMath.ComparisonKey"/>, so '1 month' and '30 days' are equal and hash alike.</item>
 /// <item><see cref="ColumnType.String"/> / <see cref="ColumnType.Id"/> — the string in <c>_reference</c>.
 ///   Id is stored as its string form here so the boundary round-trips <b>any</b> Id value exactly
 ///   (including non-canonical literal text). Packing the 96-bit ObjectId inline is a decode-time
@@ -77,6 +80,7 @@ internal readonly struct ValueSlot
     public static ValueSlot FromJsonb(byte[] cell) => new(ColumnType.Jsonb, 0, 0, cell);
     public static ValueSlot FromUuid(long high, long low) => new(ColumnType.Uuid, low, high, null);
     public static ValueSlot FromNumeric(long high, long low) => new(ColumnType.Numeric, low, high, null);
+    public static ValueSlot FromInterval(long high, long low) => new(ColumnType.Interval, low, high, null);
     public static ValueSlot FromArray(ColumnType elementType, ValueSlot[] elements) => new(ColumnType.Array, 0, (long)(int)elementType, elements);
 
     // ── Typed accessors ──
@@ -90,6 +94,7 @@ internal readonly struct ValueSlot
     public long UuidHigh => _high;
     public long UuidLow => _low;
     public Int128 NumericUnscaled => ((Int128)_high << 64) | (Int128)(ulong)_low;
+    public IntervalParts IntervalParts => new((int)(_high >> 32), (int)_high, _low);
     public ColumnType ArrayElementType => (ColumnType)(int)_high;
     public ValueSlot[] ArrayElements => (ValueSlot[])(_reference ?? System.Array.Empty<ValueSlot>());
 
@@ -129,6 +134,9 @@ internal readonly struct ValueSlot
 
             case ColumnType.Numeric:
                 return FromNumeric(value.UuidHigh, value.LongValue);
+
+            case ColumnType.Interval:
+                return FromInterval(value.UuidHigh, value.LongValue);
 
             case ColumnType.Bytes:
                 return FromBytes(value.BytesValue);
@@ -170,6 +178,7 @@ internal readonly struct ValueSlot
             case ColumnType.Id:        return new ColumnValue(ColumnType.Id, AsString);
             case ColumnType.Uuid:      return new ColumnValue(ColumnType.Uuid, _high, _low);
             case ColumnType.Numeric:   return new ColumnValue(ColumnType.Numeric, _high, _low);
+            case ColumnType.Interval:  return ColumnValue.FromIntervalHalves(_high, _low);
             case ColumnType.Bytes:     return AsBytes is null ? ColumnValue.Null : new ColumnValue(AsBytes);
             case ColumnType.Jsonb:     return ColumnValue.FromJsonbCell(AsBytes!);
 
@@ -238,6 +247,9 @@ internal readonly struct ValueSlot
 
             case ColumnType.Numeric:
                 return NumericUnscaled.CompareTo(other.NumericUnscaled);
+
+            case ColumnType.Interval:
+                return IntervalMath.Compare(IntervalParts, other.IntervalParts);
 
             case ColumnType.Bytes:
             {
@@ -314,6 +326,10 @@ internal readonly struct ValueSlot
                 Jsonb.JsonbDocument.AddHash(ref hc, Jsonb.JsonbDocument.Item(AsBytes));
                 return hc.ToHashCode();
             }
+
+            case ColumnType.Interval:
+                // The comparison total, so that '1 month' and '30 days' hash alike.
+                return HashCode.Combine(_type, IntervalMath.ComparisonKey(IntervalParts));
 
             case ColumnType.Array:
             {

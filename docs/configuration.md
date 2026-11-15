@@ -10,13 +10,13 @@ into a single resolved configuration object. It uses the first file it finds:
    `CAMUS_HOME` is set)
 5. built-in defaults, when no file exists
 
-A path named by 1 or 2 must exist; startup fails rather than falling through to another file.
+A path named by 1 or 2 must exist. If it does not, startup fails and no other file is tried.
 `camusdb init` writes a short starter file to location 4 and creates the default data directory.
 `CamusDB/Config/config.yml` in the repository is the annotated reference for every key; it is tracked
 in git, so do not keep a node's settings there.
 
-To see what a running node actually resolved — including which layer supplied each value — run
-[`SHOW VARIABLES`](show-variables.md) against it rather than reconstructing the merge by hand.
+To see what a running node resolved, including which layer supplied each value, run
+[`SHOW VARIABLES`](show-variables.md) against it.
 
 ## Precedence
 
@@ -135,9 +135,9 @@ Example: YAML `mode: cluster` with `--mode standalone` starts in standalone mode
 The table covers every key with a CLI flag plus a selection of YAML-only keys. `config.yml` documents
 every accepted key with its default, and `SHOW VARIABLES` reports the resolved value of each.
 
-Parser-cache, lock/isolation, spill, and query-result-cache knobs are YAML-only (operational tuning,
-not per-node startup flags). The result cache is **on by default** (opt-in per query via a
-`{cache=…}` hint); set `query_result_cache_enabled: false` to turn it off entirely. See
+Parser-cache, lock/isolation, spill, and query-result-cache knobs are YAML-only: they are
+operational tuning and have no CLI flag. The result cache is **on by default** (opt-in per query via a
+`{cache=…}` hint); set `query_result_cache_enabled: false` to turn it off. See
 [query-result-cache.md](query-result-cache.md) for what each knob does and operator guidance.
 
 The slow-query-log knobs are YAML-only too. The log is **off by default**; see
@@ -261,10 +261,10 @@ older than `cache_entry_ttl_ms` each pass. Raft-log compaction is governed toget
 `compact_every_operations` (how often), `compact_number_entries` (trailing entries kept), and
 `max_entries_per_compaction` (per-pass removal cap).
 
-`compact_every_operations` counts persisted WAL **batches**, not log entries: under load a batch carries
-on the order of a hundred entries. With a RocksDB Raft log, the log is reclaimed by dropping whole SST
-files below a persisted compaction floor, and every pass advances that floor to the true floor. The
-cadence therefore decides only how often a pass runs, not how much it may reclaim.
+`compact_every_operations` counts persisted WAL **batches**: under load one batch carries on the order
+of a hundred log entries. With a RocksDB Raft log, the log is reclaimed by dropping whole SST
+files below a persisted compaction floor, and every pass advances that floor to the true floor. So
+the cadence decides how often a pass runs. It does not limit how much a pass reclaims.
 
 Storage backends: `memory`, `sqlite`, `rocksdb`, `solarium`.
 
@@ -373,10 +373,10 @@ synced writes. A rate that is too low lets level 0 grow until writes slow down.
 transaction commit in **one** durable round instead of two: the bundled commit carries its
 on-partition read dependencies, and every replica judges them at apply time, in log order, against the
 partition's replicated committed-head ledger. With it off, those transactions pay one extra Raft
-proposal plus the replica-fence exchange per commit. Eligibility is decided by the transaction, not by
-the flag: only one participant partition, the anchor on that partition, and a read set the gate can
-decide there. A cross-partition transaction stays on two-phase commit either way. CamusDB's grouped key
-layout is what makes it pay: a table row and its index entries hash to the same partition, so a
+proposal plus the replica-fence exchange per commit. The flag does not change which
+transactions are eligible. A transaction is eligible with only one participant partition, the anchor on
+that partition, and a read set the gate can decide there. A cross-partition transaction stays on
+two-phase commit either way. CamusDB's grouped key layout makes it pay: a table row and its index entries hash to the same partition, so a
 single-row update is a one-partition transaction. Measured on a three-partition `accounts` workload,
 turning it on is worth about **+24% throughput** at a 99.8% one-phase rate.
 
@@ -385,7 +385,7 @@ gate judges against — remembers a key's last transactionally committed head fo
 exceed the longest transaction lifetime the deployment allows: a transaction that began before the
 horizon is refused, because pruned memory is indistinguishable from "no commit happened".
 
-Three operating rules, all of them enforced by Kahuna rather than by CamusDB:
+Three operating rules. Kahuna enforces all of them; CamusDB does not check them:
 
 - **Same value on every node of the group** — for both keys. The gate is a property of the replicated
   command, and nodes with different horizons would judge the same bundled commit differently.
@@ -397,7 +397,7 @@ Three operating rules, all of them enforced by Kahuna rather than by CamusDB:
   before the ledger existed fails at startup, and refuses to install a partition snapshot exported
   without a ledger.
 
-Because the default is on, the last rule is an **upgrade step**, not a one-time setup note. Bringing a
+Because the default is on, the last rule is an **upgrade step**. Bringing a
 data directory written by a build that predates the committed-head ledger into a build that defaults the
 gate on will fail to start. Upgrading such a deployment:
 
@@ -420,7 +420,7 @@ consecutive clean two-hour fault soaks on two released Kahuna versions (conserva
 every fault recovered), and it is a per-group property, so the baseline decides it for every node. An
 explicit value, including `false`, always wins.
 
-Two operating rules, both enforced by the record shape rather than by CamusDB:
+Two operating rules. The record shape enforces both; CamusDB does not check them:
 
 - **Every node first, then the flag.** Every node must run a Kahuna build that installs on a
   materializing settle (Kahuna.Core 1.10.1 or later) before any node has this on. An older node resolves
@@ -470,8 +470,8 @@ served from cache instead of disk.
 `dev` is for a node sharing a developer machine with the application being built against it: the
 budgets are fixed, so the same node is the same size on a 64 GiB workstation and in a 2 GiB
 container. The cost is throughput once the working set outgrows the cache — the TPC-C run that
-motivated proportional sizing was ~5x slower against a 320 MiB block cache — so it is not a server
-setting. Note that the caches are ceilings filled lazily: a burst of large writes can still push
+motivated proportional sizing was ~5x slower against a 320 MiB block cache — so do not use it on a
+server. The caches are ceilings filled lazily: a burst of large writes can still push
 process RSS well above the cache total, because transient managed allocations and the .NET GC
 dominate the peak. Server GC (the build default, one heap per core) also keeps the space a burst grew
 after the burst ends: an idle dev node on a 10-core machine was measured at 2.1 GB committed for a
@@ -486,13 +486,13 @@ and leaves the child running. Setting `DOTNET_gcServer` (either value) yourself 
 off and keeps the GC mode you chose. The startup banner states which GC the node runs under.
 
 An explicit `kahuna.*` budget always beats the profile, so `dev` plus one raised budget is a valid
-combination rather than a conflict.
+combination.
 
 ### Memory-proportional cache defaults
 
 Under `memory_profile: prod`, most unset keys keep Kahuna's own default, but the four cache-sizing
-knobs are an exception: when left unset they are computed at startup from the node's memory rather
-than from a fixed constant. A fixed 320 MB block cache was measured forcing a 1.2 GB TPC-C working set
+knobs are an exception: when left unset they are computed at startup from the node's memory.
+A fixed 320 MB block cache was measured forcing a 1.2 GB TPC-C working set
 through disk reads on nearly every statement; sizing it to the machine took the same workload from
 24.5 to 119.6 tx/s at 8 clients.
 
@@ -506,8 +506,7 @@ Two different memory sizes feed the computation, one for each kind of cache:
   `DOTNET_GCHeapHardLimitPercent`, or the runtime's own 75% default inside a memory-limited
   container), else the machine memory.
 
-With no heap limit the two sizes are the same. With a heap limit they differ, and the difference
-matters: the shared budgets sit **outside** the heap limit and count against the container beside it,
+With no heap limit the two sizes are the same. With a heap limit they differ: the shared budgets sit **outside** the heap limit and count against the container beside it,
 on RocksDB and on Solarium alike ([Solarium's are native memory too](#solarium-storage-engine)). On a
 4,096 MiB container with `DOTNET_GCHeapHardLimitPercent=3C` (60%, the value is hexadecimal), the heap
 budget is 2,457 MiB and both engines size the budgets from 4,096 MiB: RocksDB gets a 409 MiB cache and
@@ -575,13 +574,12 @@ IDE than a dedicated database server. An explicit value always wins over the com
 sub-budget (above the 192 MiB flush unit without any floor), and 512 MiB of actor caches split across
 32 actors (16 MiB each) — about 1.5 GiB.
 
-A dedicated server should raise all four explicitly; the sizing above is a floor to build from, not
-a recommendation for a machine whose only job is CamusDB.
+A dedicated server should raise all four explicitly. The sizing above is a floor to build from.
 
-Note that the 6.25% share and its 64 MiB floor bound the actor-cache layer *as a whole*, and are
+The 6.25% share and its 64 MiB floor bound the actor-cache layer *as a whole*, and are
 then divided by the key/value actor count (`kahuna.key_value_workers`, or max(32, 4 × CPU cores)
 when unset); only the 8 MiB per-actor minimum is per actor. Adding cores
-therefore splits the same budget more ways rather than growing it — a machine with many cores
+therefore splits the same budget more ways and does not grow it — a machine with many cores
 relative to its RAM does not end up with a multiple of the intended share.
 
 The RocksDB pair is shared: `rocksdb_shared_memory` (default on, and a no-op unless `storage` and
@@ -597,7 +595,9 @@ The memory-proportional sizing therefore raises an unset budget to 256 MiB, the 
 128 MiB flush unit plus one memtable of headroom, but never past half the cache. Below that size, the
 Solarium WAL writes a warning at open and flushes the Raft log in small pieces. The 256 MiB fits in
 half the cache only from 5 GiB of machine memory; a smaller Solarium node that wants the unit covered
-sets both budgets explicitly. Likewise `max_bytes_per_actor` is **per actor**: multiply by the actor count (`key_value_workers`,
+sets both budgets explicitly.
+
+`max_bytes_per_actor` is **per actor**: multiply by the actor count (`key_value_workers`,
 default max(32, 4 × CPU cores)) to get the total.
 
 `kahuna.key_value_write_max_in_flight_batches_per_partition` (default **1**, Kahuna 1.7.1) is how many
@@ -618,7 +618,7 @@ Measured 2026-09-09: the linger itself is inert at full occupancy (1, 3 and 5 ms
 batches), because a completing batch re-dispatches whatever is queued.
 
 `kahuna.key_value_write_post_completion_hold_ms` (default **1** in CamusDB; Kahuna's own default is 0)
-is the knob that does add density at full occupancy: after a batch completes the aggregator holds this
+adds density at full occupancy: after a batch completes the aggregator holds this
 long before dispatching the next, so more items accumulate per batch; the cost is that much added write
 latency. The aggregator keeps one Raft round in flight per partition, so at full load a round carries
 only what arrived during the previous round. The timer that ends the hold fires about 1 ms late (0.95 to
@@ -658,8 +658,8 @@ cgroup and shows in `docker stats`, but it is reclaimable and does not threaten 
 
 Eight `kahuna.wal_shard_*` keys size the RocksDB column families that hold the Raft log. **CamusDB sets
 none of them.** Each key is unset by default, and unset leaves Kommander's own default for that field in
-force, field for field — these are overrides of a default that is tuned and measured in Kommander, not a
-CamusDB posture. They take effect only when `kahuna.wal_storage` is `rocksdb`.
+force, field for field. These keys override a default that is tuned and measured in Kommander. They
+take effect only when `kahuna.wal_storage` is `rocksdb`.
 
 A Raft log row dies when a compaction pass covers it with a range tombstone. A row that meets its
 tombstone inside one flush unit is dropped at flush and never reaches L0; a row flushed earlier has to be
@@ -681,14 +681,14 @@ Three cautions apply to the whole group.
 - **Memory.** The worst case per actively-written shard is `wal_shard_write_buffer_size_mb` ×
   `wal_shard_max_write_buffer_number` — 256 MB at the defaults. That competes with
   `kahuna.rocksdb_shared_memory_budget_mb` on a small node. Under the shared WriteBufferManager an
-  over-budget node flushes early, which quietly returns the flush unit to its old size rather than
-  growing memory, so raising the memtable knobs without raising the budget can buy nothing. The
+  over-budget node flushes early, which quietly returns the flush unit to its old size and does not
+  grow memory, so raising the memtable knobs without raising the budget can buy nothing. The
   computed memtable budget follows these two keys through the flush-unit floor above, but only up to
   half the block cache; past that, raise `kahuna.rocksdb_shared_memtable_budget_mb` alongside them.
 - **Restart.** A wider flush unit is a wider WAL-replay unit. A restart re-reads more before the node
-  reports ready; measure that, not only the bytes written.
+  reports ready; measure that as well as the bytes written.
 - **Universal makes the level size inert.** Setting `wal_shard_universal_compaction: true` together with
-  `wal_shard_max_bytes_for_level_base_mb` is accepted and is not an error, but RocksDB does not consult
+  `wal_shard_max_bytes_for_level_base_mb` is accepted, but RocksDB does not consult
   level sizing under universal compaction, so the second key has no effect.
 
 Validation rejects a size outside 1..65536 MiB, a count outside 1..64, a

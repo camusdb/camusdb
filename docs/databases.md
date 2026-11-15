@@ -2,7 +2,7 @@
 
 ## Lifecycle
 
-Databases in CamusDB must be **created explicitly** before use. There is no magic-creation — opening or querying a name that has not been registered throws `DatabaseDoesntExist` (error code `CADB0010`).
+Databases in CamusDB must be **created explicitly** before use. Opening or querying a name that has not been registered throws `DatabaseDoesntExist` (error code `CADB0010`).
 
 ```sql
 CREATE DATABASE mydb;
@@ -50,7 +50,7 @@ Guarantees:
 - `OPEN(old)` throws `DatabaseDoesntExist` immediately after the rename completes.
 - `OPEN(new)` resolves to the same id and returns the same cached descriptor.
 - There is no window where neither name resolves — the registry swap is atomic.
-- In-flight operations on the database continue uninterrupted; they observe the old display name until the descriptor is naturally recycled (harmless — the name is display-only).
+- In-flight operations on the database continue uninterrupted; they observe the old display name until the descriptor is recycled. This is harmless, because the name is display-only.
 - Renaming to an existing or reserved name throws `DatabaseAlreadyExists` or `DatabaseNameReserved`.
 
 ## Error codes

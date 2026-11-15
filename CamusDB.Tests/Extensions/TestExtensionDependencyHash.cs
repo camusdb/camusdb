@@ -152,6 +152,31 @@ internal sealed class TestExtensionDependencyHash : ExtensionTestBase
         Assert.IsFalse(ExtensionBuild.SameDependencies(pinned, ExtensionBuild.EmptyDependencySet));
     }
 
+    [Test]
+    public void AFolderReachedThroughALink_MatchesThePathTheResolverGives()
+    {
+        // The boot can see the folder through a link (as /var/folders is a link to /private/var/folders
+        // on macOS) while the dependency resolver gives the target path. Both forms must find the hash.
+        string assembly = CopyUsesHelper();
+        string folder = Path.GetDirectoryName(assembly)!;
+        string link = folder + "-link";
+        Directory.CreateSymbolicLink(link, folder);
+
+        try
+        {
+            ExtensionDependencyHash dependencies = ExtensionDependencyHash.Compute(Path.Combine(link, "Fixture.UsesHelper.dll"), ExtensionTrust.Unsafe);
+
+            Assert.DoesNotThrow(() => dependencies.ReadVerified(Path.Combine(folder, "Fixture.Helper.dll"), "uses_helper"));
+            Assert.DoesNotThrow(() => dependencies.ReadVerified(Path.Combine(link, "Fixture.Helper.dll"), "uses_helper"));
+            Assert.AreEqual(ExtensionDependencyHash.Compute(assembly, ExtensionTrust.Unsafe).Sha256, dependencies.Sha256);
+        }
+        finally
+        {
+            // Deletes the link only; the folder goes in the teardown.
+            Directory.Delete(link);
+        }
+    }
+
     private static async Task<string> Code(Func<Task> action) =>
         Assert.ThrowsAsync<CamusDBException>(async () => await action())!.Code;
 }

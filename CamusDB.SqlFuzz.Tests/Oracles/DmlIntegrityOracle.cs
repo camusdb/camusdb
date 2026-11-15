@@ -97,7 +97,9 @@ internal sealed class WriteCheck : OracleCheck
         InsertStmt { OnConflict: not null } => "upsert",
         InsertStmt => "insert",
         InsertSelectStmt => "insert-select",
+        UpdateStmt { From: not null } => "update-from",
         UpdateStmt => "update",
+        DeleteStmt { Using: not null } => "delete-using",
         DeleteStmt => "delete",
         _ => "other",
     };
@@ -130,12 +132,13 @@ internal sealed class WriteCheck : OracleCheck
             case UpdateStmt update:
                 assigned = update.Set.Select(a => a.Column).ToList();
                 prediction = printer.Print(new SelectStmt(
-                    update.Set.Select(a => new SelectItem(a.Value)).Prepend(new SelectItem(key)).ToList(),
-                    new TableRef(update.Table, "d"), update.Where));
+                    update.Set.Select(a => new SelectItem(a.Value)).Prepend(new SelectItem(KeyOf(table, update.Qualifier))).ToList(),
+                    PredictionFrom(update.Table, update.Qualifier, update.From), update.Where));
                 break;
 
             case DeleteStmt delete:
-                prediction = printer.Print(new SelectStmt([new SelectItem(key)], new TableRef(delete.Table, "d"), delete.Where));
+                prediction = printer.Print(new SelectStmt([new SelectItem(KeyOf(table, delete.Qualifier))],
+                    PredictionFrom(delete.Table, delete.Qualifier, delete.Using), delete.Where));
                 break;
 
             case InsertSelectStmt insertSelect:
@@ -165,6 +168,24 @@ internal sealed class WriteCheck : OracleCheck
         }
 
         return new WriteSpec(Table, Kind, printer.Print(Write), prediction, assigned, keys, proposed, proposedColumns);
+    }
+
+    /// <summary>The primary key of the target, qualified as the columns of the write are.</summary>
+    private static ColumnExpr KeyOf(TableDef table, string? qualifier) => new(qualifier, table.PrimaryKey.Name, table.PrimaryKey.Type);
+
+    /// <summary>
+    /// The FROM of the prediction of an UPDATE or a DELETE. A plain write reads its table under a
+    /// placeholder alias, because its columns are bare. A write with a qualifier reads the table under
+    /// that name. A joined write reads <c>list CROSS JOIN target</c>: in PostgreSQL the joined form is
+    /// <c>FROM target, list WHERE …</c>, a comma is a cross join, and the WHERE does the rest. The
+    /// prediction is a plain SELECT, so it runs on the join path of a read, while the write builds its
+    /// own join, and the two must give the same rows. A target row that the prediction names twice
+    /// matched two rows of the list.
+    /// </summary>
+    private static FromItem PredictionFrom(string table, string? qualifier, FromItem? list)
+    {
+        TableRef target = new(table, qualifier ?? "d");
+        return list is null ? target : new JoinFrom(list, JoinKind.Cross, target, null);
     }
 
     /// <summary>

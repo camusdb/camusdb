@@ -23,16 +23,16 @@ machine**:
   `SchemaChangeLogEntry` (a *delta*) replicated through Raft on a dedicated partition.
   Every node applies the committed deltas **in order**, so every node converges on the
   same schema.
-- **The persisted KV blobs are a checkpoint**, not the truth. They let a node rebuild
+- **The persisted KV blobs are a checkpoint.** They let a node rebuild
   its in-memory schema on open without replaying the entire log. They are written *as a
   side effect* of applying a delta.
 - **Schema is versioned with a monotonic counter** (`Schema.SchemaVersion` per database,
   `TableSchema.Version` per table). Versions are how readers, writers, and the replication
   layer reason about "which schema" a piece of data or a transaction belongs to.
 
-Two big consequences flow from this model and are worth internalizing before reading code:
+Two consequences of this model matter before you read the code:
 
-1. **DDL is `FromVersion -> ToVersion`, never "set state X".** An entry is only valid if
+1. **DDL is a `FromVersion -> ToVersion` step.** An entry is only valid if
    the node is currently at `FromVersion`. This makes apply idempotent and ordered.
 2. **Renames and online column/index changes are *metadata-only*** because row bytes are
    keyed and serialized *positionally by immutable IDs*, not by names (see §7). Renaming a
@@ -40,8 +40,7 @@ Two big consequences flow from this model and are worth internalizing before rea
 
 ### 1.1 Key concepts & vocabulary
 
-If you are new to this subsystem, these five ideas are the whole story; the rest of the
-document is detail.
+These five ideas explain the subsystem; the rest of the document is detail.
 
 **Consensus.** A cluster has many nodes that can fail, restart, or be slow, yet they must all
 agree on *what the schema is and in what order it changed*. Kommander (Raft) provides this: a
@@ -52,22 +51,22 @@ reordered. We put every schema change for a database into one ordered Raft log (
 
 **Replicated state machine.** Each node starts from the same empty schema and applies the same
 committed deltas in the same order, so each node deterministically arrives at the same schema.
-The schema is never "copied" between nodes — it is *recomputed* on each node by replaying the
-agreed log. (The persisted KV blob is only a cached snapshot so a restarting node doesn't have
+Each node *recomputes* the schema by replaying the agreed log; nodes never copy it from each
+other. (The persisted KV blob is only a cached snapshot so a restarting node doesn't have
 to replay from the beginning.)
 
-**Acknowledgement (ack).** Commit in Raft means "a majority has stored the delta", **not**
-"every node has *applied* it to its in-memory schema yet". An **ack** is a node reporting *"I
+**Acknowledgement (ack).** Commit in Raft means "a majority has stored the delta". Some nodes
+may not have *applied* it to their in-memory schema yet. An **ack** is a node reporting *"I
 have applied schema version N."* We track acks because two things depend on knowing every node
-has caught up, not just a majority:
+has caught up, and a majority is not enough for them:
 
 - *Safety of the next step.* We never want three different schema versions live at once (a
   reader could be on N-1 while a writer is already on N+1 — an unbounded spread is impossible to
   reason about). So before proposing the move to version N+1, we **wait until every live node
   has acked N** (the two-version invariant, §6.2). Acks are the gate that enforces this.
 - *Honest completion.* When a `CREATE TABLE`/`ALTER` call returns to the client, we want it to
-  mean "this change is in effect everywhere", not "a majority will get it eventually". Waiting
-  for all live acks before returning gives that guarantee.
+  mean "this change is in effect everywhere". Waiting for all live acks before returning gives
+  that guarantee. A majority commit alone means "every node will get it eventually".
 
 **Convergence.** The cluster has *converged* on version N when every live node has applied N and
 acked it — i.e. all nodes show the same schema. Because of the ack gate, CamusDB's DDL is
@@ -75,11 +74,11 @@ acked it — i.e. all nodes show the same schema. Because of the ack gate, Camus
 converged. (Tests assert this directly with `WaitForSchemaConvergenceAsync`.) A node that was
 offline during some changes converges on rejoin by replaying the missed committed log entries.
 
-**Coordinator.** A safe online schema change is not one delta — it is a *sequence* of small
+**Coordinator.** A safe online schema change is a *sequence* of small
 deltas (e.g. add a column as invisible, then make it writable, backfill existing rows, then make
 it readable), with a convergence gate between each. Something has to **own** that multi-step
 sequence: emit the next delta only after the previous one has converged, run the backfill at the
-right moment, and — crucially — **survive a leader change** so a half-finished change is carried
+right moment, and **survive a leader change** so a half-finished change is carried
 to completion rather than left stuck. That owner is the `SchemaChangeCoordinator` (§8.2). It runs
 on the schema leader, records its progress durably, and resumes on whichever node becomes leader
 next.
@@ -118,8 +117,8 @@ crash-safe online schema change.
 
 **No type under `Catalogs/Apply/` takes an `IKahuna` or a `KvTransaction`.** Apply runs inside the
 schema partition's commit pipeline on every node, and a KV write from there re-enters the same
-partition and deadlocks it. The separation used to be a comment; it is now something the compiler
-refuses to let you break.
+partition and deadlocks it. The separation used to be a comment. The compiler now
+enforces it.
 
 | Replication glue | `SchemaReplicator` | Bridges Kahuna's apply/restore callbacks to `CatalogsManager`. Applies committed deltas in-memory (never persists from the callback), records acks, evicts cached `TableDescriptor`s, and registers the coordinator-resume leader callback. |
 | KV / consensus | `EmbeddedKahuna` | Routes schema deltas to a Raft partition, replicates+commits them, fans them out to local subscribers, tracks per-node acks, sources live membership from Raft, and fires `OnLeaderChanged` for coordinator resume. |
@@ -198,7 +197,7 @@ that writes and reads these bytes is `SchemaChangeLogEntryCodec`:
            body                    the whole SchemaChangeLogEntry as UTF-8 JSON
 ```
 
-The header repeats three fields that are also in the body, and that repetition is the point. Every
+The header repeats three fields that are also in the body, on purpose. Every
 open database subscribes to its own schema-log partition, several databases can hash to the same
 partition, and the node that proposed a change is delivered its own entry **twice** — once through
 the replication callback and once through the local apply that lets the proposer observe its change
@@ -206,7 +205,7 @@ before the statement returns (§5.2). A subscriber therefore drops far more entr
 Reading the header answers both reasons to drop one — *not my database*, and *already applied* —
 without deserializing anything and without allocating.
 
-"Already applied" needs one thing the versions alone cannot give. A re-delivery of the entry that
+The versions alone cannot decide "already applied". A re-delivery of the entry that
 produced the current version and a *different* entry claiming that same target version carry
 identical from/to versions; the first must be dropped and the second must fail loudly as an
 out-of-order change (§6.1). So `ApplyAsync` also compares a 64-bit digest of the entry bytes against
@@ -370,7 +369,7 @@ SchemaLogPartition(db) => Raft.GetPrefixPartitionKey($"{db}/meta")
   avoid colliding with Kahuna's reserved partition.
 
 > ⚠️ This is the one routing subtlety that has bitten us before. Schema *metadata keys*
-> are per-object (`{db}/meta/table/{tableId}`) for storage scalability, but the *schema
+> are per-object (`{db}/meta/table:{tableId}`) for storage scalability, but the *schema
 > log* must be single-partition for ordering. Don't "optimize" the log to spread across
 > partitions — ordering is the whole point.
 
@@ -510,7 +509,7 @@ pipeline. Persist uses its own KV transaction with bounded retry. This inverts t
 "persist-before-advance" ordering: in-memory now advances first (in the apply callback) and the
 checkpoint is written just after. That is safe because the **committed schema log is the source
 of truth** and the KV checkpoint is a load-time optimization — a node whose checkpoint write
-fails is not divergent, it rebuilds from the committed log. If the retries are **exhausted** the
+fails rebuilds from the committed log and does not diverge. If the retries are **exhausted** the
 proposer does *not* fail the DDL (the change is already committed and live cluster-wide); instead
 it marks the node's schema subsystem **degraded** and steps down its schema-partition leadership
 so a healthy peer can take over — see the persist-failure policy in §10. (Making schema-log
@@ -518,7 +517,7 @@ replay authoritative on restart, so a degraded node provably recovers without op
 the remaining piece — see §13.)
 
 `RestoreAsync` (log recovery) is a separate, simpler path: it applies in version order and
-logs+skips out-of-order entries; it likewise only mutates in-memory.
+logs+skips out-of-order entries; it also only mutates in-memory.
 
 **Idempotency keys to remember:**
 - `WasSchemaDeltaApplied(schema, entry)` checks the *effect* (table present? column present?)
@@ -553,7 +552,7 @@ Implemented by `SchemaAckTracker` (per-db `{node → NodeAck{Version, LastSeen}}
 - `WaitForAllLiveAsync(db, version, timeout, getLiveMembers, liveNodeLease, ct)` polls until
   every endpoint returned by `getLiveMembers()` has acked `version`, or throws on timeout.
 
-**Live membership comes from Raft, not a manual register set.**
+**Live membership comes from Raft.**
 `EmbeddedKahuna.GetLiveSchemaNodes()` supplies the live set, and the lease controls which Raft
 signal it uses:
 
@@ -579,9 +578,9 @@ signal it uses:
 
 Acks are keyed on `Raft.GetLocalEndpoint()`, so each node reports under its real Raft identity.
 
-**Liveness is sourced from Raft activity, not from acks.** Because membership already filters out
+**Liveness is sourced from Raft activity.** Because membership already filters out
 dead peers via `GetActiveNodes`, the `SchemaAckTracker` itself is given an **infinite** lease and
-simply waits for every member of the (already liveness-filtered) set to ack — it does **not** expire a
+waits for every member of the (already liveness-filtered) set to ack — it does **not** expire a
 member on its own apply-derived `LastSeen`. This is what prevents false eviction: a Raft-alive but
 schema-idle node has no fresh ack, but it is still in the active set, so the gate keeps waiting for
 it. (The tracker's `LastSeen` field is retained as a recorded version stamp but no longer drives
@@ -662,7 +661,7 @@ sound for the real threat model: a node lagging *schema-apply* while caught up o
 advancing `HeadSchemaVersion` (the entry was received) and is fenced; a *fully* partitioned node
 receives neither new schema nor new data, so it has nothing newer to mis-decode.
 
-**What the fence cannot see: an entry that was never delivered.** `HeadSchemaVersion` advances
+**The fence cannot see an entry that was never delivered.** `HeadSchemaVersion` advances
 only when an entry reaches `ApplyAsync`/`RestoreAsync`. Kommander delivers each committed entry
 exactly once, to whichever subscribers exist at that instant, and never redelivers it — so a delta
 that commits while a database is *unopened* on some node, or inside the open-time gap between the
@@ -673,7 +672,7 @@ a cluster's traffic with `TableDoesntExist` for a full run). The freshness recon
 the repair for exactly this blind spot.
 
 Because the fence fires in `TableOpener.Open` *before* any write or schema-version pin, the in-flight
-transaction is untouched and the same operation is safe to re-run. `ExecuteNonSQLQuery` exploits this:
+transaction is untouched and the same operation is safe to re-run. `ExecuteNonSQLQuery` uses this:
 it auto-retries a `SchemaCatchingUp` DML a few times with a short exponential backoff, so a brief lag
 clears transparently and the caller only ever sees `CADB0503` if the node stays behind across all
 attempts. (The commit-routing `TransactionMustRetry`/`CADB0504` is different — it is thrown after the
@@ -689,7 +688,7 @@ results against a stale schema.
 > and both are surfaced: the post-commit gate logs a warning **naming the lagging endpoints** (and the
 > timeout error names the nodes that never acked), and always-on `SchemaMetrics` counters track
 > `QuorumBackstopActivations` and `SchemaCatchingUp` `FenceRejections` (global + per-database) so a
-> lagging follower is observable as a number, not just a log line. (Wiring those counters to an
+> lagging follower is observable as a number as well as a log line. (Wiring those counters to an
 > external metrics exporter is left for when the codebase grows one.)
 
 ### 6.4 Schema freshness reconciliation — repairing undelivered deltas
@@ -729,8 +728,8 @@ Three triggers, all funnelled through the same reconciler:
 
 A delayed live delivery that arrives *after* a reconcile jumped past it is absorbed by
 `ApplyAsync`'s idempotency: the structural `WasSchemaDeltaApplied` check recognizes the entry's
-effect in the reloaded schema and re-acks. What the reconciler deliberately does **not** repair is a
-checkpoint that is itself behind the committed log (persist exhaustion, §10) — that remains the
+effect in the reloaded schema and re-acks. The reconciler deliberately does **not** repair a
+checkpoint that is itself behind the committed log (persist exhaustion, §10). That remains the
 restart-replay path's job, because only the log knows more than the checkpoint.
 
 ### 6.5 Replica placement — nodes outside a control partition's replica set
@@ -825,14 +824,14 @@ To scale to databases with many tables, metadata is stored per object, not as on
 
 ```
 {db}/meta/version                       → the database SchemaVersion counter
-{db}/meta/table/{tableId}               → one TableSchema, incl. its Indexes (current version)
-{db}/meta/history/{tableId}/{version}   → one past column layout (TableSchemaHistory)
-{db}/meta/coordinator/...               → PersistedCoordinatorJob(s) for in-flight staged
+{db}/meta/table:{tableId}               → one TableSchema, incl. its Indexes (current version)
+{db}/meta/history:{tableId}:{version}   → one past column layout (TableSchemaHistory)
+{db}/meta/coordinator:{tableId}~{elementName}
+                                        → PersistedCoordinatorJob(s) for in-flight staged
                                           changes, so a new leader can resume them (§8.2)
 {db}/meta/extension:{name}              → ExtensionDefinition — one installed C# extension
 {db}/meta/system                        → SystemSchema — LEGACY index storage, read-only;
                                           only migrated from on load (see §7.3)
-{db}/meta/schema                        → LEGACY single-blob schema (migrated on load)
 ```
 
 - **Triggers have no key of their own.** A row trigger (`CREATE TRIGGER`) is a `TriggerDefinition`
@@ -848,19 +847,18 @@ To scale to databases with many tables, metadata is stored per object, not as on
   statement resolves a member. An update replaces the one record, which moves every trigger of the
   extension to the new build at the same schema version.
 - Keyed by **immutable `tableId`**, so renaming a table never moves its key.
-- `LoadMetaAsync` range-scans `{db}/meta/table/` to rebuild `Schema.Tables`, and lazily
+- `LoadMetaAsync` range-scans `{db}/meta/table:` to rebuild `Schema.Tables`, and lazily
   loads history on demand via `SchemaHistoryLoader` (a row written under an old version
   triggers a history fetch the first time it's decoded).
 - Serialization uses UTF-8 + a source-generated `JsonSerializerContext`
   (`MetaJsonContext` / `MetaJsonSerializer`), with a UTF-16 fallback (`DeserializeCompat`)
   for old data.
-- Legacy single-blob schema is detected on load and migrated to per-object keys.
 
 ### 7.3 Indexes: owned by `TableSchema`, replicated through the log, built via the staged coordinator
 
 Indexes are **owned by the replicated `TableSchema`**, like columns:
 `TableSchema.Indexes : List<TableIndexSchema>`, persisted inside the same
-`{db}/meta/table/{tableId}` blob. `TableIndexSchema` serves two forms (one type, disambiguated
+`{db}/meta/table:{tableId}` blob. `TableIndexSchema` serves two forms (one type, disambiguated
 for JSON by a `[JsonConstructor]`):
 
 - **Persisted** (inside `TableSchema.Indexes`): immutable `Id`, `ColumnIds` (immutable column
@@ -925,18 +923,18 @@ AddIndex(DeleteOnly)  → ack gate → SetElementState(WriteOnly) → ack gate
   row and skips a row that disagrees, counting it in `camus.index_read.stale_entries` and logging
   it once a minute per index. The planner drops the predicate an index answered from the residual
   filter, so without the check a stale entry surfaced as a row that did not match its `WHERE`.
-  This is defence in depth, not a substitute for the ordering above: a covering (index-only) read
+  This is defence in depth. The ordering above is still required: a covering (index-only) read
   never fetches the row and answers from the entry alone.
-- **A lost batch is retried, never abandoned.** A batch loses only at its locks, before any work,
+- **A lost batch is always retried.** A batch loses only at its locks, before any work,
   when a writer holds one of its rows. `BackfillBatchRunner` retries it after a jittered backoff,
   halving the batch on each loss and doubling it on each win, so the free rows are written while
   the busy ones wait. There is no attempt cap: a writer holds a row for one transaction at most and
   Kahuna expires an abandoned lock with its lease, so every row is free again within a bounded
-  time. A table under sustained writes is still indexed; the build is slower, not failed. Only a
+  time. A table under sustained writes is still indexed; the build is slower and still completes. Only a
   non-retryable error (a duplicate key, a cancellation) ends the build and triggers compensation.
   The fill of an added column uses the same runner (`TableColumnAdder`). The read-only scan that
   lists each batch's row ids is retried under the same policy: Kahuna can refuse a page of it under
-  concurrent writes (reported as `CADB0504`), and the scan keeps nothing, so it is simply run
+  concurrent writes (reported as `CADB0504`), and the scan keeps nothing, so it is run
   again instead of failing the schema change on the busiest tables.
 - **Idempotent backfill (no duplicates on resume, none after a concurrent UPDATE).**
   `PutIndexEntry(backfillMode: true)` makes a re-run safe: on a unique index a `NotSet` response
@@ -1159,7 +1157,7 @@ finds the semaphore held again on return, so its own compensation and its `final
 balanced; the resume passes nothing and gets it back released.
 
 **Persistence & leader-change resume.** The durable job is `PersistedCoordinatorJob`
-(`{db}/meta/coordinator/...`): table, element, `targetState`, `ElementKind`, the column fields
+(`{db}/meta/coordinator:{tableId}~{elementName}`): table, element, `targetState`, `ElementKind`, the column fields
 (`ColumnType/NotNull/Default`) or index fields (`IndexId/IndexColumnIds/IndexType/StartOffset`),
 and an `Attempts` counter. Three triggers run `ResumeJobsAsync` on the schema leader
 (`CoordinatorResumeTrigger`), and any one of them is enough to reach a job:
@@ -1202,8 +1200,8 @@ Each resume:
 - A failed attempt is retried after a node-local backoff that doubles per attempt
   (`ResumeRetryBackoff` 5 s up to `ResumeRetryBackoffMax` 2 min), so the sweep cannot burn the
   budget in a few ticks. A job that keeps failing is abandoned after `MaxResumeAttempts` (8), some
-  six minutes of retries with the defaults: it is deleted and logged loudly rather than retried
-  forever — a poison job can't loop forever. The element stays in its current state and must be
+  six minutes of retries with the defaults: it is deleted and logged loudly, so a poison job
+  can't loop forever. The element stays in its current state and must be
   dropped by hand before it can be created again. A CHECK or NOT NULL job also removes its
   constraint when it is abandoned. Those constraints have no element state, so a constraint kept
   after the job is gone would look valid over rows nobody proved.
@@ -1225,8 +1223,8 @@ over the job the successor was driving to `Public`. Now:
 - The coordinator registers `EmbeddedKahuna.RegisterSchemaLeadershipLostCallback` for the long
   phase and cancels the fill or the backfill when its node stops leading, so the former driver stops
   at its next batch. Row correctness never depended on this: every batch locks and re-reads its rows,
-  and the successor's batches do the same, so no row is filled twice. The cancellation is about not
-  fighting the successor for row locks, and about stopping promptly.
+  and the successor's batches do the same, so no row is filled twice. The cancellation keeps the
+  former driver from fighting the successor for row locks, and stops it promptly.
 - A driver whose job failed after the term moved, or whose record write was refused, does not take
   the element back and does not report the failure as its own. `RunJobAsync` releases the gate and
   waits for the job's outcome (`AnswerFromHandedOverJobAsync`): it returns normally when the
@@ -1249,7 +1247,7 @@ element in a valid intermediate state that resume completes — never a stuck ha
 ### 8.3 Foreign keys: a shorter ladder
 
 A foreign key is an element too (`SchemaElementKind.ForeignKey`), with a shorter ladder. It is
-not data that a backfill fills in, but a rule that the DML enforces and a validation pass proves:
+a rule that the DML enforces and a validation pass proves, with no data for a backfill to fill in:
 
 ```
 ADD:   Absent ──AddForeignKey──► WriteOnly ──(ack gate, validation pass)──► Public
@@ -1318,7 +1316,7 @@ A later statement of the same transaction that finds the table at another versio
 one is refused at the statement with the same code (`KvTransaction.PinSchemaVersion`). (Transparent
 retry inside the server is a future-work item — see §13; today the client does the replay.)
 
-Why this works without extra plumbing: `ApplyAlterColumn`/`ApplyElementState` mutate the
+This works without extra plumbing: `ApplyAlterColumn`/`ApplyElementState` mutate the
 **same `TableSchema` instance** the cached `TableDescriptor` holds (`Version++` in place),
 so the pin closure observes the bump. **This in-place-mutation identity is an invariant** —
 if a future change ever replaces `Schema.Tables[name]` with a *new* `TableSchema` object
@@ -1392,14 +1390,14 @@ adds nothing. The single-node index build, which adds the index in memory before
 calls `DatabaseDescriptor.FenceWritersAndWaitAsync` directly before its backfill. The single-node
 `ADD CONSTRAINT ... CHECK` and `SET NOT NULL` do the same before their scan of the existing rows.
 
-**A validation scan must come after the enforcement, never before it.** The fence only refuses
+**A validation scan must come after the enforcement.** The fence only refuses
 writes that were planned before the stamp. A write planned and committed between a scan and a later
 install of the constraint has no pin older than any stamp, and nothing checks it. So every operation
 that proves existing rows (an index backfill, a foreign-key validation, a CHECK or NOT NULL scan)
 first makes new statements maintain or obey the element, then waits for the earlier writers, then
 reads.
 
-What a schema change waits for is small: **commits in flight**, never open transactions. An idle
+A schema change waits for **commits in flight** only. It does not wait for open transactions. An idle
 client that holds a transaction open does not delay DDL; its commit is refused instead.
 
 Limits of the fence:
@@ -1428,8 +1426,8 @@ the change on the leader).
 ## 10. Failure handling & compensation
 
 - **Checkpoint persist-failure (degrade + step-down policy):** the schema delta is already
-  committed in Raft and applied in-memory cluster-wide, so a failed checkpoint is never
-  divergence — it is a stale load-time cache the committed log reconciles. The proposer's
+  committed in Raft and applied in-memory cluster-wide, so a failed checkpoint never causes
+  divergence. It leaves a stale load-time cache that the committed log reconciles. The proposer's
   `PersistSchemaCheckpointWithRetryAsync` retries the KV write with bounded backoff; on
   **exhaustion** it applies a defined policy rather than failing the (already-live) DDL:
   - It marks the node **degraded** (`DatabaseDescriptor.MarkSchemaSubsystemDegraded`). The
@@ -1628,8 +1626,8 @@ on an older layout decode with their own version and read `age` with current vis
   took 40 s (about 500 rows/s), and the load ran at 52% of its throughput during the build and at
   72% once the index was maintained (Caraxes `schema-preflight`, 2026-10-21). An earlier build
   took 134–148 s at about 70% of the load's throughput, so the build is now shorter but its dip is
-  deeper. Batching the entry writes of a batch into one Kahuna call is the lever that has not been
-  pulled; measure it by the dip per second, not by the build time alone.
+  deeper. Batching the entry writes of a batch into one Kahuna call has not been
+  tried; measure it by the dip per second as well as by the build time.
 - **Legacy index cleanup.** `SystemSchema` index storage is read-only legacy (§7.3); remove it
   once all databases are known to be migrated.
 - **Broader failure-injection coverage.** The in-process harness supports concurrent DML during

@@ -9,7 +9,7 @@ SHOW SLOW QUERIES LIKE '%FROM orders%';
 ```
 
 The log is **off by default** and **bounded in memory**. It is a diagnostic you turn on when a node
-is slow, not a permanent audit trail — see [Limits](#limits) before you plan around it.
+is slow. It keeps no permanent audit trail — see [Limits](#limits) before you plan around it.
 
 ## What it is for
 
@@ -57,7 +57,7 @@ A node that started with `slow_query_log_enabled: false` holds no ring. The firs
 with, and the next statement is recorded. Turning the log **off** at runtime keeps the ring and the
 entries already recorded, so you can still read them.
 
-All four are **node-scoped**. Nodes may legitimately disagree, which is the point: turn the log on
+All four are **node-scoped**. Nodes may disagree, so you can turn the log on
 for the one node you are investigating.
 
 ### Sizing it
@@ -119,7 +119,7 @@ SHOW SLOW QUERIES LIKE '%orders%';
 | 407 | 2210.7 | select | 500 | 500 | false | true | completed | SELECT * FROM orders ORDER BY total DESC |
 
 The first row read two million rows to return twelve: `region` has no index. The second read exactly
-what it returned but spilled, so it is a memory problem, not an index problem — either raise
+what it returned but spilled, so its problem is memory and no index would help — either raise
 `spill_threshold_rows` or bound the sort with a `LIMIT`. See
 [Spill to disk](spill-to-disk.md) and [the query planner guide](query-planner.md).
 

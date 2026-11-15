@@ -123,6 +123,14 @@ public enum NodeType
     GroupBy,
     Having,
     TableReference,
+    /// <summary>
+    /// A query in <c>FROM</c>: <c>(SELECT …) [AS] alias [(c1, …)]</c>. <c>leftAst</c> = the query,
+    /// <c>rightAst</c> = the alias identifier, <c>extendedOne</c> = the cache hint of an expanded view,
+    /// <c>extendedTwo</c> = the owner of an expanded view, <c>extendedThree</c> = the column-alias list
+    /// (an <see cref="IdentifierList"/> or one <see cref="Identifier"/>) or null, <c>extendedFour</c> =
+    /// the <see cref="CteMaterialization"/> marker of a CTE that the statement computes once, or null.
+    /// A rewrite that builds a new node must carry every slot.
+    /// </summary>
     DerivedTableReference,
     CommaJoin,
     CommaJoinTableList,
@@ -1256,4 +1264,31 @@ public enum NodeType
     /// <c>rightAst</c> = the table identifier.
     /// </summary>
     ShowCreateTrigger,
+
+    /// <summary>
+    /// <c>WITH a AS (…), b AS (…) statement</c>, before <see cref="SQLParser.CommonTableExpressions"/>
+    /// expands it. <c>leftAst</c> = the definitions (a <see cref="CommonTableExpressionList"/> or one
+    /// <see cref="CommonTableExpression"/>), <c>rightAst</c> = the statement. No tree that leaves the
+    /// parser holds this node: the parser replaces each one by its statement, with every CTE
+    /// reference written out as a derived table.
+    /// </summary>
+    With,
+
+    /// <summary>
+    /// One definition of a <see cref="With"/> list: <c>name [(c1, …)] AS [[NOT] MATERIALIZED] (query)</c>.
+    /// <c>leftAst</c> = the name identifier, <c>rightAst</c> = the query, <c>extendedOne</c> = the
+    /// column-alias list or null, <c>yytext</c> = <c>"materialized"</c>, <c>"not materialized"</c> or null.
+    /// </summary>
+    CommonTableExpression,
+
+    /// <summary>Two or more definitions of a <see cref="With"/> list, left-deep: <c>leftAst</c> = the definitions before, <c>rightAst</c> = the last one.</summary>
+    CommonTableExpressionList,
+
+    /// <summary>
+    /// The marker of a CTE that the statement computes once and every reader reads from the kept rows.
+    /// A leaf in <see cref="DerivedTableReference"/>'s <c>extendedFour</c>; every reference to one CTE
+    /// holds the same instance, so the executor finds the kept rows by the reference of this node.
+    /// <c>yytext</c> = the CTE name, for EXPLAIN and errors.
+    /// </summary>
+    CteMaterialization,
 }

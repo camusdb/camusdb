@@ -43,6 +43,10 @@ namespace CamusDB.Core.CommandsExecutor.Models;
 ///               (<see cref="JsonbDocument"/>); no tree is built. Equal bytes are equal documents, but
 ///               two documents can be equal with different bytes when only a number's scale differs
 ///               (1.0 and 1), so equality goes through <see cref="JsonbDocument.Compare"/>.
+///   Interval  — the months in the high 32 bits of UuidHigh, the days in its low 32 bits, and the
+///               microseconds in LongValue (<see cref="IntervalParts"/>). Order and equality use
+///               <see cref="IntervalMath.ComparisonKey"/>, where a month is 30 days, so two values
+///               with different parts can be equal ('1 month' and '30 days').
 /// </summary>
 public sealed class ColumnValue : IComparable<ColumnValue>
 {
@@ -116,6 +120,13 @@ public sealed class ColumnValue : IComparable<ColumnValue>
     /// </summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? JsonValue => Type == ColumnType.Jsonb ? JsonbText.ToText(JsonbDocument.Item(BytesValue)) : null;
+
+    /// <summary>
+    /// The months, days and microseconds of a <see cref="ColumnType.Interval"/> value. Meaningless for
+    /// all other types.
+    /// </summary>
+    [JsonIgnore]
+    public IntervalParts IntervalParts => new((int)(UuidHigh >> 32), (int)UuidHigh, LongValue);
 
     [JsonIgnore]
     public Int128 NumericUnscaled => ((Int128)UuidHigh << 64) | (Int128)(ulong)LongValue;
@@ -207,7 +218,39 @@ public sealed class ColumnValue : IComparable<ColumnValue>
             ArrayValues = arrayValues ?? [];
             ArrayElementType = arrayElementType;
         }
+
+        if (type == ColumnType.Interval)
+        {
+            // Text (an HTTP parameter) is parsed; otherwise the packed halves round-trip.
+            IntervalParts parts = strValue is not null
+                ? IntervalMath.Parse(strValue)
+                : new IntervalParts((int)(uuidHigh >> 32), (int)uuidHigh, longValue);
+
+            UuidHigh = PackIntervalHigh(parts);
+            LongValue = parts.Micros;
+        }
     }
+
+    private ColumnValue(IntervalParts interval)
+    {
+        Type = ColumnType.Interval;
+        UuidHigh = PackIntervalHigh(interval);
+        LongValue = interval.Micros;
+    }
+
+    /// <summary>Builds a <see cref="ColumnType.Interval"/> value.</summary>
+    public static ColumnValue FromInterval(IntervalParts interval) => new(interval);
+
+    /// <summary>
+    /// Builds a <see cref="ColumnType.Interval"/> value from its packed halves: <see cref="UuidHigh"/>
+    /// (months in the high 32 bits, days in the low 32 bits) and <see cref="LongValue"/> (microseconds).
+    /// The codecs that copy the two 64-bit fields use it.
+    /// </summary>
+    public static ColumnValue FromIntervalHalves(long high, long low) =>
+        new(new IntervalParts((int)(high >> 32), (int)high, low));
+
+    private static long PackIntervalHigh(IntervalParts interval) =>
+        ((long)interval.Months << 32) | (uint)interval.Days;
 
     // -------------------------------------------------------------------------
     // Typed constructors
@@ -387,6 +430,10 @@ public sealed class ColumnValue : IComparable<ColumnValue>
             throw new CamusDBException(CamusDBErrorCodes.FeatureNotSupported,
                 "arrays of jsonb are not supported; use a jsonb array instead");
 
+        // An interval is an expression value only; an array of them would need its own codecs.
+        if (elementType == ColumnType.Interval)
+            throw new CamusDBException(CamusDBErrorCodes.FeatureNotSupported, "arrays of interval are not supported");
+
         for (int i = 0; i < elements.Count; i++)
         {
             ColumnValue el = elements[i];
@@ -476,6 +523,9 @@ public sealed class ColumnValue : IComparable<ColumnValue>
             case ColumnType.Numeric:
                 return NumericUnscaled.CompareTo(other.NumericUnscaled);
 
+            case ColumnType.Interval:
+                return IntervalMath.Compare(IntervalParts, other.IntervalParts);
+
             case ColumnType.Array:
             {
                 IReadOnlyList<ColumnValue> a = ArrayValues ?? [];
@@ -518,6 +568,7 @@ public sealed class ColumnValue : IComparable<ColumnValue>
             ColumnType.Uuid      => $"ColumnValue({Type}:{ToGuid():D})",
             ColumnType.Numeric   => $"ColumnValue({Type}:{NumericValue})",
             ColumnType.Jsonb     => $"ColumnValue({Type}:len={BytesValue?.Length ?? 0})",
+            ColumnType.Interval  => $"ColumnValue({Type}:{IntervalMath.FormatIso(IntervalParts)})",
             ColumnType.Array     => $"ColumnValue({Type}<{ArrayElementType}>:count={ArrayValues?.Count ?? 0})",
             _                    => $"ColumnValue({Type}:{StrValue})",
         };

@@ -105,11 +105,11 @@ Decoding is schema-driven and tolerant of a short/absent tuple (missing trailing
 - **INSERT / backfill** materialize the included values into each new entry (included values may be
   `NULL`, unlike key columns).
 - **DELETE** removes the entry by key; its value goes with it.
-- **UPDATE** is the subtle case. An index entry is rewritten when the **key** changes (delete old
-  key + insert new key) — and now **also** when an *included* value changes even though the key does
+- **UPDATE** rewrites an index entry when the **key** changes (delete old
+  key + insert new key), and **also** when an *included* value changes even though the key does
   not. In that case the key bytes are identical, so the entry value is **overwritten in place** on
   the same key (a plain `Set`, not `SetIfNotExists`, so a unique index's existing entry is refreshed
-  rather than skipped). Miss this and a covered read would return stale payload.
+  rather than skipped). Without this overwrite a covered read would return stale payload.
 
 ### Query path
 

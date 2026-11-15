@@ -57,7 +57,25 @@ internal static class DateTimeScalarFunctions
         // date_add always infers DateTime: the Date-vs-DateTime promotion rule (Date+subday→DateTime,
         // Date+day→Date) requires knowing the unit value at plan time, which InferReturnType cannot do
         // (it only sees argument types). Widening to DateTime keeps Evaluator and InferReturnType in agreement.
-        RegisterTernary(registry, "date_add", EvaluateDateAdd, _ => ColumnType.DateTime);
+        // date_add(t, n, 'unit') and date_add(t, INTERVAL n unit), the MySQL form; date_sub is the same
+        // with the amount negated.
+        registry.Register(new ScalarFunctionDescriptor
+        {
+            Name = "date_add",
+            MinArity = 2,
+            MaxArity = 3,
+            Evaluator = static (calledName, arguments) => EvaluateDateAddOrSub(calledName, arguments, subtract: false),
+            InferReturnType = _ => ColumnType.DateTime,
+        });
+
+        registry.Register(new ScalarFunctionDescriptor
+        {
+            Name = "date_sub",
+            MinArity = 2,
+            MaxArity = 3,
+            Evaluator = static (calledName, arguments) => EvaluateDateAddOrSub(calledName, arguments, subtract: true),
+            InferReturnType = _ => ColumnType.DateTime,
+        });
         RegisterTernary(registry, "date_diff", EvaluateDateDiff, _ => ColumnType.Integer64);
         // EXTRACT(field FROM x) parses to a call named "extract" whose arguments are (field, x), the
         // same order as date_part, so one evaluator serves both spellings.
@@ -217,6 +235,44 @@ internal static class DateTimeScalarFunctions
         });
     }
 
+    /// <summary>
+    /// <c>date_add</c> and <c>date_sub</c>. With two arguments the second is an interval
+    /// (<c>date_add(d, INTERVAL 1 DAY)</c>, the MySQL form), applied by the <c>datetime + interval</c>
+    /// rule. With three it is an integer amount and a unit name. The result is always a datetime: the
+    /// result type cannot depend on the unit, which only the value shows. <c>date_sub</c> negates the
+    /// amount; an amount that has no negation (<see cref="long.MinValue"/>, or an interval part at its
+    /// minimum) is an out-of-range error.
+    /// </summary>
+    private static ColumnValue EvaluateDateAddOrSub(string calledName, IReadOnlyList<ColumnValue> arguments, bool subtract)
+    {
+        if (PropagateNull(arguments) is ColumnValue nullResult)
+            return nullResult;
+
+        if (arguments.Count == 2)
+        {
+            if (arguments[1].Type != ColumnType.Interval)
+                throw new CamusDBException(
+                    CamusDBErrorCodes.InvalidInput,
+                    $"Function '{calledName}' argument 1 expects an interval value but received {arguments[1].Type}; " +
+                    $"write {calledName}(x, INTERVAL n unit) or {calledName}(x, n, 'unit')");
+
+            DateTimeOffset start = ReadTemporal(calledName, 0, arguments[0]);
+            IntervalParts interval = subtract ? IntervalMath.Negate(arguments[1].IntervalParts) : arguments[1].IntervalParts;
+            return new ColumnValue(ColumnType.DateTime, IntervalMath.AddToTicks(start.UtcTicks, interval));
+        }
+
+        if (!subtract)
+            return EvaluateDateAdd(calledName, arguments);
+
+        RequireInteger(calledName, 1, arguments[1]);
+        if (arguments[1].LongValue == long.MinValue)
+            throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInput,
+                $"Function '{calledName}' date/time overflow for amount {arguments[1].LongValue.ToString(CultureInfo.InvariantCulture)}");
+
+        return EvaluateDateAdd(calledName, [arguments[0], new ColumnValue(ColumnType.Integer64, -arguments[1].LongValue), arguments[2]]);
+    }
+
     private static ColumnValue EvaluateDateAdd(string calledName, IReadOnlyList<ColumnValue> arguments)
     {
         if (PropagateNull(arguments) is ColumnValue nullResult)
@@ -256,9 +312,65 @@ internal static class DateTimeScalarFunctions
         RequireString(calledName, 0, arguments[0]);
 
         DateTimeUnit unit = ParseUnit(calledName, arguments[0].StrValue!);
+
+        if (arguments[1].Type == ColumnType.Interval)
+            return new ColumnValue(ColumnType.Integer64, ExtractIntervalPart(arguments[0].StrValue!, unit, arguments[1].IntervalParts));
+
         DateTimeOffset value = ReadTemporal(calledName, 1, arguments[1]);
 
         return new ColumnValue(ColumnType.Integer64, ExtractPart(value.ToUniversalTime(), unit));
+    }
+
+    /// <summary>
+    /// One part of an interval, with the PostgreSQL field split: the months give whole years
+    /// (<c>months / 12</c>) and the months left over (<c>months % 12</c>); the days stay as they are;
+    /// the time part gives hours, minutes, seconds and a fraction of a second. A part has the sign of
+    /// the field it comes from, and no field moves into another (<c>EXTRACT(day FROM INTERVAL
+    /// '36 hours')</c> is 0). Decade, century and millennium divide the years by 10, 100 and 1000.
+    /// <c>epoch</c> counts a year as 365.25 days and a month as 30 days, as PostgreSQL does, rounded
+    /// down to whole seconds. As for a datetime, <c>millisecond</c> and <c>microsecond</c> are the
+    /// fraction of the current second only. A unit that names a position in a calendar (<c>week</c>,
+    /// <c>dow</c>, <c>isodow</c>, <c>doy</c>, <c>isoyear</c>) has no meaning for a length, and is
+    /// an error, as in PostgreSQL.
+    /// </summary>
+    private static long ExtractIntervalPart(string unitText, DateTimeUnit unit, IntervalParts value)
+    {
+        long years = value.Months / 12;
+        long months = value.Months % 12;
+        long time = value.Micros;
+        long hours = time / IntervalMath.MicrosPerHour;
+        time -= hours * IntervalMath.MicrosPerHour;
+        long minutes = time / IntervalMath.MicrosPerMinute;
+        time -= minutes * IntervalMath.MicrosPerMinute;
+        long seconds = time / IntervalMath.MicrosPerSecond;
+        long fraction = time - seconds * IntervalMath.MicrosPerSecond;
+
+        return unit switch
+        {
+            DateTimeUnit.Year => years,
+            // PostgreSQL 16 uses this one rule for every sign, so '-4 months' is quarter 0.
+            DateTimeUnit.Quarter => months / 3 + 1,
+            DateTimeUnit.Month => months,
+            DateTimeUnit.Day => value.Days,
+            DateTimeUnit.Hour => hours,
+            DateTimeUnit.Minute => minutes,
+            DateTimeUnit.Second => seconds,
+            DateTimeUnit.Millisecond => fraction / 1000,
+            DateTimeUnit.Microsecond => fraction,
+            DateTimeUnit.Decade => years / 10,
+            DateTimeUnit.Century => years / 100,
+            DateTimeUnit.Millennium => years / 1000,
+            DateTimeUnit.Epoch => (long)FloorDivide(IntervalMath.EpochMicros(value), IntervalMath.MicrosPerSecond),
+            _ => throw new CamusDBException(
+                CamusDBErrorCodes.InvalidInput,
+                $"unit \"{unitText.Trim().ToLowerInvariant()}\" not supported for type interval"),
+        };
+    }
+
+    private static Int128 FloorDivide(Int128 value, long divisor)
+    {
+        Int128 quotient = value / divisor;
+        return value % divisor < 0 ? quotient - 1 : quotient;
     }
 
     /// <summary>

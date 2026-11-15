@@ -1,16 +1,16 @@
 # CamusDB gRPC Client Protocol
 
-This document specifies the CamusDB gRPC wire protocol for **client implementers**. It is
-programming-language-agnostic: it describes the contract a client must honor, not any particular
-language binding. If you are writing a driver, an ORM/EF-Core-style provider, or a thin RPC wrapper
+This document specifies the CamusDB gRPC wire protocol for **client implementers**. It applies to
+every programming language: it describes the contract a client must honor, with no reference to a
+particular language binding. If you are writing a driver, an ORM/EF-Core-style provider, or a thin RPC wrapper
 in any language, this is the reference.
 
 The single source of truth for message shapes is the Protobuf definition at
 [`CamusDB.Grpc.Contracts/Protos/camus_sql.proto`](../CamusDB.Grpc.Contracts/Protos/camus_sql.proto). This document explains the
 **semantics** the `.proto` cannot express: encoding rules, ordering guarantees, transaction and
-causal-token threading, the error/retry model, and the duplex batching handshake. Where the two ever
-disagree, the `.proto` wins — but the behavioral rules here are mandatory and are enforced
-server-side.
+causal-token threading, the error/retry model, and the duplex batching handshake. If the two
+disagree, the `.proto` wins. The behavioral rules here are mandatory, and the server enforces
+them.
 
 ---
 
@@ -35,7 +35,7 @@ insert/query/update/delete by column values and filters without building a SQL s
 
 ## 2. The value model — encoding every column type
 
-All row/parameter data crosses the wire as the `Value` message, a `oneof` over thirteen cases. The
+All row/parameter data crosses the wire as the `Value` message, a `oneof` over fourteen cases. The
 enum tag numbers of `ColumnType` are **frozen** and mirror the engine's internal `ColumnType`
 integers exactly — never renumber or reuse them:
 
@@ -55,6 +55,7 @@ integers exactly — never renumber or reuse them:
 | `UUID`       | 11  | `uuid_value`        | **exactly 16 bytes, big-endian** (high 8 bytes ‖ low 8 bytes) |
 | `NUMERIC`    | 12  | `numeric_value`     | decimal text, for example `"-12.5"` (see below) |
 | `JSONB`      | 13  | `json_value`        | the document's JSON text, for example `{"a": [1, 2.50]}` (see below) |
+| (interval)   | —   | `string_value`      | An interval has no type code on the wire. A query result sends its ISO-8601 text, for example `"P1DT2H"`, in a column of type `STRING`. A client sends an interval as text: `CAST(@p AS interval)` |
 
 ### Encoding rules you MUST implement precisely
 
@@ -120,7 +121,7 @@ integers exactly — never renumber or reuse them:
 
 8. **Float32 vs Float64 are separate cases.** Do not widen a `float32_value` into
    `float64_value` on the wire; keep the type the column declares.
-   - Infinity, -Infinity and NaN are column values, not errors. A cell carries them in the IEEE
+   - Infinity, -Infinity and NaN are valid column values. A cell carries them in the IEEE
      field with no conversion, and a parameter can send them. `NaN` equals `NaN` in SQL and sorts
      above every number. A client must not map NaN to NULL or 0. The HTTP JSON API writes these
      three values as strings, because JSON has no number for them (see
@@ -128,7 +129,7 @@ integers exactly — never renumber or reuse them:
 
 > **Single mapping point.** Server-side, all of this lives in one converter
 > (`GrpcValueCodec`) so REST and gRPC can never drift. Your client should likewise centralize the
-> `Value` ⇄ native conversion in exactly one place and cover all thirteen cases.
+> `Value` ⇄ native conversion in exactly one place and cover all fourteen cases.
 
 ---
 
@@ -305,7 +306,7 @@ with a `RETURNING` list (see [returning.md](returning.md)). An `UPDATE` returns 
 
 Only relevant when the server runs with authentication enabled (`CAMUSDB_AUTH_ENABLED=true`). These
 are the **only** RPCs reachable without a bearer token — a client has none until `Login` returns one —
-which is why they are a separate service rather than two more methods on `CamusSql`.
+so they form a separate service, outside `CamusSql`.
 
 | RPC | Request | Reply | Notes |
 |-----|---------|-------|-------|
@@ -362,7 +363,7 @@ For code paths that operate on rows directly without composing SQL:
 `QueryById` / `UpdateById` / `DeleteById` take a bare `id` string. The server resolves the **real**
 primary-key column from the table's primary-key index — it does **not** assume the PK column is named
 `"id"`. It also coerces the `id` string into the PK column's actual type: if the PK column is of type
-`Id`, the value becomes an `Id`; otherwise it is treated as a `String`. As a client you just pass the
+`Id`, the value becomes an `Id`; otherwise it is treated as a `String`. A client passes the
 key's string form; the server handles column-name and type resolution.
 
 ---
@@ -440,7 +441,7 @@ Because one `BatchExecute` call carries many ops, per-op metadata that the unary
   of the unary path's error trailers.
 
 Every op therefore reaches exactly one **terminal** response: `query_complete`, `non_query`,
-`start_reply`, `commit_reply`, `rollback_reply`, or `error`. The client marks the op complete on its
+`start_reply`, `commit_reply`, `rollback_reply`, `prepare_reply`, `close_reply`, or `error`. The client marks the op complete on its
 terminal message.
 
 ### 7.4 Ordering, concurrency, and stream routing
@@ -498,7 +499,7 @@ Rules:
 - **Await the `PrepareReply` before sending anything that references the id** — same contract as
   `START`. Ops run concurrently, so an execution sent earlier may arrive first.
 - Sending `statement_id` *and* any of `sql` / `database` / `parameters` is refused
-  (`CADB0400`), rather than resolved by a precedence rule.
+  (`CADB0400`). No precedence rule resolves it.
 - `positional_parameters` without a `statement_id` is refused; the count must equal the declared
   parameter count exactly.
 - A handle is valid **only on the stream that minted it**. After a stream is rebuilt, executions fail
@@ -623,8 +624,8 @@ largest on point reads and small multi-row reads.
 ### 7.9 A transaction in one frame — `txn_start_ref` and `COMMIT_IF_OK` (contract version 2)
 
 A short transaction costs one exchange per op when the client awaits each answer: six for a bank
-transfer (`START`, two reads, two writes, `COMMIT`). The exchanges, not the statements, dominate its
-latency at high concurrency. Two additions let a client send a whole transaction, or each dependent
+transfer (`START`, two reads, two writes, `COMMIT`). At high concurrency the exchanges cost more
+latency than the statements. Two additions let a client send a whole transaction, or each dependent
 half of one, as a single frame. Neither changes what a frame is: items still get no atomicity from
 the frame, every op still answers by its own `request_id`, and a failed statement still ends its
 transaction (§7.5).
@@ -730,7 +731,7 @@ Never branch on the message text — branch on the code:
 
 For streaming queries, honor the **retry-only-pre-first-write** rule: it is safe to replay a query
 only if you have not yet surfaced any of its rows to the caller. Once you have emitted rows, surface
-the error rather than silently replaying (the server follows the same rule and will not replay for
+the error and do not replay (the server follows the same rule and will not replay for
 you once output has begun — §7.5).
 
 A robust client centralizes this: inspect `camus-error-code`, classify (replay-from-begin vs
@@ -745,7 +746,7 @@ mirrors.
 Use this as an acceptance list when building a client:
 
 **Values**
-- [ ] Centralize `Value` ⇄ native conversion in one place; cover all 12 `ColumnType` cases.
+- [ ] Centralize `Value` ⇄ native conversion in one place; cover all fourteen `Value` cases.
 - [ ] `Id` → `id_value`, never `string_value`; 24 lowercase hex.
 - [ ] Date/DateTime → raw UTC ticks (100 ns since 0001-01-01); Date truncated to midnight.
 - [ ] UUID → 16 big-endian bytes (high‖low); reject non-16-byte on decode.
@@ -767,7 +768,8 @@ Use this as an acceptance list when building a client:
 
 **Batching**
 - [ ] Assign monotonic `request_id`s; demultiplex responses by id; tolerate out-of-order interleave.
-- [ ] Recognize the three terminals: `query_complete`, `non_query`, `error`.
+- [ ] Recognize the terminals: `query_complete`, `non_query`, `start_reply`, `commit_reply`,
+      `rollback_reply`, `prepare_reply`, `close_reply`, `error`.
 - [ ] Serialize ops that share a `txn_handle` in send order; let autocommit ops pipeline.
 - [ ] Own replay yourself on `BatchError` retryable codes; don't expect server retry.
 
@@ -775,7 +777,7 @@ Use this as an acceptance list when building a client:
 - [ ] Read `camus-error-code` / `camus-error-message` trailers (unary/stream) and `BatchError`
       (batch); branch on the code, never the message.
 - [ ] Implement the retry split: `0502/0504/0505` → new BEGIN; `0509` → retry same finalize;
-      others → fatal. Bounded backoff. Respect retry-only-pre-first-write for streams.
+      `0555` → no automatic retry; others → fatal. Bounded backoff. Respect retry-only-pre-first-write for streams.
 
 ---
 
@@ -784,7 +786,7 @@ Use this as an acceptance list when building a client:
 - **Learned client routing** (advisory `RoutingAdvice` metadata, negotiation, eligibility, the
   endpoint trust map): [sql-routing-advice.md](sql-routing-advice.md)
 - The ready-made **.NET client** for this protocol: [grpc-dotnet-client.md](grpc-dotnet-client.md)
-  (`CamusDB.Grpc.Client`). Use it if you're on .NET rather than implementing the wire contract yourself.
+  (`CamusDB.Grpc.Client`). On .NET, use it in place of your own implementation of the wire contract.
 - Message shapes (source of truth): [`CamusDB.Grpc.Contracts/Protos/camus_sql.proto`](../CamusDB.Grpc.Contracts/Protos/camus_sql.proto)
 - Prepared statements on both transports (§7.6 in full): [prepared-statements.md](prepared-statements.md)
 - Data types & the compact-raw encoding: [data-types.md](data-types.md)

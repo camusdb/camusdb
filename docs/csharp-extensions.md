@@ -571,7 +571,7 @@ authentication stays off, its SQL runs as the statement does, because there are 
 After authentication is turned on, each statement that its body runs through `Sql` fails with
 `CADB0846`, for every writer, a superuser included. The body still fires, so a BEFORE trigger that
 only changes `NEW` keeps its work. A body that catches the error still fails its statement
-(`CADB0823`). The reason: before authentication was on, any user with API access could create a
+(`CADB0823`). Before authentication was on, any user with API access could create a
 trigger. If its SQL ran with the rights of the writer, an administrator's `INSERT` would run that
 SQL with the administrator's rights. To keep such a trigger, a superuser drops it and creates it
 again as a user who may run its SQL. `SHOW TRIGGERS` shows an empty owner for these triggers.
@@ -646,7 +646,7 @@ CALL transfer(@from, @to, 10 * 3);
   duplicate key stays a duplicate key.
 - **An error from the session ends the calling statement, even if your code catches it.** Any
   failed statement inside a transaction aborts the transaction, as in PostgreSQL (see
-  `transactions-locking-and-isolation.md`, §9.4), and the session's own SQL is no exception: the
+  `transactions-locking-and-isolation.md`, §9.4), and that rule covers the session's own SQL: the
   session marks the transaction on every failure of its SQL, so a trigger or procedure that catches
   the error and returns still fails its statement with `CADB0823`, every later statement on the
   transaction is refused, and its commit rolls it back with `CADB0824`.
@@ -826,7 +826,7 @@ any assembly outside the allow-list, so a dynamic load cannot go around the chec
 A file in `unsafe_extension_assemblies` skips both checks. The server logs a warning for it at
 startup, and `SHOW EXTENSIONS` reports its trust as `unsafe`.
 
-**SAFE is a guardrail, not a sandbox.** .NET has no in-process isolation: an extension runs inside
+**SAFE is a guardrail. It does not isolate the code.** .NET has no in-process isolation: an extension runs inside
 the server process with the server's rights. The SAFE check catches accidental use of a dangerous
 API. It does not stop code that loops forever or allocates without limit. The lists also cannot
 name every framework member that reaches a file or the network: for example, a `StreamReader`
@@ -939,7 +939,7 @@ until a server release adds it.
 
 | Refused | Why |
 | --- | --- |
-| Files, the network, processes, the environment, threads, tasks, `Type` and all of reflection, `Span<T>`, pointers, `unsafe`, `stackalloc`, attributes, `extern` | A body gets its arguments and nothing else. `typeof` and `GetType()` are refused because they are the door to reflection, which reaches every other API. |
+| Files, the network, processes, the environment, threads, tasks, `Type` and all of reflection, `Span<T>`, pointers, `unsafe`, `stackalloc`, attributes, `extern` | A body gets its arguments and nothing else. `typeof` and `GetType()` are refused because they lead to reflection, which reaches every other API. |
 | `DateTime.Now`, `UtcNow`, `Today`, `Random`, `Guid.NewGuid`, `GetHashCode`, `Environment`, `DateTime.Parse`, `ToLocalTime`, the `z` and `U` date formats | The result of a function depends on its arguments only, so every node computes the same value. The hash of a string changes between processes, and the last three read the time zone of the machine. |
 | `new string(c, n)`, `PadLeft`, `PadRight`, `string.Format`, a capacity argument (`new List<int>(n)`), `Enumerable.Range` and `Repeat`, `Array.Resize`, a `ToString` format that is not a constant | Each makes memory that the size of the arguments does not bound. .NET accepts a format precision of 999,999,999, which is a 1 GB string. A constant format of at most 64 characters with a precision of at most 2 digits is allowed, and an interpolation alignment of at most 1,024. |
 | `await`, `async`, `yield`, `lock`, `using`, `goto` and labels | A body runs on one thread from start to end, and a jump would make a loop that no budget check sees. |
@@ -968,7 +968,7 @@ A call that goes over a budget fails its statement with `CADB0840`. The node goe
 | Elements of one array made with `new T[n]` | `inline_function_array_limit` | 1048576 |
 | Depth of the body's own calls | none: the free stack of the thread | |
 
-**The budgets are for one call, not for one statement.** `SELECT f(x) FROM big_table` calls `f`
+**A budget covers one call. No budget covers a whole statement.** `SELECT f(x) FROM big_table` calls `f`
 once for each row, and each call gets the full budget. A user who may create a function can
 therefore write a statement that runs for a very long time, with each call inside its budget. There
 is no statement timeout in this version. Watch for long statements, and give `CREATE` on a database

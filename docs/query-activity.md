@@ -1,7 +1,7 @@
 # Running queries and connections — `SHOW QUERIES`, `SHOW CONNECTIONS`, `CANCEL QUERY`
 
 CamusDB has no session object of its own. A client sends each statement over HTTP or gRPC, and a
-transaction lives across requests as a handle. These statements show what the clients do now anyway:
+transaction lives across requests as a handle. These statements show what the clients do now:
 
 ```sql
 SHOW QUERIES;                          -- statements that run on this node now
@@ -18,8 +18,8 @@ They are the CamusDB form of CockroachDB `SHOW CLUSTER QUERIES` / `CANCEL QUERY`
 `SHOW FULL PROCESSLIST` / `KILL QUERY`. None of the words is reserved: `queries`, `connections`,
 `cancel` and `query` stay usable as table and column names.
 
-All five statements are server-level. They need no database and open no transaction, so send them
-with an empty database name if you like.
+All five statements are server-level. They need no database and open no transaction, so you can send
+them with an empty database name.
 
 ## `SHOW QUERIES`
 

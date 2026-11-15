@@ -24,8 +24,8 @@ CamusDB stores each row as a single KV blob (not column-per-cell). The mutation 
 row id, and the primary key is an index mapping the key value to that row id — so writing a row to a
 table with no secondary index at all costs **two** mutations, not one. The insert figures are
 measured: an `INSERT` reserves 2 mutations per row on a primary-key-only table and 3 with one
-secondary index. `DELETE` collects its keys through the same index set, so it costs the same; the
-`UPDATE` row below predates this note and has not been re-checked.
+secondary index. `DELETE` collects its keys through the same index set, so it costs the same; an
+`UPDATE` reserves the row key plus the old and the new entry of each index it changes.
 
 Below, **K is the number of secondary indexes** — the primary key is already counted separately.
 
@@ -109,7 +109,7 @@ User DML (INSERT / UPDATE / DELETE) is always counted, regardless of isolation l
 ### Design notes
 
 CamusDB counts mutations at the **KV-key** grain: one row blob plus one entry per
-secondary index. Because a row is stored as a single blob (not column-per-cell), a
+index, the primary key included. Because a row is stored as a single blob (not column-per-cell), a
 multi-column update costs **1 row mutation** plus its changed index entries — not one
 mutation per column. The default budget of 20 000 is therefore measured in
 row-equivalent units.

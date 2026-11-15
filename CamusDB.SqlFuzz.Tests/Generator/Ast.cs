@@ -25,7 +25,18 @@ internal enum FuzzType
     String,
     Bool,
     Date,
+
+    /// <summary>A UTC point in time with microseconds. A column type, and the result of <c>date ± interval</c>.</summary>
+    DateTime,
+
     Jsonb,
+
+    /// <summary>
+    /// A span of months, days and microseconds. An expression type only: no CamusDB table stores an
+    /// interval, so the generator never makes a column, an index key or a written value of this type
+    /// (<see cref="FuzzTypes.IsExpressionOnly"/>).
+    /// </summary>
+    Interval,
 }
 
 internal static class FuzzTypes
@@ -33,11 +44,17 @@ internal static class FuzzTypes
     /// <summary>INT64, FLOAT64 and NUMERIC compare with one another and mix in arithmetic.</summary>
     public static bool IsNumber(FuzzType type) => type is FuzzType.Int64 or FuzzType.Float64 or FuzzType.Numeric;
 
+    /// <summary>DATE and DATETIME compare with each other (a date is midnight UTC) and take an interval.</summary>
+    public static bool IsPointInTime(FuzzType type) => type is FuzzType.Date or FuzzType.DateTime;
+
+    /// <summary>A type that only an expression has: never a column, an index key or a value that a write stores.</summary>
+    public static bool IsExpressionOnly(FuzzType type) => type == FuzzType.Interval;
+
     /// <summary>Two types whose values compare with <c>=</c> and <c>&lt;</c> without an error.</summary>
     public static bool AreComparable(FuzzType a, FuzzType b) =>
-        a == b ? a != FuzzType.Jsonb : IsNumber(a) && IsNumber(b);
+        a == b ? a != FuzzType.Jsonb : (IsNumber(a) && IsNumber(b)) || (IsPointInTime(a) && IsPointInTime(b));
 
-    /// <summary>A type that an ordered index can hold. JSONB has GIN indexes only.</summary>
+    /// <summary>A type with an order (ORDER BY, MIN, MAX, BETWEEN), and for a column type, a type an ordered index can hold. JSONB has GIN indexes only.</summary>
     public static bool IsOrderable(FuzzType type) => type != FuzzType.Jsonb;
 
     /// <summary>The result type of arithmetic on two number types: FLOAT64 wins, then NUMERIC, then INT64.</summary>
@@ -48,8 +65,8 @@ internal static class FuzzTypes
 }
 
 /// <summary>
-/// One literal value. <see cref="Text"/> holds the canonical text of a NUMERIC, DATE, STRING or JSONB
-/// value; <see cref="Int"/>, <see cref="Float"/> and <see cref="Bool"/> hold the other types. A NULL
+/// One literal value. <see cref="Text"/> holds the canonical text of a NUMERIC, DATE, DATETIME (ISO-8601
+/// with a <c>Z</c>), STRING, JSONB or INTERVAL (the text of an <c>INTERVAL '…'</c> literal) value; <see cref="Int"/>, <see cref="Float"/> and <see cref="Bool"/> hold the other types. A NULL
 /// keeps its type, so a printer can write a typed NULL where the type matters.
 /// </summary>
 internal sealed record FuzzValue(FuzzType Type, bool IsNull, long Int = 0, double Float = 0, string? Text = null, bool Bool = false)
@@ -61,7 +78,9 @@ internal sealed record FuzzValue(FuzzType Type, bool IsNull, long Int = 0, doubl
     public static FuzzValue String(string value) => new(FuzzType.String, false, Text: value);
     public static FuzzValue Numeric(string value) => new(FuzzType.Numeric, false, Text: value);
     public static FuzzValue Date(string value) => new(FuzzType.Date, false, Text: value);
+    public static FuzzValue DateTime(string value) => new(FuzzType.DateTime, false, Text: value);
     public static FuzzValue Json(string value) => new(FuzzType.Jsonb, false, Text: value);
+    public static FuzzValue Interval(string value) => new(FuzzType.Interval, false, Text: value);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -230,7 +249,16 @@ internal sealed record TableDef(string Name, IReadOnlyList<ColumnDef> Columns)
 internal abstract record FromItem;
 
 /// <summary>A table in FROM. <see cref="IndexHint"/> names the index the scan must use, or null. A dialect without index hints prints nothing for it.</summary>
-internal sealed record TableRef(string Table, string Alias, string? IndexHint = null) : FromItem;
+internal sealed record TableRef(string Table, string Alias, string? IndexHint = null) : FromItem
+{
+    /// <summary>
+    /// True when the reference reads the table through the CTE <c>cte_{Table}</c> (<c>SELECT * FROM Table</c>)
+    /// that an enclosing <see cref="SelectStmt.CteTables"/> declares. The printer uses the CTE only when a
+    /// WITH it wrote declares that table, and never with an index hint, so a statement that an oracle builds
+    /// from parts of another one prints the plain table. The rows are the table's rows either way.
+    /// </summary>
+    public bool ViaCte { get; init; }
+}
 
 internal enum JoinKind
 {
@@ -276,11 +304,31 @@ internal sealed record InsertStmt(string Table, IReadOnlyList<string> Columns, I
 
 internal sealed record InsertSelectStmt(string Table, IReadOnlyList<string> Columns, SelectStmt Source) : Statement;
 
-/// <summary>An UPDATE. <see cref="Where"/> is never null: a full-table update is <c>WHERE TRUE</c>, because one without WHERE is refused by design.</summary>
-internal sealed record UpdateStmt(string Table, IReadOnlyList<Assignment> Set, Expr Where) : Statement;
+/// <summary>
+/// An UPDATE. <see cref="Where"/> is never null: a full-table update is <c>WHERE TRUE</c>, because one
+/// without WHERE is refused by design.
+///
+/// <para>The joined form is <c>UPDATE t [AS alias] SET … FROM list WHERE …</c>. <see cref="Alias"/> names
+/// the target, and <see cref="From"/> is the relation list, or null. In both forms with an alias or a
+/// list, every column of the statement is qualified: a target column by <see cref="Qualifier"/>, a column
+/// of the list by its own alias. A bare name that the target and a source both have is ambiguous, so the
+/// generator never writes a bare name there.</para>
+/// </summary>
+internal sealed record UpdateStmt(string Table, IReadOnlyList<Assignment> Set, Expr Where, string? Alias = null, FromItem? From = null) : Statement
+{
+    /// <summary>The name that qualifies a target column: the alias, else the table name in a joined form, else null (bare columns).</summary>
+    public string? Qualifier => Alias ?? (From is null ? null : Table);
+}
 
-/// <summary>A DELETE. <see cref="Where"/> is never null, for the reason of <see cref="UpdateStmt"/>.</summary>
-internal sealed record DeleteStmt(string Table, Expr Where) : Statement;
+/// <summary>
+/// A DELETE. <see cref="Where"/> is never null, for the reason of <see cref="UpdateStmt"/>. The joined form
+/// is <c>DELETE FROM t [AS alias] USING list WHERE …</c>, with the column rule of <see cref="UpdateStmt"/>.
+/// </summary>
+internal sealed record DeleteStmt(string Table, Expr Where, string? Alias = null, FromItem? Using = null) : Statement
+{
+    /// <summary>The name that qualifies a target column; see <see cref="UpdateStmt.Qualifier"/>.</summary>
+    public string? Qualifier => Alias ?? (Using is null ? null : Table);
+}
 
 internal sealed record AnalyzeStmt(string Table) : Statement;
 
@@ -298,7 +346,16 @@ internal sealed record SelectStmt(
     IReadOnlyList<OrderItem>? OrderBy = null,
     long? Limit = null,
     long? Offset = null,
-    SetOperation? SetOp = null) : Statement;
+    SetOperation? SetOp = null) : Statement
+{
+    /// <summary>
+    /// The tables that this SELECT declares in a WITH, each as <c>cte_{table} AS (SELECT * FROM table)</c>,
+    /// for the references marked <see cref="TableRef.ViaCte"/>; null for no WITH. A table that the SELECT
+    /// reads two times gives a CTE that the statement reads two times, which CamusDB computes once at the
+    /// start of a statement and inlines in parentheses.
+    /// </summary>
+    public IReadOnlyList<string>? CteTables { get; init; }
+}
 
 /// <summary>An EXPLAIN of a SELECT, for the plan names in a finding.</summary>
 internal sealed record ExplainStmt(SelectStmt Query) : Statement;

@@ -43,6 +43,11 @@ The list cannot hold these items. The server refuses the statement before it cha
 | A sequence function (`nextval`, `setval`, `currval`, `lastval`) | `CADB0547` (`SequenceCallNotAllowedHere`) |
 | A name that is not a column of the target | `CADB0404` (`UnknownColumn`) |
 
+In `UPDATE … FROM` and `DELETE … USING`, the list reads the target row only. A column of another
+relation and a bare `*` are refused with `CADB0400`, because in PostgreSQL `*` also returns the columns
+of the other relations there. List the target columns instead. See
+[UPDATE … FROM and DELETE … USING](update-from-delete-using.md).
+
 ## What the values are
 
 RETURNING reports the stored value of each row, not the value in the statement text. Which row
@@ -104,7 +109,7 @@ reads both.
 - On a query endpoint, an `INSERT`, `UPDATE` or `DELETE` without a `RETURNING` list is refused. Send
   it to a no-rows endpoint.
 - The server sends no row before the commit. The streaming endpoints also wait for the commit before
-  they send the schema. Thus, a client never receives rows from an attempt that did not commit, and a
+  they send the schema. So a client never receives rows from an attempt that did not commit, and a
   Serializable conflict can retry from a new transaction.
 - In an explicit transaction, the rows come back before the commit, as for any statement. A rollback
   removes them.
@@ -142,7 +147,7 @@ before.
 
 The rows stay in server memory until the statement completes. The per-transaction mutation limit
 (`max_mutations_per_transaction`) limits the row count. An `UPDATE` or a `DELETE` writes its rows in
-chunks, and projects each chunk through the `RETURNING` list as soon as the chunk is written. Thus,
+chunks, and projects each chunk through the `RETURNING` list as soon as the chunk is written. So
 the server keeps only the returned columns in memory, not the full rows.
 
 A gRPC `ExecuteNonQuery` reply, and a `NON_QUERY` batch reply, carry all rows in one message. A gRPC

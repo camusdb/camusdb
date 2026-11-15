@@ -380,6 +380,34 @@ internal sealed class SelectStatementExecutor
         recording?.Describe(ast);
         activity?.Describe(ast.nodeType);
 
+        // A statement with a CTE that it computes once keeps that CTE's rows until its cursor ends.
+        ComputedOnceScope? computedOnce = ComputedOnceRows.Begin(ticket.TxnState, ast);
+        if (computedOnce is null)
+            return await ExecuteParsedQueryAsync(ast, ticket, metaOut, schemaOut, recording, activity).ConfigureAwait(false);
+
+        try
+        {
+            (DatabaseDescriptor database, IAsyncEnumerable<QueryResultRow> cursor) =
+                await ExecuteParsedQueryAsync(ast, ticket, metaOut, schemaOut, recording, activity).ConfigureAwait(false);
+
+            return (database, computedOnce.EndWhenDone(cursor));
+        }
+        catch
+        {
+            await computedOnce.DisposeAsync().ConfigureAwait(false);
+            throw;
+        }
+    }
+
+    /// <summary>
+    /// Runs a parsed row-returning statement; the rest of <see cref="ExecuteSQLQueryInternal"/>, after
+    /// the parse.
+    /// </summary>
+    private async Task<(DatabaseDescriptor database, IAsyncEnumerable<QueryResultRow> cursor)> ExecuteParsedQueryAsync(
+        NodeAst ast, ExecuteSQLTicket ticket, CacheMetadataHolder? metaOut, QuerySchemaHolder? schemaOut, StatementRecording? recording,
+        QueryActivityEntry? activity)
+    {
+
         // An INSERT, UPDATE or DELETE with a RETURNING list is a write that returns rows. The no-rows
         // dispatcher owns every write statement, so it runs the statement and this path only exposes
         // its buffered rows as a cursor. The statement completes before the cursor exists, so draining

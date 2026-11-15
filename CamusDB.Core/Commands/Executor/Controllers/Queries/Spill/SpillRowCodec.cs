@@ -34,7 +34,7 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Queries.Spill;
 /// <item>String — [int32 utf8Len][utf8 bytes]</item>
 /// <item>Bytes — [int32 len][raw bytes]</item>
 /// <item>Jsonb — [int32 len][the jsonb cell bytes]</item>
-/// <item>Uuid, Numeric — 16 bytes: <c>UuidHigh</c> then <c>LongValue</c> (little-endian int64 each)</item>
+/// <item>Uuid, Numeric, Interval — 16 bytes: <c>UuidHigh</c> then <c>LongValue</c> (little-endian int64 each)</item>
 /// <item>Array — [1-byte elementType][int32 count][element…] where each
 ///   element is [1-byte isNull flag: 0=null, 1=present][value bytes for elementType if present]</item>
 /// </list>
@@ -270,6 +270,7 @@ public static class SpillRowCodec
 
             case ColumnType.Uuid:
             case ColumnType.Numeric:
+            case ColumnType.Interval:
                 BinaryPrimitives.WriteInt64LittleEndian(buf[pos..], cv.UuidHigh);
                 BinaryPrimitives.WriteInt64LittleEndian(buf[(pos + 8)..], cv.LongValue);
                 pos += 16;
@@ -414,6 +415,14 @@ public static class SpillRowCodec
                 long low = BinaryPrimitives.ReadInt64LittleEndian(data[(pos + 8)..]);
                 pos += 16;
                 return new ColumnValue(type, high, low);
+            }
+
+            case ColumnType.Interval:
+            {
+                long high = BinaryPrimitives.ReadInt64LittleEndian(data[pos..]);
+                long low = BinaryPrimitives.ReadInt64LittleEndian(data[(pos + 8)..]);
+                pos += 16;
+                return ColumnValue.FromIntervalHalves(high, low);
             }
 
             default:
@@ -569,7 +578,7 @@ public static class SpillRowCodec
             ColumnType.Float32 => 4,
             ColumnType.Bool => 1,
             ColumnType.Bytes or ColumnType.Jsonb => 4 + (cv.BytesValue?.Length ?? 0),
-            ColumnType.Uuid or ColumnType.Numeric => 16,
+            ColumnType.Uuid or ColumnType.Numeric or ColumnType.Interval => 16,
             _ => throw new InvalidOperationException($"SpillRowCodec: unsupported ColumnType {type}"),
         };
     }

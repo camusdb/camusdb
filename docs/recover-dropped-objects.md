@@ -50,7 +50,7 @@ A plain (non-`FORCE`) drop of a root database or one of its tables:
   `SHOW ORPHAN …` and recoverable via `RELINK`.
 
 Because CamusDB never reuses ids, recovery is unambiguous: the orphan keeps its original id, and a new
-object created with the *same name* simply gets a *new* id and its own empty keyspace — it never
+object created with the *same name* gets a *new* id and its own empty keyspace — it never
 collides with the orphan.
 
 ```sql
@@ -171,7 +171,7 @@ orphan_retention_ms: 0
 ```
 
 The GC also runs one sweep at startup, so orphans that expired while the server was down are reclaimed
-promptly rather than only on the next interval. Reclamation is crash-safe: an interrupted purge is
+without waiting for the next interval. Reclamation is crash-safe: an interrupted purge is
 idempotent and is finished by a later sweep. Retention is independent of Kahuna's PITR/WAL window,
 which governs log compaction, not these physical row keys.
 
@@ -196,6 +196,7 @@ which governs log compaction, not these physical row keys.
   not deferred, and is not recoverable via `RELINK`. (Deferring a branch would require pinning its
   parent's snapshot history for the whole retention window.) Root databases and their tables are fully
   covered.
+
 A relinked table that was `ALTER`ed before the drop recovers rows written under **every** schema version:
 it is reattached at its real drop-time version with a lazy schema-history loader over the retained
 history keys, so both current-layout and earlier pre-`ALTER` rows decode.

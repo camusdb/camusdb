@@ -15,17 +15,29 @@ namespace CamusDB.Core.CommandsExecutor.Controllers.Queries;
 /// </summary>
 internal static class QueryExpressionWalker
 {
-    public static void CollectColumnReferences(NodeAst expr, ICollection<string> identifiers)
+    public static void CollectColumnReferences(NodeAst expr, ICollection<string> identifiers) =>
+        Collect(expr, identifiers, nodes: null);
+
+    /// <summary>
+    /// Collects the column-reference nodes of <paramref name="expr"/>, the same references
+    /// <see cref="CollectColumnReferences"/> names, so a caller can replace them by identity
+    /// (<see cref="NodeAstWalk.Replace"/>). A node inside a nested SELECT is not collected.
+    /// </summary>
+    public static void CollectColumnReferenceNodes(NodeAst expr, ICollection<NodeAst> nodes) =>
+        Collect(expr, identifiers: null, nodes);
+
+    private static void Collect(NodeAst expr, ICollection<string>? identifiers, ICollection<NodeAst>? nodes)
     {
         switch (expr.nodeType)
         {
             case NodeType.Identifier:
-                identifiers.Add(expr.yytext!);
+                identifiers?.Add(expr.yytext!);
+                nodes?.Add(expr);
                 return;
 
             case NodeType.ExprAlias:
                 if (expr.leftAst is not null)
-                    CollectColumnReferences(expr.leftAst, identifiers);
+                    Collect(expr.leftAst, identifiers, nodes);
 
                 return;
 
@@ -60,10 +72,10 @@ internal static class QueryExpressionWalker
             // value and the array. Its operator marker holds no identifier, so it is not walked.
             case NodeType.ExprQuantifiedComparison:
                 if (expr.leftAst is not null)
-                    CollectColumnReferences(expr.leftAst, identifiers);
+                    Collect(expr.leftAst, identifiers, nodes);
 
                 if (expr.rightAst is not null)
-                    CollectColumnReferences(expr.rightAst, identifiers);
+                    Collect(expr.rightAst, identifiers, nodes);
 
                 return;
 
@@ -78,7 +90,7 @@ internal static class QueryExpressionWalker
             case NodeType.ExprIsFalse:
             case NodeType.ExprIsNotFalse:
                 if (expr.leftAst is not null)
-                    CollectColumnReferences(expr.leftAst, identifiers);
+                    Collect(expr.leftAst, identifiers, nodes);
 
                 return;
 
@@ -88,29 +100,29 @@ internal static class QueryExpressionWalker
             case NodeType.ExprInMembership:
             case NodeType.ExprNotInMembership:
                 if (expr.leftAst is not null)
-                    CollectColumnReferences(expr.leftAst, identifiers);
+                    Collect(expr.leftAst, identifiers, nodes);
 
                 if (expr.rightAst is not null)
-                    CollectColumnReferences(expr.rightAst, identifiers);
+                    Collect(expr.rightAst, identifiers, nodes);
 
                 return;
 
             case NodeType.ExprInSubquery:
             case NodeType.ExprNotInSubquery:
                 if (expr.leftAst is not null)
-                    CollectColumnReferences(expr.leftAst, identifiers);
+                    Collect(expr.leftAst, identifiers, nodes);
 
                 return;
 
             case NodeType.ExprBetween:
                 if (expr.leftAst is not null)
-                    CollectColumnReferences(expr.leftAst, identifiers);
+                    Collect(expr.leftAst, identifiers, nodes);
 
                 if (expr.extendedOne is not null)
-                    CollectColumnReferences(expr.extendedOne, identifiers);
+                    Collect(expr.extendedOne, identifiers, nodes);
 
                 if (expr.extendedTwo is not null)
-                    CollectColumnReferences(expr.extendedTwo, identifiers);
+                    Collect(expr.extendedTwo, identifiers, nodes);
 
                 return;
 
@@ -125,35 +137,35 @@ internal static class QueryExpressionWalker
 
             case NodeType.ExprList:
                 if (expr.leftAst is not null)
-                    CollectColumnReferences(expr.leftAst, identifiers);
+                    Collect(expr.leftAst, identifiers, nodes);
 
                 if (expr.rightAst is not null)
-                    CollectColumnReferences(expr.rightAst, identifiers);
+                    Collect(expr.rightAst, identifiers, nodes);
 
                 return;
 
             case NodeType.ExprFuncCall:
                 if (expr.rightAst is not null)
-                    CollectColumnReferences(expr.rightAst, identifiers);
+                    Collect(expr.rightAst, identifiers, nodes);
 
                 return;
 
             case NodeType.ExprCast:
                 if (expr.leftAst is not null)
-                    CollectColumnReferences(expr.leftAst, identifiers);
+                    Collect(expr.leftAst, identifiers, nodes);
 
                 return;
 
             case NodeType.ExprCase:
                 // Operand (simple CASE), the WHEN/THEN chain, and the ELSE result.
                 if (expr.leftAst is not null)
-                    CollectColumnReferences(expr.leftAst, identifiers);
+                    Collect(expr.leftAst, identifiers, nodes);
 
                 if (expr.rightAst is not null)
-                    CollectColumnReferences(expr.rightAst, identifiers);
+                    Collect(expr.rightAst, identifiers, nodes);
 
                 if (expr.extendedOne is not null)
-                    CollectColumnReferences(expr.extendedOne, identifiers);
+                    Collect(expr.extendedOne, identifiers, nodes);
 
                 return;
 
@@ -161,19 +173,19 @@ internal static class QueryExpressionWalker
             case NodeType.ExprCaseWhenList:
                 // Chain/clause nodes: leftAst and rightAst together cover every condition and result.
                 if (expr.leftAst is not null)
-                    CollectColumnReferences(expr.leftAst, identifiers);
+                    Collect(expr.leftAst, identifiers, nodes);
 
                 if (expr.rightAst is not null)
-                    CollectColumnReferences(expr.rightAst, identifiers);
+                    Collect(expr.rightAst, identifiers, nodes);
 
                 return;
 
             case NodeType.ExprArgumentList:
                 if (expr.leftAst is not null)
-                    CollectColumnReferences(expr.leftAst, identifiers);
+                    Collect(expr.leftAst, identifiers, nodes);
 
                 if (expr.rightAst is not null)
-                    CollectColumnReferences(expr.rightAst, identifiers);
+                    Collect(expr.rightAst, identifiers, nodes);
 
                 return;
 

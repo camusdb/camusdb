@@ -29,7 +29,7 @@ CREATE VIEW order_summary (order_id, who, amount) AS
 ### The body is checked when you create it
 
 Every table, column, and function the body references is resolved at `CREATE VIEW` time, so a
-mistake is reported to the author immediately rather than to whoever reads the view first:
+mistake is reported to the author at once, before anyone reads the view:
 
 ```sql
 CREATE VIEW v AS SELECT id FROM no_such_table;
@@ -38,8 +38,7 @@ CREATE VIEW v AS SELECT id FROM no_such_table;
 
 ### Every output column needs a name
 
-A projection that is a bare expression has no name to publish, and CamusDB refuses it rather than
-inventing one:
+A projection that is a bare expression has no name to publish, and CamusDB refuses it:
 
 ```sql
 CREATE VIEW v AS SELECT total + 1 FROM orders;
@@ -83,11 +82,11 @@ CREATE OR REPLACE VIEW v AS SELECT id FROM orders;                    -- ERROR (
 CREATE OR REPLACE VIEW v AS SELECT id, status FROM orders;            -- ERROR (CADB0529)
 ```
 
-This is not pedantry. A dependent view binds to the column names it saw at its own creation, a
+A dependent view binds to the column names it saw at its own creation, a
 cached plan binds to positions, and a client binds to both. Silently changing any of them would
 change what those already-created objects mean, and the change would surface later and elsewhere as
-wrong data rather than as an error. Drop and recreate to change the shape — which forces the
-dependents into the open, and is the point.
+wrong data, with no error. Drop and recreate to change the shape. That forces the dependents into
+the open.
 
 The body itself may change freely:
 
@@ -139,8 +138,7 @@ its rows, its indexes and its unique enforcement.
 ### Columns a view reads
 
 A body binds the columns it reads by immutable id, just as it binds its relations, so **renaming a
-column is transparent** — and dropping one is refused rather than leaving the view to fail at its
-next read:
+column is transparent** — and dropping one is refused, so the view cannot fail at its next read:
 
 ```sql
 CREATE VIEW open_orders AS SELECT id, total FROM orders WHERE status = 'open';
@@ -159,15 +157,15 @@ body reads `... amount AS total ...`.
 
 A column the body reads only in its `WHERE` counts, as do columns read inside a subquery, and a
 materialized view's body protects the columns it reads on every refresh. `DROP COLUMN` has no
-`CASCADE` form, so the escape hatch is to drop or replace the dependent view first.
+`CASCADE` form, so drop or replace the dependent view first.
 
-> **A rename is still refused in two cases**, because the body would be stranded rather than
-> unaffected: a definition written before columns were bound by id, and a reference in `ORDER BY`,
+> **A rename is still refused in two cases**, because the body would be stranded:
+> a definition written before columns were bound by id, and a reference in `ORDER BY`,
 > `GROUP BY` or `HAVING` that matches one of the view's own output names. The second is deliberate —
 > those clauses may legally name an output column instead of a relation's, so such a reference is
-> left as written rather than guessing.
+> left as written.
 
-> **This is a lower bound, not a guarantee.** A reference the analysis cannot attribute to one
+> **This check is a lower bound.** A reference the analysis cannot attribute to one
 > relation with certainty is not recorded, so an unusually shaped body may still let a column be
 > dropped. It errs that way on purpose: a missed refusal leaves the behavior that existed before
 > this check, while a wrong one would block a column change nothing actually depends on.
@@ -237,8 +235,8 @@ SELECT v.id, c.region
 FROM open_orders v INNER JOIN customers c ON v.customer = c.name;
 ```
 
-There is no "view scan" node in `EXPLAIN` — the plan shows what actually runs, which is the expanded
-query.
+There is no "view scan" node in `EXPLAIN` — the plan shows the expanded query, which is what
+runs.
 
 A view is also a source for a statement that writes rows somewhere else: `CREATE TABLE … AS SELECT`
 (also `WITH NO DATA`), `INSERT … SELECT` and a materialized view body read it in the same way. Each
@@ -278,17 +276,13 @@ SELECT o.customer FROM open_orders o;           -- an explicit alias wins
   deeper cannot be, and a column added to one of its tables would give its operands different column
   counts. See [set-operations.md](./set-operations.md#views).
 
-Applying a hint *to* a view is likewise refused: a view has no indexes of its own, and the hint would
-silently target a relation the statement does not name.
-
-A consequence worth knowing: **a query that reads through a view is never served from the
-query-result cache.** The cache fences one physical table's row keyspace per entry, and a view
+**A query that reads through a view is never served from the query-result cache.** The cache fences one physical table's row keyspace per entry, and a view
 expands to a derived table, which has no keyspace of its own — the same limitation that makes joins
-uncacheable. A `{cache=name}` hint on a view reference is accepted and the response reports it as a
-bypass (`DerivedSource`) rather than failing, so the hint is visible rather than silent, but the rows
-come from live storage every time.
+uncacheable. A `{cache=name}` hint on a view reference is accepted, and the response reports it as a
+bypass (`DerivedSource`), so the outcome of the hint is visible. The rows come from live storage
+every time.
 
-An **index** hint on a view reference is still refused: a view has no indexes of its own, so the hint
+An **index** hint on a view reference is refused: a view has no indexes of its own, so the hint
 could only be applied to a relation the statement does not name.
 
 A cache hint inside a view *body* is refused at `CREATE VIEW` time, and materialized views are
@@ -336,8 +330,8 @@ Metadata-only; the view's id is unchanged, so dependents keep resolving.
 
 ## Ownership and security
 
-A view runs its body with the privileges of **its owner**, not of whoever queries it. That is what
-makes a view a security boundary rather than a shorthand:
+A view runs its body with the privileges of **its owner**, whoever queries it. That makes a view a
+security boundary:
 
 ```sql
 -- as alice, who can read orders
@@ -352,7 +346,7 @@ SELECT * FROM orders;         -- refused
 The caller is checked on the **view**; the view's owner is checked on everything the body reads. So a
 view can widen access to a slice of a table, and nothing more.
 
-Some specifics worth knowing:
+Specifics:
 
 - **The owner is recorded by immutable id**, not by name. Dropping a user and re-creating the same
   name does not transfer ownership — the view fails closed instead, and reads refuse until it is
@@ -404,9 +398,8 @@ SELECT * FROM customer_totals WHERE customer = 'acme';   -- reads stored rows, d
 REFRESH MATERIALIZED VIEW customer_totals;               -- re-runs the query, replaces the contents
 ```
 
-Inserting into `orders` afterwards changes nothing that `customer_totals` returns. That is the
-point, and it is the one behavior to internalize: **a materialized view is a snapshot, and only
-`REFRESH` moves it forward.** `SHOW MATERIALIZED VIEWS` reports how stale each one is.
+Inserting into `orders` afterwards changes nothing that `customer_totals` returns. **A materialized
+view is a snapshot, and only `REFRESH` moves it forward.** `SHOW MATERIALIZED VIEWS` reports how stale each one is.
 
 ### It is a real relation
 
@@ -426,20 +419,19 @@ index counts it measured onto the view, so the planner costs it correctly straig
 histograms an `ANALYZE` built are dropped at the same moment, because they describe the contents the
 refresh replaced. [`SHOW STATISTICS FOR <view>`](show-statistics.md) reports what it currently holds.
 
-The one thing you cannot do is write to it:
+You cannot write to it:
 
 ```sql
 INSERT INTO customer_totals (customer, total_spent) VALUES ('acme', 1);
 -- ERROR: 'customer_totals' is a materialized view and cannot be written to directly
 ```
 
-A hand-written row would be silently discarded by the next refresh, so the write is refused instead
-of accepted and later erased.
+A hand-written row would be silently discarded by the next refresh, so the write is refused.
 
 ### Its shape is fixed at creation
 
 The column list is derived from the query when the materialized view is created, and a refresh
-reuses it rather than re-deriving it. Adding a column to a base table therefore does not widen an
+reuses it. Adding a column to a base table therefore does not widen an
 existing materialized view — the same rule plain views follow, and for the same reason: anything
 bound to its shape would otherwise change meaning with no statement having been issued against it.
 
@@ -455,8 +447,8 @@ CREATE MATERIALIZED VIEW open_orders (order_id, amount) AS
 ### `WITH NO DATA`
 
 `WITH NO DATA` creates the materialized view without running the query. **Reading one that has never
-been populated is an error, not an empty result** — an empty result would make a forgotten `REFRESH`
-indistinguishable from a correct answer:
+been populated is an error.** An empty result would make a forgotten `REFRESH` indistinguishable
+from a correct answer:
 
 ```sql
 CREATE MATERIALIZED VIEW customer_totals AS SELECT ... WITH NO DATA;
@@ -470,21 +462,21 @@ REFRESH MATERIALIZED VIEW customer_totals;   -- now it reads
 
 ### What a refresh does to concurrent readers
 
-Nothing. A refresh builds an entirely new relation, populates it, and then moves the materialized
+A refresh does not affect concurrent readers. It builds an entirely new relation, populates it, and then moves the materialized
 view's name onto it in a single atomic schema change. Readers already running keep reading the
 previous contents at their own snapshot; readers that start after the switch see the new contents
 whole. **Nobody blocks, and nobody ever observes a half-built materialized view** — not even briefly,
 and not on any node of a cluster.
 
-This is why `REFRESH MATERIALIZED VIEW CONCURRENTLY` is **refused** rather than accepted as a
-synonym. In PostgreSQL, `CONCURRENTLY` exists because the ordinary form takes an exclusive lock and
-blocks readers; CamusDB's ordinary form already does not. What `CONCURRENTLY` additionally buys —
-writing only the rows that changed — is a genuine optimization that is not implemented, so the
-statement says so instead of quietly doing something else.
+This is why `REFRESH MATERIALIZED VIEW CONCURRENTLY` is **refused** and is not a synonym of
+the ordinary form. In PostgreSQL, `CONCURRENTLY` exists because the ordinary form takes an exclusive lock and
+blocks readers; CamusDB's ordinary form already does not. The other thing `CONCURRENTLY` gives —
+writing only the rows that changed — is an optimization that is not implemented, so the statement
+is refused.
 
 The rebuild reads its source at **one pinned snapshot** for its whole duration, so the result is
 always a state the database actually was in, however long the rebuild takes and however many rows it
-copies. It writes in chunked transactions (`materialized_view_refresh_chunk_rows`), which is what
+copies. It writes in chunked transactions (`materialized_view_refresh_chunk_rows`), which
 lets it exceed the per-transaction mutation limit that would otherwise cap the size of a
 materialized view.
 
@@ -497,10 +489,10 @@ is refused while the first is in flight, whichever node it was issued on.
 A refresh that is **interrupted** rather than failed — the process died, or the node lost leadership
 part-way — is picked up by a background sweep and **run again from the beginning**, up to
 `materialized_view_refresh_takeover_attempts` times. The sweep takes the same cluster fence a
-`REFRESH` takes, so exactly one node finishes the work and no rebuild is ever running twice. It is a
-restart, not a resume: continuing a half-finished scan would require the body to yield rows in the
-same order on every execution, which is true of a single-relation scan and not promised for a join or
-an aggregate — and resuming one of those would give you a materialized view with duplicated and
+`REFRESH` takes, so exactly one node finishes the work and no rebuild is ever running twice. The run
+restarts because continuing a half-finished scan would require the body to yield rows in the
+same order on every execution. That is true of a single-relation scan and not promised for a join or
+an aggregate, and resuming one of those would give you a materialized view with duplicated and
 missing rows. Until a restart completes, the view keeps serving its previous contents. When the
 attempts run out the view is left stale, an error is logged naming it, and it is yours to
 `REFRESH` again.
@@ -532,8 +524,8 @@ SHOW INDEXES FROM customer_totals;
 ```
 
 `SHOW TABLES` lists **tables only** — neither views nor materialized views. `SHOW CREATE MATERIALIZED
-VIEW` prints `WITH NO DATA` for an unpopulated one, so its output re-creates the same object rather
-than a populated lookalike.
+VIEW` prints `WITH NO DATA` for an unpopulated one, so its output re-creates the same
+unpopulated object.
 
 ---
 
@@ -544,10 +536,11 @@ than a populated lookalike.
 | Unnamed expression columns | **Refused** | PostgreSQL names them `?column?`, which nothing can reference. Requiring an alias costs one `AS` and produces a usable view. |
 | Rules / `INSTEAD OF` triggers | **Not supported** | CamusDB has neither, so there is no escape hatch that makes a non-auto-updatable view writable. |
 | Updatable views | **Not implemented yet** | See below. All views are currently read-only. |
-| `REFRESH … CONCURRENTLY` | **Refused** | The ordinary refresh already leaves readers unblocked, which is what it buys in PostgreSQL; writing only the changed rows is not implemented, and pretending otherwise would be worse than refusing. |
+| `REFRESH … CONCURRENTLY` | **Refused** | The ordinary refresh already leaves readers unblocked, which is what it buys in PostgreSQL; writing only the changed rows is not implemented. |
 | Writing to a materialized view | **Refused** | PostgreSQL refuses too; the row would be discarded by the next refresh either way. |
 | `DROP TABLE … CASCADE` | **No `CASCADE` form** | Drop the dependent views explicitly. |
 | `security_invoker` views | **Not supported** | Only the owner's-rights model is implemented. |
+| `WITH` in a body | **Stored without the `WITH`** | Each CTE is stored as a derived table where the body reads it, so `SHOW CREATE VIEW` shows no `WITH`, and a CTE that the body reads two times runs two times. See [WITH queries](common-table-expressions.md#views). |
 | `WITH RECURSIVE` views | **Not supported** | CamusDB has no `WITH RECURSIVE`. |
 | Cross-database views | **Not supported** | Matches the existing single-database restriction on `INSERT … SELECT`. |
 | Temporary views | **Not supported** | CamusDB has no temporary relations. |
@@ -558,8 +551,7 @@ than a populated lookalike.
 
 ## What is not implemented
 
-These parse but are **rejected at execution**, so they fail loudly rather than doing something
-unexpected:
+These parse but are **rejected at execution**, so they fail with an error:
 
 - **Updatable views.** `INSERT`/`UPDATE`/`DELETE` through a view, the auto-updatability rules, and
   `WITH CHECK OPTION` enforcement. The `WITH [LOCAL|CASCADED] CHECK OPTION` clause parses and is
@@ -567,8 +559,7 @@ unexpected:
 - **Incremental refresh** (`REFRESH MATERIALIZED VIEW … CONCURRENTLY`), which would write only the
   rows that changed instead of rebuilding. The plain form works and does not block readers.
 - **Resuming an interrupted refresh mid-scan.** An interrupted refresh is restarted from the
-  beginning rather than continued from where it stopped (see above) — the work the dead run did is
-  paid for again. The materialized view is untouched in the meantime, so nothing is left
+  beginning (see above), so the work the dead run did is done again. The materialized view is untouched in the meantime, so nothing is left
   inconsistent.
 - **Re-checking a nested view's grant at read time.** A view whose body reads another view has that
   inner reference checked when it is *created*, not on every read; a grant revoked afterwards does not

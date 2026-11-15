@@ -80,7 +80,7 @@ free slot, so the cluster can go past the cap by the number of nodes that create
 
 This is not a setting. An `IN` list of more than eight constant items (literals, parameters, and
 casts or negations of those) is evaluated once per statement into a hash set. This applies in every
-position, not only at the top of a `WHERE` clause. Before, a list inside a `CASE` or a function
+position: at the top of a `WHERE` clause and anywhere else. Before, a list inside a `CASE` or a function
 argument was scanned again for each row, so a list of N items over M rows cost N × M comparisons.
 The result is the same as the scan, including the rules for `NULL` items and mixed numeric types.
 

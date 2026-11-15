@@ -61,8 +61,14 @@
    `a + b[1]` subscripts only b, and `NOT x::bool` negates the cast value. Declaring them above every
    binary operator makes each such shift/reduce choice resolve to a shift. */
 %left TCOLONCOLON LBRACKET
+/* INTERVAL '3' HOUR: after INTERVAL and its text, an identifier is the unit, so the parser shifts it.
+   A plain identifier can follow an expression in a few places (ON CONFLICT (a) WHERE p DO NOTHING), so
+   the choice must be stated. TIDENTIFIER takes a precedence only for this choice: no other conflict
+   has it as the lookahead. INTERVAL_TEXT is a precedence name only; no token carries it. */
+%nonassoc INTERVAL_TEXT
+%nonassoc TIDENTIFIER
 
-%token TBYTESLIT LBRACKET RBRACKET TMOD TCOLONCOLON
+%token TBYTESLIT LBRACKET RBRACKET TMOD TCOLONCOLON TINTERVAL
 %token TDIGIT TFLOAT TSTRING TIDENTIFIER TPLACEHOLDER LPAREN RPAREN TCOMMA TMULT TADD TMINUS TDIV TSELECT TFROM TWHERE 
 %token TEQUALS TNOTEQUALS TLESSTHAN TGREATERTHAN TLESSTHANEQUALS TGREATERTHANEQUALS TAND TOR TORDER TBY TASC TDESC
 %token TTRUE TFALSE TUPDATE TSET TDELETE TINSERT TINTO TVALUES TCREATE TTABLE TNOT TNULL
@@ -75,10 +81,12 @@
 %token TJSONFIELD TJSONFIELDTEXT TJSONPATH TJSONPATHTEXT TJSONCONTAINS TJSONCONTAINEDBY
 %token TJSONEXISTS TJSONEXISTSANY TJSONEXISTSALL TJSONDELETEPATH
 %token TBEGIN TSTART TTRANSACTION TROLLBACK TCOMMIT TJOIN TINNER TDOT THAVING TDISTINCT TBETWEEN TEXPLAIN
-/* LEFT, RIGHT, OUTER and CROSS are reserved for the join forms, as they are in PostgreSQL. FULL,
-   NATURAL and USING are not: FULL is already a plain identifier that the foreign-key MATCH FULL
-   clause validates in its parse action, and the other two have no join form here yet. */
-%token TLEFT TRIGHT TOUTER TCROSS
+/* LEFT, RIGHT, OUTER and CROSS are reserved for the join forms, as they are in PostgreSQL. FULL and
+   NATURAL are not: FULL is already a plain identifier that the foreign-key MATCH FULL clause
+   validates in its parse action, and NATURAL has no join form here yet. USING is reserved, as in
+   PostgreSQL, for DELETE ... USING: after the target of DELETE FROM a plain word could be the alias
+   of the target or the start of the USING list, and one token of lookahead cannot tell them apart. */
+%token TLEFT TRIGHT TOUTER TCROSS TUSING
 %token TRENAME TTO TANALYZE TBRANCH TBRANCHES TANCESTORS TEVICT TFORCE TRELINK TORPHAN
 %token TTRUNCATE TWITHOUT
 %token TCASE TWHEN TTHEN TELSE TEND
@@ -187,6 +195,11 @@ stat    : select_stmt { $$.n = $1.n; }
         | drop_extension_stmt { $$.n = $1.n; }
         | create_function_stmt { $$.n = $1.n; }
         | alter_function_stmt { $$.n = $1.n; }
+        /* WITH in front of a write, as in PostgreSQL. A CTE is never the target of the write: the
+           target name always reads the table. A WITH in front of a SELECT is part of select_no_parens. */
+        | with_clause update_stmt { $$.n = CommonTableExpressions.With($1.n, $2.n); }
+        | with_clause delete_stmt { $$.n = CommonTableExpressions.With($1.n, $2.n); }
+        | with_clause insert_stmt { $$.n = CommonTableExpressions.With($1.n, $2.n); }
         ;
 
 /* SELECT … FOR UPDATE [OF t] [NOWAIT | SKIP LOCKED], and FOR NO KEY UPDATE as its synonym. Accepted
@@ -228,14 +241,52 @@ select_stmt : select_no_parens { $$.n = $1.n; }
             | select_with_parens { $$.n = $1.n; }
             ;
 
-select_with_parens : LPAREN select_no_parens RPAREN { $$.n = $2.n; }
+/* A WITH inside parentheses (a subquery, a derived table, an operand, a CTE body) is written out here,
+   with every CTE inlined: such a query can read the columns of an enclosing query, so its rows are not
+   computed once for the statement. Only a WITH at the start of a statement or of its source query
+   reaches the end of the parse, where a CTE that is read two or more times is marked to be computed
+   once (see CommonTableExpressions). */
+select_with_parens : LPAREN select_no_parens RPAREN { $$.n = CommonTableExpressions.InlineNested($2.n); }
                    ;
 
 select_no_parens : simple_select { $$.n = SetOperationAst.Finish($1.n, null, null, null); }
                  | select_clause order_clause opt_limit opt_offset { $$.n = SetOperationAst.Finish($1.n, $2.n, $3.n, $4.n); }
                  | select_clause limit_clause opt_offset { $$.n = SetOperationAst.Finish($1.n, null, $2.n, $3.n); }
                  | select_clause offset_clause { $$.n = SetOperationAst.Finish($1.n, null, null, $2.n); }
+                 | with_clause select_clause { $$.n = CommonTableExpressions.With($1.n, SetOperationAst.Finish($2.n, null, null, null)); }
+                 | with_clause select_clause order_clause opt_limit opt_offset { $$.n = CommonTableExpressions.With($1.n, SetOperationAst.Finish($2.n, $3.n, $4.n, $5.n)); }
+                 | with_clause select_clause limit_clause opt_offset { $$.n = CommonTableExpressions.With($1.n, SetOperationAst.Finish($2.n, null, $3.n, $4.n)); }
+                 | with_clause select_clause offset_clause { $$.n = CommonTableExpressions.With($1.n, SetOperationAst.Finish($2.n, null, null, $3.n)); }
                  ;
+
+/* WITH name [(c1, ...)] AS [[NOT] MATERIALIZED] (query) [, ...]. MATERIALIZED is already reserved for
+   the materialized-view statements. RECURSIVE is a plain identifier: it is refused here by name, so it
+   stays usable as a CTE name, a table name and a column name. */
+with_clause : TWITH cte_list { sawWith = true; $$.n = $2.n; }
+            | TWITH TIDENTIFIER cte_list
+            {
+                if (string.Equals($2.s, "recursive", System.StringComparison.OrdinalIgnoreCase))
+                    throw new CamusDBException(CamusDBErrorCodes.FeatureNotSupported, "WITH RECURSIVE is not supported");
+                throw new CamusDBException(CamusDBErrorCodes.SqlSyntaxError, "syntax error, unexpected '" + $2.s + "' after WITH");
+            }
+            ;
+
+cte_list : cte_list TCOMMA common_table_expr { $$.n = new(NodeType.CommonTableExpressionList, $1.n, $3.n, null, null, null, null, null, null); }
+         | common_table_expr { $$.n = $1.n; }
+         ;
+
+common_table_expr : any_identifier opt_cte_columns TAS opt_cte_materialized select_with_parens
+                  { $$.n = CommonTableExpressions.Definition($1.n, $2.n, $4.s, $5.n); }
+                  ;
+
+opt_cte_columns : LPAREN table_function_column_list RPAREN { $$.n = $2.n; }
+                | { $$.n = null; }
+                ;
+
+opt_cte_materialized : TMATERIALIZED { $$.s = CommonTableExpressions.Materialized; }
+                     | TNOT TMATERIALIZED { $$.s = CommonTableExpressions.NotMaterialized; }
+                     | { $$.s = null; }
+                     ;
 
 select_clause : simple_select { $$.n = $1.n; }
               | select_with_parens { $$.n = $1.n; }
@@ -434,13 +485,17 @@ insert_values : LPAREN values_list RPAREN { $$.n = $2.n; $$.s = $2.s; }
              ;
 
 /* The optional RETURNING list hangs off extendedThree, because extendedTwo already holds LIMIT.
-   StatementScope.GetReturningList knows the slot of each statement; read the list through it. */
-update_stmt : TUPDATE any_identifier TSET update_list TWHERE condition opt_limit opt_returning
-            { $$.n = new(NodeType.Update, $2.n, $4.n, $6.n, $7.n, $8.n, null, null, null); }
+   StatementScope.GetReturningList knows the slot of each statement; read the list through it.
+   The FROM list of UPDATE ... FROM hangs off extendedFour and the alias of the target off
+   extendedFive; DmlJoinSlots reads both. The slots after RETURNING keep every older consumer of the
+   node unchanged, and a placeholder in the FROM list is published after the placeholders of the
+   SET list, the WHERE and RETURNING (see PlaceholderCollector). */
+update_stmt : TUPDATE any_identifier opt_dml_alias TSET update_list opt_dml_from TWHERE condition opt_limit opt_returning
+            { $$.n = new(NodeType.Update, $2.n, $5.n, $8.n, $9.n, $10.n, $6.n, $3.n, null); }
             /* UPDATE and DELETE without WHERE are refused on purpose, so one statement cannot change
                every row by accident. The rules exist only to name that rule in the error; without
                them the parser would report a bare "expecting TWHERE" syntax error. */
-            | TUPDATE any_identifier TSET update_list opt_limit opt_returning
+            | TUPDATE any_identifier opt_dml_alias TSET update_list opt_dml_from opt_limit opt_returning
             {
                 throw new CamusDBException(
                     CamusDBErrorCodes.InvalidInput,
@@ -449,10 +504,11 @@ update_stmt : TUPDATE any_identifier TSET update_list TWHERE condition opt_limit
             }
 		    ;
 
-/* The optional RETURNING list hangs off extendedTwo, the first free slot after LIMIT. */
-delete_stmt : TDELETE TFROM any_identifier TWHERE condition opt_limit opt_returning
-            { $$.n = new(NodeType.Delete, $3.n, $5.n, $6.n, $7.n, null, null, null, null); }
-            | TDELETE TFROM any_identifier opt_limit opt_returning
+/* The optional RETURNING list hangs off extendedTwo, the first free slot after LIMIT. The USING list
+   hangs off extendedThree and the alias of the target off extendedFour; DmlJoinSlots reads both. */
+delete_stmt : TDELETE TFROM any_identifier opt_dml_alias opt_dml_using TWHERE condition opt_limit opt_returning
+            { $$.n = new(NodeType.Delete, $3.n, $7.n, $8.n, $9.n, $5.n, $4.n, null, null); }
+            | TDELETE TFROM any_identifier opt_dml_alias opt_dml_using opt_limit opt_returning
             {
                 throw new CamusDBException(
                     CamusDBErrorCodes.InvalidInput,
@@ -460,6 +516,23 @@ delete_stmt : TDELETE TFROM any_identifier TWHERE condition opt_limit opt_return
                     "To delete every row, write WHERE TRUE");
             }
 			;
+
+/* The alias of the target of UPDATE or DELETE (UPDATE accounts a, DELETE FROM orders AS o). */
+opt_dml_alias : TAS any_identifier { $$.n = $2.n; }
+              | identifier { $$.n = $1.n; }
+              | escaped_identifier { $$.n = $1.n; }
+              | { $$.n = null; }
+              ;
+
+/* The relations that UPDATE ... FROM joins to its target: every FROM form a SELECT takes. */
+opt_dml_from : TFROM select_table { $$.n = $2.n; }
+             | { $$.n = null; }
+             ;
+
+/* The relations that DELETE ... USING joins to its target: every FROM form a SELECT takes. */
+opt_dml_using : TUSING select_table { $$.n = $2.n; }
+              | { $$.n = null; }
+              ;
 
 begin_stmt : TBEGIN { $$.n = NodeAst.Begin; }
            | TSTART TTRANSACTION { $$.n = NodeAst.Begin; }
@@ -1073,11 +1146,12 @@ create_index_stmt : TCREATE TINDEX any_identifier TON any_identifier LPAREN iden
                   | TCREATE TUNIQUE TINDEX any_identifier TON any_identifier LPAREN identifier_index_list RPAREN index_include_clause { $$.n = new(NodeType.AlterTableAddUniqueIndex, $6.n, $4.n, $8.n, $10.n, null, null, null, null); }
                   | TCREATE TUNIQUE TINDEX TIF TNOT TEXISTS any_identifier TON any_identifier LPAREN identifier_index_list RPAREN index_include_clause { $$.n = new(NodeType.AlterTableAddUniqueIndexIfNotExists, $9.n, $7.n, $11.n, $13.n, null, null, null, null); }
                   /* CREATE INDEX ... USING <method> (col [opclass]) and the CockroachDB CREATE INVERTED INDEX.
-                     USING, GIN, BTREE, INVERTED and the operator class are plain identifiers, so none of them
-                     becomes a reserved word; the actions check the words. A GIN index builds the AST of
-                     CREATE INDEX with "gin" in its text, so every consumer of that node handles it. */
-                  | TCREATE TINDEX any_identifier TON any_identifier TIDENTIFIER TIDENTIFIER LPAREN method_index_list RPAREN { $$.n = new(NodeType.AlterTableAddIndex, $5.n, $3.n, $9.n, null, null, null, null, IndexMethod($6.s, $7.s, $9.n)); }
-                  | TCREATE TINDEX TIF TNOT TEXISTS any_identifier TON any_identifier TIDENTIFIER TIDENTIFIER LPAREN method_index_list RPAREN { $$.n = new(NodeType.AlterTableAddIndexIfNotExists, $8.n, $6.n, $12.n, null, null, null, null, IndexMethod($9.s, $10.s, $12.n)); }
+                     GIN, BTREE, INVERTED and the operator class are plain identifiers, so none of them
+                     becomes a reserved word; the actions check the words. USING is reserved for
+                     DELETE ... USING (see the token list). A GIN index builds the AST of CREATE INDEX with
+                     "gin" in its text, so every consumer of that node handles it. */
+                  | TCREATE TINDEX any_identifier TON any_identifier TUSING TIDENTIFIER LPAREN method_index_list RPAREN { $$.n = new(NodeType.AlterTableAddIndex, $5.n, $3.n, $9.n, null, null, null, null, IndexMethod($7.s, $9.n)); }
+                  | TCREATE TINDEX TIF TNOT TEXISTS any_identifier TON any_identifier TUSING TIDENTIFIER LPAREN method_index_list RPAREN { $$.n = new(NodeType.AlterTableAddIndexIfNotExists, $8.n, $6.n, $12.n, null, null, null, null, IndexMethod($10.s, $12.n)); }
                   | TCREATE TIDENTIFIER TINDEX any_identifier TON any_identifier LPAREN identifier_index_list RPAREN { $$.n = new(NodeType.AlterTableAddIndex, $6.n, $4.n, $8.n, null, null, null, null, InvertedIndexWord($2.s)); }
                   | TCREATE TIDENTIFIER TINDEX TIF TNOT TEXISTS any_identifier TON any_identifier LPAREN identifier_index_list RPAREN { $$.n = new(NodeType.AlterTableAddIndexIfNotExists, $9.n, $7.n, $11.n, null, null, null, null, InvertedIndexWord($2.s)); }
                   ;
@@ -1600,8 +1674,14 @@ table_function_column_list : table_function_column_list TCOMMA any_identifier
                            | any_identifier { $$.n = $1.n; $$.s = $1.s; }
                            ;
 
+/* AS t(c1, c2) names the columns of the derived table, as in PostgreSQL. The list hangs off
+   extendedThree; a list shorter than the query's columns renames the first ones only. */
 derived_table_reference : query_expr derived_table_alias
                 { $$.n = new(NodeType.DerivedTableReference, $1.n, $2.n, null, null, null, null, null, null); $$.s = $2.s; }
+                | query_expr TAS any_identifier LPAREN table_function_column_list RPAREN
+                { $$.n = new(NodeType.DerivedTableReference, $1.n, $3.n, null, null, $5.n, null, null, null); $$.s = null; }
+                | query_expr identifier LPAREN table_function_column_list RPAREN
+                { $$.n = new(NodeType.DerivedTableReference, $1.n, $2.n, null, null, $4.n, null, null, null); $$.s = $2.n.yytext; }
                 ;
 
 derived_table_alias : TAS any_identifier { $$.n = $2.n; $$.s = null; }
@@ -2420,12 +2500,25 @@ simple_expr : any_identifier { $$.n = $1.n; $$.s = $1.s; }
             | placeholder { $$.n = $1.n; $$.s = $1.s; }
             | numeric_literal { $$.n = $1.n; $$.s = $1.s; }
             | identifier_typed_literal { $$.n = $1.n; $$.s = $1.s; }
+            | interval_literal { $$.n = $1.n; $$.s = $1.s; }
 			;
 
 /* JSONB '{"a": 1}' (also JSON '…'): the PostgreSQL typed literal for a type whose name is a plain
    identifier. It builds the same ExprCast node as '…'::jsonb, so the text is parsed by the cast. */
 identifier_typed_literal : TIDENTIFIER string { $$.n = new(NodeType.ExprCast, $2.n, TypeFromWord($1.s), null, null, null, null, null, null); }
                          ;
+
+/* INTERVAL '1 day 2 hours' (PostgreSQL), INTERVAL '3' HOUR (SQL standard) and INTERVAL 3 HOUR (MySQL).
+   The lexer returns TINTERVAL only when a quote, a digit or a parameter follows the word, so a column
+   named interval stays an identifier. Every form builds nodes that exist already: a cast of the text to
+   the interval type, or n * CAST('1 hour' AS interval). An identifier right after INTERVAL '…' is read
+   as its unit (see INTERVAL_TEXT in the precedence list). */
+interval_literal : TINTERVAL string %prec INTERVAL_TEXT { $$.n = new(NodeType.ExprCast, $2.n, IntervalTypeNode(), null, null, null, null, null, null); }
+                 | TINTERVAL string TIDENTIFIER { $$.n = IntervalWithUnit($2.n, $3.s); }
+                 | TINTERVAL int TIDENTIFIER { $$.n = IntervalWithUnit($2.n, $3.s); }
+                 | TINTERVAL float TIDENTIFIER { $$.n = IntervalWithUnit($2.n, $3.s); }
+                 | TINTERVAL placeholder TIDENTIFIER { $$.n = IntervalWithUnit($2.n, $3.s); }
+                 ;
 
 /* NUMERIC '1.23' is the Spanner typed literal. It builds the ExprCast node that CAST('1.23' AS NUMERIC)
    builds, so the string is parsed exactly by the cast and never passes through a float. */
