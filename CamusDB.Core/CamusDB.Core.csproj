@@ -115,7 +115,7 @@
        kahuna.wal_storage = solarium). It needs files and threads, which the browser runtime does not
        have, so the browser target leaves it out. -->
   <ItemGroup Condition="!$(TargetFramework.EndsWith('-browser'))">
-    <PackageReference Include="SolariumDb.Kahuna" Version="0.1.8" />
+    <PackageReference Include="SolariumDb.Kahuna" Version="0.2.1" />
   </ItemGroup>
 
   <!-- The C# compiler, for inline SQL functions (CREATE FUNCTION ... LANGUAGE csharp): the server
